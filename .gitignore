@@ -1,0 +1,13 @@
+# Local Claude Code settings (per-machine hook URLs)
+.claude/settings.local.json
+
+# Verification rig output
+scripts/hook-log.jsonl
+
+# OS
+.DS_Store
+
+# Future build artifacts
+/target/
+node_modules/
+dist/
