@@ -1,0 +1,114 @@
+import type { Comment } from "../types";
+
+interface FooterProps {
+  comments: Comment[];
+  canSubmit: boolean;
+  canApprove: boolean;
+  waiting: boolean;
+  onSubmit: () => void;
+  onApprove: () => void;
+}
+
+export function Footer({
+  comments,
+  canSubmit,
+  canApprove,
+  waiting,
+  onSubmit,
+  onApprove,
+}: FooterProps) {
+  const pending = comments.filter(
+    (c) => c.status === "draft" || c.status === "reopened",
+  );
+  const counts = countByType(pending);
+  const total = pending.length;
+
+  return (
+    <footer
+      className="font-sans flex items-center justify-between gap-4 px-6 py-2 border-t"
+      style={{
+        borderColor: "var(--color-rule)",
+        color: "var(--color-ink-muted)",
+        fontSize: "12px",
+      }}
+    >
+      <span className="flex items-center gap-2">
+        {waiting ? (
+          <span className="italic">Waiting for Claude's revision…</span>
+        ) : total === 0 ? (
+          "no pending comments"
+        ) : (
+          <>
+            {total} pending ·{" "}
+            <Badge n={counts.edit} label="edit" color="var(--color-info)" />
+            {" · "}
+            <Badge
+              n={counts.feedback}
+              label="feedback"
+              color="var(--color-warning)"
+            />
+            {" · "}
+            <Badge
+              n={counts.question}
+              label="question"
+              color="var(--color-success)"
+            />
+          </>
+        )}
+      </span>
+      <span className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={onSubmit}
+          disabled={!canSubmit || waiting}
+          className="rounded px-3 py-1 font-medium disabled:opacity-40"
+          style={{
+            background: "white",
+            border: "1px solid var(--color-rule)",
+            color: "var(--color-ink)",
+            fontSize: "12px",
+          }}
+        >
+          Continue revising
+        </button>
+        <button
+          type="button"
+          onClick={onApprove}
+          disabled={!canApprove || waiting}
+          className="rounded px-3 py-1 font-medium disabled:opacity-40"
+          style={{
+            background: "var(--color-success)",
+            color: "white",
+            fontSize: "12px",
+          }}
+        >
+          Approve plan
+        </button>
+      </span>
+    </footer>
+  );
+}
+
+function Badge({
+  n,
+  label,
+  color,
+}: {
+  n: number;
+  label: string;
+  color: string;
+}) {
+  return (
+    <span style={{ color }}>
+      {n} {label}
+    </span>
+  );
+}
+
+function countByType(comments: Comment[]): Record<Comment["type"], number> {
+  const out = { edit: 0, feedback: 0, question: 0 };
+  for (const c of comments) {
+    out[c.type] += 1;
+  }
+  return out;
+}

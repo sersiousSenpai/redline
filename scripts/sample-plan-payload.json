@@ -1,0 +1,13 @@
+{
+  "hook_event_name": "PreToolUse",
+  "session_id": "sample-0001-aaaa-bbbb-cccccccccccc",
+  "tool_use_id": "toolu_sample_m2_demo",
+  "transcript_path": "/tmp/redline-m2-demo.jsonl",
+  "cwd": "/Users/example/code/sample-project",
+  "permission_mode": "plan",
+  "tool_name": "ExitPlanMode",
+  "tool_input": {
+    "plan": "# Refactor authentication to JWT-based session model\n\nThe current cookie-based session model is showing its age and we want to move to JWT before the mobile launch next quarter.\n\n## Current state\n\nSessions are stored server-side in Redis with a 24-hour TTL. The session ID is sent in a httpOnly cookie. This is fine for the web app but the mobile team has been asking for a token-based flow.\n\n### Threat model constraints\n\nXSS exposure is currently mitigated by the httpOnly flag. Any JWT design must not regress this — storing tokens in localStorage is the obvious wrong move.\n\n## Proposed approach\n\nWe will issue short-lived access tokens and longer-lived refresh tokens. Access tokens go in an httpOnly Secure SameSite=Strict cookie; refresh tokens rotate on every use.\n\n### JWT structure\n\nStandard claims plus a custom `tier` claim for plan-gating. Signed with RS256 against the existing key pair.\n\n### Refresh rotation\n\nEach refresh invalidates the previous token. A reuse-detection check forces full re-auth if an old refresh is presented after rotation.\n\n# Migration path\n\nRoll out behind a feature flag. Existing sessions remain valid until natural expiry; new logins use JWT.\n\n## Order of operations\n\nAuth endpoints first, then mobile-facing read endpoints, then write endpoints. We do not flip the flag globally until all three tiers are validated in staging.\n\n# Risk assessment\n\nMain risk is the refresh-rotation logic — bugs there cause user-visible logouts. We mitigate with extensive integration tests and a one-week staging soak before any production traffic.\n",
+    "planFilePath": "/tmp/redline-m2-demo-plan.md"
+  }
+}
