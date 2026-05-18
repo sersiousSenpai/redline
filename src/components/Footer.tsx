@@ -7,6 +7,11 @@ interface FooterProps {
   waiting: boolean;
   onSubmit: () => void;
   onApprove: () => void;
+  /** Terminal dock collapsed (and not fullscreen) — show a peek segment. */
+  termCollapsed: boolean;
+  termTabCount: number;
+  termHasUnseen: boolean;
+  onExpandTerminal: () => void;
 }
 
 export function Footer({
@@ -16,6 +21,10 @@ export function Footer({
   waiting,
   onSubmit,
   onApprove,
+  termCollapsed,
+  termTabCount,
+  termHasUnseen,
+  onExpandTerminal,
 }: FooterProps) {
   const pending = comments.filter(
     (c) => c.status === "draft" || c.status === "reopened",
@@ -53,6 +62,36 @@ export function Footer({
               label="question"
               color="var(--color-success)"
             />
+          </>
+        )}
+        {termCollapsed && (
+          <>
+            <span style={{ color: "var(--color-rule)" }}>·</span>
+            <button
+              type="button"
+              onClick={onExpandTerminal}
+              title="Show terminal"
+              className="flex items-center gap-1"
+              style={{
+                color: "var(--color-ink-muted)",
+                fontSize: "12px",
+                cursor: "pointer",
+              }}
+            >
+              {termHasUnseen && (
+                <span
+                  aria-label="new terminal output"
+                  style={{
+                    width: 6,
+                    height: 6,
+                    borderRadius: 9999,
+                    background: "var(--color-info)",
+                    display: "inline-block",
+                  }}
+                />
+              )}
+              {termTabCount} terminal{termTabCount === 1 ? "" : "s"}
+            </button>
           </>
         )}
       </span>
@@ -106,7 +145,14 @@ function Badge({
 }
 
 function countByType(comments: Comment[]): Record<Comment["type"], number> {
-  const out = { edit: 0, feedback: 0, question: 0 };
+  const out: Record<Comment["type"], number> = {
+    edit: 0,
+    feedback: 0,
+    question: 0,
+    "block-insert": 0,
+    "block-delete": 0,
+    "block-move": 0,
+  };
   for (const c of comments) {
     out[c.type] += 1;
   }

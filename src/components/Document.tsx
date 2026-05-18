@@ -1,18 +1,60 @@
-import { useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import type { ParagraphDiff } from "../diff";
-import type { Comment, Paragraph, Section } from "../types";
+import type {
+  Comment,
+  NewCommentRequest,
+  Paragraph,
+  Section,
+  UpdateCommentRequest,
+} from "../types";
+import type { BaseBlock } from "../editor/changeLedger";
+import { applyCommentsToDoc } from "../editor/applyCommentsToDoc";
+import { useTrackChangesSync } from "../editor/useTrackChangesSync";
 import { AnchorPill } from "./AnchorPill";
+import { EditableBlock, type RegisteredHandle } from "./EditableBlock";
 
 interface DocumentProps {
   sections: Section[];
   diff?: ParagraphDiff;
   comments?: Comment[];
+  /** Changes when a new revision arrives → remounts every block. */
+  revisionKey: string;
+  onAddComment?: (req: NewCommentRequest) => Promise<unknown>;
+  onUpdateComment?: (id: string, u: UpdateCommentRequest) => Promise<unknown>;
+  onDeleteComment?: (id: string) => Promise<unknown>;
 }
 
-export function Document({ sections, diff, comments }: DocumentProps) {
+/** A block is "structured" (list/table/code/etc.) when its rich markdown
+ *  differs from its plain-text rendering — editing it captures plain text. */
+function isStructured(p: Paragraph): boolean {
+  return p.markdown.trim() !== p.text.trim();
+}
+
+function countEditable(sections: Section[]): number {
+  let n = 0;
+  const walk = (secs: Section[]) => {
+    for (const s of secs) {
+      n += 1; // heading title
+      n += s.paragraphs.length;
+      walk(s.children);
+    }
+  };
+  walk(sections);
+  return n;
+}
+
+export function Document({
+  sections,
+  diff,
+  comments,
+  revisionKey,
+  onAddComment,
+  onUpdateComment,
+  onDeleteComment,
+}: DocumentProps) {
   const commentedAnchors = useMemo(() => {
     const set = new Set<string>();
     for (const c of comments ?? []) {
@@ -20,6 +62,75 @@ export function Document({ sections, diff, comments }: DocumentProps) {
     }
     return set;
   }, [comments]);
+
+  // Block handles register themselves on mount; their captured baseline
+  // (initial innerText) is the authoritative diff/revert basis, so an
+  // untouched block never reads as edited.
+  const registry = useRef(new Map<string, RegisteredHandle>());
+  const [baseTick, setBaseTick] = useState(0);
+
+  const register = useCallback((h: RegisteredHandle) => {
+    registry.current.set(h.blockId, h);
+    setBaseTick((t) => t + 1);
+  }, []);
+  const unregister = useCallback((blockId: string) => {
+    registry.current.delete(blockId);
+    setBaseTick((t) => t + 1);
+  }, []);
+
+  const base = useMemo<BaseBlock[]>(
+    () =>
+      [...registry.current.values()].map((h) => ({
+        blockId: h.blockId,
+        anchorId: h.anchorId,
+        markdown: h.baseline,
+      })),
+    [baseTick, revisionKey],
+  );
+
+  const expected = useMemo(() => countEditable(sections), [sections]);
+  const editable =
+    !!onAddComment && !!onUpdateComment && !!onDeleteComment;
+  const enabled =
+    editable && base.length > 0 && base.length === expected;
+
+  const backend = useMemo(
+    () => ({
+      addComment: (req: NewCommentRequest) =>
+        onAddComment?.(req) ?? Promise.resolve(),
+      updateComment: (id: string, u: UpdateCommentRequest) =>
+        onUpdateComment?.(id, u) ?? Promise.resolve(),
+      deleteComment: (id: string) =>
+        onDeleteComment?.(id) ?? Promise.resolve(),
+    }),
+    [onAddComment, onUpdateComment, onDeleteComment],
+  );
+
+  const readCurrent = useCallback(
+    () =>
+      [...registry.current.values()].map((h) => ({
+        blockId: h.blockId,
+        anchorId: h.anchorId,
+        markdown: h.getMarkdown(),
+      })),
+    [],
+  );
+
+  const { schedule } = useTrackChangesSync({
+    base,
+    comments: comments ?? [],
+    backend,
+    readCurrent,
+    enabled,
+  });
+
+  // Sidebar → document reconcile (idempotent, focus/structure-guarded inside
+  // each handle's setMarkdown). Runs on comment changes and as blocks mount.
+  useEffect(() => {
+    if (!editable) return;
+    const baseMap = new Map(base.map((b) => [b.blockId, b.markdown]));
+    applyCommentsToDoc(comments ?? [], [...registry.current.values()], baseMap);
+  }, [comments, base, editable]);
 
   if (sections.length === 0) {
     return (
@@ -42,33 +153,49 @@ export function Document({ sections, diff, comments }: DocumentProps) {
           section={s}
           diff={diff}
           commentedAnchors={commentedAnchors}
+          revisionKey={revisionKey}
+          editable={editable}
+          register={register}
+          unregister={unregister}
+          onInput={schedule}
         />
       ))}
     </article>
   );
 }
 
+interface BlockWiring {
+  revisionKey: string;
+  editable: boolean;
+  register: (h: RegisteredHandle) => void;
+  unregister: (blockId: string) => void;
+  onInput: () => void;
+}
+
 function SectionView({
   section,
   diff,
   commentedAnchors,
+  ...wiring
 }: {
   section: Section;
   diff?: ParagraphDiff;
   commentedAnchors: Set<string>;
-}) {
+} & BlockWiring) {
   return (
     <section className="mb-8" data-anchor-id={section.anchorId}>
       <Heading
         section={section}
         hasComment={commentedAnchors.has(section.anchorId)}
+        {...wiring}
       />
       {section.paragraphs.map((p) => (
         <ParagraphView
-          key={p.anchorId}
+          key={`${wiring.revisionKey}:${p.blockId}`}
           paragraph={p}
           diff={diff}
           hasComment={commentedAnchors.has(p.anchorId)}
+          {...wiring}
         />
       ))}
       {section.children.length > 0 && (
@@ -79,6 +206,7 @@ function SectionView({
               section={child}
               diff={diff}
               commentedAnchors={commentedAnchors}
+              {...wiring}
             />
           ))}
         </div>
@@ -91,16 +219,26 @@ function ParagraphView({
   paragraph,
   diff,
   hasComment,
+  editable,
+  register,
+  unregister,
+  onInput,
 }: {
   paragraph: Paragraph;
   diff?: ParagraphDiff;
   hasComment: boolean;
-}) {
+} & BlockWiring) {
   const info = diff?.get(paragraph.anchorId);
   const isAdded = info?.status === "added";
   const isModified = info?.status === "modified";
+  const isMoved = info?.status === "moved";
 
   const blockStyle: React.CSSProperties = {};
+  if (isMoved) {
+    blockStyle.borderLeft = "2px dashed var(--color-info)";
+    blockStyle.paddingLeft = "8px";
+    blockStyle.marginLeft = "-10px";
+  }
   if (isAdded) {
     blockStyle.background = "color-mix(in srgb, var(--color-success) 10%, transparent)";
     blockStyle.borderLeft = "2px solid var(--color-success)";
@@ -121,11 +259,12 @@ function ParagraphView({
     >
       <span
         className="shrink-0 pt-1 opacity-60 group-hover:opacity-100 transition-opacity"
+        contentEditable={false}
         aria-hidden
       >
         <AnchorPill anchorId={paragraph.anchorId} />
       </span>
-      <div className={`flex-1 md-block${hasComment ? " md-commented" : ""}`}>
+      <div className="flex-1">
         {isModified && info?.originalText && (
           <span
             className="line-through block mb-1"
@@ -134,10 +273,37 @@ function ParagraphView({
             {info.originalText}
           </span>
         )}
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>
-          {paragraph.markdown}
-        </ReactMarkdown>
+        {editable ? (
+          <EditableBlock
+            blockId={paragraph.blockId}
+            anchorId={paragraph.anchorId}
+            sourceMarkdown={paragraph.markdown}
+            structured={isStructured(paragraph)}
+            hasComment={hasComment}
+            register={register}
+            unregister={unregister}
+            onInput={onInput}
+          />
+        ) : (
+          <ReadOnlyBlock markdown={paragraph.markdown} hasComment={hasComment} />
+        )}
       </div>
+    </div>
+  );
+}
+
+// Read-only fallback (no comment backend wired) — the original
+// ReactMarkdown render, byte-identical to the editable surface's mount HTML.
+function ReadOnlyBlock({
+  markdown,
+  hasComment,
+}: {
+  markdown: string;
+  hasComment: boolean;
+}) {
+  return (
+    <div className={`md-block${hasComment ? " md-commented" : ""}`}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>
     </div>
   );
 }
@@ -145,18 +311,35 @@ function ParagraphView({
 function Heading({
   section,
   hasComment,
+  revisionKey,
+  editable,
+  register,
+  unregister,
+  onInput,
 }: {
   section: Section;
   hasComment: boolean;
-}) {
-  const { anchorId, title, level } = section;
+} & BlockWiring) {
+  const { anchorId, title, level, blockId } = section;
   const sharedClass = `flex items-baseline gap-3 mt-6 mb-3 font-serif font-semibold${
     hasComment ? " md-commented" : ""
   }`;
   const inner = (
     <>
       <AnchorPill anchorId={anchorId} />
-      <span>{title}</span>
+      {editable ? (
+        <HeadingTitle
+          key={`${revisionKey}:${blockId}`}
+          blockId={blockId}
+          anchorId={anchorId}
+          title={title}
+          register={register}
+          unregister={unregister}
+          onInput={onInput}
+        />
+      ) : (
+        <span>{title}</span>
+      )}
     </>
   );
   switch (level) {
@@ -185,4 +368,56 @@ function Heading({
         </h4>
       );
   }
+}
+
+// Editable heading title — plain serif text (no markdown), same registry
+// mechanism as EditableBlock.
+function HeadingTitle({
+  blockId,
+  anchorId,
+  title,
+  register,
+  unregister,
+  onInput,
+}: {
+  blockId: string;
+  anchorId: string;
+  title: string;
+} & Pick<BlockWiring, "register" | "unregister" | "onInput">) {
+  const ref = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const baseline = el.innerText;
+    register({
+      blockId,
+      anchorId,
+      baseline,
+      getMarkdown: () => ref.current?.innerText ?? baseline,
+      setMarkdown: (md) => {
+        const node = ref.current;
+        if (!node) return;
+        if (document.activeElement === node) return;
+        if (node.innerText === md) return;
+        node.innerText = md;
+      },
+    });
+    return () => unregister(blockId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blockId]);
+  return (
+    <span
+      ref={ref}
+      role="textbox"
+      aria-label={`Edit heading ${anchorId}`}
+      tabIndex={0}
+      contentEditable
+      suppressContentEditableWarning
+      spellCheck
+      onInput={onInput}
+      onBlur={onInput}
+    >
+      {title}
+    </span>
+  );
 }

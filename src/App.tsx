@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { ApproveToast } from "./components/ApproveToast";
 import { CommentCard } from "./components/CommentCard";
@@ -19,11 +20,16 @@ import type { ThemeName } from "./theme/themes";
 import { usePersistedState } from "./theme/usePersistedState";
 import { useResizablePane } from "./hooks/useResizablePane";
 import { PaneDivider } from "./components/PaneDivider";
+import { TerminalTabs } from "./components/TerminalTabs";
+import { DecisionWindowBanner } from "./components/DecisionWindowBanner";
 import type {
   Comment,
   CommentType,
   HookStatus,
+  InterceptionMode,
+  ModeEvent,
   NewCommentRequest,
+  PlanDecisionWindowEvent,
   PlanReceivedEvent,
   ReviewSession,
   SessionSummary,
@@ -51,6 +57,9 @@ function App() {
   const [warning, setWarning] = useState<ResolutionWarning | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [hookStatus, setHookStatus] = useState<HookStatus | null>(null);
+  const [mode, setMode] = useState<InterceptionMode>("active");
+  const [decisionWindow, setDecisionWindow] =
+    useState<PlanDecisionWindowEvent | null>(null);
   const [theme, setTheme] = useState<ThemeName>(() => readStoredTheme());
   const [paneWidth, setPaneWidth] = usePersistedState(
     "redline.commentPane.width",
@@ -60,6 +69,20 @@ function App() {
     "redline.commentPane.collapsed",
     false,
   );
+  const [termHeight, setTermHeight] = usePersistedState(
+    "redline.terminalPane.height",
+    260,
+  );
+  const [termCollapsed, setTermCollapsed] = usePersistedState(
+    "redline.terminalPane.collapsed",
+    false,
+  );
+  const [termFullscreen, setTermFullscreen] = usePersistedState(
+    "redline.terminalPane.fullscreen",
+    false,
+  );
+  const [termTabCount, setTermTabCount] = useState(1);
+  const [termHasUnseen, setTermHasUnseen] = useState(false);
   const documentRef = useRef<HTMLElement | null>(null);
 
   const onThemeChange = (name: ThemeName) => {
@@ -72,6 +95,14 @@ function App() {
     width: paneWidth,
     onWidthChange: setPaneWidth,
   });
+
+  const { isDragging: termDragging, startDrag: startTermDrag } =
+    useResizablePane({
+      width: termHeight,
+      onWidthChange: setTermHeight,
+      axis: "y",
+      min: 120,
+    });
 
   const [selection, clearSelection] = useTextSelection(
     documentRef,
@@ -110,6 +141,12 @@ function App() {
         setHookStatus(status);
       } catch (err) {
         console.error("get_hook_status failed", err);
+      }
+      try {
+        const m = await invoke<InterceptionMode>("get_interception_mode");
+        setMode(m);
+      } catch (err) {
+        console.error("get_interception_mode failed", err);
       }
       const list = await refreshSummaries();
       const first = list[0]?.sessionId ?? null;
@@ -162,10 +199,33 @@ function App() {
         }
       },
     );
+    const modeUnlisten = listen<ModeEvent>("mode-changed", (e) => {
+      setMode(e.payload.mode);
+    });
+    const decisionUnlisten = listen<PlanDecisionWindowEvent>(
+      "plan-decision-window",
+      (e) => {
+        setDecisionWindow(e.payload);
+        // Attention-grab: a short window is useless behind other windows.
+        void (async () => {
+          try {
+            const w = getCurrentWindow();
+            if (!(await w.isFocused())) {
+              await w.unminimize();
+              await w.setFocus();
+            }
+          } catch {
+            /* window API unavailable — banner still shows */
+          }
+        })();
+      },
+    );
     return () => {
       void planUnlisten.then((u) => u());
       void commentsUnlisten.then((u) => u());
       void statusUnlisten.then((u) => u());
+      void modeUnlisten.then((u) => u());
+      void decisionUnlisten.then((u) => u());
     };
   }, [activeId]);
 
@@ -206,6 +266,12 @@ function App() {
   const canSubmit = pendingComments.length > 0;
   const canApprove = !!session && session.status !== "approved";
 
+  // While Claude revises, the live terminal *is* the waiting state — make sure
+  // the dock is visible so "watch it below" actually points at something.
+  useEffect(() => {
+    if (waiting) setTermCollapsed(false);
+  }, [waiting, setTermCollapsed]);
+
   const pendingPerSession = useMemo(() => {
     const map: Record<string, number> = {};
     for (const s of summaries) {
@@ -234,6 +300,30 @@ function App() {
       setComposing(null);
     } catch (err) {
       console.error("failed to add comment", err);
+    }
+  };
+
+  const addEditorComment = async (req: NewCommentRequest) => {
+    if (!session) return;
+    return invoke<Comment>("add_comment", {
+      sessionId: session.sessionId,
+      request: req,
+    });
+  };
+
+  const updateComment = async (
+    commentId: string,
+    update: import("./types").UpdateCommentRequest,
+  ) => {
+    if (!session) return;
+    try {
+      await invoke<Comment>("update_comment", {
+        sessionId: session.sessionId,
+        commentId,
+        update,
+      });
+    } catch (err) {
+      console.error("failed to update comment", err);
     }
   };
 
@@ -277,6 +367,43 @@ function App() {
     }
   };
 
+  const changeMode = async (next: InterceptionMode) => {
+    setMode(next); // optimistic; the mode-changed event confirms
+    try {
+      await invoke("set_interception_mode", { mode: next });
+    } catch (err) {
+      console.error("set_interception_mode failed", err);
+    }
+  };
+
+  const dismissDecisionWindow = useCallback(() => setDecisionWindow(null), []);
+
+  const openDecisionForReview = async () => {
+    const dw = decisionWindow;
+    if (!dw) return;
+    try {
+      await invoke<boolean>("claim_review", { sessionId: dw.sessionId });
+    } catch (err) {
+      console.error("claim_review failed", err);
+    }
+    setActiveId(dw.sessionId);
+    void loadSession(dw.sessionId);
+    setDecisionWindow(null);
+  };
+
+  const approveFromDecision = async () => {
+    const dw = decisionWindow;
+    if (!dw) return;
+    try {
+      await invoke("approve_plan", { sessionId: dw.sessionId });
+      setToast("Approved · Claude is executing");
+      setTimeout(() => setToast(null), 3500);
+    } catch (err) {
+      console.error("approve_plan failed", err);
+    }
+    setDecisionWindow(null);
+  };
+
   const acceptResolution = async (commentId: string) => {
     if (!session) return;
     try {
@@ -313,8 +440,23 @@ function App() {
 
   return (
     <div className="h-full flex flex-col">
-      <Header session={session} theme={theme} onThemeChange={onThemeChange} />
-      <main className="flex-1 overflow-hidden flex">
+      <Header
+        session={session}
+        theme={theme}
+        onThemeChange={onThemeChange}
+        mode={mode}
+        onModeChange={changeMode}
+      />
+      {decisionWindow && (
+        <DecisionWindowBanner
+          event={decisionWindow}
+          onOpen={openDecisionForReview}
+          onApprove={approveFromDecision}
+          onExpire={dismissDecisionWindow}
+        />
+      )}
+      <main className="relative flex-1 overflow-hidden flex flex-col">
+        <div className="flex-1 overflow-hidden flex">
         <SessionSidebar
           sessions={summaries}
           activeId={activeId}
@@ -340,6 +482,10 @@ function App() {
                 sections={sections}
                 diff={diff}
                 comments={allComments}
+                revisionKey={`${activeId ?? ""}:${latest?.versionNumber ?? 0}`}
+                onAddComment={addEditorComment}
+                onUpdateComment={updateComment}
+                onDeleteComment={deleteComment}
               />
             ) : (
               <EmptyState
@@ -384,15 +530,19 @@ function App() {
             )}
             {waiting && (
               <div
-                className="rounded-md border p-3 italic"
+                className="rounded-md border p-3"
                 style={{
                   borderColor: "var(--color-rule)",
                   background: "var(--color-bg-elevated)",
                   color: "var(--color-ink-muted)",
                   fontSize: "12px",
+                  lineHeight: 1.5,
                 }}
               >
-                Waiting for Claude's revised plan…
+                Feedback sent. Claude is revising —{" "}
+                <span style={{ color: "var(--color-ink)" }}>
+                  watch it work in the terminal below ↓
+                </span>
               </div>
             )}
             {allComments.length === 0 && !composing && (
@@ -419,6 +569,39 @@ function App() {
           </div>
         </aside>
         )}
+        </div>
+
+        {!termFullscreen && (
+          <PaneDivider
+            orientation="horizontal"
+            label="terminal"
+            collapsed={termCollapsed}
+            dragging={termDragging}
+            onToggle={() => setTermCollapsed((c) => !c)}
+            onPointerDown={startTermDrag}
+          />
+        )}
+        <div
+          className={
+            termFullscreen
+              ? "absolute inset-0 z-30"
+              : "shrink-0 overflow-hidden"
+          }
+          style={
+            termFullscreen
+              ? { background: "var(--color-paper)" }
+              : { height: termCollapsed ? 0 : `${termHeight}px` }
+          }
+        >
+          <TerminalTabs
+            theme={theme}
+            fullscreen={termFullscreen}
+            onFullscreenChange={setTermFullscreen}
+            onTabsChange={setTermTabCount}
+            onActivityChange={setTermHasUnseen}
+            collapsed={termFullscreen ? false : termCollapsed}
+          />
+        </div>
       </main>
       <Footer
         comments={allComments}
@@ -427,6 +610,10 @@ function App() {
         waiting={waiting}
         onSubmit={submitReview}
         onApprove={approvePlan}
+        termCollapsed={termCollapsed && !termFullscreen}
+        termTabCount={termTabCount}
+        termHasUnseen={termHasUnseen}
+        onExpandTerminal={() => setTermCollapsed(false)}
       />
       {selection && !composing && (
         <SelectionMenu rect={selection.rect} onPick={beginCompose} />

@@ -10,42 +10,112 @@ use crate::state::{Paragraph, Section};
 /// `Paragraph` whose `markdown` is the **verbatim source slice** — nothing is
 /// flattened or dropped, so the frontend can render it faithfully.
 pub fn parse_plan(markdown: &str) -> Vec<Section> {
+    parse_collect(markdown).0
+}
+
+/// Parse a plan and return it alongside a copy of the (resolution-stripped)
+/// markdown in which **every** section/block is preceded by a stable
+/// `<!-- rl:blk-… -->` sidecar. Blocks that already carried a sidecar keep
+/// their id verbatim; blocks without one get a freshly minted id injected at
+/// the block's byte offset, leaving every other byte untouched.
+///
+/// Invariant (asserted in tests): the operation is idempotent — feeding the
+/// returned markdown back in yields byte-identical markdown and identical
+/// `block_id`s. This is what makes `block_id` survive the "reparse on load"
+/// model in `db.rs::load_all`.
+pub fn parse_plan_with_sidecars(markdown: &str) -> (Vec<Section>, String) {
+    let (sections, injections, stripped) = parse_collect(markdown);
+    let augmented = apply_injections(&stripped, injections);
+    (sections, augmented)
+}
+
+fn parse_collect(markdown: &str) -> (Vec<Section>, Vec<(usize, String)>, String) {
     let stripped = strip_resolutions_block(markdown);
     let mut walker = Walker::new();
-    let mut iter = Parser::new_ext(&stripped, Options::all()).into_offset_iter();
-    while let Some((event, range)) = iter.next() {
-        match event {
-            Event::Start(Tag::Heading { level, .. }) => {
-                walker.begin_heading(heading_level_to_u8(level));
-            }
-            Event::End(TagEnd::Heading(_)) => {
-                walker.end_heading();
-            }
-            Event::Text(t) | Event::Code(t) => {
-                walker.push_title(&t);
-            }
-            Event::Start(tag) if is_block_container(&tag) => {
-                let md = stripped[range].trim().to_string();
-                // Consume this block's inner events up to its matching End so
-                // nested content is not re-interpreted as plan structure.
-                let mut depth = 1usize;
-                while depth > 0 {
-                    match iter.next() {
-                        Some((Event::Start(_), _)) => depth += 1,
-                        Some((Event::End(_), _)) => depth -= 1,
-                        Some(_) => {}
-                        None => break,
+    {
+        let mut iter = Parser::new_ext(&stripped, Options::all()).into_offset_iter();
+        while let Some((event, range)) = iter.next() {
+            match event {
+                Event::Start(Tag::Heading { level, .. }) => {
+                    walker.begin_heading(heading_level_to_u8(level), range.start);
+                }
+                Event::End(TagEnd::Heading(_)) => {
+                    walker.end_heading();
+                }
+                Event::Text(t) | Event::Code(t) => {
+                    walker.push_title(&t);
+                }
+                Event::Start(tag) if is_block_container(&tag) => {
+                    let start = range.start;
+                    let md = stripped[range].trim().to_string();
+                    // Consume this block's inner events up to its matching End
+                    // so nested content is not re-interpreted as plan structure.
+                    let mut depth = 1usize;
+                    while depth > 0 {
+                        match iter.next() {
+                            Some((Event::Start(_), _)) => depth += 1,
+                            Some((Event::End(_), _)) => depth -= 1,
+                            Some(_) => {}
+                            None => break,
+                        }
+                    }
+                    if let Some(id) = parse_sidecar_id(&md) {
+                        // A redline sidecar: not content — it names the next block.
+                        walker.pending_block_id = Some(id);
+                    } else {
+                        walker.attach_block(start, md);
                     }
                 }
-                walker.attach_block(md);
+                Event::Rule => {
+                    walker.attach_block(range.start, stripped[range].trim().to_string());
+                }
+                _ => {}
             }
-            Event::Rule => {
-                walker.attach_block(stripped[range].trim().to_string());
-            }
-            _ => {}
         }
     }
-    walker.finish()
+    let (sections, injections) = walker.finish();
+    (sections, injections, stripped)
+}
+
+/// If `s` (trimmed) is exactly a redline block sidecar, return its block id.
+fn parse_sidecar_id(s: &str) -> Option<String> {
+    let inner = s.strip_prefix("<!--")?.strip_suffix("-->")?.trim();
+    let id = inner.strip_prefix("rl:")?.trim();
+    let rest = id.strip_prefix("blk-")?;
+    if !rest.is_empty()
+        && rest
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        Some(id.to_string())
+    } else {
+        None
+    }
+}
+
+fn mint_block_id() -> String {
+    let u = uuid::Uuid::new_v4().simple().to_string();
+    format!("blk-{}", &u[..8])
+}
+
+/// Splice `<!-- rl:blk-… -->\n` in front of each recorded block offset,
+/// preserving every other byte of `src` exactly.
+fn apply_injections(src: &str, mut injections: Vec<(usize, String)>) -> String {
+    if injections.is_empty() {
+        return src.to_string();
+    }
+    injections.sort_by_key(|(off, _)| *off);
+    let mut out = String::with_capacity(src.len() + injections.len() * 28);
+    let mut last = 0usize;
+    for (off, id) in injections {
+        out.push_str(&src[last..off]);
+        out.push_str("<!-- rl:");
+        out.push_str(&id);
+        out.push_str(" -->\n");
+        last = off;
+    }
+    out.push_str(&src[last..]);
+    out
 }
 
 fn is_block_container(tag: &Tag<'_>) -> bool {
@@ -104,6 +174,7 @@ fn strip_resolutions_block(md: &str) -> String {
 struct SectionFrame {
     level: u8,
     anchor_id: String,
+    block_id: String,
     title: String,
     paragraphs: Vec<Paragraph>,
     children: Vec<Section>,
@@ -117,6 +188,7 @@ impl SectionFrame {
         Self {
             level: 0,
             anchor_id: String::new(),
+            block_id: String::new(),
             title: String::new(),
             paragraphs: Vec::new(),
             children: Vec::new(),
@@ -131,6 +203,12 @@ struct Walker {
     stack: Vec<SectionFrame>,
     title_buf: Option<String>,
     pending_heading_level: Option<u8>,
+    pending_heading_start: usize,
+    /// Block id read from a sidecar, awaiting the section/block it names.
+    pending_block_id: Option<String>,
+    /// `(byte offset, minted id)` for blocks that had no sidecar — used to
+    /// splice sidecars back into the stored markdown.
+    injections: Vec<(usize, String)>,
 }
 
 impl Walker {
@@ -139,11 +217,28 @@ impl Walker {
             stack: vec![SectionFrame::root()],
             title_buf: None,
             pending_heading_level: None,
+            pending_heading_start: 0,
+            pending_block_id: None,
+            injections: Vec::new(),
         }
     }
 
-    fn begin_heading(&mut self, level: u8) {
+    /// Resolve the id for a section/block starting at byte `start`: reuse a
+    /// sidecar id if one preceded it, else mint one and record where its
+    /// sidecar must be injected.
+    fn take_block_id(&mut self, start: usize) -> String {
+        if let Some(id) = self.pending_block_id.take() {
+            id
+        } else {
+            let id = mint_block_id();
+            self.injections.push((start, id.clone()));
+            id
+        }
+    }
+
+    fn begin_heading(&mut self, level: u8, start: usize) {
         self.pending_heading_level = Some(level);
+        self.pending_heading_start = start;
         self.title_buf = Some(String::new());
     }
 
@@ -155,15 +250,17 @@ impl Walker {
 
     fn end_heading(&mut self) {
         let level = self.pending_heading_level.take().unwrap_or(1);
+        let start = self.pending_heading_start;
         let title = self.title_buf.take().unwrap_or_default().trim().to_string();
-        self.open_section(level, title);
+        self.open_section(level, start, title);
     }
 
-    fn attach_block(&mut self, markdown: String) {
+    fn attach_block(&mut self, start: usize, markdown: String) {
         if markdown.is_empty() {
             return;
         }
         let text = block_plain_text(&markdown);
+        let block_id = self.take_block_id(start);
         let frame = self.stack.last_mut().unwrap();
         frame.next_paragraph_index += 1;
         let anchor = format!("{}.p{}", frame.anchor_id, frame.next_paragraph_index);
@@ -173,15 +270,17 @@ impl Walker {
         frame.body_markdown.push_str(&markdown);
         frame.paragraphs.push(Paragraph {
             anchor_id: anchor,
+            block_id,
             markdown,
             text,
         });
     }
 
-    fn open_section(&mut self, level: u8, title: String) {
+    fn open_section(&mut self, level: u8, start: usize, title: String) {
         while self.stack.len() > 1 && self.stack.last().unwrap().level >= level {
             self.close_top();
         }
+        let block_id = self.take_block_id(start);
         let parent = self.stack.last_mut().unwrap();
         parent.next_child_index += 1;
         let anchor = if parent.level == 0 {
@@ -192,6 +291,7 @@ impl Walker {
         self.stack.push(SectionFrame {
             level,
             anchor_id: anchor,
+            block_id,
             title,
             paragraphs: Vec::new(),
             children: Vec::new(),
@@ -205,6 +305,7 @@ impl Walker {
         let frame = self.stack.pop().unwrap();
         let section = Section {
             anchor_id: frame.anchor_id,
+            block_id: frame.block_id,
             level: frame.level,
             title: frame.title,
             body_markdown: frame.body_markdown,
@@ -215,11 +316,12 @@ impl Walker {
         parent.children.push(section);
     }
 
-    fn finish(mut self) -> Vec<Section> {
+    fn finish(mut self) -> (Vec<Section>, Vec<(usize, String)>) {
         while self.stack.len() > 1 {
             self.close_top();
         }
-        self.stack.pop().unwrap().children
+        let injections = std::mem::take(&mut self.injections);
+        (self.stack.pop().unwrap().children, injections)
     }
 }
 
@@ -410,6 +512,154 @@ fn main() {
 
         let rule = &s.paragraphs[6];
         assert!(rule.markdown.contains("---"));
+    }
+
+    fn flatten_block_ids(secs: &[Section]) -> Vec<String> {
+        fn walk(secs: &[Section], out: &mut Vec<String>) {
+            for s in secs {
+                out.push(s.block_id.clone());
+                for p in &s.paragraphs {
+                    out.push(p.block_id.clone());
+                }
+                walk(&s.children, out);
+            }
+        }
+        let mut out = Vec::new();
+        walk(secs, &mut out);
+        out
+    }
+
+    /// Remove only the injected sidecar lines, leaving everything else.
+    fn strip_sidecar_lines(md: &str) -> String {
+        md.split('\n')
+            .filter(|l| {
+                let t = l.trim();
+                !(t.starts_with("<!-- rl:blk-") && t.ends_with("-->"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    const RICH_PLAN: &str = "\
+# Plan
+
+Intro paragraph with **bold**.
+
+- bullet one
+- bullet two
+  - nested
+
+```rust
+fn main() {}
+```
+
+> a quote
+
+| A | B |
+| - | - |
+| 1 | 2 |
+
+---
+
+## Sub
+
+Sub body.
+
+### Deep
+
+Deep body.
+
+# Second
+
+Tail paragraph.
+";
+
+    #[test]
+    fn sidecars_inject_for_every_block_and_section() {
+        let (sections, md) = parse_plan_with_sidecars(RICH_PLAN);
+        let ids = flatten_block_ids(&sections);
+        assert!(!ids.is_empty());
+        // Every id is unique and well-formed.
+        let mut seen = std::collections::HashSet::new();
+        for id in &ids {
+            assert!(id.starts_with("blk-"), "bad id {id}");
+            assert!(seen.insert(id.clone()), "duplicate id {id}");
+            assert!(md.contains(&format!("<!-- rl:{id} -->")), "missing sidecar for {id}");
+        }
+        // One sidecar per section + paragraph.
+        assert_eq!(md.matches("<!-- rl:blk-").count(), ids.len());
+    }
+
+    #[test]
+    fn sidecar_round_trip_is_byte_stable_and_id_stable() {
+        let (s1, md1) = parse_plan_with_sidecars(RICH_PLAN);
+        // Re-feeding the augmented markdown must not change a single byte and
+        // must read the same ids back (the reparse-on-load invariant).
+        let (s2, md2) = parse_plan_with_sidecars(&md1);
+        assert_eq!(md1, md2, "sidecar injection is not idempotent");
+        assert_eq!(flatten_block_ids(&s1), flatten_block_ids(&s2));
+        // Plain reparse (what db.rs::load_all does) also yields the same ids.
+        let s3 = parse_plan(&md1);
+        assert_eq!(flatten_block_ids(&s1), flatten_block_ids(&s3));
+    }
+
+    #[test]
+    fn injection_only_adds_sidecars_nothing_else() {
+        let (_, md1) = parse_plan_with_sidecars(RICH_PLAN);
+        assert_eq!(
+            strip_sidecar_lines(&md1),
+            RICH_PLAN,
+            "bytes other than sidecars were altered"
+        );
+    }
+
+    #[test]
+    fn sidecars_do_not_create_spurious_blocks() {
+        // Structure/anchors with sidecars must match structure without them.
+        let bare = parse_plan(RICH_PLAN);
+        let (_, md1) = parse_plan_with_sidecars(RICH_PLAN);
+        let with = parse_plan(&md1);
+
+        fn shape(secs: &[Section]) -> Vec<(String, usize)> {
+            fn walk(secs: &[Section], out: &mut Vec<(String, usize)>) {
+                for s in secs {
+                    out.push((s.anchor_id.clone(), s.paragraphs.len()));
+                    walk(&s.children, out);
+                }
+            }
+            let mut out = Vec::new();
+            walk(secs, &mut out);
+            out
+        }
+        assert_eq!(shape(&bare), shape(&with));
+
+        // List/table/code content stays verbatim (the de-risked case).
+        let plan = &with[0];
+        assert!(plan.paragraphs.iter().any(|p| p.markdown.contains("- nested")));
+        assert!(plan.paragraphs.iter().any(|p| p.markdown.contains("```rust")));
+        assert!(plan.paragraphs.iter().any(|p| p.markdown.contains("| A | B |")));
+    }
+
+    #[test]
+    fn parse_sidecar_id_matches_only_real_sidecars() {
+        assert_eq!(parse_sidecar_id("<!-- rl:blk-7f3a -->"), Some("blk-7f3a".into()));
+        assert_eq!(parse_sidecar_id("<!--rl:blk-AB_c-1-->"), Some("blk-AB_c-1".into()));
+        assert_eq!(parse_sidecar_id("<!-- not ours -->"), None);
+        assert_eq!(parse_sidecar_id("<!-- rl:other -->"), None);
+        assert_eq!(parse_sidecar_id("<!-- rl:blk- -->"), None);
+        assert_eq!(parse_sidecar_id("plain text"), None);
+    }
+
+    #[test]
+    fn heading_adjacent_with_no_blank_line_round_trips() {
+        let md = "# Title\nBody right after heading.\n";
+        let (s1, md1) = parse_plan_with_sidecars(md);
+        assert_eq!(s1.len(), 1);
+        assert_eq!(s1[0].paragraphs.len(), 1);
+        assert_eq!(strip_sidecar_lines(&md1), md);
+        let (s2, md2) = parse_plan_with_sidecars(&md1);
+        assert_eq!(md1, md2);
+        assert_eq!(flatten_block_ids(&s1), flatten_block_ids(&s2));
     }
 
     #[test]

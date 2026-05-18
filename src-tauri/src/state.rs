@@ -14,6 +14,10 @@ pub type AnchorId = String;
 #[serde(rename_all = "camelCase")]
 pub struct Paragraph {
     pub anchor_id: AnchorId,
+    /// Structure-independent identity, stable across reparse within a revision.
+    /// Persisted as an HTML-comment sidecar in `raw_plan_markdown`. The join
+    /// key for track-changes / comments / diff; `anchor_id` stays positional.
+    pub block_id: String,
     /// Verbatim markdown source for this block — rendered faithfully by the UI.
     pub markdown: String,
     /// Plain-text rendering, used for revision diffing.
@@ -24,6 +28,8 @@ pub struct Paragraph {
 #[serde(rename_all = "camelCase")]
 pub struct Section {
     pub anchor_id: AnchorId,
+    /// Structure-independent identity for the heading block (see `Paragraph::block_id`).
+    pub block_id: String,
     pub level: u8,
     pub title: String,
     pub body_markdown: String,
@@ -39,6 +45,39 @@ pub struct Revision {
     pub raw_plan_markdown: String,
     pub sections: Vec<Section>,
     pub comments: Vec<Comment>,
+}
+
+/// How the daemon treats incoming `ExitPlanMode` plans.
+///
+/// - `Active`   — intercept and block until the reviewer decides (original behavior).
+/// - `Ambient`  — surface the plan, but auto-approve after a short decision window
+///                unless the reviewer explicitly opens it for review.
+/// - `Paused`   — killswitch: immediately auto-approve, capture nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InterceptionMode {
+    Active,
+    Ambient,
+    Paused,
+}
+
+impl InterceptionMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            InterceptionMode::Active => "active",
+            InterceptionMode::Ambient => "ambient",
+            InterceptionMode::Paused => "paused",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "active" => Some(InterceptionMode::Active),
+            "ambient" => Some(InterceptionMode::Ambient),
+            "paused" => Some(InterceptionMode::Paused),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -74,12 +113,17 @@ pub struct SessionSummary {
     pub awaiting_review: bool,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+// kebab-case keeps edit/feedback/question identical to the legacy
+// lowercase form while giving the new structural kinds hyphenated names.
+#[serde(rename_all = "kebab-case")]
 pub enum CommentKind {
     Edit,
     Feedback,
     Question,
+    BlockInsert,
+    BlockDelete,
+    BlockMove,
 }
 
 impl CommentKind {
@@ -88,6 +132,9 @@ impl CommentKind {
             CommentKind::Edit => "edit",
             CommentKind::Feedback => "feedback",
             CommentKind::Question => "question",
+            CommentKind::BlockInsert => "block-insert",
+            CommentKind::BlockDelete => "block-delete",
+            CommentKind::BlockMove => "block-move",
         }
     }
 
@@ -96,8 +143,18 @@ impl CommentKind {
             "edit" => Some(CommentKind::Edit),
             "feedback" => Some(CommentKind::Feedback),
             "question" => Some(CommentKind::Question),
+            "block-insert" => Some(CommentKind::BlockInsert),
+            "block-delete" => Some(CommentKind::BlockDelete),
+            "block-move" => Some(CommentKind::BlockMove),
             _ => None,
         }
+    }
+
+    pub fn is_structural(&self) -> bool {
+        matches!(
+            self,
+            CommentKind::BlockInsert | CommentKind::BlockDelete | CommentKind::BlockMove
+        )
     }
 }
 
@@ -169,6 +226,27 @@ pub struct EditPayload {
     pub revised: String,
 }
 
+/// Whole-block structural change (D5: an explicit reviewer gesture, never an
+/// inferred delete+insert). Stored as `structural_json` and rendered into the
+/// feedback payload's STRUCTURAL CHANGES section declaratively.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StructuralPayload {
+    /// "insert" | "delete" | "move".
+    pub op: String,
+    /// Stable id of the affected block (the join key).
+    pub block_id: String,
+    /// Anchor the block sat at before the change (move/delete).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_anchor: Option<String>,
+    /// Anchor the block now sits at (move/insert).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_anchor: Option<String>,
+    /// Inserted / deleted block body (verbatim markdown).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub markdown: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Resolution {
@@ -186,9 +264,16 @@ pub struct Comment {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<CommentScope>,
     pub anchor_id: String,
+    /// Stable join key to the plan block this comment is attached to (D1).
+    /// Set for editor-originated comments; positional `anchor_id` stays for
+    /// display. `None` for legacy / sidebar-only comments.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block_id: Option<String>,
     pub body: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub edit: Option<EditPayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structural: Option<StructuralPayload>,
     pub created_at: i64,
     pub status: CommentStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -202,8 +287,12 @@ pub struct NewCommentRequest {
     pub kind: CommentKind,
     pub scope: Option<CommentScope>,
     pub anchor_id: String,
+    #[serde(default)]
+    pub block_id: Option<String>,
     pub body: String,
     pub edit: Option<EditPayload>,
+    #[serde(default)]
+    pub structural: Option<StructuralPayload>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -211,7 +300,11 @@ pub struct NewCommentRequest {
 pub struct UpdateCommentRequest {
     pub body: Option<String>,
     pub scope: Option<CommentScope>,
+    #[serde(default)]
+    pub block_id: Option<String>,
     pub edit: Option<EditPayload>,
+    #[serde(default)]
+    pub structural: Option<StructuralPayload>,
 }
 
 #[derive(Clone)]
@@ -323,12 +416,14 @@ impl SessionStore {
         &self,
         session_id: &str,
         request: NewCommentRequest,
-    ) -> Option<Comment> {
+    ) -> Result<Comment, String> {
         let mut map = self.inner.lock().unwrap();
-        let session = map.get_mut(session_id)?;
+        let session = map
+            .get_mut(session_id)
+            .ok_or_else(|| format!("no session found for id {session_id}"))?;
 
         if session.revisions.is_empty() {
-            return None;
+            return Err(format!("session {session_id} has no revisions yet"));
         }
 
         let next_n = session
@@ -349,13 +444,20 @@ impl SessionStore {
             CommentKind::Edit => request.edit.clone(),
             _ => None,
         };
+        let structural = if request.kind.is_structural() {
+            request.structural.clone()
+        } else {
+            None
+        };
         let comment = Comment {
             id,
             kind: request.kind,
             scope,
             anchor_id: request.anchor_id,
+            block_id: request.block_id,
             body: request.body,
             edit,
+            structural,
             created_at: now_millis(),
             status: CommentStatus::Draft,
             resolution: None,
@@ -367,10 +469,10 @@ impl SessionStore {
             .insert_comment(session_id, latest.version_number, &comment)
         {
             tracing::error!(error = %e, "failed to persist comment");
-            return None;
+            return Err(format!("failed to persist comment: {e}"));
         }
         latest.comments.push(comment.clone());
-        Some(comment)
+        Ok(comment)
     }
 
     pub fn update_comment(
@@ -386,6 +488,12 @@ impl SessionStore {
                 if let Some(body) = update.body {
                     comment.body = body;
                 }
+                if update.block_id.is_some() {
+                    comment.block_id = update.block_id;
+                }
+                if update.structural.is_some() && comment.kind.is_structural() {
+                    comment.structural = update.structural;
+                }
                 if matches!(comment.kind, CommentKind::Feedback) {
                     if let Some(scope) = update.scope {
                         comment.scope = Some(scope);
@@ -396,7 +504,7 @@ impl SessionStore {
                         comment.edit = Some(edit);
                     }
                 }
-                if let Err(e) = self.db.update_comment(comment) {
+                if let Err(e) = self.db.update_comment(session_id, comment) {
                     tracing::error!(error = %e, "failed to persist comment update");
                 }
                 return Some(comment.clone());
@@ -414,7 +522,7 @@ impl SessionStore {
             let before = revision.comments.len();
             revision.comments.retain(|c| c.id != comment_id);
             if revision.comments.len() != before {
-                if let Err(e) = self.db.delete_comment(comment_id) {
+                if let Err(e) = self.db.delete_comment(session_id, comment_id) {
                     tracing::error!(error = %e, "failed to delete comment from db");
                 }
                 return true;
@@ -455,7 +563,7 @@ impl SessionStore {
                     });
                     comment.status = CommentStatus::Resolved;
                     matched.insert(comment.id.clone(), true);
-                    if let Err(e) = self.db.update_comment(comment) {
+                    if let Err(e) = self.db.update_comment(session_id, comment) {
                         tracing::error!(error = %e, "failed to persist resolution attach");
                     }
                 }
@@ -511,7 +619,7 @@ impl SessionStore {
                 ) {
                     comment.status = CommentStatus::Submitted;
                     ids.push(comment.id.clone());
-                    if let Err(e) = self.db.update_comment(comment) {
+                    if let Err(e) = self.db.update_comment(session_id, comment) {
                         tracing::error!(error = %e, "failed to persist submit transition");
                     }
                 }
@@ -543,7 +651,7 @@ impl SessionStore {
                         res.accepted_at = Some(now);
                     }
                     comment.status = CommentStatus::Accepted;
-                    if let Err(e) = self.db.update_comment(comment) {
+                    if let Err(e) = self.db.update_comment(session_id, comment) {
                         tracing::error!(error = %e, "failed to persist accept");
                     }
                     return true;
@@ -562,7 +670,7 @@ impl SessionStore {
             for comment in revision.comments.iter_mut() {
                 if comment.id == comment_id {
                     comment.status = CommentStatus::Reopened;
-                    if let Err(e) = self.db.update_comment(comment) {
+                    if let Err(e) = self.db.update_comment(session_id, comment) {
                         tracing::error!(error = %e, "failed to persist reopen");
                     }
                     return true;

@@ -1,14 +1,24 @@
-import type { ReviewSession } from "../types";
+import type { InterceptionMode, ReviewSession } from "../types";
 import type { ThemeName } from "../theme/themes";
 import { ThemePicker } from "./ThemePicker";
+import { ModeToggle } from "./ModeToggle";
+import redlineLogo from "../assets/redline-logo.png";
 
 interface HeaderProps {
   session: ReviewSession | null;
   theme: ThemeName;
   onThemeChange: (name: ThemeName) => void;
+  mode: InterceptionMode;
+  onModeChange: (mode: InterceptionMode) => void;
 }
 
-export function Header({ session, theme, onThemeChange }: HeaderProps) {
+export function Header({
+  session,
+  theme,
+  onThemeChange,
+  mode,
+  onModeChange,
+}: HeaderProps) {
   const latest = session?.revisions[session.revisions.length - 1];
   return (
     <header
@@ -16,9 +26,11 @@ export function Header({ session, theme, onThemeChange }: HeaderProps) {
       style={{ borderColor: "var(--color-rule)" }}
     >
       <div className="flex items-baseline gap-3">
-        <span className="font-semibold tracking-tight" style={{ fontSize: "14px" }}>
-          Redline
-        </span>
+        <img
+          src={redlineLogo}
+          alt="Redline"
+          style={{ height: "22px", width: "auto", display: "block" }}
+        />
         {session && (
           <>
             <span style={{ color: "var(--color-ink-muted)" }}>·</span>
@@ -40,6 +52,7 @@ export function Header({ session, theme, onThemeChange }: HeaderProps) {
         )}
       </div>
       <div className="flex items-center gap-3">
+        <ModeToggle mode={mode} onChange={onModeChange} />
         <ThemePicker theme={theme} onThemeChange={onThemeChange} />
         {latest && (
           <span

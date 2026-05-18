@@ -2,24 +2,96 @@ mod db;
 mod feedback;
 mod hook;
 mod parser;
+mod pty;
 mod resolutions;
 mod state;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
 
 use axum::{extract::State, routing::post, Json, Router};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{tray::TrayIconBuilder, AppHandle, Emitter, Manager};
+use tauri::{
+    menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
+    tray::TrayIconBuilder,
+    AppHandle, Emitter, Listener, Manager,
+};
 use tokio::sync::oneshot;
 
 use crate::db::Database;
 use crate::hook::HookStatus;
 use crate::state::{
-    Comment, NewCommentRequest, ReviewSession, SessionStatus, SessionStore, SessionSummary,
-    UpdateCommentRequest,
+    now_millis, Comment, InterceptionMode, NewCommentRequest, ReviewSession, SessionStatus,
+    SessionStore, SessionSummary, UpdateCommentRequest,
 };
+
+const SETTING_MODE: &str = "interception_mode";
+/// Seconds the Ambient decision window stays open before auto-approving.
+const AMBIENT_WINDOW_SECS: u64 = 20;
+
+/// Interception mode, persisted to the `app_settings` table and mirrored in memory.
+#[derive(Clone)]
+struct Settings {
+    mode: Arc<StdMutex<InterceptionMode>>,
+    db: Arc<Database>,
+}
+
+impl Settings {
+    fn load(db: Arc<Database>) -> Self {
+        let mode = db
+            .get_setting(SETTING_MODE)
+            .and_then(|s| InterceptionMode::from_str(&s))
+            .unwrap_or(InterceptionMode::Active);
+        Self {
+            mode: Arc::new(StdMutex::new(mode)),
+            db,
+        }
+    }
+    fn get(&self) -> InterceptionMode {
+        *self.mode.lock().unwrap()
+    }
+    fn set(&self, mode: InterceptionMode) {
+        *self.mode.lock().unwrap() = mode;
+        if let Err(e) = self.db.set_setting(SETTING_MODE, mode.as_str()) {
+            tracing::error!(error = %e, "failed to persist interception mode");
+        }
+    }
+}
+
+/// Per-session "the reviewer opened this for full review" flags, used by Ambient
+/// mode to convert a transient decision window into a held review.
+#[derive(Clone, Default)]
+struct ClaimFlags(Arc<StdMutex<HashMap<String, Arc<AtomicBool>>>>);
+
+impl ClaimFlags {
+    fn new() -> Self {
+        Self::default()
+    }
+    fn register(&self, session_id: &str) -> Arc<AtomicBool> {
+        let flag = Arc::new(AtomicBool::new(false));
+        self.0
+            .lock()
+            .unwrap()
+            .insert(session_id.to_string(), flag.clone());
+        flag
+    }
+    /// Returns true if a decision window for this session was found and claimed.
+    fn claim(&self, session_id: &str) -> bool {
+        match self.0.lock().unwrap().get(session_id) {
+            Some(flag) => {
+                flag.store(true, Ordering::SeqCst);
+                true
+            }
+            None => false,
+        }
+    }
+    fn clear(&self, session_id: &str) {
+        self.0.lock().unwrap().remove(session_id);
+    }
+}
 
 #[derive(Serialize, Clone, Debug)]
 struct HookResponse {
@@ -76,6 +148,12 @@ impl PendingResponses {
     fn take(&self, session_id: &str) -> Option<oneshot::Sender<HookResponse>> {
         self.0.lock().unwrap().remove(session_id)
     }
+    /// Remove and return every pending sender — used to release orphaned held
+    /// POSTs when the interception mode changes away from Active.
+    fn drain_all(&self) -> Vec<oneshot::Sender<HookResponse>> {
+        let mut map = self.0.lock().unwrap();
+        map.drain().map(|(_, tx)| tx).collect()
+    }
 }
 
 #[derive(Clone)]
@@ -83,6 +161,8 @@ struct AppState {
     store: SessionStore,
     app_handle: AppHandle,
     pending: PendingResponses,
+    settings: Settings,
+    claims: ClaimFlags,
 }
 
 #[derive(Serialize, Clone)]
@@ -101,6 +181,22 @@ struct PlanReceivedEvent {
 #[serde(rename_all = "camelCase")]
 struct SessionEvent {
     session_id: String,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct DecisionWindowEvent {
+    session_id: String,
+    version: u32,
+    /// Absolute epoch-millis after which Ambient mode auto-approves.
+    deadline_ms: i64,
+    window_secs: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ModeEvent {
+    mode: String,
 }
 
 fn refresh_tray(app: &AppHandle, store: &SessionStore) {
@@ -155,8 +251,21 @@ async fn handle_plan(
         .unwrap_or("")
         .to_string();
 
+    let mode = app_state.settings.get();
+
+    // Paused = killswitch: auto-approve immediately, capture nothing.
+    if mode == InterceptionMode::Paused {
+        tracing::info!(session_id = %session_id, tool_use_id = %tool_use_id, "Redline paused — auto-approving without capture");
+        return Json(allow_response(
+            "Redline is paused — this plan was auto-approved without review.",
+        ));
+    }
+
     let resolution_result = resolutions::extract_resolutions(&raw_plan);
-    let sections = parser::parse_plan(&resolution_result.stripped_markdown);
+    // Parse and stamp every block with a stable sidecar id; the augmented
+    // markdown is what we persist so block ids survive the reparse-on-load model.
+    let (sections, plan_markdown) =
+        parser::parse_plan_with_sidecars(&resolution_result.stripped_markdown);
     let section_count = sections.len();
 
     let session_existed = app_state.store.has_session(&session_id);
@@ -182,7 +291,7 @@ async fn handle_plan(
     let upsert = app_state.store.upsert_plan(
         &session_id,
         &cwd,
-        resolution_result.stripped_markdown.clone(),
+        plan_markdown,
         sections,
     );
 
@@ -214,21 +323,77 @@ async fn handle_plan(
     }
     refresh_tray(&app_state.app_handle, &app_state.store);
 
-    let Some(rx) = app_state.pending.register(&session_id) else {
-        tracing::warn!(session_id = %session_id, "duplicate POST while review pending — returning deny");
-        return Json(deny_response(
-            "A review of an earlier plan from this session is still in progress in Redline. \
-             Wait for the reviewer to finish before submitting a new plan.",
-        ));
+    // Orphan fix: if a prior held POST for this session is still pending (Claude
+    // re-entered plan mode, retried, or the earlier hold was abandoned), release
+    // the stale waiter cleanly instead of leaving it hung, then take over.
+    let mut rx = match app_state.pending.register(&session_id) {
+        Some(rx) => rx,
+        None => {
+            if let Some(stale) = app_state.pending.take(&session_id) {
+                tracing::warn!(session_id = %session_id, "superseding a stale held POST for this session");
+                let _ = stale.send(allow_response(
+                    "Superseded by a newer plan from the same session.",
+                ));
+            }
+            app_state
+                .pending
+                .register(&session_id)
+                .expect("pending slot freed above")
+        }
     };
 
-    let response = match rx.await {
-        Ok(r) => r,
-        Err(_) => {
-            tracing::info!(session_id = %session_id, "review channel closed without explicit decision");
-            deny_response(
-                "User cancelled the review and does not want to proceed with this plan.",
-            )
+    let cancelled_msg = "User cancelled the review and does not want to proceed with this plan.";
+
+    let response = match mode {
+        InterceptionMode::Paused => unreachable!("handled before parsing"),
+        InterceptionMode::Active => match rx.await {
+            Ok(r) => r,
+            Err(_) => {
+                tracing::info!(session_id = %session_id, "review channel closed without explicit decision");
+                deny_response(cancelled_msg)
+            }
+        },
+        InterceptionMode::Ambient => {
+            let deadline_ms = now_millis() + (AMBIENT_WINDOW_SECS as i64) * 1000;
+            if let Err(e) = app_state.app_handle.emit(
+                "plan-decision-window",
+                DecisionWindowEvent {
+                    session_id: session_id.clone(),
+                    version: upsert.version_number,
+                    deadline_ms,
+                    window_secs: AMBIENT_WINDOW_SECS,
+                },
+            ) {
+                tracing::warn!(error = %e, "failed to emit plan-decision-window");
+            }
+            let claimed = app_state.claims.register(&session_id);
+            let resp = tokio::select! {
+                r = &mut rx => match r {
+                    Ok(r) => r,
+                    Err(_) => deny_response(cancelled_msg),
+                },
+                _ = tokio::time::sleep(Duration::from_secs(AMBIENT_WINDOW_SECS)) => {
+                    if claimed.load(Ordering::SeqCst) {
+                        // Reviewer opened it — convert to a full held review and
+                        // wait for the explicit decision (bounded by the hook timeout).
+                        tracing::info!(session_id = %session_id, "Ambient: claimed for full review");
+                        match (&mut rx).await {
+                            Ok(r) => r,
+                            Err(_) => deny_response(cancelled_msg),
+                        }
+                    } else {
+                        // Window elapsed unclaimed — auto-approve and drop the
+                        // pending sender so it is never orphaned.
+                        let _ = app_state.pending.take(&session_id);
+                        tracing::info!(session_id = %session_id, "Ambient: decision window elapsed — auto-approving");
+                        allow_response(
+                            "Auto-approved (Ambient mode — the plan was not opened for review within the decision window).",
+                        )
+                    }
+                }
+            };
+            app_state.claims.clear(&session_id);
+            resp
         }
     };
 
@@ -269,9 +434,7 @@ fn add_comment(
     session_id: String,
     request: NewCommentRequest,
 ) -> Result<Comment, String> {
-    let result = store
-        .add_comment(&session_id, request)
-        .ok_or_else(|| format!("no session found for id {session_id}"))?;
+    let result = store.add_comment(&session_id, request)?;
     let _ = app.emit(
         "comments-changed",
         SessionEvent {
@@ -423,6 +586,46 @@ fn reopen_resolution(
 }
 
 #[tauri::command]
+fn get_interception_mode(settings: tauri::State<'_, Settings>) -> String {
+    settings.get().as_str().to_string()
+}
+
+/// Single source of truth for a mode transition: persist it, release any held
+/// POSTs if we're no longer in Active, and broadcast `mode-changed` so the UI and
+/// the tray menu stay in sync regardless of who initiated the change.
+fn apply_mode(app: &AppHandle, mode: InterceptionMode) {
+    app.state::<Settings>().set(mode);
+    if mode != InterceptionMode::Active {
+        for tx in app.state::<PendingResponses>().drain_all() {
+            let _ = tx.send(allow_response(
+                "Superseded — Redline interception mode changed; plan auto-approved.",
+            ));
+        }
+    }
+    tracing::info!(mode = %mode.as_str(), "interception mode changed");
+    let _ = app.emit(
+        "mode-changed",
+        ModeEvent {
+            mode: mode.as_str().to_string(),
+        },
+    );
+}
+
+#[tauri::command]
+fn set_interception_mode(app: AppHandle, mode: String) -> Result<(), String> {
+    let parsed = InterceptionMode::from_str(&mode).ok_or_else(|| format!("invalid mode: {mode}"))?;
+    apply_mode(&app, parsed);
+    Ok(())
+}
+
+/// Reviewer explicitly opened an Ambient-mode plan for full review — cancels the
+/// auto-approve and keeps the held POST waiting for an explicit decision.
+#[tauri::command]
+fn claim_review(claims: tauri::State<'_, ClaimFlags>, session_id: String) -> bool {
+    claims.claim(&session_id)
+}
+
+#[tauri::command]
 fn get_hook_status() -> HookStatus {
     hook::get_status()
 }
@@ -457,8 +660,17 @@ pub fn run() {
             approve_plan,
             accept_resolution,
             reopen_resolution,
+            get_interception_mode,
+            set_interception_mode,
+            claim_review,
             get_hook_status,
             install_hook,
+            pty::pty_spawn,
+            pty::pty_write,
+            pty::pty_resize,
+            pty::pty_kill,
+            pty::pty_kill_all,
+            pty::pty_cwd,
         ])
         .setup(|app| {
             let data_dir = app
@@ -471,6 +683,14 @@ pub fn run() {
                 Database::open(&db_path).expect("failed to open sqlite database"),
             );
 
+            let settings = Settings::load(db.clone());
+            app.manage(settings.clone());
+
+            let claims = ClaimFlags::new();
+            app.manage(claims.clone());
+
+            app.manage(pty::PtyState::new());
+
             let store = SessionStore::new(db);
             app.manage(store.clone());
 
@@ -481,12 +701,82 @@ pub fn run() {
                 store: store.clone(),
                 app_handle: app.handle().clone(),
                 pending,
+                settings: settings.clone(),
+                claims,
             };
             tauri::async_runtime::spawn(run_server(app_state));
+
+            // Tray menu mirrors the interception mode (radio-style check items).
+            let current = settings.get();
+            let mi_active = CheckMenuItem::with_id(
+                app,
+                "mode_active",
+                "Active — review every plan",
+                true,
+                current == InterceptionMode::Active,
+                None::<&str>,
+            )?;
+            let mi_ambient = CheckMenuItem::with_id(
+                app,
+                "mode_ambient",
+                "Ambient — auto-approve unless opened",
+                true,
+                current == InterceptionMode::Ambient,
+                None::<&str>,
+            )?;
+            let mi_paused = CheckMenuItem::with_id(
+                app,
+                "mode_paused",
+                "Paused — pass everything through",
+                true,
+                current == InterceptionMode::Paused,
+                None::<&str>,
+            )?;
+            let sep = PredefinedMenuItem::separator(app)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit Redline", true, None::<&str>)?;
+            let menu = Menu::with_items(
+                app,
+                &[&mi_active, &mi_ambient, &mi_paused, &sep, &quit],
+            )?;
+
+            // Keep the three check items consistent with whatever mode is active,
+            // whether the change came from the tray or the in-app toggle.
+            let checks = (mi_active.clone(), mi_ambient.clone(), mi_paused.clone());
+            let sync_checks = move |mode: InterceptionMode| {
+                let _ = checks.0.set_checked(mode == InterceptionMode::Active);
+                let _ = checks.1.set_checked(mode == InterceptionMode::Ambient);
+                let _ = checks.2.set_checked(mode == InterceptionMode::Paused);
+            };
+            let sync_for_event = sync_checks.clone();
+            app.handle().listen("mode-changed", move |ev| {
+                if let Ok(m) = serde_json::from_str::<ModeEvent>(ev.payload()) {
+                    if let Some(mode) = InterceptionMode::from_str(&m.mode) {
+                        sync_for_event(mode);
+                    }
+                }
+            });
 
             let _tray = TrayIconBuilder::with_id("main")
                 .icon(app.default_window_icon().unwrap().clone())
                 .tooltip("Redline")
+                .menu(&menu)
+                .show_menu_on_left_click(true)
+                .on_menu_event(move |app, event: MenuEvent| {
+                    let mode = match event.id().as_ref() {
+                        "mode_active" => Some(InterceptionMode::Active),
+                        "mode_ambient" => Some(InterceptionMode::Ambient),
+                        "mode_paused" => Some(InterceptionMode::Paused),
+                        "quit" => {
+                            app.exit(0);
+                            return;
+                        }
+                        _ => None,
+                    };
+                    if let Some(mode) = mode {
+                        apply_mode(app, mode);
+                        sync_checks(mode);
+                    }
+                })
                 .build(app)?;
 
             refresh_tray(app.handle(), &store);

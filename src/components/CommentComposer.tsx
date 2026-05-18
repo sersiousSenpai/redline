@@ -18,12 +18,18 @@ const TYPE_LABELS: Record<CommentType, string> = {
   edit: "Edit",
   feedback: "Feedback",
   question: "Question",
+  "block-insert": "Block inserted",
+  "block-delete": "Block deleted",
+  "block-move": "Block moved",
 };
 
 const TYPE_COLORS: Record<CommentType, string> = {
   edit: "var(--color-info)",
   feedback: "var(--color-warning)",
   question: "var(--color-success)",
+  "block-insert": "var(--color-success)",
+  "block-delete": "var(--color-ink-muted)",
+  "block-move": "var(--color-info)",
 };
 
 export function CommentComposer({
