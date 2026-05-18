@@ -25,7 +25,7 @@ export function Footer({
 
   return (
     <footer
-      className="font-sans flex items-center justify-between gap-4 px-6 py-2 border-t"
+      className="flex items-center justify-between gap-4 px-6 py-2 border-t"
       style={{
         borderColor: "var(--color-rule)",
         color: "var(--color-ink-muted)",
@@ -63,7 +63,7 @@ export function Footer({
           disabled={!canSubmit || waiting}
           className="rounded px-3 py-1 font-medium disabled:opacity-40"
           style={{
-            background: "white",
+            background: "var(--color-bg-elevated)",
             border: "1px solid var(--color-rule)",
             color: "var(--color-ink)",
             fontSize: "12px",
@@ -78,7 +78,7 @@ export function Footer({
           className="rounded px-3 py-1 font-medium disabled:opacity-40"
           style={{
             background: "var(--color-success)",
-            color: "white",
+            color: "var(--color-on-accent)",
             fontSize: "12px",
           }}
         >

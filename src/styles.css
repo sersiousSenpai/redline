@@ -19,6 +19,21 @@
   --color-info: #2563eb;
   --color-warning: #b45309;
   --color-success: #15803d;
+
+  /* Surfaces / accents (Basic-theme defaults; overridden at runtime by
+     applyTheme() via inline custom properties on <html>). */
+  --color-bg-elevated: #ffffff;
+  --color-on-accent: #ffffff;
+  --color-code-bg: #1e1e1c;
+  --color-code-fg: #f3f3ee;
+  --color-commented-bg: rgba(47, 107, 255, 0.22);
+  --color-commented-bar: rgba(47, 107, 255, 0.85);
+  --color-selection: rgba(47, 107, 255, 0.42);
+  --color-overlay: rgba(20, 20, 20, 0.35);
+}
+
+::selection {
+  background: var(--color-selection);
 }
 
 html,
@@ -31,7 +46,126 @@ body {
   margin: 0;
   background: var(--color-paper);
   color: var(--color-ink);
-  font-family: var(--font-sans);
+  /* Chrome is monospace/terminal-styled; the plan body scopes sans/serif
+     back on via .doc-article / .md-block below. */
+  font-family: var(--font-mono);
   font-size: 13px;
   -webkit-font-smoothing: antialiased;
+}
+
+/* The rendered plan stays readable: sans prose, serif headings. */
+.doc-article,
+.md-block {
+  font-family: var(--font-sans);
+}
+
+/* Theme-aware subtle row hover (replaces hardcoded Tailwind bg-white/stone). */
+.hover-elevated {
+  transition: background-color 0.12s;
+}
+.hover-elevated:hover {
+  background: color-mix(in srgb, var(--color-bg-elevated) 60%, transparent);
+}
+
+/* Faithful rendering of a plan block's verbatim markdown. */
+.md-block > :first-child {
+  margin-top: 0;
+}
+.md-block > :last-child {
+  margin-bottom: 0;
+}
+.md-block p {
+  margin: 0.4em 0;
+}
+.md-block ul,
+.md-block ol {
+  margin: 0.4em 0;
+  padding-left: 1.5em;
+}
+.md-block ul {
+  list-style: disc;
+}
+.md-block ol {
+  list-style: decimal;
+}
+.md-block li {
+  margin: 0.15em 0;
+}
+.md-block li > ul,
+.md-block li > ol {
+  margin: 0.1em 0;
+}
+.md-block a {
+  color: var(--color-info);
+  text-decoration: underline;
+}
+.md-block strong {
+  font-weight: 600;
+}
+.md-block em {
+  font-style: italic;
+}
+.md-block code {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  background: var(--color-anchor-bg);
+  padding: 0.1em 0.3em;
+  border-radius: 3px;
+}
+.md-block pre {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background: var(--color-code-bg);
+  color: var(--color-code-fg);
+  padding: 0.75em 1em;
+  border-radius: 6px;
+  overflow-x: auto;
+  margin: 0.5em 0;
+}
+.md-block pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  font-size: inherit;
+}
+.md-block blockquote {
+  margin: 0.5em 0;
+  padding-left: 0.9em;
+  border-left: 3px solid var(--color-rule);
+  color: var(--color-ink-muted);
+}
+.md-block table {
+  border-collapse: collapse;
+  margin: 0.5em 0;
+  font-size: 0.92em;
+}
+.md-block th,
+.md-block td {
+  border: 1px solid var(--color-rule);
+  padding: 0.35em 0.6em;
+  text-align: left;
+}
+.md-block th {
+  background: var(--color-anchor-bg);
+  font-weight: 600;
+}
+.md-block hr {
+  border: none;
+  border-top: 1px solid var(--color-rule);
+  margin: 1em 0;
+}
+.md-block h1,
+.md-block h2,
+.md-block h3,
+.md-block h4 {
+  font-family: var(--font-serif);
+  font-weight: 600;
+  margin: 0.6em 0 0.3em;
+}
+
+/* Commented locations get a subtle highlight (Google-Docs style). */
+.md-commented {
+  background: var(--color-commented-bg);
+  box-shadow: inset 2px 0 0 var(--color-commented-bar);
+  border-radius: 2px;
 }

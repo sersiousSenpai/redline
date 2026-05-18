@@ -13,10 +13,10 @@ export function ResolutionWarningBanner({
 }: ResolutionWarningBannerProps) {
   return (
     <div
-      className="rounded-md border p-3 font-sans"
+      className="rounded-md border p-3"
       style={{
         borderColor: "var(--color-warning)",
-        background: "rgba(180, 83, 9, 0.06)",
+        background: "color-mix(in srgb, var(--color-warning) 8%, transparent)",
         fontSize: "12px",
         color: "var(--color-ink)",
       }}

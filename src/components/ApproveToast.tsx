@@ -5,10 +5,10 @@ interface ApproveToastProps {
 export function ApproveToast({ message }: ApproveToastProps) {
   return (
     <div
-      className="fixed bottom-12 right-6 font-sans rounded-md shadow-lg px-4 py-2 z-50"
+      className="fixed bottom-12 right-6 rounded-md shadow-lg px-4 py-2 z-50"
       style={{
         background: "var(--color-success)",
-        color: "white",
+        color: "var(--color-on-accent)",
         fontSize: "13px",
         fontWeight: 500,
       }}

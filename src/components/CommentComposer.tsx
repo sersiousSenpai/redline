@@ -81,10 +81,10 @@ export function CommentComposer({
 
   return (
     <div
-      className="font-sans rounded-md border p-3"
+      className="rounded-md border p-3"
       style={{
         borderColor: TYPE_COLORS[type],
-        background: "white",
+        background: "var(--color-bg-elevated)",
       }}
       onKeyDown={onKeyDown}
     >
@@ -222,7 +222,7 @@ export function CommentComposer({
           className="rounded px-3 py-1 font-medium disabled:opacity-40"
           style={{
             background: TYPE_COLORS[type],
-            color: "white",
+            color: "var(--color-on-accent)",
             fontSize: "12px",
           }}
         >

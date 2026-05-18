@@ -14,6 +14,11 @@ import { SelectionMenu } from "./components/SelectionMenu";
 import { SessionSidebar } from "./components/SessionSidebar";
 import { computeParagraphDiff } from "./diff";
 import { useTextSelection } from "./hooks/useTextSelection";
+import { applyTheme, readStoredTheme, storeTheme } from "./theme/applyTheme";
+import type { ThemeName } from "./theme/themes";
+import { usePersistedState } from "./theme/usePersistedState";
+import { useResizablePane } from "./hooks/useResizablePane";
+import { PaneDivider } from "./components/PaneDivider";
 import type {
   Comment,
   CommentType,
@@ -46,7 +51,27 @@ function App() {
   const [warning, setWarning] = useState<ResolutionWarning | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [hookStatus, setHookStatus] = useState<HookStatus | null>(null);
+  const [theme, setTheme] = useState<ThemeName>(() => readStoredTheme());
+  const [paneWidth, setPaneWidth] = usePersistedState(
+    "redline.commentPane.width",
+    320,
+  );
+  const [paneCollapsed, setPaneCollapsed] = usePersistedState(
+    "redline.commentPane.collapsed",
+    false,
+  );
   const documentRef = useRef<HTMLElement | null>(null);
+
+  const onThemeChange = (name: ThemeName) => {
+    setTheme(name);
+    applyTheme(name);
+    storeTheme(name);
+  };
+
+  const { isDragging, startDrag } = useResizablePane({
+    width: paneWidth,
+    onWidthChange: setPaneWidth,
+  });
 
   const [selection, clearSelection] = useTextSelection(
     documentRef,
@@ -288,7 +313,7 @@ function App() {
 
   return (
     <div className="h-full flex flex-col">
-      <Header session={session} />
+      <Header session={session} theme={theme} onThemeChange={onThemeChange} />
       <main className="flex-1 overflow-hidden flex">
         <SessionSidebar
           sessions={summaries}
@@ -302,7 +327,7 @@ function App() {
         >
           <article
             ref={documentRef}
-            className="mx-auto px-8 py-10"
+            className="doc-article mx-auto px-8 py-10"
             style={{ maxWidth: "780px" }}
           >
             {loading ? (
@@ -311,7 +336,11 @@ function App() {
                 body="Fetching the latest review session."
               />
             ) : session ? (
-              <Document sections={sections} diff={diff} />
+              <Document
+                sections={sections}
+                diff={diff}
+                comments={allComments}
+              />
             ) : (
               <EmptyState
                 title="No plans yet"
@@ -321,10 +350,18 @@ function App() {
           </article>
         </div>
 
+        <PaneDivider
+          collapsed={paneCollapsed}
+          dragging={isDragging}
+          onToggle={() => setPaneCollapsed((c) => !c)}
+          onPointerDown={startDrag}
+        />
+
+        {!paneCollapsed && (
         <aside
           className="overflow-y-auto border-l shrink-0"
           style={{
-            width: "320px",
+            width: `${paneWidth}px`,
             borderColor: "var(--color-rule)",
             background: "var(--color-paper)",
           }}
@@ -347,10 +384,10 @@ function App() {
             )}
             {waiting && (
               <div
-                className="rounded-md border p-3 font-sans italic"
+                className="rounded-md border p-3 italic"
                 style={{
                   borderColor: "var(--color-rule)",
-                  background: "white",
+                  background: "var(--color-bg-elevated)",
                   color: "var(--color-ink-muted)",
                   fontSize: "12px",
                 }}
@@ -360,7 +397,7 @@ function App() {
             )}
             {allComments.length === 0 && !composing && (
               <div
-                className="font-sans italic"
+                className="italic"
                 style={{
                   fontSize: "12px",
                   color: "var(--color-ink-muted)",
@@ -381,6 +418,7 @@ function App() {
             ))}
           </div>
         </aside>
+        )}
       </main>
       <Footer
         comments={allComments}

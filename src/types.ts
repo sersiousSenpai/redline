@@ -5,6 +5,9 @@ export type SessionStatus = "in_review" | "approved" | "aborted";
 
 export interface Paragraph {
   anchorId: AnchorId;
+  /** Verbatim markdown source for this block — rendered faithfully by the UI. */
+  markdown: string;
+  /** Plain-text rendering, used for revision diffing. */
   text: string;
 }
 

@@ -1,14 +1,18 @@
 import type { ReviewSession } from "../types";
+import type { ThemeName } from "../theme/themes";
+import { ThemePicker } from "./ThemePicker";
 
 interface HeaderProps {
   session: ReviewSession | null;
+  theme: ThemeName;
+  onThemeChange: (name: ThemeName) => void;
 }
 
-export function Header({ session }: HeaderProps) {
+export function Header({ session, theme, onThemeChange }: HeaderProps) {
   const latest = session?.revisions[session.revisions.length - 1];
   return (
     <header
-      className="font-sans flex items-center justify-between gap-4 px-6 py-3 border-b"
+      className="flex items-center justify-between gap-4 px-6 py-3 border-b"
       style={{ borderColor: "var(--color-rule)" }}
     >
       <div className="flex items-baseline gap-3">
@@ -35,18 +39,21 @@ export function Header({ session }: HeaderProps) {
           </>
         )}
       </div>
-      {latest && (
-        <span
-          className="font-mono rounded-sm px-2 py-0.5"
-          style={{
-            background: "var(--color-anchor-bg)",
-            color: "var(--color-anchor-text)",
-            fontSize: "11px",
-          }}
-        >
-          v{latest.versionNumber}
-        </span>
-      )}
+      <div className="flex items-center gap-3">
+        <ThemePicker theme={theme} onThemeChange={onThemeChange} />
+        {latest && (
+          <span
+            className="font-mono rounded-sm px-2 py-0.5"
+            style={{
+              background: "var(--color-anchor-bg)",
+              color: "var(--color-anchor-text)",
+              fontSize: "11px",
+            }}
+          >
+            v{latest.versionNumber}
+          </span>
+        )}
+      </div>
     </header>
   );
 }

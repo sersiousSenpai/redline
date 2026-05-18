@@ -49,8 +49,11 @@ export function CommentCard({
 
   return (
     <div
-      className="font-sans rounded-md border p-3"
-      style={{ borderColor: "var(--color-rule)", background: "white" }}
+      className="rounded-md border p-3"
+      style={{
+        borderColor: "var(--color-rule)",
+        background: "var(--color-bg-elevated)",
+      }}
     >
       <div className="flex items-center justify-between mb-2 gap-2">
         <div className="flex items-center gap-2 flex-wrap">
@@ -116,7 +119,6 @@ export function CommentCard({
 
       {comment.body && comment.body.trim() !== "(edit)" && (
         <div
-          className="font-sans"
           style={{
             fontSize: "13px",
             lineHeight: 1.45,
@@ -152,7 +154,6 @@ export function CommentCard({
             </span>
           </div>
           <div
-            className="font-sans"
             style={{
               fontSize: "13px",
               lineHeight: 1.45,
@@ -170,7 +171,7 @@ export function CommentCard({
                 className="rounded px-2 py-0.5 font-medium"
                 style={{
                   background: "var(--color-success)",
-                  color: "white",
+                  color: "var(--color-on-accent)",
                   fontSize: "11px",
                 }}
               >
@@ -181,7 +182,7 @@ export function CommentCard({
                 onClick={onReopen}
                 className="rounded px-2 py-0.5 font-medium"
                 style={{
-                  background: "white",
+                  background: "var(--color-bg-elevated)",
                   border: "1px solid var(--color-rule)",
                   color: "var(--color-ink)",
                   fontSize: "11px",

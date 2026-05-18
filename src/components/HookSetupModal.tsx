@@ -14,13 +14,14 @@ export function HookSetupModal({
   return (
     <div
       className="fixed inset-0 flex items-center justify-center z-50"
-      style={{ background: "rgba(20, 20, 20, 0.35)" }}
+      style={{ background: "var(--color-overlay)" }}
     >
       <div
-        className="font-sans rounded-md shadow-xl border bg-white p-6"
+        className="rounded-md shadow-xl border p-6"
         style={{
           maxWidth: "520px",
           borderColor: "var(--color-rule)",
+          background: "var(--color-bg-elevated)",
         }}
       >
         <h2
@@ -95,7 +96,7 @@ export function HookSetupModal({
             onClick={onSkip}
             className="rounded px-3 py-1.5"
             style={{
-              background: "white",
+              background: "var(--color-bg-elevated)",
               border: "1px solid var(--color-rule)",
               color: "var(--color-ink-muted)",
               fontSize: "12px",
@@ -109,7 +110,7 @@ export function HookSetupModal({
             className="rounded px-3 py-1.5 font-medium"
             style={{
               background: "var(--color-info)",
-              color: "white",
+              color: "var(--color-on-accent)",
               fontSize: "12px",
             }}
           >

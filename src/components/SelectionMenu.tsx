@@ -11,11 +11,11 @@ export function SelectionMenu({ rect, onPick }: SelectionMenuProps) {
 
   return (
     <div
-      className="fixed z-50 font-sans flex items-center gap-1 rounded-md shadow-lg border px-1 py-1"
+      className="fixed z-50 flex items-center gap-1 rounded-md shadow-lg border px-1 py-1"
       style={{
         top,
         left,
-        background: "white",
+        background: "var(--color-bg-elevated)",
         borderColor: "var(--color-rule)",
       }}
       onMouseDown={(e) => e.preventDefault()}
@@ -46,7 +46,7 @@ function MenuButton({
     <button
       type="button"
       onClick={onClick}
-      className="px-2.5 py-1 rounded hover:bg-stone-100 transition-colors"
+      className="hover-elevated px-2.5 py-1 rounded"
       style={{
         fontSize: "12px",
         color: `var(${colorVar})`,

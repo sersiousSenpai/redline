@@ -14,6 +14,9 @@ pub type AnchorId = String;
 #[serde(rename_all = "camelCase")]
 pub struct Paragraph {
     pub anchor_id: AnchorId,
+    /// Verbatim markdown source for this block — rendered faithfully by the UI.
+    pub markdown: String,
+    /// Plain-text rendering, used for revision diffing.
     pub text: String,
 }
 

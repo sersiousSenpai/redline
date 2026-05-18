@@ -27,7 +27,7 @@ export function SessionSidebar({
 }: SessionSidebarProps) {
   return (
     <aside
-      className="font-sans border-r overflow-y-auto shrink-0"
+      className="border-r overflow-y-auto shrink-0"
       style={{
         width: "240px",
         borderColor: "var(--color-rule)",
@@ -86,10 +86,10 @@ function SessionRow({
       <button
         type="button"
         onClick={onClick}
-        className="w-full text-left px-3 py-2 border-b transition-colors hover:bg-white/60"
+        className="hover-elevated w-full text-left px-3 py-2 border-b"
         style={{
           borderColor: "var(--color-rule)",
-          background: active ? "white" : "transparent",
+          background: active ? "var(--color-bg-elevated)" : "transparent",
         }}
       >
         <div className="flex items-center justify-between gap-2 mb-1">
@@ -133,7 +133,7 @@ function SessionRow({
               className="rounded-full px-1.5"
               style={{
                 background: "var(--color-warning)",
-                color: "white",
+                color: "var(--color-on-accent)",
                 fontSize: "9px",
                 fontWeight: 600,
               }}
