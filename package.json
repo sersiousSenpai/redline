@@ -1,8 +1,13 @@
 {
   "name": "redline",
-  "private": true,
   "version": "0.1.0",
   "type": "module",
+  "license": "Apache-2.0",
+  "author": "Yusuf Al-Bazian",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sersiousSenpai/redline.git"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
@@ -13,16 +18,25 @@
   "dependencies": {
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
+    "@tiptap/core": "^2.27.2",
+    "@tiptap/extension-link": "^2.27.2",
+    "@tiptap/extension-table": "^2.27.2",
+    "@tiptap/extension-table-cell": "^2.27.2",
+    "@tiptap/extension-table-header": "^2.27.2",
+    "@tiptap/extension-table-row": "^2.27.2",
+    "@tiptap/pm": "^2.27.2",
+    "@tiptap/react": "^2.27.2",
+    "@tiptap/starter-kit": "^2.27.2",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
+    "markdown-it": "^14.1.1",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0",
-    "react-markdown": "^9.0.1",
-    "remark-gfm": "^4.0.0"
+    "react-dom": "^19.1.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.0",
     "@tauri-apps/cli": "^2",
+    "@types/markdown-it": "^14.1.2",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",

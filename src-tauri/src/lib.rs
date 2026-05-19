@@ -148,6 +148,11 @@ impl PendingResponses {
     fn take(&self, session_id: &str) -> Option<oneshot::Sender<HookResponse>> {
         self.0.lock().unwrap().remove(session_id)
     }
+    /// A POST is currently held for this session (Claude Code is blocked in
+    /// its terminal). Such a session is "active" and must not be deleted.
+    fn has(&self, session_id: &str) -> bool {
+        self.0.lock().unwrap().contains_key(session_id)
+    }
     /// Remove and return every pending sender — used to release orphaned held
     /// POSTs when the interception mode changes away from Active.
     fn drain_all(&self) -> Vec<oneshot::Sender<HookResponse>> {
@@ -171,6 +176,9 @@ struct PlanReceivedEvent {
     session_id: String,
     version: u32,
     is_new_session: bool,
+    /// This plan begins a new review thread (fresh, unrelated plan) rather
+    /// than a revision answering reviewer feedback. See `Revision::thread_start`.
+    thread_start: bool,
     resolutions_attached: usize,
     unmatched_resolution_ids: Vec<String>,
     unresolved_submitted_ids: Vec<String>,
@@ -270,6 +278,16 @@ async fn handle_plan(
 
     let session_existed = app_state.store.has_session(&session_id);
 
+    // Classify BEFORE attach_resolutions mutates comment statuses. An inbound
+    // plan is a *revision* (diff against the prior plan, keep its comments)
+    // only if it answers feedback: it carries a REDLINE_RESOLUTIONS block, or
+    // a submit_review denial is still outstanding for this session. Otherwise
+    // it starts a fresh thread (clean render, empty comment pane) — this is
+    // what happens when a new, unrelated plan reuses the same terminal session.
+    let answers_feedback = !resolution_result.resolutions.is_empty()
+        || app_state.store.has_outstanding_review(&session_id);
+    let thread_start = !session_existed || !answers_feedback;
+
     let (attach_report, resolutions_attached) = if session_existed
         && !resolution_result.resolutions.is_empty()
     {
@@ -293,6 +311,7 @@ async fn handle_plan(
         &cwd,
         plan_markdown,
         sections,
+        thread_start,
     );
 
     tracing::info!(
@@ -302,6 +321,7 @@ async fn handle_plan(
         sections = section_count,
         version = upsert.version_number,
         new_session = upsert.is_new_session,
+        thread_start = thread_start,
         resolutions = resolutions_attached,
         unmatched = attach_report.unmatched_ids.len(),
         unresolved = attach_report.unresolved_submitted_ids.len(),
@@ -313,6 +333,7 @@ async fn handle_plan(
         session_id: session_id.clone(),
         version: upsert.version_number,
         is_new_session: upsert.is_new_session,
+        thread_start,
         resolutions_attached,
         unmatched_resolution_ids: attach_report.unmatched_ids,
         unresolved_submitted_ids: attach_report.unresolved_submitted_ids,
@@ -418,8 +439,44 @@ async fn run_server(state: AppState) {
 }
 
 #[tauri::command]
-fn list_sessions(store: tauri::State<'_, SessionStore>) -> Vec<SessionSummary> {
-    store.list()
+fn list_sessions(
+    store: tauri::State<'_, SessionStore>,
+    pending: tauri::State<'_, PendingResponses>,
+) -> Vec<SessionSummary> {
+    let mut sessions = store.list();
+    for s in &mut sessions {
+        s.held = pending.has(&s.session_id);
+    }
+    sessions
+}
+
+/// Delete a session — rejected while a POST is held for it (its terminal is
+/// still active and Claude Code is blocked waiting for review).
+#[tauri::command]
+fn delete_session(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    pending: tauri::State<'_, PendingResponses>,
+    session_id: String,
+) -> Result<bool, String> {
+    if pending.has(&session_id) {
+        return Err(
+            "This session's terminal is still active (Claude Code is waiting for review). \
+             Approve or continue it before deleting."
+                .to_string(),
+        );
+    }
+    let removed = store.delete_session(&session_id);
+    if removed {
+        let _ = app.emit(
+            "session-status-changed",
+            SessionEvent {
+                session_id: session_id.clone(),
+            },
+        );
+        refresh_tray(&app, &store);
+    }
+    Ok(removed)
 }
 
 #[tauri::command]
@@ -653,6 +710,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_sessions,
             get_session,
+            delete_session,
             add_comment,
             update_comment,
             delete_comment,

@@ -31,6 +31,9 @@ export interface Revision {
   rawPlanMarkdown: string;
   sections: Section[];
   comments: Comment[];
+  /** Begins a new review thread (fresh plan) rather than a revision
+   *  answering feedback. Diff/comments are scoped within a thread. */
+  threadStart: boolean;
 }
 
 export type CommentType =
@@ -122,6 +125,8 @@ export interface SessionSummary {
   status: SessionStatus;
   pendingCount: number;
   awaitingReview: boolean;
+  /** A POST is held for this session — its terminal is active; not deletable. */
+  held: boolean;
 }
 
 export interface HookStatus {
@@ -135,6 +140,7 @@ export interface PlanReceivedEvent {
   sessionId: SessionId;
   version: number;
   isNewSession: boolean;
+  threadStart: boolean;
   resolutionsAttached: number;
   unmatchedResolutionIds: string[];
   unresolvedSubmittedIds: string[];

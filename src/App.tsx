@@ -6,7 +6,11 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ApproveToast } from "./components/ApproveToast";
 import { CommentCard } from "./components/CommentCard";
 import { CommentComposer } from "./components/CommentComposer";
-import { Document } from "./components/Document";
+import { lazy, Suspense } from "react";
+// Tiptap/ProseMirror is heavy; lazy-load so it's off the initial paint path.
+const PlanEditor = lazy(() =>
+  import("./components/PlanEditor").then((m) => ({ default: m.PlanEditor })),
+);
 import { Footer } from "./components/Footer";
 import { Header } from "./components/Header";
 import { HookSetupModal } from "./components/HookSetupModal";
@@ -117,6 +121,23 @@ function App() {
     } catch (err) {
       console.error("list_sessions failed", err);
       return [];
+    }
+  }
+
+  async function deleteSession(id: string): Promise<void> {
+    try {
+      await invoke<boolean>("delete_session", { sessionId: id });
+    } catch (err) {
+      // Backend rejects sessions whose terminal is still active; the ✕ is
+      // already hidden for those, so this is just a safety net.
+      console.error("delete_session failed", err);
+      return;
+    }
+    const list = await refreshSummaries();
+    if (id === activeId) {
+      const next = list[0]?.sessionId ?? null;
+      setActiveId(next);
+      if (next === null) setSession(null);
     }
   }
 
@@ -238,9 +259,25 @@ function App() {
   }, [activeId]);
 
   const latest = session?.revisions[session.revisions.length - 1];
+  // Scope diff + comments to the current review *thread*: everything from the
+  // last `threadStart` revision onward. A fresh plan (threadStart) therefore
+  // renders clean (diffs against nothing) with an empty comment pane instead
+  // of redlining against an unrelated prior plan in the same terminal session.
+  const threadRevisions = useMemo(() => {
+    if (!session || session.revisions.length === 0) return [];
+    const revs = session.revisions;
+    let start = 0;
+    for (let i = revs.length - 1; i >= 0; i--) {
+      if (revs[i].threadStart) {
+        start = i;
+        break;
+      }
+    }
+    return revs.slice(start);
+  }, [session]);
   const previous =
-    session && session.revisions.length >= 2
-      ? session.revisions[session.revisions.length - 2]
+    threadRevisions.length >= 2
+      ? threadRevisions[threadRevisions.length - 2]
       : undefined;
   const sections = latest?.sections ?? [];
   const diff = useMemo(
@@ -248,8 +285,8 @@ function App() {
     [sections, previous],
   );
   const allComments = useMemo<Comment[]>(
-    () => (session ? session.revisions.flatMap((r) => r.comments) : []),
-    [session],
+    () => threadRevisions.flatMap((r) => r.comments),
+    [threadRevisions],
   );
 
   const pendingComments = useMemo(
@@ -462,6 +499,7 @@ function App() {
           activeId={activeId}
           pendingCounts={pendingPerSession}
           onSelect={(id) => setActiveId(id)}
+          onDelete={deleteSession}
         />
         <div
           className="flex-1 overflow-y-auto"
@@ -478,15 +516,20 @@ function App() {
                 body="Fetching the latest review session."
               />
             ) : session ? (
-              <Document
-                sections={sections}
-                diff={diff}
-                comments={allComments}
-                revisionKey={`${activeId ?? ""}:${latest?.versionNumber ?? 0}`}
-                onAddComment={addEditorComment}
-                onUpdateComment={updateComment}
-                onDeleteComment={deleteComment}
-              />
+              <Suspense fallback={null}>
+                <PlanEditor
+                  markdown={latest?.rawPlanMarkdown ?? ""}
+                  sections={sections}
+                  diff={diff}
+                  comments={allComments}
+                  revisionKey={`${activeId ?? ""}:${
+                    threadRevisions[0]?.versionNumber ?? 0
+                  }:${latest?.versionNumber ?? 0}`}
+                  onAddComment={addEditorComment}
+                  onUpdateComment={updateComment}
+                  onDeleteComment={deleteComment}
+                />
+              </Suspense>
             ) : (
               <EmptyState
                 title="No plans yet"

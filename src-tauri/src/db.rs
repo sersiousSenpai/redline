@@ -154,6 +154,12 @@ impl Database {
         let _ = conn.execute("ALTER TABLE comments ADD COLUMN block_id TEXT", []);
         // Whole-block structural payload, JSON-encoded (Milestone D).
         let _ = conn.execute("ALTER TABLE comments ADD COLUMN structural_json TEXT", []);
+        // Review-thread boundary. Legacy rows default to 1 (thread start) so an
+        // upgraded DB renders prior plans clean rather than as spurious redline.
+        let _ = conn.execute(
+            "ALTER TABLE revisions ADD COLUMN thread_start INTEGER NOT NULL DEFAULT 1",
+            [],
+        );
         Ok(())
     }
 
@@ -204,16 +210,18 @@ impl Database {
     ) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO revisions (session_id, version_number, received_at, raw_plan_markdown)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO revisions (session_id, version_number, received_at, raw_plan_markdown, thread_start)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(session_id, version_number) DO UPDATE SET
                 received_at = excluded.received_at,
-                raw_plan_markdown = excluded.raw_plan_markdown",
+                raw_plan_markdown = excluded.raw_plan_markdown,
+                thread_start = excluded.thread_start",
             params![
                 session_id,
                 revision.version_number,
                 revision.received_at,
                 revision.raw_plan_markdown,
+                revision.thread_start as i64,
             ],
         )?;
         Ok(())
@@ -321,6 +329,25 @@ impl Database {
         Ok(())
     }
 
+    /// Delete a session and its revisions/comments. Explicit child deletes so
+    /// this is correct regardless of the `foreign_keys` PRAGMA.
+    pub fn delete_session(&self, session_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM comments WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        conn.execute(
+            "DELETE FROM revisions WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        conn.execute(
+            "DELETE FROM sessions WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        Ok(())
+    }
+
     pub fn load_all(&self) -> rusqlite::Result<HashMap<String, ReviewSession>> {
         let conn = self.conn.lock().unwrap();
         let mut sessions: HashMap<String, ReviewSession> = HashMap::new();
@@ -346,7 +373,7 @@ impl Database {
         drop(stmt);
 
         let mut stmt = conn.prepare(
-            "SELECT session_id, version_number, received_at, raw_plan_markdown
+            "SELECT session_id, version_number, received_at, raw_plan_markdown, thread_start
              FROM revisions ORDER BY session_id, version_number",
         )?;
         let revs = stmt.query_map([], |row| {
@@ -355,10 +382,11 @@ impl Database {
                 row.get::<_, u32>(1)?,
                 row.get::<_, i64>(2)?,
                 row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)? != 0,
             ))
         })?;
         for r in revs {
-            let (session_id, version_number, received_at, raw_plan_markdown) = r?;
+            let (session_id, version_number, received_at, raw_plan_markdown, thread_start) = r?;
             if let Some(s) = sessions.get_mut(&session_id) {
                 let sections = reparse_sections(&raw_plan_markdown);
                 s.revisions.push(Revision {
@@ -367,6 +395,7 @@ impl Database {
                     raw_plan_markdown,
                     sections,
                     comments: Vec::new(),
+                    thread_start,
                 });
             }
         }
@@ -472,10 +501,88 @@ mod tests {
     }
 
     #[test]
+    fn delete_session_removes_memory_and_db() {
+        use crate::state::{CommentKind, NewCommentRequest};
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let store = SessionStore::new(db.clone());
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("doomed", "/tmp/d", md.to_string(), reparse_sections(md), true);
+        store
+            .add_comment(
+                "doomed",
+                NewCommentRequest {
+                    kind: CommentKind::Question,
+                    scope: None,
+                    anchor_id: "A".to_string(),
+                    block_id: None,
+                    structural: None,
+                    body: "q".to_string(),
+                    edit: None,
+                },
+            )
+            .expect("add comment");
+        store.upsert_plan("keep", "/tmp/k", md.to_string(), reparse_sections(md), true);
+
+        assert!(store.delete_session("doomed"));
+        assert!(!store.has_session("doomed"));
+        assert!(store.get("doomed").is_none());
+        assert!(store.has_session("keep")); // unrelated session untouched
+        assert!(!store.delete_session("doomed")); // already gone → false
+
+        // Survives a reload from the same DB (revisions + comments cascaded).
+        let reloaded = SessionStore::new(db);
+        assert!(reloaded.get("doomed").is_none());
+        assert!(reloaded.get("keep").is_some());
+    }
+
+    // Mirrors the `handle_plan` thread-classification predicate:
+    // a plan answers feedback iff it carries resolutions OR a submit_review
+    // denial is still outstanding. This pins the `has_outstanding_review`
+    // half (the resolutions half is exercised by the round-trip test).
+    #[test]
+    fn outstanding_review_drives_thread_classification() {
+        use crate::state::{CommentKind, SessionStatus};
+        let store = make_store();
+        let md = "# Plan\n\nBody.\n";
+
+        // Missing session → not outstanding (first plan starts a fresh thread).
+        assert!(!store.has_outstanding_review("sess-c"));
+
+        store.upsert_plan("sess-c", "/tmp/c", md.to_string(), reparse_sections(md), true);
+        // v1 received, no comments yet → nothing outstanding.
+        assert!(!store.has_outstanding_review("sess-c"));
+
+        store
+            .add_comment(
+                "sess-c",
+                NewCommentRequest {
+                    kind: CommentKind::Question,
+                    scope: None,
+                    anchor_id: "A".to_string(),
+                    block_id: None,
+                    structural: None,
+                    body: "why?".to_string(),
+                    edit: None,
+                },
+            )
+            .expect("add comment");
+        // Draft only — the reviewer hasn't submitted; next plan is still fresh.
+        assert!(!store.has_outstanding_review("sess-c"));
+
+        store.mark_submitted("sess-c");
+        // Submitted + InReview → the next inbound plan is a revision.
+        assert!(store.has_outstanding_review("sess-c"));
+
+        store.set_status("sess-c", SessionStatus::Approved);
+        // Approved → a subsequent plan in the same terminal is a fresh thread.
+        assert!(!store.has_outstanding_review("sess-c"));
+    }
+
+    #[test]
     fn add_and_retrieve_comments() {
         let store = make_store();
         let sections = reparse_sections("# A\n\nIntro paragraph.\n");
-        store.upsert_plan("sess-1", "/tmp/proj", "# A\n\nIntro paragraph.\n".to_string(), sections);
+        store.upsert_plan("sess-1", "/tmp/proj", "# A\n\nIntro paragraph.\n".to_string(), sections, true);
 
         let req = NewCommentRequest {
             kind: CommentKind::Feedback,
@@ -524,6 +631,7 @@ mod tests {
             "/tmp/proj",
             v1_md.to_string(),
             reparse_sections(v1_md),
+            true,
         );
 
         // Reviewer adds two comments
@@ -596,7 +704,7 @@ Restructured detail body.
         let v2_sections = reparse_sections(&stripped);
         let report: HashMap<_, _> = extracted.resolutions.into_iter().collect();
         let attach_report = store.attach_resolutions("sess-rt", &report, 2);
-        store.upsert_plan("sess-rt", "/tmp/proj", stripped, v2_sections);
+        store.upsert_plan("sess-rt", "/tmp/proj", stripped, v2_sections, false);
 
         assert!(attach_report.unmatched_ids.is_empty());
         assert!(attach_report.unresolved_submitted_ids.is_empty());
@@ -670,7 +778,7 @@ Restructured detail body.
             let db = Arc::new(Database::open(&tmpfile).unwrap());
             let store = SessionStore::new(db);
             let md = "# Title\n\nBody.\n";
-            store.upsert_plan("sess-x", "/tmp/p", md.to_string(), reparse_sections(md));
+            store.upsert_plan("sess-x", "/tmp/p", md.to_string(), reparse_sections(md), true);
             store.add_comment(
                 "sess-x",
                 NewCommentRequest {
@@ -707,7 +815,7 @@ Restructured detail body.
         let db = Arc::new(Database::open_in_memory().unwrap());
         let store = SessionStore::new(db.clone());
         let md = "# T\n\nBody.\n";
-        store.upsert_plan("s", "/tmp/s", md.to_string(), reparse_sections(md));
+        store.upsert_plan("s", "/tmp/s", md.to_string(), reparse_sections(md), true);
 
         let c = store
             .add_comment(
@@ -767,7 +875,7 @@ Restructured detail body.
         let db = Arc::new(Database::open_in_memory().unwrap());
         let store = SessionStore::new(db.clone());
         let md = "# T\n\nAlpha.\n\nBeta.\n";
-        store.upsert_plan("s", "/tmp/s", md.to_string(), reparse_sections(md));
+        store.upsert_plan("s", "/tmp/s", md.to_string(), reparse_sections(md), true);
 
         let c = store
             .add_comment(
@@ -819,8 +927,8 @@ Restructured detail body.
         let db = Arc::new(Database::open_in_memory().unwrap());
         let store = SessionStore::new(db.clone());
         let md = "# A\n\nIntro.\n";
-        store.upsert_plan("sess-a", "/tmp/a", md.to_string(), reparse_sections(md));
-        store.upsert_plan("sess-b", "/tmp/b", md.to_string(), reparse_sections(md));
+        store.upsert_plan("sess-a", "/tmp/a", md.to_string(), reparse_sections(md), true);
+        store.upsert_plan("sess-b", "/tmp/b", md.to_string(), reparse_sections(md), true);
 
         let mk = |body: &str| NewCommentRequest {
             kind: CommentKind::Question,
@@ -958,7 +1066,7 @@ Restructured detail body.
         // A brand-new session can now persist its own `c-001` without a
         // UNIQUE constraint violation (the original bug).
         let md = "# T\n\nP.\n";
-        store.upsert_plan("fresh", "/tmp/fresh", md.to_string(), reparse_sections(md));
+        store.upsert_plan("fresh", "/tmp/fresh", md.to_string(), reparse_sections(md), true);
         let c = store
             .add_comment(
                 "fresh",

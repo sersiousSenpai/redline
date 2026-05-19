@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "Companion app for Claude Code that turns plan-mode review into a track-changes workflow"
 authors = ["Yusuf Al-Bazian"]
 edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/sersiousSenpai/redline"
 
 [lib]
 name = "redline_lib"

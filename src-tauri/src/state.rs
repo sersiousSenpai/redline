@@ -45,6 +45,11 @@ pub struct Revision {
     pub raw_plan_markdown: String,
     pub sections: Vec<Section>,
     pub comments: Vec<Comment>,
+    /// True when this revision begins a new review *thread* — a fresh,
+    /// unrelated plan rather than a revision answering reviewer feedback.
+    /// The frontend diffs/clears comments only within a thread, so a fresh
+    /// plan renders clean instead of as a redline of the prior plan.
+    pub thread_start: bool,
 }
 
 /// How the daemon treats incoming `ExitPlanMode` plans.
@@ -111,6 +116,10 @@ pub struct SessionSummary {
     pub status: SessionStatus,
     pub pending_count: u32,
     pub awaiting_review: bool,
+    /// A POST is currently held for this session — Claude Code is blocked in
+    /// its terminal waiting for review. Such a session must not be deleted.
+    /// Set by the `list_sessions` command (the store can't see held POSTs).
+    pub held: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -336,6 +345,7 @@ impl SessionStore {
         project_path: &str,
         raw_plan: String,
         sections: Vec<Section>,
+        thread_start: bool,
     ) -> UpsertResult {
         let now = now_millis();
         let project_name = derive_project_name(project_path);
@@ -362,6 +372,7 @@ impl SessionStore {
             raw_plan_markdown: raw_plan,
             sections,
             comments: Vec::new(),
+            thread_start,
         };
         if let Err(e) = self.db.insert_revision(session_id, &revision) {
             tracing::error!(error = %e, "failed to persist revision");
@@ -400,6 +411,7 @@ impl SessionStore {
                     status: s.status,
                     pending_count,
                     awaiting_review,
+                    held: false,
                 }
             })
             .collect();
@@ -533,6 +545,41 @@ impl SessionStore {
 
     pub fn has_session(&self, session_id: &str) -> bool {
         self.inner.lock().unwrap().contains_key(session_id)
+    }
+
+    /// Permanently remove a session and all its revisions/comments (memory +
+    /// DB). Returns false if no such session. Callers must ensure no POST is
+    /// currently held for it (an active terminal).
+    pub fn delete_session(&self, session_id: &str) -> bool {
+        let mut map = self.inner.lock().unwrap();
+        if map.remove(session_id).is_none() {
+            return false;
+        }
+        if let Err(e) = self.db.delete_session(session_id) {
+            tracing::error!(error = %e, "failed to delete session from db");
+        }
+        true
+    }
+
+    /// True iff a `submit_review` denial is still outstanding for this session:
+    /// the session is in review and at least one comment is awaiting a new
+    /// revision (`Submitted`) or was reopened after an unsatisfactory
+    /// resolution (`Reopened`). This is the signal that the *next* inbound
+    /// plan is a revision answering feedback rather than a fresh, unrelated
+    /// plan reusing the same Claude Code terminal session id.
+    pub fn has_outstanding_review(&self, session_id: &str) -> bool {
+        let map = self.inner.lock().unwrap();
+        let Some(session) = map.get(session_id) else {
+            return false;
+        };
+        if !matches!(session.status, SessionStatus::InReview) {
+            return false;
+        }
+        session
+            .revisions
+            .iter()
+            .flat_map(|r| r.comments.iter())
+            .any(|c| matches!(c.status, CommentStatus::Submitted | CommentStatus::Reopened))
     }
 
     pub fn attach_resolutions(

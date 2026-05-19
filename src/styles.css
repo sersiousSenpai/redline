@@ -169,3 +169,153 @@ body {
   box-shadow: inset 2px 0 0 var(--color-commented-bar);
   border-radius: 2px;
 }
+
+/* ── Tiptap single-document plan editor (PlanEditor) ──────────────────────
+   Mirrors .md-block so the new surface renders byte-for-byte like the
+   the rendered plan view. One editing host = native
+   drag-selection across the whole document. */
+.rl-prose {
+  font-family: var(--font-sans);
+  color: var(--color-ink);
+}
+.rl-prose:focus,
+.rl-prose:focus-visible {
+  outline: none;
+}
+.rl-prose > :first-child {
+  margin-top: 0;
+}
+.rl-prose > :last-child {
+  margin-bottom: 0;
+}
+.rl-prose p {
+  margin: 0.4em 0;
+}
+.rl-prose ul,
+.rl-prose ol {
+  margin: 0.4em 0;
+  padding-left: 1.5em;
+}
+.rl-prose ul {
+  list-style: disc;
+}
+.rl-prose ol {
+  list-style: decimal;
+}
+.rl-prose li {
+  margin: 0.15em 0;
+}
+.rl-prose a {
+  color: var(--color-info);
+  text-decoration: underline;
+}
+.rl-prose strong {
+  font-weight: 600;
+}
+.rl-prose em {
+  font-style: italic;
+}
+.rl-prose code {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  background: var(--color-anchor-bg);
+  padding: 0.1em 0.3em;
+  border-radius: 3px;
+}
+.rl-prose pre {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background: var(--color-code-bg);
+  color: var(--color-code-fg);
+  padding: 0.75em 1em;
+  border-radius: 6px;
+  overflow-x: auto;
+  margin: 0.5em 0;
+}
+.rl-prose pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  font-size: inherit;
+}
+.rl-prose blockquote {
+  margin: 0.5em 0;
+  padding-left: 0.9em;
+  border-left: 3px solid var(--color-rule);
+  color: var(--color-ink-muted);
+}
+.rl-prose table {
+  border-collapse: collapse;
+  margin: 0.5em 0;
+  font-size: 0.92em;
+}
+.rl-prose th,
+.rl-prose td {
+  border: 1px solid var(--color-rule);
+  padding: 0.35em 0.6em;
+  text-align: left;
+}
+.rl-prose th {
+  background: var(--color-anchor-bg);
+  font-weight: 600;
+}
+.rl-prose hr {
+  border: none;
+  border-top: 1px solid var(--color-rule);
+  margin: 1em 0;
+}
+.rl-prose h1,
+.rl-prose h2,
+.rl-prose h3,
+.rl-prose h4 {
+  font-family: var(--font-serif);
+  font-weight: 600;
+  margin: 0.6em 0 0.3em;
+}
+.rl-prose h1 {
+  font-size: 26px;
+  line-height: 1.2;
+}
+.rl-prose h2 {
+  font-size: 20px;
+  line-height: 1.25;
+}
+.rl-prose h3 {
+  font-size: 16px;
+}
+.rl-prose h4 {
+  font-size: 14px;
+}
+
+/* Revision redline (vN vs vN-1) — same affordance the old Document used. */
+.rl-block-added,
+.rl-block-modified,
+.rl-block-moved {
+  padding-left: 8px;
+  margin-left: -10px;
+  border-radius: 2px;
+}
+.rl-block-added {
+  background: color-mix(in srgb, var(--color-success) 10%, transparent);
+  border-left: 2px solid var(--color-success);
+}
+.rl-block-modified {
+  background: color-mix(in srgb, var(--color-warning) 10%, transparent);
+  border-left: 2px solid var(--color-warning);
+}
+.rl-block-moved {
+  border-left: 2px dashed var(--color-info);
+}
+
+/* Word-style inline tracked changes. Deletions stay in place struck-through
+   and faded; insertions show in a distinct "proposed" color. */
+.rl-ins {
+  color: var(--color-success);
+  text-decoration: none;
+  background: color-mix(in srgb, var(--color-success) 12%, transparent);
+}
+.rl-del {
+  color: var(--color-ink-muted);
+  text-decoration: line-through;
+  background: color-mix(in srgb, var(--color-warning) 12%, transparent);
+}

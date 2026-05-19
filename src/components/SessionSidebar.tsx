@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 import type { SessionSummary } from "../types";
 
 interface SessionSidebarProps {
@@ -5,6 +7,9 @@ interface SessionSidebarProps {
   activeId: string | null;
   pendingCounts: Record<string, number>;
   onSelect: (id: string) => void;
+  /** Delete a finished session. Only offered when its terminal is inactive
+   *  (`!session.held`); the backend rejects held sessions defensively. */
+  onDelete: (id: string) => void;
 }
 
 const STATUS_COLORS: Record<SessionSummary["status"], string> = {
@@ -24,6 +29,7 @@ export function SessionSidebar({
   activeId,
   pendingCounts,
   onSelect,
+  onDelete,
 }: SessionSidebarProps) {
   return (
     <aside
@@ -62,6 +68,7 @@ export function SessionSidebar({
               active={s.sessionId === activeId}
               pending={pendingCounts[s.sessionId] ?? 0}
               onClick={() => onSelect(s.sessionId)}
+              onDelete={() => onDelete(s.sessionId)}
             />
           ))}
         </ul>
@@ -75,14 +82,81 @@ function SessionRow({
   active,
   pending,
   onClick,
+  onDelete,
 }: {
   session: SessionSummary;
   active: boolean;
   pending: number;
   onClick: () => void;
+  onDelete: () => void;
 }) {
+  const [confirming, setConfirming] = useState(false);
+
   return (
-    <li>
+    <li className="relative group">
+      {!session.held &&
+        (confirming ? (
+          <div
+            className="absolute right-2 top-2 z-10 flex items-center gap-1"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              title="Confirm delete (cannot be undone)"
+              onClick={(e) => {
+                e.stopPropagation();
+                setConfirming(false);
+                onDelete();
+              }}
+              className="rounded px-1.5"
+              style={{
+                color: "var(--color-on-accent)",
+                background: "var(--color-warning)",
+                fontSize: "11px",
+                lineHeight: 1.5,
+                fontWeight: 600,
+              }}
+            >
+              Delete
+            </button>
+            <button
+              type="button"
+              title="Cancel"
+              onClick={(e) => {
+                e.stopPropagation();
+                setConfirming(false);
+              }}
+              className="rounded px-1.5"
+              style={{
+                color: "var(--color-ink-muted)",
+                background: "var(--color-anchor-bg)",
+                fontSize: "11px",
+                lineHeight: 1.5,
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            aria-label="Delete session"
+            title="Delete this session"
+            onClick={(e) => {
+              e.stopPropagation();
+              setConfirming(true);
+            }}
+            className="absolute right-2 top-2 z-10 rounded px-1.5 opacity-0 group-hover:opacity-100 transition-opacity"
+            style={{
+              color: "var(--color-ink-muted)",
+              background: "var(--color-anchor-bg)",
+              fontSize: "12px",
+              lineHeight: 1.4,
+            }}
+          >
+            ✕
+          </button>
+        ))}
       <button
         type="button"
         onClick={onClick}

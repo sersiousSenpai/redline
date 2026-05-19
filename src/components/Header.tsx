@@ -29,11 +29,10 @@ export function Header({
         <img
           src={redlineLogo}
           alt="Redline"
-          style={{ height: "22px", width: "auto", display: "block" }}
+          style={{ height: "26px", width: "auto", display: "block" }}
         />
         {session && (
           <>
-            <span style={{ color: "var(--color-ink-muted)" }}>·</span>
             <span style={{ color: "var(--color-ink-muted)" }}>
               {session.projectName}
             </span>
