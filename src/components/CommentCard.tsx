@@ -1,8 +1,20 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Yusuf Al-Bazian
 import type { Comment, CommentStatus } from "../types";
 import { AnchorPill } from "./AnchorPill";
 
 interface CommentCardProps {
   comment: Comment;
+  /** True when this card is the currently focused one (driven by the in-doc
+   *  highlight click bridge or a direct click on the card). Surfaces a
+   *  focused outline. */
+  focused?: boolean;
+  /** Click anywhere on the card to mirror focus over to the editor's
+   *  matching highlight or block. Behaves as a toggle in the parent. Always
+   *  active — PlanEditor's focus effect falls back to scrolling the comment's
+   *  block when no in-doc highlight exists (orphaned blockId, non-selection
+   *  comment types). */
+  onSelect?: () => void;
   onDelete: () => void;
   onAccept: () => void;
   onReopen: () => void;
@@ -46,6 +58,8 @@ const STATUS_COLORS: Record<CommentStatus, string> = {
 
 export function CommentCard({
   comment,
+  focused = false,
+  onSelect,
   onDelete,
   onAccept,
   onReopen,
@@ -55,10 +69,18 @@ export function CommentCard({
 
   return (
     <div
+      data-comment-id={comment.id}
       className="rounded-md border p-3"
+      onClick={onSelect ? () => onSelect() : undefined}
       style={{
-        borderColor: "var(--color-rule)",
+        borderColor: focused ? color : "var(--color-rule)",
         background: "var(--color-bg-elevated)",
+        // Mirror the prominence of `.rl-comment-highlight--focused`: a 2px
+        // accent ring on the type-color so both sides of the bridge feel like
+        // one motion.
+        boxShadow: focused ? `inset 0 0 0 2px ${color}` : undefined,
+        cursor: onSelect ? "pointer" : undefined,
+        transition: "border-color 120ms ease, box-shadow 120ms ease",
       }}
     >
       <div className="flex items-center justify-between mb-2 gap-2">

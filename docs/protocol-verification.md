@@ -212,6 +212,144 @@ Not worth additional digging into alternate field names (`updatedInput`, etc.) �
 
 ---
 
+## Experiment (g) — Ask round-trip (plan body unchanged + answers in sidecar)
+
+**Question:** when the deny reason instructs Claude that the user has *questions only* (no plan changes requested) and to call `ExitPlanMode` again with the plan body unchanged plus a `REDLINE_RESOLUTIONS` sidecar, does Claude actually return the plan body byte-equivalent?
+
+This is the load-bearing assumption behind Redline's Ask-mode submission (split-discuss-from-revise design). If Claude reliably leaves the plan alone, Redline can support multi-round Q&A on a single plan without churning revisions. If Claude rewords the plan anyway, the UI surfaces a violation banner and falls through to a normal revision.
+
+**Pane A:**
+```bash
+python3 scripts/verify-hook.py --mode=deny --reason="The user reviewed your plan in Redline and has requested revisions.
+
+ORIGINAL PLAN ANCHORS (for reference):
+- §A: Plan
+
+QUESTIONS:
+
+§A [question]
+  USER COMMENT (verbatim):
+    Why a single file rather than splitting setup and run?
+  COMMENT_ID: c-001
+
+REQUIRED RESPONSE FORMAT:
+
+The user has questions about your plan but is NOT requesting any plan changes. Call ExitPlanMode again with the plan body EXACTLY as you previously submitted it — do not add, remove, reword, or restructure anything. Answer each question in the resolution block at the top of the plan in this exact format:
+
+<!-- REDLINE_RESOLUTIONS
+{
+  \"c-001\": \"<your answer to this question>\"
+}
+-->
+
+Each comment_id from the QUESTIONS section above MUST appear as a key in the resolution block. Do not skip any."
+```
+
+**Pane B:** in plan mode, ask: `make a 3-sentence plan for hello world in python`. After Claude calls `ExitPlanMode`, the hook denies with the Ask-shaped reason. Claude should call `ExitPlanMode` again with (a) the same plan body and (b) a `REDLINE_RESOLUTIONS` block at the top answering the question.
+
+**Inspect:** the two captured request payloads in `hook-log.jsonl`. Compare `tool_input.plan` from the first POST against `tool_input.plan` from the second POST after stripping the `REDLINE_RESOLUTIONS` block. Use Redline's `plan_text_signature` notion of equality (whitespace-normalized, sidecar-stripped) — exact-bytes is too strict.
+
+- [ ] Hook fired twice (server logged two POSTs)
+- [ ] POST 2's plan body (sans resolution block) is equivalent to POST 1's plan body
+- [ ] POST 2's plan starts with `<!-- REDLINE_RESOLUTIONS … -->` containing `c-001`
+- [ ] Claude reworded the plan anyway (Ask violation)
+- Notes:
+
+If Claude obeys reliably, Ask-mode multi-round discussion works as designed. If Claude tends to reword, Redline's `ask_mode_violated` path takes over — soft-degrade, no terminal hang.
+
+---
+
+## Experiment (h) — terminal rendering of intercept moment
+
+**Question:** when `ExitPlanMode` fires and Redline holds the connection, can we make the terminal show a calm, branded "plan ready — intercepted by redline" banner instead of either hanging silently or rendering as a hook error?
+
+Two sub-questions decide the architecture (HTTP hook vs command-hook wrapper):
+
+### (h.A) HTTP hook — what does Claude Code render?
+
+**Pane A:**
+```bash
+python3 scripts/verify-hook.py --mode=deny --sleep=120 \
+  --reason="line 1
+line 2 with leading spaces
+  indented line
+\033[31mred?\033[0m"
+```
+
+(Note: the shell will pass `\033[31m...` literally; whether Claude Code interprets it is the question.)
+
+**Pane B:** in plan mode, `make a 3-sentence plan for hello world in python`. Watch the terminal for the full 120s, then continue watching after the deny returns.
+
+Record:
+
+| Observation | Result |
+|---|---|
+| Anything rendered during the 120s wait? (spinner / status line / blank) | Only the standard `✻ Elucidating…` thinking spinner. No hook-specific status line during the wait. From the user's perspective, indistinguishable from normal model thought time. |
+| After deny returns, where does `permissionDecisionReason` appear? (terminal directly / passed to LLM only / both) | Both. Rendered in the terminal **and** passed to the LLM. |
+| Render format | **Wrapped in red `⎿  Error: …` chrome.** This is the same UI Claude Code uses for any hook denial. The prefix `Error:` cannot be suppressed from the daemon side. |
+| Multi-line preserved in render? | Not directly tested with literal `\n` (paste-wrapping forced single-line test). Long single-line content was word-wrapped at terminal width with continuation indented under "Error:". |
+| Leading whitespace preserved? | Not directly tested. |
+| ANSI color codes rendered or printed literally? | Not directly tested. Almost certainly literal — Claude Code already applies its own (red) styling to the `Error:` line. |
+| Surrounding chrome Claude Code adds | `⏺ Updated plan` → `⎿  /plan to preview` → `⎿  Error: <reason text>` |
+
+**Verdict on (h.A):** Path P+ (multi-line banner via `permissionDecisionReason`) is **not viable.** Any text returned via this channel renders as a red `Error:` line — the exact framing the redesign was meant to escape.
+
+### (h.B) Command-hook wrapper — does stderr stream live?
+
+**Setup:** the probe lives at `scripts/probe-command-hook.sh` (executable). It prints a banner to stderr, sleeps 60s, then emits a deny JSON.
+
+Write a project-scoped `.claude/settings.local.json` inside a *sandbox* project (NOT redline itself — would conflict with the real hook):
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "ExitPlanMode",
+        "hooks": [
+          { "type": "command",
+            "command": "/Users/yusufalbazian/redline/scripts/probe-command-hook.sh",
+            "timeout": 120 }
+        ]
+      }
+    ]
+  }
+}
+```
+
+**Pane B (fresh claude session in the sandbox):** in plan mode, `make a 3-sentence plan for hello world in python`.
+
+Record:
+
+| Observation | Result |
+|---|---|
+| Banner visible during the 60s sleep, or only after the script exits? | **Neither. Banner never appeared.** Stderr was swallowed entirely. |
+| ANSI handling? | N/A — no stderr surfaced at all. |
+| Blank lines preserved? | N/A. |
+| Surrounding chrome before / after the stderr block | N/A — nothing surfaced. |
+| Does Claude Code show stdout (the JSON) raw, or only act on it? | Only acts on it — `permissionDecisionReason` rendered as `⎿  Error: …` (same chrome as h.A). stdout JSON is parsed and consumed silently. |
+
+**Verdict on (h.B):** Path W (command-hook wrapper) is **not viable.** Claude Code does not expose any visible channel for hook-side text other than `permissionDecisionReason` — which is the same channel as the plain HTTP hook, with the same red `Error:` styling. Adding a wrapper buys nothing.
+
+### Decision matrix
+
+| (h.A) HTTP renders multi-line + ANSI nicely? | (h.B) Command-hook streams stderr live? | Path |
+|---|---|---|
+| Yes (newlines preserved, ANSI honored) | — | **Path P+**: stay on HTTP hook, return a `permissionDecisionReason` with the banner inline. Cheapest. |
+| No | Yes (live stream) | **Path W**: switch installer to command-hook wrapper that prints banner to stderr then relays the HTTP POST. |
+| No | No (buffered until exit) | **Path P**: keep HTTP hook, only polish copy and add a Redline-UI toast. No live terminal banner is achievable. |
+
+### Decision
+
+(h.A) = No (`Error:` chrome unavoidable).
+(h.B) = No (stderr swallowed entirely).
+
+→ **Path P.** A "▶ plan ready — intercepted by redline" banner in the terminal **cannot be drawn from Redline's side** under Claude Code v2.1.145. The only changes available are (a) better wording inside the unavoidable `⎿  Error:` line and (b) Redline-side UI affordances that make the user understand what's happening without needing terminal feedback.
+
+After running, fold results into "Accumulated findings" below and update `~/.claude/projects/-Users-yusufalbazian-redline/memory/reference_hook_verification.md`.
+
+---
+
 ## Verdict
 
 After running all experiments, the answers determine:

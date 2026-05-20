@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Yusuf Al-Bazian
 import { Extension } from "@tiptap/core";
 
 import { BLOCK_ID_NODE_TYPES } from "./BlockIdAttribute";

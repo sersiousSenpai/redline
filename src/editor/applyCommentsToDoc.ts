@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Yusuf Al-Bazian
 import type { Comment } from "../types";
 import { commentsToBlockOverrides } from "./changeLedger";
 

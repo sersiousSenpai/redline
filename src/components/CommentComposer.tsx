@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Yusuf Al-Bazian
 import { useEffect, useRef, useState } from "react";
 import type {
   CommentScope,
@@ -10,6 +12,11 @@ interface CommentComposerProps {
   type: CommentType;
   anchorId: string;
   selectedText: string;
+  /** Block-relative character range of the selection at the moment compose
+   *  began. Persisted with the comment so the editor can paint a persistent
+   *  highlight and click-bridge it with the card. */
+  charStart: number;
+  charEnd: number;
   onCancel: () => void;
   onSubmit: (request: NewCommentRequest) => Promise<void>;
 }
@@ -36,6 +43,8 @@ export function CommentComposer({
   type,
   anchorId,
   selectedText,
+  charStart,
+  charEnd,
   onCancel,
   onSubmit,
 }: CommentComposerProps) {
@@ -58,6 +67,15 @@ export function CommentComposer({
     if (!canSubmit || saving) return;
     setSaving(true);
     try {
+      // Every selection-originated comment carries its block-relative range
+      // — paints the persistent highlight and powers card↔doc focus
+      // bridging. `charEnd > charStart` is a sanity gate so a zero-width
+      // selection (shouldn't happen here, but defensively) doesn't request
+      // an empty highlight.
+      const selection =
+        charEnd > charStart
+          ? { charStart, charEnd, quotedText: selectedText }
+          : undefined;
       const req: NewCommentRequest =
         type === "edit"
           ? {
@@ -65,10 +83,11 @@ export function CommentComposer({
               anchorId,
               body: body.trim() || "(edit)",
               edit: { original: selectedText, revised: revised.trim() },
+              selection,
             }
           : type === "feedback"
-            ? { type, anchorId, scope, body: body.trim() }
-            : { type, anchorId, body: body.trim() };
+            ? { type, anchorId, scope, body: body.trim(), selection }
+            : { type, anchorId, body: body.trim(), selection };
       await onSubmit(req);
     } finally {
       setSaving(false);

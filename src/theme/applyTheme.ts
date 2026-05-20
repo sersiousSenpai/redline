@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Yusuf Al-Bazian
 import { deriveTokens } from "./derive";
 import { DEFAULT_THEME, getTheme, isThemeName } from "./themes";
 import type { ThemeName } from "./themes";

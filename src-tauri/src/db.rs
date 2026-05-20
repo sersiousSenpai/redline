@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Yusuf Al-Bazian
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
@@ -5,8 +7,8 @@ use std::sync::Mutex;
 use rusqlite::{params, Connection};
 
 use crate::state::{
-    reparse_sections, Comment, CommentKind, CommentScope, CommentStatus, EditPayload, Resolution,
-    ReviewSession, Revision, SessionStatus, StructuralPayload,
+    reparse_sections, Comment, CommentKind, CommentScope, CommentSelection, CommentStatus,
+    EditPayload, Resolution, ReviewSession, Revision, SessionStatus, StructuralPayload,
 };
 
 pub struct Database {
@@ -160,6 +162,22 @@ impl Database {
             "ALTER TABLE revisions ADD COLUMN thread_start INTEGER NOT NULL DEFAULT 1",
             [],
         );
+        // Selection-anchor columns for the Word-style comment-highlight
+        // feature (Part B). All three are NULL for pre-feature rows so the
+        // editor simply skips painting a highlight — the comment still
+        // appears in the sidebar with its block anchor.
+        let _ = conn.execute(
+            "ALTER TABLE comments ADD COLUMN sel_char_start INTEGER",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE comments ADD COLUMN sel_char_end INTEGER",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE comments ADD COLUMN sel_quoted_text TEXT",
+            [],
+        );
         Ok(())
     }
 
@@ -246,13 +264,22 @@ impl Database {
             .structural
             .as_ref()
             .and_then(|s| serde_json::to_string(s).ok());
+        let (sel_char_start, sel_char_end, sel_quoted_text) = match &comment.selection {
+            Some(s) => (
+                Some(s.char_start as i64),
+                Some(s.char_end as i64),
+                Some(s.quoted_text.as_str()),
+            ),
+            None => (None, None, None),
+        };
         conn.execute(
             "INSERT INTO comments (
                 id, session_id, version_number, type, scope, anchor_id,
                 body, edit_original, edit_revised, created_at, status,
                 resolution_body, resolution_version, resolution_accepted_at,
-                block_id, structural_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                block_id, structural_json,
+                sel_char_start, sel_char_end, sel_quoted_text
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 comment.id,
                 session_id,
@@ -270,6 +297,9 @@ impl Database {
                 res_accepted,
                 comment.block_id,
                 structural_json,
+                sel_char_start,
+                sel_char_end,
+                sel_quoted_text,
             ],
         )?;
         Ok(())
@@ -289,6 +319,14 @@ impl Database {
             .structural
             .as_ref()
             .and_then(|s| serde_json::to_string(s).ok());
+        let (sel_char_start, sel_char_end, sel_quoted_text) = match &comment.selection {
+            Some(s) => (
+                Some(s.char_start as i64),
+                Some(s.char_end as i64),
+                Some(s.quoted_text.as_str()),
+            ),
+            None => (None, None, None),
+        };
         conn.execute(
             "UPDATE comments SET
                 scope = ?1,
@@ -300,8 +338,11 @@ impl Database {
                 resolution_version = ?7,
                 resolution_accepted_at = ?8,
                 block_id = ?9,
-                structural_json = ?10
-             WHERE session_id = ?11 AND id = ?12",
+                structural_json = ?10,
+                sel_char_start = ?11,
+                sel_char_end = ?12,
+                sel_quoted_text = ?13
+             WHERE session_id = ?14 AND id = ?15",
             params![
                 comment.scope.map(|s| s.as_str()),
                 comment.body,
@@ -313,6 +354,9 @@ impl Database {
                 res_accepted,
                 comment.block_id,
                 structural_json,
+                sel_char_start,
+                sel_char_end,
+                sel_quoted_text,
                 session_id,
                 comment.id,
             ],
@@ -405,7 +449,8 @@ impl Database {
             "SELECT id, session_id, version_number, type, scope, anchor_id,
                     body, edit_original, edit_revised, created_at, status,
                     resolution_body, resolution_version, resolution_accepted_at,
-                    block_id, structural_json
+                    block_id, structural_json,
+                    sel_char_start, sel_char_end, sel_quoted_text
              FROM comments
              ORDER BY session_id, version_number, created_at",
         )?;
@@ -438,6 +483,17 @@ impl Database {
                 }),
                 _ => None,
             };
+            let sel_char_start: Option<i64> = row.get(16)?;
+            let sel_char_end: Option<i64> = row.get(17)?;
+            let sel_quoted_text: Option<String> = row.get(18)?;
+            let selection = match (sel_char_start, sel_char_end, sel_quoted_text) {
+                (Some(start), Some(end), Some(text)) => Some(CommentSelection {
+                    char_start: start.max(0) as u32,
+                    char_end: end.max(0) as u32,
+                    quoted_text: text,
+                }),
+                _ => None,
+            };
             Ok((
                 row.get::<_, String>(1)?, // session_id
                 row.get::<_, u32>(2)?,    // version_number
@@ -453,6 +509,7 @@ impl Database {
                     created_at: row.get(9)?,
                     status: CommentStatus::from_str(&status_str).unwrap_or(CommentStatus::Draft),
                     resolution,
+                    selection,
                 },
             ))
         })?;
@@ -518,6 +575,7 @@ mod tests {
                     structural: None,
                     body: "q".to_string(),
                     edit: None,
+                    selection: None,
                 },
             )
             .expect("add comment");
@@ -563,6 +621,7 @@ mod tests {
                     structural: None,
                     body: "why?".to_string(),
                     edit: None,
+                    selection: None,
                 },
             )
             .expect("add comment");
@@ -592,6 +651,7 @@ mod tests {
             structural: None,
             body: "rethink this entire section".to_string(),
             edit: None,
+            selection: None,
         };
         let c1 = store.add_comment("sess-1", req).expect("add");
         assert_eq!(c1.id, "c-001");
@@ -606,6 +666,7 @@ mod tests {
             structural: None,
             body: "why?".to_string(),
             edit: None,
+            selection: None,
         };
         let c2 = store.add_comment("sess-1", req2).expect("add 2");
         assert_eq!(c2.id, "c-002");
@@ -617,7 +678,7 @@ mod tests {
 
     #[test]
     fn full_round_trip_state_machine() {
-        use crate::feedback::serialize_feedback_payload;
+        use crate::feedback::serialize_revise_payload;
         use crate::resolutions::extract_resolutions;
         use crate::state::CommentScope;
         use std::collections::HashMap;
@@ -645,6 +706,7 @@ mod tests {
                 structural: None,
                 body: "Rethink the detail section.".to_string(),
                 edit: None,
+                selection: None,
             },
         )
         .expect("add comment");
@@ -658,16 +720,17 @@ mod tests {
                 structural: None,
                 body: "Why this order?".to_string(),
                 edit: None,
+                selection: None,
             },
         )
         .expect("add comment");
 
         // Build the feedback payload and submit
-        let (sections, draft_comments) = store
+        let (sections, draft_comments, body_markdown) = store
             .drafts_and_reopens_for_payload("sess-rt")
             .expect("session exists");
         assert_eq!(draft_comments.len(), 2);
-        let payload = serialize_feedback_payload(&sections, &draft_comments);
+        let payload = serialize_revise_payload(&sections, &draft_comments, &body_markdown);
         assert!(payload.contains("\"c-001\":"));
         assert!(payload.contains("\"c-002\":"));
 
@@ -742,11 +805,127 @@ Restructured detail body.
         assert!(matches!(c2.status, CommentStatus::Reopened));
 
         // Submitting again should include the reopened c-002 but not the accepted c-001
-        let (_, comments_for_round_2) = store
+        let (_, comments_for_round_2, _) = store
             .drafts_and_reopens_for_payload("sess-rt")
             .expect("session exists");
         let ids: Vec<&str> = comments_for_round_2.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, vec!["c-002"]);
+    }
+
+    #[test]
+    fn ask_round_trip_attaches_resolutions_without_version_bump() {
+        // Mirrors handle_plan's Ask path: prior submit was an all-question
+        // batch, Claude returned the same plan with answers in the
+        // resolution sidecar. The store side of that path must attach
+        // resolutions to the CURRENT revision (appeared_in_version =
+        // latest, not next) and NOT upsert a new revision row.
+        use crate::resolutions::extract_resolutions;
+        use std::collections::HashMap;
+
+        let store = make_store();
+
+        let v1_md = "# Plan\n\nIntro paragraph.\n\n# Beta\n\nbody.\n";
+        store.upsert_plan(
+            "sess-ask",
+            "/tmp/proj",
+            v1_md.to_string(),
+            reparse_sections(v1_md),
+            true,
+        );
+
+        store
+            .add_comment(
+                "sess-ask",
+                NewCommentRequest {
+                    kind: CommentKind::Question,
+                    scope: None,
+                    anchor_id: "A".to_string(),
+                    block_id: None,
+                    structural: None,
+                    body: "Why this order?".to_string(),
+                    edit: None,
+                    selection: None,
+                },
+            )
+            .expect("add q1");
+        store
+            .add_comment(
+                "sess-ask",
+                NewCommentRequest {
+                    kind: CommentKind::Question,
+                    scope: None,
+                    anchor_id: "B".to_string(),
+                    block_id: None,
+                    structural: None,
+                    body: "Why is Beta last?".to_string(),
+                    edit: None,
+                    selection: None,
+                },
+            )
+            .expect("add q2");
+
+        store.mark_submitted("sess-ask");
+
+        // Ask round-trip: Claude returns the plan body unchanged + answers.
+        let same_md_with_answers = r#"<!-- REDLINE_RESOLUTIONS
+{
+  "c-001": "Alphabetical, no narrative reason.",
+  "c-002": "Same — alphabetical."
+}
+-->
+
+# Plan
+
+Intro paragraph.
+
+# Beta
+
+body.
+"#;
+        let extracted = extract_resolutions(same_md_with_answers);
+        assert!(extracted.parse_error.is_none());
+        assert_eq!(extracted.resolutions.len(), 2);
+
+        // The current latest version is 1 — Ask path uses that, not 2.
+        let latest_version = store
+            .get("sess-ask")
+            .and_then(|s| s.revisions.last().map(|r| r.version_number))
+            .unwrap();
+        assert_eq!(latest_version, 1);
+
+        let report: HashMap<_, _> = extracted.resolutions.into_iter().collect();
+        let attach_report = store.attach_resolutions("sess-ask", &report, latest_version);
+
+        // Crucially: NO upsert_plan call here. The Ask path keeps the
+        // same revision row.
+        assert!(attach_report.unmatched_ids.is_empty());
+        assert!(attach_report.unresolved_submitted_ids.is_empty());
+
+        let session = store.get("sess-ask").unwrap();
+        assert_eq!(
+            session.revisions.len(),
+            1,
+            "Ask round-trip must not create a new revision"
+        );
+
+        for id in ["c-001", "c-002"] {
+            let c = session.revisions[0]
+                .comments
+                .iter()
+                .find(|c| c.id == id)
+                .unwrap();
+            assert!(matches!(c.status, CommentStatus::Resolved));
+            let res = c.resolution.as_ref().expect("resolution attached");
+            assert_eq!(
+                res.appeared_in_version, 1,
+                "answers belong to the current (unchanged) revision"
+            );
+        }
+
+        // has_outstanding_review flips false now that all questions
+        // resolved — a subsequent unrelated plan would correctly classify
+        // as a thread_start.
+        assert!(!store.has_outstanding_review("sess-ask"));
     }
 
     #[test]
@@ -792,6 +971,7 @@ Restructured detail body.
                         original: "Body.".to_string(),
                         revised: "Substance.".to_string(),
                     }),
+                    selection: None,
                 },
             )
             .expect("add comment");
@@ -831,6 +1011,7 @@ Restructured detail body.
                         original: "Body.".to_string(),
                         revised: "Prose.".to_string(),
                     }),
+                    selection: None,
                 },
             )
             .expect("add");
@@ -856,6 +1037,7 @@ Restructured detail body.
                     block_id: Some("blk-def456".to_string()),
                     structural: None,
                     edit: None,
+                    selection: None,
                 },
             )
             .expect("update");
@@ -894,6 +1076,7 @@ Restructured detail body.
                     }),
                     body: "reordered for flow".to_string(),
                     edit: None,
+                    selection: None,
                 },
             )
             .expect("add structural");
@@ -938,6 +1121,7 @@ Restructured detail body.
             structural: None,
             body: body.to_string(),
             edit: None,
+            selection: None,
         };
 
         let a = store
@@ -962,6 +1146,7 @@ Restructured detail body.
                     block_id: None,
                     structural: None,
                     edit: None,
+                    selection: None,
                 },
             )
             .expect("update sess-a c-001");
@@ -1078,6 +1263,7 @@ Restructured detail body.
                     structural: None,
                     body: "new session comment".to_string(),
                     edit: None,
+                    selection: None,
                 },
             )
             .expect("fresh session c-001 persists");

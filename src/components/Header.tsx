@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Yusuf Al-Bazian
 import type { InterceptionMode, ReviewSession } from "../types";
 import type { ThemeName } from "../theme/themes";
 import { ThemePicker } from "./ThemePicker";
@@ -22,7 +24,7 @@ export function Header({
   const latest = session?.revisions[session.revisions.length - 1];
   return (
     <header
-      className="flex items-center justify-between gap-4 px-6 py-3 border-b"
+      className="flex items-center justify-between gap-4 pl-3 pr-6 py-3 border-b"
       style={{ borderColor: "var(--color-rule)" }}
     >
       <div className="flex items-baseline gap-3">

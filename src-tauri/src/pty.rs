@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Yusuf Al-Bazian
 //! Embedded terminals backed by real PTYs (via `portable-pty`).
 //!
 //! A keyed registry of PTYs — one per terminal tab, addressed by a string `id`

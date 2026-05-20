@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Yusuf Al-Bazian
 import { Extension } from "@tiptap/core";
 import { ChangeSet } from "@tiptap/pm/changeset";
 import { Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Yusuf Al-Bazian
 import type { Comment } from "../types";
 
 interface FooterProps {
@@ -31,6 +33,14 @@ export function Footer({
   );
   const counts = countByType(pending);
   const total = pending.length;
+  // Ask-mode whenever the tray is non-empty and every pending comment is a
+  // question — the backend infers the same way, this is purely for UI
+  // labelling. Mixed batches stay in "Continue revising".
+  const askMode = total > 0 && pending.every((c) => c.type === "question");
+  const submitLabel = askMode ? "Ask Claude" : "Continue revising";
+  const waitingCopy = askMode
+    ? "Waiting for Claude's answer…"
+    : "Waiting for Claude's revision…";
 
   return (
     <footer
@@ -43,7 +53,7 @@ export function Footer({
     >
       <span className="flex items-center gap-2">
         {waiting ? (
-          <span className="italic">Waiting for Claude's revision…</span>
+          <span className="italic">{waitingCopy}</span>
         ) : total === 0 ? (
           "no pending comments"
         ) : (
@@ -108,7 +118,7 @@ export function Footer({
             fontSize: "12px",
           }}
         >
-          Continue revising
+          {submitLabel}
         </button>
         <button
           type="button"

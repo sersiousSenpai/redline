@@ -1,18 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-interface ResolutionWarningBannerProps {
-  warning: {
-    parseError: string | null;
-    unmatchedIds: string[];
-    unresolvedSubmittedIds: string[];
-  };
+interface AskModeViolationBannerProps {
   onDismiss: () => void;
 }
 
-export function ResolutionWarningBanner({
-  warning,
-  onDismiss,
-}: ResolutionWarningBannerProps) {
+export function AskModeViolationBanner({ onDismiss }: AskModeViolationBannerProps) {
   return (
     <div
       className="rounded-md border p-3"
@@ -33,7 +25,7 @@ export function ResolutionWarningBanner({
             color: "var(--color-warning)",
           }}
         >
-          Resolution block issue
+          Plan modified during Ask
         </span>
         <button
           type="button"
@@ -44,22 +36,10 @@ export function ResolutionWarningBanner({
           ✕
         </button>
       </div>
-      {warning.parseError && (
-        <p style={{ lineHeight: 1.45, marginBottom: 6 }}>
-          Claude's resolution block could not be parsed: {warning.parseError}
-        </p>
-      )}
-      {warning.unmatchedIds.length > 0 && (
-        <p style={{ lineHeight: 1.45, marginBottom: 6 }}>
-          Resolutions for unknown comments: {warning.unmatchedIds.join(", ")}
-        </p>
-      )}
-      {warning.unresolvedSubmittedIds.length > 0 && (
-        <p style={{ lineHeight: 1.45 }}>
-          Submitted comments without a resolution:{" "}
-          {warning.unresolvedSubmittedIds.join(", ")}
-        </p>
-      )}
+      <p style={{ lineHeight: 1.45 }}>
+        You asked Claude only questions, but it returned a revised plan
+        anyway. This was processed as a normal revision — review the diff.
+      </p>
     </div>
   );
 }

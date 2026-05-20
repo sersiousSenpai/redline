@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Yusuf Al-Bazian
 export type SessionId = string;
 export type AnchorId = string;
 
@@ -73,6 +75,20 @@ export interface Resolution {
   acceptedAt: number | null;
 }
 
+/** Character-range anchor inside a single block's plain textContent, captured
+ *  at comment creation. Renders as a Word-style highlight; click-bridges
+ *  the comment card and the in-doc selection. Block-relative so it piggybacks
+ *  on the stable `blockId` identity (positions per-doc would drift on every
+ *  transaction). `quotedText` is the self-healing fallback when offsets
+ *  shift inside the block. */
+export interface CommentSelection {
+  /** Inclusive, in block textContent units. */
+  charStart: number;
+  /** Exclusive. */
+  charEnd: number;
+  quotedText: string;
+}
+
 export interface Comment {
   id: string;
   type: CommentType;
@@ -87,6 +103,9 @@ export interface Comment {
   createdAt: number;
   status: CommentStatus;
   resolution?: Resolution;
+  /** Optional character-range inside the comment's block. Drives the in-doc
+   *  highlight and bidirectional focus with the comment card. */
+  selection?: CommentSelection;
 }
 
 export interface NewCommentRequest {
@@ -97,6 +116,7 @@ export interface NewCommentRequest {
   body: string;
   edit?: EditPayload;
   structural?: StructuralPayload;
+  selection?: CommentSelection;
 }
 
 export interface UpdateCommentRequest {
@@ -105,6 +125,7 @@ export interface UpdateCommentRequest {
   blockId?: string;
   edit?: EditPayload;
   structural?: StructuralPayload;
+  selection?: CommentSelection;
 }
 
 export interface ReviewSession {
@@ -136,6 +157,10 @@ export interface HookStatus {
   conflictingUrl: string | null;
 }
 
+/** "ask" = this plan is an answers-only round-trip; the body is unchanged
+ *  and no new revision was created. "revise" = a normal new revision. */
+export type PlanSubmissionMode = "ask" | "revise";
+
 export interface PlanReceivedEvent {
   sessionId: SessionId;
   version: number;
@@ -145,6 +170,10 @@ export interface PlanReceivedEvent {
   unmatchedResolutionIds: string[];
   unresolvedSubmittedIds: string[];
   resolutionParseError: string | null;
+  mode: PlanSubmissionMode;
+  /** Present (true) only when the user submitted an Ask batch but Claude
+   *  returned a modified plan body anyway. Surface a warning banner. */
+  askModeViolated?: boolean;
 }
 
 export type InterceptionMode = "active" | "ambient" | "paused";

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Yusuf Al-Bazian
 import { THEMES } from "../theme/themes";
 import type { ThemeName } from "../theme/themes";
 

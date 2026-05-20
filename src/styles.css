@@ -1,3 +1,5 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Yusuf Al-Bazian */
 @import "tailwindcss";
 
 @theme {
@@ -318,4 +320,29 @@ body {
   color: var(--color-ink-muted);
   text-decoration: line-through;
   background: color-mix(in srgb, var(--color-warning) 12%, transparent);
+}
+
+/* Word-style comment highlight over the originally-selected text. Sits on
+   top of inline ins/del marks (the editor renders the ins/del color through
+   the highlight tint), and click-bridges with the sidebar card. */
+.rl-comment-highlight {
+  background: color-mix(in srgb, var(--color-warning) 22%, transparent);
+  box-shadow: inset 2px 0 0 var(--color-warning);
+  border-radius: 2px;
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    box-shadow 120ms ease;
+}
+.rl-comment-highlight--focused {
+  background: color-mix(in srgb, var(--color-warning) 42%, transparent);
+  box-shadow: inset 2px 0 0 var(--color-info);
+}
+.rl-comment-highlight--muted {
+  background: color-mix(in srgb, var(--color-ink-muted) 10%, transparent);
+  box-shadow: none;
+}
+.rl-comment-highlight--muted.rl-comment-highlight--focused {
+  background: color-mix(in srgb, var(--color-info) 22%, transparent);
+  box-shadow: inset 2px 0 0 var(--color-info);
 }

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Yusuf Al-Bazian
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EditorContent, useEditor } from "@tiptap/react";
 
@@ -10,6 +12,10 @@ import type {
 } from "../types";
 import { planExtensions } from "../editor/extensions/planExtensions";
 import { RedlineDecorations } from "../editor/extensions/RedlineDecorations";
+import {
+  CommentHighlights,
+  type CommentHighlightRange,
+} from "../editor/extensions/CommentHighlights";
 import {
   anchorByBlockId,
   applyAnchorIds,
@@ -35,6 +41,12 @@ interface PlanEditorProps {
   onAddComment?: (req: NewCommentRequest) => Promise<unknown>;
   onUpdateComment?: (id: string, u: UpdateCommentRequest) => Promise<unknown>;
   onDeleteComment?: (id: string) => Promise<unknown>;
+  /** Bidirectional focus: when a highlight is clicked, fires with that
+   *  comment's id so the parent can mirror focus in the sidebar. */
+  onHighlightClick?: (commentId: string) => void;
+  /** Drives the `--focused` modifier on the matching in-doc highlight (and
+   *  scrolls it into view when set). Single source of truth for the App. */
+  focusedCommentId?: string | null;
 }
 
 /**
@@ -52,12 +64,14 @@ export function PlanEditor({
   onAddComment,
   onUpdateComment,
   onDeleteComment,
+  onHighlightClick,
+  focusedCommentId,
 }: PlanEditorProps) {
   const editable =
     !!onAddComment && !!onUpdateComment && !!onDeleteComment;
 
   const extensions = useMemo(
-    () => [...planExtensions(), RedlineDecorations],
+    () => [...planExtensions(), RedlineDecorations, CommentHighlights],
     [],
   );
   const initialDoc = useMemo(
@@ -142,6 +156,19 @@ export function PlanEditor({
   // into the same language for any paragraph an edit comment doesn't own.
   useEffect(() => {
     if (!editor || !editable || base.length === 0) return;
+    // Stale-base guard. On revisionKey change the editor is recreated and a
+    // new `base` is captured in onCreate, but there's a render gap during
+    // which this effect can fire with the *new* editor and the *old* base
+    // (from v_{n-1}). When that happens, baseMap lookups miss for every
+    // current block, `applyRevisionRedline`'s baseline is wrong, and the
+    // revision redline silently fails to render. Bail out; the follow-up
+    // render with the fresh base will retry.
+    const liveBlockIds = new Set<string>();
+    editor.state.doc.forEach((node) => {
+      const id = node.attrs?.blockId as string | undefined;
+      if (id) liveBlockIds.add(id);
+    });
+    if (!base.some((b) => liveBlockIds.has(b.blockId))) return;
     const baseMap = new Map(base.map((b) => [b.blockId, b.markdown]));
     applyCommentOverridesToEditor(editor, comments ?? [], baseMap);
     const overridden = new Set(
@@ -154,5 +181,72 @@ export function PlanEditor({
     );
   }, [editor, editable, comments, base, sections, diff]);
 
+  // Project selection-anchored comments to inline highlight decorations.
+  // Skipped for comments without a stored `selection` (legacy / sidebar-only).
+  useEffect(() => {
+    if (!editor) return;
+    const ranges: CommentHighlightRange[] = (comments ?? [])
+      .filter((c) => !!c.selection && !!c.blockId)
+      .map((c) => ({
+        commentId: c.id,
+        blockId: c.blockId as string,
+        charStart: c.selection!.charStart,
+        charEnd: c.selection!.charEnd,
+        quotedText: c.selection!.quotedText,
+        muted: c.status === "resolved" || c.status === "accepted",
+      }));
+    editor.commands.setCommentHighlights(ranges);
+  }, [editor, comments]);
+
+  // Mirror the external focused-comment state into the extension storage so
+  // the matching decoration gets the `--focused` modifier (and scroll the
+  // highlight into view). Falls back to scrolling the comment's *block* when
+  // there's no in-doc highlight to scroll to — covers comments without a
+  // stored selection and comments whose `blockId` no longer matches any
+  // block in the current revision (orphan case).
+  useEffect(() => {
+    if (!editor) return;
+    editor.commands.focusCommentHighlight(focusedCommentId ?? null);
+    if (!focusedCommentId) return;
+    const dom = editor.view.dom.querySelector(
+      `[data-comment-id="${cssEscape(focusedCommentId)}"]`,
+    );
+    if (dom instanceof HTMLElement) {
+      dom.scrollIntoView({ block: "center", behavior: "smooth" });
+      return;
+    }
+    const target = (comments ?? []).find((c) => c.id === focusedCommentId);
+    const targetBlockId = target?.blockId;
+    if (!targetBlockId) return;
+    let scrolled = false;
+    editor.state.doc.forEach((node, pos) => {
+      if (scrolled) return;
+      if (node.attrs?.blockId !== targetBlockId) return;
+      const dom = editor.view.nodeDOM(pos);
+      if (dom instanceof HTMLElement) {
+        dom.scrollIntoView({ block: "center", behavior: "smooth" });
+        scrolled = true;
+      }
+    });
+  }, [editor, focusedCommentId, comments]);
+
+  // Click on any highlight → fire the parent's callback. Re-binds when the
+  // parent's handler identity changes so a stale closure can't capture an
+  // old focused-id state.
+  useEffect(() => {
+    if (!editor) return;
+    editor.commands.bindHighlightClick(onHighlightClick ?? null);
+  }, [editor, onHighlightClick]);
+
   return <EditorContent editor={editor} />;
+}
+
+/** Minimal CSS.escape polyfill — Tauri WebViews support it but TS lib defs
+ *  may flag it as `any`. Comment ids are `c-NNN`, so plain concatenation is
+ *  safe; this keeps the query bulletproof if the id format ever changes. */
+function cssEscape(s: string): string {
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+    return CSS.escape(s);
+  }
+  return s.replace(/["\\\n]/g, "\\$&");
 }

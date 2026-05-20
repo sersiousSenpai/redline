@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Yusuf Al-Bazian
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -14,6 +16,7 @@ const PlanEditor = lazy(() =>
 import { Footer } from "./components/Footer";
 import { Header } from "./components/Header";
 import { HookSetupModal } from "./components/HookSetupModal";
+import { AskModeViolationBanner } from "./components/AskModeViolationBanner";
 import { ResolutionWarningBanner } from "./components/ResolutionWarningBanner";
 import { SelectionMenu } from "./components/SelectionMenu";
 import { SessionSidebar } from "./components/SessionSidebar";
@@ -43,6 +46,12 @@ interface ComposingState {
   type: CommentType;
   anchorId: string;
   selectedText: string;
+  /** Block-relative character range of the original selection. Forwarded
+   *  with the NewCommentRequest so the editor can paint a persistent
+   *  highlight over exactly the selected span (and click-bridge it with
+   *  the card). */
+  charStart: number;
+  charEnd: number;
 }
 
 interface ResolutionWarning {
@@ -59,6 +68,7 @@ function App() {
   const [composing, setComposing] = useState<ComposingState | null>(null);
   const [busy, setBusy] = useState(false);
   const [warning, setWarning] = useState<ResolutionWarning | null>(null);
+  const [askModeViolation, setAskModeViolation] = useState<boolean>(false);
   const [toast, setToast] = useState<string | null>(null);
   const [hookStatus, setHookStatus] = useState<HookStatus | null>(null);
   const [mode, setMode] = useState<InterceptionMode>("active");
@@ -88,6 +98,11 @@ function App() {
   const [termTabCount, setTermTabCount] = useState(1);
   const [termHasUnseen, setTermHasUnseen] = useState(false);
   const documentRef = useRef<HTMLElement | null>(null);
+  const sidebarRef = useRef<HTMLElement | null>(null);
+  // Bidirectional focus between in-doc highlights and sidebar cards. Single
+  // source of truth: card click sets it; highlight click sets it; effects
+  // mirror the change in each direction.
+  const [focusedCommentId, setFocusedCommentId] = useState<string | null>(null);
 
   const onThemeChange = (name: ThemeName) => {
     setTheme(name);
@@ -201,6 +216,9 @@ function App() {
           unresolvedSubmittedIds: payload.unresolvedSubmittedIds,
         });
       }
+      if (payload.sessionId === activeId && payload.askModeViolated) {
+        setAskModeViolation(true);
+      }
     });
     const commentsUnlisten = listen<{ sessionId: string }>(
       "comments-changed",
@@ -255,6 +273,7 @@ function App() {
     if (activeId) {
       void loadSession(activeId);
       setWarning(null);
+      setAskModeViolation(false);
     }
   }, [activeId]);
 
@@ -296,10 +315,15 @@ function App() {
       ),
     [allComments],
   );
-  const submittedCount = allComments.filter(
+  const submittedComments = allComments.filter(
     (c) => c.status === "submitted",
-  ).length;
+  );
+  const submittedCount = submittedComments.length;
   const waiting = submittedCount > 0 && pendingComments.length === 0;
+  // Mirror Footer's mode inference for the pane-side waiting card: if the
+  // in-flight batch is all questions, Claude is answering, not revising.
+  const waitingAsk =
+    waiting && submittedComments.every((c) => c.type === "question");
   const canSubmit = pendingComments.length > 0;
   const canApprove = !!session && session.status !== "approved";
 
@@ -308,6 +332,39 @@ function App() {
   useEffect(() => {
     if (waiting) setTermCollapsed(false);
   }, [waiting, setTermCollapsed]);
+
+  // Bidirectional focus: when the editor (or anything else) sets a focused
+  // comment id, scroll the matching sidebar card into view. The editor side
+  // is handled by PlanEditor's own effect on `focusedCommentId`.
+  useEffect(() => {
+    if (!focusedCommentId) return;
+    const aside = sidebarRef.current;
+    if (!aside) return;
+    const card = aside.querySelector(
+      `[data-comment-id="${cssEscape(focusedCommentId)}"]`,
+    );
+    if (card instanceof HTMLElement) {
+      card.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+  }, [focusedCommentId]);
+
+  // Clear focus when the user clicks the document chrome outside any
+  // highlight or card (Word's behaviour). Anchored to the main panel so
+  // clicks inside the highlight/card still propagate to their handlers.
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (!focusedCommentId) return;
+      const target = e.target as Node | null;
+      if (!target) return;
+      // Inside the editor — let CommentHighlights' click handler decide.
+      if (documentRef.current?.contains(target)) return;
+      // Inside the sidebar — let card onSelect decide.
+      if (sidebarRef.current?.contains(target)) return;
+      setFocusedCommentId(null);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [focusedCommentId]);
 
   const pendingPerSession = useMemo(() => {
     const map: Record<string, number> = {};
@@ -323,6 +380,8 @@ function App() {
       type,
       anchorId: selection.anchorId,
       selectedText: selection.text,
+      charStart: selection.charStart,
+      charEnd: selection.charEnd,
     });
     clearSelection();
   };
@@ -528,6 +587,8 @@ function App() {
                   onAddComment={addEditorComment}
                   onUpdateComment={updateComment}
                   onDeleteComment={deleteComment}
+                  focusedCommentId={focusedCommentId}
+                  onHighlightClick={(id) => setFocusedCommentId(id)}
                 />
               </Suspense>
             ) : (
@@ -548,6 +609,7 @@ function App() {
 
         {!paneCollapsed && (
         <aside
+          ref={sidebarRef as React.RefObject<HTMLElement>}
           className="overflow-y-auto border-l shrink-0"
           style={{
             width: `${paneWidth}px`,
@@ -556,6 +618,11 @@ function App() {
           }}
         >
           <div className="p-4 flex flex-col gap-3">
+            {askModeViolation && (
+              <AskModeViolationBanner
+                onDismiss={() => setAskModeViolation(false)}
+              />
+            )}
             {warning && (
               <ResolutionWarningBanner
                 warning={warning}
@@ -567,6 +634,8 @@ function App() {
                 type={composing.type}
                 anchorId={composing.anchorId}
                 selectedText={composing.selectedText}
+                charStart={composing.charStart}
+                charEnd={composing.charEnd}
                 onCancel={() => setComposing(null)}
                 onSubmit={submitComment}
               />
@@ -582,7 +651,9 @@ function App() {
                   lineHeight: 1.5,
                 }}
               >
-                Feedback sent. Claude is revising —{" "}
+                {waitingAsk
+                  ? "Questions sent. Claude is answering — "
+                  : "Feedback sent. Claude is revising — "}
                 <span style={{ color: "var(--color-ink)" }}>
                   watch it work in the terminal below ↓
                 </span>
@@ -604,6 +675,10 @@ function App() {
               <CommentCard
                 key={c.id}
                 comment={c}
+                focused={focusedCommentId === c.id}
+                onSelect={() =>
+                  setFocusedCommentId((prev) => (prev === c.id ? null : c.id))
+                }
                 onDelete={() => deleteComment(c.id)}
                 onAccept={() => acceptResolution(c.id)}
                 onReopen={() => reopenResolution(c.id)}
@@ -671,6 +746,13 @@ function App() {
       )}
     </div>
   );
+}
+
+function cssEscape(s: string): string {
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+    return CSS.escape(s);
+  }
+  return s.replace(/["\\\n]/g, "\\$&");
 }
 
 function EmptyState({ title, body }: { title: string; body: string }) {

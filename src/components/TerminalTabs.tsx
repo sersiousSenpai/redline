@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Yusuf Al-Bazian
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { TerminalTabBar } from "./TerminalTabBar";

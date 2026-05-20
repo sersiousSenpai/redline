@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Yusuf Al-Bazian
 // Terminal.app themes only define background, foreground, and an ANSI-16
 // palette. We store the minimum (bg / fg / blue / yellow / green) per theme and
 // derive the full Redline token set deterministically here.

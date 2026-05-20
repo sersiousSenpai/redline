@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Yusuf Al-Bazian
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -167,6 +169,33 @@ impl CommentKind {
     }
 }
 
+/// Which submission verb a batch of pending comments expresses.
+///
+/// `Ask` = the user wants Claude to answer questions about the plan without
+/// editing it. `Revise` = at least one comment is a *driver* for a plan
+/// change (Edit / Feedback / structural). The choice is inferred from the
+/// batch, not picked in the UI, so backend payload assembly stays the
+/// single source of truth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubmissionMode {
+    Ask,
+    Revise,
+}
+
+impl SubmissionMode {
+    pub fn infer(comments: &[Comment]) -> Self {
+        // `CommentKind::Feedback` with `scope == Structural` is still a
+        // *driver* — `is_structural()` is kind-based (BlockInsert/Delete/Move)
+        // and intentionally returns false for scoped-structural feedback.
+        // Matching on `Feedback` directly covers both scopes.
+        let any_driver = comments.iter().any(|c| {
+            c.kind.is_structural()
+                || matches!(c.kind, CommentKind::Edit | CommentKind::Feedback)
+        });
+        if any_driver { Self::Revise } else { Self::Ask }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CommentScope {
@@ -264,6 +293,19 @@ pub struct Resolution {
     pub accepted_at: Option<i64>,
 }
 
+/// Character-range anchor inside a single block's plain textContent. Drives
+/// the persistent comment-highlight decoration and the Word-style click
+/// bridge with the comment card. Block-relative so it survives Tiptap
+/// transactions and revision regenerations (block_ids are stable, absolute
+/// PM positions are not).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommentSelection {
+    pub char_start: u32,
+    pub char_end: u32,
+    pub quoted_text: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Comment {
@@ -287,6 +329,8 @@ pub struct Comment {
     pub status: CommentStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolution: Option<Resolution>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selection: Option<CommentSelection>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -302,6 +346,8 @@ pub struct NewCommentRequest {
     pub edit: Option<EditPayload>,
     #[serde(default)]
     pub structural: Option<StructuralPayload>,
+    #[serde(default)]
+    pub selection: Option<CommentSelection>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -314,6 +360,8 @@ pub struct UpdateCommentRequest {
     pub edit: Option<EditPayload>,
     #[serde(default)]
     pub structural: Option<StructuralPayload>,
+    #[serde(default)]
+    pub selection: Option<CommentSelection>,
 }
 
 #[derive(Clone)]
@@ -473,6 +521,7 @@ impl SessionStore {
             created_at: now_millis(),
             status: CommentStatus::Draft,
             resolution: None,
+            selection: request.selection,
         };
 
         let latest = session.revisions.last_mut().expect("non-empty checked above");
@@ -515,6 +564,9 @@ impl SessionStore {
                     if let Some(edit) = update.edit {
                         comment.edit = Some(edit);
                     }
+                }
+                if let Some(selection) = update.selection {
+                    comment.selection = Some(selection);
                 }
                 if let Err(e) = self.db.update_comment(session_id, comment) {
                     tracing::error!(error = %e, "failed to persist comment update");
@@ -636,7 +688,10 @@ impl SessionStore {
         report
     }
 
-    pub fn drafts_and_reopens_for_payload(&self, session_id: &str) -> Option<(Vec<Section>, Vec<Comment>)> {
+    pub fn drafts_and_reopens_for_payload(
+        &self,
+        session_id: &str,
+    ) -> Option<(Vec<Section>, Vec<Comment>, String)> {
         let map = self.inner.lock().unwrap();
         let session = map.get(session_id)?;
         let latest = session.revisions.last()?;
@@ -649,7 +704,11 @@ impl SessionStore {
             })
             .cloned()
             .collect();
-        Some((latest.sections.clone(), comments))
+        Some((
+            latest.sections.clone(),
+            comments,
+            latest.raw_plan_markdown.clone(),
+        ))
     }
 
     pub fn mark_submitted(&self, session_id: &str) -> Vec<String> {
@@ -757,4 +816,76 @@ fn derive_project_name(path: &str) -> String {
 
 pub fn reparse_sections(raw: &str) -> Vec<Section> {
     parser::parse_plan(raw)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn comment(kind: CommentKind, scope: Option<CommentScope>) -> Comment {
+        Comment {
+            id: "c-0".to_string(),
+            kind,
+            scope,
+            anchor_id: "A".to_string(),
+            block_id: None,
+            body: String::new(),
+            edit: None,
+            structural: None,
+            created_at: 0,
+            status: CommentStatus::Draft,
+            resolution: None,
+            selection: None,
+        }
+    }
+
+    #[test]
+    fn submission_mode_empty_is_ask() {
+        // An empty batch wouldn't actually pass `submit_review` (which
+        // requires drafts/reopens), but the classifier should still answer
+        // sensibly: no drivers → Ask.
+        assert_eq!(SubmissionMode::infer(&[]), SubmissionMode::Ask);
+    }
+
+    #[test]
+    fn submission_mode_all_questions_is_ask() {
+        let batch = [
+            comment(CommentKind::Question, None),
+            comment(CommentKind::Question, None),
+        ];
+        assert_eq!(SubmissionMode::infer(&batch), SubmissionMode::Ask);
+    }
+
+    #[test]
+    fn submission_mode_one_edit_is_revise() {
+        let batch = [
+            comment(CommentKind::Question, None),
+            comment(CommentKind::Edit, None),
+        ];
+        assert_eq!(SubmissionMode::infer(&batch), SubmissionMode::Revise);
+    }
+
+    #[test]
+    fn submission_mode_feedback_local_is_revise() {
+        let batch = [comment(CommentKind::Feedback, Some(CommentScope::Local))];
+        assert_eq!(SubmissionMode::infer(&batch), SubmissionMode::Revise);
+    }
+
+    #[test]
+    fn submission_mode_feedback_structural_scope_is_revise() {
+        // Regression: a `Feedback` with `scope == Structural` is NOT a
+        // structural-kind comment (BlockInsert/Delete/Move) — it must still
+        // be classified as a driver.
+        let batch = [comment(
+            CommentKind::Feedback,
+            Some(CommentScope::Structural),
+        )];
+        assert_eq!(SubmissionMode::infer(&batch), SubmissionMode::Revise);
+    }
+
+    #[test]
+    fn submission_mode_block_delete_is_revise() {
+        let batch = [comment(CommentKind::BlockDelete, None)];
+        assert_eq!(SubmissionMode::infer(&batch), SubmissionMode::Revise);
+    }
 }

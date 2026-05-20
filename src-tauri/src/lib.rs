@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Yusuf Al-Bazian
 mod db;
 mod feedback;
 mod hook;
@@ -25,7 +27,7 @@ use crate::db::Database;
 use crate::hook::HookStatus;
 use crate::state::{
     now_millis, Comment, InterceptionMode, NewCommentRequest, ReviewSession, SessionStatus,
-    SessionStore, SessionSummary, UpdateCommentRequest,
+    SessionStore, SessionSummary, SubmissionMode, UpdateCommentRequest,
 };
 
 const SETTING_MODE: &str = "interception_mode";
@@ -161,11 +163,36 @@ impl PendingResponses {
     }
 }
 
+/// Records, per session, the submission mode of the most recent
+/// `submit_review` so the *next* inbound plan can be classified as an
+/// Ask round-trip (plan body unchanged + answers in resolutions) rather
+/// than a normal revision. Set by `submit_review` immediately before
+/// unblocking the held hook; consumed by the next `handle_plan` for the
+/// same session.
+#[derive(Clone, Default)]
+struct ExpectedModes(Arc<StdMutex<HashMap<String, SubmissionMode>>>);
+
+impl ExpectedModes {
+    fn new() -> Self {
+        Self::default()
+    }
+    fn set(&self, session_id: &str, mode: SubmissionMode) {
+        self.0
+            .lock()
+            .unwrap()
+            .insert(session_id.to_string(), mode);
+    }
+    fn take(&self, session_id: &str) -> Option<SubmissionMode> {
+        self.0.lock().unwrap().remove(session_id)
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
     store: SessionStore,
     app_handle: AppHandle,
     pending: PendingResponses,
+    expected_modes: ExpectedModes,
     settings: Settings,
     claims: ClaimFlags,
 }
@@ -183,6 +210,14 @@ struct PlanReceivedEvent {
     unmatched_resolution_ids: Vec<String>,
     unresolved_submitted_ids: Vec<String>,
     resolution_parse_error: Option<String>,
+    /// Whether this plan is an Ask round-trip (questions answered, plan
+    /// body unchanged, no version bump) or a normal Revise revision.
+    mode: &'static str,
+    /// Some(true) when the user submitted an Ask batch but Claude returned
+    /// a plan with a changed body anyway — the UI surfaces a warning and
+    /// the change is processed as a normal Revise revision.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ask_mode_violated: Option<bool>,
 }
 
 #[derive(Serialize, Clone)]
@@ -271,12 +306,60 @@ async fn handle_plan(
 
     let resolution_result = resolutions::extract_resolutions(&raw_plan);
     // Parse and stamp every block with a stable sidecar id; the augmented
-    // markdown is what we persist so block ids survive the reparse-on-load model.
-    let (sections, plan_markdown) =
-        parser::parse_plan_with_sidecars(&resolution_result.stripped_markdown);
+    // markdown is what we persist so block ids survive the reparse-on-load
+    // model. When a previous revision exists, rebind freshly-minted v2 ids to
+    // their v1 counterparts where the plain-text signature matches — this is
+    // the safety net for when Claude rewrites the plan body and drops the
+    // `<!-- rl:blk-… -->` markers, which would otherwise paint every block
+    // as new in the diff (the 100%-highlight bug).
+    let prev_sections_for_rebind: Option<Vec<state::Section>> = app_state
+        .store
+        .get(&session_id)
+        .and_then(|s| s.revisions.last().map(|r| r.sections.clone()));
+    let (sections, plan_markdown) = match &prev_sections_for_rebind {
+        Some(prev) => parser::parse_plan_with_sidecars_relative_to(
+            &resolution_result.stripped_markdown,
+            prev,
+        ),
+        None => parser::parse_plan_with_sidecars(&resolution_result.stripped_markdown),
+    };
     let section_count = sections.len();
 
+    // Consume the expected mode (if any) recorded by the most recent
+    // submit_review for this session. When Ask, this plan should be the
+    // answer-only round-trip: same plan body, resolutions in the sidecar.
+    let expected_mode = app_state.expected_modes.take(&session_id);
+
     let session_existed = app_state.store.has_session(&session_id);
+
+    // Ask round-trip detection: the prior submit_review was an Ask batch
+    // AND Claude returned the plan body unchanged (compared on a canonical
+    // text signature that ignores cosmetic markdown / sidecar reflow).
+    let ask_round_trip = expected_mode == Some(SubmissionMode::Ask)
+        && session_existed
+        && {
+            let prev_sig = app_state
+                .store
+                .get(&session_id)
+                .and_then(|s| s.revisions.last().map(|r| parser::plan_text_signature(&r.sections)))
+                .unwrap_or_default();
+            let new_sig = parser::plan_text_signature(&sections);
+            prev_sig == new_sig
+        };
+
+    // Ask-mode was expected but Claude modified the plan anyway. Surface
+    // a soft warning to the UI and proceed as a normal Revise revision —
+    // hard-failing would leave the user without their answers and the
+    // terminal hung waiting for a verdict we never deliver.
+    let ask_mode_violated = if expected_mode == Some(SubmissionMode::Ask) && !ask_round_trip {
+        tracing::warn!(
+            session_id = %session_id,
+            "ask_mode_violation: Claude returned a modified plan body during an Ask round-trip"
+        );
+        Some(true)
+    } else {
+        None
+    };
 
     // Classify BEFORE attach_resolutions mutates comment statuses. An inbound
     // plan is a *revision* (diff against the prior plan, keep its comments)
@@ -286,42 +369,69 @@ async fn handle_plan(
     // what happens when a new, unrelated plan reuses the same terminal session.
     let answers_feedback = !resolution_result.resolutions.is_empty()
         || app_state.store.has_outstanding_review(&session_id);
-    let thread_start = !session_existed || !answers_feedback;
+    let thread_start = !ask_round_trip && (!session_existed || !answers_feedback);
 
+    // Attach resolutions. For an Ask round-trip the resolution belongs to
+    // the *current* latest revision (no version bump); otherwise it
+    // belongs to the next revision (existing behavior).
     let (attach_report, resolutions_attached) = if session_existed
         && !resolution_result.resolutions.is_empty()
     {
-        let next_version = app_state
-            .store
-            .get(&session_id)
-            .map(|s| s.revisions.len() as u32 + 1)
-            .unwrap_or(1);
+        let appeared_in_version = if ask_round_trip {
+            app_state
+                .store
+                .get(&session_id)
+                .and_then(|s| s.revisions.last().map(|r| r.version_number))
+                .unwrap_or(1)
+        } else {
+            app_state
+                .store
+                .get(&session_id)
+                .map(|s| s.revisions.len() as u32 + 1)
+                .unwrap_or(1)
+        };
         let report = app_state.store.attach_resolutions(
             &session_id,
             &resolution_result.resolutions,
-            next_version,
+            appeared_in_version,
         );
         (report, resolution_result.resolutions.len())
     } else {
         (Default::default(), 0)
     };
 
-    let upsert = app_state.store.upsert_plan(
-        &session_id,
-        &cwd,
-        plan_markdown,
-        sections,
-        thread_start,
-    );
+    // Skip upsert_plan for an Ask round-trip — the latest revision is the
+    // same plan, just with resolutions attached.
+    let (version_number, is_new_session) = if ask_round_trip {
+        let latest = app_state
+            .store
+            .get(&session_id)
+            .and_then(|s| s.revisions.last().map(|r| r.version_number))
+            .unwrap_or(1);
+        (latest, false)
+    } else {
+        let upsert = app_state.store.upsert_plan(
+            &session_id,
+            &cwd,
+            plan_markdown,
+            sections,
+            thread_start,
+        );
+        (upsert.version_number, upsert.is_new_session)
+    };
+
+    let event_mode: &'static str = if ask_round_trip { "ask" } else { "revise" };
 
     tracing::info!(
         session_id = %session_id,
         tool_use_id = %tool_use_id,
         plan_len = raw_plan.len(),
         sections = section_count,
-        version = upsert.version_number,
-        new_session = upsert.is_new_session,
+        version = version_number,
+        new_session = is_new_session,
         thread_start = thread_start,
+        mode = event_mode,
+        ask_violated = ask_mode_violated.is_some(),
         resolutions = resolutions_attached,
         unmatched = attach_report.unmatched_ids.len(),
         unresolved = attach_report.unresolved_submitted_ids.len(),
@@ -331,13 +441,15 @@ async fn handle_plan(
 
     let event = PlanReceivedEvent {
         session_id: session_id.clone(),
-        version: upsert.version_number,
-        is_new_session: upsert.is_new_session,
+        version: version_number,
+        is_new_session,
         thread_start,
         resolutions_attached,
         unmatched_resolution_ids: attach_report.unmatched_ids,
         unresolved_submitted_ids: attach_report.unresolved_submitted_ids,
         resolution_parse_error: resolution_result.parse_error,
+        mode: event_mode,
+        ask_mode_violated,
     };
     if let Err(e) = app_state.app_handle.emit("plan-received", event) {
         tracing::warn!(error = %e, "failed to emit plan-received");
@@ -380,7 +492,7 @@ async fn handle_plan(
                 "plan-decision-window",
                 DecisionWindowEvent {
                     session_id: session_id.clone(),
-                    version: upsert.version_number,
+                    version: version_number,
                     deadline_ms,
                     window_secs: AMBIENT_WINDOW_SECS,
                 },
@@ -548,9 +660,12 @@ fn submit_review(
     app: AppHandle,
     store: tauri::State<'_, SessionStore>,
     pending: tauri::State<'_, PendingResponses>,
+    expected_modes: tauri::State<'_, ExpectedModes>,
     session_id: String,
 ) -> Result<(), String> {
-    let Some((sections, comments)) = store.drafts_and_reopens_for_payload(&session_id) else {
+    let Some((sections, comments, current_plan_markdown)) =
+        store.drafts_and_reopens_for_payload(&session_id)
+    else {
         return Err(format!("session not found: {session_id}"));
     };
     if comments.is_empty() {
@@ -560,13 +675,29 @@ fn submit_review(
         );
     }
 
-    let payload = feedback::serialize_feedback_payload(&sections, &comments);
+    let mode = SubmissionMode::infer(&comments);
+    let payload = feedback::serialize_payload(
+        mode,
+        &sections,
+        &comments,
+        &current_plan_markdown,
+    );
     let submitted = store.mark_submitted(&session_id);
-    tracing::info!(session_id = %session_id, count = submitted.len(), "submit_review fired");
+    tracing::info!(
+        session_id = %session_id,
+        count = submitted.len(),
+        mode = ?mode,
+        "submit_review fired",
+    );
 
     let tx = pending
         .take(&session_id)
         .ok_or_else(|| "no plan is currently waiting for review on this session".to_string())?;
+    // Ordering invariant: set expected_mode BEFORE unblocking the hook.
+    // Claude can't possibly send the next ExitPlanMode POST before this
+    // tx.send() returns to the held handle_plan task, so the next
+    // handle_plan invocation is guaranteed to see this entry.
+    expected_modes.set(&session_id, mode);
     let _ = tx.send(deny_response(payload));
 
     let _ = app.emit(
@@ -584,11 +715,15 @@ fn approve_plan(
     app: AppHandle,
     store: tauri::State<'_, SessionStore>,
     pending: tauri::State<'_, PendingResponses>,
+    expected_modes: tauri::State<'_, ExpectedModes>,
     session_id: String,
 ) -> Result<(), String> {
     let tx = pending
         .take(&session_id)
         .ok_or_else(|| "no plan is currently waiting for review on this session".to_string())?;
+    // Approving short-circuits any in-flight Ask round-trip — no follow-up
+    // plan will arrive to consume the mode, so drop it here to avoid leaks.
+    let _ = expected_modes.take(&session_id);
     store.set_status(&session_id, SessionStatus::Approved);
     let _ = tx.send(allow_response("Reviewer approved via Redline."));
     tracing::info!(session_id = %session_id, "approve_plan fired");
@@ -755,10 +890,14 @@ pub fn run() {
             let pending = PendingResponses::new();
             app.manage(pending.clone());
 
+            let expected_modes = ExpectedModes::new();
+            app.manage(expected_modes.clone());
+
             let app_state = AppState {
                 store: store.clone(),
                 app_handle: app.handle().clone(),
                 pending,
+                expected_modes,
                 settings: settings.clone(),
                 claims,
             };

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Yusuf Al-Bazian
 /**
  * JS mirror of the Rust sidecar contract in `src-tauri/src/parser.rs`
  * (`parse_sidecar_id`, `apply_injections`, `mint_block_id`). The block id is

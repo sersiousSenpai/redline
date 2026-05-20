@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Yusuf Al-Bazian
+use std::collections::{HashMap, HashSet};
+
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 use crate::state::{Paragraph, Section};
@@ -27,6 +31,284 @@ pub fn parse_plan_with_sidecars(markdown: &str) -> (Vec<Section>, String) {
     let (sections, injections, stripped) = parse_collect(markdown);
     let augmented = apply_injections(&stripped, injections);
     (sections, augmented)
+}
+
+/// Like [`parse_plan_with_sidecars`], but adopts `block_id`s from `prev_sections`
+/// for any newly-minted blocks whose plain-text signature matches an
+/// unambiguous v1 block. This is the safety net for revise round-trips where
+/// Claude rewrites the plan body from scratch and drops the `<!-- rl:blk-… -->`
+/// sidecar markers — without it, every block in v2 receives a fresh id and the
+/// frontend diff paints the whole plan as added/modified.
+///
+/// Conservative by design:
+/// - Only "minted" v2 blocks (those without a Claude-echoed sidecar) are
+///   eligible for rebinding — sidecars Claude DID preserve are never touched.
+/// - A v1 id is only adopted when the signature has exactly one available
+///   candidate (not already claimed by a v2 sidecar, not already consumed by
+///   an earlier rebind in this pass).
+/// - Rebinding updates both the in-memory `block_id` and the markdown
+///   injection vector, so the persisted `raw_plan_markdown` carries the
+///   adopted id in its sidecar — load-time reparse via `parse_plan` will
+///   then yield the same id.
+pub fn parse_plan_with_sidecars_relative_to(
+    markdown: &str,
+    prev_sections: &[Section],
+) -> (Vec<Section>, String) {
+    let (mut sections, mut injections, stripped) = parse_collect(markdown);
+    rebind_block_ids(prev_sections, &mut sections, &mut injections);
+    let augmented = apply_injections(&stripped, injections);
+    (sections, augmented)
+}
+
+/// Heading signature (used by [`rebind_block_ids`]) — level + trimmed title.
+fn heading_signature(level: u8, title: &str) -> String {
+    format!("h{}: {}", level, title.trim())
+}
+
+/// Paragraph signature — `block_plain_text` is already whitespace-normalized
+/// when `Paragraph::text` is built by `attach_block`, but we re-trim here for
+/// safety when callers hand us synthetic sections.
+fn paragraph_signature(text: &str) -> String {
+    format!("p: {}", text.trim())
+}
+
+fn collect_prev_signature_index(prev: &[Section]) -> HashMap<String, Vec<String>> {
+    fn walk(secs: &[Section], out: &mut HashMap<String, Vec<String>>) {
+        for s in secs {
+            out.entry(heading_signature(s.level, &s.title))
+                .or_default()
+                .push(s.block_id.clone());
+            for p in &s.paragraphs {
+                out.entry(paragraph_signature(&p.text))
+                    .or_default()
+                    .push(p.block_id.clone());
+            }
+            walk(&s.children, out);
+        }
+    }
+    let mut out = HashMap::new();
+    walk(prev, &mut out);
+    out
+}
+
+/// Set of v2 `block_id`s that came from Claude-echoed sidecars (i.e., are not
+/// in the `injections` minted-id list). Those must never be overwritten and
+/// must never be adopted from v1, since the v1 id may differ from what
+/// Claude correctly preserved.
+fn collect_claimed_v2_ids(
+    sections: &[Section],
+    minted: &HashSet<String>,
+) -> HashSet<String> {
+    fn walk(secs: &[Section], minted: &HashSet<String>, out: &mut HashSet<String>) {
+        for s in secs {
+            if !minted.contains(&s.block_id) {
+                out.insert(s.block_id.clone());
+            }
+            for p in &s.paragraphs {
+                if !minted.contains(&p.block_id) {
+                    out.insert(p.block_id.clone());
+                }
+            }
+            walk(&s.children, minted, out);
+        }
+    }
+    let mut out = HashSet::new();
+    walk(sections, minted, &mut out);
+    out
+}
+
+fn rebind_block_ids(
+    prev_sections: &[Section],
+    new_sections: &mut [Section],
+    injections: &mut [(usize, String)],
+) {
+    if prev_sections.is_empty() || injections.is_empty() {
+        return;
+    }
+    let prev_index = collect_prev_signature_index(prev_sections);
+    let minted: HashSet<String> = injections.iter().map(|(_, id)| id.clone()).collect();
+    let claimed_v2 = collect_claimed_v2_ids(new_sections, &minted);
+    let mut consumed: HashSet<String> = HashSet::new();
+    walk_rebind(
+        new_sections,
+        &prev_index,
+        &claimed_v2,
+        &minted,
+        &mut consumed,
+        injections,
+    );
+    // Second pass: positional fallback for paragraphs whose text changed
+    // (signature match failed) but whose containing section's id is preserved
+    // — either because Claude echoed the heading's sidecar or because the
+    // first pass rebound it via heading signature. Without this, the
+    // canonical Bug 2 case (an edit on a previously-edited paragraph) leaves
+    // the paragraph with a fresh id; the diff falls back to anchor-id keying,
+    // which is brittle if any sibling block was added/removed.
+    rebind_paragraphs_by_ordinal(
+        prev_sections,
+        new_sections,
+        &minted,
+        &claimed_v2,
+        &mut consumed,
+        injections,
+    );
+}
+
+/// Index v2 sections by their `block_id` for the positional-fallback pass.
+/// After the signature pass, any v2 section whose id matches a v3 section's
+/// id (echoed sidecar or signature-rebound heading) is a stable anchor —
+/// inside it we can match paragraphs by ordinal without risking a
+/// cross-section confusion.
+fn collect_prev_sections_by_block_id(prev: &[Section]) -> HashMap<String, &Section> {
+    fn walk<'a>(secs: &'a [Section], out: &mut HashMap<String, &'a Section>) {
+        for s in secs {
+            out.insert(s.block_id.clone(), s);
+            walk(&s.children, out);
+        }
+    }
+    let mut out = HashMap::new();
+    walk(prev, &mut out);
+    out
+}
+
+fn rebind_paragraphs_by_ordinal(
+    prev_sections: &[Section],
+    new_sections: &mut [Section],
+    minted: &HashSet<String>,
+    claimed_v2: &HashSet<String>,
+    consumed: &mut HashSet<String>,
+    injections: &mut [(usize, String)],
+) {
+    let prev_index = collect_prev_sections_by_block_id(prev_sections);
+    walk_positional(new_sections, &prev_index, minted, claimed_v2, consumed, injections);
+}
+
+fn walk_positional(
+    new_secs: &mut [Section],
+    prev_index: &HashMap<String, &Section>,
+    minted: &HashSet<String>,
+    claimed_v2: &HashSet<String>,
+    consumed: &mut HashSet<String>,
+    injections: &mut [(usize, String)],
+) {
+    for s in new_secs {
+        if let Some(prev_s) = prev_index.get(&s.block_id) {
+            // Same logical section AND same paragraph count: a section whose
+            // structure is unchanged but one or more paragraphs were
+            // reworded. Zip paragraphs by ordinal. We require length equality
+            // to avoid misaligned guesses when Claude added or removed a
+            // sibling block (those land under the anchor-id fallback in the
+            // frontend diff, where they're at least correctly *positional*).
+            if s.paragraphs.len() == prev_s.paragraphs.len() {
+                for (i, p) in s.paragraphs.iter_mut().enumerate() {
+                    if !minted.contains(&p.block_id) {
+                        continue;
+                    }
+                    let prev_p = &prev_s.paragraphs[i];
+                    if claimed_v2.contains(&prev_p.block_id)
+                        || consumed.contains(&prev_p.block_id)
+                    {
+                        continue;
+                    }
+                    let old_id = p.block_id.clone();
+                    consumed.insert(prev_p.block_id.clone());
+                    for entry in injections.iter_mut() {
+                        if entry.1 == old_id {
+                            entry.1 = prev_p.block_id.clone();
+                            break;
+                        }
+                    }
+                    p.block_id = prev_p.block_id.clone();
+                }
+            }
+        }
+        walk_positional(
+            &mut s.children,
+            prev_index,
+            minted,
+            claimed_v2,
+            consumed,
+            injections,
+        );
+    }
+}
+
+fn walk_rebind(
+    secs: &mut [Section],
+    prev_index: &HashMap<String, Vec<String>>,
+    claimed_v2: &HashSet<String>,
+    minted: &HashSet<String>,
+    consumed: &mut HashSet<String>,
+    injections: &mut [(usize, String)],
+) {
+    for s in secs {
+        if minted.contains(&s.block_id) {
+            if let Some(new_id) = pick_rebind_target(
+                &s.block_id,
+                &heading_signature(s.level, &s.title),
+                prev_index,
+                claimed_v2,
+                consumed,
+                injections,
+            ) {
+                s.block_id = new_id;
+            }
+        }
+        for p in &mut s.paragraphs {
+            if minted.contains(&p.block_id) {
+                if let Some(new_id) = pick_rebind_target(
+                    &p.block_id,
+                    &paragraph_signature(&p.text),
+                    prev_index,
+                    claimed_v2,
+                    consumed,
+                    injections,
+                ) {
+                    p.block_id = new_id;
+                }
+            }
+        }
+        walk_rebind(
+            &mut s.children,
+            prev_index,
+            claimed_v2,
+            minted,
+            consumed,
+            injections,
+        );
+    }
+}
+
+/// If `signature` has exactly one v1 candidate that is neither claimed by a
+/// surviving v2 sidecar nor already consumed by an earlier rebind, return it
+/// and (a) splice the id swap into `injections` so the persisted markdown
+/// carries the adopted id, and (b) mark the v1 id consumed.
+fn pick_rebind_target(
+    old_id: &str,
+    signature: &str,
+    prev_index: &HashMap<String, Vec<String>>,
+    claimed_v2: &HashSet<String>,
+    consumed: &mut HashSet<String>,
+    injections: &mut [(usize, String)],
+) -> Option<String> {
+    let candidates = prev_index.get(signature)?;
+    let mut available = candidates
+        .iter()
+        .filter(|id| !claimed_v2.contains(*id) && !consumed.contains(*id));
+    let first = available.next()?;
+    if available.next().is_some() {
+        // Ambiguous match — leave the freshly minted id alone.
+        return None;
+    }
+    let new_id = first.clone();
+    consumed.insert(new_id.clone());
+    for entry in injections.iter_mut() {
+        if entry.1 == old_id {
+            entry.1 = new_id.clone();
+            break;
+        }
+    }
+    Some(new_id)
 }
 
 fn parse_collect(markdown: &str) -> (Vec<Section>, Vec<(usize, String)>, String) {
@@ -131,9 +413,32 @@ fn is_block_container(tag: &Tag<'_>) -> bool {
     )
 }
 
+/// Canonical plain-text "signature" of a plan, used by the Ask round-trip
+/// detector to decide whether Claude's re-emitted plan body is meaningfully
+/// the same as the prior revision. Walks the section tree in order,
+/// folding in heading level + title + each paragraph's plain text. Two
+/// plans with identical content but different sidecar stamps or cosmetic
+/// markdown reflows produce equal signatures; any real wording change
+/// breaks them apart.
+pub fn plan_text_signature(sections: &[Section]) -> String {
+    fn walk(secs: &[Section], out: &mut String) {
+        for s in secs {
+            out.push_str(&format!("h{} {}\n", s.level, s.title.trim()));
+            for p in &s.paragraphs {
+                out.push_str(p.text.trim());
+                out.push('\n');
+            }
+            walk(&s.children, out);
+        }
+    }
+    let mut out = String::new();
+    walk(sections, &mut out);
+    out.trim_end().to_string()
+}
+
 /// Plain-text rendering of a block's markdown, used for revision diffing so
 /// cosmetic markdown reflows don't read as content changes.
-fn block_plain_text(md: &str) -> String {
+pub fn block_plain_text(md: &str) -> String {
     let mut out = String::new();
     for event in Parser::new_ext(md, Options::all()) {
         match event {
@@ -698,5 +1003,253 @@ Body two.
         };
         assert_eq!(flatten(&a), flatten(&b));
         assert!(!flatten(&a).is_empty());
+    }
+
+    #[test]
+    fn plan_text_signature_ignores_cosmetic_reflow() {
+        // Sidecar stamps and an extra blank line are cosmetic and must not
+        // register as a content change for Ask round-trip detection.
+        let a = parse_plan("# Alpha\n\nIntro paragraph.\n\n# Beta\n\nBeta body.\n");
+        let stamped = parse_plan_with_sidecars(
+            "# Alpha\n\nIntro paragraph.\n\n# Beta\n\nBeta body.\n",
+        )
+        .0;
+        let with_extra_blank = parse_plan(
+            "# Alpha\n\n\nIntro paragraph.\n\n# Beta\n\nBeta body.\n",
+        );
+        assert_eq!(plan_text_signature(&a), plan_text_signature(&stamped));
+        assert_eq!(plan_text_signature(&a), plan_text_signature(&with_extra_blank));
+    }
+
+    #[test]
+    fn plan_text_signature_detects_reworded_paragraph() {
+        let a = parse_plan("# Alpha\n\nIntro paragraph.\n");
+        let b = parse_plan("# Alpha\n\nRefined intro paragraph.\n");
+        assert_ne!(plan_text_signature(&a), plan_text_signature(&b));
+    }
+
+    #[test]
+    fn plan_text_signature_detects_heading_change() {
+        let a = parse_plan("# Alpha\n\nbody.\n");
+        let b = parse_plan("# Beta\n\nbody.\n");
+        assert_ne!(plan_text_signature(&a), plan_text_signature(&b));
+    }
+
+    #[test]
+    fn plan_text_signature_detects_added_section() {
+        let a = parse_plan("# Alpha\n\nbody.\n");
+        let b = parse_plan("# Alpha\n\nbody.\n\n# Beta\n\nmore.\n");
+        assert_ne!(plan_text_signature(&a), plan_text_signature(&b));
+    }
+
+    /// The 100%-highlighted bug: Claude returns v2 without sidecars; without
+    /// rebinding every block in v2 gets a fresh id and the diff paints the
+    /// whole plan as added/modified. With rebinding, unchanged blocks must
+    /// adopt their v1 ids verbatim.
+    #[test]
+    fn rebind_recovers_unchanged_ids_when_sidecars_are_dropped() {
+        let v1_md = "# Alpha\n\nIntro paragraph.\n\n# Beta\n\nBeta body.\n";
+        let (v1_sections, _) = parse_plan_with_sidecars(v1_md);
+        let v1_ids = flatten_block_ids(&v1_sections);
+
+        // Simulate Claude dropping every sidecar in the response.
+        let v2_md_no_markers = "# Alpha\n\nIntro paragraph.\n\n# Beta\n\nBeta body.\n";
+        let (v2_sections, v2_md_augmented) =
+            parse_plan_with_sidecars_relative_to(v2_md_no_markers, &v1_sections);
+        let v2_ids = flatten_block_ids(&v2_sections);
+
+        // Every id is recovered from v1.
+        assert_eq!(v1_ids, v2_ids);
+        // The persisted markdown now carries the adopted ids so the
+        // reparse-on-load path yields stable identity.
+        for id in &v1_ids {
+            assert!(
+                v2_md_augmented.contains(&format!("<!-- rl:{id} -->")),
+                "rebound id {id} missing from augmented markdown"
+            );
+        }
+    }
+
+    /// Heading + every paragraph in a structurally-unchanged section keep
+    /// their v1 ids — including paragraphs Claude reworded. The unchanged
+    /// paragraph matches via signature; the reworded paragraph matches via
+    /// the positional fallback (same ordinal in the same section, equal
+    /// paragraph count). This is what makes Bug 2's "edit on a previously-
+    /// edited block" surface as a redline rather than as a phantom add.
+    #[test]
+    fn rebind_keeps_v1_ids_for_unchanged_blocks_only() {
+        let v1_md = "# Plan\n\nIntro paragraph.\n\nSecond paragraph.\n";
+        let (v1_sections, _) = parse_plan_with_sidecars(v1_md);
+        let v1_heading_id = v1_sections[0].block_id.clone();
+        let v1_p1_id = v1_sections[0].paragraphs[0].block_id.clone();
+        let v1_p2_id = v1_sections[0].paragraphs[1].block_id.clone();
+
+        // Claude reworded the first paragraph, kept the second.
+        let v2_md = "# Plan\n\nRefined intro paragraph.\n\nSecond paragraph.\n";
+        let (v2_sections, _) =
+            parse_plan_with_sidecars_relative_to(v2_md, &v1_sections);
+
+        // Heading is unchanged → adopt v1 id (signature pass).
+        assert_eq!(v2_sections[0].block_id, v1_heading_id);
+        // Unchanged paragraph adopts via signature pass.
+        assert_eq!(v2_sections[0].paragraphs[1].block_id, v1_p2_id);
+        // Reworded paragraph adopts via positional fallback (section
+        // unchanged, paragraph count equal).
+        assert_eq!(v2_sections[0].paragraphs[0].block_id, v1_p1_id);
+    }
+
+    /// A v2 sidecar Claude correctly echoed must never be overwritten, and the
+    /// id it points at must not be stolen for a minted block elsewhere.
+    #[test]
+    fn rebind_never_overwrites_a_preserved_sidecar() {
+        let v1_md = "# Plan\n\nFirst.\n\nSecond.\n";
+        let (v1_sections, _) = parse_plan_with_sidecars(v1_md);
+        let v1_p1_id = v1_sections[0].paragraphs[0].block_id.clone();
+
+        // v2: Claude preserved the first paragraph's sidecar but dropped the
+        // others. The minted blocks must NOT adopt `v1_p1_id` even if their
+        // signature would otherwise match.
+        let v2_md = format!(
+            "# Plan\n\n<!-- rl:{v1_p1_id} -->\nFirst.\n\nSecond.\n"
+        );
+        let (v2_sections, _) =
+            parse_plan_with_sidecars_relative_to(&v2_md, &v1_sections);
+
+        // Preserved paragraph keeps the echoed id (claimed_v2 protects it).
+        assert_eq!(v2_sections[0].paragraphs[0].block_id, v1_p1_id);
+        // The other paragraph either picks up its own v1 id ("Second.") or
+        // a fresh one — never the claimed `v1_p1_id`.
+        assert_ne!(v2_sections[0].paragraphs[1].block_id, v1_p1_id);
+    }
+
+    /// When v1 has duplicate paragraph text, a single matching v2 minted
+    /// block must NOT pick one arbitrarily — that would be a guess.
+    #[test]
+    fn rebind_skips_ambiguous_matches() {
+        let v1_md = "# Plan\n\nTODO\n\nTODO\n";
+        let (v1_sections, _) = parse_plan_with_sidecars(v1_md);
+
+        let v2_md = "# Plan\n\nTODO\n\nNEW LINE\n\nTODO\n";
+        let (v2_sections, _) =
+            parse_plan_with_sidecars_relative_to(v2_md, &v1_sections);
+
+        // The "TODO" v2 paragraphs both match v1's two "TODO" entries
+        // ambiguously — neither gets rebound.
+        let v1_ids: HashSet<String> = flatten_block_ids(&v1_sections).into_iter().collect();
+        for p in &v2_sections[0].paragraphs {
+            if p.text == "TODO" {
+                assert!(
+                    !v1_ids.contains(&p.block_id),
+                    "ambiguous TODO paragraph must NOT adopt a v1 id"
+                );
+            }
+        }
+    }
+
+    /// Bug 2 canonical case: a paragraph's text changed between revisions but
+    /// its containing section is unchanged. The signature pass can't match
+    /// (text differs), but the positional fallback adopts the v_{n-1} id by
+    /// ordinal so the frontend diff keys correctly via `prevByBlock` and the
+    /// revision redline renders.
+    #[test]
+    fn rebind_positional_fallback_adopts_id_when_only_text_changed() {
+        let v1_md = "# Plan\n\nFirst paragraph.\n\nSecond paragraph.\n";
+        let (v1_sections, _) = parse_plan_with_sidecars(v1_md);
+        let v1_p1_id = v1_sections[0].paragraphs[0].block_id.clone();
+        let v1_p2_id = v1_sections[0].paragraphs[1].block_id.clone();
+
+        // Claude reworded the first paragraph AND dropped every sidecar.
+        let v2_md = "# Plan\n\nRefined first paragraph.\n\nSecond paragraph.\n";
+        let (v2_sections, v2_augmented) =
+            parse_plan_with_sidecars_relative_to(v2_md, &v1_sections);
+
+        // Signature pass rebinds the unchanged paragraph.
+        assert_eq!(v2_sections[0].paragraphs[1].block_id, v1_p2_id);
+        // Positional fallback rebinds the reworded paragraph by ordinal.
+        assert_eq!(v2_sections[0].paragraphs[0].block_id, v1_p1_id);
+        // The persisted markdown carries the adopted id (so the reparse path
+        // yields stable identity).
+        assert!(
+            v2_augmented.contains(&format!("<!-- rl:{v1_p1_id} -->")),
+            "positional-rebound id {v1_p1_id} missing from augmented markdown"
+        );
+    }
+
+    /// The positional fallback must NOT apply when the section's paragraph
+    /// count differs from v_{n-1} (Claude added or removed a sibling) — a
+    /// blind ordinal zip would silently miscredit a fresh paragraph with the
+    /// id of an adjacent unrelated block.
+    #[test]
+    fn rebind_positional_fallback_skipped_on_length_mismatch() {
+        let v1_md = "# Plan\n\nOriginal A.\n\nOriginal B.\n";
+        let (v1_sections, _) = parse_plan_with_sidecars(v1_md);
+        let v1_a_id = v1_sections[0].paragraphs[0].block_id.clone();
+        let v1_b_id = v1_sections[0].paragraphs[1].block_id.clone();
+
+        // Claude added a third paragraph AND reworded the first.
+        let v2_md =
+            "# Plan\n\nReworded A.\n\nA brand new middle paragraph.\n\nOriginal B.\n";
+        let (v2_sections, _) =
+            parse_plan_with_sidecars_relative_to(v2_md, &v1_sections);
+
+        // Length differs (3 vs 2) → positional skipped. Only the signature
+        // pass applies: "Original B." matches → rebound; the reworded first
+        // and the new middle each receive fresh ids — never v1's stale ids.
+        assert_eq!(v2_sections[0].paragraphs[2].block_id, v1_b_id);
+        for (i, p) in v2_sections[0].paragraphs.iter().enumerate() {
+            if i == 2 {
+                continue;
+            }
+            assert_ne!(
+                p.block_id, v1_a_id,
+                "length-mismatched paragraph must not adopt v1 id by position"
+            );
+            assert_ne!(p.block_id, v1_b_id);
+        }
+    }
+
+    /// The positional fallback must respect `claimed_v2`: when Claude echoed
+    /// a sidecar that already claims a v_{n-1} id at the SAME ordinal, the
+    /// positional pass must not double-claim that id for a sibling.
+    #[test]
+    fn rebind_positional_fallback_respects_claimed_sidecars() {
+        let v1_md = "# Plan\n\nFirst.\n\nSecond.\n";
+        let (v1_sections, _) = parse_plan_with_sidecars(v1_md);
+        let v1_p1_id = v1_sections[0].paragraphs[0].block_id.clone();
+
+        // v2: Claude echoed the first paragraph's sidecar (so v1_p1_id is
+        // claimed there) and reworded the second paragraph without a sidecar.
+        // The positional pass at ordinal 1 must not try to adopt v1_p1_id
+        // even though v3[0].block_id == v1_p1_id by direct echo.
+        let v2_md = format!(
+            "# Plan\n\n<!-- rl:{v1_p1_id} -->\nFirst.\n\nReworded second.\n"
+        );
+        let (v2_sections, _) =
+            parse_plan_with_sidecars_relative_to(&v2_md, &v1_sections);
+
+        // Echoed sidecar keeps its id.
+        assert_eq!(v2_sections[0].paragraphs[0].block_id, v1_p1_id);
+        // The reworded second adopts v1's second-paragraph id (signature pass
+        // didn't match — text differs — but positional did, since lengths
+        // are equal and v1_p1_id is claimed elsewhere so it stays available
+        // for ordinal 1 only via "Second."'s own id).
+        assert_ne!(v2_sections[0].paragraphs[1].block_id, v1_p1_id);
+    }
+
+    /// Empty prev_sections (fresh thread, no prior revision) is a no-op:
+    /// every block gets a freshly minted id, identical to plain
+    /// `parse_plan_with_sidecars`.
+    #[test]
+    fn rebind_is_noop_when_no_previous_revision() {
+        let md = "# Plan\n\nIntro.\n\nSecond.\n";
+        let (with_prev, _) = parse_plan_with_sidecars_relative_to(md, &[]);
+        let (without_prev, _) = parse_plan_with_sidecars(md);
+        // Both should have the same shape and freshly-minted ids (different
+        // uuids, of course, but the structure is identical).
+        assert_eq!(with_prev.len(), without_prev.len());
+        assert_eq!(
+            with_prev[0].paragraphs.len(),
+            without_prev[0].paragraphs.len()
+        );
     }
 }

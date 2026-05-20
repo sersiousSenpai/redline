@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Yusuf Al-Bazian
 import { Mark, mergeAttributes } from "@tiptap/core";
 
 /**
