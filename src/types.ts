@@ -157,6 +157,17 @@ export interface HookStatus {
   conflictingUrl: string | null;
 }
 
+export interface SkillStatus {
+  /** The skill file exists and matches the version Redline ships. */
+  installed: boolean;
+  /** Absolute path to ~/.claude/skills/redline/SKILL.md. */
+  skillPath: string;
+  /** A SKILL.md is present but its content differs from the shipped version. */
+  outdated: boolean;
+  /** Skill version Redline would install. */
+  version: number;
+}
+
 /** "ask" = this plan is an answers-only round-trip; the body is unchanged
  *  and no new revision was created. "revise" = a normal new revision. */
 export type PlanSubmissionMode = "ask" | "revise";

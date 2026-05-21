@@ -7,6 +7,7 @@ mod hook;
 mod parser;
 mod pty;
 mod resolutions;
+mod skill;
 mod state;
 
 use std::collections::HashMap;
@@ -26,6 +27,7 @@ use tokio::sync::oneshot;
 
 use crate::db::Database;
 use crate::hook::HookStatus;
+use crate::skill::SkillStatus;
 use crate::state::{
     now_millis, Comment, InterceptionMode, NewCommentRequest, ReviewSession, SessionStatus,
     SessionStore, SessionSummary, SubmissionMode, UpdateCommentRequest,
@@ -843,6 +845,24 @@ fn install_hook() -> Result<HookStatus, String> {
     result
 }
 
+#[tauri::command]
+fn get_skill_status() -> SkillStatus {
+    skill::get_status()
+}
+
+#[tauri::command]
+fn install_skill() -> Result<SkillStatus, String> {
+    let result = skill::install();
+    if let Ok(status) = &result {
+        tracing::info!(
+            path = %status.skill_path,
+            version = status.version,
+            "installed redline skill"
+        );
+    }
+    result
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()
@@ -870,6 +890,8 @@ pub fn run() {
             claim_review,
             get_hook_status,
             install_hook,
+            get_skill_status,
+            install_skill,
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,

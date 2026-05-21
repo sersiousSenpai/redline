@@ -41,6 +41,7 @@ import type {
   PlanReceivedEvent,
   ReviewSession,
   SessionSummary,
+  SkillStatus,
 } from "./types";
 
 interface ComposingState {
@@ -72,6 +73,7 @@ function App() {
   const [askModeViolation, setAskModeViolation] = useState<boolean>(false);
   const [toast, setToast] = useState<string | null>(null);
   const [hookStatus, setHookStatus] = useState<HookStatus | null>(null);
+  const [skillStatus, setSkillStatus] = useState<SkillStatus | null>(null);
   const [mode, setMode] = useState<InterceptionMode>("active");
   const [decisionWindow, setDecisionWindow] =
     useState<PlanDecisionWindowEvent | null>(null);
@@ -178,6 +180,12 @@ function App() {
         setHookStatus(status);
       } catch (err) {
         console.error("get_hook_status failed", err);
+      }
+      try {
+        const skill = await invoke<SkillStatus>("get_skill_status");
+        setSkillStatus(skill);
+      } catch (err) {
+        console.error("get_skill_status failed", err);
       }
       try {
         const m = await invoke<InterceptionMode>("get_interception_mode");
@@ -538,13 +546,24 @@ function App() {
     }
   };
 
-  const installHook = async () => {
+  // Installs both pieces of the Redline integration. The hook (a JSON merge
+  // into the user's settings.json) and the skill (a whole-file write) have
+  // independent failure modes — install each in its own try/catch so one
+  // failing still installs the other.
+  const installIntegration = async () => {
     try {
       const status = await invoke<HookStatus>("install_hook");
       setHookStatus(status);
     } catch (err) {
       console.error("install_hook failed", err);
-      alert(`Install failed: ${err}`);
+      alert(`Hook install failed: ${err}`);
+    }
+    try {
+      const skill = await invoke<SkillStatus>("install_skill");
+      setSkillStatus(skill);
+    } catch (err) {
+      console.error("install_skill failed", err);
+      alert(`Skill install failed: ${err}`);
     }
   };
 
@@ -752,13 +771,23 @@ function App() {
         <SelectionMenu rect={selection.rect} onPick={beginCompose} />
       )}
       {toast && <ApproveToast message={toast} />}
-      {hookStatus && !hookStatus.installed && (
-        <HookSetupModal
-          status={hookStatus}
-          onInstall={installHook}
-          onSkip={() => setHookStatus({ ...hookStatus, installed: true })}
-        />
-      )}
+      {hookStatus &&
+        skillStatus &&
+        (!hookStatus.installed || !skillStatus.installed) && (
+          <HookSetupModal
+            hookStatus={hookStatus}
+            skillStatus={skillStatus}
+            onInstall={installIntegration}
+            onSkip={() => {
+              setHookStatus({ ...hookStatus, installed: true });
+              setSkillStatus({
+                ...skillStatus,
+                installed: true,
+                outdated: false,
+              });
+            }}
+          />
+        )}
     </div>
   );
 }

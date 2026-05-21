@@ -394,6 +394,7 @@ on read.
 | `get_interception_mode` / `set_interception_mode` | Read / write current mode |
 | `claim_review(session_id)` | Ambient-mode "I want the full review window" |
 | `get_hook_status` / `install_hook` | Inspect/install `~/.claude/settings.json` entry |
+| `get_skill_status` / `install_skill` | Inspect/install `~/.claude/skills/redline/SKILL.md` (embedded via `include_str!`) |
 | `pty_spawn / pty_write / pty_resize / pty_kill / pty_kill_all / pty_cwd` | Embedded terminal lifecycle |
 
 ### 7.2 Events (backend → frontend)
@@ -475,7 +476,7 @@ Window default: 1100×800, resizable. Three primary regions stacked vertically:
 | `AskModeViolationBanner` | "Claude modified the plan during an Ask; proceeding as revise" |
 | `ResolutionWarningBanner` | Unmatched / missing / parse-error warnings on resolution blocks |
 | `ApproveToast` | Brief confirmation after `approve_plan` |
-| `HookSetupModal` | Walks the user through installing the `~/.claude/settings.json` hook entry |
+| `HookSetupModal` | Two-row "Install Redline integration" — installs the hook and the review-protocol skill |
 | `TerminalView` | Single xterm.js bound to one PTY, base64 decoder, Fit addon, theme sync |
 | `TerminalTabs` / `TerminalTabBar` | Tab management: spawn, close, unseen-activity dot |
 | `PaneDivider` | Draggable divider for sidebar / comment-pane / terminal heights |
@@ -534,10 +535,17 @@ divider between editor and terminal is draggable.
 
 ---
 
-## 11. Hook installation
+## 11. Redline integration installation
 
-`HookSetupModal` triggers `install_hook`, which writes to
-`~/.claude/settings.json`:
+Redline integrates with Claude Code through two installed pieces — a **hook**
+and a **skill**. `HookSetupModal` ("Install Redline integration") drives both:
+the modal shows a status row per piece and one button that runs `install_hook`
+then `install_skill` (each in its own error boundary, so one failing still
+installs the other).
+
+### 11.1 The plan-intercept hook
+
+`install_hook` writes to `~/.claude/settings.json`:
 
 ```json
 {
@@ -554,14 +562,38 @@ divider between editor and terminal is draggable.
 }
 ```
 
+The write is a JSON merge — every other key in `settings.json` is preserved.
 `get_hook_status` inspects the file and reports `installed | missing |
-malformed` so the modal can render appropriate guidance.
+malformed`, plus any conflicting `ExitPlanMode` URL, so the modal can render
+appropriate guidance.
 
 The 10-minute timeout matches the longest realistic review session. If
 Claude Code is running but Redline isn't, the hook fails to connect and Claude
 proceeds silently (verified empirically; see `docs/protocol-verification.md`).
 The user must launch Redline (or set the mode to Paused) for the hook to
 behave as designed.
+
+### 11.2 The review-protocol skill
+
+`install_skill` writes the Redline review-protocol skill to
+`~/.claude/skills/redline/SKILL.md`. The canonical source is
+`skills/redline/SKILL.md` in the repo (mirrored to `.claude/skills/redline/`
+and `.agents/skills/redline/` by symlink); `src-tauri/src/skill.rs` embeds it at
+compile time with `include_str!` — there is no bundled resource.
+`get_skill_status` reports `installed | missing | outdated`, where `outdated`
+means a `SKILL.md` is present but differs from the version Redline ships;
+installing overwrites it. A unit test keeps `SKILL_VERSION` in `skill.rs` in
+lockstep with the `version:` frontmatter field.
+
+The skill teaches a Claude Code agent the Redline contract up front:
+presentation-aware plan markdown (never raw HTML), `<!-- rl:blk-… -->` block-id
+sidecar preservation, the `REDLINE_RESOLUTIONS` block, the
+`[edit]`/`[feedback]`/`[question]` payload semantics with Ask vs Revise, and
+fork-thread etiquette. It **enriches** the contract — it does not replace it.
+The `feedback.rs` payload (§5, §13) stays fully self-contained, carrying every
+instruction inline, and is the reliable fallback when the skill is absent.
+Trimming the payload to lean on the skill is deferred pending empirical
+verification.
 
 ---
 
