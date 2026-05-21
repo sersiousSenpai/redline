@@ -2,9 +2,12 @@
 // Copyright 2026 Yusuf Al-Bazian
 import type { Comment, CommentStatus } from "../types";
 import { AnchorPill } from "./AnchorPill";
+import { CommentThread } from "./CommentThread";
 
 interface CommentCardProps {
   comment: Comment;
+  /** The review session id — passed through to the comment's fork thread. */
+  sessionId: string;
   /** True when this card is the currently focused one (driven by the in-doc
    *  highlight click bridge or a direct click on the card). Surfaces a
    *  focused outline. */
@@ -58,6 +61,7 @@ const STATUS_COLORS: Record<CommentStatus, string> = {
 
 export function CommentCard({
   comment,
+  sessionId,
   focused = false,
   onSelect,
   onDelete,
@@ -222,6 +226,8 @@ export function CommentCard({
           )}
         </div>
       )}
+
+      <CommentThread sessionId={sessionId} comment={comment} />
     </div>
   );
 }

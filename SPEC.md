@@ -271,6 +271,54 @@ of:
 - `missing_block` — block absent entirely (only on revise submissions, which
   require it).
 
+### 5.5 Fork-agent discussion threads
+
+Every comment can host a multi-turn **discussion thread** with a Claude Code
+session *fork* — a context-aware sub-agent that answers inline without
+disturbing the held plan-mode session. This is the "discuss" verb, distinct
+from "revise" (§5.1): a thread never round-trips into the plan.
+
+**Mechanism.** A turn runs a headless `claude` process (`src-tauri/src/fork.rs`):
+
+- First turn — `claude -p "<prompt>" --resume <main_session_id> --fork-session
+  --output-format stream-json --include-partial-messages --verbose
+  --permission-mode default --tools "Read,Grep,Glob" --strict-mcp-config`.
+  `--fork-session` writes the turn to a *new* session id, leaving the main
+  transcript untouched.
+- Follow-up turns — the same, resuming `<fork_session_id>` with no
+  `--fork-session`.
+
+The fork is **read-only**: built-in tools are limited to `Read`/`Grep`/`Glob`,
+MCP servers are stripped, and it never runs in plan mode. `fork.rs` parses the
+`stream-json` stdout (`text_delta` chunks → `fork-delta` events; the `result`
+line → the authoritative final text) and keys a process registry by
+`(session_id, comment_id)` — comment ids are session-scoped, so the pair is the
+real key.
+
+**Lifecycle.** A thread is `idle | streaming | error`. Clicking **Discuss**
+sends the comment's own text as turn 1; the composer drives follow-ups. A
+streaming turn can be cancelled (kills the child). **Discard** kills any running
+turn, deletes the thread's messages, and clears `fork_session_id` — the host
+comment stays.
+
+**Persistence.** `thread_messages` (`id, session_id, comment_id, role, body,
+status, created_at`) holds *terminal* turns only — a row is written when a turn
+finishes (`status` = `complete` | `error`); live streaming text is
+frontend-only. `comments.fork_session_id` (additive, nullable, DB-only) records
+the comment's fork so later turns resume rather than re-fork.
+
+**Coexistence.** A fork inherits the user's hooks, so one that called
+`ExitPlanMode` would POST to `:7676`. Three guards prevent a phantom revision:
+the tool restriction makes `ExitPlanMode` unavailable; the turn prompt forbids
+it; and `handle_plan` ignores any POST whose `session_id` is a known fork id
+(`is_known_fork_session`). The main plan-mode session stays blocked and
+untouched throughout.
+
+Commands: `fork_thread_send`, `get_thread`, `fork_thread_cancel`,
+`fork_thread_discard`, `fork_kill_all`. Events: `fork-delta`, `fork-done`,
+`fork-error`, `fork-cancelled`. The mechanism is verified empirically in
+`docs/protocol-verification.md` Experiment (i).
+
 ---
 
 ## 6. Data model
@@ -419,7 +467,8 @@ Window default: 1100×800, resizable. Three primary regions stacked vertically:
 | `PlanEditor` (lazy) | Tiptap editor with redline marks, anchor pills, selection menu |
 | `SelectionMenu` | Floating action menu on text selection: pick type + scope |
 | `CommentComposer` | Inline form for the active comment in composition |
-| `CommentCard` | Rendered comment with edit/structural payload, resolution UI |
+| `CommentCard` | Rendered comment with edit/structural payload, resolution UI, fork thread |
+| `CommentThread` | Per-comment fork-agent discussion: streaming turns, composer, collapse / discard (§5.5) |
 | `AnchorPill` | Small monospace anchor chip (`§B.2.p1`) |
 | `Footer` | Comment tally, **Continue revising** / **Ask Claude** / **Approve plan** buttons, collapsed-terminal peek |
 | `DecisionWindowBanner` | Ambient countdown ("auto-approving in 18 s") with Open / Approve actions |

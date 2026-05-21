@@ -219,7 +219,7 @@ fn build_first_turn_prompt(
     is_question: bool,
     anchor_id: &str,
     quoted: Option<&str>,
-    comment_body: &str,
+    opening: &str,
 ) -> String {
     let mut p = String::from(
         "You are discussing a plan you produced earlier in this session with \
@@ -244,7 +244,7 @@ fn build_first_turn_prompt(
     }
     p.push('\n');
     p.push_str("Their comment:\n");
-    for line in comment_body.lines() {
+    for line in opening.lines() {
         p.push_str("> ");
         p.push_str(line);
         p.push('\n');
@@ -316,13 +316,15 @@ pub async fn fork_thread_send(
         .insert_thread_message(&user_msg)
         .map_err(|e| format!("failed to persist message: {e}"))?;
 
-    // Build the turn prompt — wrapped on the first turn, verbatim after.
+    // Build the turn prompt — wrapped on the first turn, verbatim after. The
+    // first turn uses `text` (the frontend's seed) so the persisted user row
+    // and the prompt stay identical.
     let prompt = match &prior_fork {
         None => build_first_turn_prompt(
             matches!(comment.kind, CommentKind::Question),
             &comment.anchor_id,
             comment.selection.as_ref().map(|s| s.quoted_text.as_str()),
-            &comment.body,
+            &text,
         ),
         Some(_) => text.clone(),
     };

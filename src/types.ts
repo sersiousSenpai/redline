@@ -189,3 +189,46 @@ export interface PlanDecisionWindowEvent {
   deadlineMs: number;
   windowSecs: number;
 }
+
+/** One persisted turn in a comment's fork-agent discussion thread. Rows are
+ *  terminal — written only when a turn finishes — so `status` is "complete"
+ *  or "error". Live streaming text is frontend-only state. */
+export interface ThreadMessage {
+  id: string;
+  sessionId: SessionId;
+  commentId: string;
+  /** "user" | "assistant". */
+  role: string;
+  body: string;
+  /** "complete" | "error". */
+  status: string;
+  createdAt: number;
+}
+
+/** A chunk of streaming assistant text for a comment's fork thread. */
+export interface ForkDeltaEvent {
+  sessionId: SessionId;
+  commentId: string;
+  text: string;
+}
+
+/** A fork turn finished — `body` is the authoritative full reply. */
+export interface ForkDoneEvent {
+  sessionId: SessionId;
+  commentId: string;
+  messageId: string;
+  body: string;
+}
+
+/** A fork turn failed; `error` is also persisted as a terminal message. */
+export interface ForkErrorEvent {
+  sessionId: SessionId;
+  commentId: string;
+  error: string;
+}
+
+/** A fork turn was cancelled — nothing was persisted for it. */
+export interface ForkCancelledEvent {
+  sessionId: SessionId;
+  commentId: string;
+}

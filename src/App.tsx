@@ -687,7 +687,8 @@ function App() {
             )}
             {allComments.map((c) => (
               <CommentCard
-                key={c.id}
+                key={`${session?.sessionId ?? ""}-${c.id}`}
+                sessionId={session?.sessionId ?? ""}
                 comment={c}
                 focused={focusedCommentId === c.id}
                 onSelect={() =>
