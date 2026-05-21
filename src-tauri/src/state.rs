@@ -107,6 +107,17 @@ pub struct ReviewSession {
     pub status: SessionStatus,
 }
 
+/// A lightweight per-revision projection for the sidebar's revisions tree —
+/// version, timestamp, and the thread-boundary flag, without the heavy
+/// `raw_plan_markdown` / `sections` / `comments` payload.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevisionSummary {
+    pub version_number: u32,
+    pub received_at: i64,
+    pub thread_start: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSummary {
@@ -114,6 +125,8 @@ pub struct SessionSummary {
     pub project_name: String,
     pub project_path: String,
     pub latest_version: u32,
+    /// Every revision of this session, oldest-first — drives the sidebar tree.
+    pub revisions: Vec<RevisionSummary>,
     pub created_at: i64,
     pub status: SessionStatus,
     pub pending_count: u32,
@@ -482,6 +495,15 @@ impl SessionStore {
                     project_name: s.project_name.clone(),
                     project_path: s.project_path.clone(),
                     latest_version,
+                    revisions: s
+                        .revisions
+                        .iter()
+                        .map(|r| RevisionSummary {
+                            version_number: r.version_number,
+                            received_at: r.received_at,
+                            thread_start: r.thread_start,
+                        })
+                        .collect(),
                     created_at: s.created_at,
                     status: s.status,
                     pending_count,

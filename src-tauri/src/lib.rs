@@ -24,6 +24,7 @@ use tauri::{
     AppHandle, Emitter, Listener, Manager,
 };
 use tokio::sync::oneshot;
+use tauri_plugin_dialog::DialogExt;
 
 use crate::db::Database;
 use crate::hook::HookStatus;
@@ -610,6 +611,64 @@ fn get_session(store: tauri::State<'_, SessionStore>, id: String) -> Option<Revi
     store.get(&id)
 }
 
+/// A filesystem-safe default file name for an exported revision, e.g.
+/// `redline-v3.md`. Non-alphanumerics in the project name collapse to `-`.
+fn export_file_name(project_name: &str, version: u32) -> String {
+    let stem: String = project_name
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect();
+    let stem = stem.trim_matches('-');
+    let stem = if stem.is_empty() { "plan" } else { stem };
+    format!("{stem}-v{version}.md")
+}
+
+/// Export one plan revision as clean markdown (block-id sidecars stripped) to a
+/// file the user picks. `async` is required: the command then runs on the async
+/// runtime rather than the main thread, where `blocking_save_file` would
+/// deadlock the event loop. Returns the saved path, or `None` if cancelled.
+#[tauri::command]
+async fn export_revision_markdown(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    session_id: String,
+    version_number: u32,
+) -> Result<Option<String>, String> {
+    // Resolve the revision and strip sidecars in a scoped block so no store
+    // lock is held across the (blocking) save dialog.
+    let (clean, project_name) = {
+        let session = store
+            .get(&session_id)
+            .ok_or_else(|| format!("no session for id {session_id}"))?;
+        let revision = session
+            .revisions
+            .iter()
+            .find(|r| r.version_number == version_number)
+            .ok_or_else(|| format!("revision v{version_number} not found"))?;
+        (
+            parser::strip_sidecar_lines(&revision.raw_plan_markdown),
+            session.project_name.clone(),
+        )
+    };
+
+    let picked = app
+        .dialog()
+        .file()
+        .add_filter("Markdown", &["md"])
+        .set_file_name(export_file_name(&project_name, version_number))
+        .blocking_save_file();
+
+    let Some(file_path) = picked else {
+        return Ok(None); // user cancelled the save dialog
+    };
+    let path = file_path
+        .into_path()
+        .map_err(|e| format!("invalid save path: {e}"))?;
+    std::fs::write(&path, clean).map_err(|e| e.to_string())?;
+    tracing::info!(path = %path.display(), version = version_number, "exported revision markdown");
+    Ok(Some(path.to_string_lossy().to_string()))
+}
+
 #[tauri::command]
 fn add_comment(
     app: AppHandle,
@@ -874,9 +933,11 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             list_sessions,
             get_session,
+            export_revision_markdown,
             delete_session,
             add_comment,
             update_comment,

@@ -400,6 +400,20 @@ fn apply_injections(src: &str, mut injections: Vec<(usize, String)>) -> String {
     out
 }
 
+/// Remove only the injected `<!-- rl:blk-… -->` sidecar lines, leaving every
+/// other byte intact — including the trailing newline. The read side of the
+/// `apply_injections` contract, used to export human-facing clean markdown;
+/// mirrors the JS `stripSidecars` in `src/editor/markdown/sidecar.ts`.
+pub fn strip_sidecar_lines(md: &str) -> String {
+    md.split('\n')
+        .filter(|l| {
+            let t = l.trim();
+            !(t.starts_with("<!-- rl:blk-") && t.ends_with("-->"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn is_block_container(tag: &Tag<'_>) -> bool {
     matches!(
         tag,
@@ -834,17 +848,6 @@ fn main() {
         out
     }
 
-    /// Remove only the injected sidecar lines, leaving everything else.
-    fn strip_sidecar_lines(md: &str) -> String {
-        md.split('\n')
-            .filter(|l| {
-                let t = l.trim();
-                !(t.starts_with("<!-- rl:blk-") && t.ends_with("-->"))
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
     const RICH_PLAN: &str = "\
 # Plan
 
@@ -953,6 +956,21 @@ Tail paragraph.
         assert_eq!(parse_sidecar_id("<!-- rl:other -->"), None);
         assert_eq!(parse_sidecar_id("<!-- rl:blk- -->"), None);
         assert_eq!(parse_sidecar_id("plain text"), None);
+    }
+
+    #[test]
+    fn strip_sidecar_lines_removes_sidecars_and_keeps_trailing_newline() {
+        // A parser-augmented plan carries a sidecar before every block;
+        // stripping them yields back the exact original bytes.
+        let md = "# Title\n\nA paragraph.\n";
+        let (_s, augmented) = parse_plan_with_sidecars(md);
+        assert!(augmented.contains("<!-- rl:blk-"));
+        assert_eq!(strip_sidecar_lines(&augmented), md);
+        // Indented sidecars are matched too; the trailing newline is kept.
+        assert_eq!(
+            strip_sidecar_lines("  <!-- rl:blk-abc123 -->\nkept\n"),
+            "kept\n"
+        );
     }
 
     #[test]
