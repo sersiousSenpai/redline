@@ -9,6 +9,7 @@ use rusqlite::{params, Connection};
 use crate::state::{
     reparse_sections, Comment, CommentKind, CommentScope, CommentSelection, CommentStatus,
     EditPayload, Resolution, ReviewSession, Revision, SessionStatus, StructuralPayload,
+    ThreadMessage,
 };
 
 pub struct Database {
@@ -80,6 +81,19 @@ impl Database {
                 FOREIGN KEY (session_id, version_number)
                     REFERENCES revisions(session_id, version_number) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS thread_messages (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                comment_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                body TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_thread_messages
+                ON thread_messages (session_id, comment_id, created_at);
             "#,
         )?;
         // Best-effort additive migrations (errors on existing columns are ignored)
@@ -176,6 +190,15 @@ impl Database {
         );
         let _ = conn.execute(
             "ALTER TABLE comments ADD COLUMN sel_quoted_text TEXT",
+            [],
+        );
+        // Fork-agent discussion threads (Phase 2): the Claude Code session id
+        // of the comment's forked discussion, NULL until its first "Discuss"
+        // turn. Added in the post-rebuild ALTER group so a rebuilt `comments`
+        // table gains it too — the legacy rebuild's explicit-column
+        // `INSERT … SELECT` runs earlier and would otherwise drop it.
+        let _ = conn.execute(
+            "ALTER TABLE comments ADD COLUMN fork_session_id TEXT",
             [],
         );
         Ok(())
@@ -390,6 +413,119 @@ impl Database {
             params![session_id],
         )?;
         Ok(())
+    }
+
+    // --- Fork-agent discussion threads (Phase 2) ---------------------------
+    // `thread_messages` rows are terminal: written only when a turn finishes.
+    // `comments.fork_session_id` is a DB-only column (not on the `Comment`
+    // struct) so resuming a fork never reads a stale in-memory value.
+
+    pub fn insert_thread_message(&self, msg: &ThreadMessage) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO thread_messages
+                (id, session_id, comment_id, role, body, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                msg.id,
+                msg.session_id,
+                msg.comment_id,
+                msg.role,
+                msg.body,
+                msg.status,
+                msg.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_thread(
+        &self,
+        session_id: &str,
+        comment_id: &str,
+    ) -> rusqlite::Result<Vec<ThreadMessage>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, session_id, comment_id, role, body, status, created_at
+             FROM thread_messages
+             WHERE session_id = ?1 AND comment_id = ?2
+             ORDER BY created_at, id",
+        )?;
+        let rows = stmt.query_map(params![session_id, comment_id], |row| {
+            Ok(ThreadMessage {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                comment_id: row.get(2)?,
+                role: row.get(3)?,
+                body: row.get(4)?,
+                status: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn delete_thread(&self, session_id: &str, comment_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM thread_messages WHERE session_id = ?1 AND comment_id = ?2",
+            params![session_id, comment_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_comment_fork_session(
+        &self,
+        session_id: &str,
+        comment_id: &str,
+    ) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT fork_session_id FROM comments WHERE session_id = ?1 AND id = ?2",
+            params![session_id, comment_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+    }
+
+    pub fn set_comment_fork_session(
+        &self,
+        session_id: &str,
+        comment_id: &str,
+        fork_session_id: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE comments SET fork_session_id = ?1 WHERE session_id = ?2 AND id = ?3",
+            params![fork_session_id, session_id, comment_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_comment_fork_session(
+        &self,
+        session_id: &str,
+        comment_id: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE comments SET fork_session_id = NULL WHERE session_id = ?1 AND id = ?2",
+            params![session_id, comment_id],
+        )?;
+        Ok(())
+    }
+
+    /// True if `session_id` is the forked session of any comment — used by
+    /// `handle_plan` to ignore stray `ExitPlanMode` POSTs from a fork agent.
+    pub fn is_known_fork_session(&self, session_id: &str) -> bool {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT 1 FROM comments WHERE fork_session_id = ?1 LIMIT 1",
+            params![session_id],
+            |_| Ok(()),
+        )
+        .is_ok()
     }
 
     pub fn load_all(&self) -> rusqlite::Result<HashMap<String, ReviewSession>> {
@@ -674,6 +810,83 @@ mod tests {
 
         let session = store.get("sess-1").expect("get session");
         assert_eq!(session.revisions[0].comments.len(), 2);
+    }
+
+    #[test]
+    fn thread_messages_round_trip_and_ordering() {
+        let db = Database::open_in_memory().unwrap();
+        let mk = |id: &str, role: &str, body: &str, at: i64| ThreadMessage {
+            id: id.to_string(),
+            session_id: "s1".to_string(),
+            comment_id: "c-001".to_string(),
+            role: role.to_string(),
+            body: body.to_string(),
+            status: "complete".to_string(),
+            created_at: at,
+        };
+        // Inserted out of order — load_thread must return them by created_at.
+        db.insert_thread_message(&mk("m2", "assistant", "second", 200))
+            .unwrap();
+        db.insert_thread_message(&mk("m1", "user", "first", 100))
+            .unwrap();
+        // A message on a different comment must not leak into this thread.
+        db.insert_thread_message(&ThreadMessage {
+            comment_id: "c-002".to_string(),
+            ..mk("m3", "user", "other", 150)
+        })
+        .unwrap();
+
+        let thread = db.load_thread("s1", "c-001").unwrap();
+        assert_eq!(
+            thread.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["m1", "m2"],
+        );
+        assert_eq!(thread[0].body, "first");
+        assert_eq!(thread[1].role, "assistant");
+
+        db.delete_thread("s1", "c-001").unwrap();
+        assert!(db.load_thread("s1", "c-001").unwrap().is_empty());
+        // The scoped delete left the other comment's message intact.
+        assert_eq!(db.load_thread("s1", "c-002").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn comment_fork_session_set_get_clear() {
+        let store = make_store();
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("s-fork", "/tmp/f", md.to_string(), reparse_sections(md), true);
+        store
+            .add_comment(
+                "s-fork",
+                NewCommentRequest {
+                    kind: CommentKind::Question,
+                    scope: None,
+                    anchor_id: "A".to_string(),
+                    block_id: None,
+                    structural: None,
+                    body: "why?".to_string(),
+                    edit: None,
+                    selection: None,
+                },
+            )
+            .expect("add comment");
+        let db = store.database();
+
+        // Fresh comment: no fork yet.
+        assert!(db.get_comment_fork_session("s-fork", "c-001").is_none());
+        assert!(!db.is_known_fork_session("fork-xyz"));
+
+        db.set_comment_fork_session("s-fork", "c-001", "fork-xyz")
+            .unwrap();
+        assert_eq!(
+            db.get_comment_fork_session("s-fork", "c-001").as_deref(),
+            Some("fork-xyz"),
+        );
+        assert!(db.is_known_fork_session("fork-xyz"));
+
+        db.clear_comment_fork_session("s-fork", "c-001").unwrap();
+        assert!(db.get_comment_fork_session("s-fork", "c-001").is_none());
+        assert!(!db.is_known_fork_session("fork-xyz"));
     }
 
     #[test]
@@ -1268,6 +1481,17 @@ body.
             )
             .expect("fresh session c-001 persists");
         assert_eq!(c.id, "c-001");
+
+        // The post-rebuild fork_session_id column landed on the rebuilt
+        // legacy `comments` table — set/get round-trips on the legacy row.
+        let db = store.database();
+        assert!(db.get_comment_fork_session("old", "c-001").is_none());
+        db.set_comment_fork_session("old", "c-001", "fork-legacy")
+            .unwrap();
+        assert_eq!(
+            db.get_comment_fork_session("old", "c-001").as_deref(),
+            Some("fork-legacy"),
+        );
 
         let _ = std::fs::remove_file(&tmpfile);
     }

@@ -333,6 +333,25 @@ pub struct Comment {
     pub selection: Option<CommentSelection>,
 }
 
+/// One turn in a comment's fork-agent discussion thread (Phase 2). Rows are
+/// terminal — persisted only once a turn finishes — so `status` is `complete`
+/// or `error`; live streaming text is frontend-only state. The fork session
+/// itself is tracked by the DB-only `comments.fork_session_id` column, not on
+/// `Comment`, so resuming the right fork never reads a stale in-memory value.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadMessage {
+    pub id: String,
+    pub session_id: String,
+    pub comment_id: String,
+    /// "user" | "assistant".
+    pub role: String,
+    pub body: String,
+    /// "complete" | "error".
+    pub status: String,
+    pub created_at: i64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewCommentRequest {
@@ -385,6 +404,14 @@ impl SessionStore {
             inner: Arc::new(Mutex::new(map)),
             db,
         }
+    }
+
+    /// The backing database handle — test-only, for exercising fork-thread
+    /// persistence (`thread_messages`, `comments.fork_session_id`) against a
+    /// comment created the normal way through the store.
+    #[cfg(test)]
+    pub fn database(&self) -> Arc<Database> {
+        self.db.clone()
     }
 
     pub fn upsert_plan(
