@@ -350,6 +350,48 @@ After running, fold results into "Accumulated findings" below and update `~/.cla
 
 ---
 
+## Experiment (i) — `--fork-session` discussion forks (Phase 2)
+
+**Question:** can `claude -p --resume <session_id> --fork-session --output-format stream-json` back Redline's fork-agent comment threads — a context-aware Claude process per comment that discusses the plan without disturbing the held main plan-mode session?
+
+**Verified** 2026-05-21, `claude` v2.1.146, against a real Redline session transcript. Captures: `/tmp/redline-fork-verify-{1,2}.jsonl`.
+
+**First turn** (forks the main session):
+```bash
+claude -p "<prompt>" --resume <main_session_id> --fork-session \
+  --output-format stream-json --include-partial-messages --verbose \
+  --permission-mode default --tools "Read,Grep,Glob" --strict-mcp-config
+```
+**Follow-up turn** (resumes the fork — no `--fork-session`):
+```bash
+claude -p "<prompt>" --resume <fork_session_id> \
+  --output-format stream-json --include-partial-messages --verbose \
+  --permission-mode default --tools "Read,Grep,Glob" --strict-mcp-config
+```
+
+- [x] **`--fork-session` mints a new session id.** The first turn resumed `d8111931-…`; the `system/init` event reported a *different* `session_id` (`5cd5f058-…`). `result.session_id` matched `init`.
+- [x] **The resumed transcript is untouched.** The main session's `.jsonl` was byte- and mtime-identical before and after the fork.
+- [x] **Follow-up `--resume <fork_id>` (no `--fork-session`) keeps the same id** and carries prior-turn context (the follow-up correctly recalled what the first turn discussed). First turn forks; follow-ups plain-resume.
+- [x] **`--tools "Read,Grep,Glob"` restricts the built-in tool set.** `init.tools` built-ins were exactly `Glob, Grep, LSP, Read` — no `Edit`, `Write`, `Bash`, `ExitPlanMode`, `Task`, `WebFetch`, `NotebookEdit`.
+- [x] **`--tools` alone does NOT exclude MCP tools** — the first run's `init.tools` still listed ~40 `mcp__…` tools. `--strict-mcp-config` (with no `--mcp-config`) strips them: the follow-up run's `init` had **0** MCP tools. Both flags are required for a genuinely read-only fork.
+- [x] **Hooks still fire on the fork.** `init` was preceded by three `system/hook_started` / `system/hook_response` pairs (SessionStart hooks). Confirms the hook-reentrancy risk: a fork that called `ExitPlanMode` would POST to `:7676`. Mitigated three ways — `--tools` makes `ExitPlanMode` unavailable; the turn prompt forbids it; `handle_plan` ignores POSTs whose `session_id` is a known fork id (`is_known_fork_session`).
+
+**stream-json event shapes** (`--output-format stream-json --include-partial-messages`), one JSON object per line:
+
+| `type` | use |
+|---|---|
+| `system` / `hook_started`, `hook_response` | ignore |
+| `system` / `init` | `session_id` = the forked id; `tools` = available set |
+| `system` / `status` | ignore |
+| `stream_event` → `event.content_block_delta` | the streaming text — **only when `event.delta.type == "text_delta"`**; `signature_delta` (thinking) and other deltas must be skipped |
+| `assistant` | a *cumulative* message snapshot — **ignore** (rendering it double-renders against the text deltas) |
+| `rate_limit_event` | ignore |
+| `result` / `success` | authoritative final: `result` (full text), `session_id`, `is_error` |
+
+**Verdict:** the fork mechanism is viable for Phase 2 discussion threads. `fork.rs` keys a process registry by `(session_id, comment_id)`, parses the table above, and persists terminal turns to `thread_messages`.
+
+---
+
 ## Verdict
 
 After running all experiments, the answers determine:

@@ -2,6 +2,7 @@
 // Copyright 2026 Yusuf Al-Bazian
 mod db;
 mod feedback;
+mod fork;
 mod hook;
 mod parser;
 mod pty;
@@ -195,6 +196,7 @@ struct AppState {
     expected_modes: ExpectedModes,
     settings: Settings,
     claims: ClaimFlags,
+    fork: fork::ForkState,
 }
 
 #[derive(Serialize, Clone)]
@@ -301,6 +303,16 @@ async fn handle_plan(
         tracing::info!(session_id = %session_id, tool_use_id = %tool_use_id, "Redline paused — auto-approving without capture");
         return Json(allow_response(
             "Redline is paused — this plan was auto-approved without review.",
+        ));
+    }
+
+    // A fork agent (a "Discuss" thread) inherits this hook. If one ever calls
+    // ExitPlanMode, the POST arrives under the fork's own session id — never
+    // capture it as a plan; that would spawn a phantom review revision.
+    if app_state.fork.is_known_fork_session(&session_id) {
+        tracing::info!(session_id = %session_id, "ignoring ExitPlanMode POST from a known fork session");
+        return Json(allow_response(
+            "This plan came from a Redline discussion-thread fork; it was not captured for review.",
         ));
     }
 
@@ -864,6 +876,11 @@ pub fn run() {
             pty::pty_kill,
             pty::pty_kill_all,
             pty::pty_cwd,
+            fork::fork_thread_send,
+            fork::get_thread,
+            fork::fork_thread_cancel,
+            fork::fork_thread_discard,
+            fork::fork_kill_all,
         ])
         .setup(|app| {
             let data_dir = app
@@ -884,6 +901,11 @@ pub fn run() {
 
             app.manage(pty::PtyState::new());
 
+            // Resolve `claude` once — a Finder-launched app has a minimal PATH.
+            // Built before SessionStore::new consumes the `db` Arc.
+            let fork_state = fork::ForkState::new(db.clone(), fork::resolve_claude_bin());
+            app.manage(fork_state.clone());
+
             let store = SessionStore::new(db);
             app.manage(store.clone());
 
@@ -900,6 +922,7 @@ pub fn run() {
                 expected_modes,
                 settings: settings.clone(),
                 claims,
+                fork: fork_state,
             };
             tauri::async_runtime::spawn(run_server(app_state));
 
@@ -980,6 +1003,15 @@ pub fn run() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // Kill any headless `claude` discussion forks on teardown so no
+            // child is orphaned (PTYs SIGHUP-clean when their master closes).
+            if let tauri::RunEvent::Exit = event {
+                if let Some(fork) = app_handle.try_state::<fork::ForkState>() {
+                    fork.kill_all();
+                }
+            }
+        });
 }
