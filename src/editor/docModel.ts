@@ -56,6 +56,25 @@ export function anchorByBlockId(sections: Section[]): Map<string, string> {
   return out;
 }
 
+/** anchorId → stable blockId — the inverse of {@link anchorByBlockId}. A
+ *  selection-originated comment only knows the positional `anchorId` of the
+ *  block it landed in; this resolves the stable `blockId` join key the in-doc
+ *  highlight decoration is keyed by, so the highlight actually paints. */
+export function blockIdByAnchorId(sections: Section[]): Map<string, string> {
+  const out = new Map<string, string>();
+  const walk = (secs: Section[]) => {
+    for (const s of secs) {
+      if (s.anchorId && s.blockId) out.set(s.anchorId, s.blockId);
+      for (const p of s.paragraphs) {
+        if (p.anchorId && p.blockId) out.set(p.anchorId, p.blockId);
+      }
+      walk(s.children);
+    }
+  };
+  walk(sections);
+  return out;
+}
+
 export interface RevisionEdit {
   status: ParagraphDiffStatus;
   originalText: string;

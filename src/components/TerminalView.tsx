@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -167,12 +168,42 @@ export function TerminalView({
     });
     ro.observe(host);
 
+    // After the OS app returns from the background, a still-`visible` terminal
+    // gets no `visible` transition to re-fit/re-focus it — and a webview that
+    // was backgrounded can leave the xterm renderer stale and the pane
+    // unfocused. Re-fit, repaint and refocus on every window-focus regain so
+    // the terminal never strands the user.
+    const focusPromise = getCurrentWindow().onFocusChanged(
+      ({ payload: focused }) => {
+        if (!focused || !visibleRef.current) return;
+        requestAnimationFrame(() => {
+          const term = termRef.current;
+          if (!term) return;
+          try {
+            fitRef.current?.fit();
+          } catch {
+            /* host detached */
+          }
+          if (term.cols > 0 && term.rows > 0) {
+            void invoke("pty_resize", {
+              id,
+              cols: term.cols,
+              rows: term.rows,
+            }).catch(() => {});
+            term.refresh(0, term.rows - 1);
+          }
+          term.focus();
+        });
+      },
+    );
+
     return () => {
       ro.disconnect();
       dataSub.dispose();
       void outPromise.then((un) => un());
       void exitPromise.then((un) => un());
       void dropPromise.then((un) => un());
+      void focusPromise.then((un) => un());
       void invoke("pty_kill", { id }).catch(() => {});
       term.dispose();
       termRef.current = null;
@@ -206,6 +237,9 @@ export function TerminalView({
           cols: term.cols,
           rows: term.rows,
         }).catch(() => {});
+        // Force a renderer repaint — a pane that was hidden (display:none)
+        // can come back with a stale xterm render surface.
+        term.refresh(0, term.rows - 1);
       }
       term?.focus();
     });
@@ -215,6 +249,10 @@ export function TerminalView({
   return (
     <div
       className="h-full w-full overflow-hidden"
+      // Guaranteed click-to-focus: a click anywhere in the pane re-acquires
+      // xterm focus even if xterm's own mousedown handling is in a bad state
+      // after a background/visibility cycle.
+      onPointerDown={() => termRef.current?.focus()}
       style={{
         background: "var(--color-paper)",
         padding: "6px 8px",

@@ -21,6 +21,7 @@ import {
   applyAnchorIds,
   applyCommentOverridesToEditor,
   applyRevisionRedline,
+  blockIdByAnchorId,
   redlineStatusByBlockId,
   revisionEditByBlockId,
   serializeBlocks,
@@ -82,8 +83,12 @@ export function PlanEditor({
   const anchors = useMemo(() => anchorByBlockId(sections), [sections]);
 
   // Immutable per-revision baseline (captured once the doc mounts) — the
-  // diff/revert basis for the changeLedger engine.
-  const [base, setBase] = useState<SerializedBlock[]>([]);
+  // diff/revert basis for the changeLedger engine. Tagged with the
+  // `revisionKey` it was captured under so the reconcile effect can tell a
+  // fresh baseline apart from a stale one left over from the prior revision.
+  const [base, setBase] = useState<{ key: string; blocks: SerializedBlock[] }>(
+    { key: "", blocks: [] },
+  );
   const scheduleRef = useRef<(() => void) | null>(null);
 
   const editor = useEditor(
@@ -98,7 +103,10 @@ export function PlanEditor({
         },
       },
       onCreate: ({ editor }) => {
-        setBase(serializeBlocks(editor, anchors));
+        setBase({
+          key: revisionKey,
+          blocks: serializeBlocks(editor, anchors),
+        });
       },
       onUpdate: ({ editor, transaction }) => {
         // Ignore our own reverse-projection writes and pure selection moves.
@@ -129,11 +137,11 @@ export function PlanEditor({
   );
 
   const { schedule } = useTrackChangesSync({
-    base,
+    base: base.blocks,
     comments: comments ?? [],
     backend,
     readCurrent,
-    enabled: editable && base.length > 0,
+    enabled: editable && base.blocks.length > 0,
   });
   scheduleRef.current = schedule;
 
@@ -155,21 +163,17 @@ export function PlanEditor({
   // edit comments to inline ins/del marks, then fold the revision redline
   // into the same language for any paragraph an edit comment doesn't own.
   useEffect(() => {
-    if (!editor || !editable || base.length === 0) return;
-    // Stale-base guard. On revisionKey change the editor is recreated and a
-    // new `base` is captured in onCreate, but there's a render gap during
-    // which this effect can fire with the *new* editor and the *old* base
-    // (from v_{n-1}). When that happens, baseMap lookups miss for every
-    // current block, `applyRevisionRedline`'s baseline is wrong, and the
-    // revision redline silently fails to render. Bail out; the follow-up
-    // render with the fresh base will retry.
-    const liveBlockIds = new Set<string>();
-    editor.state.doc.forEach((node) => {
-      const id = node.attrs?.blockId as string | undefined;
-      if (id) liveBlockIds.add(id);
-    });
-    if (!base.some((b) => liveBlockIds.has(b.blockId))) return;
-    const baseMap = new Map(base.map((b) => [b.blockId, b.markdown]));
+    if (!editor || !editable || base.blocks.length === 0) return;
+    // Stale-base guard. On revisionKey change the editor is recreated, but
+    // Tiptap emits `create` on a deferred tick — so this effect can fire with
+    // the *new* editor while `base` is still the snapshot from the previous
+    // revision. Running `applyCommentOverridesToEditor` then would revert the
+    // new revision's prose back to the stale base (and the deferred onCreate
+    // would lock that revert into `base`). `base.key` is the `revisionKey` the
+    // snapshot was captured under; bail until it matches the current revision
+    // — the onCreate that follows captures the fresh base and re-runs this.
+    if (base.key !== revisionKey) return;
+    const baseMap = new Map(base.blocks.map((b) => [b.blockId, b.markdown]));
     applyCommentOverridesToEditor(editor, comments ?? [], baseMap);
     const overridden = new Set(
       commentsToBlockOverrides(comments ?? []).keys(),
@@ -179,24 +183,37 @@ export function PlanEditor({
       revisionEditByBlockId(sections, diff),
       overridden,
     );
-  }, [editor, editable, comments, base, sections, diff]);
+  }, [editor, editable, comments, base, sections, diff, revisionKey]);
+
+  // Resolve blockId from a comment's positional anchorId when the comment
+  // itself carries none — covers comments persisted before blockId was
+  // recorded on selection-originated comments.
+  const blockByAnchor = useMemo(
+    () => blockIdByAnchorId(sections),
+    [sections],
+  );
 
   // Project selection-anchored comments to inline highlight decorations.
-  // Skipped for comments without a stored `selection` (legacy / sidebar-only).
+  // Skipped for comments without a stored `selection` (legacy / sidebar-only)
+  // or with no resolvable blockId.
   useEffect(() => {
     if (!editor) return;
     const ranges: CommentHighlightRange[] = (comments ?? [])
-      .filter((c) => !!c.selection && !!c.blockId)
-      .map((c) => ({
-        commentId: c.id,
-        blockId: c.blockId as string,
-        charStart: c.selection!.charStart,
-        charEnd: c.selection!.charEnd,
-        quotedText: c.selection!.quotedText,
-        muted: c.status === "resolved" || c.status === "accepted",
-      }));
+      .map((c) => {
+        const blockId = c.blockId ?? blockByAnchor.get(c.anchorId);
+        if (!c.selection || !blockId) return null;
+        return {
+          commentId: c.id,
+          blockId,
+          charStart: c.selection.charStart,
+          charEnd: c.selection.charEnd,
+          quotedText: c.selection.quotedText,
+          muted: c.status === "resolved" || c.status === "accepted",
+        };
+      })
+      .filter((r): r is CommentHighlightRange => r !== null);
     editor.commands.setCommentHighlights(ranges);
-  }, [editor, comments]);
+  }, [editor, comments, blockByAnchor]);
 
   // Mirror the external focused-comment state into the extension storage so
   // the matching decoration gets the `--focused` modifier (and scroll the

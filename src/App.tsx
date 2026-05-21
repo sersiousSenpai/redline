@@ -21,6 +21,7 @@ import { ResolutionWarningBanner } from "./components/ResolutionWarningBanner";
 import { SelectionMenu } from "./components/SelectionMenu";
 import { SessionSidebar } from "./components/SessionSidebar";
 import { computeParagraphDiff } from "./diff";
+import { blockIdByAnchorId } from "./editor/docModel";
 import { useTextSelection } from "./hooks/useTextSelection";
 import { applyTheme, readStoredTheme, storeTheme } from "./theme/applyTheme";
 import type { ThemeName } from "./theme/themes";
@@ -303,6 +304,13 @@ function App() {
     () => computeParagraphDiff(sections, previous?.sections),
     [sections, previous],
   );
+  // anchorId → stable blockId for the current revision. Selection-originated
+  // comments only capture a positional anchorId; the in-doc highlight
+  // decoration is keyed by blockId, so resolve it at submit time.
+  const blockIdByAnchor = useMemo(
+    () => blockIdByAnchorId(sections),
+    [sections],
+  );
   const allComments = useMemo<Comment[]>(
     () => threadRevisions.flatMap((r) => r.comments),
     [threadRevisions],
@@ -344,7 +352,7 @@ function App() {
       `[data-comment-id="${cssEscape(focusedCommentId)}"]`,
     );
     if (card instanceof HTMLElement) {
-      card.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      card.scrollIntoView({ block: "center", behavior: "smooth" });
     }
   }, [focusedCommentId]);
 
@@ -391,7 +399,13 @@ function App() {
     try {
       await invoke<Comment>("add_comment", {
         sessionId: session.sessionId,
-        request: req,
+        // Resolve the stable blockId from the comment's anchor so the in-doc
+        // highlight decoration (keyed by blockId) paints — without it the
+        // highlight never renders and the highlight↔card focus bridge is dead.
+        request: {
+          ...req,
+          blockId: req.blockId ?? blockIdByAnchor.get(req.anchorId),
+        },
       });
       setComposing(null);
     } catch (err) {
