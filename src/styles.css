@@ -179,6 +179,10 @@ body {
 .rl-prose {
   font-family: var(--font-sans);
   color: var(--color-ink);
+  /* Document-grade reading size — the chrome's 13px mono is too small for
+     sustained prose. */
+  font-size: 15px;
+  line-height: 1.7;
 }
 .rl-prose:focus,
 .rl-prose:focus-visible {
@@ -191,11 +195,11 @@ body {
   margin-bottom: 0;
 }
 .rl-prose p {
-  margin: 0.4em 0;
+  margin: 0.7em 0;
 }
 .rl-prose ul,
 .rl-prose ol {
-  margin: 0.4em 0;
+  margin: 0.7em 0;
   padding-left: 1.5em;
 }
 .rl-prose ul {
@@ -205,7 +209,7 @@ body {
   list-style: decimal;
 }
 .rl-prose li {
-  margin: 0.15em 0;
+  margin: 0.3em 0;
 }
 .rl-prose a {
   color: var(--color-info);
@@ -241,25 +245,38 @@ body {
   font-size: inherit;
 }
 .rl-prose blockquote {
-  margin: 0.5em 0;
-  padding-left: 0.9em;
-  border-left: 3px solid var(--color-rule);
+  /* Document-style callout: a tinted panel, not a bare margin rule. */
+  margin: 0.9em 0;
+  padding: 0.5em 0.9em;
+  border-left: 3px solid var(--color-info);
+  border-radius: 0 4px 4px 0;
+  background: color-mix(in srgb, var(--color-info) 7%, transparent);
   color: var(--color-ink-muted);
+}
+.rl-prose blockquote > :first-child {
+  margin-top: 0;
+}
+.rl-prose blockquote > :last-child {
+  margin-bottom: 0;
 }
 .rl-prose table {
   border-collapse: collapse;
-  margin: 0.5em 0;
+  margin: 0.9em 0;
   font-size: 0.92em;
 }
 .rl-prose th,
 .rl-prose td {
   border: 1px solid var(--color-rule);
-  padding: 0.35em 0.6em;
+  padding: 0.4em 0.7em;
   text-align: left;
 }
 .rl-prose th {
   background: var(--color-anchor-bg);
   font-weight: 600;
+}
+/* Zebra striping keeps wide tables readable across a row. */
+.rl-prose tbody tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--color-anchor-bg) 45%, transparent);
 }
 .rl-prose hr {
   border: none;
@@ -272,21 +289,29 @@ body {
 .rl-prose h4 {
   font-family: var(--font-serif);
   font-weight: 600;
-  margin: 0.6em 0 0.3em;
+  line-height: 1.3;
+  /* Generous space above for sectioning rhythm; tight below so the heading
+     binds to the content it introduces. */
+  margin: 1.4em 0 0.5em;
 }
 .rl-prose h1 {
-  font-size: 26px;
+  font-size: 30px;
   line-height: 1.2;
+  letter-spacing: -0.01em;
+  margin-bottom: 0.6em;
 }
 .rl-prose h2 {
-  font-size: 20px;
-  line-height: 1.25;
+  font-size: 22px;
+  /* Light document-style section rule under each H2. */
+  padding-bottom: 0.2em;
+  border-bottom: 1px solid var(--color-rule);
 }
 .rl-prose h3 {
-  font-size: 16px;
+  font-size: 17px;
 }
 .rl-prose h4 {
-  font-size: 14px;
+  font-size: 15px;
+  color: var(--color-ink-muted);
 }
 
 /* Revision redline (vN vs vN-1) — same affordance the old Document used. */
@@ -345,4 +370,191 @@ body {
 .rl-comment-highlight--muted.rl-comment-highlight--focused {
   background: color-mix(in srgb, var(--color-info) 22%, transparent);
   box-shadow: inset 2px 0 0 var(--color-info);
+}
+
+/* ── Phase 1: rich code-block & mermaid presentation ──────────────────────
+   Rendered by the CodeBlockView React NodeView. The `codeBlock` ProseMirror
+   node is unchanged — this is presentation only. */
+
+/* Syntax-highlighted code block: a rounded dark card with a chrome header. */
+.rl-codeblock {
+  margin: 1em 0;
+  border: 1px solid var(--color-rule);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--color-code-bg);
+}
+.rl-codeblock-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  user-select: none;
+}
+.rl-codeblock-lang {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--color-code-fg) 55%, transparent);
+}
+.rl-codeblock-copy {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: color-mix(in srgb, var(--color-code-fg) 70%, transparent);
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 4px;
+  padding: 1px 8px;
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    color 120ms ease;
+}
+.rl-codeblock-copy:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--color-code-fg);
+}
+/* The <pre> sits flush inside the card — the card carries the bg + radius. */
+.rl-codeblock pre {
+  margin: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0.75em 1em;
+  overflow-x: auto;
+}
+
+/* Mermaid diagram: a rendered SVG on a light surface + collapsible source. */
+.rl-mermaid-block {
+  margin: 1em 0;
+}
+.rl-mermaid {
+  display: flex;
+  justify-content: center;
+  padding: 1em;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-rule);
+  border-radius: 8px;
+}
+.rl-mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+.rl-mermaid--pending,
+.rl-mermaid--error {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  justify-content: flex-start;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--color-ink-muted);
+}
+.rl-mermaid--error {
+  border-color: var(--color-warning);
+  background: color-mix(in srgb, var(--color-warning) 8%, transparent);
+}
+.rl-mermaid-error-label {
+  font-weight: 600;
+  color: var(--color-warning);
+}
+.rl-mermaid-error-msg {
+  white-space: pre-wrap;
+}
+.rl-mermaid-source {
+  margin-top: 4px;
+}
+.rl-mermaid-source summary {
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-ink-muted);
+  user-select: none;
+}
+.rl-mermaid-source pre {
+  margin: 6px 0 0;
+  background: var(--color-code-bg);
+  color: var(--color-code-fg);
+  padding: 0.6em 0.9em;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-size: 0.82em;
+}
+
+/* Revision redline on a code/mermaid card. The base .rl-block-* affordance is
+   tuned for bare blocks; on a bordered card neutralise its inset trick and
+   use a clean outer accent bar instead. */
+.rl-codeblock.rl-block-added,
+.rl-codeblock.rl-block-modified,
+.rl-codeblock.rl-block-moved,
+.rl-mermaid-block.rl-block-added,
+.rl-mermaid-block.rl-block-modified,
+.rl-mermaid-block.rl-block-moved {
+  margin-left: 0;
+  padding-left: 0;
+}
+.rl-codeblock.rl-block-added,
+.rl-mermaid-block.rl-block-added {
+  border-color: var(--color-success);
+  box-shadow: -4px 0 0 var(--color-success);
+}
+.rl-codeblock.rl-block-modified,
+.rl-mermaid-block.rl-block-modified {
+  border-color: var(--color-warning);
+  box-shadow: -4px 0 0 var(--color-warning);
+}
+.rl-codeblock.rl-block-moved,
+.rl-mermaid-block.rl-block-moved {
+  box-shadow: -4px 0 0 var(--color-info);
+}
+
+/* highlight.js token palette — tuned for the warm-dark code surface. lowlight
+   emits these `hljs-*` classes as inline decorations inside the <code>. */
+.rl-prose .hljs-comment,
+.rl-prose .hljs-quote {
+  color: #7f7d72;
+  font-style: italic;
+}
+.rl-prose .hljs-keyword,
+.rl-prose .hljs-selector-tag,
+.rl-prose .hljs-literal,
+.rl-prose .hljs-section,
+.rl-prose .hljs-link {
+  color: #c9a2f5;
+}
+.rl-prose .hljs-string,
+.rl-prose .hljs-attr,
+.rl-prose .hljs-regexp,
+.rl-prose .hljs-addition {
+  color: #a6c98a;
+}
+.rl-prose .hljs-number,
+.rl-prose .hljs-built_in,
+.rl-prose .hljs-type,
+.rl-prose .hljs-symbol,
+.rl-prose .hljs-bullet {
+  color: #e3b367;
+}
+.rl-prose .hljs-title,
+.rl-prose .hljs-name,
+.rl-prose .hljs-attribute {
+  color: #82aaf0;
+}
+.rl-prose .hljs-variable,
+.rl-prose .hljs-template-variable,
+.rl-prose .hljs-meta {
+  color: #d59a78;
+}
+.rl-prose .hljs-deletion {
+  color: #e08b86;
+}
+.rl-prose .hljs-emphasis {
+  font-style: italic;
+}
+.rl-prose .hljs-strong {
+  font-weight: 700;
 }

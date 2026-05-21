@@ -10,6 +10,7 @@ import TableHeader from "@tiptap/extension-table-header";
 
 import { AnchorIdAttribute } from "./AnchorIdAttribute";
 import { BlockIdAttribute } from "./BlockIdAttribute";
+import { richCodeBlock } from "./CodeBlockView";
 import { DeletionMark, InsertionMark } from "./TrackChanges";
 import { TrackChangesInput } from "./TrackChangesInput";
 
@@ -25,7 +26,13 @@ import { TrackChangesInput } from "./TrackChangesInput";
  */
 export function planExtensions(): Extensions {
   return [
-    StarterKit,
+    // StarterKit's bundled code block is swapped for `richCodeBlock()` —
+    // CodeBlockLowlight + a NodeView for syntax highlighting and mermaid
+    // diagrams. The `codeBlock` node spec (name, `language` attr, `text*`
+    // content) is identical, so the schema and markdown round-trip are
+    // unaffected; only the rendering is richer.
+    StarterKit.configure({ codeBlock: false }),
+    richCodeBlock(),
     Link.configure({
       openOnClick: false,
       autolink: false,

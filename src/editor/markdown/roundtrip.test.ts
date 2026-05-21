@@ -47,6 +47,12 @@ const RICH_PLAN = [
   "| --- | --- |",
   "| 1 | 2 |",
   "",
+  "<!-- rl:blk-cccc9999 -->",
+  "```mermaid",
+  "graph TD",
+  "A-->B",
+  "```",
+  "",
 ].join("\n");
 
 const ALL_IDS = [
@@ -58,6 +64,7 @@ const ALL_IDS = [
   "blk-ffff6666",
   "blk-aaaa7777",
   "blk-bbbb8888",
+  "blk-cccc9999",
 ];
 
 describe("plan markdown round-trip", () => {
@@ -102,6 +109,8 @@ describe("plan markdown round-trip", () => {
     expect(md).toContain("1. Step one");
     expect(md).toContain("```rust");
     expect(md).toContain("fn main() {}");
+    expect(md).toContain("```mermaid");
+    expect(md).toContain("A-->B");
     expect(md).toContain("> A quoted line.");
     expect(md).toContain("| Col A | Col B |");
     expect(md).toContain("**bold**");
