@@ -137,11 +137,22 @@ export interface ReviewSession {
   status: SessionStatus;
 }
 
+/** Lightweight per-revision projection for the sidebar's revisions tree —
+ *  version, timestamp, and the thread-boundary flag, without the heavy
+ *  rawPlanMarkdown / sections / comments payload. */
+export interface RevisionSummary {
+  versionNumber: number;
+  receivedAt: number;
+  threadStart: boolean;
+}
+
 export interface SessionSummary {
   sessionId: SessionId;
   projectName: string;
   projectPath: string;
   latestVersion: number;
+  /** Every revision of this session, oldest-first — drives the sidebar tree. */
+  revisions: RevisionSummary[];
   createdAt: number;
   status: SessionStatus;
   pendingCount: number;

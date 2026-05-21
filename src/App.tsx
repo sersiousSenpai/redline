@@ -485,6 +485,25 @@ function App() {
     }
   };
 
+  // Save one plan revision as a clean .md file (sidecars stripped) through a
+  // native save dialog. A resolved `null` means the user cancelled the dialog.
+  const exportRevision = async (sessionId: string, versionNumber: number) => {
+    try {
+      const saved = await invoke<string | null>("export_revision_markdown", {
+        sessionId,
+        versionNumber,
+      });
+      if (saved) {
+        const name = saved.split(/[\\/]/).pop() ?? saved;
+        setToast(`Saved ${name}`);
+        setTimeout(() => setToast(null), 3500);
+      }
+    } catch (err) {
+      console.error("export_revision_markdown failed", err);
+      alert(`Export failed: ${err}`);
+    }
+  };
+
   const changeMode = async (next: InterceptionMode) => {
     setMode(next); // optimistic; the mode-changed event confirms
     try {
@@ -575,6 +594,7 @@ function App() {
         onThemeChange={onThemeChange}
         mode={mode}
         onModeChange={changeMode}
+        onExport={exportRevision}
       />
       {decisionWindow && (
         <DecisionWindowBanner
@@ -592,6 +612,7 @@ function App() {
           pendingCounts={pendingPerSession}
           onSelect={(id) => setActiveId(id)}
           onDelete={deleteSession}
+          onExport={exportRevision}
         />
         <div
           className="flex-1 overflow-y-auto"

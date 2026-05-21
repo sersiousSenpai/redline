@@ -383,6 +383,7 @@ on read.
 |---|---|
 | `list_sessions` | All sessions (with `held` flag computed from `PendingResponses`) |
 | `get_session(id)` | Full session detail |
+| `export_revision_markdown(session_id, version_number)` | Save a revision as clean markdown (block-id sidecars stripped) through a native save dialog |
 | `delete_session(id)` | Rejected while a POST is held; otherwise drops the session |
 | `add_comment(session_id, request)` | Create comment |
 | `update_comment(session_id, comment_id, update)` | Edit comment in place |
@@ -463,8 +464,8 @@ Window default: 1100×800, resizable. Three primary regions stacked vertically:
 
 | Component | Role |
 |---|---|
-| `Header` | App title, `ThemePicker`, `ModeToggle`, hook-setup button |
-| `SessionSidebar` | Sessions list with project name, last-updated, pending counts, delete button (hidden while a POST is held) |
+| `Header` | App logo, session id, `ModeToggle`, `ThemePicker`, **Download .md** (current revision), version badge |
+| `SessionSidebar` | Sessions list with project name, version, pending counts, delete button (hidden while a POST is held); each session expands to a revision tree (`v1…vN`, thread boundaries, per-revision download) |
 | `PlanEditor` (lazy) | Tiptap editor with redline marks, anchor pills, selection menu |
 | `SelectionMenu` | Floating action menu on text selection: pick type + scope |
 | `CommentComposer` | Inline form for the active comment in composition |
@@ -511,6 +512,23 @@ pending. Either button triggers `submit_review`, which:
 
 **Approve plan** calls `approve_plan`, which releases the POST with `allow`,
 marks the session `Approved`, and surfaces `ApproveToast`.
+
+### 9.4 Downloading a plan
+
+A plan revision can be saved to disk as a clean Markdown file:
+
+- The **Download .md** button in the header exports the currently-displayed
+  revision; each revision row in the `SessionSidebar` tree exports that
+  specific revision.
+- Both call `export_revision_markdown`, which looks the revision up in the
+  in-memory store, strips the `<!-- rl:blk-… -->` block-id sidecars
+  (`parser::strip_sidecar_lines`), opens a native save dialog
+  (`tauri-plugin-dialog`), and writes the file with `std::fs`. The command is
+  `async` so the blocking save dialog runs off the main thread.
+- The export is the revision **as received** — reviewer track-changes are
+  proposals that round-trip to Claude, not part of the saved artifact.
+  Markdown stays the source of truth; the sidecars are an internal
+  persistence detail and never appear in the downloaded file.
 
 ---
 

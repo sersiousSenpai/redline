@@ -12,6 +12,8 @@ interface HeaderProps {
   onThemeChange: (name: ThemeName) => void;
   mode: InterceptionMode;
   onModeChange: (mode: InterceptionMode) => void;
+  /** Download the currently-displayed revision as a clean .md file. */
+  onExport: (sessionId: string, versionNumber: number) => void;
 }
 
 export function Header({
@@ -20,6 +22,7 @@ export function Header({
   onThemeChange,
   mode,
   onModeChange,
+  onExport,
 }: HeaderProps) {
   const latest = session?.revisions[session.revisions.length - 1];
   return (
@@ -55,6 +58,23 @@ export function Header({
       <div className="flex items-center gap-3">
         <ModeToggle mode={mode} onChange={onModeChange} />
         <ThemePicker theme={theme} onThemeChange={onThemeChange} />
+        {session && latest && (
+          <button
+            type="button"
+            onClick={() => onExport(session.sessionId, latest.versionNumber)}
+            title={`Download v${latest.versionNumber} as a Markdown file`}
+            className="rounded px-2.5 py-1 font-medium"
+            style={{
+              background: "var(--color-bg-elevated)",
+              border: "1px solid var(--color-rule)",
+              color: "var(--color-ink)",
+              fontSize: "12px",
+              cursor: "pointer",
+            }}
+          >
+            Download .md
+          </button>
+        )}
         {latest && (
           <span
             className="font-mono rounded-sm px-2 py-0.5"
