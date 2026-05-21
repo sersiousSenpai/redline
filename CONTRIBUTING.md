@@ -40,6 +40,20 @@ Other useful commands:
 | `npm run tauri build` | Build the production desktop bundle |
 | `cargo build --manifest-path src-tauri/Cargo.toml` | Build the Rust backend |
 
+## The review-protocol skill
+
+`skills/redline/SKILL.md` is the canonical Redline review-protocol skill — the
+contract handed to Claude Code sessions whose plans are reviewed in Redline. The
+Rust backend embeds it at compile time (`include_str!`) and the in-app installer
+writes it to `~/.claude/skills/redline/SKILL.md`.
+
+`.claude/skills/redline` and `.agents/skills/redline` are **symlinks** to the
+canonical `skills/redline/` directory, so a Claude Code (or other) agent working
+in this repo loads the skill too. Edit only the canonical file — the symlinks
+follow automatically. On Windows checkouts git may materialize the symlinks as
+plain text files; that is cosmetic (the canonical file and the app installer are
+unaffected).
+
 ## Submitting changes
 
 1. Fork the repository and create a topic branch.
