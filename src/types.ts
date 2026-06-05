@@ -80,13 +80,17 @@ export interface Resolution {
  *  the comment card and the in-doc selection. Block-relative so it piggybacks
  *  on the stable `blockId` identity (positions per-doc would drift on every
  *  transaction). `quotedText` is the self-healing fallback when offsets
- *  shift inside the block. */
+ *  shift inside the block. `subBlockId` is the precision tier above offsets
+ *  — `blk-X.s3.w2-w4` names the range structurally (sentence 3, words 2..4
+ *  of block X) and survives any revise where the parent block's text is
+ *  unchanged. Set only when the selection lands on clean unit boundaries. */
 export interface CommentSelection {
   /** Inclusive, in block textContent units. */
   charStart: number;
   /** Exclusive. */
   charEnd: number;
   quotedText: string;
+  subBlockId?: string;
 }
 
 export interface Comment {
@@ -159,6 +163,40 @@ export interface SessionSummary {
   awaitingReview: boolean;
   /** A POST is held for this session — its terminal is active; not deletable. */
   held: boolean;
+}
+
+/** One entry in a directory listing from the `list_dir` command. `path` is
+ *  absolute so the file tree can recurse without rebuilding it. */
+export interface DirEntry {
+  name: string;
+  path: string;
+  isDir: boolean;
+}
+
+/** A file's contents from `read_text_file`. Exactly one of `content` /
+ *  `isBinary` / `tooLarge` carries the answer: text files set `content`;
+ *  binaries and oversized files set their flag with no content. */
+export interface FileContent {
+  content: string | null;
+  isBinary: boolean;
+  tooLarge: boolean;
+  size: number;
+}
+
+/** A file's raw bytes from `read_file_base64`, base64-encoded for a data URL.
+ *  `data` is null when the file exceeded the size cap (`tooLarge`). */
+export interface BinaryFile {
+  data: string | null;
+  tooLarge: boolean;
+  size: number;
+}
+
+/** A project folder opened in the explorer, shown as a sidebar tab. `id` is
+ *  stable for the session; `path` is the absolute folder, `name` its basename. */
+export interface FolderTab {
+  id: string;
+  path: string;
+  name: string;
 }
 
 export interface HookStatus {

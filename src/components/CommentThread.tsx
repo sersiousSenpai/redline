@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
@@ -11,6 +11,7 @@ import type {
   ForkErrorEvent,
   ThreadMessage,
 } from "../types";
+import { MarkdownView } from "./MarkdownView";
 
 interface CommentThreadProps {
   /** The review session id — keys the fork backend with the comment id. */
@@ -47,6 +48,10 @@ export function CommentThread({ sessionId, comment }: CommentThreadProps) {
   const [expanded, setExpanded] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [draft, setDraft] = useState("");
+  // When the reviewer manually collapses an expanded thread, suppress the
+  // streaming auto-expand until the next send — otherwise a long Claude reply
+  // keeps re-opening a thread they're deliberately trying to set aside.
+  const userCollapsedRef = useRef(false);
 
   // Load persisted turns + subscribe to this comment's fork events. Re-runs if
   // the card is reused for another (session, comment) — App.tsx keys by both.
@@ -70,13 +75,19 @@ export function CommentThread({ sessionId, comment }: CommentThreadProps) {
     const mine = (p: { sessionId: string; commentId: string }) =>
       p.sessionId === sessionId && p.commentId === commentId;
 
+    // StrictMode runs setup→cleanup→setup; the cleanup's unlisten resolves
+    // async, so between the second setup and that resolve there are briefly
+    // two live handlers. The `alive` closure capture lets the stale generation
+    // no-op, preventing a duplicate message append.
     const deltaP = listen<ForkDeltaEvent>("fork-delta", (e) => {
+      if (!alive) return;
       if (!mine(e.payload)) return;
       setStatus("streaming");
-      setExpanded(true);
+      if (!userCollapsedRef.current) setExpanded(true);
       setLiveText((t) => t + e.payload.text);
     });
     const doneP = listen<ForkDoneEvent>("fork-done", (e) => {
+      if (!alive) return;
       if (!mine(e.payload)) return;
       setMessages((m) => [
         ...m,
@@ -94,6 +105,7 @@ export function CommentThread({ sessionId, comment }: CommentThreadProps) {
       setStatus("idle");
     });
     const errorP = listen<ForkErrorEvent>("fork-error", (e) => {
+      if (!alive) return;
       if (!mine(e.payload)) return;
       setMessages((m) => [
         ...m,
@@ -111,6 +123,7 @@ export function CommentThread({ sessionId, comment }: CommentThreadProps) {
       setStatus("error");
     });
     const cancelP = listen<ForkCancelledEvent>("fork-cancelled", (e) => {
+      if (!alive) return;
       if (!mine(e.payload)) return;
       setLiveText("");
       setStatus("idle");
@@ -143,6 +156,9 @@ export function CommentThread({ sessionId, comment }: CommentThreadProps) {
     ]);
     setLiveText("");
     setStatus("streaming");
+    // A fresh send re-grants the auto-expand-on-delta behavior — the user
+    // just asked something, so they want to see the reply unfold.
+    userCollapsedRef.current = false;
     setExpanded(true);
     void invoke("fork_thread_send", {
       sessionId,
@@ -183,8 +199,19 @@ export function CommentThread({ sessionId, comment }: CommentThreadProps) {
   // Avoid a flash of the "Discuss" button before get_thread resolves.
   if (!loaded) return null;
 
-  // No thread yet — the entry point.
-  if (messages.length === 0 && status === "idle") {
+  // The opening user turn is the comment's own text (see `discussSeed`), which
+  // the CommentCard already renders as the comment body — so don't echo it as a
+  // visible bubble. We still send it to the fork (Claude needs the question);
+  // we just hide the redundant first "You:" turn here. Covers both the
+  // optimistic path (seed is messages[0]) and the persisted reload (get_thread
+  // returns it as rows[0]).
+  const seed = discussSeed(comment);
+  const visible = messages.filter(
+    (m, i) => !(i === 0 && m.role === "user" && m.body.trim() === seed),
+  );
+
+  // No thread yet (or only the suppressed seed) — the entry point.
+  if (visible.length === 0 && status === "idle") {
     return (
       <div
         className="mt-3 pt-3 border-t"
@@ -208,7 +235,7 @@ export function CommentThread({ sessionId, comment }: CommentThreadProps) {
     );
   }
 
-  const last = messages[messages.length - 1];
+  const last = visible[visible.length - 1];
   const summary = last
     ? `${last.role === "user" ? "You" : "Claude"}: ${last.body
         .replace(/\s+/g, " ")
@@ -224,7 +251,14 @@ export function CommentThread({ sessionId, comment }: CommentThreadProps) {
     >
       <button
         type="button"
-        onClick={() => setExpanded((x) => !x)}
+        onClick={() =>
+          setExpanded((x) => {
+            // Track manual collapse so a streaming reply doesn't immediately
+            // re-open what the user just folded away.
+            userCollapsedRef.current = x;
+            return !x;
+          })
+        }
         className="flex items-center gap-1.5 text-left"
         style={{
           fontSize: "10px",
@@ -240,7 +274,7 @@ export function CommentThread({ sessionId, comment }: CommentThreadProps) {
           className="font-mono normal-case"
           style={{ color: "var(--color-ink-muted)" }}
         >
-          · {messages.length}
+          · {visible.length}
         </span>
         {status === "streaming" && (
           <span
@@ -263,8 +297,8 @@ export function CommentThread({ sessionId, comment }: CommentThreadProps) {
 
       {expanded && (
         <>
-          <div className="flex flex-col gap-2.5">
-            {messages.map((m) => (
+          <div className="flex flex-col gap-2.5 rl-thread-scroll">
+            {visible.map((m) => (
               <MessageBubble key={m.id} msg={m} />
             ))}
             {status === "streaming" && <StreamingBubble text={liveText} />}
@@ -311,16 +345,20 @@ function MessageBubble({ msg }: { msg: ThreadMessage }) {
       >
         {isUser ? "You" : "Claude"}
       </span>
-      <div
-        style={{
-          fontSize: "12.5px",
-          lineHeight: 1.5,
-          whiteSpace: "pre-wrap",
-          color: isError ? "var(--color-warning)" : "var(--color-ink)",
-        }}
-      >
-        {msg.body}
-      </div>
+      {isError ? (
+        <div
+          style={{
+            fontSize: "12.5px",
+            lineHeight: 1.5,
+            whiteSpace: "pre-wrap",
+            color: "var(--color-warning)",
+          }}
+        >
+          {msg.body}
+        </div>
+      ) : (
+        <MarkdownView body={msg.body} compact />
+      )}
     </div>
   );
 }
@@ -339,19 +377,22 @@ function StreamingBubble({ text }: { text: string }) {
       >
         Claude
       </span>
-      <div
-        style={{
-          fontSize: "12.5px",
-          lineHeight: 1.5,
-          whiteSpace: "pre-wrap",
-          color: "var(--color-ink)",
-        }}
-      >
-        {text || (
-          <span style={{ color: "var(--color-ink-muted)" }}>thinking…</span>
-        )}
-        {text && <span style={{ color: "var(--color-ink-muted)" }}>▌</span>}
-      </div>
+      {text ? (
+        <div>
+          <MarkdownView body={text} compact />
+          <span style={{ color: "var(--color-ink-muted)" }}>▌</span>
+        </div>
+      ) : (
+        <div
+          style={{
+            fontSize: "12.5px",
+            lineHeight: 1.5,
+            color: "var(--color-ink-muted)",
+          }}
+        >
+          thinking…
+        </div>
+      )}
     </div>
   );
 }
@@ -383,13 +424,18 @@ function Composer({
         placeholder="Ask a follow-up…"
         rows={2}
         disabled={streaming}
-        className="flex-1 rounded px-2 py-1 resize-none"
+        className="flex-1 rounded px-2 py-1"
         style={{
           fontSize: "12px",
           border: "1px solid var(--color-rule)",
           background: "var(--color-paper)",
           color: "var(--color-ink)",
           fontFamily: "inherit",
+          // Big pastes scroll inside the composer instead of blowing out the
+          // card; reviewer can still drag-grow the textarea vertically.
+          resize: "vertical",
+          maxHeight: "200px",
+          overflowY: "auto",
         }}
       />
       {streaming ? (

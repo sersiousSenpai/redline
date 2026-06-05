@@ -268,7 +268,6 @@ export function applyRevisionRedline(
   const sel = state.selection;
   const schema = editor.schema;
   const insMark = schema.marks.rl_ins;
-  const delMark = schema.marks.rl_del;
 
   const edits: { from: number; to: number; para: PMNode }[] = [];
   state.doc.forEach((node, pos) => {
@@ -283,13 +282,20 @@ export function applyRevisionRedline(
 
     const original = rev.status === "added" ? "" : rev.originalText;
     const revised = serializeBlockToMarkdown(node);
+    // Revision-level diffs (vN vs vN-1) drop `delete` runs entirely: the user
+    // wants the new paragraph to read as a clean sentence, not as a strike-
+    // through soup. The block-level gutter (`.rl-block-modified` /
+    // `.rl-block-changed-bar`) still marks the section as edited, and inline
+    // `rl_ins` highlights the added words. Edit track-changes (author-authored
+    // proposed edits) keep the existing inline ins/del treatment via the
+    // separate edit path — this only touches revision diffs.
     const runs = diffWords(original, revised)
-      .filter((p) => p.text.length > 0)
+      .filter((p) => p.kind !== "delete" && p.text.length > 0)
       .map((p) =>
         p.kind === "equal"
           ? schema.text(p.text)
           : schema.text(p.text, [
-              (p.kind === "insert" ? insMark : delMark).create({
+              insMark.create({
                 blockId: id,
                 changeId: `rev:${id}`,
               }),

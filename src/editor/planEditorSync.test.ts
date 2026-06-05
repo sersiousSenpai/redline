@@ -154,7 +154,7 @@ describe("PlanEditor doc↔comment sync", () => {
     expect(ops).toEqual([]); // sync sees the edit already mirrored
   });
 
-  it("folds revision redline into inline ins/del, idempotently", () => {
+  it("folds revision redline into inline insertions only, idempotently", () => {
     const editor = makeEditor(PLAN);
     const revisions = new Map<string, RevisionEdit>([
       [
@@ -169,7 +169,11 @@ describe("PlanEditor doc↔comment sync", () => {
     editor.state.doc.descendants((n) =>
       n.marks.forEach((m) => markNames.add(m.type.name)),
     );
-    expect(markNames.has("rl_del")).toBe(true); // "draft" removed
+    // Revision diffs no longer strike-through removed words — the section's
+    // gutter bar (`.rl-block-modified`/`.rl-block-changed-bar`) is the
+    // demarcation, and rl_ins highlights what's new. Edit track-changes keep
+    // their own ins/del treatment via a separate path.
+    expect(markNames.has("rl_del")).toBe(false);
     expect(markNames.has("rl_ins")).toBe(true); // "body" added
 
     // Accept-all serialization is still the clean current text.

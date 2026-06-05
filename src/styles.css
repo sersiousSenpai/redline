@@ -10,28 +10,30 @@
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
     "Liberation Mono", monospace;
 
-  --color-paper: #fafaf7;
-  --color-ink: #1a1a1a;
-  --color-ink-muted: #5a5a5a;
-  --color-rule: #e5e3dd;
+  /* Studio-theme defaults — the flagship dark mood. applyTheme() in main.tsx
+     overrides these via inline custom properties on <html> before React paints,
+     but we still match the runtime-default theme here so the brief moment
+     between CSS load and JS execution shows the right palette (no FOUC). */
+  --color-paper: #1a1a1f;
+  --color-ink: #fafafa;
+  --color-ink-muted: #959597;
+  --color-rule: #424246;
 
-  --color-anchor-bg: #f1efe8;
-  --color-anchor-text: #6b6859;
+  --color-anchor-bg: #343439;
+  --color-anchor-text: #9b9b9e;
 
-  --color-info: #2563eb;
-  --color-warning: #b45309;
-  --color-success: #15803d;
+  --color-info: #5b9fe4;
+  --color-warning: #d6c060;
+  --color-success: #5dc585;
 
-  /* Surfaces / accents (Basic-theme defaults; overridden at runtime by
-     applyTheme() via inline custom properties on <html>). */
-  --color-bg-elevated: #ffffff;
+  --color-bg-elevated: #29292e;
   --color-on-accent: #ffffff;
-  --color-code-bg: #1e1e1c;
-  --color-code-fg: #f3f3ee;
-  --color-commented-bg: rgba(47, 107, 255, 0.22);
-  --color-commented-bar: rgba(47, 107, 255, 0.85);
-  --color-selection: rgba(47, 107, 255, 0.42);
-  --color-overlay: rgba(20, 20, 20, 0.35);
+  --color-code-bg: #303034;
+  --color-code-fg: #fafafa;
+  --color-commented-bg: rgba(232, 85, 61, 0.22);
+  --color-commented-bar: rgba(232, 85, 61, 0.85);
+  --color-selection: rgba(232, 85, 61, 0.55);
+  --color-overlay: rgba(0, 0, 0, 0.55);
 }
 
 ::selection {
@@ -59,6 +61,19 @@ body {
 .doc-article,
 .md-block {
   font-family: var(--font-sans);
+}
+
+/* All-caps tracked microtype label — used for chrome section headers
+   ("SESSIONS", "DISCUSSION", "TERMINAL") so the surface frame reads as an
+   IDE/editor rather than a generic web app. Pair with `font-mono` for the
+   tightest feel; the utility itself is presentation-only. */
+.rl-chrome-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--color-ink-muted);
+  font-family: var(--font-mono);
 }
 
 /* Theme-aware subtle row hover (replaces hardcoded Tailwind bg-white/stone). */
@@ -314,6 +329,63 @@ body {
   color: var(--color-ink-muted);
 }
 
+/* Word-style anchor marginalia. Each top-level block is stamped with
+   `data-anchor-id` by the AnchorIdAttribute extension; here we render that id
+   into the article's left gutter as a ghost label that lights up on hover or
+   when the block carries comments. The article wrapper in App.tsx leaves
+   ~64px of left padding so the gutter has room. Code blocks opt out (their
+   own NodeView wrapper uses `overflow: hidden` for the rounded card, which
+   would clip the pseudo-element).
+*/
+.rl-prose [data-anchor-id] {
+  position: relative;
+}
+.rl-prose [data-anchor-id]::before {
+  content: attr(data-anchor-id);
+  position: absolute;
+  left: -56px;
+  top: 0.4em;
+  width: 48px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: -0.01em;
+  color: var(--color-ink-muted);
+  opacity: 0;
+  text-align: right;
+  pointer-events: none;
+  transition:
+    opacity 120ms ease,
+    color 120ms ease;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rl-prose [data-anchor-id]:hover::before,
+.rl-prose .rl-has-comments[data-anchor-id]::before {
+  opacity: 0.85;
+  color: var(--color-commented-bar);
+}
+/* The "this block has open comments" dot. Sits in the same gutter so the
+   eye scans a single column for both signals. */
+.rl-prose .rl-has-comments[data-anchor-id]::after {
+  content: "";
+  position: absolute;
+  left: -12px;
+  top: 0.85em;
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: var(--color-commented-bar);
+  pointer-events: none;
+}
+/* Code blocks render via a NodeView with a rounded card + overflow: hidden;
+   the gutter pseudo-elements would be clipped. The anchor still exists in
+   the DOM for selection/hit-testing — just no marginalia. */
+.rl-prose .rl-codeblock[data-anchor-id]::before,
+.rl-prose .rl-codeblock[data-anchor-id]::after {
+  display: none;
+}
+
 /* Revision redline (vN vs vN-1) — same affordance the old Document used. */
 .rl-block-added,
 .rl-block-modified,
@@ -332,6 +404,32 @@ body {
 }
 .rl-block-moved {
   border-left: 2px dashed var(--color-info);
+}
+/* For modified paragraphs the inline ins/del marks (applied by
+   `applyRevisionRedline`) already carry the precise signal of *what* changed
+   — so the block-level treatment shrinks to a subtle gutter rule. A full
+   background fill on top would visually overwhelm the word-level marks and
+   make the entire paragraph read as "changed" even when only a few words
+   were. Headings, code blocks, and other non-paragraph nodes keep the
+   default block treatment because they get no inline-marks fallback. */
+p.rl-block-modified {
+  background: transparent;
+  border-left-style: dashed;
+  border-left-color: color-mix(in srgb, var(--color-warning) 55%, transparent);
+}
+
+/* Precision-highlight gutter bar: applied to any block (paragraph, heading,
+   code) when its modified content already carries inline rl_ins/rl_del marks.
+   No background fill, just the thin gutter so the reviewer can scan the
+   document and see "something here changed" while the word-level marks
+   localize the actual edit. */
+.rl-block-changed-bar {
+  padding-left: 8px;
+  margin-left: -10px;
+  border-radius: 2px;
+  background: transparent;
+  border-left: 2px solid
+    color-mix(in srgb, var(--color-warning) 70%, transparent);
 }
 
 /* Word-style inline tracked changes. Deletions stay in place struck-through
@@ -370,6 +468,73 @@ body {
 .rl-comment-highlight--muted.rl-comment-highlight--focused {
   background: color-mix(in srgb, var(--color-info) 22%, transparent);
   box-shadow: inset 2px 0 0 var(--color-info);
+}
+
+/* ── In-document find (Cmd/Ctrl+F) ────────────────────────────────────────
+   The editor host is the positioning context for the floating find bar; the
+   SearchHighlight extension paints match decorations over the prose. */
+.rl-editor-host {
+  position: relative;
+}
+.rl-search-box {
+  position: sticky;
+  top: 8px;
+  z-index: 20;
+  margin-left: auto;
+  width: fit-content;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border: 1px solid var(--color-rule);
+  border-radius: 8px;
+  background: var(--color-bg-elevated);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+}
+.rl-search-input {
+  width: 180px;
+  font-size: 12px;
+  padding: 3px 6px;
+  border: 1px solid var(--color-rule);
+  border-radius: 4px;
+  background: var(--color-paper);
+  color: var(--color-ink);
+}
+.rl-search-input:focus {
+  outline: none;
+  border-color: var(--color-info);
+}
+.rl-search-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-ink-muted);
+  min-width: 34px;
+  text-align: center;
+}
+.rl-search-btn {
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 6px;
+  border: 1px solid var(--color-rule);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-ink);
+  cursor: pointer;
+}
+.rl-search-btn:hover:not(:disabled) {
+  background: var(--color-anchor-bg);
+}
+.rl-search-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.rl-search-match {
+  background: color-mix(in srgb, var(--color-warning) 28%, transparent);
+  border-radius: 2px;
+}
+.rl-search-match--active {
+  background: color-mix(in srgb, var(--color-warning) 60%, transparent);
+  box-shadow: inset 0 0 0 1px var(--color-warning);
 }
 
 /* ── Phase 1: rich code-block & mermaid presentation ──────────────────────
@@ -557,4 +722,181 @@ body {
 }
 .rl-prose .hljs-strong {
   font-weight: 700;
+}
+
+/* Read-only file viewer (CodeView). Same highlight.js token palette as the
+   in-plan code blocks, scoped so the explorer's <pre> picks it up without the
+   surrounding prose typography. */
+.rl-code-view {
+  margin: 0;
+  padding: 16px 20px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--color-ink);
+  background: var(--color-paper);
+  white-space: pre;
+  overflow-x: auto;
+  tab-size: 4;
+}
+.rl-code-view .hljs-comment,
+.rl-code-view .hljs-quote {
+  color: #7f7d72;
+  font-style: italic;
+}
+.rl-code-view .hljs-keyword,
+.rl-code-view .hljs-selector-tag,
+.rl-code-view .hljs-literal,
+.rl-code-view .hljs-section,
+.rl-code-view .hljs-link {
+  color: #c9a2f5;
+}
+.rl-code-view .hljs-string,
+.rl-code-view .hljs-attr,
+.rl-code-view .hljs-regexp,
+.rl-code-view .hljs-addition {
+  color: #a6c98a;
+}
+.rl-code-view .hljs-number,
+.rl-code-view .hljs-built_in,
+.rl-code-view .hljs-type,
+.rl-code-view .hljs-symbol,
+.rl-code-view .hljs-bullet {
+  color: #e3b367;
+}
+.rl-code-view .hljs-title,
+.rl-code-view .hljs-name,
+.rl-code-view .hljs-attribute {
+  color: #82aaf0;
+}
+.rl-code-view .hljs-variable,
+.rl-code-view .hljs-template-variable,
+.rl-code-view .hljs-meta {
+  color: #d59a78;
+}
+.rl-code-view .hljs-deletion {
+  color: #e08b86;
+}
+.rl-code-view .hljs-emphasis {
+  font-style: italic;
+}
+.rl-code-view .hljs-strong {
+  font-weight: 700;
+}
+
+/* ----- Comment-pane markdown (.rl-md) ---------------------------------- *
+ * Compact rendering tuned for the ~320px comment pane. Used by
+ * MarkdownView for user comments, Claude replies, and resolution bodies. */
+.rl-md {
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--color-ink);
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
+}
+
+/* Cap the height of a comment body and a discussion-thread message list so a
+ * huge pasted block scrolls inside the card instead of blowing the pane out.
+ * The card itself stays collapsible via the header chevron. */
+.rl-comment-body-scroll {
+  max-height: 240px;
+  overflow-y: auto;
+}
+.rl-thread-scroll {
+  max-height: 320px;
+  overflow-y: auto;
+}
+.rl-md p {
+  margin: 0 0 6px;
+}
+.rl-md > :first-child {
+  margin-top: 0;
+}
+.rl-md > :last-child {
+  margin-bottom: 0;
+}
+.rl-md h1,
+.rl-md h2,
+.rl-md h3,
+.rl-md h4,
+.rl-md h5,
+.rl-md h6 {
+  font-size: 13.5px;
+  font-weight: 600;
+  margin: 8px 0 4px;
+  line-height: 1.3;
+}
+.rl-md ul,
+.rl-md ol {
+  margin: 4px 0 6px;
+  padding-left: 18px;
+}
+.rl-md li {
+  margin-bottom: 2px;
+}
+.rl-md li > p {
+  margin: 0 0 2px;
+}
+.rl-md strong {
+  font-weight: 600;
+}
+.rl-md em {
+  font-style: italic;
+}
+.rl-md a {
+  color: var(--color-info);
+  text-decoration: underline;
+}
+.rl-md code {
+  background: var(--color-code-bg);
+  color: var(--color-code-fg);
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 0.9em;
+  font-family: var(--font-mono);
+}
+.rl-md pre {
+  background: var(--color-code-bg);
+  color: var(--color-code-fg);
+  padding: 8px 10px;
+  border-radius: 4px;
+  overflow-x: auto;
+  margin: 6px 0;
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+.rl-md pre code {
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  font-size: inherit;
+}
+.rl-md blockquote {
+  border-left: 2px solid var(--color-rule);
+  padding-left: 8px;
+  margin: 4px 0;
+  color: var(--color-ink-muted);
+}
+.rl-md hr {
+  border: 0;
+  border-top: 1px solid var(--color-rule);
+  margin: 8px 0;
+}
+.rl-md-compact {
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.rl-md-compact p {
+  margin: 0 0 4px;
+}
+
+/* Full-window pulse fired when a plan is intercepted (FlashOverlay). The
+   element carries its own background color; this only animates opacity so a
+   single keyframe works for any user-chosen color. */
+@keyframes redline-flash {
+  0% { opacity: 0; }
+  15% { opacity: 0.55; }
+  40% { opacity: 0; }
+  60% { opacity: 0.55; }
+  100% { opacity: 0; }
 }

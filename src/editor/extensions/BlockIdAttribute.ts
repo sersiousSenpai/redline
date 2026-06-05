@@ -3,13 +3,15 @@
 import { Extension } from "@tiptap/core";
 
 /**
- * Adds a model-only `blockId` attribute to every top-level block node.
+ * Adds a `blockId` attribute to every top-level block node.
  *
  * The id is the stable join key minted by the Rust parser
  * (`src-tauri/src/parser.rs`) and carried in markdown as a
- * `<!-- rl:blk-xxxx -->` sidecar. It is intentionally NOT serialized to the
- * DOM — it lives only in the ProseMirror document model and is round-tripped
- * through markdown by the custom serializer/parser in `../markdown`.
+ * `<!-- rl:blk-xxxx -->` sidecar. The custom markdown serializer/parser in
+ * `../markdown` is the authoritative wire format — DOM rendering is a
+ * separate concern, surfaced as `data-block-id` so selection-capture code
+ * (`useTextSelection`) can pick up the stable id without needing a handle
+ * on the live Tiptap editor instance.
  */
 export const BLOCK_ID_NODE_TYPES = [
   "paragraph",
@@ -32,9 +34,10 @@ export const BlockIdAttribute = Extension.create({
         attributes: {
           blockId: {
             default: null,
-            // Model-only: never read from or written to the DOM.
-            rendered: false,
             keepOnSplit: false,
+            parseHTML: (el) => el.getAttribute("data-block-id"),
+            renderHTML: (attrs) =>
+              attrs.blockId ? { "data-block-id": attrs.blockId } : {},
           },
         },
       },

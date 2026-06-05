@@ -70,6 +70,12 @@ If you strip or shuffle the sidecars, Redline's diff can't tell what changed and
 paints the whole plan as new. (Redline has a fallback that re-matches blocks by
 their text, but it is best-effort — preserving the markers is the reliable path.)
 
+Sidecars may carry a sub-block suffix (`.lN`, `.sN`, `.wN[-wM]` — e.g.
+`<!-- rl:blk-abc12345.s3.w2-w4 -->`) when a reviewer comment anchored at
+sentence- or word-level granularity. Treat the whole suffixed id the same way you
+treat a bare `blk-…` id: preserve it exactly. Never emit sub-block ids yourself —
+Redline mints them at parse time, and inventing them would corrupt the addressing.
+
 ## 3. Answer every comment in a REDLINE_RESOLUTIONS block
 
 Every comment in the payload carries a `COMMENT_ID` (e.g. `c-001`). When you call

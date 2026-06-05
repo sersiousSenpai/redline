@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useEffect, useState } from "react";
+import {
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { TerminalTabBar } from "./TerminalTabBar";
 import { TerminalView } from "./TerminalView";
@@ -19,6 +25,18 @@ interface TerminalTabsProps {
   onActivityChange: (hasUnseen: boolean) => void;
   /** Dock is fully collapsed (no active view is really visible). */
   collapsed: boolean;
+  /** Notified whenever the active tab changes. The host (App) uses this to
+   *  route post-submit PTY injects to whichever terminal the reviewer is
+   *  currently watching. Best-effort: a "wrong" tab is still strictly better
+   *  than the alternative of no inject at all. */
+  onActiveTabChange?: (id: string) => void;
+}
+
+/** Imperative handle so the host (App) can drive tab selection — used by the
+ *  reverse of linked navigation: clicking a folder tab focuses the terminal
+ *  that lives in that folder. */
+export interface TerminalTabsHandle {
+  selectTab: (id: string) => void;
 }
 
 // Owns the set of terminal tabs and their lifecycle. Every tab's
@@ -28,14 +46,19 @@ interface TerminalTabsProps {
 // 1-based slot) and recompute on close, like iTerm2 / Terminal.app / VS Code —
 // no monotonic ids, no gaps. New tabs open in $HOME by default; the "here"
 // action opens in the active terminal's live working directory instead.
-export function TerminalTabs({
-  theme,
-  fullscreen,
-  onFullscreenChange,
-  onTabsChange,
-  onActivityChange,
-  collapsed,
-}: TerminalTabsProps) {
+export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
+  function TerminalTabs(
+    {
+      theme,
+      fullscreen,
+      onFullscreenChange,
+      onTabsChange,
+      onActivityChange,
+      collapsed,
+      onActiveTabChange,
+    }: TerminalTabsProps,
+    ref,
+  ) {
   const [tabs, setTabs] = useState<Tab[]>(() => [
     { id: crypto.randomUUID(), cwd: null },
   ]);
@@ -123,6 +146,23 @@ export function TerminalTabs({
     });
   };
 
+  // Expose tab selection to the host. selectTab/tabs are recreated each render,
+  // so the handle reads them through refs and guards against a stale id (a
+  // terminal closed since the folder→terminal mapping was recorded).
+  const selectTabRef = useRef(selectTab);
+  selectTabRef.current = selectTab;
+  const tabsRef = useRef(tabs);
+  tabsRef.current = tabs;
+  useImperativeHandle(
+    ref,
+    () => ({
+      selectTab: (id: string) => {
+        if (tabsRef.current.some((t) => t.id === id)) selectTabRef.current(id);
+      },
+    }),
+    [],
+  );
+
   const handleActivity = (id: string) => {
     if (id !== activeId || collapsed) {
       setUnseen((prev) => {
@@ -157,6 +197,12 @@ export function TerminalTabs({
     });
   }, [activeId, collapsed]);
 
+  // Notify the host whenever the active tab changes so post-submit PTY
+  // injects can target the terminal the reviewer is currently watching.
+  useEffect(() => {
+    onActiveTabChange?.(activeId);
+  }, [activeId, onActiveTabChange]);
+
   // Positional labels: a tab's number is its 1-based slot, so closing one
   // renumbers the rest with no gaps.
   const barTabs = tabs.map((t, i) => ({ id: t.id, title: `zsh ${i + 1}` }));
@@ -190,4 +236,5 @@ export function TerminalTabs({
       </div>
     </div>
   );
-}
+  },
+);

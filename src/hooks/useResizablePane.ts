@@ -10,6 +10,12 @@ interface Options {
   onWidthChange: (next: number) => void;
   /** "x" = right-hand pane (default), "y" = bottom dock. */
   axis?: Axis;
+  /** Which edge the pane occupies. "trailing" (default) panes sit at the
+   *  right/bottom with the divider on their leading edge, so they grow as the
+   *  pointer moves *toward* the document (size = start - delta). "leading"
+   *  panes (e.g. the left sidebar) have the divider on their trailing edge and
+   *  grow as the pointer moves *away* (size = start + delta). */
+  side?: "leading" | "trailing";
   min?: number;
   max?: number;
 }
@@ -25,6 +31,7 @@ export function useResizablePane({
   width,
   onWidthChange,
   axis = "x",
+  side = "trailing",
   min = 240,
   max,
 }: Options) {
@@ -33,9 +40,25 @@ export function useResizablePane({
 
   const maxSize = useCallback(() => {
     if (max != null) return max;
+    // Side panes can grow to nearly the full viewport, leaving 320px for the
+    // primary surface (the editor for axis "x", the editor stack above the
+    // bottom dock for axis "y"). The pane also has its own fullscreen toggle
+    // for the rare case where 320px isn't enough headroom.
     return axis === "x"
-      ? Math.min(640, Math.round(window.innerWidth * 0.6))
-      : Math.min(720, Math.round(window.innerHeight * 0.7));
+      ? Math.max(
+          320,
+          Math.min(
+            window.innerWidth - 320,
+            Math.round(window.innerWidth * 0.9),
+          ),
+        )
+      : Math.max(
+          120,
+          Math.min(
+            window.innerHeight - 200,
+            Math.round(window.innerHeight * 0.85),
+          ),
+        );
   }, [axis, max]);
 
   const startDrag = useCallback(
@@ -53,10 +76,11 @@ export function useResizablePane({
   useEffect(() => {
     if (!isDragging) return;
 
+    const sign = side === "leading" ? 1 : -1;
     const onMove = (e: PointerEvent) => {
       const cur = axis === "x" ? e.clientX : e.clientY;
       const delta = cur - start.current.pos;
-      onWidthChange(clamp(start.current.size - delta, min, maxSize()));
+      onWidthChange(clamp(start.current.size + sign * delta, min, maxSize()));
     };
     const onUp = () => setDragging(false);
 
@@ -73,7 +97,7 @@ export function useResizablePane({
       document.body.style.cursor = prevCursor;
       document.body.style.userSelect = prevSelect;
     };
-  }, [isDragging, axis, min, maxSize, onWidthChange]);
+  }, [isDragging, axis, side, min, maxSize, onWidthChange]);
 
   return { isDragging, startDrag };
 }

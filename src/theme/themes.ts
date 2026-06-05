@@ -3,6 +3,7 @@
 import type { ThemeBase } from "./derive";
 
 export type ThemeName =
+  | "studio"
   | "basic"
   | "pro"
   | "homebrew"
@@ -21,9 +22,27 @@ export interface ThemeEntry {
 }
 
 // macOS Terminal.app's built-in profiles, as bg / fg / blue / yellow / green.
-// The remaining tokens are derived in derive.ts. The "basic" entry must match
-// the @theme defaults in styles.css so first paint is correct before JS runs.
+// The remaining tokens are derived in derive.ts. The "studio" entry must match
+// the @theme defaults in styles.css so first paint is correct before JS runs
+// (Studio is the runtime default; the rest are user choices).
 export const THEMES: ThemeEntry[] = [
+  // Studio — Redline's flagship dark mood. OKLCH-tuned accents (blue/yellow/
+  // green) sit in the same harmonic family; selection is the warm "redline"
+  // red-orange so commented spans and v-badges read with intent. The base
+  // sRGB approximations of the OKLCH targets are spelled out inline so the
+  // theme survives without an oklch() parser.
+  {
+    name: "studio",
+    label: "Studio",
+    base: {
+      bg: "#1a1a1f",      // ≈ oklch(0.145 0.005 285)
+      fg: "#fafafa",      // ≈ oklch(0.985 0 0)
+      blue: "#5b9fe4",    // ≈ oklch(0.7 0.16 230) — info / edit
+      yellow: "#d6c060",  // ≈ oklch(0.82 0.16 90)  — warning / feedback
+      green: "#5dc585",   // ≈ oklch(0.72 0.18 145) — success / question
+      selection: "#e8553d", // ≈ oklch(0.65 0.23 25) — the "redline" accent
+    },
+  },
   {
     name: "basic",
     label: "Basic",
@@ -76,7 +95,9 @@ export const THEMES: ThemeEntry[] = [
   },
 ];
 
-export const DEFAULT_THEME: ThemeName = "basic";
+// First-launch default. `readStoredTheme()` only consults this when the user
+// has no saved choice yet, so existing installs keep their picked theme.
+export const DEFAULT_THEME: ThemeName = "studio";
 
 const BY_NAME = new Map(THEMES.map((t) => [t.name, t]));
 

@@ -260,4 +260,39 @@ describe("commentsToBlockOverrides", () => {
       new Map([["blk-1", "Reconciled."]]),
     );
   });
+
+  // Resolved / accepted / submitted edits must NOT survive into the override
+  // map — once Claude has rewritten the block, the user's old draft proposal
+  // is no longer the source of truth and `applyRevisionRedline` needs the
+  // block freed up so its precise diff lands. Regression for the
+  // "accept-and-continue" loop: a resolved thread's block should be paintable
+  // by the revision redline on the next round.
+  it("omits non-draft/non-reopened editor comments", () => {
+    const base: Comment = {
+      id: "c-001",
+      type: "edit",
+      anchorId: "A.p1",
+      blockId: "blk-1",
+      body: "(edit)",
+      edit: { original: "Original.", revised: "Reconciled." },
+      createdAt: 0,
+      status: "draft",
+    };
+    for (const status of [
+      "submitted",
+      "resolved",
+      "accepted",
+      "withdrawn",
+    ] as const) {
+      expect(
+        commentsToBlockOverrides([{ ...base, status }]),
+        `status=${status} must not contribute to overrides`,
+      ).toEqual(new Map());
+    }
+    // Reopened comments stay in the override map — the reviewer has explicitly
+    // revived the proposal for the next round.
+    expect(
+      commentsToBlockOverrides([{ ...base, status: "reopened" }]),
+    ).toEqual(new Map([["blk-1", "Reconciled."]]));
+  });
 });

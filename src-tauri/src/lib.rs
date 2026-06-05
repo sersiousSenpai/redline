@@ -3,6 +3,8 @@
 mod db;
 mod feedback;
 mod fork;
+mod fsbrowse;
+mod fswatch;
 mod hook;
 mod parser;
 mod pty;
@@ -11,7 +13,7 @@ mod skill;
 mod state;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -23,7 +25,7 @@ use tauri::{
     tray::TrayIconBuilder,
     AppHandle, Emitter, Listener, Manager,
 };
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Notify};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::db::Database;
@@ -136,34 +138,129 @@ fn deny_response(reason: impl Into<String>) -> HookResponse {
 }
 
 #[derive(Clone)]
-struct PendingResponses(Arc<StdMutex<HashMap<String, oneshot::Sender<HookResponse>>>>);
+struct PendingResponses {
+    // Value carries a unique registration token so a cancelled handle_plan can
+    // remove *only its own* held POST and never clobber a superseding one.
+    map: Arc<StdMutex<HashMap<String, (u64, oneshot::Sender<HookResponse>)>>>,
+    next_token: Arc<AtomicU64>,
+    // Woken on every register() so a take_or_wait() racing the next plan can
+    // wake immediately when the new POST arrives instead of polling.
+    notify: Arc<Notify>,
+}
 
 impl PendingResponses {
     fn new() -> Self {
-        Self(Arc::new(StdMutex::new(HashMap::new())))
+        Self {
+            map: Arc::new(StdMutex::new(HashMap::new())),
+            next_token: Arc::new(AtomicU64::new(1)),
+            notify: Arc::new(Notify::new()),
+        }
     }
-    fn register(&self, session_id: &str) -> Option<oneshot::Receiver<HookResponse>> {
-        let mut map = self.0.lock().unwrap();
+    /// Register a held POST for this session. Returns the receiver to await plus
+    /// a unique token identifying *this* registration — used by the drop-guard
+    /// (`take_if_owned`) so a cancelled request removes only its own entry.
+    fn register(&self, session_id: &str) -> Option<(oneshot::Receiver<HookResponse>, u64)> {
+        let mut map = self.map.lock().unwrap();
         if map.contains_key(session_id) {
             return None;
         }
+        let token = self.next_token.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
-        map.insert(session_id.to_string(), tx);
-        Some(rx)
+        map.insert(session_id.to_string(), (token, tx));
+        drop(map);
+        self.notify.notify_waiters();
+        Some((rx, token))
     }
     fn take(&self, session_id: &str) -> Option<oneshot::Sender<HookResponse>> {
-        self.0.lock().unwrap().remove(session_id)
+        self.map.lock().unwrap().remove(session_id).map(|(_, tx)| tx)
+    }
+    /// Remove and return this session's sender *iff* it is still the one
+    /// registered under `token`. Used by the drop-guard: a hit means the held
+    /// POST was cancelled (connection dropped) before any decision was sent.
+    fn take_if_owned(
+        &self,
+        session_id: &str,
+        token: u64,
+    ) -> Option<oneshot::Sender<HookResponse>> {
+        let mut map = self.map.lock().unwrap();
+        match map.get(session_id) {
+            Some((t, _)) if *t == token => map.remove(session_id).map(|(_, tx)| tx),
+            _ => None,
+        }
+    }
+    /// Like `take` but if no sender is registered yet, wait up to `timeout` for
+    /// the next `register` call (for any session) and retry. Closes the race
+    /// where the user clicks submit between a plan's POST arriving and its
+    /// sender being registered — the second-revision silent-drop bug.
+    async fn take_or_wait(
+        &self,
+        session_id: &str,
+        timeout: Duration,
+    ) -> Option<oneshot::Sender<HookResponse>> {
+        if let Some(tx) = self.take(session_id) {
+            return Some(tx);
+        }
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            // Subscribe to the next notification BEFORE re-checking the map to
+            // avoid a lost-wakeup if register() runs between our take and our
+            // await.
+            let notified = self.notify.notified();
+            if let Some(tx) = self.take(session_id) {
+                return Some(tx);
+            }
+            tokio::select! {
+                _ = notified => continue,
+                _ = tokio::time::sleep_until(deadline) => return self.take(session_id),
+            }
+        }
     }
     /// A POST is currently held for this session (Claude Code is blocked in
     /// its terminal). Such a session is "active" and must not be deleted.
     fn has(&self, session_id: &str) -> bool {
-        self.0.lock().unwrap().contains_key(session_id)
+        self.map.lock().unwrap().contains_key(session_id)
     }
     /// Remove and return every pending sender — used to release orphaned held
     /// POSTs when the interception mode changes away from Active.
     fn drain_all(&self) -> Vec<oneshot::Sender<HookResponse>> {
-        let mut map = self.0.lock().unwrap();
-        map.drain().map(|(_, tx)| tx).collect()
+        let mut map = self.map.lock().unwrap();
+        map.drain().map(|(_, (_, tx))| tx).collect()
+    }
+}
+
+/// Held for the lifetime of a `handle_plan` await. On drop it removes the
+/// session's pending sender *iff it is still our own* (`take_if_owned`). A hit
+/// means the future was cancelled — the held POST's connection dropped (hook
+/// timeout, terminal/session closed, app restart) before any decision was sent
+/// — so the sender would otherwise linger as a dead channel that a later
+/// `submit_review` sends into silently. We clean it up and tell the UI the
+/// session has detached so it stops showing a healthy-looking review.
+/// On the normal path the sender was already `take`n, so this is a no-op.
+struct DetachGuard {
+    pending: PendingResponses,
+    app_handle: AppHandle,
+    session_id: String,
+    token: u64,
+}
+
+impl Drop for DetachGuard {
+    fn drop(&mut self) {
+        if self
+            .pending
+            .take_if_owned(&self.session_id, self.token)
+            .is_some()
+        {
+            tracing::info!(
+                session_id = %self.session_id,
+                "held POST detached before a decision — releasing orphan and notifying UI"
+            );
+            let _ = self.app_handle.emit(
+                "session-detached",
+                SessionEvent {
+                    session_id: self.session_id.clone(),
+                },
+            );
+        }
     }
 }
 
@@ -191,6 +288,26 @@ impl ExpectedModes {
     }
 }
 
+/// Whether the daemon successfully bound `127.0.0.1:7676`. False means another
+/// process holds the port, so this window can capture no plans — the UI checks
+/// this on mount (and listens for `daemon-bind-failed`) to show a blocking
+/// banner instead of looking healthy. Single-instance makes this rare, but a
+/// non-Redline squatter on the port can still trip it.
+#[derive(Clone, Default)]
+struct DaemonStatus(Arc<AtomicBool>);
+
+impl DaemonStatus {
+    fn new() -> Self {
+        Self::default()
+    }
+    fn set_bound(&self, bound: bool) {
+        self.0.store(bound, Ordering::SeqCst);
+    }
+    fn is_bound(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
     store: SessionStore,
@@ -200,6 +317,7 @@ struct AppState {
     settings: Settings,
     claims: ClaimFlags,
     fork: fork::ForkState,
+    daemon_status: DaemonStatus,
 }
 
 #[derive(Serialize, Clone)]
@@ -474,8 +592,8 @@ async fn handle_plan(
     // Orphan fix: if a prior held POST for this session is still pending (Claude
     // re-entered plan mode, retried, or the earlier hold was abandoned), release
     // the stale waiter cleanly instead of leaving it hung, then take over.
-    let mut rx = match app_state.pending.register(&session_id) {
-        Some(rx) => rx,
+    let (mut rx, token) = match app_state.pending.register(&session_id) {
+        Some(pair) => pair,
         None => {
             if let Some(stale) = app_state.pending.take(&session_id) {
                 tracing::warn!(session_id = %session_id, "superseding a stale held POST for this session");
@@ -488,6 +606,15 @@ async fn handle_plan(
                 .register(&session_id)
                 .expect("pending slot freed above")
         }
+    };
+    // If this request is cancelled (the held connection drops before a decision),
+    // the guard removes our orphaned sender and notifies the UI. On the normal
+    // decision path the sender was already taken, so the guard is a no-op.
+    let _detach_guard = DetachGuard {
+        pending: app_state.pending.clone(),
+        app_handle: app_state.app_handle.clone(),
+        session_id: session_id.clone(),
+        token,
     };
 
     let cancelled_msg = "User cancelled the review and does not want to proceed with this plan.";
@@ -549,20 +676,41 @@ async fn handle_plan(
 }
 
 async fn run_server(state: AppState) {
+    // Keep handles for the post-bind status update before the router consumes `state`.
+    let daemon_status = state.daemon_status.clone();
+    let app_handle = state.app_handle.clone();
     let app = Router::new()
         .route("/v1/plan", post(handle_plan))
         .with_state(state);
     match tokio::net::TcpListener::bind("127.0.0.1:7676").await {
         Ok(listener) => {
+            daemon_status.set_bound(true);
             tracing::info!("Redline daemon listening on http://127.0.0.1:7676");
             if let Err(e) = axum::serve(listener, app).await {
                 tracing::error!(error = %e, "axum::serve exited");
             }
         }
         Err(e) => {
+            daemon_status.set_bound(false);
             tracing::error!(error = %e, "failed to bind 127.0.0.1:7676");
+            // Tell the (now daemon-less) window so it shows a blocking banner.
+            // Emit even though the webview may not have mounted its listener yet
+            // — `get_daemon_status` is the authoritative mount-time check.
+            let _ = app_handle.emit(
+                "daemon-bind-failed",
+                SessionEvent {
+                    session_id: String::new(),
+                },
+            );
         }
     }
+}
+
+/// Mount-time check: did the daemon bind its port? `false` → another process
+/// holds 7676 and this window cannot capture plans.
+#[tauri::command]
+fn get_daemon_status(daemon_status: tauri::State<'_, DaemonStatus>) -> bool {
+    daemon_status.is_bound()
 }
 
 #[tauri::command]
@@ -577,23 +725,45 @@ fn list_sessions(
     sessions
 }
 
-/// Delete a session — rejected while a POST is held for it (its terminal is
-/// still active and Claude Code is blocked waiting for review).
+/// Core of `delete_session` minus the Tauri-runtime concerns (event emit,
+/// tray refresh). Factored out so the force-drain behavior is unit-testable
+/// without spinning a `tauri::AppHandle`.
+fn delete_session_inner(
+    store: &SessionStore,
+    pending: &PendingResponses,
+    session_id: &str,
+    force: bool,
+) -> Result<bool, String> {
+    if pending.has(session_id) {
+        if !force {
+            return Err(
+                "This session's terminal is still active (Claude Code is waiting for review). \
+                 Approve or continue it before deleting."
+                    .to_string(),
+            );
+        }
+        if let Some(tx) = pending.take(session_id) {
+            let _ = tx.send(deny_response("Session deleted by reviewer."));
+        }
+    }
+    Ok(store.delete_session(session_id))
+}
+
+/// Delete a session. By default, rejected while a POST is held (its terminal
+/// is still active and Claude Code is blocked waiting for review). When
+/// `force = true`, the held POST is drained with a `deny_response` so Claude
+/// Code's hook returns cleanly before the session row is removed — this
+/// covers the stale-held-state case where the underlying terminal is gone
+/// but the in-memory channel is still registered.
 #[tauri::command]
 fn delete_session(
     app: AppHandle,
     store: tauri::State<'_, SessionStore>,
     pending: tauri::State<'_, PendingResponses>,
     session_id: String,
+    force: Option<bool>,
 ) -> Result<bool, String> {
-    if pending.has(&session_id) {
-        return Err(
-            "This session's terminal is still active (Claude Code is waiting for review). \
-             Approve or continue it before deleting."
-                .to_string(),
-        );
-    }
-    let removed = store.delete_session(&session_id);
+    let removed = delete_session_inner(&store, &pending, &session_id, force.unwrap_or(false))?;
     if removed {
         let _ = app.emit(
             "session-status-changed",
@@ -728,13 +898,34 @@ fn delete_comment(
     Ok(removed)
 }
 
+/// Keystroke sequence that selects "give feedback" on Claude Code's plan-mode
+/// rejection menu, so the reviewer doesn't have to click through it after
+/// pressing "Continue revising". Provisional default — the exact selector is
+/// part of Claude Code's TUI and must be confirmed by an interactive run
+/// against the target version. Recorded in `docs/protocol-verification.md`
+/// alongside the other empirically-verified hook behaviors.
+///
+/// The frontend gates this inject behind an opt-in flag so a wrong default
+/// never mashes random keys into someone's terminal.
+const MENU_SKIP_KEYSTROKE: &str = "3\r";
+
+/// `terminal_id` is the PTY id of the terminal currently hosting this
+/// session's `claude`; when `auto_continue` is `Some(true)` and this is
+/// `Some`, the menu-skip keystroke is written into that PTY after the held
+/// POST is released so Claude Code's plan-rejection menu is invisible to the
+/// reviewer. `auto_continue` defaults to `None` (= disabled); the frontend
+/// must explicitly opt in once the keystroke has been verified for the
+/// user's Claude Code version (see `MENU_SKIP_KEYSTROKE`).
 #[tauri::command]
-fn submit_review(
+async fn submit_review(
     app: AppHandle,
     store: tauri::State<'_, SessionStore>,
     pending: tauri::State<'_, PendingResponses>,
     expected_modes: tauri::State<'_, ExpectedModes>,
+    pty: tauri::State<'_, pty::PtyState>,
     session_id: String,
+    terminal_id: Option<String>,
+    auto_continue: Option<bool>,
 ) -> Result<(), String> {
     let Some((sections, comments, current_plan_markdown)) =
         store.drafts_and_reopens_for_payload(&session_id)
@@ -763,15 +954,60 @@ fn submit_review(
         "submit_review fired",
     );
 
+    // Close the second-revision race: when a new plan POST is in flight but
+    // its sender hasn't been registered yet, wait briefly instead of bailing.
     let tx = pending
-        .take(&session_id)
+        .take_or_wait(&session_id, Duration::from_millis(2000))
+        .await
         .ok_or_else(|| "no plan is currently waiting for review on this session".to_string())?;
     // Ordering invariant: set expected_mode BEFORE unblocking the hook.
     // Claude can't possibly send the next ExitPlanMode POST before this
     // tx.send() returns to the held handle_plan task, so the next
     // handle_plan invocation is guaranteed to see this entry.
     expected_modes.set(&session_id, mode);
-    let _ = tx.send(deny_response(payload));
+    // A failed send means the receiver is gone: the held POST already ended
+    // (hook timeout — Redline holds a plan up to 10 min — or the Claude Code
+    // session/terminal closed). Don't pretend it worked. Roll back the submit
+    // (restore comments to draft, drop the expected_mode) and surface a clear
+    // error so the reviewer re-runs the plan and resubmits, instead of their
+    // feedback vanishing into a dead channel.
+    if tx.send(deny_response(payload)).is_err() {
+        expected_modes.take(&session_id);
+        store.unmark_submitted(&session_id, &submitted);
+        let _ = app.emit(
+            "comments-changed",
+            SessionEvent {
+                session_id: session_id.clone(),
+            },
+        );
+        refresh_tray(&app, &store);
+        tracing::warn!(
+            session_id = %session_id,
+            "submit_review delivery failed — held POST no longer listening; rolled back"
+        );
+        return Err(
+            "Claude is no longer waiting for this plan — the review timed out \
+             (Redline holds a plan for up to 10 minutes) or the Claude Code session \
+             ended. Re-run the plan in your terminal, then submit your review again."
+                .to_string(),
+        );
+    }
+
+    // Best-effort: skip Claude Code's "Auto-accept / Edit / Feedback / Reject"
+    // prompt by feeding the configured keystroke into the embedded terminal.
+    // Off by default; a missing PTY is a silent no-op (the reviewer probably
+    // closed the tab — the menu will surface for them in their own terminal).
+    if auto_continue.unwrap_or(false) {
+        if let Some(tid) = terminal_id.as_deref() {
+            if let Err(e) = pty::pty_write_bytes(&pty, tid, MENU_SKIP_KEYSTROKE.as_bytes()) {
+                tracing::warn!(
+                    error = %e,
+                    terminal_id = tid,
+                    "auto-continue PTY inject failed (non-fatal)"
+                );
+            }
+        }
+    }
 
     let _ = app.emit(
         "comments-changed",
@@ -932,6 +1168,22 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
+        // Must be the first plugin (Tauri v2 requirement). A second `redline`
+        // launch hands off to the running instance and focuses its window
+        // instead of opening a daemon-less duplicate that can't bind :7676 and
+        // would silently miss every plan (it only shares the on-disk DB).
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            // Default window label is "main"; fall back to any window so this
+            // keeps working if the label ever changes.
+            let win = app
+                .get_webview_window("main")
+                .or_else(|| app.webview_windows().into_values().next());
+            if let Some(w) = win {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
@@ -948,6 +1200,7 @@ pub fn run() {
             reopen_resolution,
             get_interception_mode,
             set_interception_mode,
+            get_daemon_status,
             claim_review,
             get_hook_status,
             install_hook,
@@ -959,6 +1212,12 @@ pub fn run() {
             pty::pty_kill,
             pty::pty_kill_all,
             pty::pty_cwd,
+            fsbrowse::list_dir,
+            fsbrowse::read_text_file,
+            fsbrowse::read_file_base64,
+            fsbrowse::home_dir,
+            fswatch::watch_dir,
+            fswatch::unwatch_dir,
             fork::fork_thread_send,
             fork::get_thread,
             fork::fork_thread_cancel,
@@ -984,6 +1243,8 @@ pub fn run() {
 
             app.manage(pty::PtyState::new());
 
+            app.manage(fswatch::FsWatcher::new(app.handle().clone()));
+
             // Resolve `claude` once — a Finder-launched app has a minimal PATH.
             // Built before SessionStore::new consumes the `db` Arc.
             let fork_state = fork::ForkState::new(db.clone(), fork::resolve_claude_bin());
@@ -998,6 +1259,9 @@ pub fn run() {
             let expected_modes = ExpectedModes::new();
             app.manage(expected_modes.clone());
 
+            let daemon_status = DaemonStatus::new();
+            app.manage(daemon_status.clone());
+
             let app_state = AppState {
                 store: store.clone(),
                 app_handle: app.handle().clone(),
@@ -1006,6 +1270,7 @@ pub fn run() {
                 settings: settings.clone(),
                 claims,
                 fork: fork_state,
+                daemon_status,
             };
             tauri::async_runtime::spawn(run_server(app_state));
 
@@ -1097,4 +1362,158 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Database;
+    use crate::state::reparse_sections;
+    use std::sync::Arc;
+
+    fn make_store() -> SessionStore {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        SessionStore::new(db)
+    }
+
+    #[test]
+    fn delete_session_inner_refuses_held_without_force() {
+        let store = make_store();
+        let pending = PendingResponses::new();
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("s1", "/tmp/d", md.to_string(), reparse_sections(md), true);
+        let _rx = pending.register("s1").expect("register first time");
+
+        let err = delete_session_inner(&store, &pending, "s1", false)
+            .expect_err("held session must be refused without force");
+        assert!(err.contains("still active"), "got: {err}");
+        assert!(pending.has("s1"), "held entry must survive a refused delete");
+        assert!(store.has_session("s1"), "store row must survive a refused delete");
+    }
+
+    #[test]
+    fn delete_session_inner_force_drains_held_then_deletes() {
+        let store = make_store();
+        let pending = PendingResponses::new();
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("s1", "/tmp/d", md.to_string(), reparse_sections(md), true);
+        let (rx, _token) = pending.register("s1").expect("register first time");
+
+        let removed = delete_session_inner(&store, &pending, "s1", true)
+            .expect("force delete must succeed");
+        assert!(removed, "delete must report true for an existing session");
+        assert!(!pending.has("s1"), "held entry must be drained");
+        assert!(!store.has_session("s1"), "store row must be gone");
+
+        // The drained oneshot received a deny response so Claude Code's hook
+        // returns cleanly rather than timing out.
+        let resp = rx.blocking_recv().expect("oneshot must have been sent");
+        assert_eq!(resp.hook_specific_output.permission_decision, "deny");
+        assert!(
+            resp.hook_specific_output
+                .permission_decision_reason
+                .contains("deleted"),
+            "reason should mention deletion, got: {}",
+            resp.hook_specific_output.permission_decision_reason
+        );
+    }
+
+    #[tokio::test]
+    async fn take_or_wait_returns_immediately_when_sender_present() {
+        let pending = PendingResponses::new();
+        let _rx = pending.register("s1").expect("first register");
+
+        let tx = pending
+            .take_or_wait("s1", Duration::from_secs(5))
+            .await
+            .expect("sender was already registered");
+        // The senderslot must be drained — a second take returns None.
+        assert!(pending.take("s1").is_none(), "take must remove the slot");
+        // Sending into the channel still works (no double-take).
+        let _ = tx.send(allow_response("ok"));
+    }
+
+    #[tokio::test]
+    async fn take_or_wait_waits_for_late_register() {
+        // The bug-5 race: take_or_wait fires before the next plan's POST
+        // registers its sender. The take must wake up when register() runs
+        // and return the freshly-registered sender, not bail out.
+        let pending = PendingResponses::new();
+        let waiter = {
+            let pending = pending.clone();
+            tokio::spawn(async move {
+                pending
+                    .take_or_wait("s2", Duration::from_secs(2))
+                    .await
+                    .map(|_| ())
+            })
+        };
+        // Yield long enough that the waiter is parked on `notified()`.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _rx = pending.register("s2").expect("late register");
+        let got = waiter.await.expect("waiter task panicked");
+        assert!(got.is_some(), "take_or_wait must wake on register");
+    }
+
+    #[tokio::test]
+    async fn take_or_wait_times_out_when_no_sender_ever_arrives() {
+        let pending = PendingResponses::new();
+        let out = pending
+            .take_or_wait("nobody", Duration::from_millis(50))
+            .await;
+        assert!(out.is_none(), "take_or_wait must time out cleanly");
+    }
+
+    #[test]
+    fn take_if_owned_only_removes_matching_token() {
+        let pending = PendingResponses::new();
+        let (_rx1, token1) = pending.register("s1").expect("first register");
+
+        // Supersede: take the original and register a fresh one (new token).
+        let _ = pending.take("s1").expect("take original");
+        let (_rx2, token2) = pending.register("s1").expect("re-register");
+        assert_ne!(token1, token2, "tokens must be unique per registration");
+
+        // The stale guard (token1) must NOT clobber the new registration.
+        assert!(
+            pending.take_if_owned("s1", token1).is_none(),
+            "stale token must not remove a superseding entry"
+        );
+        assert!(pending.has("s1"), "the live entry must survive");
+
+        // The owning guard (token2) reclaims its own orphaned sender.
+        assert!(
+            pending.take_if_owned("s1", token2).is_some(),
+            "matching token must remove its own entry"
+        );
+        assert!(!pending.has("s1"), "entry gone after owned take");
+    }
+
+    #[test]
+    fn send_into_dropped_receiver_is_an_error() {
+        // Models the timed-out / detached held POST: submit_review must detect
+        // this and roll back rather than report a false success.
+        let pending = PendingResponses::new();
+        let (rx, _token) = pending.register("s1").expect("register");
+        drop(rx); // receiver gone — the held POST ended
+        let tx = pending.take("s1").expect("sender still in map");
+        assert!(
+            tx.send(allow_response("late")).is_err(),
+            "sending into a dropped receiver must fail"
+        );
+    }
+
+    #[test]
+    fn delete_session_inner_non_held_path_unchanged() {
+        let store = make_store();
+        let pending = PendingResponses::new();
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("s1", "/tmp/d", md.to_string(), reparse_sections(md), true);
+
+        // No POST held → both force values behave identically.
+        let removed = delete_session_inner(&store, &pending, "s1", false)
+            .expect("non-held delete must succeed");
+        assert!(removed);
+        assert!(!store.has_session("s1"));
+    }
 }

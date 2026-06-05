@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { useState } from "react";
 import type { Comment, CommentStatus } from "../types";
+import { compactEditPreview } from "../editor/wordDiff";
 import { AnchorPill } from "./AnchorPill";
 import { CommentThread } from "./CommentThread";
+import { MarkdownView } from "./MarkdownView";
 
 interface CommentCardProps {
   comment: Comment;
@@ -21,6 +24,11 @@ interface CommentCardProps {
   onDelete: () => void;
   onAccept: () => void;
   onReopen: () => void;
+  /** True while a submit_review / approve_plan invoke is mid-flight. The only
+   *  state that should disable Accept/Reopen — outside of this brief window,
+   *  including the entire "Claude is revising" wait, resolution is always
+   *  available. */
+  submitInFlight?: boolean;
 }
 
 const TYPE_COLORS: Record<Comment["type"], string> = {
@@ -67,9 +75,27 @@ export function CommentCard({
   onDelete,
   onAccept,
   onReopen,
+  submitInFlight = false,
 }: CommentCardProps) {
   const color = TYPE_COLORS[comment.type];
   const canDelete = comment.status === "draft";
+  // Session-local collapse state — gives the reviewer an escape hatch when a
+  // huge pasted body or a long discussion thread overruns the pane. Not
+  // persisted: a freshly loaded session always starts expanded so nothing is
+  // hidden by surprise.
+  const [collapsed, setCollapsed] = useState(false);
+  // Edit comments default to a compact one-line word-diff; the full
+  // before/after is one click away. Keeps a flurry of small edits from
+  // flooding the pane.
+  const [showFullEdit, setShowFullEdit] = useState(false);
+  const bodyPreview = (() => {
+    const text = (comment.body ?? "").replace(/\s+/g, " ").trim();
+    if (text && text !== "(edit)") return text.slice(0, 90);
+    if (comment.edit) {
+      return `"${comment.edit.original}" → "${comment.edit.revised}"`.slice(0, 90);
+    }
+    return "";
+  })();
 
   return (
     <div
@@ -89,6 +115,24 @@ export function CommentCard({
     >
       <div className="flex items-center justify-between mb-2 gap-2">
         <div className="flex items-center gap-2 flex-wrap">
+          <button
+            type="button"
+            aria-label={collapsed ? "Expand comment" : "Collapse comment"}
+            title={collapsed ? "Expand comment" : "Collapse comment"}
+            onClick={(e) => {
+              e.stopPropagation();
+              setCollapsed((c) => !c);
+            }}
+            style={{
+              fontSize: "10px",
+              lineHeight: 1,
+              color: "var(--color-ink-muted)",
+              cursor: "pointer",
+              padding: "0 2px",
+            }}
+          >
+            {collapsed ? "▸" : "▾"}
+          </button>
           <span
             style={{
               fontSize: "10px",
@@ -135,34 +179,92 @@ export function CommentCard({
         </div>
       </div>
 
-      {comment.edit && (
-        <div className="mb-2 font-serif" style={{ fontSize: "13px" }}>
-          <div
-            className="line-through"
-            style={{ color: "var(--color-ink-muted)" }}
-          >
-            {comment.edit.original}
-          </div>
-          <div style={{ color: "var(--color-info)" }}>
-            {comment.edit.revised}
-          </div>
-        </div>
-      )}
-
-      {comment.body && comment.body.trim() !== "(edit)" && (
+      {collapsed && bodyPreview && (
         <div
-          style={{
-            fontSize: "13px",
-            lineHeight: 1.45,
-            color: "var(--color-ink)",
-            whiteSpace: "pre-wrap",
-          }}
+          className="truncate"
+          style={{ fontSize: "12px", color: "var(--color-ink-muted)" }}
         >
-          {comment.body}
+          {bodyPreview}
         </div>
       )}
 
-      {comment.resolution && (
+      {!collapsed && comment.edit && (
+        <div className="mb-2 font-serif" style={{ fontSize: "13px" }}>
+          {showFullEdit ? (
+            <>
+              <div
+                className="line-through"
+                style={{ color: "var(--color-ink-muted)" }}
+              >
+                {comment.edit.original}
+              </div>
+              <div style={{ color: "var(--color-info)" }}>
+                {comment.edit.revised}
+              </div>
+            </>
+          ) : (
+            <div style={{ lineHeight: 1.5 }}>
+              <span
+                style={{
+                  fontWeight: 600,
+                  fontSize: "10px",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.06em",
+                  color: "var(--color-ink-muted)",
+                  marginRight: "6px",
+                }}
+              >
+                Edited
+              </span>
+              {compactEditPreview(
+                comment.edit.original,
+                comment.edit.revised,
+              ).map((part, i) =>
+                part.kind === "delete" ? (
+                  <span
+                    key={i}
+                    className="line-through"
+                    style={{ color: "var(--color-ink-muted)" }}
+                  >
+                    {part.text}
+                  </span>
+                ) : part.kind === "insert" ? (
+                  <span key={i} style={{ color: "var(--color-info)" }}>
+                    {part.text}
+                  </span>
+                ) : (
+                  <span key={i} style={{ color: "var(--color-ink-muted)" }}>
+                    {part.text}
+                  </span>
+                ),
+              )}
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowFullEdit((s) => !s);
+            }}
+            style={{
+              fontSize: "10px",
+              color: "var(--color-ink-muted)",
+              marginTop: "2px",
+              cursor: "pointer",
+            }}
+          >
+            {showFullEdit ? "show less" : "show full"}
+          </button>
+        </div>
+      )}
+
+      {!collapsed && comment.body && comment.body.trim() !== "(edit)" && (
+        <div className="rl-comment-body-scroll">
+          <MarkdownView body={comment.body} />
+        </div>
+      )}
+
+      {!collapsed && comment.resolution && (
         <div
           className="mt-3 pt-3 border-t"
           style={{ borderColor: "var(--color-rule)" }}
@@ -185,22 +287,19 @@ export function CommentCard({
               · v{comment.resolution.appearedInVersion}
             </span>
           </div>
-          <div
-            style={{
-              fontSize: "13px",
-              lineHeight: 1.45,
-              color: "var(--color-ink)",
-              whiteSpace: "pre-wrap",
-            }}
-          >
-            {comment.resolution.body}
-          </div>
+          <MarkdownView body={comment.resolution.body} />
           {comment.status === "resolved" && (
             <div className="mt-2 flex items-center gap-2">
               <button
                 type="button"
                 onClick={onAccept}
-                className="rounded px-2 py-0.5 font-medium"
+                disabled={submitInFlight}
+                title={
+                  submitInFlight
+                    ? "A submit is in flight — wait a moment."
+                    : "Accept this resolution"
+                }
+                className="rounded px-2 py-0.5 font-medium disabled:opacity-40"
                 style={{
                   background: "var(--color-success)",
                   color: "var(--color-on-accent)",
@@ -212,7 +311,13 @@ export function CommentCard({
               <button
                 type="button"
                 onClick={onReopen}
-                className="rounded px-2 py-0.5 font-medium"
+                disabled={submitInFlight}
+                title={
+                  submitInFlight
+                    ? "A submit is in flight — wait a moment."
+                    : "Reopen this resolution for another round of feedback"
+                }
+                className="rounded px-2 py-0.5 font-medium disabled:opacity-40"
                 style={{
                   background: "var(--color-bg-elevated)",
                   border: "1px solid var(--color-rule)",
@@ -227,7 +332,7 @@ export function CommentCard({
         </div>
       )}
 
-      <CommentThread sessionId={sessionId} comment={comment} />
+      {!collapsed && <CommentThread sessionId={sessionId} comment={comment} />}
     </div>
   );
 }

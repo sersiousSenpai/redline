@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EditorContent, useEditor } from "@tiptap/react";
 
-import type { ParagraphDiff } from "../diff";
+import type { ParagraphDiff, SubBlockDiffEntry } from "../diff";
 import type {
   Comment,
   NewCommentRequest,
@@ -12,10 +12,13 @@ import type {
 } from "../types";
 import { planExtensions } from "../editor/extensions/planExtensions";
 import { RedlineDecorations } from "../editor/extensions/RedlineDecorations";
+import { CommentMarkers } from "../editor/extensions/CommentMarkers";
 import {
   CommentHighlights,
   type CommentHighlightRange,
 } from "../editor/extensions/CommentHighlights";
+import { SearchHighlight } from "../editor/extensions/SearchHighlight";
+import { PlanSearchBox } from "./PlanSearchBox";
 import {
   anchorByBlockId,
   applyAnchorIds,
@@ -72,7 +75,13 @@ export function PlanEditor({
     !!onAddComment && !!onUpdateComment && !!onDeleteComment;
 
   const extensions = useMemo(
-    () => [...planExtensions(), RedlineDecorations, CommentHighlights],
+    () => [
+      ...planExtensions(),
+      RedlineDecorations,
+      CommentHighlights,
+      CommentMarkers,
+      SearchHighlight,
+    ],
     [],
   );
   const initialDoc = useMemo(
@@ -153,10 +162,28 @@ export function PlanEditor({
   }, [editor, anchors]);
 
   // Block-level decoration (covers headings/lists/code/tables + `moved`);
-  // paragraph add/modify is additionally shown inline below.
+  // paragraph add/modify is additionally shown inline below. Sub-block
+  // (sentence-level) decomposition rides along — when present, the gutter
+  // bar paints against just the modified sentences inside a paragraph.
   useEffect(() => {
     if (!editor) return;
     editor.commands.setRedlineStatuses(redlineStatusByBlockId(sections, diff));
+    const subBlocks = new Map<string, SubBlockDiffEntry[]>();
+    if (diff) {
+      const walk = (secs: typeof sections) => {
+        for (const s of secs) {
+          for (const p of s.paragraphs) {
+            const info = diff.get(p.anchorId);
+            if (p.blockId && info?.subBlocks && info.subBlocks.length > 0) {
+              subBlocks.set(p.blockId, info.subBlocks);
+            }
+          }
+          walk(s.children);
+        }
+      };
+      walk(sections);
+    }
+    editor.commands.setRedlineSubBlocks(subBlocks);
   }, [editor, sections, diff]);
 
   // Unified reconcile (idempotent; caret/echo-guarded inside): first project
@@ -193,16 +220,31 @@ export function PlanEditor({
     [sections],
   );
 
+  // Mark blocks that carry at least one un-dismissed comment, so the gutter
+  // can render a small dot next to them (CSS picks up `.rl-has-comments`).
+  // Resolved/accepted comments don't count — those are visually muted in the
+  // sidebar already and the gutter dot would be noise.
+  useEffect(() => {
+    if (!editor) return;
+    const ids = new Set<string>();
+    for (const c of comments ?? []) {
+      if (c.status === "resolved" || c.status === "accepted") continue;
+      const blockId = c.blockId ?? blockByAnchor.get(c.anchorId);
+      if (blockId) ids.add(blockId);
+    }
+    editor.commands.setCommentedBlocks(ids);
+  }, [editor, comments, blockByAnchor]);
+
   // Project selection-anchored comments to inline highlight decorations.
   // Skipped for comments without a stored `selection` (legacy / sidebar-only)
   // or with no resolvable blockId.
   useEffect(() => {
     if (!editor) return;
     const ranges: CommentHighlightRange[] = (comments ?? [])
-      .map((c) => {
+      .flatMap<CommentHighlightRange>((c) => {
         const blockId = c.blockId ?? blockByAnchor.get(c.anchorId);
-        if (!c.selection || !blockId) return null;
-        return {
+        if (!c.selection || !blockId) return [];
+        const range: CommentHighlightRange = {
           commentId: c.id,
           blockId,
           charStart: c.selection.charStart,
@@ -210,8 +252,9 @@ export function PlanEditor({
           quotedText: c.selection.quotedText,
           muted: c.status === "resolved" || c.status === "accepted",
         };
-      })
-      .filter((r): r is CommentHighlightRange => r !== null);
+        if (c.selection.subBlockId) range.subBlockId = c.selection.subBlockId;
+        return [range];
+      });
     editor.commands.setCommentHighlights(ranges);
   }, [editor, comments, blockByAnchor]);
 
@@ -255,7 +298,93 @@ export function PlanEditor({
     editor.commands.bindHighlightClick(onHighlightClick ?? null);
   }, [editor, onHighlightClick]);
 
-  return <EditorContent editor={editor} />;
+  // In-document find (Cmd/Ctrl+F). PlanEditor owns the query + match counters;
+  // the SearchHighlight extension owns the decorations and match positions.
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchCount, setSearchCount] = useState(0);
+  const [searchActive, setSearchActive] = useState(-1);
+
+  const syncSearchState = useCallback(() => {
+    if (!editor) return;
+    const s = editor.storage.searchHighlight;
+    setSearchCount(s.matches.length);
+    setSearchActive(s.activeIndex);
+  }, [editor]);
+
+  const scrollToActiveMatch = useCallback(() => {
+    if (!editor) return;
+    const s = editor.storage.searchHighlight;
+    const m = s.matches[s.activeIndex];
+    if (!m) return;
+    const at = editor.view.domAtPos(m.from);
+    const el =
+      at.node instanceof HTMLElement ? at.node : at.node.parentElement;
+    el?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [editor]);
+
+  const runSearch = useCallback(
+    (q: string) => {
+      setSearchQuery(q);
+      editor?.commands.setSearchQuery(q);
+      syncSearchState();
+      scrollToActiveMatch();
+    },
+    [editor, syncSearchState, scrollToActiveMatch],
+  );
+
+  const stepSearch = useCallback(
+    (dir: "next" | "prev") => {
+      if (!editor) return;
+      if (dir === "next") editor.commands.nextMatch();
+      else editor.commands.prevMatch();
+      syncSearchState();
+      scrollToActiveMatch();
+    },
+    [editor, syncSearchState, scrollToActiveMatch],
+  );
+
+  const closeSearch = useCallback(() => {
+    setSearchOpen(false);
+    editor?.commands.clearSearch();
+    syncSearchState();
+    editor?.commands.focus();
+  }, [editor, syncSearchState]);
+
+  // Intercept Cmd/Ctrl+F while the plan editor is mounted and open the find
+  // bar instead of the WebView's native find.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === "f" || e.key === "F")) {
+        e.preventDefault();
+        setSearchOpen(true);
+        // Re-run the prior query against the latest doc so the count is fresh.
+        if (editor && searchQuery) {
+          editor.commands.setSearchQuery(searchQuery);
+          syncSearchState();
+        }
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [editor, searchQuery, syncSearchState]);
+
+  return (
+    <div className="rl-editor-host">
+      {searchOpen && (
+        <PlanSearchBox
+          query={searchQuery}
+          onQueryChange={runSearch}
+          matchCount={searchCount}
+          activeIndex={searchActive}
+          onNext={() => stepSearch("next")}
+          onPrev={() => stepSearch("prev")}
+          onClose={closeSearch}
+        />
+      )}
+      <EditorContent editor={editor} />
+    </div>
+  );
 }
 
 /** Minimal CSS.escape polyfill — Tauri WebViews support it but TS lib defs

@@ -6,8 +6,9 @@ export interface DiffPart {
 }
 
 /** Tokenize keeping whitespace as its own tokens so concatenating tokens
- *  reproduces the input exactly. */
-function tokenize(s: string): string[] {
+ *  reproduces the input exactly. Exported for the sub-block addressing
+ *  resolver / capture path so word indices stay in lockstep with the diff. */
+export function tokenize(s: string): string[] {
   return s.split(/(\s+)/).filter((t) => t.length > 0);
 }
 
@@ -60,4 +61,40 @@ export function diffWords(original: string, revised: string): DiffPart[] {
     else out.push({ ...p });
   }
   return out;
+}
+
+/**
+ * A one-line summary of an edit for the comment pane: the full word diff with
+ * long `equal` runs trimmed to a little context around each change (and an `…`
+ * marking where text was elided). Changed runs are kept verbatim, except an
+ * unusually long single run is itself middle-truncated. Callers render the
+ * returned parts with strike (delete) / accent (insert) styling.
+ */
+export function compactEditPreview(
+  original: string,
+  revised: string,
+  context = 18,
+): DiffPart[] {
+  const parts = diffWords(original, revised);
+  return parts.map((p, idx) => {
+    if (p.kind !== "equal") {
+      // Cap a single huge changed run so one giant paste can't fill the line.
+      if (p.text.length > context * 3) {
+        return {
+          kind: p.kind,
+          text: `${p.text.slice(0, context)}…${p.text.slice(-context / 2)}`,
+        };
+      }
+      return p;
+    }
+    if (p.text.length <= context * 2) return p;
+    const first = idx === 0;
+    const lastPart = idx === parts.length - 1;
+    if (first) return { kind: "equal", text: `…${p.text.slice(-context)}` };
+    if (lastPart) return { kind: "equal", text: `${p.text.slice(0, context)}…` };
+    return {
+      kind: "equal",
+      text: `${p.text.slice(0, context)} … ${p.text.slice(-context)}`,
+    };
+  });
 }

@@ -9,11 +9,19 @@ interface SessionSidebarProps {
   activeId: string | null;
   pendingCounts: Record<string, number>;
   onSelect: (id: string) => void;
-  /** Delete a finished session. Only offered when its terminal is inactive
-   *  (`!session.held`); the backend rejects held sessions defensively. */
+  /** Delete a session. Held sessions are deleted with force=true, which
+   *  drains the orphaned hook response so Claude Code's terminal unblocks
+   *  before the row disappears. */
   onDelete: (id: string) => void;
-  /** Download a specific revision as a clean .md file. */
+  /** Download a specific revision as a clean .md file. Kept as a separate
+   *  affordance (header button) — sidebar row clicks no longer download. */
   onExport: (sessionId: string, versionNumber: number) => void;
+  /** Load a specific revision into the document pane for in-place viewing.
+   *  `null` means "back to the latest revision". */
+  onSelectRevision: (sessionId: string, versionNumber: number | null) => void;
+  /** Which revision is currently displayed in the pane for the active
+   *  session. `null` means the latest. Used to highlight the row. */
+  viewedVersionNumber: number | null;
 }
 
 const STATUS_COLORS: Record<SessionSummary["status"], string> = {
@@ -43,6 +51,8 @@ export function SessionSidebar({
   onSelect,
   onDelete,
   onExport,
+  onSelectRevision,
+  viewedVersionNumber,
 }: SessionSidebarProps) {
   // Which sessions are expanded to show their revision tree. The active
   // session auto-expands so its history is visible the moment it's selected.
@@ -68,23 +78,13 @@ export function SessionSidebar({
     });
 
   return (
-    <aside
-      className="border-r overflow-y-auto shrink-0"
-      style={{
-        width: "240px",
-        borderColor: "var(--color-rule)",
-        background: "var(--color-paper)",
-      }}
+    <div
+      className="flex-1 overflow-y-auto"
+      style={{ background: "var(--color-paper)" }}
     >
       <div
-        className="px-3 py-2 border-b"
-        style={{
-          borderColor: "var(--color-rule)",
-          fontSize: "11px",
-          textTransform: "uppercase",
-          letterSpacing: "0.08em",
-          color: "var(--color-ink-muted)",
-        }}
+        className="rl-chrome-label px-3 py-2 border-b"
+        style={{ borderColor: "var(--color-rule)" }}
       >
         Sessions
       </div>
@@ -104,15 +104,19 @@ export function SessionSidebar({
               active={s.sessionId === activeId}
               expanded={expanded.has(s.sessionId)}
               pending={pendingCounts[s.sessionId] ?? 0}
+              viewedVersionNumber={
+                s.sessionId === activeId ? viewedVersionNumber : null
+              }
               onClick={() => onSelect(s.sessionId)}
               onToggleExpand={() => toggleExpand(s.sessionId)}
               onDelete={() => onDelete(s.sessionId)}
               onExport={onExport}
+              onSelectRevision={onSelectRevision}
             />
           ))}
         </ul>
       )}
-    </aside>
+    </div>
   );
 }
 
@@ -121,19 +125,25 @@ function SessionRow({
   active,
   expanded,
   pending,
+  viewedVersionNumber,
   onClick,
   onToggleExpand,
   onDelete,
   onExport,
+  onSelectRevision,
 }: {
   session: SessionSummary;
   active: boolean;
   expanded: boolean;
   pending: number;
+  /** Which revision the active pane is viewing — only relevant on the active
+   *  session row, used to highlight the corresponding RevisionRow. */
+  viewedVersionNumber: number | null;
   onClick: () => void;
   onToggleExpand: () => void;
   onDelete: () => void;
   onExport: (sessionId: string, versionNumber: number) => void;
+  onSelectRevision: (sessionId: string, versionNumber: number | null) => void;
 }) {
   const [confirming, setConfirming] = useState(false);
 
@@ -158,69 +168,76 @@ function SessionRow({
       >
         {expanded ? "▾" : "▸"}
       </button>
-      {!session.held &&
-        (confirming ? (
-          <div
-            className="absolute right-2 top-2 z-10 flex items-center gap-1"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <button
-              type="button"
-              title="Confirm delete (cannot be undone)"
-              onClick={(e) => {
-                e.stopPropagation();
-                setConfirming(false);
-                onDelete();
-              }}
-              className="rounded px-1.5"
-              style={{
-                color: "var(--color-on-accent)",
-                background: "var(--color-warning)",
-                fontSize: "11px",
-                lineHeight: 1.5,
-                fontWeight: 600,
-              }}
-            >
-              Delete
-            </button>
-            <button
-              type="button"
-              title="Cancel"
-              onClick={(e) => {
-                e.stopPropagation();
-                setConfirming(false);
-              }}
-              className="rounded px-1.5"
-              style={{
-                color: "var(--color-ink-muted)",
-                background: "var(--color-anchor-bg)",
-                fontSize: "11px",
-                lineHeight: 1.5,
-              }}
-            >
-              Cancel
-            </button>
-          </div>
-        ) : (
+      {confirming ? (
+        <div
+          className="absolute right-2 top-2 z-10 flex items-center gap-1"
+          onClick={(e) => e.stopPropagation()}
+        >
           <button
             type="button"
-            aria-label="Delete session"
-            title="Delete this session"
+            title={
+              session.held
+                ? "Delete this session and release Claude Code's blocked terminal (cannot be undone)"
+                : "Confirm delete (cannot be undone)"
+            }
             onClick={(e) => {
               e.stopPropagation();
-              setConfirming(true);
+              setConfirming(false);
+              onDelete();
             }}
-            className="absolute right-2 top-2 z-10 rounded px-1.5 opacity-0 group-hover:opacity-100 transition-opacity"
+            className="rounded px-1.5"
+            style={{
+              color: "var(--color-on-accent)",
+              background: "var(--color-warning)",
+              fontSize: "11px",
+              lineHeight: 1.5,
+              fontWeight: 600,
+            }}
+          >
+            {session.held ? "Delete (release Claude)" : "Delete"}
+          </button>
+          <button
+            type="button"
+            title="Cancel"
+            onClick={(e) => {
+              e.stopPropagation();
+              setConfirming(false);
+            }}
+            className="rounded px-1.5"
             style={{
               color: "var(--color-ink-muted)",
               background: "var(--color-anchor-bg)",
-              fontSize: "12px",
-              lineHeight: 1.4,
+              fontSize: "11px",
+              lineHeight: 1.5,
             }}
           >
-            ✕
+            Cancel
           </button>
-        ))}
+        </div>
+      ) : (
+        <button
+          type="button"
+          aria-label="Delete session"
+          title={
+            session.held
+              ? "Delete this session (will release Claude Code's blocked terminal)"
+              : "Delete this session"
+          }
+          onClick={(e) => {
+            e.stopPropagation();
+            setConfirming(true);
+          }}
+          className="absolute right-2 top-2 z-10 rounded px-1.5 opacity-0 group-hover:opacity-100 transition-opacity"
+          style={{
+            color: "var(--color-ink-muted)",
+            background: "var(--color-anchor-bg)",
+            fontSize: "12px",
+            lineHeight: 1.4,
+          }}
+        >
+          ✕
+        </button>
+      )}
       <button
         type="button"
         onClick={onClick}
@@ -283,43 +300,71 @@ function SessionRow({
       </button>
       {expanded && (
         <ul className="border-b" style={{ borderColor: "var(--color-rule)" }}>
-          {session.revisions.map((r, idx) => (
-            <RevisionRow
-              key={r.versionNumber}
-              revision={r}
-              current={active && r.versionNumber === session.latestVersion}
-              threadBoundary={r.threadStart && idx > 0}
-              onExport={() => onExport(session.sessionId, r.versionNumber)}
-            />
-          ))}
+          {session.revisions.map((r, idx) => {
+            const isLatest = r.versionNumber === session.latestVersion;
+            // Highlight the row currently displayed in the document pane:
+            // either the explicitly-viewed historical revision, or the latest
+            // when no historical view is selected.
+            const viewed =
+              active &&
+              (viewedVersionNumber === null
+                ? isLatest
+                : r.versionNumber === viewedVersionNumber);
+            return (
+              <RevisionRow
+                key={r.versionNumber}
+                revision={r}
+                viewed={viewed}
+                isLatest={isLatest}
+                threadBoundary={r.threadStart && idx > 0}
+                onSelect={() =>
+                  onSelectRevision(
+                    session.sessionId,
+                    isLatest ? null : r.versionNumber,
+                  )
+                }
+                onExport={() => onExport(session.sessionId, r.versionNumber)}
+              />
+            );
+          })}
         </ul>
       )}
     </li>
   );
 }
 
-/** One revision under an expanded session. The whole row is a download
- *  affordance — clicking it exports that revision as clean markdown. */
+/** One revision under an expanded session. Row click loads that revision
+ *  into the document pane for read-only viewing/compare. A small download
+ *  icon on the right exports the same revision as clean markdown. */
 function RevisionRow({
   revision,
-  current,
+  viewed,
+  isLatest,
   threadBoundary,
+  onSelect,
   onExport,
 }: {
   revision: RevisionSummary;
-  current: boolean;
+  /** This row is the one currently shown in the document pane. */
+  viewed: boolean;
+  /** Convenience: the latest revision of the session. Affects the title. */
+  isLatest: boolean;
   threadBoundary: boolean;
+  onSelect: () => void;
   onExport: () => void;
 }) {
+  const title = isLatest
+    ? `View v${revision.versionNumber} (latest)`
+    : `View v${revision.versionNumber} in the document pane`;
   return (
     <li>
       <button
         type="button"
-        onClick={onExport}
-        title={`Download v${revision.versionNumber} as a Markdown file`}
-        className="hover-elevated w-full text-left flex items-center justify-between gap-2 pl-8 pr-3 py-1"
+        onClick={onSelect}
+        title={title}
+        className="hover-elevated w-full text-left flex items-center justify-between gap-2 pl-8 pr-2 py-1"
         style={{
-          background: current ? "var(--color-bg-elevated)" : "transparent",
+          background: viewed ? "var(--color-bg-elevated)" : "transparent",
           borderTop: threadBoundary
             ? "1px solid var(--color-rule)"
             : undefined,
@@ -331,8 +376,8 @@ function RevisionRow({
             className="font-mono"
             style={{
               fontSize: "11px",
-              fontWeight: current ? 600 : 400,
-              color: current ? "var(--color-ink)" : "var(--color-ink-muted)",
+              fontWeight: viewed ? 600 : 400,
+              color: viewed ? "var(--color-ink)" : "var(--color-ink-muted)",
             }}
           >
             v{revision.versionNumber}
@@ -350,11 +395,37 @@ function RevisionRow({
             </span>
           )}
         </span>
-        <span
-          className="shrink-0"
-          style={{ fontSize: "10px", color: "var(--color-ink-muted)" }}
-        >
-          {formatTime(revision.receivedAt)}
+        <span className="flex items-center gap-1 shrink-0">
+          <span style={{ fontSize: "10px", color: "var(--color-ink-muted)" }}>
+            {formatTime(revision.receivedAt)}
+          </span>
+          {/* Download stays available per-row — separate affordance from
+              row click, since clicking the row now loads into the pane. */}
+          <span
+            role="button"
+            tabIndex={0}
+            aria-label={`Download v${revision.versionNumber} as a Markdown file`}
+            title={`Download v${revision.versionNumber} as a Markdown file`}
+            onClick={(e) => {
+              e.stopPropagation();
+              onExport();
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                e.stopPropagation();
+                onExport();
+              }
+            }}
+            className="rounded px-1 opacity-60 hover:opacity-100"
+            style={{
+              fontSize: "11px",
+              color: "var(--color-ink-muted)",
+              cursor: "pointer",
+            }}
+          >
+            ↓
+          </span>
         </span>
       </button>
     </li>

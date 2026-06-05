@@ -359,20 +359,166 @@ fn parse_collect(markdown: &str) -> (Vec<Section>, Vec<(usize, String)>, String)
     (sections, injections, stripped)
 }
 
-/// If `s` (trimmed) is exactly a redline block sidecar, return its block id.
-fn parse_sidecar_id(s: &str) -> Option<String> {
-    let inner = s.strip_prefix("<!--")?.strip_suffix("-->")?.trim();
-    let id = inner.strip_prefix("rl:")?.trim();
-    let rest = id.strip_prefix("blk-")?;
-    if !rest.is_empty()
-        && rest
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        Some(id.to_string())
+/// The axis a sub-block sidecar addresses against.
+///
+/// Lines and sentences are mutually exclusive within a single id. Lines are
+/// the natural unit for code blocks, lists, and blockquotes (where the
+/// markdown source carries hard newlines); sentences are the natural unit
+/// for prose paragraphs (where source-line indexing would collapse to
+/// `.l1` for everything).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubAxis {
+    /// 1-based source-line index within the block's markdown body.
+    Line(u32),
+    /// 1-based sentence index within the block's prose.
+    Sentence(u32),
+}
+
+/// 1-based inclusive word range under a [`SubAxis`]. `start == end` for a
+/// single word.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WordRange {
+    pub start: u32,
+    pub end: u32,
+}
+
+/// Parsed form of the redline sidecar id (`blk-…` plus optional sub-block
+/// suffix). The opaque string form remains the wire format — this enum is
+/// for callers that need to introspect line / sentence / word indices.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SidecarId {
+    /// Just the block id, e.g. `blk-7f3a1c40`.
+    Block(String),
+    /// Block id plus a sub-block axis (and optional word range under it).
+    SubBlock {
+        block: String,
+        axis: SubAxis,
+        words: Option<WordRange>,
+    },
+}
+
+impl SidecarId {
+    /// Block id this sidecar lives under (always present). Public for the
+    /// upcoming diff-decomposition pass (Phase D) which keys sub-block
+    /// statuses by their parent block id.
+    #[allow(dead_code)]
+    pub fn block_id(&self) -> &str {
+        match self {
+            SidecarId::Block(b) => b,
+            SidecarId::SubBlock { block, .. } => block,
+        }
+    }
+
+    /// Canonical string form — the inverse of [`Self::parse`]. Round-trips
+    /// byte-identically with the grammar tests.
+    pub fn to_canonical_string(&self) -> String {
+        let mut out = String::with_capacity(24);
+        match self {
+            SidecarId::Block(b) => out.push_str(b),
+            SidecarId::SubBlock { block, axis, words } => {
+                out.push_str(block);
+                match axis {
+                    SubAxis::Line(n) => {
+                        out.push_str(".l");
+                        out.push_str(&n.to_string());
+                    }
+                    SubAxis::Sentence(n) => {
+                        out.push_str(".s");
+                        out.push_str(&n.to_string());
+                    }
+                }
+                if let Some(w) = words {
+                    out.push_str(".w");
+                    out.push_str(&w.start.to_string());
+                    if w.end != w.start {
+                        out.push_str("-w");
+                        out.push_str(&w.end.to_string());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Parse the inner id (no `<!-- rl:` / `-->` wrappers). Returns `None`
+    /// for any malformed input — empty pieces, double dots, missing
+    /// indices, reversed word ranges, leading/trailing dots, unknown axes.
+    pub fn parse(s: &str) -> Option<Self> {
+        // Block portion: required, `blk-<alphanumeric/-_>+`.
+        let mut parts = s.split('.');
+        let block_part = parts.next()?;
+        let rest = block_part.strip_prefix("blk-")?;
+        if rest.is_empty()
+            || !rest
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return None;
+        }
+        let block = block_part.to_string();
+
+        // Optional axis portion (`l<digits>` or `s<digits>`).
+        let axis_part = match parts.next() {
+            Some(p) => p,
+            None => return Some(SidecarId::Block(block)),
+        };
+        let axis = parse_axis(axis_part)?;
+
+        // Optional word range portion (`w<digits>` or `w<digits>-w<digits>`).
+        let words = match parts.next() {
+            Some(p) => Some(parse_word_range(p)?),
+            None => None,
+        };
+
+        // Nothing else is allowed past the word range.
+        if parts.next().is_some() {
+            return None;
+        }
+        Some(SidecarId::SubBlock {
+            block,
+            axis,
+            words,
+        })
+    }
+}
+
+fn parse_axis(s: &str) -> Option<SubAxis> {
+    if let Some(rest) = s.strip_prefix('l') {
+        let n: u32 = rest.parse().ok().filter(|&n| n >= 1)?;
+        Some(SubAxis::Line(n))
+    } else if let Some(rest) = s.strip_prefix('s') {
+        let n: u32 = rest.parse().ok().filter(|&n| n >= 1)?;
+        Some(SubAxis::Sentence(n))
     } else {
         None
     }
+}
+
+fn parse_word_range(s: &str) -> Option<WordRange> {
+    let body = s.strip_prefix('w')?;
+    if body.is_empty() {
+        return None;
+    }
+    if let Some((start_s, end_s)) = body.split_once("-w") {
+        let start: u32 = start_s.parse().ok().filter(|&n| n >= 1)?;
+        let end: u32 = end_s.parse().ok().filter(|&n| n >= start)?;
+        Some(WordRange { start, end })
+    } else {
+        let n: u32 = body.parse().ok().filter(|&n| n >= 1)?;
+        Some(WordRange { start: n, end: n })
+    }
+}
+
+/// If `s` (trimmed) is exactly a redline sidecar, return its canonical id
+/// string. Accepts the full sub-block grammar (`blk-XXX[.lN|.sN][.wN[-wM]]`)
+/// — sub-block ids round-trip through [`apply_injections`] unchanged because
+/// the byte stream stays opaque to the splicer.
+fn parse_sidecar_id(s: &str) -> Option<String> {
+    let inner = s.strip_prefix("<!--")?.strip_suffix("-->")?.trim();
+    let id = inner.strip_prefix("rl:")?.trim();
+    // The SidecarId parser is our canonical grammar definition; gating on
+    // it here means malformed ids never enter the document model.
+    SidecarId::parse(id).map(|sid| sid.to_canonical_string())
 }
 
 fn mint_block_id() -> String {
@@ -956,6 +1102,69 @@ Tail paragraph.
         assert_eq!(parse_sidecar_id("<!-- rl:other -->"), None);
         assert_eq!(parse_sidecar_id("<!-- rl:blk- -->"), None);
         assert_eq!(parse_sidecar_id("plain text"), None);
+        // Sub-block grammar accepted end-to-end. The canonical string form
+        // round-trips so callers comparing raw id strings still work.
+        assert_eq!(
+            parse_sidecar_id("<!-- rl:blk-7f3a.l2 -->"),
+            Some("blk-7f3a.l2".into())
+        );
+        assert_eq!(
+            parse_sidecar_id("<!-- rl:blk-7f3a.l2.w5 -->"),
+            Some("blk-7f3a.l2.w5".into())
+        );
+        assert_eq!(
+            parse_sidecar_id("<!-- rl:blk-7f3a.s3.w2-w4 -->"),
+            Some("blk-7f3a.s3.w2-w4".into())
+        );
+        // Single-word ranges canonicalize without the redundant `-wN` half.
+        assert_eq!(
+            parse_sidecar_id("<!-- rl:blk-7f3a.l1.w1-w1 -->"),
+            Some("blk-7f3a.l1.w1".into())
+        );
+        // Malformed: empty pieces, zero indices, axisless, reversed range,
+        // unknown axis.
+        assert_eq!(parse_sidecar_id("<!-- rl:blk-7f3a. -->"), None);
+        assert_eq!(parse_sidecar_id("<!-- rl:blk-7f3a..l1 -->"), None);
+        assert_eq!(parse_sidecar_id("<!-- rl:blk-7f3a.l0 -->"), None);
+        assert_eq!(parse_sidecar_id("<!-- rl:blk-7f3a.l -->"), None);
+        assert_eq!(parse_sidecar_id("<!-- rl:blk-7f3a.x2 -->"), None);
+        assert_eq!(parse_sidecar_id("<!-- rl:blk-7f3a.l2.w5-w2 -->"), None);
+        assert_eq!(parse_sidecar_id("<!-- rl:blk-7f3a.l2.w5.extra -->"), None);
+    }
+
+    #[test]
+    fn sidecar_id_round_trip_canonical_strings() {
+        // The canonical string form of every grammar shape parses back to
+        // the same enum value — the load-bearing invariant for any code
+        // that introspects ids (Phase C resolver, Phase D diff decomposer).
+        let cases = [
+            "blk-abc12345",
+            "blk-abc12345.l2",
+            "blk-abc12345.s3",
+            "blk-abc12345.l2.w5",
+            "blk-abc12345.l2.w5-w8",
+            "blk-abc12345.s3.w2",
+            "blk-abc12345.s3.w2-w4",
+        ];
+        for s in cases {
+            let parsed = SidecarId::parse(s).unwrap_or_else(|| panic!("parse {s}"));
+            assert_eq!(parsed.to_canonical_string(), s);
+        }
+        // Block-id getter works for both arms.
+        assert_eq!(
+            SidecarId::parse("blk-abc12345.s3.w2-w4").unwrap().block_id(),
+            "blk-abc12345"
+        );
+    }
+
+    #[test]
+    fn strip_sidecar_lines_strips_sub_block_sidecars_too() {
+        // `strip_sidecar_lines` keys on the `<!-- rl:blk-` prefix so the
+        // new grammar's sidecars are stripped without code change. Pinning
+        // this so the prefix invariant doesn't regress.
+        let md = "<!-- rl:blk-abc -->\n# h\n\n<!-- rl:blk-abc.s2.w3 -->\npara\n";
+        let stripped = strip_sidecar_lines(md);
+        assert_eq!(stripped, "# h\n\npara\n");
     }
 
     #[test]

@@ -33,6 +33,22 @@ export function Footer({
   );
   const counts = countByType(pending);
   const total = pending.length;
+  // "All resolutions handled" surfaces once the reviewer has dispatched every
+  // Claude resolution in the current revision: nothing pending, nothing still
+  // sitting at resolved (i.e. awaiting accept/reopen), and at least one comment
+  // has reached a terminal state. The line is a nudge, not a state machine —
+  // the buttons below already drive everything.
+  const hasUnreviewedResolution = comments.some(
+    (c) => c.status === "resolved",
+  );
+  const hasTerminalComment = comments.some(
+    (c) => c.status === "accepted" || c.status === "withdrawn",
+  );
+  const allResolutionsHandled =
+    total === 0 &&
+    !hasUnreviewedResolution &&
+    hasTerminalComment &&
+    !waiting;
   // Ask-mode whenever the tray is non-empty and every pending comment is a
   // question — the backend infers the same way, this is purely for UI
   // labelling. Mixed batches stay in "Continue revising".
@@ -41,6 +57,14 @@ export function Footer({
   const waitingCopy = askMode
     ? "Waiting for Claude's answer…"
     : "Waiting for Claude's revision…";
+
+  // Semantic status dot for the footer: amber while you have pending work,
+  // info-blue while Claude is in-flight, success-green when the tray is clear.
+  const dotColor = waiting
+    ? "var(--color-info)"
+    : total > 0
+      ? "var(--color-warning)"
+      : "var(--color-success)";
 
   return (
     <footer
@@ -52,8 +76,23 @@ export function Footer({
       }}
     >
       <span className="flex items-center gap-2">
+        <span
+          aria-hidden
+          style={{
+            width: 8,
+            height: 8,
+            borderRadius: 9999,
+            background: dotColor,
+            display: "inline-block",
+          }}
+        />
         {waiting ? (
           <span className="italic">{waitingCopy}</span>
+        ) : allResolutionsHandled ? (
+          <span style={{ color: "var(--color-success)" }}>
+            All resolutions handled — Approve plan, or add another round of
+            comments.
+          </span>
         ) : total === 0 ? (
           "no pending comments"
         ) : (
@@ -147,9 +186,21 @@ function Badge({
   label: string;
   color: string;
 }) {
+  // Tracked microtype on the label keeps the chrome reading as an IDE/editor
+  // surface. The count stays in the normal type for legibility.
   return (
     <span style={{ color }}>
-      {n} {label}
+      {n}{" "}
+      <span
+        style={{
+          textTransform: "uppercase",
+          letterSpacing: "0.12em",
+          fontSize: "11px",
+          fontWeight: 600,
+        }}
+      >
+        {label}
+      </span>
     </span>
   );
 }

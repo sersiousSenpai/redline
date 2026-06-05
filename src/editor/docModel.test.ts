@@ -67,7 +67,10 @@ describe("computeParagraphDiff + revisionEditByBlockId — Bug 2 round-trip", ()
       section("A", "blk-h", [para("A.p1", "blk-p1", "reworded")]),
     ];
     const diff = computeParagraphDiff(curr, prev);
-    expect(diff.get("A.p1")).toEqual({
+    // Loose match: Phase D adds an optional `subBlocks` decomposition
+    // alongside the status/originalText pair; this test cares about
+    // routing, not the decomposition payload.
+    expect(diff.get("A.p1")).toMatchObject({
       status: "modified",
       originalText: "original",
     });
@@ -90,7 +93,10 @@ describe("computeParagraphDiff + revisionEditByBlockId — Bug 2 round-trip", ()
       section("A", "blk-h", [para("A.p1", "blk-fresh", "reworded")]),
     ];
     const diff = computeParagraphDiff(curr, prev);
-    expect(diff.get("A.p1")).toEqual({
+    // Loose match: Phase D adds an optional `subBlocks` decomposition
+    // alongside the status/originalText pair; this test cares about
+    // routing, not the decomposition payload.
+    expect(diff.get("A.p1")).toMatchObject({
       status: "modified",
       originalText: "original",
     });

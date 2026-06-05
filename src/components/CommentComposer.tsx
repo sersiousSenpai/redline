@@ -17,6 +17,10 @@ interface CommentComposerProps {
    *  highlight and click-bridge it with the card. */
   charStart: number;
   charEnd: number;
+  /** Sub-block sidecar id (`blk-X.s3.w2-w4` style) when the selection
+   *  landed on whole-unit boundaries. Stored on the comment as the
+   *  primary, reflow-stable anchor; char offsets stay as the fallback. */
+  subBlockId?: string;
   onCancel: () => void;
   onSubmit: (request: NewCommentRequest) => Promise<void>;
 }
@@ -45,6 +49,7 @@ export function CommentComposer({
   selectedText,
   charStart,
   charEnd,
+  subBlockId,
   onCancel,
   onSubmit,
 }: CommentComposerProps) {
@@ -74,7 +79,7 @@ export function CommentComposer({
       // an empty highlight.
       const selection =
         charEnd > charStart
-          ? { charStart, charEnd, quotedText: selectedText }
+          ? { charStart, charEnd, quotedText: selectedText, subBlockId }
           : undefined;
       const req: NewCommentRequest =
         type === "edit"

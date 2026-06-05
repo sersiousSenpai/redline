@@ -201,6 +201,15 @@ impl Database {
             "ALTER TABLE comments ADD COLUMN fork_session_id TEXT",
             [],
         );
+        // Sub-block-grained selection anchor (e.g. `blk-X.s3.w2-w4`). NULL
+        // for pre-feature rows and for any selection that doesn't land on a
+        // clean word / line / sentence boundary — the comment still has
+        // `sel_char_start` / `sel_char_end` as its primary anchor, and the
+        // resolver tiers through this id first when present.
+        let _ = conn.execute(
+            "ALTER TABLE comments ADD COLUMN sel_sub_block_id TEXT",
+            [],
+        );
         Ok(())
     }
 
@@ -287,22 +296,25 @@ impl Database {
             .structural
             .as_ref()
             .and_then(|s| serde_json::to_string(s).ok());
-        let (sel_char_start, sel_char_end, sel_quoted_text) = match &comment.selection {
-            Some(s) => (
-                Some(s.char_start as i64),
-                Some(s.char_end as i64),
-                Some(s.quoted_text.as_str()),
-            ),
-            None => (None, None, None),
-        };
+        let (sel_char_start, sel_char_end, sel_quoted_text, sel_sub_block_id) =
+            match &comment.selection {
+                Some(s) => (
+                    Some(s.char_start as i64),
+                    Some(s.char_end as i64),
+                    Some(s.quoted_text.as_str()),
+                    s.sub_block_id.as_deref(),
+                ),
+                None => (None, None, None, None),
+            };
         conn.execute(
             "INSERT INTO comments (
                 id, session_id, version_number, type, scope, anchor_id,
                 body, edit_original, edit_revised, created_at, status,
                 resolution_body, resolution_version, resolution_accepted_at,
                 block_id, structural_json,
-                sel_char_start, sel_char_end, sel_quoted_text
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                sel_char_start, sel_char_end, sel_quoted_text,
+                sel_sub_block_id
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 comment.id,
                 session_id,
@@ -323,6 +335,7 @@ impl Database {
                 sel_char_start,
                 sel_char_end,
                 sel_quoted_text,
+                sel_sub_block_id,
             ],
         )?;
         Ok(())
@@ -342,14 +355,16 @@ impl Database {
             .structural
             .as_ref()
             .and_then(|s| serde_json::to_string(s).ok());
-        let (sel_char_start, sel_char_end, sel_quoted_text) = match &comment.selection {
-            Some(s) => (
-                Some(s.char_start as i64),
-                Some(s.char_end as i64),
-                Some(s.quoted_text.as_str()),
-            ),
-            None => (None, None, None),
-        };
+        let (sel_char_start, sel_char_end, sel_quoted_text, sel_sub_block_id) =
+            match &comment.selection {
+                Some(s) => (
+                    Some(s.char_start as i64),
+                    Some(s.char_end as i64),
+                    Some(s.quoted_text.as_str()),
+                    s.sub_block_id.as_deref(),
+                ),
+                None => (None, None, None, None),
+            };
         conn.execute(
             "UPDATE comments SET
                 scope = ?1,
@@ -364,8 +379,9 @@ impl Database {
                 structural_json = ?10,
                 sel_char_start = ?11,
                 sel_char_end = ?12,
-                sel_quoted_text = ?13
-             WHERE session_id = ?14 AND id = ?15",
+                sel_quoted_text = ?13,
+                sel_sub_block_id = ?14
+             WHERE session_id = ?15 AND id = ?16",
             params![
                 comment.scope.map(|s| s.as_str()),
                 comment.body,
@@ -380,6 +396,7 @@ impl Database {
                 sel_char_start,
                 sel_char_end,
                 sel_quoted_text,
+                sel_sub_block_id,
                 session_id,
                 comment.id,
             ],
@@ -389,6 +406,13 @@ impl Database {
 
     pub fn delete_comment(&self, session_id: &str, comment_id: &str) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
+        // Cascade the comment's discussion thread. Comment ids are reused
+        // (`c-{max+1}`), so leaving these rows would resurface a deleted
+        // comment's answer under the next comment that inherits its id.
+        conn.execute(
+            "DELETE FROM thread_messages WHERE session_id = ?1 AND comment_id = ?2",
+            params![session_id, comment_id],
+        )?;
         conn.execute(
             "DELETE FROM comments WHERE session_id = ?1 AND id = ?2",
             params![session_id, comment_id],
@@ -400,6 +424,10 @@ impl Database {
     /// this is correct regardless of the `foreign_keys` PRAGMA.
     pub fn delete_session(&self, session_id: &str) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM thread_messages WHERE session_id = ?1",
+            params![session_id],
+        )?;
         conn.execute(
             "DELETE FROM comments WHERE session_id = ?1",
             params![session_id],
@@ -586,7 +614,8 @@ impl Database {
                     body, edit_original, edit_revised, created_at, status,
                     resolution_body, resolution_version, resolution_accepted_at,
                     block_id, structural_json,
-                    sel_char_start, sel_char_end, sel_quoted_text
+                    sel_char_start, sel_char_end, sel_quoted_text,
+                    sel_sub_block_id
              FROM comments
              ORDER BY session_id, version_number, created_at",
         )?;
@@ -622,11 +651,13 @@ impl Database {
             let sel_char_start: Option<i64> = row.get(16)?;
             let sel_char_end: Option<i64> = row.get(17)?;
             let sel_quoted_text: Option<String> = row.get(18)?;
+            let sel_sub_block_id: Option<String> = row.get(19)?;
             let selection = match (sel_char_start, sel_char_end, sel_quoted_text) {
                 (Some(start), Some(end), Some(text)) => Some(CommentSelection {
                     char_start: start.max(0) as u32,
                     char_end: end.max(0) as u32,
                     quoted_text: text,
+                    sub_block_id: sel_sub_block_id,
                 }),
                 _ => None,
             };
@@ -848,6 +879,44 @@ mod tests {
         assert!(db.load_thread("s1", "c-001").unwrap().is_empty());
         // The scoped delete left the other comment's message intact.
         assert_eq!(db.load_thread("s1", "c-002").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn deleting_comment_cascades_its_thread() {
+        let store = make_store();
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("s1", "/tmp/x", md.to_string(), reparse_sections(md), true);
+        let mk_q = || NewCommentRequest {
+            kind: CommentKind::Question,
+            scope: None,
+            anchor_id: "A".to_string(),
+            block_id: None,
+            structural: None,
+            body: "why?".to_string(),
+            edit: None,
+            selection: None,
+        };
+        store.add_comment("s1", mk_q()).expect("add comment");
+        let db = store.database();
+        db.insert_thread_message(&ThreadMessage {
+            id: "m1".to_string(),
+            session_id: "s1".to_string(),
+            comment_id: "c-001".to_string(),
+            role: "assistant".to_string(),
+            body: "old answer".to_string(),
+            status: "complete".to_string(),
+            created_at: 100,
+        })
+        .unwrap();
+
+        store.delete_comment("s1", "c-001");
+        assert!(db.load_thread("s1", "c-001").unwrap().is_empty());
+
+        // A new comment reuses the id `c-001` — it must start with an empty
+        // thread, not resurface the deleted comment's answer.
+        let reused = store.add_comment("s1", mk_q()).expect("re-add comment");
+        assert_eq!(reused.id, "c-001");
+        assert!(db.load_thread("s1", "c-001").unwrap().is_empty());
     }
 
     #[test]

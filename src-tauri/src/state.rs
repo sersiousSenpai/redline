@@ -311,12 +311,22 @@ pub struct Resolution {
 /// bridge with the comment card. Block-relative so it survives Tiptap
 /// transactions and revision regenerations (block_ids are stable, absolute
 /// PM positions are not).
+///
+/// `sub_block_id`, when present, names the selection's range structurally
+/// (e.g. `blk-X.s3.w2-w4` = sentence 3, words 2..4 of block X). The
+/// resolver tiers through it first — stable across any revise where the
+/// parent block survives — then falls back to `char_start`/`char_end`,
+/// finally to `quoted_text` self-heal. Set only when the original
+/// selection landed on whole-word / whole-line / whole-sentence
+/// boundaries; partial selections leave it `None`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommentSelection {
     pub char_start: u32,
     pub char_end: u32,
     pub quoted_text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_block_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -781,6 +791,29 @@ impl SessionStore {
             }
         }
         ids
+    }
+
+    /// Roll back a failed `submit_review`: restore the listed comments from
+    /// Submitted back to Draft so the reviewer can re-run the plan and resubmit.
+    /// (A reopened-then-submitted comment also returns to Draft — its content is
+    /// preserved and it stays editable, which is all the rollback needs.)
+    pub fn unmark_submitted(&self, session_id: &str, ids: &[String]) {
+        let mut map = self.inner.lock().unwrap();
+        let Some(session) = map.get_mut(session_id) else {
+            return;
+        };
+        for revision in session.revisions.iter_mut() {
+            for comment in revision.comments.iter_mut() {
+                if matches!(comment.status, CommentStatus::Submitted)
+                    && ids.contains(&comment.id)
+                {
+                    comment.status = CommentStatus::Draft;
+                    if let Err(e) = self.db.update_comment(session_id, comment) {
+                        tracing::error!(error = %e, "failed to persist submit rollback");
+                    }
+                }
+            }
+        }
     }
 
     pub fn set_status(&self, session_id: &str, status: SessionStatus) {

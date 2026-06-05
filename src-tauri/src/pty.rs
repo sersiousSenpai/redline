@@ -26,9 +26,12 @@ struct PtySession {
     pid: Option<u32>,
 }
 
-/// Registry of live PTYs keyed by the frontend-assigned terminal id.
+/// Registry of live PTYs keyed by the frontend-assigned terminal id. The outer
+/// mutex guards only the map structure (insert/remove/lookup, microsecond
+/// criticals). Each session has its own inner mutex for write/resize I/O — so
+/// a stalled child shell on one tab can't block sibling tabs.
 #[derive(Clone, Default)]
-pub struct PtyState(Arc<Mutex<HashMap<String, PtySession>>>);
+pub struct PtyState(Arc<Mutex<HashMap<String, Arc<Mutex<PtySession>>>>>);
 
 impl PtyState {
     pub fn new() -> Self {
@@ -110,12 +113,12 @@ pub fn pty_spawn(
 
     guard.insert(
         id.clone(),
-        PtySession {
+        Arc::new(Mutex::new(PtySession {
             master: pair.master,
             writer,
             killer,
             pid,
-        },
+        })),
     );
     drop(guard);
 
@@ -161,19 +164,36 @@ pub fn pty_spawn(
     Ok(())
 }
 
+/// Pull a session out of the registry without holding the outer lock across
+/// any I/O — the entire point of the per-session split.
+fn session_of(state: &PtyState, id: &str) -> Option<Arc<Mutex<PtySession>>> {
+    state.0.lock().unwrap().get(id).cloned()
+}
+
 #[tauri::command]
 pub fn pty_write(
     state: tauri::State<'_, PtyState>,
     id: String,
     data: String,
 ) -> Result<(), String> {
-    let mut guard = state.0.lock().unwrap();
-    let session = guard.get_mut(&id).ok_or("no terminal running")?;
-    session
-        .writer
-        .write_all(data.as_bytes())
+    pty_write_bytes(&state, &id, data.as_bytes())
+}
+
+/// Internal write helper — same as the `pty_write` Tauri command but callable
+/// directly from Rust (e.g. from `submit_review` to inject the menu-skip
+/// keystroke after releasing the held POST). Returns `Ok(())` even when the
+/// PTY id isn't registered, because a missing terminal is a soft failure for
+/// best-effort auto-continue: we don't want to fail the whole submit just
+/// because the user closed the tab.
+pub fn pty_write_bytes(state: &PtyState, id: &str, bytes: &[u8]) -> Result<(), String> {
+    let Some(session) = session_of(state, id) else {
+        return Ok(());
+    };
+    let mut s = session.lock().unwrap();
+    s.writer
+        .write_all(bytes)
         .map_err(|e| format!("pty write failed: {e}"))?;
-    session.writer.flush().ok();
+    s.writer.flush().ok();
     Ok(())
 }
 
@@ -184,10 +204,9 @@ pub fn pty_resize(
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
-    let guard = state.0.lock().unwrap();
-    let session = guard.get(&id).ok_or("no terminal running")?;
-    session
-        .master
+    let session = session_of(&state, &id).ok_or("no terminal running")?;
+    let s = session.lock().unwrap();
+    s.master
         .resize(PtySize {
             rows: rows.max(1),
             cols: cols.max(1),
@@ -199,8 +218,11 @@ pub fn pty_resize(
 
 #[tauri::command]
 pub fn pty_kill(state: tauri::State<'_, PtyState>, id: String) -> Result<(), String> {
-    if let Some(mut session) = state.0.lock().unwrap().remove(&id) {
-        let _ = session.killer.kill();
+    // Remove from the registry (outer lock only), then kill the underlying
+    // child outside any lock.
+    let session = { state.0.lock().unwrap().remove(&id) };
+    if let Some(session) = session {
+        let _ = session.lock().unwrap().killer.kill();
     }
     Ok(())
 }
@@ -210,10 +232,8 @@ pub fn pty_kill(state: tauri::State<'_, PtyState>, id: String) -> Result<(), Str
 /// shell pid's `cwd` fd. Returns `None` if it can't be determined.
 #[tauri::command]
 pub fn pty_cwd(state: tauri::State<'_, PtyState>, id: String) -> Option<String> {
-    let pid = {
-        let guard = state.0.lock().unwrap();
-        guard.get(&id)?.pid?
-    };
+    let session = session_of(&state, &id)?;
+    let pid = session.lock().unwrap().pid?;
     let output = std::process::Command::new("lsof")
         .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
         .output()
@@ -224,11 +244,30 @@ pub fn pty_cwd(state: tauri::State<'_, PtyState>, id: String) -> Option<String> 
         .filter(|p| !p.is_empty())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pty_write_bytes_is_silent_noop_for_missing_id() {
+        // The post-submit auto-continue inject calls this with a best-effort
+        // terminal id; a missing PTY (closed tab) must not surface as an
+        // error or panic — `submit_review` should still succeed.
+        let state = PtyState::new();
+        assert!(pty_write_bytes(&state, "no-such-tab", b"3\r").is_ok());
+    }
+}
+
 #[tauri::command]
 pub fn pty_kill_all(state: tauri::State<'_, PtyState>) -> Result<(), String> {
-    let mut guard = state.0.lock().unwrap();
-    for (_, mut session) in guard.drain() {
-        let _ = session.killer.kill();
+    // Drain the map (outer lock only), then kill each child outside the lock
+    // so one stuck killer can't block the others.
+    let drained: Vec<Arc<Mutex<PtySession>>> = {
+        let mut guard = state.0.lock().unwrap();
+        guard.drain().map(|(_, v)| v).collect()
+    };
+    for session in drained {
+        let _ = session.lock().unwrap().killer.kill();
     }
     Ok(())
 }

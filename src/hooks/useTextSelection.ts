@@ -2,6 +2,11 @@
 // Copyright 2026 Yusuf Al-Bazian
 import { useEffect, useState, type RefObject } from "react";
 
+import {
+  blockKindForTag,
+  computeSubBlockId,
+} from "../editor/subBlockResolve";
+
 export interface SelectionState {
   anchorId: string;
   text: string;
@@ -12,6 +17,12 @@ export interface SelectionState {
    *  positions would drift on every keystroke. */
   charStart: number;
   charEnd: number;
+  /** Sub-block sidecar id naming the selection's range structurally — set
+   *  only when the selection lands on whole-word / whole-line /
+   *  whole-sentence boundaries. Lets the highlight resolver re-locate the
+   *  range across revises without depending on the byte-fragile
+   *  (charStart, charEnd, quotedText) tier. */
+  subBlockId?: string;
 }
 
 export function useTextSelection(
@@ -64,12 +75,35 @@ export function useTextSelection(
       );
       const charStart = Math.min(start, end);
       const charEnd = Math.max(start, end);
+      // Sub-block id, if the selection lands on a clean unit boundary.
+      // `data-block-id` is surfaced by `BlockIdAttribute`; absent = legacy
+      // / sidebar-only block, in which case the sub-id is undefined and the
+      // comment resolves via the (charStart, charEnd, quotedText) tier.
+      const blockId = anchorEl.dataset.blockId;
+      let subBlockId: string | undefined;
+      const kind = blockKindForTag(anchorEl.tagName);
+      // Only mint sub-block ids on the sentence axis (paragraphs / headings).
+      // The line axis (lists, code, blockquote) computes its id against the
+      // block's flat DOM textContent, which concatenates items with no
+      // newlines — but the highlight resolver reads only the first inner
+      // textblock, so the id never round-trips. Those blocks fall back to the
+      // (charStart, charEnd, quotedText) tier, which is stable for them.
+      if (blockId && kind === "sentence") {
+        subBlockId = computeSubBlockId({
+          blockId,
+          blockText: anchorEl.textContent ?? "",
+          kind,
+          charStart,
+          charEnd,
+        });
+      }
       setState({
         anchorId: anchorEl.dataset.anchorId ?? "",
         text,
         rect,
         charStart,
         charEnd,
+        subBlockId,
       });
     };
     document.addEventListener("selectionchange", handler);

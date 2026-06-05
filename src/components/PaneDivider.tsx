@@ -7,8 +7,19 @@ interface PaneDividerProps {
   onPointerDown: (e: React.PointerEvent) => void;
   /** "vertical" = between columns (default), "horizontal" = above a bottom dock. */
   orientation?: "vertical" | "horizontal";
+  /** Which edge the host pane occupies, for the chevron direction. "trailing"
+   *  (default) = pane on the right/bottom (divider on its leading edge).
+   *  "leading" = pane on the left (divider on its trailing edge), so the
+   *  collapse/expand chevron points the opposite way. */
+  side?: "leading" | "trailing";
   /** What the pane holds, e.g. "comments" / "terminal" — used in tooltips. */
   label?: string;
+  /** When true, the host pane is in fullscreen mode: the drag affordance is
+   *  disabled and the chevron exits fullscreen via `onExitFullscreen` instead
+   *  of toggling collapse. This preserves the familiar top-edge caret as the
+   *  shrink-back affordance regardless of mode. */
+  fullscreen?: boolean;
+  onExitFullscreen?: () => void;
 }
 
 // Divider hosting a drag affordance (when expanded) and a collapse/expand
@@ -20,10 +31,43 @@ export function PaneDivider({
   onToggle,
   onPointerDown,
   orientation = "vertical",
+  side = "trailing",
   label = "comments",
+  fullscreen = false,
+  onExitFullscreen,
 }: PaneDividerProps) {
   const horizontal = orientation === "horizontal";
   const resizeCursor = horizontal ? "row-resize" : "col-resize";
+  // In fullscreen the divider stops being a drag handle; the chevron exits
+  // fullscreen so the user can shrink back from the same top-edge spot they
+  // already know.
+  const dragDisabled = collapsed || fullscreen;
+  const exitLabel = horizontal
+    ? `Exit fullscreen ${label}`
+    : `Exit fullscreen ${label}`;
+  const handleClick = fullscreen && onExitFullscreen ? onExitFullscreen : onToggle;
+  const buttonTitle = fullscreen
+    ? exitLabel
+    : collapsed
+      ? `Show ${label}`
+      : `Collapse ${label}`;
+  // Chevrons read as "shrink back inward." For vertical dividers the direction
+  // depends on which side the pane is on: a trailing (right) pane points "›"
+  // when expanded, a leading (left) pane points "‹".
+  const leading = side === "leading";
+  const collapseGlyph = leading ? "‹" : "›";
+  const expandGlyph = leading ? "›" : "‹";
+  const glyph = fullscreen
+    ? horizontal
+      ? "⌄"
+      : collapseGlyph
+    : horizontal
+      ? collapsed
+        ? "⌃"
+        : "⌄"
+      : collapsed
+        ? expandGlyph
+        : collapseGlyph;
 
   return (
     <div
@@ -31,21 +75,21 @@ export function PaneDivider({
       style={horizontal ? { height: "6px" } : { width: "6px" }}
     >
       <div
-        onPointerDown={collapsed ? undefined : onPointerDown}
-        title={collapsed ? undefined : `Drag to resize ${label}`}
+        onPointerDown={dragDisabled ? undefined : onPointerDown}
+        title={dragDisabled ? undefined : `Drag to resize ${label}`}
         style={{
           position: "absolute",
           inset: 0,
-          cursor: collapsed ? "default" : resizeCursor,
+          cursor: dragDisabled ? "default" : resizeCursor,
           background: dragging ? "var(--color-info)" : "var(--color-rule)",
           transition: dragging ? undefined : "background-color 0.12s",
         }}
       />
       <button
         type="button"
-        onClick={onToggle}
-        title={collapsed ? `Show ${label}` : `Collapse ${label}`}
-        aria-label={collapsed ? `Show ${label}` : `Collapse ${label}`}
+        onClick={handleClick}
+        title={buttonTitle}
+        aria-label={buttonTitle}
         className="absolute flex items-center justify-center rounded-full shadow-sm"
         style={{
           top: "50%",
@@ -61,13 +105,7 @@ export function PaneDivider({
           cursor: "pointer",
         }}
       >
-        {horizontal
-          ? collapsed
-            ? "⌃"
-            : "⌄"
-          : collapsed
-            ? "‹"
-            : "›"}
+        {glyph}
       </button>
     </div>
   );
