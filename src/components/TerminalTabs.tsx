@@ -9,10 +9,13 @@ import {
   type CSSProperties,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { homeDir } from "@tauri-apps/api/path";
 import { usePersistedState } from "../theme/usePersistedState";
 import { TerminalTabBar } from "./TerminalTabBar";
 import { TerminalView } from "./TerminalView";
 import { TerminalSplitDivider } from "./TerminalSplitDivider";
+import { CloseConfirmModal } from "./CloseConfirmModal";
 
 interface Tab {
   id: string;
@@ -79,6 +82,9 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
     0.5,
   );
   const [unseen, setUnseen] = useState<Set<string>>(() => new Set());
+  // Set when a window-close is intercepted because a terminal has moved off its
+  // start dir; drives the Redline-styled confirmation modal.
+  const [showCloseConfirm, setShowCloseConfirm] = useState(false);
 
   const split = paneB !== null;
   const focusedId = focusedPane === "B" && paneB ? paneB : paneA;
@@ -276,6 +282,60 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
     [],
   );
 
+  // Guard the window close: like a real terminal app, confirm before tearing
+  // down a session that has work in flight. We treat "moved off the directory it
+  // opened in" as the signal — a terminal still sitting at its start dir ($HOME,
+  // or its "open here" dir) is disposable and closes without a prompt.
+  useEffect(() => {
+    const win = getCurrentWindow();
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+
+    const norm = (p: string) => p.replace(/\/+$/, "") || "/";
+    const anyTerminalMoved = async (): Promise<boolean> => {
+      let home = "";
+      try {
+        home = await homeDir();
+      } catch {
+        /* compare against explicit cwds only if HOME is unreadable */
+      }
+      for (const t of tabsRef.current) {
+        const initial = t.cwd ?? home;
+        if (!initial) continue;
+        let live: string | null = null;
+        try {
+          live = await invoke<string | null>("pty_cwd", { id: t.id });
+        } catch {
+          /* shell gone / unreadable → treat as not moved */
+        }
+        if (live && norm(live) !== norm(initial)) return true;
+      }
+      return false;
+    };
+
+    void win
+      .onCloseRequested(async (event) => {
+        let moved = false;
+        try {
+          moved = await anyTerminalMoved();
+        } catch {
+          /* on any failure, don't block the close */
+        }
+        if (!moved) return;
+        event.preventDefault();
+        setShowCloseConfirm(true);
+      })
+      .then((u) => {
+        if (disposed) u();
+        else unlisten = u;
+      });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
   const handleActivity = (id: string) => {
     const visibleNow = id === paneA || id === paneB;
     if (!visibleNow || collapsed) {
@@ -414,6 +474,15 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
           />
         )}
       </div>
+      {showCloseConfirm && (
+        <CloseConfirmModal
+          onConfirm={() => {
+            // destroy() bypasses the onCloseRequested guard we set above.
+            void getCurrentWindow().destroy();
+          }}
+          onCancel={() => setShowCloseConfirm(false)}
+        />
+      )}
     </div>
   );
   },

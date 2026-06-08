@@ -11,6 +11,7 @@ import { CommentComposer } from "./components/CommentComposer";
 import { MarkdownView } from "./components/MarkdownView";
 import { lazy, Suspense } from "react";
 import { stripSidecars } from "./editor/markdown/sidecar";
+import { installExternalLinkHandler } from "./lib/externalLinks";
 // Tiptap/ProseMirror is heavy; lazy-load so it's off the initial paint path.
 const PlanEditor = lazy(() =>
   import("./components/PlanEditor").then((m) => ({ default: m.PlanEditor })),
@@ -410,6 +411,10 @@ function App() {
       setLoading(false);
     })();
   }, []);
+
+  // Route external links (markdown READMEs, comment panes, etc.) to the system
+  // browser instead of letting them navigate — and replace — the webview.
+  useEffect(() => installExternalLinkHandler(), []);
 
   // Event subscriptions
   useEffect(() => {
