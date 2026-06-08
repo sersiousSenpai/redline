@@ -3,12 +3,9 @@
 import { useEffect, useState, type RefObject } from "react";
 
 import {
-  blockKindForTag,
-  computeSubBlockId,
-} from "../editor/subBlockResolve";
-import {
   findAnchoredAncestor,
   offsetWithinAnchor,
+  subBlockIdForSelection,
 } from "../editor/html/domPoint";
 
 export interface SelectionState {
@@ -83,20 +80,17 @@ export function useTextSelection(
       // `data-block-id` is surfaced by `BlockIdAttribute`; absent = legacy
       // / sidebar-only block, in which case the sub-id is undefined and the
       // comment resolves via the (charStart, charEnd, quotedText) tier.
+      // `subBlockIdForSelection` dispatches on the block's axis: the sentence
+      // axis for prose, the line axis (`.lN`) for a list item / table cell /
+      // code source line — each resolved against the unit's own clean text so
+      // it round-trips through the highlight resolver's unit path.
       const blockId = anchorEl.dataset.blockId;
       let subBlockId: string | undefined;
-      const kind = blockKindForTag(anchorEl.tagName);
-      // Only mint sub-block ids on the sentence axis (paragraphs / headings).
-      // The line axis (lists, code, blockquote) computes its id against the
-      // block's flat DOM textContent, which concatenates items with no
-      // newlines — but the highlight resolver reads only the first inner
-      // textblock, so the id never round-trips. Those blocks fall back to the
-      // (charStart, charEnd, quotedText) tier, which is stable for them.
-      if (blockId && kind === "sentence") {
-        subBlockId = computeSubBlockId({
+      if (blockId) {
+        subBlockId = subBlockIdForSelection({
+          anchorEl,
           blockId,
-          blockText: anchorEl.textContent ?? "",
-          kind,
+          range,
           charStart,
           charEnd,
         });

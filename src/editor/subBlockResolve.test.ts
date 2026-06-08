@@ -5,16 +5,21 @@ import { describe, expect, it } from "vitest";
 import {
   blockKindForTag,
   computeSubBlockId,
+  computeWordsInUnit,
   resolveSubBlockId,
+  resolveWordsInUnit,
 } from "./subBlockResolve";
 
 describe("blockKindForTag", () => {
-  it("maps code / list / blockquote to the line axis", () => {
+  it("maps code / list / table / blockquote to the line axis", () => {
     expect(blockKindForTag("PRE")).toBe("line");
     expect(blockKindForTag("CODE")).toBe("line");
     expect(blockKindForTag("UL")).toBe("line");
     expect(blockKindForTag("OL")).toBe("line");
     expect(blockKindForTag("LI")).toBe("line");
+    expect(blockKindForTag("TABLE")).toBe("line");
+    expect(blockKindForTag("TD")).toBe("line");
+    expect(blockKindForTag("TH")).toBe("line");
     expect(blockKindForTag("BLOCKQUOTE")).toBe("line");
   });
   it("defaults everything else to the sentence axis", () => {
@@ -143,6 +148,44 @@ describe("computeSubBlockId — code (line axis)", () => {
       charEnd: 31,
     });
     expect(id).toBe("blk-bbbb2222.l2");
+  });
+});
+
+describe("computeWordsInUnit ↔ resolveWordsInUnit — unit-scoped word ranges", () => {
+  const unit = "Second bullet item";
+
+  it("whole-unit selection resolves to the full unit span", () => {
+    expect(resolveWordsInUnit(unit, null)).toEqual({ start: 0, end: unit.length });
+  });
+
+  it("computes a single-word range and resolves it back", () => {
+    // "Second" → chars 0..6 → word 1.
+    const words = computeWordsInUnit(unit, 0, 6);
+    expect(words).toEqual({ start: 1, end: 1 });
+    const back = resolveWordsInUnit(unit, words);
+    expect(unit.slice(back!.start, back!.end)).toBe("Second");
+  });
+
+  it("computes a contiguous word-range and resolves it back", () => {
+    // "bullet item" → chars 7..18 → words 2..3.
+    const words = computeWordsInUnit(unit, 7, 18);
+    expect(words).toEqual({ start: 2, end: 3 });
+    const back = resolveWordsInUnit(unit, words);
+    expect(unit.slice(back!.start, back!.end)).toBe("bullet item");
+  });
+
+  it("returns null on a partial-word selection", () => {
+    expect(computeWordsInUnit(unit, 0, 3)).toBeNull(); // "Sec"
+  });
+
+  it("returns null on an empty or out-of-bounds selection", () => {
+    expect(computeWordsInUnit(unit, 5, 5)).toBeNull();
+    expect(computeWordsInUnit(unit, -1, 6)).toBeNull();
+    expect(computeWordsInUnit(unit, 0, unit.length + 1)).toBeNull();
+  });
+
+  it("returns null when a word index runs past the unit", () => {
+    expect(resolveWordsInUnit(unit, { start: 1, end: 9 })).toBeNull();
   });
 });
 

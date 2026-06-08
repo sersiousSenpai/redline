@@ -5,6 +5,9 @@ import { Plugin, PluginKey } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 
 import { resolveRange, type CommentHighlightRange } from "../resolveHighlightRange";
+import { parseSidecarIdTyped } from "../markdown/sidecar";
+import { resolveWordsInUnit } from "../subBlockResolve";
+import { findUnitNode } from "../unitResolve";
 
 // Re-exported so existing importers (PlanEditor) keep their import path. The
 // type + tiered resolver now live in `resolveHighlightRange` so the static-HTML
@@ -52,6 +55,8 @@ function pmNodeTagName(node: import("@tiptap/pm/model").Node): string {
       return "LI";
     case "blockquote":
       return "BLOCKQUOTE";
+    case "table":
+      return "TABLE";
     case "heading": {
       const level = (node.attrs?.level as number | undefined) ?? 1;
       return `H${level}`;
@@ -152,34 +157,76 @@ export const CommentHighlights = Extension.create<
               const ranges = byBlock.get(blockId);
               if (!ranges) return;
               const target = firstTextblockInside(blockNode);
-              if (!target) return;
-              const text = target.node.textContent;
-              // First doc position INSIDE the textblock is `blockOffset +
-              // target.offset + 1` (the `+1` steps through the opening
-              // token of the textblock node).
-              const base = blockOffset + target.offset + 1;
+              // First doc position INSIDE the first textblock is `blockOffset +
+              // target.offset + 1` (the `+1` steps through the opening token of
+              // the textblock node). Only needed for the legacy fallback path.
+              const legacyText = target ? target.node.textContent : "";
+              const legacyBase = target ? blockOffset + target.offset + 1 : 0;
               // Sub-block-id resolution needs the block's tag (PRE / UL /
               // BLOCKQUOTE → line axis; everything else → sentence axis).
               // The PM Node has the type name; map to the equivalent DOM
               // tag for `blockKindForTag`.
               const blockTagName = pmNodeTagName(blockNode);
               for (const range of ranges) {
-                const resolved = resolveRange(text, blockTagName, range);
-                if (!resolved) continue;
+                let from: number | null = null;
+                let to: number | null = null;
+
+                // Tier 0 — line-axis unit path. A `.lN` id addresses one list
+                // item / table cell / code source line; resolve the word range
+                // against that unit's own text so structured blocks no longer
+                // collapse to their first inner textblock (items 1, 6, 9).
+                const parsed = range.subBlockId
+                  ? parseSidecarIdTyped(range.subBlockId)
+                  : null;
+                if (
+                  parsed &&
+                  parsed.kind === "subBlock" &&
+                  parsed.axis.kind === "line"
+                ) {
+                  const unit = findUnitNode(blockNode, parsed.axis);
+                  if (unit) {
+                    const wr = resolveWordsInUnit(unit.unitText, parsed.words);
+                    // Validate against the captured quote before trusting a
+                    // derived index — a drifted unit resolves to a non-matching
+                    // slice and falls through to the proven char/quotedText
+                    // tiers instead of painting at the wrong spot.
+                    if (
+                      wr &&
+                      wr.end > wr.start &&
+                      (range.quotedText.length === 0 ||
+                        unit.unitText.slice(wr.start, wr.end) ===
+                          range.quotedText)
+                    ) {
+                      const unitBase =
+                        blockOffset + unit.contentStart + unit.charBase;
+                      from = unitBase + wr.start;
+                      to = unitBase + wr.end;
+                    }
+                  }
+                }
+
+                // Legacy tiers (sub-id on the first textblock → char range →
+                // quotedText self-heal) for everything the unit path didn't
+                // claim.
+                if (from === null && target) {
+                  const resolved = resolveRange(legacyText, blockTagName, range);
+                  if (resolved) {
+                    from = legacyBase + resolved.from;
+                    to = legacyBase + resolved.to;
+                  }
+                }
+
+                if (from === null || to === null) continue;
                 const classes = ["rl-comment-highlight"];
                 if (range.muted) classes.push("rl-comment-highlight--muted");
                 if (storage.focusedId === range.commentId)
                   classes.push("rl-comment-highlight--focused");
                 decos.push(
-                  Decoration.inline(
-                    base + resolved.from,
-                    base + resolved.to,
-                    {
-                      class: classes.join(" "),
-                      "data-comment-id": range.commentId,
-                      nodeName: "span",
-                    },
-                  ),
+                  Decoration.inline(from, to, {
+                    class: classes.join(" "),
+                    "data-comment-id": range.commentId,
+                    nodeName: "span",
+                  }),
                 );
               }
             });

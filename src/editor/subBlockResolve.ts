@@ -25,6 +25,7 @@ export function blockKindForTag(tagName: string): BlockKind {
   const t = tagName.toUpperCase();
   if (t === "PRE" || t === "CODE") return "line";
   if (t === "UL" || t === "OL" || t === "LI") return "line";
+  if (t === "TABLE" || t === "TD" || t === "TH") return "line";
   if (t === "BLOCKQUOTE") return "line";
   return "sentence";
 }
@@ -123,6 +124,37 @@ export function resolveSubBlockId(args: {
   const range = wordRangeToCharRange(unit, tokens, words);
   if (!range) return null;
   return range;
+}
+
+/** Compute the `.wN[-wM]` word qualifier for a selection inside a single
+ *  *unit* (one list item / table cell / code source line) whose text is
+ *  `unitText`, with `relStart`/`relEnd` measured from the unit's start. Returns
+ *  `null` when the selection is empty or doesn't align with whole-word
+ *  boundaries. Unlike {@link computeSubBlockId}, this takes the unit text
+ *  directly — no block-level segmentation — so the line axis can address a
+ *  cell/item/line without re-flattening the parent block. */
+export function computeWordsInUnit(
+  unitText: string,
+  relStart: number,
+  relEnd: number,
+): WordRange | null {
+  if (relEnd <= relStart) return null;
+  if (relStart < 0 || relEnd > unitText.length) return null;
+  const tokens = tokenize(unitText);
+  return findWordRange({ start: 0, text: unitText }, tokens, relStart, relEnd);
+}
+
+/** Resolve a `WordRange` (or `null` for the whole unit) to a char range inside
+ *  a single unit's text. The mirror of {@link computeWordsInUnit}; offsets are
+ *  relative to the unit's start (0). Returns `null` when a word index falls
+ *  outside the unit. */
+export function resolveWordsInUnit(
+  unitText: string,
+  words: WordRange | null,
+): CharRange | null {
+  if (!words) return { start: 0, end: unitText.length };
+  const tokens = tokenize(unitText);
+  return wordRangeToCharRange({ start: 0, text: unitText }, tokens, words);
 }
 
 /** Inverse of `findWordRange`: take a `WordRange` (1-based inclusive) and
