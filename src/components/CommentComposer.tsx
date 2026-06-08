@@ -21,6 +21,10 @@ interface CommentComposerProps {
    *  landed on whole-unit boundaries. Stored on the comment as the
    *  primary, reflow-stable anchor; char offsets stay as the fallback. */
   subBlockId?: string;
+  /** Initial value for the "Revised" field of an edit. Empty string = a
+   *  cross-out (delete the span); the composer opens ready to save it.
+   *  Undefined defaults the field to the selected text (a normal edit). */
+  presetRevised?: string;
   onCancel: () => void;
   onSubmit: (request: NewCommentRequest) => Promise<void>;
 }
@@ -50,23 +54,26 @@ export function CommentComposer({
   charStart,
   charEnd,
   subBlockId,
+  presetRevised,
   onCancel,
   onSubmit,
 }: CommentComposerProps) {
   const [body, setBody] = useState("");
   const [scope, setScope] = useState<CommentScope>("local");
-  const [revised, setRevised] = useState(selectedText);
+  const [revised, setRevised] = useState(presetRevised ?? selectedText);
   const [saving, setSaving] = useState(false);
   const firstFieldRef = useRef<HTMLTextAreaElement | null>(null);
+  // A cross-out: the composer was opened pre-set to delete the span.
+  const isCrossOut = presetRevised === "";
 
   useEffect(() => {
     firstFieldRef.current?.focus();
   }, []);
 
+  // An edit submits when the revised text differs from the original — including
+  // an empty revised (a deletion / cross-out).
   const canSubmit =
-    type === "edit"
-      ? revised.trim().length > 0 && revised !== selectedText
-      : body.trim().length > 0;
+    type === "edit" ? revised !== selectedText : body.trim().length > 0;
 
   const submit = async () => {
     if (!canSubmit || saving) return;
@@ -158,7 +165,7 @@ export function CommentComposer({
           >
             {selectedText}
           </div>
-          <Label>Revised</Label>
+          <Label>{isCrossOut ? "Revised (empty = delete)" : "Revised"}</Label>
           <textarea
             ref={firstFieldRef}
             value={revised}

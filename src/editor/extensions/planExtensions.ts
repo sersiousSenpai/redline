@@ -2,6 +2,7 @@
 // Copyright 2026 Yusuf Al-Bazian
 import type { Extensions } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
+import { Code } from "@tiptap/extension-code";
 import Link from "@tiptap/extension-link";
 import Table from "@tiptap/extension-table";
 import TableRow from "@tiptap/extension-table-row";
@@ -31,7 +32,14 @@ export function planExtensions(): Extensions {
     // diagrams. The `codeBlock` node spec (name, `language` attr, `text*`
     // content) is identical, so the schema and markdown round-trip are
     // unaffected; only the rendering is richer.
-    StarterKit.configure({ codeBlock: false }),
+    // StarterKit's inline `code` mark ships `excludes: '_'` (exclude ALL other
+    // marks). That silently blocked the rl_ins/rl_del track-change marks from
+    // ever attaching to inline code, so Backspace/Strike did nothing on the
+    // file-reference chips (`app/page.tsx`, etc.). Re-add code with an explicit
+    // exclude list that keeps it plain against formatting marks but lets the
+    // redline marks through.
+    StarterKit.configure({ codeBlock: false, code: false }),
+    Code.extend({ excludes: "bold italic strike link" }),
     richCodeBlock(),
     Link.configure({
       openOnClick: false,

@@ -22,6 +22,9 @@ interface TerminalViewProps {
   onActivity: (id: string) => void;
   /** Called when this tab's shell exits. */
   onExit: (id: string) => void;
+  /** Called when the user clicks into this pane — lets the host mark which of
+   *  two split panes is the focused/"active" terminal. */
+  onPaneFocus?: () => void;
 }
 
 function base64ToBytes(b64: string): Uint8Array {
@@ -60,6 +63,7 @@ export function TerminalView({
   visible,
   onActivity,
   onExit,
+  onPaneFocus,
 }: TerminalViewProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -252,7 +256,10 @@ export function TerminalView({
       // Guaranteed click-to-focus: a click anywhere in the pane re-acquires
       // xterm focus even if xterm's own mousedown handling is in a bad state
       // after a background/visibility cycle.
-      onPointerDown={() => termRef.current?.focus()}
+      onPointerDown={() => {
+        onPaneFocus?.();
+        termRef.current?.focus();
+      }}
       style={{
         background: "var(--color-paper)",
         padding: "6px 8px",

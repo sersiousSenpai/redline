@@ -9,14 +9,24 @@ interface Tab {
 
 interface TerminalTabBarProps {
   tabs: Tab[];
+  /** The tab shown in this strip's pane (gets the active highlight). */
   activeId: string;
   fullscreen: boolean;
+  /** Whether this strip's pane is the focused one — drives the strength of the
+   *  active-tab underline (bright accent vs. muted rule). */
+  focused?: boolean;
+  /** Whether to render the action cluster (new / split / fullscreen). When the
+   *  dock is split only the right strip carries the actions. */
+  showActions?: boolean;
+  /** Whether the dock is currently split into two side-by-side panes. */
+  split: boolean;
   onSelect: (id: string) => void;
   /** New terminal in $HOME ("root"). */
   onNew: () => void;
   /** New terminal in the active terminal's live working directory. */
   onNewHere: () => void;
   onClose: (id: string) => void;
+  onToggleSplit: () => void;
   onToggleFullscreen: () => void;
   /** Commit a reorder: remove the tab at `from`, reinsert it at `to`. */
   onReorder: (from: number, to: number) => void;
@@ -44,10 +54,14 @@ export function TerminalTabBar({
   tabs,
   activeId,
   fullscreen,
+  focused = true,
+  showActions = true,
+  split,
   onSelect,
   onNew,
   onNewHere,
   onClose,
+  onToggleSplit,
   onToggleFullscreen,
   onReorder,
 }: TerminalTabBarProps) {
@@ -131,7 +145,7 @@ export function TerminalTabBar({
   return (
     <div
       ref={barRef}
-      className="flex items-stretch shrink-0"
+      className="flex items-stretch shrink-0 w-full overflow-hidden"
       style={{
         height: "30px",
         borderBottom: "1px solid var(--color-rule)",
@@ -172,12 +186,12 @@ export function TerminalTabBar({
             title={t.title}
             className="flex items-center gap-1 px-3 cursor-pointer select-none"
             style={{
-              color: active
-                ? "var(--color-ink)"
-                : "var(--color-ink-muted)",
+              color: active ? "var(--color-ink)" : "var(--color-ink-muted)",
               background: active ? "var(--color-paper)" : "transparent",
+              // The focused pane's active tab gets the bright accent; the other
+              // pane's active tab gets a muted rule so you can tell them apart.
               borderBottom: active
-                ? "2px solid var(--color-info)"
+                ? `2px solid ${focused ? "var(--color-info)" : "var(--color-rule)"}`
                 : "2px solid transparent",
               fontSize: "12px",
               touchAction: "none",
@@ -226,6 +240,7 @@ export function TerminalTabBar({
           </div>
         );
       })}
+      {showActions && (
       <div className="flex items-center gap-1 px-2" style={{ marginLeft: "auto" }}>
         <button
           type="button"
@@ -267,6 +282,28 @@ export function TerminalTabBar({
         </button>
         <button
           type="button"
+          onClick={onToggleSplit}
+          title={split ? "Unsplit terminal" : "Split terminal side-by-side"}
+          aria-label={split ? "Unsplit terminal" : "Split terminal"}
+          aria-pressed={split}
+          className="flex items-center justify-center rounded"
+          style={{
+            width: "20px",
+            height: "20px",
+            fontSize: "12px",
+            lineHeight: 1,
+            background: split
+              ? "var(--color-paper)"
+              : "var(--color-bg-elevated)",
+            border: "1px solid var(--color-rule)",
+            color: split ? "var(--color-ink)" : "var(--color-ink-muted)",
+            cursor: "pointer",
+          }}
+        >
+          {split ? "▢" : "◫"}
+        </button>
+        <button
+          type="button"
           onClick={onToggleFullscreen}
           title={fullscreen ? "Restore terminal" : "Fullscreen terminal"}
           aria-label={fullscreen ? "Restore terminal" : "Fullscreen terminal"}
@@ -285,6 +322,7 @@ export function TerminalTabBar({
           {fullscreen ? "⤡" : "⤢"}
         </button>
       </div>
+      )}
     </div>
   );
 }

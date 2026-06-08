@@ -5,9 +5,12 @@ import type { CommentType } from "../types";
 interface SelectionMenuProps {
   rect: DOMRect;
   onPick: (type: CommentType) => void;
+  /** Cross out the selection — opens the edit composer pre-set to delete the
+   *  span (revised = ""). When omitted, the strike button is hidden. */
+  onCrossOut?: () => void;
 }
 
-export function SelectionMenu({ rect, onPick }: SelectionMenuProps) {
+export function SelectionMenu({ rect, onPick, onCrossOut }: SelectionMenuProps) {
   const top = Math.max(8, rect.top - 42);
   const left = Math.max(8, rect.left + rect.width / 2 - 110);
 
@@ -31,6 +34,11 @@ export function SelectionMenu({ rect, onPick }: SelectionMenuProps) {
       <MenuButton onClick={() => onPick("question")} colorVar="--color-success">
         Question
       </MenuButton>
+      {onCrossOut && (
+        <MenuButton onClick={onCrossOut} colorVar="--color-ink-muted">
+          Strike
+        </MenuButton>
+      )}
     </div>
   );
 }

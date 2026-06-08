@@ -1,11 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { Extension } from "@tiptap/core";
+import { Extension, getMarkRange } from "@tiptap/core";
 import { ChangeSet } from "@tiptap/pm/changeset";
 import { Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
 import type { EditorState, Transaction } from "@tiptap/pm/state";
 
 export const trackChangesInputKey = new PluginKey("trackChangesInput");
+
+declare module "@tiptap/core" {
+  interface Commands<ReturnType> {
+    trackChangesInput: {
+      /** Strike the current (non-empty) selection exactly as the Delete key
+       *  would: mark it `rl_del` in place (or accept-delete an own pending
+       *  `rl_ins`). No-op on an empty selection. */
+      strikeSelection: () => ReturnType;
+    };
+  }
+}
 
 /** Every inline text leaf in [from,to) carries `markName`. */
 function rangeAllMarked(
@@ -58,6 +69,18 @@ function trackedDelete(
       from = $pos.pos;
       to = $pos.pos + 1;
     }
+    // If the caret sits against an inline-code span (a file-reference chip),
+    // strike the WHOLE chip at once. Nibbling one character at a time off a
+    // `path/to/file.tsx` chip is never what the user means — they want the
+    // file removed from the plan as a unit.
+    const codeType = schema.marks.code;
+    if (codeType) {
+      const range = getMarkRange(state.doc.resolve(from), codeType);
+      if (range) {
+        from = range.from;
+        to = range.to;
+      }
+    }
   }
   if (to <= from) return false;
 
@@ -107,6 +130,19 @@ export const TrackChangesInput = Extension.create({
       Delete: run(1),
       "Mod-Backspace": run(-1),
       "Mod-Delete": run(1),
+    };
+  },
+
+  addCommands() {
+    return {
+      strikeSelection:
+        () =>
+        ({ state, dispatch }) => {
+          if (state.selection.empty) return false;
+          // dir is irrelevant for a non-empty selection — trackedDelete keys
+          // off selection.from/to and lands the caret at `from`.
+          return trackedDelete(state, dispatch, -1);
+        },
     };
   },
 

@@ -78,6 +78,13 @@ export function CommentCard({
   submitInFlight = false,
 }: CommentCardProps) {
   const color = TYPE_COLORS[comment.type];
+  // A point-anchored sticky-note from the HTML redline surface: a feedback
+  // comment whose selection is a zero-width caret point. Demarcated in the pane
+  // so it reads as a pinned note rather than a span-anchored feedback.
+  const isPinnedNote =
+    comment.type === "feedback" &&
+    !!comment.selection &&
+    comment.selection.charEnd === comment.selection.charStart;
   const canDelete = comment.status === "draft";
   // Session-local collapse state — gives the reviewer an escape hatch when a
   // huge pasted body or a long discussion thread overruns the pane. Not
@@ -142,7 +149,7 @@ export function CommentCard({
               letterSpacing: "0.06em",
             }}
           >
-            {TYPE_LABELS[comment.type]}
+            {isPinnedNote ? "💬 Note" : TYPE_LABELS[comment.type]}
             {comment.scope && (
               <span
                 className="ml-1 font-mono normal-case"

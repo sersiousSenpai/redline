@@ -16,11 +16,11 @@
      between CSS load and JS execution shows the right palette (no FOUC). */
   --color-paper: #1a1a1f;
   --color-ink: #fafafa;
-  --color-ink-muted: #959597;
+  --color-ink-muted: #a4a4a5;
   --color-rule: #424246;
 
   --color-anchor-bg: #343439;
-  --color-anchor-text: #9b9b9e;
+  --color-anchor-text: #bababb;
 
   --color-info: #5b9fe4;
   --color-warning: #d6c060;
@@ -30,6 +30,16 @@
   --color-on-accent: #ffffff;
   --color-code-bg: #303034;
   --color-code-fg: #fafafa;
+  /* Syntax-highlight (highlight.js) token palette — Studio's dark-surface
+     pastels. deriveTokens() swaps in a dark, readable "linting" palette on
+     light themes so code stays legible without changing the surface. */
+  --color-hl-comment: #7f7d72;
+  --color-hl-keyword: #c9a2f5;
+  --color-hl-string: #a6c98a;
+  --color-hl-number: #e3b367;
+  --color-hl-title: #82aaf0;
+  --color-hl-variable: #d59a78;
+  --color-hl-deletion: #e08b86;
   --color-commented-bg: rgba(232, 85, 61, 0.22);
   --color-commented-bar: rgba(232, 85, 61, 0.85);
   --color-selection: rgba(232, 85, 61, 0.55);
@@ -470,6 +480,203 @@ p.rl-block-modified {
   box-shadow: inset 2px 0 0 var(--color-info);
 }
 
+/* ── HTML render mode ──────────────────────────────────────────────────────
+   The read-only rich render of the plan. Content reuses `.rl-prose` for
+   typography; this layer adds the positioning context for the annotation
+   overlay, block-level revision redline, and highlight/cross-out rects. */
+.rl-html-render {
+  position: relative;
+}
+/* The editable redline surface: a real text caret + selection, but all
+   mutations are suppressed in JS so the markdown stays source of truth. */
+.rl-html-content {
+  outline: none;
+  caret-color: var(--color-info);
+}
+.rl-html-content:focus,
+.rl-html-content:focus-visible {
+  outline: none;
+}
+
+/* Floating sticky-note composer — opens at the caret when the user types. */
+.rl-html-note-composer {
+  position: fixed;
+  z-index: 50;
+  width: 260px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  border-radius: 6px;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-rule);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+}
+.rl-html-note-composer textarea {
+  width: 100%;
+  resize: vertical;
+  font-size: 13px;
+  line-height: 1.4;
+  padding: 6px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--color-rule);
+  background: var(--color-paper);
+  color: var(--color-ink);
+}
+.rl-html-note-hint {
+  font-size: 10px;
+  color: var(--color-ink-muted);
+}
+
+/* Persisted pinned notes — collapsible markers over the document. The layer is
+   click-through; only the pins themselves are interactive. */
+.rl-html-pins {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+.rl-html-pin-wrap {
+  position: absolute;
+  pointer-events: auto;
+  transform: translate(-50%, -50%);
+}
+.rl-html-pin {
+  font-size: 12px;
+  line-height: 1;
+  padding: 1px 2px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  opacity: 0.85;
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease;
+}
+.rl-html-pin:hover,
+.rl-html-pin--focused {
+  opacity: 1;
+  transform: scale(1.15);
+}
+.rl-html-pin--muted {
+  opacity: 0.45;
+}
+.rl-html-pin-tip {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-top: 4px;
+  max-width: 260px;
+  width: max-content;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-rule);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--color-ink);
+  white-space: pre-wrap;
+  z-index: 3;
+}
+/* Block-level revision redline — mirrors the editor's `.rl-block-*` affordance
+   but keyed on the HTML render's per-block wrappers. */
+.rl-html-block--added,
+.rl-html-block--modified,
+.rl-html-block--moved {
+  padding-left: 8px;
+  margin-left: -10px;
+  border-radius: 2px;
+}
+.rl-html-block--added {
+  background: color-mix(in srgb, var(--color-success) 10%, transparent);
+  border-left: 2px solid var(--color-success);
+}
+.rl-html-block--modified {
+  background: color-mix(in srgb, var(--color-warning) 10%, transparent);
+  border-left: 2px solid var(--color-warning);
+}
+.rl-html-block--moved {
+  border-left: 2px dashed var(--color-info);
+}
+
+/* Preferred path: CSS Custom Highlight API. Native painting over the comment's
+   DOM range — wraps perfectly, repaints on scroll/resize with no JS, and feels
+   identical to the editor's inline decorations. `::highlight()` only supports a
+   subset of properties (color, background-color, text-decoration, text-shadow),
+   so focus is conveyed by a stronger background rather than the editor's inset
+   bar. Focused buckets carry a higher `priority` so they win on overlap. */
+::highlight(rl-hl) {
+  background-color: color-mix(in srgb, var(--color-warning) 24%, transparent);
+}
+::highlight(rl-hl-focused) {
+  background-color: color-mix(in srgb, var(--color-warning) 46%, transparent);
+}
+::highlight(rl-hl-muted) {
+  background-color: color-mix(in srgb, var(--color-ink-muted) 13%, transparent);
+}
+::highlight(rl-hl-strike) {
+  background-color: color-mix(in srgb, var(--color-warning) 10%, transparent);
+  text-decoration: line-through;
+  text-decoration-color: var(--color-ink-muted);
+}
+::highlight(rl-hl-strike-focused) {
+  background-color: color-mix(in srgb, var(--color-warning) 22%, transparent);
+  text-decoration: line-through;
+  text-decoration-color: var(--color-info);
+}
+
+/* Fallback path: an absolutely-positioned rect overlay (WebViews without the
+   Highlight API). Transparent to pointer events so native text selection works
+   underneath; click-to-focus is hit-tested separately. */
+.rl-html-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+}
+.rl-html-hl {
+  position: absolute;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--color-warning) 22%, transparent);
+  box-shadow: inset 2px 0 0 var(--color-warning);
+  transition:
+    background 120ms ease,
+    box-shadow 120ms ease;
+}
+.rl-html-hl--focused {
+  background: color-mix(in srgb, var(--color-warning) 42%, transparent);
+  box-shadow: inset 2px 0 0 var(--color-info);
+}
+.rl-html-hl--muted {
+  background: color-mix(in srgb, var(--color-ink-muted) 10%, transparent);
+  box-shadow: none;
+}
+.rl-html-hl--muted.rl-html-hl--focused {
+  background: color-mix(in srgb, var(--color-info) 22%, transparent);
+  box-shadow: inset 2px 0 0 var(--color-info);
+}
+/* Cross-out: a deletion edit. No wash — a strike-through line through the
+   middle of each rect, plus a faint tint. */
+.rl-html-hl--strike {
+  background: color-mix(in srgb, var(--color-warning) 8%, transparent);
+  box-shadow: none;
+}
+.rl-html-hl--strike::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 2px;
+  transform: translateY(-1px);
+  background: var(--color-ink-muted);
+}
+.rl-html-hl--strike.rl-html-hl--focused::after {
+  background: var(--color-info);
+}
+
 /* ── In-document find (Cmd/Ctrl+F) ────────────────────────────────────────
    The editor host is the positioning context for the floating find bar; the
    SearchHighlight extension paints match decorations over the prose. */
@@ -681,7 +888,7 @@ p.rl-block-modified {
    emits these `hljs-*` classes as inline decorations inside the <code>. */
 .rl-prose .hljs-comment,
 .rl-prose .hljs-quote {
-  color: #7f7d72;
+  color: var(--color-hl-comment);
   font-style: italic;
 }
 .rl-prose .hljs-keyword,
@@ -689,33 +896,33 @@ p.rl-block-modified {
 .rl-prose .hljs-literal,
 .rl-prose .hljs-section,
 .rl-prose .hljs-link {
-  color: #c9a2f5;
+  color: var(--color-hl-keyword);
 }
 .rl-prose .hljs-string,
 .rl-prose .hljs-attr,
 .rl-prose .hljs-regexp,
 .rl-prose .hljs-addition {
-  color: #a6c98a;
+  color: var(--color-hl-string);
 }
 .rl-prose .hljs-number,
 .rl-prose .hljs-built_in,
 .rl-prose .hljs-type,
 .rl-prose .hljs-symbol,
 .rl-prose .hljs-bullet {
-  color: #e3b367;
+  color: var(--color-hl-number);
 }
 .rl-prose .hljs-title,
 .rl-prose .hljs-name,
 .rl-prose .hljs-attribute {
-  color: #82aaf0;
+  color: var(--color-hl-title);
 }
 .rl-prose .hljs-variable,
 .rl-prose .hljs-template-variable,
 .rl-prose .hljs-meta {
-  color: #d59a78;
+  color: var(--color-hl-variable);
 }
 .rl-prose .hljs-deletion {
-  color: #e08b86;
+  color: var(--color-hl-deletion);
 }
 .rl-prose .hljs-emphasis {
   font-style: italic;
@@ -741,7 +948,7 @@ p.rl-block-modified {
 }
 .rl-code-view .hljs-comment,
 .rl-code-view .hljs-quote {
-  color: #7f7d72;
+  color: var(--color-hl-comment);
   font-style: italic;
 }
 .rl-code-view .hljs-keyword,
@@ -749,33 +956,33 @@ p.rl-block-modified {
 .rl-code-view .hljs-literal,
 .rl-code-view .hljs-section,
 .rl-code-view .hljs-link {
-  color: #c9a2f5;
+  color: var(--color-hl-keyword);
 }
 .rl-code-view .hljs-string,
 .rl-code-view .hljs-attr,
 .rl-code-view .hljs-regexp,
 .rl-code-view .hljs-addition {
-  color: #a6c98a;
+  color: var(--color-hl-string);
 }
 .rl-code-view .hljs-number,
 .rl-code-view .hljs-built_in,
 .rl-code-view .hljs-type,
 .rl-code-view .hljs-symbol,
 .rl-code-view .hljs-bullet {
-  color: #e3b367;
+  color: var(--color-hl-number);
 }
 .rl-code-view .hljs-title,
 .rl-code-view .hljs-name,
 .rl-code-view .hljs-attribute {
-  color: #82aaf0;
+  color: var(--color-hl-title);
 }
 .rl-code-view .hljs-variable,
 .rl-code-view .hljs-template-variable,
 .rl-code-view .hljs-meta {
-  color: #d59a78;
+  color: var(--color-hl-variable);
 }
 .rl-code-view .hljs-deletion {
-  color: #e08b86;
+  color: var(--color-hl-deletion);
 }
 .rl-code-view .hljs-emphasis {
   font-style: italic;

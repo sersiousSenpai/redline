@@ -4,30 +4,12 @@ import { Extension } from "@tiptap/core";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 
-import {
-  blockKindForTag,
-  resolveSubBlockId,
-} from "../subBlockResolve";
+import { resolveRange, type CommentHighlightRange } from "../resolveHighlightRange";
 
-/** A persistent highlight over a comment's selected character range. The
- *  decoration is keyed by `(blockId, charStart, charEnd)` with three
- *  resolution tiers (see {@link resolveRange}): the sub-block id is tried
- *  first when present, then the stored char range, finally `quotedText`
- *  self-heal. */
-export interface CommentHighlightRange {
-  commentId: string;
-  blockId: string;
-  charStart: number;
-  charEnd: number;
-  quotedText: string;
-  /** Optional sub-block sidecar id (e.g. `blk-X.s3.w2-w4`) — when set, the
-   *  resolver tries it first because it survives reflow inside the parent
-   *  block. */
-  subBlockId?: string;
-  /** Resolved/accepted comments fade their highlight to a muted state but
-   *  stay visible (audit trail). */
-  muted: boolean;
-}
+// Re-exported so existing importers (PlanEditor) keep their import path. The
+// type + tiered resolver now live in `resolveHighlightRange` so the static-HTML
+// overlay can share them without depending on ProseMirror.
+export type { CommentHighlightRange };
 
 interface CommentHighlightsStorage {
   ranges: CommentHighlightRange[];
@@ -53,59 +35,6 @@ declare module "@tiptap/core" {
 }
 
 export const commentHighlightsKey = new PluginKey("commentHighlights");
-
-/** Resolve a stored selection to ProseMirror positions inside `blockText`,
- *  trying three tiers in order:
- *
- *  1. **Sub-block id** (`blk-X.s3.w2-w4`) — stable across any revise that
- *     leaves the parent block's body byte-identical. When present and
- *     resolvable against the current text, this is the highest-fidelity
- *     anchor we have.
- *  2. **Stored char range** — fast path when the byte slice still equals
- *     `quotedText` (no edits inside the block since capture).
- *  3. **`quotedText` self-heal** — `indexOf` lookup; rescues the highlight
- *     when offsets drifted but the quoted substring still appears
- *     somewhere in the block. */
-export function resolveRange(
-  blockText: string,
-  blockTagName: string,
-  range: CommentHighlightRange,
-): { from: number; to: number } | null {
-  if (range.subBlockId) {
-    const resolved = resolveSubBlockId({
-      blockText,
-      kind: blockKindForTag(blockTagName),
-      subBlockId: range.subBlockId,
-    });
-    // Only trust the sub-block tier when its slice actually matches the
-    // captured `quotedText`. The id is minted against the whole-block DOM
-    // textContent at selection time but resolved here against a single inner
-    // textblock — for lists/blockquotes those texts differ, so a stale id can
-    // resolve to a wrong (but non-null) range. Validating before returning
-    // lets a mismatch fall through to the proven char-range / quotedText tiers
-    // instead of painting (or losing) the highlight at the wrong spot.
-    if (
-      resolved &&
-      resolved.end > resolved.start &&
-      (range.quotedText.length === 0 ||
-        blockText.slice(resolved.start, resolved.end) === range.quotedText)
-    ) {
-      return { from: resolved.start, to: resolved.end };
-    }
-  }
-  const { charStart, charEnd, quotedText } = range;
-  if (
-    charStart >= 0 &&
-    charEnd <= blockText.length &&
-    blockText.slice(charStart, charEnd) === quotedText
-  ) {
-    return { from: charStart, to: charEnd };
-  }
-  if (quotedText.length === 0) return null;
-  const idx = blockText.indexOf(quotedText);
-  if (idx === -1) return null;
-  return { from: idx, to: idx + quotedText.length };
-}
 
 /** Map a ProseMirror node type to the DOM tag name `blockKindForTag` keys
  *  on. The mapping mirrors the default Tiptap renderer (codeBlock → pre,

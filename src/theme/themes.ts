@@ -89,9 +89,11 @@ export const THEMES: ThemeEntry[] = [
     base: { bg: "#000000", fg: "#ffffff", blue: "#3b6cd2", yellow: "#c7c400", green: "#28cd41", selection: "#4f9bff" },
   },
   {
+    // Deepened from the Terminal.app bright-green (#13773d) to a dark forest
+    // green so the pale-yellow text reads clearly — kept per user preference.
     name: "grass",
     label: "Grass",
-    base: { bg: "#13773d", fg: "#fff0a5", blue: "#7bafd4", yellow: "#ffd75f", green: "#c7f08a", selection: "#ff7a18" },
+    base: { bg: "#08341b", fg: "#fff0a5", blue: "#7bafd4", yellow: "#ffd75f", green: "#c7f08a", selection: "#ff7a18" },
   },
 ];
 

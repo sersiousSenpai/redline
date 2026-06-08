@@ -6,10 +6,13 @@ import {
   useImperativeHandle,
   useRef,
   useState,
+  type CSSProperties,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { usePersistedState } from "../theme/usePersistedState";
 import { TerminalTabBar } from "./TerminalTabBar";
 import { TerminalView } from "./TerminalView";
+import { TerminalSplitDivider } from "./TerminalSplitDivider";
 
 interface Tab {
   id: string;
@@ -25,10 +28,10 @@ interface TerminalTabsProps {
   onActivityChange: (hasUnseen: boolean) => void;
   /** Dock is fully collapsed (no active view is really visible). */
   collapsed: boolean;
-  /** Notified whenever the active tab changes. The host (App) uses this to
-   *  route post-submit PTY injects to whichever terminal the reviewer is
-   *  currently watching. Best-effort: a "wrong" tab is still strictly better
-   *  than the alternative of no inject at all. */
+  /** Notified whenever the focused tab changes. The host (App) uses this to
+   *  route post-submit PTY injects and cwd-follow polling to whichever terminal
+   *  the reviewer is currently watching. Best-effort: a "wrong" tab is still
+   *  strictly better than the alternative of no inject at all. */
   onActiveTabChange?: (id: string) => void;
 }
 
@@ -40,12 +43,15 @@ export interface TerminalTabsHandle {
 }
 
 // Owns the set of terminal tabs and their lifecycle. Every tab's
-// <TerminalView> stays mounted (shells + scrollback persist); only the active,
-// non-collapsed one is `visible`. The dock is never empty: closing the last
+// <TerminalView> stays mounted (shells + scrollback persist); only the tabs
+// shown in a pane are `visible`. The dock can show one pane or be split into
+// two side-by-side panes (`paneA` left, `paneB` right) — splitting is purely a
+// view change: toggling it on/off never spawns-and-kills the underlying shells,
+// so sessions and scrollback survive. The dock is never empty: closing the last
 // tab spawns a fresh replacement. Labels are positional (`zsh N` = the tab's
-// 1-based slot) and recompute on close, like iTerm2 / Terminal.app / VS Code —
-// no monotonic ids, no gaps. New tabs open in $HOME by default; the "here"
-// action opens in the active terminal's live working directory instead.
+// 1-based slot) and recompute on close, like iTerm2 / Terminal.app / VS Code.
+// New tabs open in $HOME by default; the "here" action opens in the focused
+// terminal's live working directory instead.
 export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
   function TerminalTabs(
     {
@@ -62,32 +68,24 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
   const [tabs, setTabs] = useState<Tab[]>(() => [
     { id: crypto.randomUUID(), cwd: null },
   ]);
-  const [activeId, setActiveId] = useState<string>(() => tabs[0].id);
+  // The two pane slots. `paneA` is always set (the left/primary pane); `paneB`
+  // is null unless split. `focusedPane` is the one driving the bar highlight,
+  // cwd-follow polling and PTY injection.
+  const [paneA, setPaneA] = useState<string>(() => tabs[0].id);
+  const [paneB, setPaneB] = useState<string | null>(null);
+  const [focusedPane, setFocusedPane] = useState<"A" | "B">("A");
+  const [splitRatio, setSplitRatio] = usePersistedState(
+    "redline.terminalPane.splitRatio",
+    0.5,
+  );
   const [unseen, setUnseen] = useState<Set<string>>(() => new Set());
 
-  // cwd null → backend resolves to $HOME ("root").
-  const addTab = (cwd: string | null) => {
-    const id = crypto.randomUUID();
-    setTabs((prev) => [...prev, { id, cwd }]);
-    setActiveId(id);
-  };
+  const split = paneB !== null;
+  const focusedId = focusedPane === "B" && paneB ? paneB : paneA;
+  const paneContainerRef = useRef<HTMLDivElement | null>(null);
 
-  // Open a new tab in whatever directory the active terminal is currently in
-  // (follows the user's `cd`). Falls back to $HOME if it can't be read.
-  const addTabHere = () => {
-    void (async () => {
-      let dir: string | null = null;
-      try {
-        dir = await invoke<string | null>("pty_cwd", { id: activeId });
-      } catch {
-        /* fall back to home */
-      }
-      addTab(dir);
-    })();
-  };
-
-  const closeTab = (id: string) => {
-    void invoke("pty_kill", { id }).catch(() => {});
+  // Drop `id` from the unseen set (it's now on screen / chosen).
+  const clearUnseen = (id: string) =>
     setUnseen((prev) => {
       if (!prev.has(id)) return prev;
       const next = new Set(prev);
@@ -95,30 +93,117 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
       return next;
     });
 
-    // Side effects (uuid, active selection) live here, not in a setTabs
-    // updater — StrictMode double-invokes updaters and would otherwise desync
-    // activeId / spawn two replacement ids.
+  // Load a tab into whichever pane currently has focus.
+  const showInFocusedPane = (id: string) => {
+    if (split && focusedPane === "B") setPaneB(id);
+    else setPaneA(id);
+  };
+
+  // cwd null → backend resolves to $HOME ("root"). New tab opens in the focused
+  // pane (preserves the "the tab I just made is the one I'm looking at" feel).
+  const addTab = (cwd: string | null) => {
+    const id = crypto.randomUUID();
+    setTabs((prev) => [...prev, { id, cwd }]);
+    showInFocusedPane(id);
+  };
+
+  // Open a new tab in whatever directory the focused terminal is currently in
+  // (follows the user's `cd`). Falls back to $HOME if it can't be read.
+  const addTabHere = () => {
+    void (async () => {
+      let dir: string | null = null;
+      try {
+        dir = await invoke<string | null>("pty_cwd", { id: focusedId });
+      } catch {
+        /* fall back to home */
+      }
+      addTab(dir);
+    })();
+  };
+
+  // Toggle the side-by-side split. Turning it on fills pane B with another open
+  // tab, spawning a fresh shell if this is the only tab. Turning it off just
+  // drops pane B from view — the shell keeps running, untouched.
+  const toggleSplit = () => {
+    if (paneB !== null) {
+      setPaneB(null);
+      setFocusedPane("A");
+      return;
+    }
+    const other = tabs.find((t) => t.id !== paneA);
+    if (other) {
+      setPaneB(other.id);
+    } else {
+      // Only one tab exists: give pane B a fresh shell so the split is usable.
+      const newId = crypto.randomUUID();
+      setTabs((prev) => [...prev, { id: newId, cwd: null }]);
+      setPaneB(newId);
+    }
+    setFocusedPane("B");
+  };
+
+  // Prefer the left neighbour of the closed slot, then the right, then any
+  // surviving tab — skipping ids already shown in the other pane so the two
+  // panes never display the same session.
+  const pickFallback = (
+    next: Tab[],
+    idx: number,
+    avoid: (string | null)[],
+  ): string | null => {
+    const blocked = new Set(avoid.filter((x): x is string => x !== null));
+    const ordered = [next[idx - 1], next[idx], ...next].filter(
+      (t): t is Tab => t != null,
+    );
+    for (const t of ordered) if (!blocked.has(t.id)) return t.id;
+    return null;
+  };
+
+  const closeTab = (id: string) => {
+    void invoke("pty_kill", { id }).catch(() => {});
+    clearUnseen(id);
+
+    // Side effects (uuid, pane selection) live here, not in a setTabs updater —
+    // StrictMode double-invokes updaters and would otherwise desync the panes /
+    // spawn two replacement ids.
     if (tabs.length === 1 && tabs[0].id === id) {
       // Last tab: never leave the dock empty — spawn a replacement.
       const newId = crypto.randomUUID();
       setTabs([{ id: newId, cwd: null }]);
-      setActiveId(newId);
+      setPaneA(newId);
+      setPaneB(null);
+      setFocusedPane("A");
       return;
     }
 
     const idx = tabs.findIndex((t) => t.id === id);
     const next = tabs.filter((t) => t.id !== id);
     setTabs(next);
-    if (id === activeId) {
-      // Prefer the left neighbour, else the right.
-      const fallback = next[idx - 1] ?? next[idx] ?? next[0];
-      if (fallback) setActiveId(fallback.id);
+
+    // Reassign any pane that was showing the closed tab.
+    if (id === paneA) {
+      const fb = pickFallback(next, idx, [paneB]);
+      if (fb) {
+        setPaneA(fb);
+      } else if (paneB) {
+        // Only pane B's tab remains — collapse the split into it.
+        setPaneA(paneB);
+        setPaneB(null);
+        setFocusedPane("A");
+      }
+    } else if (id === paneB) {
+      const fb = pickFallback(next, idx, [paneA]);
+      if (fb) setPaneB(fb);
+      else {
+        setPaneB(null);
+        setFocusedPane("A");
+      }
     }
   };
 
   // Pure array reorder: drop `fromId` into `toId`'s slot. No side effects, so
   // a setTabs updater is StrictMode-safe. TerminalViews are keyed by id and
-  // absolutely stacked, so reordering relabels slots without touching shells.
+  // positioned by pane role, so reordering relabels slots without touching
+  // shells.
   const reorderTabs = (from: number, to: number) => {
     setTabs((prev) => {
       if (
@@ -136,14 +221,42 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
     });
   };
 
+  // Pick a tab into a *specific* pane (used by each pane's own tab strip while
+  // split). Clicking the tab that already lives in the other pane swaps the two
+  // panes' contents — so you can flip which side a session is on, or change
+  // which session the split pane shows, without ever duplicating one.
+  const selectInto = (pane: "A" | "B", id: string) => {
+    setFocusedPane(pane);
+    if (pane === "A") {
+      // Clicking pane B's tab in pane A's strip swaps the two panes.
+      if (id === paneB) setPaneB(paneA);
+      setPaneA(id);
+    } else {
+      // Mirror: clicking pane A's tab in pane B's strip swaps them. paneB is
+      // non-null here (we're split), so it's a safe source for pane A.
+      if (id === paneA && paneB !== null) setPaneA(paneB);
+      setPaneB(id);
+    }
+    clearUnseen(id);
+  };
+
   const selectTab = (id: string) => {
-    setActiveId(id);
-    setUnseen((prev) => {
-      if (!prev.has(id)) return prev;
-      const next = new Set(prev);
-      next.delete(id);
-      return next;
-    });
+    // Already on screen in the other pane → just move focus there (never show
+    // the same session in both panes).
+    if (split) {
+      if (focusedPane === "A" && id === paneB) {
+        setFocusedPane("B");
+        clearUnseen(id);
+        return;
+      }
+      if (focusedPane === "B" && id === paneA) {
+        setFocusedPane("A");
+        clearUnseen(id);
+        return;
+      }
+    }
+    showInFocusedPane(id);
+    clearUnseen(id);
   };
 
   // Expose tab selection to the host. selectTab/tabs are recreated each render,
@@ -164,7 +277,8 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
   );
 
   const handleActivity = (id: string) => {
-    if (id !== activeId || collapsed) {
+    const visibleNow = id === paneA || id === paneB;
+    if (!visibleNow || collapsed) {
       setUnseen((prev) => {
         if (prev.has(id)) return prev;
         const next = new Set(prev);
@@ -186,53 +300,119 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
     onActivityChange(unseen.size > 0);
   }, [unseen, onActivityChange]);
 
-  // The active view is genuinely seen once it's active and the dock is open.
+  // A pane's view is genuinely seen once it's shown and the dock is open. Clear
+  // the unseen badge for every currently-visible pane.
   useEffect(() => {
     if (collapsed) return;
     setUnseen((prev) => {
-      if (!prev.has(activeId)) return prev;
+      let changed = false;
       const next = new Set(prev);
-      next.delete(activeId);
-      return next;
+      for (const vid of [paneA, paneB]) {
+        if (vid && next.delete(vid)) changed = true;
+      }
+      return changed ? next : prev;
     });
-  }, [activeId, collapsed]);
+  }, [paneA, paneB, collapsed]);
 
-  // Notify the host whenever the active tab changes so post-submit PTY
-  // injects can target the terminal the reviewer is currently watching.
+  // Notify the host whenever the focused tab changes so post-submit PTY injects
+  // and cwd-follow polling target the terminal the reviewer is watching.
   useEffect(() => {
-    onActiveTabChange?.(activeId);
-  }, [activeId, onActiveTabChange]);
+    onActiveTabChange?.(focusedId);
+  }, [focusedId, onActiveTabChange]);
 
   // Positional labels: a tab's number is its 1-based slot, so closing one
   // renumbers the rest with no gaps.
   const barTabs = tabs.map((t, i) => ({ id: t.id, title: `zsh ${i + 1}` }));
 
+  // Position each tab's wrapper by its pane role using CSS only — never by
+  // moving it to a different JSX parent, which would unmount/remount the
+  // TerminalView and kill its PTY. Hidden tabs stack full-bleed (their own
+  // display:none keeps them off screen).
+  const wrapperStyle = (role: "A" | "B" | null): CSSProperties => {
+    const base: CSSProperties = { position: "absolute", top: 0, bottom: 0 };
+    if (!split || role === null) return { ...base, left: 0, right: 0 };
+    if (role === "A") return { ...base, left: 0, width: `${splitRatio * 100}%` };
+    return { ...base, left: `${splitRatio * 100}%`, right: 0 };
+  };
+
+  // Shared action-button wiring, reused by whichever strip carries the actions.
+  const barActions = {
+    fullscreen,
+    split,
+    onNew: () => addTab(null),
+    onNewHere: addTabHere,
+    onToggleSplit: toggleSplit,
+    onToggleFullscreen: () => onFullscreenChange(!fullscreen),
+    onClose: closeTab,
+    onReorder: reorderTabs,
+  };
+
   return (
     <div className="flex flex-col h-full">
-      <TerminalTabBar
-        tabs={barTabs}
-        activeId={activeId}
-        fullscreen={fullscreen}
-        onSelect={selectTab}
-        onNew={() => addTab(null)}
-        onNewHere={addTabHere}
-        onClose={closeTab}
-        onToggleFullscreen={() => onFullscreenChange(!fullscreen)}
-        onReorder={reorderTabs}
-      />
-      <div className="flex-1 relative">
-        {tabs.map((t) => (
-          <div key={t.id} className="absolute inset-0">
-            <TerminalView
-              id={t.id}
-              cwd={t.cwd}
-              theme={theme}
-              visible={t.id === activeId && !collapsed}
-              onActivity={handleActivity}
-              onExit={handleExit}
+      {split && paneB ? (
+        // One tab strip per pane, aligned over its pane so a split session's
+        // tab indicator sits above the pane it's actually running in.
+        <div className="flex items-stretch shrink-0">
+          <div
+            style={{
+              width: `${splitRatio * 100}%`,
+              borderRight: "1px solid var(--color-rule)",
+            }}
+          >
+            <TerminalTabBar
+              {...barActions}
+              tabs={barTabs}
+              activeId={paneA}
+              focused={focusedPane === "A"}
+              showActions={false}
+              onSelect={(id) => selectInto("A", id)}
             />
           </div>
-        ))}
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <TerminalTabBar
+              {...barActions}
+              tabs={barTabs}
+              activeId={paneB}
+              focused={focusedPane === "B"}
+              showActions
+              onSelect={(id) => selectInto("B", id)}
+            />
+          </div>
+        </div>
+      ) : (
+        <TerminalTabBar
+          {...barActions}
+          tabs={barTabs}
+          activeId={focusedId}
+          showActions
+          onSelect={selectTab}
+        />
+      )}
+      <div ref={paneContainerRef} className="flex-1 relative">
+        {tabs.map((t) => {
+          const role: "A" | "B" | null =
+            t.id === paneA ? "A" : t.id === paneB ? "B" : null;
+          return (
+            <div key={t.id} style={wrapperStyle(role)}>
+              <TerminalView
+                id={t.id}
+                cwd={t.cwd}
+                theme={theme}
+                visible={role !== null && !collapsed}
+                onActivity={handleActivity}
+                onExit={handleExit}
+                onPaneFocus={role ? () => setFocusedPane(role) : undefined}
+              />
+            </div>
+          );
+        })}
+        {split && (
+          <TerminalSplitDivider
+            ratio={splitRatio}
+            onRatioChange={setSplitRatio}
+            containerRef={paneContainerRef}
+          />
+        )}
       </div>
     </div>
   );

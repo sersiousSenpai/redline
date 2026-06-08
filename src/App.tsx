@@ -15,6 +15,7 @@ import { stripSidecars } from "./editor/markdown/sidecar";
 const PlanEditor = lazy(() =>
   import("./components/PlanEditor").then((m) => ({ default: m.PlanEditor })),
 );
+import type { PlanEditorActions } from "./components/PlanEditor";
 import { Footer } from "./components/Footer";
 import { Header } from "./components/Header";
 import { HookSetupModal } from "./components/HookSetupModal";
@@ -67,6 +68,11 @@ interface ComposingState {
    *  unit boundaries; threaded through to the composer so the persisted
    *  selection carries the structural anchor. */
   subBlockId?: string;
+  /** Preset value for the edit composer's "Revised" field. Empty string =
+   *  a cross-out (delete the selected span); the composer opens ready to
+   *  save the deletion. Undefined leaves the field defaulting to the
+   *  selected text (a normal edit). */
+  presetRevised?: string;
 }
 
 interface ResolutionWarning {
@@ -322,6 +328,9 @@ function App() {
     documentRef,
     composing === null,
   );
+  // Imperative bridge to the lazily-mounted PlanEditor so the SelectionMenu's
+  // Strike action can run an editor command without owning the editor.
+  const planActionsRef = useRef<PlanEditorActions | null>(null);
 
   async function refreshSummaries(): Promise<SessionSummary[]> {
     try {
@@ -417,13 +426,14 @@ function App() {
         // A fresh plan means Claude is waiting again — clear any stale detach.
         setDetached(false);
       }
-      void refreshSummaries().then((list) => {
-        if (activeId === null && list.length > 0) {
-          setActiveId(list[0].sessionId);
-          void loadSession(list[0].sessionId);
-        } else if (payload.sessionId === activeId) {
-          void loadSession(payload.sessionId);
-        }
+      void refreshSummaries().then(() => {
+        // Bring the intercepted plan to the foreground no matter the current
+        // view — browsing project files, sitting on another session, or no
+        // session at all. The whole point of an intercept is to review the new
+        // plan, so flip the sidebar back to Sessions and select it.
+        selectSessions();
+        setActiveId(payload.sessionId);
+        void loadSession(payload.sessionId);
       });
       if (
         payload.sessionId === activeId &&
@@ -505,7 +515,7 @@ function App() {
       void modeUnlisten.then((u) => u());
       void decisionUnlisten.then((u) => u());
     };
-  }, [activeId]);
+  }, [activeId, selectSessions]);
 
   // When user clicks a session in the sidebar, reload it. Clear any stale
   // session object up front so the next paint doesn't flash the previous
@@ -671,6 +681,18 @@ function App() {
       charEnd: selection.charEnd,
       subBlockId: selection.subBlockId,
     });
+    clearSelection();
+  };
+
+  // Cross out the selection: strike it in place exactly like the Delete key
+  // (Word-style `rl_del` track change), driven through the editor's
+  // `strikeSelection` command. The struck text round-trips through the
+  // accept-all serializer as an [edit] with the span deleted — same outcome
+  // as before, but the user sees an immediate strikethrough instead of a
+  // composer with an empty field.
+  const beginCrossOut = () => {
+    if (!selection) return;
+    planActionsRef.current?.strikeSelection();
     clearSelection();
   };
 
@@ -1023,6 +1045,7 @@ function App() {
                     onDeleteComment={deleteComment}
                     focusedCommentId={focusedCommentId}
                     onHighlightClick={(id) => setFocusedCommentId(id)}
+                    actionsRef={planActionsRef}
                   />
                 </Suspense>
               )
@@ -1193,6 +1216,7 @@ function App() {
                 charStart={composing.charStart}
                 charEnd={composing.charEnd}
                 subBlockId={composing.subBlockId}
+                presetRevised={composing.presetRevised}
                 onCancel={() => setComposing(null)}
                 onSubmit={submitComment}
               />
@@ -1372,7 +1396,11 @@ function App() {
         onExpandTerminal={() => setTermCollapsed(false)}
       />
       {selection && !composing && !isViewingHistorical && (
-        <SelectionMenu rect={selection.rect} onPick={beginCompose} />
+        <SelectionMenu
+          rect={selection.rect}
+          onPick={beginCompose}
+          onCrossOut={beginCrossOut}
+        />
       )}
       {toast && <ApproveToast message={toast} />}
       {hookStatus &&

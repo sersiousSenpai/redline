@@ -2,7 +2,10 @@
 // Copyright 2026 Yusuf Al-Bazian
 import { describe, expect, it } from "vitest";
 
-import { resolveRange, type CommentHighlightRange } from "./CommentHighlights";
+import {
+  resolveRange,
+  type CommentHighlightRange,
+} from "../resolveHighlightRange";
 
 const range = (over: Partial<CommentHighlightRange>): CommentHighlightRange => ({
   commentId: "c1",

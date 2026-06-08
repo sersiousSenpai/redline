@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MutableRefObject,
+} from "react";
 import { EditorContent, useEditor } from "@tiptap/react";
 
 import type { ParagraphDiff, SubBlockDiffEntry } from "../diff";
@@ -51,6 +58,16 @@ interface PlanEditorProps {
   /** Drives the `--focused` modifier on the matching in-doc highlight (and
    *  scrolls it into view when set). Single source of truth for the App. */
   focusedCommentId?: string | null;
+  /** Imperative escape hatch so the App-rendered SelectionMenu can drive
+   *  editor commands (e.g. Strike) without owning the editor instance. */
+  actionsRef?: MutableRefObject<PlanEditorActions | null>;
+}
+
+/** Editor actions the App can invoke imperatively (it renders the
+ *  SelectionMenu but doesn't hold the Tiptap editor). */
+export interface PlanEditorActions {
+  /** Strike the current selection in place, identical to the Delete key. */
+  strikeSelection: () => void;
 }
 
 /**
@@ -70,6 +87,7 @@ export function PlanEditor({
   onDeleteComment,
   onHighlightClick,
   focusedCommentId,
+  actionsRef,
 }: PlanEditorProps) {
   const editable =
     !!onAddComment && !!onUpdateComment && !!onDeleteComment;
@@ -153,6 +171,21 @@ export function PlanEditor({
     enabled: editable && base.blocks.length > 0,
   });
   scheduleRef.current = schedule;
+
+  // Publish imperative actions for the App-rendered SelectionMenu.
+  useEffect(() => {
+    if (!actionsRef) return;
+    actionsRef.current = editor
+      ? {
+          strikeSelection: () => {
+            editor.commands.strikeSelection();
+          },
+        }
+      : null;
+    return () => {
+      actionsRef.current = null;
+    };
+  }, [editor, actionsRef]);
 
   // Stamp data-anchor-id so useTextSelection + the Edit/Feedback/Question
   // SelectionMenu work over the single-document editor.
