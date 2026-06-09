@@ -868,15 +868,33 @@ function App() {
     }
   };
 
-  const reopenResolution = async (commentId: string) => {
+  const reopenResolution = async (commentId: string, note?: string) => {
     if (!session) return;
     try {
       await invoke("reopen_resolution", {
         sessionId: session.sessionId,
         commentId,
+        note: note ?? null,
       });
     } catch (err) {
       console.error("reopen_resolution failed", err);
+    }
+  };
+
+  // Promote a question into a plan-driving directive ("Make this a change").
+  // Routes through the same reopen path with as_change set, so the comment
+  // re-enters the next Revise as a [decision] Claude must apply.
+  const promoteToChange = async (commentId: string, directive: string) => {
+    if (!session) return;
+    try {
+      await invoke("reopen_resolution", {
+        sessionId: session.sessionId,
+        commentId,
+        note: directive,
+        asChange: true,
+      });
+    } catch (err) {
+      console.error("promote-to-change failed", err);
     }
   };
 
@@ -1320,7 +1338,8 @@ function App() {
                 }
                 onDelete={() => deleteComment(c.id)}
                 onAccept={() => acceptResolution(c.id)}
-                onReopen={() => reopenResolution(c.id)}
+                onReopen={(note) => reopenResolution(c.id, note)}
+                onPromote={(directive) => promoteToChange(c.id, directive)}
                 submitInFlight={busy}
               />
             ))}

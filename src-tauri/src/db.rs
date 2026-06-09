@@ -8,9 +8,18 @@ use rusqlite::{params, Connection};
 
 use crate::state::{
     reparse_sections, Comment, CommentKind, CommentScope, CommentSelection, CommentStatus,
-    EditPayload, Resolution, ReviewSession, Revision, SessionStatus, StructuralPayload,
-    ThreadMessage,
+    EditPayload, Resolution, ReviewSession, Revision, RoundHistoryEntry, SessionStatus,
+    StructuralPayload, ThreadMessage,
 };
+
+/// Serialize a comment's reopen-round history for the `reopen_history` column.
+/// Empty history stores NULL (keeps pre-feature and never-reopened rows clean).
+fn reopen_history_to_json(history: &[RoundHistoryEntry]) -> Option<String> {
+    if history.is_empty() {
+        return None;
+    }
+    serde_json::to_string(history).ok()
+}
 
 pub struct Database {
     conn: Mutex<Connection>,
@@ -210,6 +219,24 @@ impl Database {
             "ALTER TABLE comments ADD COLUMN sel_sub_block_id TEXT",
             [],
         );
+        // Reopen continuity: the reviewer's pending follow-up note attached on
+        // reopen, and a JSON array of archived prior reopen rounds. Both NULL/
+        // empty for pre-feature rows. Post-rebuild ALTER group, same reasoning
+        // as `fork_session_id` above.
+        let _ = conn.execute(
+            "ALTER TABLE comments ADD COLUMN reopen_note TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE comments ADD COLUMN reopen_history TEXT",
+            [],
+        );
+        // A [question] the reviewer promoted into a plan-driving directive.
+        // 0/NULL for every pre-feature row and every non-promoted comment.
+        let _ = conn.execute(
+            "ALTER TABLE comments ADD COLUMN actionable INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
         Ok(())
     }
 
@@ -306,6 +333,7 @@ impl Database {
                 ),
                 None => (None, None, None, None),
             };
+        let reopen_history_json = reopen_history_to_json(&comment.reopen_history);
         conn.execute(
             "INSERT INTO comments (
                 id, session_id, version_number, type, scope, anchor_id,
@@ -313,8 +341,8 @@ impl Database {
                 resolution_body, resolution_version, resolution_accepted_at,
                 block_id, structural_json,
                 sel_char_start, sel_char_end, sel_quoted_text,
-                sel_sub_block_id
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+                sel_sub_block_id, reopen_note, reopen_history, actionable
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
             params![
                 comment.id,
                 session_id,
@@ -336,6 +364,9 @@ impl Database {
                 sel_char_end,
                 sel_quoted_text,
                 sel_sub_block_id,
+                comment.reopen_note,
+                reopen_history_json,
+                comment.actionable as i64,
             ],
         )?;
         Ok(())
@@ -365,6 +396,7 @@ impl Database {
                 ),
                 None => (None, None, None, None),
             };
+        let reopen_history_json = reopen_history_to_json(&comment.reopen_history);
         conn.execute(
             "UPDATE comments SET
                 scope = ?1,
@@ -380,8 +412,11 @@ impl Database {
                 sel_char_start = ?11,
                 sel_char_end = ?12,
                 sel_quoted_text = ?13,
-                sel_sub_block_id = ?14
-             WHERE session_id = ?15 AND id = ?16",
+                sel_sub_block_id = ?14,
+                reopen_note = ?15,
+                reopen_history = ?16,
+                actionable = ?17
+             WHERE session_id = ?18 AND id = ?19",
             params![
                 comment.scope.map(|s| s.as_str()),
                 comment.body,
@@ -397,6 +432,9 @@ impl Database {
                 sel_char_end,
                 sel_quoted_text,
                 sel_sub_block_id,
+                comment.reopen_note,
+                reopen_history_json,
+                comment.actionable as i64,
                 session_id,
                 comment.id,
             ],
@@ -615,7 +653,7 @@ impl Database {
                     resolution_body, resolution_version, resolution_accepted_at,
                     block_id, structural_json,
                     sel_char_start, sel_char_end, sel_quoted_text,
-                    sel_sub_block_id
+                    sel_sub_block_id, reopen_note, reopen_history, actionable
              FROM comments
              ORDER BY session_id, version_number, created_at",
         )?;
@@ -661,6 +699,13 @@ impl Database {
                 }),
                 _ => None,
             };
+            let reopen_note: Option<String> = row.get(20)?;
+            let reopen_history_json: Option<String> = row.get(21)?;
+            let reopen_history = reopen_history_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<Vec<RoundHistoryEntry>>(s).ok())
+                .unwrap_or_default();
+            let actionable: bool = row.get::<_, i64>(22)? != 0;
             Ok((
                 row.get::<_, String>(1)?, // session_id
                 row.get::<_, u32>(2)?,    // version_number
@@ -677,6 +722,9 @@ impl Database {
                     status: CommentStatus::from_str(&status_str).unwrap_or(CommentStatus::Draft),
                     resolution,
                     selection,
+                    reopen_note,
+                    reopen_history,
+                    actionable,
                 },
             ))
         })?;
@@ -1066,9 +1114,9 @@ Restructured detail body.
         assert!(res1.body.contains("Restructured"));
         assert_eq!(res1.appeared_in_version, 2);
 
-        // Accept c-001, reopen c-002
+        // Accept c-001, reopen c-002 with a follow-up note
         assert!(store.accept_resolution("sess-rt", "c-001"));
-        assert!(store.reopen_resolution("sess-rt", "c-002"));
+        assert!(store.reopen_resolution("sess-rt", "c-002", Some("still wrong — see §B"), false));
 
         let session = store.get("sess-rt").unwrap();
         let c1 = session.revisions[0]
@@ -1085,6 +1133,11 @@ Restructured detail body.
             .find(|c| c.id == "c-002")
             .unwrap();
         assert!(matches!(c2.status, CommentStatus::Reopened));
+        // The note rode through the DB round-trip; the prior resolution stays
+        // attached (continuity) but is no longer accepted.
+        assert_eq!(c2.reopen_note.as_deref(), Some("still wrong — see §B"));
+        assert!(c2.resolution.is_some());
+        assert!(c2.resolution.as_ref().unwrap().accepted_at.is_none());
 
         // Submitting again should include the reopened c-002 but not the accepted c-001
         let (_, comments_for_round_2, _) = store
@@ -1092,6 +1145,27 @@ Restructured detail body.
             .expect("session exists");
         let ids: Vec<&str> = comments_for_round_2.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, vec!["c-002"]);
+
+        // Claude re-resolves the reopened comment: the round is archived to
+        // history and the consumed note is cleared.
+        let mut round2 = HashMap::new();
+        round2.insert("c-002".to_string(), "Now fixed in v3.".to_string());
+        store.attach_resolutions("sess-rt", &round2, 3);
+
+        let session = store.get("sess-rt").unwrap();
+        let c2 = session.revisions[0]
+            .comments
+            .iter()
+            .find(|c| c.id == "c-002")
+            .unwrap();
+        assert!(matches!(c2.status, CommentStatus::Resolved));
+        assert_eq!(c2.reopen_note, None);
+        assert_eq!(c2.resolution.as_ref().unwrap().body, "Now fixed in v3.");
+        assert_eq!(c2.reopen_history.len(), 1);
+        assert_eq!(
+            c2.reopen_history[0].reopen_note.as_deref(),
+            Some("still wrong — see §B")
+        );
     }
 
     #[test]

@@ -220,6 +220,7 @@ fn build_first_turn_prompt(
     anchor_id: &str,
     quoted: Option<&str>,
     opening: &str,
+    prior_resolution: Option<&str>,
 ) -> String {
     let mut p = String::from(
         "You are discussing a plan you produced earlier in this session with \
@@ -248,6 +249,19 @@ fn build_first_turn_prompt(
         p.push_str("> ");
         p.push_str(line);
         p.push('\n');
+    }
+    // Ground the discussion in what was already resolved, so a follow-up on a
+    // resolved item ("but what about X?") builds on the prior answer instead of
+    // re-litigating it from scratch.
+    if let Some(res) = prior_resolution {
+        if !res.trim().is_empty() {
+            p.push_str("\nYou previously resolved this comment with:\n");
+            for line in res.lines() {
+                p.push_str("> ");
+                p.push_str(line);
+                p.push('\n');
+            }
+        }
     }
     p.push_str(
         "\nRespond to the reviewer directly and concisely, in plain markdown \
@@ -325,6 +339,7 @@ pub async fn fork_thread_send(
             &comment.anchor_id,
             comment.selection.as_ref().map(|s| s.quoted_text.as_str()),
             &text,
+            comment.resolution.as_ref().map(|r| r.body.as_str()),
         ),
         Some(_) => text.clone(),
     };
@@ -710,6 +725,7 @@ mod tests {
             "A.1",
             Some("the detail section"),
             "Why this order?",
+            None,
         );
         assert!(p.contains("Why this order?"));
         assert!(p.contains("the detail section"));
@@ -722,9 +738,22 @@ mod tests {
 
     #[test]
     fn first_turn_prompt_without_selection_uses_anchor_only() {
-        let p = build_first_turn_prompt(false, "B", None, "Reconsider this.");
+        let p = build_first_turn_prompt(false, "B", None, "Reconsider this.", None);
         assert!(p.contains("§B"));
         assert!(p.contains("left a comment"));
         assert!(p.contains("Reconsider this."));
+    }
+
+    #[test]
+    fn first_turn_prompt_grounds_in_prior_resolution() {
+        let p = build_first_turn_prompt(
+            false,
+            "A",
+            None,
+            "But what about retries?",
+            Some("I added exponential backoff in §A."),
+        );
+        assert!(p.contains("You previously resolved this comment with:"));
+        assert!(p.contains("exponential backoff"));
     }
 }

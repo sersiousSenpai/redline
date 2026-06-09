@@ -204,6 +204,9 @@ impl SubmissionMode {
         let any_driver = comments.iter().any(|c| {
             c.kind.is_structural()
                 || matches!(c.kind, CommentKind::Edit | CommentKind::Feedback)
+                // A question the reviewer promoted into a decision drives the
+                // plan, so even an all-questions batch flips to Revise.
+                || (matches!(c.kind, CommentKind::Question) && c.actionable)
         });
         if any_driver { Self::Revise } else { Self::Ask }
     }
@@ -306,6 +309,19 @@ pub struct Resolution {
     pub accepted_at: Option<i64>,
 }
 
+/// One archived reopen round. When a reviewer reopens a resolution and Claude
+/// re-resolves it, the prior `{resolution body, reopen note, version}` is
+/// pushed here before the live `resolution` is overwritten — so the card can
+/// surface a collapsed "earlier rounds" trail without bloating the live state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoundHistoryEntry {
+    pub resolution_body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reopen_note: Option<String>,
+    pub version: u32,
+}
+
 /// Character-range anchor inside a single block's plain textContent. Drives
 /// the persistent comment-highlight decoration and the Word-style click
 /// bridge with the comment card. Block-relative so it survives Tiptap
@@ -354,6 +370,22 @@ pub struct Comment {
     pub resolution: Option<Resolution>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selection: Option<CommentSelection>,
+    /// Pending follow-up the reviewer attached when reopening — the correction
+    /// or extra context (typed, or promoted from a Discuss fork). Carried back
+    /// to Claude in the next Revise payload, then cleared once re-resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reopen_note: Option<String>,
+    /// Archived prior reopen rounds, oldest-first. Empty for comments that were
+    /// never reopened-and-re-resolved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reopen_history: Vec<RoundHistoryEntry>,
+    /// A [question] the reviewer promoted into a directive ("Make this a
+    /// change"). Flips the comment from answer-only to a plan driver: it
+    /// counts toward Revise inference and is rendered as a `[decision]` Claude
+    /// must apply. The original question body + prior answer stay intact for
+    /// context. Always false for non-question kinds.
+    #[serde(default)]
+    pub actionable: bool,
 }
 
 /// One turn in a comment's fork-agent discussion thread (Phase 2). Rows are
@@ -581,6 +613,9 @@ impl SessionStore {
             status: CommentStatus::Draft,
             resolution: None,
             selection: request.selection,
+            reopen_note: None,
+            reopen_history: Vec::new(),
+            actionable: false,
         };
 
         let latest = session.revisions.last_mut().expect("non-empty checked above");
@@ -714,6 +749,20 @@ impl SessionStore {
         for revision in session.revisions.iter_mut() {
             for comment in revision.comments.iter_mut() {
                 if let Some(body) = resolutions.get(&comment.id) {
+                    // Re-resolving a reopened comment closes a round: archive the
+                    // prior resolution + the note that drove this round, then
+                    // consume the note so a fresh reopen starts clean.
+                    if matches!(comment.status, CommentStatus::Reopened) {
+                        if let Some(prior) = comment.resolution.take() {
+                            comment.reopen_history.push(RoundHistoryEntry {
+                                resolution_body: prior.body,
+                                reopen_note: comment.reopen_note.take(),
+                                version: prior.appeared_in_version,
+                            });
+                        } else {
+                            comment.reopen_note = None;
+                        }
+                    }
                     comment.resolution = Some(Resolution {
                         body: body.clone(),
                         appeared_in_version,
@@ -849,15 +898,37 @@ impl SessionStore {
         false
     }
 
-    pub fn reopen_resolution(&self, session_id: &str, comment_id: &str) -> bool {
+    /// Reopen a resolved (or already-accepted) resolution, attaching an optional
+    /// follow-up note for the next Revise round. The prior `resolution` body is
+    /// kept (it's the continuity Claude needs) but un-accepted; `note` replaces
+    /// any pending note (an empty/blank note clears it).
+    ///
+    /// `as_change` promotes a [question] into a directive ("Make this a
+    /// change"): the comment becomes a plan driver and is rendered as a
+    /// `[decision]` Claude must apply, with `note` carrying the decision text.
+    pub fn reopen_resolution(
+        &self,
+        session_id: &str,
+        comment_id: &str,
+        note: Option<&str>,
+        as_change: bool,
+    ) -> bool {
         let mut map = self.inner.lock().unwrap();
         let Some(session) = map.get_mut(session_id) else {
             return false;
         };
+        let note = note.map(str::trim).filter(|s| !s.is_empty());
         for revision in session.revisions.iter_mut() {
             for comment in revision.comments.iter_mut() {
                 if comment.id == comment_id {
                     comment.status = CommentStatus::Reopened;
+                    comment.reopen_note = note.map(str::to_string);
+                    if as_change {
+                        comment.actionable = true;
+                    }
+                    if let Some(res) = comment.resolution.as_mut() {
+                        res.accepted_at = None;
+                    }
                     if let Err(e) = self.db.update_comment(session_id, comment) {
                         tracing::error!(error = %e, "failed to persist reopen");
                     }
@@ -918,6 +989,9 @@ mod tests {
             status: CommentStatus::Draft,
             resolution: None,
             selection: None,
+            reopen_note: None,
+            reopen_history: Vec::new(),
+            actionable: false,
         }
     }
 
@@ -936,6 +1010,16 @@ mod tests {
             comment(CommentKind::Question, None),
         ];
         assert_eq!(SubmissionMode::infer(&batch), SubmissionMode::Ask);
+    }
+
+    #[test]
+    fn submission_mode_actionable_question_is_revise() {
+        // A promoted question ("Make this a change") drives the plan, so even
+        // an otherwise all-questions batch flips to Revise.
+        let mut q = comment(CommentKind::Question, None);
+        q.actionable = true;
+        let batch = [comment(CommentKind::Question, None), q];
+        assert_eq!(SubmissionMode::infer(&batch), SubmissionMode::Revise);
     }
 
     #[test]

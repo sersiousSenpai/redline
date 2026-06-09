@@ -44,7 +44,8 @@ const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 /// List one directory level. Directories sort first, then case-insensitive by
 /// name — the conventional file-explorer order. Entries whose metadata can't be
 /// read (broken symlinks, races) are skipped rather than failing the whole list.
-#[tauri::command]
+/// `(async)` keeps a slow directory read off the UI thread.
+#[tauri::command(async)]
 pub fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
     let read = fs::read_dir(&path).map_err(|e| format!("{path}: {e}"))?;
     let mut entries: Vec<DirEntry> = read
@@ -72,7 +73,9 @@ fn sort_entries(entries: &mut [DirEntry]) {
 
 /// Read a file for the read-only viewer. Oversized files and binaries are
 /// reported via flags instead of content so the UI can explain the omission.
-#[tauri::command]
+/// `(async)` so reading + UTF-8 validating a couple of megabytes never blocks
+/// the UI thread.
+#[tauri::command(async)]
 pub fn read_text_file(path: String) -> Result<FileContent, String> {
     let meta = fs::metadata(&path).map_err(|e| format!("{path}: {e}"))?;
     let size = meta.len();
@@ -129,7 +132,8 @@ pub struct BinaryFile {
 
 /// Read a file as base64 — used by the viewer to show images (and any other
 /// binary the UI knows how to render) inline without the asset protocol.
-#[tauri::command]
+/// `(async)` so reading + base64-encoding up to 16 MB stays off the UI thread.
+#[tauri::command(async)]
 pub fn read_file_base64(path: String) -> Result<BinaryFile, String> {
     let meta = fs::metadata(&path).map_err(|e| format!("{path}: {e}"))?;
     let size = meta.len();

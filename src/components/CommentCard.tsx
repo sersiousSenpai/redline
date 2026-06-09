@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Comment, CommentStatus } from "../types";
 import { compactEditPreview } from "../editor/wordDiff";
 import { AnchorPill } from "./AnchorPill";
@@ -23,7 +23,12 @@ interface CommentCardProps {
   onSelect?: () => void;
   onDelete: () => void;
   onAccept: () => void;
-  onReopen: () => void;
+  /** Reopen this resolution, optionally attaching a follow-up note that rides
+   *  back to Claude (as continuity) on the next Submit. */
+  onReopen: (note?: string) => void;
+  /** Promote a question into a plan-driving directive — the reviewer resolved
+   *  their question into a decision Claude must apply. */
+  onPromote: (directive: string) => void;
   /** True while a submit_review / approve_plan invoke is mid-flight. The only
    *  state that should disable Accept/Reopen — outside of this brief window,
    *  including the entire "Claude is revising" wait, resolution is always
@@ -75,9 +80,14 @@ export function CommentCard({
   onDelete,
   onAccept,
   onReopen,
+  onPromote,
   submitInFlight = false,
 }: CommentCardProps) {
-  const color = TYPE_COLORS[comment.type];
+  // A promoted question reads as a change request: relabel + recolor so it's
+  // visibly a plan driver, not an answer-only question.
+  const isPromoted = comment.type === "question" && !!comment.actionable;
+  const color = isPromoted ? "var(--color-warning)" : TYPE_COLORS[comment.type];
+  const typeLabel = isPromoted ? "Change request" : TYPE_LABELS[comment.type];
   // A point-anchored sticky-note from the HTML redline surface: a feedback
   // comment whose selection is a zero-width caret point. Demarcated in the pane
   // so it reads as a pinned note rather than a span-anchored feedback.
@@ -87,10 +97,55 @@ export function CommentCard({
     comment.selection.charEnd === comment.selection.charStart;
   const canDelete = comment.status === "draft";
   // Session-local collapse state — gives the reviewer an escape hatch when a
-  // huge pasted body or a long discussion thread overruns the pane. Not
-  // persisted: a freshly loaded session always starts expanded so nothing is
-  // hidden by surprise.
-  const [collapsed, setCollapsed] = useState(false);
+  // huge pasted body or a long discussion thread overruns the pane. Accepted
+  // cards start collapsed (the reviewer is done with them — keep the pane
+  // focused on what's still open); everything else starts expanded so nothing
+  // is hidden by surprise.
+  const [collapsed, setCollapsed] = useState(comment.status === "accepted");
+  // Auto-collapse the moment a resolution is accepted. Guarded on the status
+  // *transition* into "accepted" so a reviewer who manually re-expands an
+  // accepted card isn't fought on the next revision reload (status stays
+  // "accepted", so the effect never re-fires).
+  const prevStatusRef = useRef(comment.status);
+  useEffect(() => {
+    if (prevStatusRef.current !== "accepted" && comment.status === "accepted") {
+      setCollapsed(true);
+    }
+    prevStatusRef.current = comment.status;
+  }, [comment.status]);
+
+  // Inline "reopen with a follow-up note" composer. Seeded from any pending
+  // note so reopening an already-reopened card edits the same note.
+  const [reopenOpen, setReopenOpen] = useState(false);
+  const [noteDraft, setNoteDraft] = useState(comment.reopenNote ?? "");
+  // Collapsed-by-default trail of earlier reopen rounds.
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const openReopen = () => {
+    setNoteDraft(comment.reopenNote ?? "");
+    setCollapsed(false);
+    setReopenOpen(true);
+  };
+  const confirmReopen = () => {
+    onReopen(noteDraft.trim() || undefined);
+    setReopenOpen(false);
+  };
+
+  // "Make this a change" — promote a question into a directive. Seeded from any
+  // pending note (e.g. a decision escalated from the Discuss thread) so the
+  // reviewer just confirms. Unlike a reopen note, the directive is required.
+  const [promoteOpen, setPromoteOpen] = useState(false);
+  const [directiveDraft, setDirectiveDraft] = useState(comment.reopenNote ?? "");
+  const openPromote = () => {
+    setDirectiveDraft(comment.reopenNote ?? "");
+    setCollapsed(false);
+    setPromoteOpen(true);
+  };
+  const confirmPromote = () => {
+    const directive = directiveDraft.trim();
+    if (!directive) return;
+    onPromote(directive);
+    setPromoteOpen(false);
+  };
   // Edit comments default to a compact one-line word-diff; the full
   // before/after is one click away. Keeps a flurry of small edits from
   // flooding the pane.
@@ -149,7 +204,7 @@ export function CommentCard({
               letterSpacing: "0.06em",
             }}
           >
-            {isPinnedNote ? "💬 Note" : TYPE_LABELS[comment.type]}
+            {isPinnedNote ? "💬 Note" : typeLabel}
             {comment.scope && (
               <span
                 className="ml-1 font-mono normal-case"
@@ -282,11 +337,16 @@ export function CommentCard({
               fontWeight: 600,
               textTransform: "uppercase",
               letterSpacing: "0.06em",
-              color: "var(--color-info)",
+              color:
+                comment.status === "reopened"
+                  ? "var(--color-ink-muted)"
+                  : "var(--color-info)",
               marginBottom: "4px",
             }}
           >
-            Claude's resolution
+            {comment.status === "reopened"
+              ? "Previous resolution"
+              : "Claude's resolution"}
             <span
               className="ml-2 font-mono normal-case"
               style={{ color: "var(--color-ink-muted)" }}
@@ -294,46 +354,351 @@ export function CommentCard({
               · v{comment.resolution.appearedInVersion}
             </span>
           </div>
-          <MarkdownView body={comment.resolution.body} />
-          {comment.status === "resolved" && (
-            <div className="mt-2 flex items-center gap-2">
+          {/* When reopened, the prior resolution is superseded context — mute
+              it so the eye lands on the pending follow-up instead. */}
+          <div style={{ opacity: comment.status === "reopened" ? 0.55 : 1 }}>
+            <MarkdownView body={comment.resolution.body} />
+          </div>
+
+          {/* Earlier reopen rounds — collapsed by default, one click to the
+              full trail. Keeps the card focused while never hiding history. */}
+          {comment.reopenHistory && comment.reopenHistory.length > 0 && (
+            <div className="mt-2">
               <button
                 type="button"
-                onClick={onAccept}
-                disabled={submitInFlight}
-                title={
-                  submitInFlight
-                    ? "A submit is in flight — wait a moment."
-                    : "Accept this resolution"
-                }
-                className="rounded px-2 py-0.5 font-medium disabled:opacity-40"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setHistoryOpen((h) => !h);
+                }}
                 style={{
-                  background: "var(--color-success)",
-                  color: "var(--color-on-accent)",
-                  fontSize: "11px",
+                  fontSize: "10px",
+                  fontWeight: 600,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.06em",
+                  color: "var(--color-ink-muted)",
+                  cursor: "pointer",
                 }}
               >
-                Accept
+                ⟲ {comment.reopenHistory.length} earlier round
+                {comment.reopenHistory.length === 1 ? "" : "s"}{" "}
+                {historyOpen ? "▾" : "▸"}
               </button>
-              <button
-                type="button"
-                onClick={onReopen}
-                disabled={submitInFlight}
-                title={
-                  submitInFlight
-                    ? "A submit is in flight — wait a moment."
-                    : "Reopen this resolution for another round of feedback"
-                }
-                className="rounded px-2 py-0.5 font-medium disabled:opacity-40"
+              {historyOpen && (
+                <div className="mt-1 flex flex-col gap-2">
+                  {comment.reopenHistory.map((h, i) => (
+                    <div
+                      key={i}
+                      className="rounded px-2 py-1"
+                      style={{
+                        background: "var(--color-paper)",
+                        border: "1px solid var(--color-rule)",
+                        opacity: 0.7,
+                      }}
+                    >
+                      <div
+                        className="font-mono"
+                        style={{
+                          fontSize: "9px",
+                          color: "var(--color-ink-muted)",
+                          marginBottom: "2px",
+                        }}
+                      >
+                        v{h.version} resolution
+                      </div>
+                      <MarkdownView body={h.resolutionBody} compact />
+                      {h.reopenNote && (
+                        <div className="mt-1">
+                          <span
+                            style={{
+                              fontSize: "9px",
+                              fontWeight: 600,
+                              textTransform: "uppercase",
+                              letterSpacing: "0.06em",
+                              color: "var(--color-ink-muted)",
+                            }}
+                          >
+                            Your note
+                          </span>
+                          <MarkdownView body={h.reopenNote} compact />
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Pending follow-up / decision (reopened, not currently editing). */}
+          {comment.status === "reopened" &&
+            comment.reopenNote &&
+            !reopenOpen &&
+            !promoteOpen && (
+              <div
+                className="mt-2 rounded px-2 py-1"
                 style={{
-                  background: "var(--color-bg-elevated)",
+                  background: "var(--color-anchor-bg)",
                   border: "1px solid var(--color-rule)",
-                  color: "var(--color-ink)",
-                  fontSize: "11px",
                 }}
               >
-                Reopen
-              </button>
+                <div
+                  style={{
+                    fontSize: "10px",
+                    fontWeight: 600,
+                    textTransform: "uppercase",
+                    letterSpacing: "0.06em",
+                    color: "var(--color-warning)",
+                    marginBottom: "2px",
+                  }}
+                >
+                  {isPromoted ? "Your decision" : "Pending follow-up"}
+                </div>
+                <MarkdownView body={comment.reopenNote} compact />
+              </div>
+            )}
+
+          {/* For an answered question that hasn't been promoted, make the
+              answer-only nature explicit — and offer the escape hatch. */}
+          {comment.type === "question" &&
+            !comment.actionable &&
+            (comment.status === "resolved" ||
+              comment.status === "accepted") &&
+            !reopenOpen &&
+            !promoteOpen && (
+              <div
+                className="mt-2 italic"
+                style={{ fontSize: "11px", color: "var(--color-ink-muted)" }}
+              >
+                Asking only — this won't change the plan unless you make it a
+                change.
+              </div>
+            )}
+
+          {/* Action buttons (hidden while a composer is open). */}
+          {!reopenOpen && !promoteOpen && (
+            <div className="mt-2 flex items-center gap-2 flex-wrap">
+              {comment.status === "resolved" && (
+                <button
+                  type="button"
+                  onClick={onAccept}
+                  disabled={submitInFlight}
+                  title={
+                    submitInFlight
+                      ? "A submit is in flight — wait a moment."
+                      : "Accept this resolution"
+                  }
+                  className="rounded px-2 py-0.5 font-medium disabled:opacity-40"
+                  style={{
+                    background: "var(--color-success)",
+                    color: "var(--color-on-accent)",
+                    fontSize: "11px",
+                  }}
+                >
+                  Accept
+                </button>
+              )}
+              {(comment.status === "resolved" ||
+                comment.status === "accepted") && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    openReopen();
+                  }}
+                  disabled={submitInFlight}
+                  title={
+                    submitInFlight
+                      ? "A submit is in flight — wait a moment."
+                      : "Reopen with a follow-up for Claude"
+                  }
+                  className="rounded px-2 py-0.5 font-medium disabled:opacity-40"
+                  style={{
+                    background: "var(--color-bg-elevated)",
+                    border: "1px solid var(--color-rule)",
+                    color: "var(--color-ink)",
+                    fontSize: "11px",
+                  }}
+                >
+                  Reopen
+                </button>
+              )}
+              {/* Promote a question into a plan-driving change. */}
+              {comment.type === "question" &&
+                !comment.actionable &&
+                (comment.status === "resolved" ||
+                  comment.status === "accepted" ||
+                  comment.status === "reopened") && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      openPromote();
+                    }}
+                    disabled={submitInFlight}
+                    title={
+                      submitInFlight
+                        ? "A submit is in flight — wait a moment."
+                        : "Turn your decision into a plan change for Claude"
+                    }
+                    className="rounded px-2 py-0.5 font-medium disabled:opacity-40"
+                    style={{
+                      background: "var(--color-warning)",
+                      color: "var(--color-on-accent)",
+                      fontSize: "11px",
+                    }}
+                  >
+                    Make this a change
+                  </button>
+                )}
+              {comment.status === "reopened" && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    comment.actionable ? openPromote() : openReopen();
+                  }}
+                  disabled={submitInFlight}
+                  className="rounded px-2 py-0.5 font-medium disabled:opacity-40"
+                  style={{
+                    background: "var(--color-bg-elevated)",
+                    border: "1px solid var(--color-rule)",
+                    color: "var(--color-ink)",
+                    fontSize: "11px",
+                  }}
+                >
+                  {comment.actionable
+                    ? "Edit decision"
+                    : comment.reopenNote
+                      ? "Edit note"
+                      : "Add note"}
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Inline reopen composer. */}
+          {reopenOpen && (
+            <div
+              className="mt-2 flex flex-col gap-1.5"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <textarea
+                value={noteDraft}
+                onChange={(e) => setNoteDraft(e.target.value)}
+                autoFocus
+                placeholder="What's still off, or extra context for Claude? (optional)"
+                rows={3}
+                className="rounded px-2 py-1"
+                style={{
+                  fontSize: "12px",
+                  border: "1px solid var(--color-rule)",
+                  background: "var(--color-paper)",
+                  color: "var(--color-ink)",
+                  fontFamily: "inherit",
+                  resize: "vertical",
+                  maxHeight: "200px",
+                }}
+              />
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={confirmReopen}
+                  disabled={submitInFlight}
+                  className="rounded px-2 py-0.5 font-medium disabled:opacity-40"
+                  style={{
+                    background: "var(--color-warning)",
+                    color: "var(--color-on-accent)",
+                    fontSize: "11px",
+                  }}
+                >
+                  {comment.status === "reopened" ? "Update note" : "Reopen"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setReopenOpen(false)}
+                  className="rounded px-2 py-0.5"
+                  style={{
+                    color: "var(--color-ink-muted)",
+                    fontSize: "11px",
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Inline "make this a change" composer — directive is required. */}
+          {promoteOpen && (
+            <div
+              className="mt-2 flex flex-col gap-1.5"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div
+                style={{
+                  fontSize: "10px",
+                  fontWeight: 600,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.06em",
+                  color: "var(--color-warning)",
+                }}
+              >
+                Turn into a plan change
+              </div>
+              <textarea
+                value={directiveDraft}
+                onChange={(e) => setDirectiveDraft(e.target.value)}
+                autoFocus
+                placeholder="What should change? e.g. “Use a modern style instead.”"
+                rows={3}
+                className="rounded px-2 py-1"
+                style={{
+                  fontSize: "12px",
+                  border: "1px solid var(--color-rule)",
+                  background: "var(--color-paper)",
+                  color: "var(--color-ink)",
+                  fontFamily: "inherit",
+                  resize: "vertical",
+                  maxHeight: "200px",
+                }}
+              />
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={confirmPromote}
+                  disabled={submitInFlight || !directiveDraft.trim()}
+                  className="rounded px-2 py-0.5 font-medium disabled:opacity-40"
+                  style={{
+                    background: "var(--color-warning)",
+                    color: "var(--color-on-accent)",
+                    fontSize: "11px",
+                  }}
+                >
+                  {comment.actionable ? "Update change" : "Make this a change"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPromoteOpen(false)}
+                  className="rounded px-2 py-0.5"
+                  style={{
+                    color: "var(--color-ink-muted)",
+                    fontSize: "11px",
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
+          {comment.status === "reopened" && !reopenOpen && !promoteOpen && (
+            <div
+              className="mt-2 italic"
+              style={{ fontSize: "11px", color: "var(--color-ink-muted)" }}
+            >
+              {isPromoted
+                ? "Applied as a plan change on your next Submit."
+                : "Re-sent to Claude with your next Submit."}
             </div>
           )}
         </div>

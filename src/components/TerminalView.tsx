@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { useEffect, useRef } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, Channel } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 
 interface TerminalViewProps {
@@ -25,13 +26,6 @@ interface TerminalViewProps {
   /** Called when the user clicks into this pane — lets the host mark which of
    *  two split panes is the focused/"active" terminal. */
   onPaneFocus?: () => void;
-}
-
-function base64ToBytes(b64: string): Uint8Array {
-  const bin = atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
 }
 
 // POSIX single-quote escaping so paths with spaces/quotes paste safely.
@@ -100,6 +94,32 @@ export function TerminalView({
     termRef.current = term;
     fitRef.current = fit;
 
+    // GPU renderer: offloads cell rendering to WebGL so a fast stream doesn't
+    // peg the main thread compositing the DOM. WebGL can fail to init on some
+    // GPUs/contexts and the context can be lost at runtime — both cases fall
+    // back to xterm's default renderer rather than breaking the terminal.
+    try {
+      const webgl = new WebglAddon();
+      webgl.onContextLoss(() => webgl.dispose());
+      term.loadAddon(webgl);
+    } catch {
+      /* no WebGL here — xterm's default renderer stays active */
+    }
+
+    // Per-terminal raw-byte output stream. One Channel = one subscriber (this
+    // tab) → no N-tab event fan-out, no id filtering, no base64. Bytes arrive
+    // as an ArrayBuffer; write them straight to xterm. The write callback is our
+    // flow-control ACK — it fires once xterm has parsed the chunk, so we report
+    // the byte count back and the backend only keeps reading while we keep up.
+    const onOutput = new Channel<ArrayBuffer>();
+    onOutput.onmessage = (buf) => {
+      const bytes = new Uint8Array(buf);
+      term.write(bytes, () => {
+        void invoke("pty_ack", { id, n: bytes.length }).catch(() => {});
+      });
+      if (!visibleRef.current) onActivityRef.current(id);
+    };
+
     // A hidden (display:none / zero-height) host makes fit() compute 0×0; a
     // 0-row PTY corrupts output. Fall back to a sane size when spawning while
     // not yet visible — the [visible] effect re-fits once shown.
@@ -108,20 +128,13 @@ export function TerminalView({
       cwd,
       cols: term.cols || 80,
       rows: term.rows || 24,
+      onOutput,
     }).catch((e) => term.writeln(`\r\n[redline: failed to start shell: ${e}]`));
 
     const dataSub = term.onData((d) => {
       void invoke("pty_write", { id, data: d }).catch(() => {});
     });
 
-    const outPromise = listen<{ id: string; data: string }>(
-      "pty-output",
-      (e) => {
-        if (e.payload.id !== id) return;
-        term.write(base64ToBytes(e.payload.data));
-        if (!visibleRef.current) onActivityRef.current(id);
-      },
-    );
     const exitPromise = listen<{ id: string }>("pty-exit", (e) => {
       if (e.payload.id !== id) return;
       term.writeln("\r\n[process exited]");
@@ -204,7 +217,6 @@ export function TerminalView({
     return () => {
       ro.disconnect();
       dataSub.dispose();
-      void outPromise.then((un) => un());
       void exitPromise.then((un) => un());
       void dropPromise.then((un) => un());
       void focusPromise.then((un) => un());

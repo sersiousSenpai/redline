@@ -185,6 +185,27 @@ export function CommentThread({ sessionId, comment }: CommentThreadProps) {
     void invoke("fork_thread_cancel", { sessionId, commentId }).catch(() => {});
   }
 
+  // Promote a read-only discussion into the main revise loop: reopen the
+  // comment with the discussion transcript as its follow-up note, so the next
+  // Submit carries the original feedback + prior resolution + everything we
+  // just worked out. The card flips to "reopened" via the comments-changed
+  // reload the backend emits.
+  function sendToClaude(transcript: ThreadMessage[]) {
+    const body = transcript
+      .map((m) => `${m.role === "user" ? "Reviewer" : "Claude"}: ${m.body.trim()}`)
+      .join("\n\n");
+    const note = `Following a discussion with Claude:\n\n${body}`;
+    // A discussed question that's escalated has become a decision — promote it
+    // so the next Revise actually changes the plan, not just answers again.
+    const asChange = comment.type === "question";
+    void invoke("reopen_resolution", {
+      sessionId,
+      commentId,
+      note,
+      asChange,
+    }).catch((err) => console.error("reopen from discussion failed", err));
+  }
+
   function discard() {
     void invoke("fork_thread_discard", { sessionId, commentId }).catch(
       () => {},
@@ -209,6 +230,12 @@ export function CommentThread({ sessionId, comment }: CommentThreadProps) {
   const visible = messages.filter(
     (m, i) => !(i === 0 && m.role === "user" && m.body.trim() === seed),
   );
+  // Escalation only makes sense once Claude has resolved this comment — that's
+  // when "reopen with what we discussed" has something to reopen.
+  const canEscalate =
+    comment.status === "resolved" ||
+    comment.status === "accepted" ||
+    comment.status === "reopened";
 
   // No thread yet (or only the suppressed seed) — the entry point.
   if (visible.length === 0 && status === "idle") {
@@ -314,6 +341,31 @@ export function CommentThread({ sessionId, comment }: CommentThreadProps) {
             }}
             onStop={cancel}
           />
+
+          {/* Once there's a resolution on the table and the exchange has
+              settled, let the reviewer route what they just worked out back
+              into the revise loop — the fork itself can't change the plan. */}
+          {canEscalate && status === "idle" && (
+            <button
+              type="button"
+              onClick={() => sendToClaude(visible)}
+              className="self-start rounded px-2 py-1 font-medium"
+              style={{
+                background: "var(--color-warning)",
+                color: "var(--color-on-accent)",
+                fontSize: "11px",
+              }}
+              title={
+                comment.type === "question"
+                  ? "Turn this discussion into a plan change for the next Submit"
+                  : "Reopen this item with the discussion as context for the next Submit"
+              }
+            >
+              {comment.type === "question"
+                ? "Make this a change →"
+                : "Send to Claude for rework →"}
+            </button>
+          )}
 
           <button
             type="button"

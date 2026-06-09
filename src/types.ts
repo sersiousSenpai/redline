@@ -75,6 +75,14 @@ export interface Resolution {
   acceptedAt: number | null;
 }
 
+/** One archived reopen round — the prior resolution and the note that drove it,
+ *  surfaced under a collapsed "earlier rounds" trail on the card. */
+export interface RoundHistoryEntry {
+  resolutionBody: string;
+  reopenNote?: string;
+  version: number;
+}
+
 /** Character-range anchor inside a single block's plain textContent, captured
  *  at comment creation. Renders as a Word-style highlight; click-bridges
  *  the comment card and the in-doc selection. Block-relative so it piggybacks
@@ -110,6 +118,14 @@ export interface Comment {
   /** Optional character-range inside the comment's block. Drives the in-doc
    *  highlight and bidirectional focus with the comment card. */
   selection?: CommentSelection;
+  /** Pending follow-up attached on reopen — re-sent to Claude next Submit. */
+  reopenNote?: string;
+  /** Archived prior reopen rounds, oldest-first. */
+  reopenHistory?: RoundHistoryEntry[];
+  /** A question the reviewer promoted into a directive ("Make this a change").
+   *  Flips it from answer-only to a plan driver — rendered to Claude as a
+   *  [decision]. Always false/absent for non-question kinds. */
+  actionable?: boolean;
 }
 
 export interface NewCommentRequest {
@@ -189,6 +205,41 @@ export interface BinaryFile {
   data: string | null;
   tooLarge: boolean;
   size: number;
+}
+
+/** Metadata for a document opened in the paged viewer (`open_doc`). Tokenization
+ *  happens in Rust off the UI thread; `highlighted` is false when the file is
+ *  too large to color or no grammar matched (the viewer pages plain text). */
+export interface DocMeta {
+  lineCount: number;
+  /** Tokens can be requested for this doc (text, within the highlight size cap):
+   *  the viewer paints plain immediately, then asks `doc_highlight` and swaps in
+   *  colored lines. False for too-large / binary docs. */
+  highlightable: boolean;
+  tooLarge: boolean;
+  isBinary: boolean;
+  size: number;
+}
+
+/** One colored run within a line. `c` is a highlight.js class (absent = plain). */
+export interface HlToken {
+  c?: string;
+  t: string;
+}
+
+/** One line from `doc_lines`: `tokens` when highlighted, else raw `text`. */
+export interface DocLine {
+  tokens?: HlToken[];
+  text?: string;
+}
+
+/** `open_doc` result: metadata, plus — for normal-sized docs (≤ the backend's
+ *  inline cap) — every line inline so the viewer paints in one round-trip with no
+ *  blank frame. `lines` is absent for docs the viewer pages via `doc_lines`
+ *  (huge files) and for binary / too-large docs. */
+export interface DocOpen {
+  meta: DocMeta;
+  lines?: DocLine[];
 }
 
 /** A project folder opened in the explorer, shown as a sidebar tab. `id` is

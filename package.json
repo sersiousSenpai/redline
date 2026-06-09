@@ -30,6 +30,7 @@
     "@tiptap/react": "^2.27.2",
     "@tiptap/starter-kit": "^2.27.2",
     "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-webgl": "^0.18.0",
     "@xterm/xterm": "^5.5.0",
     "highlight.js": "^11",
     "lowlight": "^3",

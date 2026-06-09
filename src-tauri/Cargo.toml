@@ -34,4 +34,7 @@ similar = "2"
 portable-pty = "0.8"
 base64 = "0.22"
 notify-debouncer-mini = "0.4"
+# Pure-Rust regex backend (fancy-regex) so the build needs no C/oniguruma
+# toolchain. Tokenizes off the UI thread for the read-only file viewer.
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 

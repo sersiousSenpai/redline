@@ -5,8 +5,11 @@ mod feedback;
 mod fork;
 mod fsbrowse;
 mod fswatch;
+mod highlight;
 mod hook;
 mod parser;
+#[cfg(test)]
+mod perf_guard;
 mod pty;
 mod resolutions;
 mod skill;
@@ -1072,8 +1075,15 @@ fn reopen_resolution(
     store: tauri::State<'_, SessionStore>,
     session_id: String,
     comment_id: String,
+    note: Option<String>,
+    as_change: Option<bool>,
 ) -> Result<bool, String> {
-    let ok = store.reopen_resolution(&session_id, &comment_id);
+    let ok = store.reopen_resolution(
+        &session_id,
+        &comment_id,
+        note.as_deref(),
+        as_change.unwrap_or(false),
+    );
     if ok {
         let _ = app.emit(
             "comments-changed",
@@ -1207,6 +1217,7 @@ pub fn run() {
             get_skill_status,
             install_skill,
             pty::pty_spawn,
+            pty::pty_ack,
             pty::pty_write,
             pty::pty_resize,
             pty::pty_kill,
@@ -1216,6 +1227,9 @@ pub fn run() {
             fsbrowse::read_text_file,
             fsbrowse::read_file_base64,
             fsbrowse::home_dir,
+            highlight::open_doc,
+            highlight::doc_highlight,
+            highlight::doc_lines,
             fswatch::watch_dir,
             fswatch::unwatch_dir,
             fork::fork_thread_send,
@@ -1244,6 +1258,17 @@ pub fn run() {
             app.manage(pty::PtyState::new());
 
             app.manage(fswatch::FsWatcher::new(app.handle().clone()));
+
+            // Warm syntect's per-grammar regexes off the hot path so the first
+            // real file open doesn't pay the one-time compile cost on the user's
+            // click. The compiled-regex cache lives in the shared SyntaxSet, so
+            // the background warm benefits the managed instance the commands use.
+            let highlighter = Arc::new(highlight::Highlighter::new());
+            {
+                let hl = highlighter.clone();
+                std::thread::spawn(move || hl.warm_common());
+            }
+            app.manage(highlighter);
 
             // Resolve `claude` once — a Finder-launched app has a minimal PATH.
             // Built before SessionStore::new consumes the `db` Arc.

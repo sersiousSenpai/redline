@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import type { DirEntry } from "../types";
 import { subscribeFsChange } from "../hooks/useFsWatch";
+import { preloadCodeView } from "./FileViewer";
 
 interface FileTreeProps {
   /** Absolute path of the folder this tree is rooted at. */
@@ -18,6 +19,11 @@ interface FileTreeProps {
 // lazy-loads its children the first time it's expanded (one `list_dir` per
 // level), so opening a huge repo never walks the whole tree up front.
 export function FileTree({ root, activeFile, onOpenFile }: FileTreeProps) {
+  // Warm the code-viewer chunk the moment the explorer is shown, so the first
+  // file click never waits on the JS chunk (which would stack a Suspense flash
+  // on top of CodeView's own loader — the "double flash").
+  useEffect(() => preloadCodeView(), []);
+
   return (
     <div className="py-1" style={{ fontSize: "13px" }}>
       <DirChildren

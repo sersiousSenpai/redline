@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 /** Payload of the backend `fs-change` event: a directory whose listing may have
@@ -49,4 +51,39 @@ export function subscribeFsChange(path: string, onChange: () => void): () => voi
     current.delete(onChange);
     if (current.size === 0) subscribers.delete(key);
   };
+}
+
+function dirname(path: string): string {
+  const idx = path.lastIndexOf("/");
+  return idx > 0 ? path.slice(0, idx) : "/";
+}
+
+/** How long to coalesce a burst of fs-change events before reloading an open
+ *  file. A chunked rewrite can fire many events; without this the viewer would
+ *  re-read (and re-tokenize) on every one. */
+const RELOAD_DEBOUNCE_MS = 150;
+
+/** Watch the directory of `path` for the caller's lifetime and run `reload`
+ *  (debounced) whenever `path` changes on disk, so an open file reflects edits
+ *  without reopening. The backend refcounts watches, so this is safe even when
+ *  the file tree already watches the same directory. */
+export function useLiveFile(path: string, reload: () => void): void {
+  useEffect(() => {
+    const dir = dirname(path);
+    void invoke("watch_dir", { path: dir }).catch(() => {});
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const debouncedReload = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        reload();
+      }, RELOAD_DEBOUNCE_MS);
+    };
+    const unsubscribe = subscribeFsChange(path, debouncedReload);
+    return () => {
+      if (timer) clearTimeout(timer);
+      unsubscribe();
+      void invoke("unwatch_dir", { path: dir }).catch(() => {});
+    };
+  }, [path, reload]);
 }

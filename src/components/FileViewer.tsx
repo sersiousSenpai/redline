@@ -1,15 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { Suspense, lazy, useCallback, useEffect, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 import type { BinaryFile, FileContent } from "../types";
-import { subscribeFsChange } from "../hooks/useFsWatch";
+import { useLiveFile } from "../hooks/useFsWatch";
 import { MarkdownView } from "./MarkdownView";
 
-// highlight.js + its language grammars are weighty; keep them out of the
-// initial bundle until the user actually opens a code file.
-const CodeView = lazy(() => import("./CodeView"));
+// Don't flash a loading notice for reads faster than this; markdown files resolve
+// well under it, so switching between them shows no flicker. Mirrors CodeView.
+const LOADING_DELAY_MS = 120;
+
+// The code viewer is a separate chunk; keep it out of the initial bundle but
+// preload it as soon as the folder explorer is shown (see `preloadCodeView`), so
+// the first file click never waits on the chunk — which would stack a Suspense
+// "Loading…" on top of CodeView's own load (the "double flash").
+const codeViewImport = () => import("./CodeView");
+const CodeView = lazy(codeViewImport);
+
+let codeViewPreloaded: Promise<unknown> | null = null;
+/** Warm the CodeView chunk ahead of the first open. Idempotent; the bundler
+ *  dedupes this with the `lazy()` import so they share one fetch. */
+export function preloadCodeView(): void {
+  if (!codeViewPreloaded) codeViewPreloaded = codeViewImport();
+}
 
 // Image types the browser can render from a data URL. svg is text but renders
 // fine as an image, which is what people expect when they click one.
@@ -45,27 +59,6 @@ interface FileViewerProps {
 function basename(path: string): string {
   const idx = path.lastIndexOf("/");
   return idx >= 0 ? path.slice(idx + 1) : path;
-}
-
-function dirname(path: string): string {
-  const idx = path.lastIndexOf("/");
-  return idx > 0 ? path.slice(0, idx) : "/";
-}
-
-// Watch the open file's directory for the viewer's lifetime and re-run `reload`
-// when the file itself changes on disk, so edits show without reopening. The
-// directory may already be watched by the tree; the backend refcounts so this
-// extra watch is safe and guarantees coverage even if the tree dir is collapsed.
-function useLiveFile(path: string, reload: () => void): void {
-  useEffect(() => {
-    const dir = dirname(path);
-    void invoke("watch_dir", { path: dir }).catch(() => {});
-    const unsubscribe = subscribeFsChange(path, reload);
-    return () => {
-      unsubscribe();
-      void invoke("unwatch_dir", { path: dir }).catch(() => {});
-    };
-  }, [path, reload]);
 }
 
 function isMarkdown(path: string): boolean {
@@ -184,43 +177,78 @@ function ImageBody({ path, mime }: { path: string; mime: string }) {
   );
 }
 
-// Loads and renders a text file: markdown rich, everything else as highlighted
-// source. Binary (non-image) and oversized files report why instead of choking.
+// Markdown renders rich (full read); everything else goes to the virtualized,
+// off-thread-tokenized code viewer so a large file never freezes the UI.
 function TextBody({ path }: { path: string }) {
-  const [file, setFile] = useState<FileContent | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const load = useCallback(
-    (refresh: boolean) => {
-      let cancelled = false;
-      if (!refresh) {
-        setFile(null);
-        setError(null);
-      }
-      void (async () => {
-        try {
-          const result = await invoke<FileContent>("read_text_file", { path });
-          if (!cancelled) {
-            setFile(result);
-            setError(null);
-          }
-        } catch (e) {
-          if (!cancelled && !refresh) setError(String(e));
-        }
-      })();
-      return () => {
-        cancelled = true;
-      };
-    },
-    [path],
+  if (isMarkdown(path)) return <MarkdownBody path={path} />;
+  return (
+    // Blank (not a "Loading…" notice) while the chunk loads: it's preloaded on
+    // explorer open so this rarely shows, and a silent hold avoids stacking a
+    // second flash on CodeView's own (delayed, content-preserving) loader.
+    <Suspense fallback={<div className="h-full w-full" style={{ background: "var(--color-paper)" }} />}>
+      <CodeView path={path} />
+    </Suspense>
   );
+}
 
-  useEffect(() => load(false), [load]);
-  const reload = useCallback(() => void load(true), [load]);
-  useLiveFile(path, reload);
+// Markdown is read whole and rendered rich. Markdown files are small in
+// practice, so the 2 MB `read_text_file` cap (and its too-large/binary flags)
+// is the right guard here. Loads are stale-while-revalidate: the prior file's
+// content stays on screen until the new one resolves, so switching never flashes
+// a blank "Loading…" frame (the same anti-flicker contract as CodeView).
+function MarkdownBody({ path }: { path: string }) {
+  const [displayed, setDisplayed] = useState<{ path: string; file: FileContent } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [showLoading, setShowLoading] = useState(false);
+  const latestPath = useRef(path);
 
-  if (error) return <Notice>Couldn’t read this file.</Notice>;
-  if (file === null) return <Notice>Loading…</Notice>;
+  useEffect(() => {
+    latestPath.current = path;
+    setError(null);
+  }, [path]);
+
+  const load = useCallback(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const result = await invoke<FileContent>("read_text_file", { path });
+        if (cancelled || latestPath.current !== path) return;
+        setDisplayed({ path, file: result });
+        setError(null);
+      } catch (e) {
+        if (!cancelled && latestPath.current === path) setError(String(e));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [path]);
+
+  useEffect(() => load(), [load]);
+  useLiveFile(path, load);
+
+  const fresh = displayed?.path === path;
+  const view = showLoading && !fresh ? null : displayed;
+
+  useEffect(() => {
+    if (fresh) {
+      setShowLoading(false);
+      return;
+    }
+    setShowLoading(false);
+    const t = setTimeout(() => setShowLoading(true), LOADING_DELAY_MS);
+    return () => clearTimeout(t);
+  }, [fresh, path]);
+
+  if (!view) {
+    if (showLoading) {
+      return <Notice>{error ? "Couldn’t read this file." : "Loading…"}</Notice>;
+    }
+    if (!displayed && error) return <Notice>Couldn’t read this file.</Notice>;
+    return <div className="h-full w-full" style={{ background: "var(--color-paper)" }} />;
+  }
+
+  const file = view.file;
   if (file.tooLarge) {
     return (
       <Notice>
@@ -229,18 +257,10 @@ function TextBody({ path }: { path: string }) {
     );
   }
   if (file.isBinary) return <Notice>Binary file — no preview.</Notice>;
-  const content = file.content ?? "";
-  if (isMarkdown(path)) {
-    return (
-      <div className="rl-prose px-6 py-6" style={{ maxWidth: "820px" }}>
-        <MarkdownView body={content} />
-      </div>
-    );
-  }
   return (
-    <Suspense fallback={<Notice>Loading…</Notice>}>
-      <CodeView content={content} filename={basename(path)} />
-    </Suspense>
+    <div className="rl-prose px-6 py-6" style={{ maxWidth: "820px" }}>
+      <MarkdownView body={file.content ?? ""} />
+    </div>
   );
 }
 
