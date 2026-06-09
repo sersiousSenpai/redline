@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -52,6 +52,12 @@ pub struct Revision {
     /// The frontend diffs/clears comments only within a thread, so a fresh
     /// plan renders clean instead of as a redline of the prior plan.
     pub thread_start: bool,
+    /// True when this revision is a *restore* — the reviewer re-presented an
+    /// already-reviewed plan via "Restore plan session" (same `session_id`,
+    /// identical body). It re-uses the prior plan rather than advancing the
+    /// substantive version, so the frontend labels it "vN restored" and skips
+    /// it when numbering subsequent genuine revisions.
+    pub restored: bool,
 }
 
 /// How the daemon treats incoming `ExitPlanMode` plans.
@@ -116,6 +122,7 @@ pub struct RevisionSummary {
     pub version_number: u32,
     pub received_at: i64,
     pub thread_start: bool,
+    pub restored: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -442,6 +449,12 @@ pub struct UpdateCommentRequest {
 pub struct SessionStore {
     inner: Arc<Mutex<HashMap<SessionId, ReviewSession>>>,
     db: Arc<Database>,
+    /// Sessions for which the reviewer has armed a one-shot "restore" — the
+    /// next inbound plan that re-presents the identical body is tagged as a
+    /// restore rather than a fresh version. Ephemeral (in-memory only): losing
+    /// it across an app restart just means a restore labels as a normal new
+    /// thread, which is acceptable and rare.
+    pending_restores: Arc<Mutex<HashSet<SessionId>>>,
 }
 
 pub struct UpsertResult {
@@ -458,7 +471,25 @@ impl SessionStore {
         Self {
             inner: Arc::new(Mutex::new(map)),
             db,
+            pending_restores: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    /// Arm a one-shot restore for `session_id`: the next inbound plan that
+    /// re-presents the identical body will be tagged as a restore. Called when
+    /// the reviewer clicks "Restore plan session".
+    pub fn arm_restore(&self, session_id: &str) {
+        self.pending_restores
+            .lock()
+            .unwrap()
+            .insert(session_id.to_string());
+    }
+
+    /// Consume the armed restore for `session_id`, returning whether one was
+    /// set. Always clears the flag so it is strictly one-shot for the very
+    /// next plan, restore or not.
+    pub fn take_restore(&self, session_id: &str) -> bool {
+        self.pending_restores.lock().unwrap().remove(session_id)
     }
 
     /// The backing database handle — test-only, for exercising fork-thread
@@ -476,6 +507,7 @@ impl SessionStore {
         raw_plan: String,
         sections: Vec<Section>,
         thread_start: bool,
+        restored: bool,
     ) -> UpsertResult {
         let now = now_millis();
         let project_name = derive_project_name(project_path);
@@ -503,6 +535,7 @@ impl SessionStore {
             sections,
             comments: Vec::new(),
             thread_start,
+            restored,
         };
         if let Err(e) = self.db.insert_revision(session_id, &revision) {
             tracing::error!(error = %e, "failed to persist revision");
@@ -544,6 +577,7 @@ impl SessionStore {
                             version_number: r.version_number,
                             received_at: r.received_at,
                             thread_start: r.thread_start,
+                            restored: r.restored,
                         })
                         .collect(),
                     created_at: s.created_at,

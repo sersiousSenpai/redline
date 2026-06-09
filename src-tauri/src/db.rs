@@ -185,6 +185,12 @@ impl Database {
             "ALTER TABLE revisions ADD COLUMN thread_start INTEGER NOT NULL DEFAULT 1",
             [],
         );
+        // Restore marker. Legacy rows default to 0 (not a restore) so an
+        // upgraded DB renders exactly as before.
+        let _ = conn.execute(
+            "ALTER TABLE revisions ADD COLUMN restored INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
         // Selection-anchor columns for the Word-style comment-highlight
         // feature (Part B). All three are NULL for pre-feature rows so the
         // editor simply skips painting a highlight — the comment still
@@ -287,18 +293,20 @@ impl Database {
     ) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO revisions (session_id, version_number, received_at, raw_plan_markdown, thread_start)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO revisions (session_id, version_number, received_at, raw_plan_markdown, thread_start, restored)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(session_id, version_number) DO UPDATE SET
                 received_at = excluded.received_at,
                 raw_plan_markdown = excluded.raw_plan_markdown,
-                thread_start = excluded.thread_start",
+                thread_start = excluded.thread_start,
+                restored = excluded.restored",
             params![
                 session_id,
                 revision.version_number,
                 revision.received_at,
                 revision.raw_plan_markdown,
                 revision.thread_start as i64,
+                revision.restored as i64,
             ],
         )?;
         Ok(())
@@ -619,7 +627,7 @@ impl Database {
         drop(stmt);
 
         let mut stmt = conn.prepare(
-            "SELECT session_id, version_number, received_at, raw_plan_markdown, thread_start
+            "SELECT session_id, version_number, received_at, raw_plan_markdown, thread_start, restored
              FROM revisions ORDER BY session_id, version_number",
         )?;
         let revs = stmt.query_map([], |row| {
@@ -629,10 +637,11 @@ impl Database {
                 row.get::<_, i64>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, i64>(4)? != 0,
+                row.get::<_, i64>(5)? != 0,
             ))
         })?;
         for r in revs {
-            let (session_id, version_number, received_at, raw_plan_markdown, thread_start) = r?;
+            let (session_id, version_number, received_at, raw_plan_markdown, thread_start, restored) = r?;
             if let Some(s) = sessions.get_mut(&session_id) {
                 let sections = reparse_sections(&raw_plan_markdown);
                 s.revisions.push(Revision {
@@ -642,6 +651,7 @@ impl Database {
                     sections,
                     comments: Vec::new(),
                     thread_start,
+                    restored,
                 });
             }
         }
@@ -773,12 +783,41 @@ mod tests {
     }
 
     #[test]
+    fn restore_flag_is_one_shot_and_persists() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let store = SessionStore::new(db.clone());
+        let md = "# Plan\n\nBody.\n";
+
+        // v1: a genuine plan.
+        store.upsert_plan("s", "/tmp/s", md.to_string(), reparse_sections(md), true, false);
+
+        // Arm a restore: one-shot — the second take observes nothing.
+        store.arm_restore("s");
+        assert!(store.take_restore("s"));
+        assert!(!store.take_restore("s"));
+
+        // The restore re-presents the same plan, tagged restored.
+        store.upsert_plan("s", "/tmp/s", md.to_string(), reparse_sections(md), true, true);
+
+        let session = store.get("s").expect("session");
+        assert_eq!(session.revisions.len(), 2);
+        assert!(!session.revisions[0].restored);
+        assert!(session.revisions[1].restored);
+
+        // The restored flag survives a reload from the DB.
+        let reloaded = SessionStore::new(db);
+        let rs = reloaded.get("s").expect("reloaded session");
+        assert!(!rs.revisions[0].restored);
+        assert!(rs.revisions[1].restored);
+    }
+
+    #[test]
     fn delete_session_removes_memory_and_db() {
         use crate::state::{CommentKind, NewCommentRequest};
         let db = Arc::new(Database::open_in_memory().unwrap());
         let store = SessionStore::new(db.clone());
         let md = "# Plan\n\nBody.\n";
-        store.upsert_plan("doomed", "/tmp/d", md.to_string(), reparse_sections(md), true);
+        store.upsert_plan("doomed", "/tmp/d", md.to_string(), reparse_sections(md), true, false);
         store
             .add_comment(
                 "doomed",
@@ -794,7 +833,7 @@ mod tests {
                 },
             )
             .expect("add comment");
-        store.upsert_plan("keep", "/tmp/k", md.to_string(), reparse_sections(md), true);
+        store.upsert_plan("keep", "/tmp/k", md.to_string(), reparse_sections(md), true, false);
 
         assert!(store.delete_session("doomed"));
         assert!(!store.has_session("doomed"));
@@ -821,7 +860,7 @@ mod tests {
         // Missing session → not outstanding (first plan starts a fresh thread).
         assert!(!store.has_outstanding_review("sess-c"));
 
-        store.upsert_plan("sess-c", "/tmp/c", md.to_string(), reparse_sections(md), true);
+        store.upsert_plan("sess-c", "/tmp/c", md.to_string(), reparse_sections(md), true, false);
         // v1 received, no comments yet → nothing outstanding.
         assert!(!store.has_outstanding_review("sess-c"));
 
@@ -856,7 +895,7 @@ mod tests {
     fn add_and_retrieve_comments() {
         let store = make_store();
         let sections = reparse_sections("# A\n\nIntro paragraph.\n");
-        store.upsert_plan("sess-1", "/tmp/proj", "# A\n\nIntro paragraph.\n".to_string(), sections, true);
+        store.upsert_plan("sess-1", "/tmp/proj", "# A\n\nIntro paragraph.\n".to_string(), sections, true, false);
 
         let req = NewCommentRequest {
             kind: CommentKind::Feedback,
@@ -933,7 +972,7 @@ mod tests {
     fn deleting_comment_cascades_its_thread() {
         let store = make_store();
         let md = "# Plan\n\nBody.\n";
-        store.upsert_plan("s1", "/tmp/x", md.to_string(), reparse_sections(md), true);
+        store.upsert_plan("s1", "/tmp/x", md.to_string(), reparse_sections(md), true, false);
         let mk_q = || NewCommentRequest {
             kind: CommentKind::Question,
             scope: None,
@@ -971,7 +1010,7 @@ mod tests {
     fn comment_fork_session_set_get_clear() {
         let store = make_store();
         let md = "# Plan\n\nBody.\n";
-        store.upsert_plan("s-fork", "/tmp/f", md.to_string(), reparse_sections(md), true);
+        store.upsert_plan("s-fork", "/tmp/f", md.to_string(), reparse_sections(md), true, false);
         store
             .add_comment(
                 "s-fork",
@@ -1023,6 +1062,7 @@ mod tests {
             v1_md.to_string(),
             reparse_sections(v1_md),
             true,
+            false,
         );
 
         // Reviewer adds two comments
@@ -1097,7 +1137,7 @@ Restructured detail body.
         let v2_sections = reparse_sections(&stripped);
         let report: HashMap<_, _> = extracted.resolutions.into_iter().collect();
         let attach_report = store.attach_resolutions("sess-rt", &report, 2);
-        store.upsert_plan("sess-rt", "/tmp/proj", stripped, v2_sections, false);
+        store.upsert_plan("sess-rt", "/tmp/proj", stripped, v2_sections, false, false);
 
         assert!(attach_report.unmatched_ids.is_empty());
         assert!(attach_report.unresolved_submitted_ids.is_empty());
@@ -1187,6 +1227,7 @@ Restructured detail body.
             v1_md.to_string(),
             reparse_sections(v1_md),
             true,
+            false,
         );
 
         store
@@ -1313,7 +1354,7 @@ body.
             let db = Arc::new(Database::open(&tmpfile).unwrap());
             let store = SessionStore::new(db);
             let md = "# Title\n\nBody.\n";
-            store.upsert_plan("sess-x", "/tmp/p", md.to_string(), reparse_sections(md), true);
+            store.upsert_plan("sess-x", "/tmp/p", md.to_string(), reparse_sections(md), true, false);
             store.add_comment(
                 "sess-x",
                 NewCommentRequest {
@@ -1351,7 +1392,7 @@ body.
         let db = Arc::new(Database::open_in_memory().unwrap());
         let store = SessionStore::new(db.clone());
         let md = "# T\n\nBody.\n";
-        store.upsert_plan("s", "/tmp/s", md.to_string(), reparse_sections(md), true);
+        store.upsert_plan("s", "/tmp/s", md.to_string(), reparse_sections(md), true, false);
 
         let c = store
             .add_comment(
@@ -1413,7 +1454,7 @@ body.
         let db = Arc::new(Database::open_in_memory().unwrap());
         let store = SessionStore::new(db.clone());
         let md = "# T\n\nAlpha.\n\nBeta.\n";
-        store.upsert_plan("s", "/tmp/s", md.to_string(), reparse_sections(md), true);
+        store.upsert_plan("s", "/tmp/s", md.to_string(), reparse_sections(md), true, false);
 
         let c = store
             .add_comment(
@@ -1466,8 +1507,8 @@ body.
         let db = Arc::new(Database::open_in_memory().unwrap());
         let store = SessionStore::new(db.clone());
         let md = "# A\n\nIntro.\n";
-        store.upsert_plan("sess-a", "/tmp/a", md.to_string(), reparse_sections(md), true);
-        store.upsert_plan("sess-b", "/tmp/b", md.to_string(), reparse_sections(md), true);
+        store.upsert_plan("sess-a", "/tmp/a", md.to_string(), reparse_sections(md), true, false);
+        store.upsert_plan("sess-b", "/tmp/b", md.to_string(), reparse_sections(md), true, false);
 
         let mk = |body: &str| NewCommentRequest {
             kind: CommentKind::Question,
@@ -1607,7 +1648,7 @@ body.
         // A brand-new session can now persist its own `c-001` without a
         // UNIQUE constraint violation (the original bug).
         let md = "# T\n\nP.\n";
-        store.upsert_plan("fresh", "/tmp/fresh", md.to_string(), reparse_sections(md), true);
+        store.upsert_plan("fresh", "/tmp/fresh", md.to_string(), reparse_sections(md), true, false);
         let c = store
             .add_comment(
                 "fresh",

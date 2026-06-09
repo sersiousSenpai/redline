@@ -36,6 +36,8 @@ export interface Revision {
   /** Begins a new review thread (fresh plan) rather than a revision
    *  answering feedback. Diff/comments are scoped within a thread. */
   threadStart: boolean;
+  /** A restore of an already-reviewed plan (see RevisionSummary.restored). */
+  restored: boolean;
 }
 
 export type CommentType =
@@ -164,6 +166,10 @@ export interface RevisionSummary {
   versionNumber: number;
   receivedAt: number;
   threadStart: boolean;
+  /** True when this row is a *restore* of an already-reviewed plan (same body,
+   *  re-presented via "Restore plan session"). Labeled "vN restored" and
+   *  skipped when numbering subsequent genuine revisions. */
+  restored: boolean;
 }
 
 export interface SessionSummary {

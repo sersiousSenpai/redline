@@ -468,20 +468,30 @@ async fn handle_plan(
 
     let session_existed = app_state.store.has_session(&session_id);
 
-    // Ask round-trip detection: the prior submit_review was an Ask batch
-    // AND Claude returned the plan body unchanged (compared on a canonical
-    // text signature that ignores cosmetic markdown / sidecar reflow).
-    let ask_round_trip = expected_mode == Some(SubmissionMode::Ask)
-        && session_existed
-        && {
-            let prev_sig = app_state
-                .store
-                .get(&session_id)
-                .and_then(|s| s.revisions.last().map(|r| parser::plan_text_signature(&r.sections)))
-                .unwrap_or_default();
-            let new_sig = parser::plan_text_signature(&sections);
-            prev_sig == new_sig
-        };
+    // Whether Claude returned the plan body unchanged vs the latest revision,
+    // on a canonical text signature that ignores cosmetic markdown / sidecar
+    // reflow. Drives both Ask round-trip detection and restore tagging.
+    let same_as_prev = session_existed && {
+        let prev_sig = app_state
+            .store
+            .get(&session_id)
+            .and_then(|s| s.revisions.last().map(|r| parser::plan_text_signature(&r.sections)))
+            .unwrap_or_default();
+        let new_sig = parser::plan_text_signature(&sections);
+        prev_sig == new_sig
+    };
+
+    // Ask round-trip detection: the prior submit_review was an Ask batch AND
+    // Claude returned the plan body unchanged.
+    let ask_round_trip = expected_mode == Some(SubmissionMode::Ask) && same_as_prev;
+
+    // One-shot restore: the reviewer re-presented an already-reviewed plan via
+    // "Restore plan session" (frontend armed the flag). Tag it only when the
+    // body is genuinely unchanged; if Claude actually revised during the
+    // restore, it falls through to a normal new revision (it really is one).
+    // Always consume the flag so it is strictly one-shot.
+    let restore_armed = app_state.store.take_restore(&session_id);
+    let restored = restore_armed && same_as_prev && !ask_round_trip;
 
     // Ask-mode was expected but Claude modified the plan anyway. Surface
     // a soft warning to the UI and proceed as a normal Revise revision —
@@ -552,6 +562,7 @@ async fn handle_plan(
             plan_markdown,
             sections,
             thread_start,
+            restored,
         );
         (upsert.version_number, upsert.is_new_session)
     };
@@ -1181,6 +1192,15 @@ fn claim_review(claims: tauri::State<'_, ClaimFlags>, session_id: String) -> boo
     claims.claim(&session_id)
 }
 
+/// Arm a one-shot restore for a session. Called when the reviewer clicks
+/// "Restore plan session" so the next inbound plan that re-presents the
+/// identical body is tagged as a restore ("vN restored") rather than a fresh
+/// version. See `SessionStore::arm_restore`.
+#[tauri::command]
+fn arm_restore(store: tauri::State<'_, SessionStore>, session_id: String) {
+    store.arm_restore(&session_id);
+}
+
 /// Reveal the main window. The window starts hidden and is shown once the
 /// frontend has rendered its first themed frame, so launch never flashes white.
 #[tauri::command]
@@ -1267,6 +1287,7 @@ pub fn run() {
             set_interception_mode,
             get_daemon_status,
             claim_review,
+            arm_restore,
             show_main_window,
             get_hook_status,
             install_hook,
@@ -1522,7 +1543,7 @@ mod tests {
         let store = make_store();
         let pending = PendingResponses::new();
         let md = "# Plan\n\nBody.\n";
-        store.upsert_plan("s1", "/tmp/d", md.to_string(), reparse_sections(md), true);
+        store.upsert_plan("s1", "/tmp/d", md.to_string(), reparse_sections(md), true, false);
         let _rx = pending.register("s1").expect("register first time");
 
         let err = delete_session_inner(&store, &pending, "s1", false)
@@ -1537,7 +1558,7 @@ mod tests {
         let store = make_store();
         let pending = PendingResponses::new();
         let md = "# Plan\n\nBody.\n";
-        store.upsert_plan("s1", "/tmp/d", md.to_string(), reparse_sections(md), true);
+        store.upsert_plan("s1", "/tmp/d", md.to_string(), reparse_sections(md), true, false);
         let (rx, _token) = pending.register("s1").expect("register first time");
 
         let removed = delete_session_inner(&store, &pending, "s1", true)
@@ -1649,7 +1670,7 @@ mod tests {
         let store = make_store();
         let pending = PendingResponses::new();
         let md = "# Plan\n\nBody.\n";
-        store.upsert_plan("s1", "/tmp/d", md.to_string(), reparse_sections(md), true);
+        store.upsert_plan("s1", "/tmp/d", md.to_string(), reparse_sections(md), true, false);
 
         // No POST held → both force values behave identically.
         let removed = delete_session_inner(&store, &pending, "s1", false)

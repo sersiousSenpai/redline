@@ -1040,6 +1040,9 @@ function App() {
       "current plan for review (no changes needed unless you have them).";
     const cmd = `claude --resume ${shq(session.sessionId)} ${shq(prompt)}\r`;
     const cwd = session.projectPath || null;
+    // Arm a one-shot restore so the resumed session's re-presented plan is
+    // labeled "vN restored" rather than counted as a fresh version/thread.
+    void invoke("arm_restore", { sessionId: session.sessionId });
     setTermFullscreen(false);
     setTermCollapsed(false);
     const id = terminalsRef.current?.openSessionTerminal(cwd) ?? null;
@@ -1065,6 +1068,9 @@ function App() {
       "Please re-enter plan mode and call ExitPlanMode to re-present your " +
       "current plan for review (no changes needed unless you have them).";
     const cmd = `claude --resume ${shq(session.sessionId)} ${shq(prompt)}`;
+    // Same one-shot restore arming as restorePlanSession — the resumed plan,
+    // whichever terminal runs it, should land as "vN restored".
+    void invoke("arm_restore", { sessionId: session.sessionId });
     void navigator.clipboard?.writeText(cmd);
     setToast("Resume command copied — paste it into your terminal");
     setTimeout(() => setToast(null), 4000);

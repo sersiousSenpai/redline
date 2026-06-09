@@ -3,6 +3,10 @@
 import { useEffect, useState } from "react";
 
 import type { RevisionSummary, SessionSummary } from "../types";
+import {
+  computeRevisionDisplay,
+  latestDisplayVersion,
+} from "../lib/revisionVersions";
 
 interface SessionSidebarProps {
   sessions: SessionSummary[];
@@ -146,6 +150,11 @@ function SessionRow({
   onSelectRevision: (sessionId: string, versionNumber: number | null) => void;
 }) {
   const [confirming, setConfirming] = useState(false);
+  const display = computeRevisionDisplay(session.revisions);
+  const badgeVersion = latestDisplayVersion(
+    session.revisions,
+    session.latestVersion,
+  );
 
   return (
     <li className="relative group">
@@ -267,7 +276,7 @@ function SessionRow({
               fontSize: "10px",
             }}
           >
-            v{session.latestVersion}
+            v{badgeVersion}
           </span>
         </div>
         <div
@@ -301,7 +310,9 @@ function SessionRow({
       {expanded && (
         <ul className="border-b" style={{ borderColor: "var(--color-rule)" }}>
           {session.revisions.map((r, idx) => {
-            const isLatest = r.versionNumber === session.latestVersion;
+            const info = display.get(r.versionNumber);
+            const isLatest = info?.isLatest ?? false;
+            const displayVersion = info?.displayVersion ?? r.versionNumber;
             // Highlight the row currently displayed in the document pane:
             // either the explicitly-viewed historical revision, or the latest
             // when no historical view is selected.
@@ -314,9 +325,12 @@ function SessionRow({
               <RevisionRow
                 key={r.versionNumber}
                 revision={r}
+                displayVersion={displayVersion}
                 viewed={viewed}
                 isLatest={isLatest}
-                threadBoundary={r.threadStart && idx > 0}
+                // A restore is labeled "restored", not a thread boundary, even
+                // when it lands as thread_start (same body, clean render).
+                threadBoundary={r.threadStart && !r.restored && idx > 0}
                 onSelect={() =>
                   onSelectRevision(
                     session.sessionId,
@@ -338,6 +352,7 @@ function SessionRow({
  *  icon on the right exports the same revision as clean markdown. */
 function RevisionRow({
   revision,
+  displayVersion,
   viewed,
   isLatest,
   threadBoundary,
@@ -345,6 +360,9 @@ function RevisionRow({
   onExport,
 }: {
   revision: RevisionSummary;
+  /** Substantive version shown to the reviewer — restores re-use the version
+   *  they restore rather than advancing the count. */
+  displayVersion: number;
   /** This row is the one currently shown in the document pane. */
   viewed: boolean;
   /** Convenience: the latest revision of the session. Affects the title. */
@@ -353,9 +371,11 @@ function RevisionRow({
   onSelect: () => void;
   onExport: () => void;
 }) {
-  const title = isLatest
-    ? `View v${revision.versionNumber} (latest)`
-    : `View v${revision.versionNumber} in the document pane`;
+  const title = revision.restored
+    ? `View v${displayVersion} (restored) in the document pane`
+    : isLatest
+      ? `View v${displayVersion} (latest)`
+      : `View v${displayVersion} in the document pane`;
   return (
     <li>
       <button
@@ -380,9 +400,9 @@ function RevisionRow({
               color: viewed ? "var(--color-ink)" : "var(--color-ink-muted)",
             }}
           >
-            v{revision.versionNumber}
+            v{displayVersion}
           </span>
-          {threadBoundary && (
+          {(threadBoundary || revision.restored) && (
             <span
               style={{
                 fontSize: "9px",
@@ -391,7 +411,7 @@ function RevisionRow({
                 color: "var(--color-ink-muted)",
               }}
             >
-              new thread
+              {revision.restored ? "restored" : "new thread"}
             </span>
           )}
         </span>
@@ -404,8 +424,8 @@ function RevisionRow({
           <span
             role="button"
             tabIndex={0}
-            aria-label={`Download v${revision.versionNumber} as a Markdown file`}
-            title={`Download v${revision.versionNumber} as a Markdown file`}
+            aria-label={`Download v${displayVersion} as a Markdown file`}
+            title={`Download v${displayVersion} as a Markdown file`}
             onClick={(e) => {
               e.stopPropagation();
               onExport();

@@ -7,6 +7,7 @@ import { ThemePicker } from "./ThemePicker";
 import { ModeToggle } from "./ModeToggle";
 import { AlertSettings } from "./AlertSettings";
 import type { SoundConfig } from "../audio/beep";
+import { latestDisplayVersion } from "../lib/revisionVersions";
 
 // Programmatic window-drag. Tauri 2's data-tauri-drag-region attribute does
 // not reliably walk ancestors in this build — only exact mousedown targets
@@ -73,6 +74,11 @@ export function Header({
 }: HeaderProps) {
   const latest = session?.revisions[session.revisions.length - 1];
   const downloadVersion = viewedVersionNumber ?? latest?.versionNumber;
+  // Badge shows the substantive version — restores re-use the version they
+  // restore rather than advancing the count.
+  const badgeVersion = session
+    ? latestDisplayVersion(session.revisions, latest?.versionNumber ?? 0)
+    : 0;
   return (
     <header
       className="flex items-center justify-end gap-4 pl-20 pr-6 py-3"
@@ -127,7 +133,7 @@ export function Header({
               fontSize: "11px",
             }}
           >
-            v{latest.versionNumber}
+            v{badgeVersion}
           </span>
         )}
       </div>
