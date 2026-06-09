@@ -784,16 +784,53 @@ fn get_session(store: tauri::State<'_, SessionStore>, id: String) -> Option<Revi
     store.get(&id)
 }
 
+/// The plan's display name = the text of its first ATX heading (`# Title`).
+/// Used as the export filename stem so the file is named after the *plan*, not
+/// the project folder it ran in. Returns `None` when the plan has no heading.
+fn plan_title_from_markdown(md: &str) -> Option<String> {
+    md.lines().map(str::trim).find_map(|l| {
+        let hashes = l.chars().take_while(|&c| c == '#').count();
+        // A real heading is 1–6 hashes followed by a space (skips `#!/…`,
+        // hex colors, and `#` lines inside fenced code).
+        if (1..=6).contains(&hashes) && l[hashes..].starts_with(' ') {
+            let t = l[hashes..].trim();
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+        }
+        None
+    })
+}
+
+/// Collapse an arbitrary name into a filesystem-safe slug: alphanumerics kept,
+/// every other run collapsed to a single `-`, trimmed, capped so a long title
+/// can't make an unwieldy filename.
+fn slugify(name: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for c in name.chars() {
+        if c.is_alphanumeric() {
+            out.push(c);
+            prev_dash = false;
+        } else if !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    out.chars().take(60).collect::<String>().trim_matches('-').to_string()
+}
+
 /// A filesystem-safe default file name for an exported revision, e.g.
-/// `redline-v3.md`. Non-alphanumerics in the project name collapse to `-`.
-fn export_file_name(project_name: &str, version: u32) -> String {
-    let stem: String = project_name
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect();
-    let stem = stem.trim_matches('-');
-    let stem = if stem.is_empty() { "plan" } else { stem };
-    format!("{stem}-v{version}.md")
+/// `Redline-Fixes-Improvements-Pass-v3-20260608-143012.md`. `name` is the plan
+/// title (falling back to the project name). `stamp` is a pre-formatted local
+/// date/time supplied by the frontend; omitted → no stamp.
+fn export_file_name(name: &str, version: u32, stamp: Option<&str>) -> String {
+    let stem = slugify(name);
+    let stem = if stem.is_empty() { "plan" } else { &stem };
+    match stamp.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => format!("{stem}-v{version}-{s}.md"),
+        None => format!("{stem}-v{version}.md"),
+    }
 }
 
 /// Export one plan revision as clean markdown (block-id sidecars stripped) to a
@@ -806,6 +843,7 @@ async fn export_revision_markdown(
     store: tauri::State<'_, SessionStore>,
     session_id: String,
     version_number: u32,
+    stamp: Option<String>,
 ) -> Result<Option<String>, String> {
     // Resolve the revision and strip sidecars in a scoped block so no store
     // lock is held across the (blocking) save dialog.
@@ -824,11 +862,18 @@ async fn export_revision_markdown(
         )
     };
 
+    // Name the file after the plan's own title; fall back to the project name.
+    let name = plan_title_from_markdown(&clean).unwrap_or(project_name);
+
     let picked = app
         .dialog()
         .file()
         .add_filter("Markdown", &["md"])
-        .set_file_name(export_file_name(&project_name, version_number))
+        .set_file_name(export_file_name(
+            &name,
+            version_number,
+            stamp.as_deref(),
+        ))
         .blocking_save_file();
 
     let Some(file_path) = picked else {
@@ -969,11 +1014,11 @@ async fn submit_review(
     // handle_plan invocation is guaranteed to see this entry.
     expected_modes.set(&session_id, mode);
     // A failed send means the receiver is gone: the held POST already ended
-    // (hook timeout — Redline holds a plan up to 10 min — or the Claude Code
-    // session/terminal closed). Don't pretend it worked. Roll back the submit
-    // (restore comments to draft, drop the expected_mode) and surface a clear
-    // error so the reviewer re-runs the plan and resubmits, instead of their
-    // feedback vanishing into a dead channel.
+    // (the Claude Code session/terminal closed, or the long hold timed out).
+    // Don't pretend it worked. Roll back the submit (restore comments to draft,
+    // drop the expected_mode) and surface a clear error so the reviewer can
+    // restore the session and resubmit, instead of their feedback vanishing
+    // into a dead channel.
     if tx.send(deny_response(payload)).is_err() {
         expected_modes.take(&session_id);
         store.unmark_submitted(&session_id, &submitted);
@@ -989,9 +1034,9 @@ async fn submit_review(
             "submit_review delivery failed — held POST no longer listening; rolled back"
         );
         return Err(
-            "Claude is no longer waiting for this plan — the review timed out \
-             (Redline holds a plan for up to 10 minutes) or the Claude Code session \
-             ended. Re-run the plan in your terminal, then submit your review again."
+            "Claude is no longer waiting for this plan — the Claude Code session \
+             ended or the hold timed out. Use \"Restore plan session\" to resume \
+             it, then submit your review again."
                 .to_string(),
         );
     }
@@ -1136,6 +1181,16 @@ fn claim_review(claims: tauri::State<'_, ClaimFlags>, session_id: String) -> boo
     claims.claim(&session_id)
 }
 
+/// Reveal the main window. The window starts hidden and is shown once the
+/// frontend has rendered its first themed frame, so launch never flashes white.
+#[tauri::command]
+fn show_main_window(app: AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+}
+
 #[tauri::command]
 fn get_hook_status() -> HookStatus {
     hook::get_status()
@@ -1212,6 +1267,7 @@ pub fn run() {
             set_interception_mode,
             get_daemon_status,
             claim_review,
+            show_main_window,
             get_hook_status,
             install_hook,
             get_skill_status,
@@ -1239,6 +1295,40 @@ pub fn run() {
             fork::fork_kill_all,
         ])
         .setup(|app| {
+            // Silently bring an existing install's hook timeout up to date, so a
+            // user who installed under the old 10-minute timeout gets the long
+            // hold without re-running setup. No-op if not installed / current.
+            hook::ensure_timeout_current();
+
+            // Open at a generous, Safari-style fraction of whatever display the
+            // window lands on, centered — a fixed pixel size feels small on a
+            // large monitor and oversized on a laptop, so size relative to the
+            // screen like Safari does. The window starts hidden (config) and is
+            // shown here after sizing so there's no resize flash on launch.
+            if let Some(win) = app.get_webview_window("main") {
+                if let Ok(Some(monitor)) = win.current_monitor() {
+                    let scale = monitor.scale_factor();
+                    let size = monitor.size();
+                    let logical_w = size.width as f64 / scale;
+                    let logical_h = size.height as f64 / scale;
+                    // ~86% wide × ~90% tall leaves room for the menu bar / Dock;
+                    // clamped so it never gets cramped or absurdly large.
+                    let w = (logical_w * 0.86).clamp(1100.0, 1900.0);
+                    let h = (logical_h * 0.90).clamp(720.0, 1200.0);
+                    let _ = win.set_size(tauri::LogicalSize::new(w, h));
+                }
+                let _ = win.center();
+                // Reveal the window only once the frontend has painted its first
+                // themed frame (it calls `show_main_window`), so launch never
+                // shows a flash of white. Fallback: show anyway after a short
+                // delay so a JS error can't leave the window invisible forever.
+                let fallback = win.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(2000)).await;
+                    let _ = fallback.show();
+                });
+            }
+
             let data_dir = app
                 .path()
                 .app_data_dir()
@@ -1399,6 +1489,32 @@ mod tests {
     fn make_store() -> SessionStore {
         let db = Arc::new(Database::open_in_memory().unwrap());
         SessionStore::new(db)
+    }
+
+    #[test]
+    fn export_name_uses_plan_title() {
+        let title = plan_title_from_markdown(
+            "<!-- rl:blk-1 -->\n# Redline — Fixes & Improvements Pass\n\nbody",
+        );
+        assert_eq!(
+            title.as_deref(),
+            Some("Redline — Fixes & Improvements Pass")
+        );
+        assert_eq!(
+            export_file_name(&title.unwrap(), 2, Some("20260608-234706")),
+            "Redline-Fixes-Improvements-Pass-v2-20260608-234706.md"
+        );
+    }
+
+    #[test]
+    fn export_name_falls_back_and_ignores_non_headings() {
+        // A `#!`-style line or code `#` is not a heading.
+        assert_eq!(plan_title_from_markdown("#!/bin/bash\n#fff\ntext"), None);
+        // No title → caller falls back to the project name.
+        assert_eq!(
+            export_file_name("my project", 1, None),
+            "my-project-v1.md"
+        );
     }
 
     #[test]

@@ -33,17 +33,64 @@ function shellQuote(p: string): string {
   return `'${p.replace(/'/g, `'\\''`)}'`;
 }
 
+// Relative luminance of a #rrggbb / #rgb color — used to decide whether the
+// terminal background is light (needs a darker ANSI palette).
+function luminance(hex: string): number {
+  const h = hex.replace("#", "");
+  const full =
+    h.length === 3
+      ? h
+          .split("")
+          .map((c) => c + c)
+          .join("")
+      : h;
+  const r = parseInt(full.slice(0, 2), 16) / 255;
+  const g = parseInt(full.slice(2, 4), 16) / 255;
+  const b = parseInt(full.slice(4, 6), 16) / 255;
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
 function readXtermTheme() {
   const s = getComputedStyle(document.documentElement);
   const v = (name: string, fallback: string) =>
     s.getPropertyValue(name).trim() || fallback;
+  const bg = v("--color-paper", "#fafaf7");
   const fg = v("--color-ink", "#1a1a1a");
-  return {
-    background: v("--color-paper", "#fafaf7"),
+  const base = {
+    background: bg,
     foreground: fg,
     cursor: fg,
-    cursorAccent: v("--color-paper", "#fafaf7"),
+    cursorAccent: bg,
     selectionBackground: v("--color-rule", "#e5e3dd"),
+  };
+  // Dark backgrounds: xterm's default ANSI palette already reads well — leave it.
+  if (luminance(bg) < 0.5) return base;
+  // Light themes (e.g. Novel, Silver Aerogel): xterm's dark-bg ANSI defaults
+  // (bright yellow/white/cyan) wash out against the pale paper, making Claude's
+  // colored TUI text hard to read. Map the palette to darker, saturated hues —
+  // reusing the theme's own accent tokens (already tuned for contrast) for the
+  // blue/green/yellow slots so the terminal stays on-brand and legible.
+  const info = v("--color-info", "#3b5bb5");
+  const warning = v("--color-warning", "#9c6f1b");
+  const success = v("--color-success", "#2f7d32");
+  return {
+    ...base,
+    black: "#3b3b3b",
+    red: "#b3261e",
+    green: success,
+    yellow: warning,
+    blue: info,
+    magenta: "#8a2a8a",
+    cyan: "#0e6b7a",
+    white: "#5c5c5c",
+    brightBlack: "#6b6b6b",
+    brightRed: "#c5341d",
+    brightGreen: success,
+    brightYellow: warning,
+    brightBlue: info,
+    brightMagenta: "#a23299",
+    brightCyan: "#1597a8",
+    brightWhite: fg,
   };
 }
 

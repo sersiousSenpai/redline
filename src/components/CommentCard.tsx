@@ -159,6 +159,24 @@ export function CommentCard({
     return "";
   })();
 
+  // A reopened follow-up rides back to Claude on Submit, which flips the comment
+  // reopened→submitted — but the note is preserved. Keep showing it (pulsing)
+  // through that wait so the continuation never vanishes the instant the
+  // reviewer hits Continue Revising, and so there's a visible "awaiting Claude"
+  // cue per item.
+  const pendingReopen =
+    comment.status === "submitted" && !!comment.reopenNote;
+  const reopenedView = comment.status === "reopened" || pendingReopen;
+  const latestHistory =
+    comment.reopenHistory && comment.reopenHistory.length > 0
+      ? comment.reopenHistory[comment.reopenHistory.length - 1]
+      : null;
+  const historyPreview = latestHistory
+    ? (latestHistory.reopenNote || latestHistory.resolutionBody || "")
+        .replace(/\s+/g, " ")
+        .trim()
+    : "";
+
   return (
     <div
       data-comment-id={comment.id}
@@ -337,16 +355,13 @@ export function CommentCard({
               fontWeight: 600,
               textTransform: "uppercase",
               letterSpacing: "0.06em",
-              color:
-                comment.status === "reopened"
-                  ? "var(--color-ink-muted)"
-                  : "var(--color-info)",
+              color: reopenedView
+                ? "var(--color-ink-muted)"
+                : "var(--color-info)",
               marginBottom: "4px",
             }}
           >
-            {comment.status === "reopened"
-              ? "Previous resolution"
-              : "Claude's resolution"}
+            {reopenedView ? "Previous resolution" : "Claude's resolution"}
             <span
               className="ml-2 font-mono normal-case"
               style={{ color: "var(--color-ink-muted)" }}
@@ -356,7 +371,7 @@ export function CommentCard({
           </div>
           {/* When reopened, the prior resolution is superseded context — mute
               it so the eye lands on the pending follow-up instead. */}
-          <div style={{ opacity: comment.status === "reopened" ? 0.55 : 1 }}>
+          <div style={{ opacity: reopenedView ? 0.55 : 1 }}>
             <MarkdownView body={comment.resolution.body} />
           </div>
 
@@ -380,7 +395,19 @@ export function CommentCard({
                 }}
               >
                 ⟲ {comment.reopenHistory.length} earlier round
-                {comment.reopenHistory.length === 1 ? "" : "s"}{" "}
+                {comment.reopenHistory.length === 1 ? "" : "s"}
+                {historyPreview && !historyOpen && (
+                  <span
+                    className="normal-case"
+                    style={{
+                      fontWeight: 400,
+                      color: "var(--color-ink-muted)",
+                    }}
+                  >
+                    {" "}· “{historyPreview.slice(0, 60)}
+                    {historyPreview.length > 60 ? "…" : ""}”
+                  </span>
+                )}{" "}
                 {historyOpen ? "▾" : "▸"}
               </button>
               {historyOpen && (
@@ -429,13 +456,17 @@ export function CommentCard({
             </div>
           )}
 
-          {/* Pending follow-up / decision (reopened, not currently editing). */}
-          {comment.status === "reopened" &&
+          {/* Pending follow-up / decision. Shown while reopened AND through the
+              submitted wait (pulsing) so the continuation Claude is responding
+              to stays visible instead of vanishing on Continue Revising. */}
+          {reopenedView &&
             comment.reopenNote &&
             !reopenOpen &&
             !promoteOpen && (
               <div
-                className="mt-2 rounded px-2 py-1"
+                className={`mt-2 rounded px-2 py-1${
+                  pendingReopen ? " rl-pulse" : ""
+                }`}
                 style={{
                   background: "var(--color-anchor-bg)",
                   border: "1px solid var(--color-rule)",
@@ -451,7 +482,13 @@ export function CommentCard({
                     marginBottom: "2px",
                   }}
                 >
-                  {isPromoted ? "Your decision" : "Pending follow-up"}
+                  {pendingReopen
+                    ? isPromoted
+                      ? "Decision sent · Claude is applying…"
+                      : "Follow-up sent · Claude is responding…"
+                    : isPromoted
+                      ? "Your decision"
+                      : "Pending follow-up"}
                 </div>
                 <MarkdownView body={comment.reopenNote} compact />
               </div>

@@ -20,6 +20,10 @@ interface PaneDividerProps {
    *  shrink-back affordance regardless of mode. */
   fullscreen?: boolean;
   onExitFullscreen?: () => void;
+  /** Hide the collapse/expand chevron button (keeping the drag bar). Used when
+   *  the document is obscured and a combined "latch" replaces the two squished
+   *  chevrons. */
+  hideChevron?: boolean;
 }
 
 // Divider hosting a drag affordance (when expanded) and a collapse/expand
@@ -35,13 +39,15 @@ export function PaneDivider({
   label = "comments",
   fullscreen = false,
   onExitFullscreen,
+  hideChevron = false,
 }: PaneDividerProps) {
   const horizontal = orientation === "horizontal";
   const resizeCursor = horizontal ? "row-resize" : "col-resize";
   // In fullscreen the divider stops being a drag handle; the chevron exits
   // fullscreen so the user can shrink back from the same top-edge spot they
-  // already know.
-  const dragDisabled = collapsed || fullscreen;
+  // already know. A *collapsed* pane's divider stays draggable, though —
+  // dragging it re-opens the pane (the host snaps it to its min width).
+  const dragDisabled = fullscreen;
   const exitLabel = horizontal
     ? `Exit fullscreen ${label}`
     : `Exit fullscreen ${label}`;
@@ -85,6 +91,7 @@ export function PaneDivider({
           transition: dragging ? undefined : "background-color 0.12s",
         }}
       />
+      {!hideChevron && (
       <button
         type="button"
         onClick={handleClick}
@@ -107,6 +114,7 @@ export function PaneDivider({
       >
         {glyph}
       </button>
+      )}
     </div>
   );
 }

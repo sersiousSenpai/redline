@@ -73,6 +73,13 @@ body {
   font-family: var(--font-sans);
 }
 
+/* Document zoom: scale the rendered-markdown base size by --rl-doc-zoom (set on
+   .doc-article). Children use em, so the whole block scales from this. At zoom 1
+   it equals the inherited size, so the baseline look is unchanged. */
+.md-block {
+  font-size: calc(1em * var(--rl-doc-zoom, 1));
+}
+
 /* All-caps tracked microtype label — used for chrome section headers
    ("SESSIONS", "DISCUSSION", "TERMINAL") so the surface frame reads as an
    IDE/editor rather than a generic web app. Pair with `font-mono` for the
@@ -84,6 +91,53 @@ body {
   letter-spacing: 0.18em;
   color: var(--color-ink-muted);
   font-family: var(--font-mono);
+}
+
+/* Keep horizontal scroll on a squished strip (e.g. the sidebar tab strip when
+   the document pane is dragged over it) but swap the chunky native scrollbar
+   for a slim, theme-matched overlay bar. */
+.rl-thin-scroll-x {
+  scrollbar-width: thin; /* Firefox */
+  scrollbar-color: var(--color-rule) transparent;
+}
+.rl-thin-scroll-x::-webkit-scrollbar {
+  height: 5px;
+}
+.rl-thin-scroll-x::-webkit-scrollbar-track {
+  background: transparent;
+}
+.rl-thin-scroll-x::-webkit-scrollbar-thumb {
+  background: var(--color-rule);
+  border-radius: 3px;
+}
+.rl-thin-scroll-x:hover::-webkit-scrollbar-thumb {
+  background: var(--color-ink-muted);
+}
+
+/* Theme-matched vertical scrollbar (document pane): the thumb is the theme's
+   rule color so it blends with the chrome borders (terminal top edge, file
+   pane left edge); a hair darker on hover for affordance. */
+.rl-thin-scroll-y {
+  scrollbar-width: thin; /* Firefox */
+  scrollbar-color: var(--color-rule) transparent;
+}
+.rl-thin-scroll-y::-webkit-scrollbar {
+  width: 10px;
+}
+.rl-thin-scroll-y::-webkit-scrollbar-track {
+  background: transparent;
+}
+.rl-thin-scroll-y::-webkit-scrollbar-thumb {
+  background: var(--color-rule);
+  border-radius: 5px;
+  /* Inset the thumb from the track edges so it reads as a slim pill rather than
+     a full-width bar. */
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.rl-thin-scroll-y:hover::-webkit-scrollbar-thumb {
+  background: var(--color-ink-muted);
+  background-clip: padding-box;
 }
 
 /* Theme-aware subtle row hover (replaces hardcoded Tailwind bg-white/stone). */
@@ -205,13 +259,22 @@ body {
   font-family: var(--font-sans);
   color: var(--color-ink);
   /* Document-grade reading size — the chrome's 13px mono is too small for
-     sustained prose. */
-  font-size: 15px;
+     sustained prose. Scaled by the document-zoom control (--rl-doc-zoom). */
+  font-size: calc(15px * var(--rl-doc-zoom, 1));
   line-height: 1.7;
 }
 .rl-prose:focus,
 .rl-prose:focus-visible {
   outline: none;
+}
+/* The editable plan invites typing anywhere in the body — show a text caret
+   across the whole editor surface, not just directly over glyphs (otherwise the
+   blank areas read as the default arrow, i.e. "not typable"). Scoped to the
+   editable case: the read-only rich render (contenteditable="false") and the
+   folder file viewer keep the default cursor. Clickable descendants (comment
+   highlights) re-assert their own pointer. */
+.rl-prose[contenteditable="true"] {
+  cursor: text;
 }
 .rl-prose > :first-child {
   margin-top: 0;
@@ -1106,4 +1169,20 @@ p.rl-block-modified {
   40% { opacity: 0; }
   60% { opacity: 0.55; }
   100% { opacity: 0; }
+}
+
+/* A gentle breathing pulse for an item that's been sent to Claude and is
+   awaiting a response (e.g. a reopened follow-up mid round-trip). */
+@keyframes rl-pulse-fade {
+  0%,
+  100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+.rl-pulse {
+  animation: rl-pulse-fade 1.6s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rl-pulse {
+    animation: none;
+  }
 }

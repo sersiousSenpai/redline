@@ -7,7 +7,12 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 const HOOK_URL: &str = "http://127.0.0.1:7676/v1/plan";
-const HOOK_TIMEOUT_SECS: u32 = 600;
+// A held plan costs nothing while it waits (zero tokens, an idle local socket),
+// so we hold it like a plan-mode terminal that waits for you — not for 10
+// minutes. Claude Code honors a large `timeout` (verified: 600 is honored well
+// past 120s; the documented 30s is a default, not a cap). 12h covers any real
+// desk session; if a hold genuinely ends, the UI offers "Restore plan session".
+const HOOK_TIMEOUT_SECS: u32 = 43_200;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -95,6 +100,51 @@ pub fn get_status_at(path: &std::path::Path) -> HookStatus {
 
 pub fn install() -> Result<HookStatus, String> {
     install_at(&settings_path())
+}
+
+/// Read the `timeout` configured on the installed Redline ExitPlanMode hook,
+/// if any. Used to detect an out-of-date timeout left behind by an older
+/// install so we can silently refresh it.
+fn installed_timeout_at(path: &std::path::Path) -> Option<u32> {
+    let content = fs::read_to_string(path).ok()?;
+    let json: Value = serde_json::from_str(&content).ok()?;
+    let entries = json.pointer("/hooks/PreToolUse")?.as_array()?;
+    for entry in entries {
+        if entry.get("matcher").and_then(|v| v.as_str()) != Some("ExitPlanMode") {
+            continue;
+        }
+        let hooks = entry.get("hooks").and_then(|v| v.as_array())?;
+        for h in hooks {
+            if h.get("url").and_then(|v| v.as_str()) == Some(HOOK_URL) {
+                return h.get("timeout").and_then(|v| v.as_u64()).map(|n| n as u32);
+            }
+        }
+    }
+    None
+}
+
+/// If the Redline hook is already installed but with a stale `timeout` (e.g. an
+/// older build wrote 600), rewrite it so the current `HOOK_TIMEOUT_SECS` takes
+/// effect. No-op when the hook isn't installed (the setup modal handles a fresh
+/// install) or the timeout is already current. Called once at startup.
+pub fn ensure_timeout_current() {
+    ensure_timeout_current_at(&settings_path());
+}
+
+fn ensure_timeout_current_at(path: &std::path::Path) {
+    if !get_status_at(path).installed {
+        return;
+    }
+    if installed_timeout_at(path) == Some(HOOK_TIMEOUT_SECS) {
+        return;
+    }
+    match install_at(path) {
+        Ok(_) => tracing::info!(
+            timeout = HOOK_TIMEOUT_SECS,
+            "refreshed redline hook timeout"
+        ),
+        Err(e) => tracing::warn!(error = %e, "failed to refresh hook timeout"),
+    }
 }
 
 pub fn install_at(path: &std::path::Path) -> Result<HookStatus, String> {
@@ -227,6 +277,25 @@ mod tests {
         let arr = json["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["hooks"][0]["url"], HOOK_URL);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn ensure_timeout_current_rewrites_stale_timeout() {
+        let path = tmppath();
+        // Simulate an older install that wrote the previous 10-minute timeout.
+        let existing = json!({
+            "hooks": { "PreToolUse": [ {
+                "matcher": "ExitPlanMode",
+                "hooks": [ { "type": "http", "url": HOOK_URL, "timeout": 600 } ]
+            } ] }
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&existing).unwrap()).unwrap();
+        assert_eq!(installed_timeout_at(&path), Some(600));
+
+        ensure_timeout_current_at(&path);
+        assert_eq!(installed_timeout_at(&path), Some(HOOK_TIMEOUT_SECS));
 
         let _ = std::fs::remove_file(&path);
     }

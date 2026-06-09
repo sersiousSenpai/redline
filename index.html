@@ -5,6 +5,36 @@
     <link rel="icon" type="image/svg+xml" href="/icon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Redline</title>
+    <!-- Pre-paint theme bootstrap: replay the cached theme variables before the
+         JS bundle (and even styles.css) load, so the very first frame is already
+         in the user's theme — never a flash of white. Kept in sync with
+         applyTheme.ts (VARS_KEY = "redline.themeVars"). -->
+    <script>
+      (function () {
+        try {
+          var el = document.documentElement;
+          var raw = localStorage.getItem("redline.themeVars");
+          if (raw) {
+            var vars = JSON.parse(raw);
+            for (var k in vars) {
+              if (Object.prototype.hasOwnProperty.call(vars, k)) {
+                el.style.setProperty(k, vars[k]);
+              }
+            }
+            if (vars["--color-paper"])
+              el.style.backgroundColor = vars["--color-paper"];
+            if (vars["--color-ink"]) el.style.color = vars["--color-ink"];
+          } else {
+            /* First-ever launch: match the Studio (default) @theme so the first
+               paint is dark, never white. */
+            el.style.backgroundColor = "#1a1a1f";
+            el.style.color = "#fafafa";
+          }
+        } catch (e) {
+          /* localStorage unavailable — fall through to stylesheet defaults */
+        }
+      })();
+    </script>
   </head>
 
   <body>

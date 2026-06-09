@@ -63,7 +63,11 @@ own `std::thread`, so it's fine — but anything new you add isn't, by default.
 
 ---
 
-## Phase 3 — Flow-controlled, GPU terminal (freeze vector #2) — ✅ DONE (2026-06-08, GUI-unverified)
+## Phase 3 — Flow-controlled, GPU terminal (freeze vector #2) — ✅ DONE + GUI-VERIFIED (2026-06-08)
+
+GUI firehose check passed (Yusuf): `yes | head -n 5000000` in an embedded terminal
+inside a project kept the UI fully responsive (click, file switch, scroll, resize)
+with correct output. Both freeze vectors are now fixed and verified.
 
 **Shipped:** `pty.rs` reader pump rewritten — raw PTY bytes → `Coalescer` (batch)
 → a flusher thread that drains once per `COALESCE_WINDOW` (8 ms) and pushes one

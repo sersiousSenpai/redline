@@ -18,6 +18,21 @@ interface Options {
   side?: "leading" | "trailing";
   min?: number;
   max?: number;
+  /** Called when the user keeps dragging *past* the hard stop (`min`) far
+   *  enough to dismiss the pane — it snaps closed instead of resting at min.
+   *  Omit to disable snap-to-close (pane just clamps at min). */
+  onCollapse?: () => void;
+  /** How far past `min` (px) the pointer must travel before the snap fires.
+   *  Keeps the resting hard stop comfortable while still allowing a deliberate
+   *  drag-through to close. Default 56. */
+  collapseOvershoot?: number;
+  /** True when the pane is currently collapsed. Dragging its divider then
+   *  re-opens it: the pane snaps to `min` and tracks the pointer from there, so
+   *  the user doesn't have to hunt for the small caret. */
+  collapsed?: boolean;
+  /** Re-open a collapsed pane (clear its collapsed flag). Paired with
+   *  `collapsed` to enable drag-from-edge reopen. */
+  onExpand?: () => void;
 }
 
 const clamp = (n: number, lo: number, hi: number) =>
@@ -34,9 +49,23 @@ export function useResizablePane({
   side = "trailing",
   min = 240,
   max,
+  onCollapse,
+  collapseOvershoot = 56,
+  collapsed = false,
+  onExpand,
 }: Options) {
   const [isDragging, setDragging] = useState(false);
+  // True while the post-release "settle to min" CSS transition is playing, so
+  // the host can enable a width transition only for that moment (never during
+  // the live drag, which must track the pointer 1:1).
+  const [settling, setSettling] = useState(false);
   const start = useRef({ pos: 0, size: 0 });
+  // True while a collapsed→open reveal drag is in progress (lower clamp drops to
+  // 0 so the drawer can be pulled partway), plus the last width seen so release
+  // can decide whether to settle open.
+  const reopening = useRef(false);
+  const lastWidth = useRef(0);
+  const settleTimer = useRef<number | undefined>(undefined);
 
   const maxSize = useCallback(() => {
     if (max != null) return max;
@@ -64,13 +93,28 @@ export function useResizablePane({
   const startDrag = useCallback(
     (e: React.PointerEvent) => {
       e.preventDefault();
+      // Dragging the divider of a collapsed pane re-opens it as a drawer: the
+      // pane starts at width 0 and tracks the pointer (content stays pinned at
+      // min and is clipped), so it unfolds under the cursor instead of snapping.
+      let startSize = width;
+      if (collapsed && onExpand) {
+        if (settleTimer.current) window.clearTimeout(settleTimer.current);
+        setSettling(false);
+        onExpand();
+        onWidthChange(0);
+        startSize = 0;
+        reopening.current = true;
+        lastWidth.current = 0;
+      } else {
+        reopening.current = false;
+      }
       start.current = {
         pos: axis === "x" ? e.clientX : e.clientY,
-        size: width,
+        size: startSize,
       };
       setDragging(true);
     },
-    [axis, width],
+    [axis, width, collapsed, onExpand, onWidthChange],
   );
 
   useEffect(() => {
@@ -80,9 +124,38 @@ export function useResizablePane({
     const onMove = (e: PointerEvent) => {
       const cur = axis === "x" ? e.clientX : e.clientY;
       const delta = cur - start.current.pos;
-      onWidthChange(clamp(start.current.size + sign * delta, min, maxSize()));
+      const intended = start.current.size + sign * delta;
+      // Drag-through past the hard stop dismisses the pane: it rests at `min`,
+      // but pushing `collapseOvershoot` px further snaps it closed and ends the
+      // drag (so it can't immediately re-resize from under the pointer). Skipped
+      // while re-opening (the drawer is allowed below min during the reveal).
+      if (!reopening.current && onCollapse && intended < min - collapseOvershoot) {
+        setDragging(false);
+        onCollapse();
+        return;
+      }
+      // While re-opening, the lower bound is 0 so the drawer can be pulled
+      // partway; otherwise it's the normal `min` hard stop.
+      const lower = reopening.current ? 0 : min;
+      const next = clamp(intended, lower, maxSize());
+      lastWidth.current = next;
+      onWidthChange(next);
     };
-    const onUp = () => setDragging(false);
+    const onUp = () => {
+      setDragging(false);
+      // Releasing a partway drawer settles it smoothly open to min.
+      if (reopening.current) {
+        reopening.current = false;
+        if (lastWidth.current < min) {
+          setSettling(true);
+          onWidthChange(min);
+          settleTimer.current = window.setTimeout(
+            () => setSettling(false),
+            180,
+          );
+        }
+      }
+    };
 
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
@@ -97,7 +170,24 @@ export function useResizablePane({
       document.body.style.cursor = prevCursor;
       document.body.style.userSelect = prevSelect;
     };
-  }, [isDragging, axis, side, min, maxSize, onWidthChange]);
+  }, [
+    isDragging,
+    axis,
+    side,
+    min,
+    maxSize,
+    onWidthChange,
+    onCollapse,
+    collapseOvershoot,
+  ]);
 
-  return { isDragging, startDrag };
+  // Clear any pending settle timer on unmount.
+  useEffect(
+    () => () => {
+      if (settleTimer.current) window.clearTimeout(settleTimer.current);
+    },
+    [],
+  );
+
+  return { isDragging, startDrag, settling };
 }

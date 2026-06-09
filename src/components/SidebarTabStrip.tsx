@@ -34,7 +34,7 @@ export function SidebarTabStrip({
 
   return (
     <div
-      className="flex items-stretch border-b overflow-x-auto"
+      className="rl-thin-scroll-x flex items-stretch border-b overflow-x-auto"
       style={{
         borderColor: "var(--color-rule)",
         background: "var(--color-paper)",

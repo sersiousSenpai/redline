@@ -31,6 +31,11 @@ export const DEFAULT_SOUND: SoundConfig = {
 
 const GAP = 0.03; // small silence between tones in a motif
 
+// Small lead before the first tone so a freshly-resumed context never schedules
+// a start time in the past (which silently drops the tone — the intermittent
+// "no sound" bug).
+const LEAD = 0.03;
+
 let ctx: AudioContext | null = null;
 
 function getContext(): AudioContext | null {
@@ -40,43 +45,60 @@ function getContext(): AudioContext | null {
       (window as unknown as { webkitAudioContext?: typeof AudioContext })
         .webkitAudioContext;
     if (!Ctor) return null;
+    // A context can end up "closed" (e.g. after the tab/window was torn down
+    // and rebuilt); a closed context can't schedule, so recreate it.
+    if (ctx && ctx.state === "closed") ctx = null;
     if (!ctx) ctx = new Ctor();
-    // Autoplay policies can leave the context suspended until a user gesture;
-    // resume() is a no-op if already running.
-    if (ctx.state === "suspended") void ctx.resume();
     return ctx;
   } catch {
     return null;
   }
 }
 
-export function playInterceptBeep(config: SoundConfig = DEFAULT_SOUND): void {
-  try {
-    const audio = getContext();
-    if (!audio) return;
-    const tones =
-      Array.isArray(config?.tones) && config.tones.length
-        ? config.tones
-        : DEFAULT_SOUND.tones;
-    const pitch = config?.pitch ?? 1;
-    let at = audio.currentTime;
-    for (const tone of tones) {
-      const osc = audio.createOscillator();
-      const gain = audio.createGain();
-      osc.type = tone.type;
-      osc.frequency.value = tone.freq * pitch;
-      const edge = Math.min(0.02, tone.dur * 0.25);
-      gain.gain.setValueAtTime(0, at);
-      gain.gain.linearRampToValueAtTime(tone.gain, at + edge);
-      gain.gain.linearRampToValueAtTime(tone.gain, at + tone.dur - edge);
-      gain.gain.linearRampToValueAtTime(0, at + tone.dur);
-      osc.connect(gain);
-      gain.connect(audio.destination);
-      osc.start(at);
-      osc.stop(at + tone.dur);
-      at += tone.dur + GAP;
-    }
-  } catch {
-    /* audio unavailable — silent */
+// Schedule the motif. Called only once the context is confirmed running, so the
+// start time is always valid and every tone actually plays.
+function scheduleTones(audio: AudioContext, config: SoundConfig): void {
+  const tones =
+    Array.isArray(config?.tones) && config.tones.length
+      ? config.tones
+      : DEFAULT_SOUND.tones;
+  const pitch = config?.pitch ?? 1;
+  let at = audio.currentTime + LEAD;
+  for (const tone of tones) {
+    const osc = audio.createOscillator();
+    const gain = audio.createGain();
+    osc.type = tone.type;
+    osc.frequency.value = tone.freq * pitch;
+    const edge = Math.min(0.02, tone.dur * 0.25);
+    gain.gain.setValueAtTime(0, at);
+    gain.gain.linearRampToValueAtTime(tone.gain, at + edge);
+    gain.gain.linearRampToValueAtTime(tone.gain, at + tone.dur - edge);
+    gain.gain.linearRampToValueAtTime(0, at + tone.dur);
+    osc.connect(gain);
+    gain.connect(audio.destination);
+    osc.start(at);
+    osc.stop(at + tone.dur);
+    at += tone.dur + GAP;
   }
+}
+
+export function playInterceptBeep(config: SoundConfig = DEFAULT_SOUND): void {
+  const audio = getContext();
+  if (!audio) return;
+  // Autoplay policies / a backgrounded window / OS sleep can leave the context
+  // suspended. resume() is async — schedule the tones only AFTER it resolves,
+  // otherwise they're queued against a frozen clock and never sound. resume()
+  // on an already-running context is a no-op that resolves immediately.
+  audio
+    .resume()
+    .then(() => {
+      try {
+        scheduleTones(audio, config);
+      } catch (err) {
+        console.warn("intercept beep: scheduling failed", err);
+      }
+    })
+    .catch((err) => {
+      console.warn("intercept beep: AudioContext.resume() rejected", err);
+    });
 }

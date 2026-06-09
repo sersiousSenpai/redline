@@ -82,6 +82,53 @@ interface ResolutionWarning {
   unresolvedSubmittedIds: string[];
 }
 
+// A backend error from approve_plan / submit_review meaning the held POST is
+// gone (session ended or the hold timed out). Drives the detached banner so the
+// buttons stop looking like silent no-ops.
+function isDetachError(err: unknown): boolean {
+  const msg = typeof err === "string" ? err : String(err);
+  return (
+    msg.includes("no longer waiting") ||
+    msg.includes("no plan is currently waiting")
+  );
+}
+
+// A round +/− control used by the floating document-zoom pill.
+function ZoomButton({
+  label,
+  title,
+  onClick,
+}: {
+  label: string;
+  title: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      aria-label={title}
+      style={{
+        width: "22px",
+        height: "22px",
+        borderRadius: "50%",
+        border: "1px solid var(--color-rule)",
+        background: "var(--color-paper)",
+        color: "var(--color-ink)",
+        fontSize: "13px",
+        lineHeight: 1,
+        cursor: "pointer",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
 function App() {
   const [summaries, setSummaries] = useState<SessionSummary[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -164,6 +211,54 @@ function App() {
     "redline.commentPane.fullscreen",
     false,
   );
+  // Document zoom (content font-scale, not webview zoom). Persisted; clamped
+  // 0.8–1.6. Driven by the in-pane control and Cmd +/-/0 shortcuts.
+  const [docZoom, setDocZoom] = usePersistedState("redline.docZoom", 1);
+  const clampZoom = (z: number) =>
+    Math.min(1.6, Math.max(0.8, Math.round(z * 100) / 100));
+  const zoomIn = () => setDocZoom((z) => clampZoom(z + 0.1));
+  const zoomOut = () => setDocZoom((z) => clampZoom(z - 0.1));
+  const zoomReset = () => setDocZoom(1);
+  // The floating zoom control lives in the right gutter; it hides once the
+  // (centered) text column grows wide enough to reach it, so it never sits on
+  // top of the document text. Driven by the overlap effect below.
+  const [zoomVisible, setZoomVisible] = useState(true);
+  const zoomCtrlRef = useRef<HTMLDivElement | null>(null);
+  // Cmd/Ctrl +/-/0 zoom the document. These combos aren't text input, so we
+  // claim them globally (and preventDefault the browser's own page zoom).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      if (e.key === "=" || e.key === "+") {
+        e.preventDefault();
+        setDocZoom((z) => Math.min(1.6, Math.round((z + 0.1) * 100) / 100));
+      } else if (e.key === "-" || e.key === "_") {
+        e.preventDefault();
+        setDocZoom((z) => Math.max(0.8, Math.round((z - 0.1) * 100) / 100));
+      } else if (e.key === "0") {
+        e.preventDefault();
+        setDocZoom(1);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [setDocZoom]);
+
+  // Reveal the native window once the first themed frame has painted (the
+  // window starts hidden), so launch never shows a flash of white. Two rAFs:
+  // the first schedules after layout, the second after that frame commits.
+  useEffect(() => {
+    let raf2 = 0;
+    const raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => {
+        void invoke("show_main_window").catch(() => {});
+      });
+    });
+    return () => {
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
+    };
+  }, []);
   const [termHeight, setTermHeight] = usePersistedState(
     "redline.terminalPane.height",
     260,
@@ -293,6 +388,82 @@ function App() {
 
   const documentRef = useRef<HTMLElement | null>(null);
   const sidebarRef = useRef<HTMLElement | null>(null);
+  // When both side panes are dragged so wide that the document column is
+  // squeezed to a sliver, the two dividers' chevrons collide. We replace them
+  // with a single vertical "latch" (‹ above, › below) centered over the
+  // vanished document; clicking either arrow snaps it back open.
+  const docColumnRef = useRef<HTMLDivElement | null>(null);
+  const [docObscured, setDocObscured] = useState(false);
+  const [latchPos, setLatchPos] = useState({ left: 0, top: 0 });
+
+  // Hide the floating zoom pill the moment the document text would reach it.
+  // The article is centered with a max width, so on a wide pane there's an empty
+  // right gutter to host the control; as the pane narrows the text column grows
+  // toward the right edge — once its text (minus the article's right padding)
+  // reaches the control's left edge, drop the control. Recomputed on any pane
+  // resize via a ResizeObserver on the scroll container.
+  useEffect(() => {
+    const article = documentRef.current;
+    const container = article?.parentElement ?? null;
+    if (!article || !container) {
+      setZoomVisible(false);
+      return;
+    }
+    const recompute = () => {
+      const a = article.getBoundingClientRect();
+      const c = container.getBoundingClientRect();
+      const controlW = zoomCtrlRef.current?.offsetWidth ?? 84;
+      const controlLeft = c.right - 16 - controlW;
+      // pr-8 (32px) of the article is empty padding, so the text ends short of
+      // the article's right edge.
+      const textRight = a.right - 32;
+      setZoomVisible(textRight + 12 <= controlLeft);
+    };
+    recompute();
+    const ro = new ResizeObserver(recompute);
+    ro.observe(container);
+    return () => ro.disconnect();
+  }, [sidebarTab, activeFile, activeId]);
+
+  // Track when the document column has been squeezed to a sliver so the latch
+  // can replace the two colliding divider chevrons. Position is relative to the
+  // positioned <main> ancestor (the document column's offsetParent).
+  useEffect(() => {
+    const el = docColumnRef.current;
+    if (!el) return;
+    const recompute = () => {
+      const w = el.offsetWidth;
+      setDocObscured(w < 56);
+      // Center the latch over the vanished document, but keep it on-screen when
+      // the document clamps against a window edge (one pane collapsed).
+      const parent = el.offsetParent as HTMLElement | null;
+      const maxLeft = (parent?.clientWidth ?? window.innerWidth) - 12;
+      const rawLeft = el.offsetLeft + w / 2;
+      setLatchPos({
+        left: Math.min(maxLeft, Math.max(12, rawLeft)),
+        top: el.offsetTop + el.offsetHeight / 2,
+      });
+    };
+    recompute();
+    const ro = new ResizeObserver(recompute);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [sidebarWidth, paneWidth, sidebarCollapsed, paneCollapsed, paneFullscreen]);
+
+  // The latch appears whenever the document has been clamped to a sliver —
+  // whether between two open panes or against a collapsed pane's edge. Each
+  // arrow reopens the document by shrinking whichever pane is actually open on
+  // that side (falling back to the other side when one pane is collapsed).
+  const latchActive = docObscured && !paneFullscreen;
+  const reopenDocFromLeft = () => {
+    if (!sidebarCollapsed) setSidebarWidth(180);
+    else setPaneWidth(240);
+  };
+  const reopenDocFromRight = () => {
+    if (!paneCollapsed) setPaneWidth(240);
+    else setSidebarWidth(180);
+  };
+
   // Bidirectional focus between in-doc highlights and sidebar cards. Single
   // source of truth: card click sets it; highlight click sets it; effects
   // mirror the change in each direction.
@@ -304,18 +475,63 @@ function App() {
     storeTheme(name);
   };
 
-  const { isDragging: sidebarDragging, startDrag: startSidebarDrag } =
-    useResizablePane({
-      width: sidebarWidth,
-      onWidthChange: setSidebarWidth,
-      side: "leading",
-      min: 180,
-    });
+  // Track the viewport width so each side pane's max can be "up to the other
+  // pane" — letting EITHER pane be dragged until the document clamps fully shut,
+  // symmetrically. (A fixed 320px reserve made this lopsided: one pane could
+  // clamp the doc shut and the other couldn't.)
+  const [winWidth, setWinWidth] = useState(() =>
+    typeof window !== "undefined" ? window.innerWidth : 1440,
+  );
+  useEffect(() => {
+    const onResize = () => setWinWidth(window.innerWidth);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  // Max width = whatever leaves the document at 0 against the *other* pane
+  // (minus the two 6px dividers). Collapsed panes contribute 0.
+  const sidebarMaxW = Math.max(
+    180,
+    winWidth - (paneCollapsed ? 0 : paneWidth) - 12,
+  );
+  const paneMaxW = Math.max(
+    240,
+    winWidth - (sidebarCollapsed ? 0 : sidebarWidth) - 12,
+  );
 
-  const { isDragging, startDrag } = useResizablePane({
+  const {
+    isDragging: sidebarDragging,
+    startDrag: startSidebarDrag,
+    settling: sidebarSettling,
+  } = useResizablePane({
+    width: sidebarWidth,
+    onWidthChange: setSidebarWidth,
+    side: "leading",
+    min: 180,
+    max: sidebarMaxW,
+    // Drag the document over the sidebar past its hard stop → snap it shut.
+    onCollapse: () => setSidebarCollapsed(true),
+    // Drag the divider of a collapsed sidebar to re-open it as a drawer.
+    collapsed: sidebarCollapsed,
+    onExpand: () => setSidebarCollapsed(false),
+  });
+
+  const {
+    isDragging,
+    startDrag,
+    settling: paneSettling,
+  } = useResizablePane({
     width: paneWidth,
     onWidthChange: setPaneWidth,
+    max: paneMaxW,
+    // Same for the comment pane on the right edge.
+    onCollapse: () => setPaneCollapsed(true),
+    collapsed: paneCollapsed,
+    onExpand: () => setPaneCollapsed(false),
   });
+  // Drawer-reveal geometry: the clip (outer) tracks the live width while the
+  // content (inner aside) stays pinned at min so it's revealed, not reflowed.
+  const revealSidebarW = Math.max(sidebarWidth, 180);
+  const revealPaneW = Math.max(paneWidth, 240);
 
   const { isDragging: termDragging, startDrag: startTermDrag } =
     useResizablePane({
@@ -626,8 +842,11 @@ function App() {
   // in-flight batch is all questions, Claude is answering, not revising.
   const waitingAsk =
     waiting && submittedComments.every((c) => c.type === "question");
-  const canSubmit = pendingComments.length > 0;
-  const canApprove = !!session && session.status !== "approved";
+  // A detached plan is no longer held by Claude — Approve / Continue Revising
+  // would no-op against a dead channel, so disable them until the session is
+  // restored (which clears `detached` on the next plan-received POST).
+  const canSubmit = pendingComments.length > 0 && !detached;
+  const canApprove = !!session && session.status !== "approved" && !detached;
 
   // While Claude revises, the live terminal *is* the waiting state — make sure
   // the dock is visible so "watch it below" actually points at something.
@@ -678,6 +897,9 @@ function App() {
 
   const beginCompose = (type: CommentType) => {
     if (!selection) return;
+    // The composer lives in the comment pane — make sure it's open, or the
+    // action appears to do nothing when the pane is collapsed.
+    setPaneCollapsed(false);
     setComposing({
       type,
       anchorId: selection.anchorId,
@@ -697,6 +919,8 @@ function App() {
   // composer with an empty field.
   const beginCrossOut = () => {
     if (!selection) return;
+    // Reveal the pane so the resulting struck-edit card is visible.
+    setPaneCollapsed(false);
     planActionsRef.current?.strikeSelection();
     clearSelection();
   };
@@ -779,7 +1003,8 @@ function App() {
       setAwaitingNextPlan(true);
     } catch (err) {
       console.error("submit_review failed", err);
-      alert(`Submit failed: ${err}`);
+      if (isDetachError(err)) setDetached(true);
+      else alert(`Submit failed: ${err}`);
     } finally {
       setBusy(false);
     }
@@ -794,19 +1019,70 @@ function App() {
       setTimeout(() => setToast(null), 3500);
     } catch (err) {
       console.error("approve_plan failed", err);
-      alert(`Approve failed: ${err}`);
+      if (isDetachError(err)) setDetached(true);
+      else alert(`Approve failed: ${err}`);
     } finally {
       setBusy(false);
     }
+  };
+
+  // One-click recovery for a detached plan: open a terminal in the session's
+  // project dir and resume the exact Claude Code conversation with an initial,
+  // user-attested prompt that re-presents the plan. Because the resumed session
+  // keeps the same session_id, its ExitPlanMode POST reattaches to this review —
+  // comments, revisions and reopen history intact (no phantom new review).
+  const restorePlanSession = () => {
+    if (!session) return;
+    const shq = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
+    const prompt =
+      "The reviewer reopened this plan in Redline for continued review. " +
+      "Please re-enter plan mode and call ExitPlanMode to re-present your " +
+      "current plan for review (no changes needed unless you have them).";
+    const cmd = `claude --resume ${shq(session.sessionId)} ${shq(prompt)}\r`;
+    const cwd = session.projectPath || null;
+    setTermFullscreen(false);
+    setTermCollapsed(false);
+    const id = terminalsRef.current?.openSessionTerminal(cwd) ?? null;
+    if (id) {
+      // Let the freshly-spawned shell finish its rc files before the command
+      // lands; the PTY line-buffers anything typed earlier regardless.
+      window.setTimeout(() => {
+        void invoke("pty_write", { id, data: cmd });
+      }, 900);
+    }
+    setDetached(false);
+    setToast("Resuming the session in the terminal below ↓");
+    setTimeout(() => setToast(null), 4000);
+  };
+
+  // Fallback for a Claude running in a terminal Redline doesn't own: copy the
+  // resume command so the user can paste it into their own terminal.
+  const copyRestoreCommand = () => {
+    if (!session) return;
+    const shq = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
+    const prompt =
+      "The reviewer reopened this plan in Redline for continued review. " +
+      "Please re-enter plan mode and call ExitPlanMode to re-present your " +
+      "current plan for review (no changes needed unless you have them).";
+    const cmd = `claude --resume ${shq(session.sessionId)} ${shq(prompt)}`;
+    void navigator.clipboard?.writeText(cmd);
+    setToast("Resume command copied — paste it into your terminal");
+    setTimeout(() => setToast(null), 4000);
   };
 
   // Save one plan revision as a clean .md file (sidecars stripped) through a
   // native save dialog. A resolved `null` means the user cancelled the dialog.
   const exportRevision = async (sessionId: string, versionNumber: number) => {
     try {
+      const d = new Date();
+      const p = (n: number) => String(n).padStart(2, "0");
+      const stamp =
+        `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}` +
+        `-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
       const saved = await invoke<string | null>("export_revision_markdown", {
         sessionId,
         versionNumber,
+        stamp,
       });
       if (saved) {
         const name = saved.split(/[\\/]/).pop() ?? saved;
@@ -970,9 +1246,19 @@ function App() {
       <main className="relative flex-1 overflow-hidden flex flex-col">
         <div className="flex-1 overflow-hidden flex">
         {!sidebarCollapsed && (
+        <div
+          className="shrink-0"
+          style={{
+            width: `${sidebarWidth}px`,
+            overflow: "hidden",
+            display: "flex",
+            justifyContent: "flex-start",
+            transition: sidebarSettling ? "width 160ms ease" : undefined,
+          }}
+        >
         <aside
           className="flex flex-col shrink-0"
-          style={{ width: `${sidebarWidth}px` }}
+          style={{ width: `${revealSidebarW}px` }}
         >
           <SidebarTabStrip
             openFolders={openFolders}
@@ -1011,6 +1297,7 @@ function App() {
             </div>
           )}
         </aside>
+        </div>
         )}
         <PaneDivider
           orientation="vertical"
@@ -1020,19 +1307,26 @@ function App() {
           dragging={sidebarDragging}
           onToggle={() => setSidebarCollapsed((c) => !c)}
           onPointerDown={startSidebarDrag}
+          hideChevron={latchActive}
         />
         <div
-          className="flex-1 overflow-hidden flex flex-col"
+          ref={docColumnRef}
+          className="flex-1 overflow-hidden flex flex-col relative"
           style={{ background: "var(--color-paper)" }}
         >
           {sidebarTab.kind === "folder" && activeFile ? (
             <FileViewer path={activeFile} onClose={handleCloseFile} />
           ) : (
-          <div className="flex-1 overflow-y-auto">
+          <div className="rl-thin-scroll-y flex-1 overflow-y-auto">
           <article
             ref={documentRef}
             className="doc-article mx-auto pl-16 pr-8 py-10"
-            style={{ maxWidth: "820px" }}
+            style={
+              {
+                maxWidth: "820px",
+                "--rl-doc-zoom": docZoom,
+              } as React.CSSProperties
+            }
           >
             {sidebarTab.kind === "folder" ? (
               <EmptyState
@@ -1081,6 +1375,42 @@ function App() {
           </article>
           </div>
           )}
+          {/* Floating document-zoom control — pinned to the pane (doesn't scroll
+              with the plan). Hidden over the folder file viewer. */}
+          {!(sidebarTab.kind === "folder" && activeFile) && zoomVisible && (
+            <div
+              ref={zoomCtrlRef}
+              className="absolute flex items-center gap-1 rounded-full"
+              style={{
+                right: "16px",
+                bottom: "16px",
+                padding: "3px",
+                background: "var(--color-bg-elevated)",
+                border: "1px solid var(--color-rule)",
+                boxShadow: "0 4px 14px rgba(0,0,0,0.18)",
+                opacity: 0.92,
+              }}
+            >
+              <ZoomButton label="−" title="Zoom out (⌘−)" onClick={zoomOut} />
+              <button
+                type="button"
+                onClick={zoomReset}
+                title="Reset zoom (⌘0)"
+                className="font-mono"
+                style={{
+                  fontSize: "10px",
+                  minWidth: "34px",
+                  color: "var(--color-ink-muted)",
+                  background: "transparent",
+                  border: "none",
+                  cursor: "pointer",
+                }}
+              >
+                {Math.round(docZoom * 100)}%
+              </button>
+              <ZoomButton label="+" title="Zoom in (⌘+)" onClick={zoomIn} />
+            </div>
+          )}
         </div>
 
         {!paneFullscreen && (
@@ -1089,10 +1419,86 @@ function App() {
             dragging={isDragging}
             onToggle={() => setPaneCollapsed((c) => !c)}
             onPointerDown={startDrag}
+            hideChevron={latchActive}
           />
         )}
 
+        {/* The latch: when the document is squeezed shut, the two dividers'
+            chevrons would collide, so replace them with a single stacked pair
+            centered over the vanished document. ‹ reopens from the left
+            (sidebar), › from the right (comment pane). */}
+        {latchActive && (
+          <div
+            className="absolute z-30 flex flex-col rounded-full overflow-hidden shadow-sm"
+            style={{
+              left: `${latchPos.left}px`,
+              top: `${latchPos.top}px`,
+              transform: "translate(-50%, -50%)",
+              background: "var(--color-bg-elevated)",
+              border: "1px solid var(--color-rule)",
+            }}
+          >
+            <button
+              type="button"
+              onClick={reopenDocFromLeft}
+              title="Reopen document (shrink sessions)"
+              aria-label="Reopen document from the left"
+              className="flex items-center justify-center"
+              style={{
+                width: "18px",
+                height: "26px",
+                fontSize: "11px",
+                lineHeight: 1,
+                background: "transparent",
+                color: "var(--color-ink-muted)",
+                border: "none",
+                borderBottom: "1px solid var(--color-rule)",
+                cursor: "pointer",
+              }}
+            >
+              ‹
+            </button>
+            <button
+              type="button"
+              onClick={reopenDocFromRight}
+              title="Reopen document (shrink discussion)"
+              aria-label="Reopen document from the right"
+              className="flex items-center justify-center"
+              style={{
+                width: "18px",
+                height: "26px",
+                fontSize: "11px",
+                lineHeight: 1,
+                background: "transparent",
+                color: "var(--color-ink-muted)",
+                border: "none",
+                cursor: "pointer",
+              }}
+            >
+              ›
+            </button>
+          </div>
+        )}
+
         {!paneCollapsed && (
+        // Clip wrapper for the drawer reveal. In fullscreen it's display:contents
+        // (no box) so the absolute overlay aside is unaffected; otherwise it's a
+        // flex clip whose width tracks the live pane width while the aside inside
+        // stays pinned at min and is revealed from the right.
+        <div
+          style={
+            paneFullscreen
+              ? { display: "contents" }
+              : {
+                  width: `${paneWidth}px`,
+                  overflow: "hidden",
+                  display: "flex",
+                  justifyContent: "flex-end",
+                  flexShrink: 0,
+                  transition: paneSettling ? "width 160ms ease" : undefined,
+                }
+          }
+        >
         <aside
           ref={sidebarRef as React.RefObject<HTMLElement>}
           className={
@@ -1107,7 +1513,7 @@ function App() {
                   borderColor: "var(--color-rule)",
                 }
               : {
-                  width: `${paneWidth}px`,
+                  width: `${revealPaneW}px`,
                   borderColor: "var(--color-rule)",
                   background: "var(--color-paper)",
                 }
@@ -1146,19 +1552,25 @@ function App() {
           >
             <span>Discussion</span>
             <span className="flex items-center gap-2">
-              {allComments.length > 0 && (
-                <span
-                  className="font-mono normal-case"
-                  style={{
-                    fontSize: "10px",
-                    letterSpacing: "0.04em",
-                    color: "var(--color-ink-muted)",
-                    fontWeight: 500,
-                  }}
-                >
-                  {pendingComments.length} pending · {allComments.length} total
-                </span>
-              )}
+              {/* Secondary count: keep it on one line, and drop it entirely when
+                  the pane is too narrow to hold it (otherwise it wraps and looks
+                  squished under "DISCUSSION"). */}
+              {sidebarTab.kind === "sessions" &&
+                allComments.length > 0 &&
+                (paneFullscreen || paneWidth >= 340) && (
+                  <span
+                    className="font-mono normal-case"
+                    style={{
+                      fontSize: "10px",
+                      letterSpacing: "0.04em",
+                      color: "var(--color-ink-muted)",
+                      fontWeight: 500,
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {pendingComments.length} pending · {allComments.length} total
+                  </span>
+                )}
               <button
                 type="button"
                 onClick={() => setPaneFullscreen((f) => !f)}
@@ -1189,6 +1601,24 @@ function App() {
             </span>
           </div>
           <div className="p-4 flex flex-col gap-3">
+            {/* The discussion pane is scoped to the active sidebar context:
+                in a folder tab it must not leak the previously-focused
+                session's comments. */}
+            {sidebarTab.kind !== "sessions" ? (
+              <div
+                className="italic"
+                style={{
+                  fontSize: "12px",
+                  color: "var(--color-ink-muted)",
+                  lineHeight: 1.5,
+                }}
+              >
+                Comments belong to a plan session. Switch to{" "}
+                <strong style={{ color: "var(--color-ink)" }}>Sessions</strong>{" "}
+                to see a plan's discussion.
+              </div>
+            ) : (
+              <>
             {askModeViolation && (
               <AskModeViolationBanner
                 onDismiss={() => setAskModeViolation(false)}
@@ -1212,9 +1642,45 @@ function App() {
               >
                 <span style={{ flex: 1 }}>
                   <strong>Claude is no longer waiting for this plan.</strong> The
-                  review timed out (Redline holds a plan for up to 10 minutes) or
-                  the Claude Code session ended. Re-run the plan in your terminal,
-                  then submit your review again — your comments are preserved.
+                  Claude Code session ended (or the hold timed out). Your comments
+                  are preserved — <strong>Restore plan session</strong> reopens the
+                  same conversation in a terminal and re-presents the plan for
+                  review.
+                  <span
+                    className="flex flex-wrap gap-2"
+                    style={{ marginTop: "8px" }}
+                  >
+                    <button
+                      type="button"
+                      onClick={restorePlanSession}
+                      className="rounded px-2 py-1"
+                      style={{
+                        background: "var(--color-anchor-bg)",
+                        color: "var(--color-anchor-text)",
+                        border: "1px solid var(--color-rule)",
+                        cursor: "pointer",
+                        fontSize: "12px",
+                        fontWeight: 600,
+                      }}
+                    >
+                      Restore plan session
+                    </button>
+                    <button
+                      type="button"
+                      onClick={copyRestoreCommand}
+                      title="For a Claude running in a terminal Redline doesn't own — copy the resume command to paste yourself."
+                      className="rounded px-2 py-1"
+                      style={{
+                        background: "transparent",
+                        color: "var(--color-ink-muted)",
+                        border: "1px solid var(--color-rule)",
+                        cursor: "pointer",
+                        fontSize: "12px",
+                      }}
+                    >
+                      Copy resume command
+                    </button>
+                  </span>
                 </span>
                 <button
                   type="button"
@@ -1343,8 +1809,11 @@ function App() {
                 submitInFlight={busy}
               />
             ))}
+              </>
+            )}
           </div>
         </aside>
+        </div>
         )}
         </div>
 

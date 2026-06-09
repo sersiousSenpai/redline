@@ -43,6 +43,10 @@ interface TerminalTabsProps {
  *  that lives in that folder. */
 export interface TerminalTabsHandle {
   selectTab: (id: string) => void;
+  /** Open a fresh terminal tab in `cwd`, focus it, and return its id so the
+   *  host can drive it (e.g. "Restore plan session" writes `claude --resume …`
+   *  into it). cwd null → backend resolves to $HOME. */
+  openSessionTerminal: (cwd: string | null) => string;
 }
 
 // Owns the set of terminal tabs and their lifecycle. Every tab's
@@ -277,6 +281,14 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
     () => ({
       selectTab: (id: string) => {
         if (tabsRef.current.some((t) => t.id === id)) selectTabRef.current(id);
+      },
+      openSessionTerminal: (cwd: string | null) => {
+        const id = crypto.randomUUID();
+        setTabs((prev) => [...prev, { id, cwd }]);
+        // selectTabRef is reassigned every render, so it sees the live pane
+        // state and shows the new tab in the focused pane.
+        selectTabRef.current(id);
+        return id;
       },
     }),
     [],
