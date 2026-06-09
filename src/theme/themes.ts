@@ -9,6 +9,7 @@ export type ThemeName =
   | "homebrew"
   | "ocean"
   | "novel"
+  | "blossom"
   | "manpage"
   | "redsand"
   | "silveraerogel"
@@ -94,6 +95,15 @@ export const THEMES: ThemeEntry[] = [
     name: "grass",
     label: "Grass",
     base: { bg: "#08341b", fg: "#fff0a5", blue: "#7bafd4", yellow: "#ffd75f", green: "#c7f08a", selection: "#ff7a18" },
+  },
+  {
+    // Blossom — a cherry-blossom light theme drawn from a real sakura branch:
+    // a bright bubblegum-pink page, deep plum ink, with the photo's own hues as
+    // accents — lavender-haze blue, golden-stamen yellow, fresh-stem green. The
+    // selection hue is a vivid petal pink so commented spans and v-badges bloom.
+    name: "blossom",
+    label: "Blossom",
+    base: { bg: "#fac4d7", fg: "#381b2b", blue: "#897ad9", yellow: "#d99a2c", green: "#4f9e57", selection: "#ff4f97" },
   },
 ];
 
