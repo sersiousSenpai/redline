@@ -75,20 +75,37 @@ export function PaneDivider({
         ? expandGlyph
         : collapseGlyph;
 
+  // The interactive grab zone extends a few px past the 6px visible bar on each
+  // side so the resize cursor is easy to acquire even when a scrollbar gutter
+  // sits right next to the divider — without thickening the bar or its layout
+  // width. As a real DOM element painted above the document column, it also
+  // helps the cursor switch over the adjacent native scrollbar gutter.
+  const overhang = 6;
   return (
     <div
       className="relative shrink-0"
       style={horizontal ? { height: "6px" } : { width: "6px" }}
     >
+      {/* Visible bar — non-interactive; the grab zone below handles pointers. */}
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          pointerEvents: "none",
+          background: dragging ? "var(--color-info)" : "var(--color-rule)",
+          transition: dragging ? undefined : "background-color 0.12s",
+        }}
+      />
+      {/* Widened transparent grab/cursor zone. */}
       <div
         onPointerDown={dragDisabled ? undefined : onPointerDown}
         title={dragDisabled ? undefined : `Drag to resize ${label}`}
         style={{
           position: "absolute",
-          inset: 0,
+          ...(horizontal
+            ? { left: 0, right: 0, top: -overhang, bottom: -overhang }
+            : { top: 0, bottom: 0, left: -overhang, right: -overhang }),
           cursor: dragDisabled ? "default" : resizeCursor,
-          background: dragging ? "var(--color-info)" : "var(--color-rule)",
-          transition: dragging ? undefined : "background-color 0.12s",
         }}
       />
       {!hideChevron && (
