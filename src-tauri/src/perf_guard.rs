@@ -28,7 +28,6 @@ mod tests {
     fn heavy_highlight_commands_stay_async() {
         let src = include_str!("highlight.rs");
         assert_async_command(src, "highlight.rs", "open_doc");
-        assert_async_command(src, "highlight.rs", "doc_highlight");
         assert_async_command(src, "highlight.rs", "doc_lines");
     }
 

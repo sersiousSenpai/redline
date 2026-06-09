@@ -1305,7 +1305,6 @@ pub fn run() {
             fsbrowse::read_file_base64,
             fsbrowse::home_dir,
             highlight::open_doc,
-            highlight::doc_highlight,
             highlight::doc_lines,
             fswatch::watch_dir,
             fswatch::unwatch_dir,

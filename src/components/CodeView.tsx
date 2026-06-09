@@ -8,10 +8,12 @@ import { useLiveFile } from "../hooks/useFsWatch";
 import { visibleRange, chunksForRange } from "../lib/virtual";
 
 // Read-only source viewer. Normal-sized files arrive whole from `open_doc` (one
-// round-trip, `inlineLines` set) and paint instantly; genuinely huge files come
-// back without inline lines and are paged per scroll-window via `doc_lines`
-// (syntect runs off the UI thread, cached by path+mtime) so a 57k-line file never
-// freezes the app. Either way only the visible rows are ever in the DOM.
+// round-trip, `inlineLines` set) already syntax-colored — the viewer never paints
+// an uncolored frame; genuinely huge files come back without inline lines and are
+// paged per scroll-window via `doc_lines`. Syntect runs off the UI thread (cached
+// by path+mtime) so a 57k-line file never freezes the app, and the brief wait for
+// a cold grammar shows "Loading…", not flat plain text. Either way only the
+// visible rows are ever in the DOM.
 const LINE_HEIGHT = 18; // px; must match the line styling below.
 const CHUNK = 300; // lines fetched per request (paged path only).
 const OVERSCAN = 60; // extra lines rendered/fetched above & below the viewport.
@@ -36,16 +38,14 @@ interface CodeViewProps {
 }
 
 /** The currently-displayed document. `inlineLines` is present for normal-sized
- *  files (render straight from it); absent for paged (huge) files, which pull
- *  windows into `chunks`. `path` records which file this is, so a stale async
- *  resolution from a file we've navigated away from is easy to ignore. */
+ *  files (render straight from it, already colored by `open_doc`); absent for
+ *  paged (huge) files, which pull colored windows into `chunks`. `path` records
+ *  which file this is, so a stale async resolution from a file we've navigated
+ *  away from is easy to ignore. */
 interface LoadedDoc {
   path: string;
   meta: DocMeta;
   inlineLines?: DocLine[];
-  /** True once `inlineLines` hold the highlighted (colored) version, so we don't
-   *  request highlighting again. */
-  highlighted?: boolean;
 }
 
 export default function CodeView({ path }: CodeViewProps) {
@@ -210,31 +210,6 @@ export default function CodeView({ path }: CodeViewProps) {
         });
     }
   }, [pagedPath, lineCount, start, end, chunks]);
-
-  // Progressive highlight: an inline doc paints plain instantly (above); once
-  // it's on screen, fetch tokens and swap them in. Instant when the grammar is
-  // already warmed, a beat later on the first cold open of a language — but it
-  // NEVER blocks first paint, so a small file is never gated on tokenization.
-  useEffect(() => {
-    if (!fresh || !doc || !doc.inlineLines || doc.highlighted || !doc.meta.highlightable) {
-      return;
-    }
-    const target = doc.path;
-    let cancelled = false;
-    void invoke<DocLine[] | null>("doc_highlight", { path: target })
-      .then((lines) => {
-        if (cancelled || latestPath.current !== target || !lines) return;
-        setDoc((d) =>
-          d && d.path === target && d.inlineLines
-            ? { ...d, inlineLines: lines, highlighted: true }
-            : d,
-        );
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [fresh, doc]);
 
   // Nothing to show yet (very first open, before any doc resolves). Hold blank
   // until the short delay elapses, then a neutral "Loading…" — never a size-based

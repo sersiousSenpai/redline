@@ -12,3 +12,7 @@ You may obtain a copy of the License at
 "Redline", the Redline name, logo, and application icon are trademarks of
 Yusuf Al-Bazian and are NOT licensed under the Apache License. See the
 "Trademark" section of README.md.
+
+This product bundles third-party syntax-highlighting grammars (via the
+`two-face` crate) under their own permissive licenses. Those licenses are
+reproduced in THIRD_PARTY_NOTICES.md.

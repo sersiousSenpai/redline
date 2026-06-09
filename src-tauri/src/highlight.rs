@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 use serde::Serialize;
-use syntect::parsing::{ParseState, ScopeStack, SyntaxSet};
+use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
 
 /// Files larger than this are paged as plain text (no tokenization) — syntect
 /// over many megabytes is slow and the token cache would balloon. The viewer
@@ -151,7 +151,13 @@ pub struct Highlighter {
 impl Highlighter {
     pub fn new() -> Self {
         Self {
-            syntaxes: SyntaxSet::load_defaults_newlines(),
+            // `two_face`'s extended set (bat's curated, permissive-only grammars)
+            // rather than `SyntaxSet::load_defaults_newlines()`: the bundled
+            // syntect defaults omit TypeScript/TSX/JSX, so .ts/.tsx files matched
+            // no grammar and rendered as plain text (a uniform wall of the theme's
+            // foreground color). The extended set carries those grammars, and is
+            // also `_newlines` so `ParseState` still gets its trailing '\n'.
+            syntaxes: two_face::syntax::extra_newlines(),
             cache: Mutex::new(HashMap::new()),
         }
     }
@@ -183,11 +189,12 @@ impl Highlighter {
         Ok(arc)
     }
 
-    /// Read + split a file into display lines. Deliberately does **not**
-    /// tokenize: that's the slow part (syntect/`fancy-regex`), and doing it here
-    /// would block the first paint. Tokens are produced lazily by `tokens()` on
-    /// first highlight request, so the viewer paints plain text instantly and
-    /// colorizes a beat later (the VS Code model).
+    /// Read + split a file into display lines. Deliberately does **not** tokenize
+    /// here (that's the syntect parse); tokens are produced lazily by `tokens()`
+    /// on the first highlight request, then cached. With warmed grammars under the
+    /// oniguruma backend that first parse is fast enough that `open_doc` runs it
+    /// inline (off the UI thread) and returns colored lines, so the viewer never
+    /// shows an uncolored frame.
     fn build(&self, path: &str, size: u64, mtime: Option<SystemTime>) -> Result<CachedDoc, String> {
         let base = CachedDoc {
             mtime,
@@ -285,6 +292,7 @@ impl Highlighter {
             .find_syntax_for_file(path)
             .ok()
             .flatten()
+            .or_else(|| self.syntax_for_alias(path))
             .or_else(|| self.syntaxes.find_syntax_by_first_line(content))?;
         // The plain-text syntax produces no useful classes — treat as unhighlighted.
         if syntax.name == self.syntaxes.find_syntax_plain_text().name {
@@ -333,22 +341,65 @@ impl Highlighter {
         Some(out)
     }
 
-    /// Pre-tokenize a one-line sample for the highest-frequency grammars so the
-    /// first real open of a language doesn't pay syntect/`fancy-regex`'s one-time
-    /// per-grammar regex-compile cost on the user's click (that cold cost is what
-    /// made a *small* `.mjs` flash "Loading large file…"). Best-effort: a sample
-    /// that matches no grammar is simply skipped. Safe to run on a background
-    /// thread at startup — `tokenize` is `&self`, and the compiled-regex cache
-    /// lives in the shared `SyntaxSet` (interior mutability), so warming the
-    /// managed instance is visible to later command calls.
+    /// Extension aliases the bundled grammars don't claim themselves. The TS/JS
+    /// grammars list only their canonical extensions (`tsx`, `ts`, `js`), so
+    /// common variants would match no grammar and fall back to plain text. `.jsx`
+    /// uses the React grammar — it handles both JSX tags and plain JS — and the
+    /// ESM/CJS module extensions reuse the JavaScript grammar.
+    fn syntax_for_alias(&self, path: &str) -> Option<&SyntaxReference> {
+        let ext = std::path::Path::new(path).extension()?.to_str()?;
+        let name = match ext {
+            "jsx" => "TypeScriptReact",
+            "mjs" | "cjs" => "JavaScript",
+            _ => return None,
+        };
+        self.syntaxes.find_syntax_by_name(name)
+    }
+
+    /// Pre-compile the per-grammar regexes off the hot path so the first real
+    /// open of a language is as fast as possible.
+    ///
+    /// syntect compiles each grammar pattern *lazily, the first time that
+    /// construct is encountered*, so a trivial one-liner warms only a fraction of
+    /// a grammar — the real file then pays the rest. The hot samples below are
+    /// therefore deliberately rich (JSX, generics, hooks, strings, template
+    /// literals, regex literals, comments) so the whole grammar compiles up front.
+    /// With the oniguruma backend the difference is small but real (measured
+    /// TypeScriptReact, debug: ~41 ms cold → ~10 ms warmed), and warming costs
+    /// little (~100 ms total), so it's worth doing — and it was load-bearing under
+    /// the old fancy-regex backend, where cold was ~2.4 s.
+    ///
+    /// Safe on a background thread: `tokenize` is `&self`, and the compiled-regex
+    /// cache lives in the shared, `Sync` `SyntaxSet` (already used concurrently by
+    /// the async commands), so warming the managed instance is visible to — and
+    /// safe to race with — later command calls.
     pub fn warm_common(&self) {
-        // (sample-path, sample-content) — the path drives grammar selection.
-        const SAMPLES: &[(&str, &str)] = &[
+        // The hot grammars: by far the most expensive compile and the most-opened
+        // here. `.tsx`/`.jsx` share one grammar (TypeScriptReact) and
+        // `.js`/`.mjs`/`.cjs` share JavaScript, so these three samples cover the
+        // whole TS/JS family. Each sample is rich enough to compile essentially
+        // the entire grammar (see above).
+        const HOT: &[(&str, &str)] = &[
+            ("warm.tsx", RICH_TSX),
+            ("warm.ts", RICH_TS),
+            ("warm.js", RICH_JS),
+        ];
+        // Compile the hot grammars in parallel so *all* of them are ready as fast
+        // as possible (not serialized behind one another), shrinking the window in
+        // which an early open could still pay a compile. Scoped threads let the
+        // closures borrow `&self`; they all join before `warm_common` returns.
+        std::thread::scope(|s| {
+            for (path, body) in HOT {
+                s.spawn(move || {
+                    let _ = self.tokenize(path, body);
+                });
+            }
+        });
+
+        // The rest compile cheaply; a one-liner is plenty and keeps startup work
+        // small. Best-effort — a sample that matches no grammar is simply skipped.
+        const REST: &[(&str, &str)] = &[
             ("a.json", "{\"k\":1}\n"),
-            ("a.js", "const x = 1;\n"),
-            ("a.mjs", "export const x = 1;\n"),
-            ("a.ts", "const x: number = 1;\n"),
-            ("a.tsx", "const x = 1;\n"),
             ("a.rs", "fn main() {}\n"),
             ("a.py", "x = 1\n"),
             ("a.md", "# h\n"),
@@ -358,7 +409,7 @@ impl Highlighter {
             ("a.yaml", "k: 1\n"),
             ("a.sh", "echo hi\n"),
         ];
-        for (path, content) in SAMPLES {
+        for (path, content) in REST {
             let _ = self.tokenize(path, content);
         }
     }
@@ -369,6 +420,53 @@ impl Default for Highlighter {
         Self::new()
     }
 }
+
+// Representative warm samples for the hot grammars (see `warm_common`). They
+// only need to *exercise* each grammar's common constructs so its regexes
+// compile — they don't need to be meaningful or even fully valid code.
+const RICH_TSX: &str = r#"// warm
+import React, { useState, useEffect } from "react";
+import type { Foo } from "./foo";
+interface Props<T> { items: readonly T[]; onSelect?: (x: T) => void; label: string; }
+const RE = /^[a-z]+\d*$/gi;
+export function List<T extends { id: string }>({ items, onSelect, label }: Props<T>) {
+  const [active, setActive] = useState<string | null>(null);
+  useEffect(() => { console.log(`mounted ${items.length} for ${label}`); }, [items]);
+  return (
+    <div className="list" data-count={items.length}>
+      <h2>{label}</h2>
+      {items.map((it) => (
+        <button key={it.id} onClick={() => { setActive(it.id); onSelect?.(it); }}>
+          {it.id === active ? "* " : ""}{String(it.id)}
+        </button>
+      ))}
+    </div>
+  );
+}
+"#;
+
+const RICH_TS: &str = r#"// warm
+import type { Foo } from "./foo";
+type Id = string | number;
+enum Kind { A, B, C }
+interface Box<T> { id: Id; items: readonly T[]; load?: (x: T) => Promise<void>; }
+const RE = /^\d+(\.\d+)?$/g;
+export async function find<T extends { id: Id }>(b: Box<T>, id: Id): Promise<T | null> {
+  const label = `box ${b.id} has ${b.items.length}`;
+  for (const it of b.items) { if (it.id === id) return it; }
+  return null;
+}
+"#;
+
+const RICH_JS: &str = r#"// warm
+import { x } from "./mod";
+const RE = /^[a-z]+$/gi;
+export function build(a, b = 1, ...rest) {
+  const label = `v ${a} ${b} ${rest.length}`;
+  const obj = { a, b, sum() { return [a, b, ...rest].reduce((s, n) => s + n, 0); } };
+  return [a, b].map((v) => v * 2).filter((v) => v > 0 && obj.sum() > 0);
+}
+"#;
 
 /// Split into the lines a viewer displays: newline-delimited, with no phantom
 /// trailing blank line for a file that ends in '\n'. Mirrors `split_inclusive`'s
@@ -451,16 +549,18 @@ fn scope_class(scope: &str) -> Option<&'static str> {
     }
 }
 
-/// Open a document for the viewer: reads + splits lines (no tokenization) and
-/// returns metadata plus — for normal-sized docs (≤ `INLINE_MAX_LINES`) — every
-/// line inline as **plain text**, so the viewer paints in a single round-trip,
-/// instantly, with no blank frame and no "Loading…". Highlighting is requested
-/// separately via `doc_highlight` and swapped in once ready. Huge docs return
-/// `lines: None` and are paged via `doc_lines`.
+/// Open a document for the viewer: reads, splits lines, and — for normal-sized
+/// docs (≤ `INLINE_MAX_LINES`) — returns every line inline, already **colored**,
+/// so the viewer paints the highlighted file in a single round-trip. It never
+/// ships an uncolored frame: the old "plain now, swap colors in later" path made
+/// a file flash in the theme's flat foreground for however long the (cold) grammar
+/// took to compile. Huge docs return `lines: None` and are paged via `doc_lines`.
 ///
-/// `(async)` is load-bearing: even just reading a large file off disk shouldn't
-/// land on the **main thread** (a plain `#[tauri::command]` would), which would
-/// beach-ball the UI. `(async)` runs the body on a worker thread.
+/// `(async)` is load-bearing: reading a large file off disk *and* tokenizing it
+/// must not land on the **main thread** (a plain `#[tauri::command]` would), which
+/// would beach-ball the UI. `(async)` runs the body on a worker thread; the viewer
+/// shows a brief "Loading…" only if the tokenize is slow (a cold grammar's
+/// one-time regex compile), never a plain placeholder.
 #[tauri::command(async)]
 pub fn open_doc(
     path: String,
@@ -468,29 +568,20 @@ pub fn open_doc(
 ) -> Result<DocOpen, String> {
     let doc = hl.load(&path)?;
     let meta = doc.meta();
-    // Inline the whole file (plain) for normal-sized text docs. Binary/too-large
+    // Inline the whole file, colored, for normal-sized text docs. Binary/too-large
     // have no displayable lines; docs past the cap page via `doc_lines` instead.
+    // A doc with no matching grammar has nothing to color, so plain *is* its final
+    // form (not a placeholder) — `highlighted_range` returns `None` and we page it
+    // plain.
     let lines = if !meta.is_binary && !meta.too_large && meta.line_count <= INLINE_MAX_LINES {
-        Some(doc.plain_range(0, meta.line_count))
+        Some(
+            hl.highlighted_range(&path, &doc, 0, meta.line_count)
+                .unwrap_or_else(|| doc.plain_range(0, meta.line_count)),
+        )
     } else {
         None
     };
     Ok(DocOpen { meta, lines })
-}
-
-/// Tokenize (if needed) and return every line highlighted, or `None` when the
-/// doc has no grammar / can't be highlighted (the viewer keeps its plain text).
-/// This is the deferred, off-the-hot-path half of `open_doc`: the viewer shows
-/// plain text immediately, then calls this and swaps colored lines in. `(async)`
-/// because the syntect parse is CPU-heavy.
-#[tauri::command(async)]
-pub fn doc_highlight(
-    path: String,
-    hl: tauri::State<'_, Arc<Highlighter>>,
-) -> Result<Option<Vec<DocLine>>, String> {
-    let doc = hl.load(&path)?;
-    let n = doc.lines.len();
-    Ok(hl.highlighted_range(&path, &doc, 0, n))
 }
 
 /// Return display lines for `[start, end)` (clamped) — the paging path for docs
@@ -576,22 +667,70 @@ mod tests {
     }
 
     #[test]
+    fn warm_common_runs_and_warms_the_hot_grammars() {
+        // Exercises the parallel (scoped-thread) warm path: it must not panic, and
+        // the hot grammars must tokenize into classed runs afterward.
+        let hl = Highlighter::new();
+        hl.warm_common();
+        let toks = hl
+            .tokenize("after_warm.tsx", "const App = () => <div>hi</div>;\n")
+            .expect("tsx grammar after warm");
+        assert!(toks.iter().flatten().any(|t| t.class.is_some()));
+    }
+
+    #[test]
+    fn tokenizes_typescript_family_into_classed_runs() {
+        // Regression guard: syntect's bundled defaults lack TS/TSX/JSX grammars,
+        // so these used to match nothing and render as uniform plain text. The
+        // extended `two_face` set must color them. Assert each yields a keyword.
+        let hl = Highlighter::new();
+        for (path, src) in [
+            ("a.ts", "const x: number = 1;\n"),
+            ("a.tsx", "const App = () => <div>hi</div>;\n"),
+            ("a.jsx", "const App = () => <div>hi</div>;\n"),
+        ] {
+            let tokens = hl
+                .tokenize(path, src)
+                .unwrap_or_else(|| panic!("{path}: expected a grammar match, got plain text"));
+            let classes: Vec<Option<&str>> =
+                tokens.iter().flatten().map(|t| t.class).collect();
+            assert!(
+                classes.iter().any(|c| c.is_some()),
+                "{path}: expected classed tokens, got all-plain {classes:?}"
+            );
+            // Reconstructed text must be lossless (line-joined).
+            let text: String = tokens
+                .iter()
+                .map(|line| line.iter().map(|t| t.text.as_str()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(text, strip_newline(src));
+        }
+    }
+
+    #[test]
     fn open_doc_inlines_small_file_and_pages_large() {
         use std::io::Write;
         let dir = std::env::temp_dir();
         let hl = Highlighter::new();
 
-        // Normal-sized file: open_doc would inline every line (one round-trip).
+        // Normal-sized file: open_doc inlines every line (one round-trip) and —
+        // since this is the path open_doc takes — they arrive already COLORED, so
+        // the viewer never paints an uncolored frame.
         let small = dir.join("redline_hl_inline_small.json");
         std::fs::write(&small, b"{\n  \"a\": 1\n}\n").unwrap();
         let doc = hl.load(small.to_str().unwrap()).unwrap();
         let meta = doc.meta();
         assert!(meta.line_count <= INLINE_MAX_LINES);
         assert!(meta.highlightable, "a small json is highlightable");
-        // open_doc inlines PLAIN lines (instant); they carry text, not tokens.
-        let lines = doc.plain_range(0, meta.line_count);
+        let lines = hl
+            .highlighted_range(small.to_str().unwrap(), &doc, 0, meta.line_count)
+            .expect("a grammar matches → open_doc returns colored inline lines");
         assert_eq!(lines.len(), meta.line_count, "inline lines cover the whole doc");
-        assert!(lines[0].text.is_some() && lines[0].tokens.is_none());
+        assert!(
+            lines.iter().any(|l| l.tokens.is_some()),
+            "inline lines carry tokens (colored), not plain text"
+        );
 
         // Past the cap: open_doc returns no inline lines; the viewer pages it.
         let big = dir.join("redline_hl_inline_big.txt");

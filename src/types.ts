@@ -213,14 +213,14 @@ export interface BinaryFile {
   size: number;
 }
 
-/** Metadata for a document opened in the paged viewer (`open_doc`). Tokenization
- *  happens in Rust off the UI thread; `highlighted` is false when the file is
- *  too large to color or no grammar matched (the viewer pages plain text). */
+/** Metadata for a document opened in the viewer (`open_doc`). Tokenization
+ *  happens in Rust off the UI thread, before lines are returned, so the viewer
+ *  never shows an uncolored frame. */
 export interface DocMeta {
   lineCount: number;
-  /** Tokens can be requested for this doc (text, within the highlight size cap):
-   *  the viewer paints plain immediately, then asks `doc_highlight` and swaps in
-   *  colored lines. False for too-large / binary docs. */
+  /** Tokens can be produced for this doc (text, within the highlight size cap),
+   *  so `open_doc`/`doc_lines` return colored lines. False for too-large / binary
+   *  docs (and a doc whose grammar simply doesn't exist pages plain text). */
   highlightable: boolean;
   tooLarge: boolean;
   isBinary: boolean;

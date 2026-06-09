@@ -34,7 +34,19 @@ similar = "2"
 portable-pty = "0.8"
 base64 = "0.22"
 notify-debouncer-mini = "0.4"
-# Pure-Rust regex backend (fancy-regex) so the build needs no C/oniguruma
-# toolchain. Tokenizes off the UI thread for the read-only file viewer.
-syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+# Oniguruma regex backend (the same engine VS Code uses) for the read-only file
+# viewer's syntax highlighting. We measured the pure-Rust `fancy-regex` backend
+# compiling the TypeScript/TSX grammars ~50-60x slower (2.4s cold vs ~40ms in a
+# debug build), which showed as a multi-second "Loading…" on the first open;
+# oniguruma makes the first open instant. It builds oniguruma from C source, but
+# this is already a native (Tauri) build with a C toolchain, so it adds no new
+# class of build dependency. Tokenizes off the UI thread.
+syntect = { version = "5", default-features = false, features = ["default-onig"] }
+# Extended grammar set (bat's curated, permissive-only syntaxes) — adds the
+# TypeScript/TSX/JSX grammars that syntect's bundled defaults lack, so .ts/.tsx
+# files highlight instead of falling back to plain text. `syntect-default-fancy`
+# pins the same fancy-regex syntect build as above. Bundled-asset attributions
+# live in THIRD_PARTY_NOTICES.md (from two_face::acknowledgement::listing()).
+# `syntect-default-onig` pins the same oniguruma syntect build as above.
+two-face = { version = "0.5", default-features = false, features = ["syntect-default-onig"] }
 
