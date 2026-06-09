@@ -98,12 +98,14 @@ export const THEMES: ThemeEntry[] = [
   },
   {
     // Blossom — a cherry-blossom light theme drawn from a real sakura branch:
-    // a bright bubblegum-pink page, deep plum ink, with the photo's own hues as
-    // accents — lavender-haze blue, golden-stamen yellow, fresh-stem green. The
-    // selection hue is a vivid petal pink so commented spans and v-badges bloom.
+    // a soft, slightly dusty petal-pink page (lightened from the original heavy
+    // bubblegum, with green pulled below red/blue so it stays clearly pink rather
+    // than washing out to gray), deep plum ink, with the photo's own hues as
+    // accents — lavender-haze blue, golden-stamen yellow, fresh-stem green.
+    // The selection hue is a vivid petal pink so commented spans and v-badges bloom.
     name: "blossom",
     label: "Blossom",
-    base: { bg: "#fac4d7", fg: "#381b2b", blue: "#897ad9", yellow: "#d99a2c", green: "#4f9e57", selection: "#ff4f97" },
+    base: { bg: "#f2d2dd", fg: "#381b2b", blue: "#897ad9", yellow: "#d99a2c", green: "#4f9e57", selection: "#ff4f97" },
   },
 ];
 
