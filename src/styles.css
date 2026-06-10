@@ -1186,3 +1186,47 @@ p.rl-block-modified {
     animation: none;
   }
 }
+
+/* ── Header dropdown hover feedback ──────────────────────────────────────
+   One wash for every popover off the header bar (Download, Theme, Mode,
+   Alerts). Resting backgrounds live here — not inline — so :hover can layer
+   a translucent ink mix over plain and selected rows in any theme. */
+.rl-menu-item {
+  background: transparent;
+}
+.rl-menu-item[aria-selected="true"] {
+  background: var(--color-anchor-bg);
+}
+.rl-menu-item:hover {
+  background: color-mix(in srgb, var(--color-ink) 8%, var(--color-bg-elevated));
+}
+.rl-menu-item[aria-selected="true"]:hover {
+  background: color-mix(in srgb, var(--color-ink) 8%, var(--color-anchor-bg));
+}
+/* Settings rows (checkbox labels) whose resting background is transparent. */
+.rl-hover-wash:hover {
+  background: color-mix(in srgb, var(--color-ink) 8%, var(--color-bg-elevated));
+}
+/* Small buttons inside the popovers. */
+.rl-btn-anchor {
+  background: var(--color-anchor-bg);
+}
+.rl-btn-anchor:hover {
+  background: color-mix(in srgb, var(--color-ink) 10%, var(--color-anchor-bg));
+}
+.rl-btn-elevated {
+  background: var(--color-bg-elevated);
+}
+.rl-btn-elevated:hover {
+  background: color-mix(in srgb, var(--color-ink) 8%, var(--color-bg-elevated));
+}
+/* Sound-voice tiles: hover only while not the active (info-filled) pick. */
+.rl-voice-tile {
+  background: var(--color-bg-elevated);
+}
+.rl-voice-tile[aria-pressed="true"] {
+  background: var(--color-info);
+}
+.rl-voice-tile:not([aria-pressed="true"]):hover {
+  background: color-mix(in srgb, var(--color-ink) 8%, var(--color-bg-elevated));
+}

@@ -86,7 +86,7 @@ export function AlertSettings({
             fontSize: "12px",
           }}
         >
-          <label className="flex items-center gap-2 cursor-pointer">
+          <label className="rl-hover-wash rounded-sm px-1 -mx-1 flex items-center gap-2 cursor-pointer">
             <input
               type="checkbox"
               checked={enabled}
@@ -96,7 +96,7 @@ export function AlertSettings({
           </label>
 
           {enabled && (
-            <label className="flex items-center justify-between gap-2 cursor-pointer">
+            <label className="rl-hover-wash rounded-sm px-1 -mx-1 flex items-center justify-between gap-2 cursor-pointer">
               <span style={{ color: "var(--color-ink-muted)" }}>Color</span>
               <input
                 type="color"
@@ -114,7 +114,7 @@ export function AlertSettings({
             </label>
           )}
 
-          <label className="flex items-center gap-2 cursor-pointer">
+          <label className="rl-hover-wash rounded-sm px-1 -mx-1 flex items-center gap-2 cursor-pointer">
             <input
               type="checkbox"
               checked={sound}
@@ -134,9 +134,8 @@ export function AlertSettings({
           <button
             type="button"
             onClick={onTest}
-            className="rounded-sm px-2 py-1 font-medium self-start"
+            className="rl-btn-anchor rounded-sm px-2 py-1 font-medium self-start"
             style={{
-              background: "var(--color-anchor-bg)",
               color: "var(--color-anchor-text)",
               border: "1px solid var(--color-rule)",
               cursor: "pointer",

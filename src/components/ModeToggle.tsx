@@ -121,11 +121,8 @@ export function ModeToggle({ mode, onChange }: ModeToggleProps) {
                   if (!selected) onChange(opt.value);
                   setOpen(false);
                 }}
-                className="w-full text-left px-3 py-2 flex items-start gap-2"
+                className="rl-menu-item w-full text-left px-3 py-2 flex items-start gap-2"
                 style={{
-                  background: selected
-                    ? "var(--color-anchor-bg)"
-                    : "transparent",
                   cursor: "pointer",
                   borderBottom: "1px solid var(--color-rule)",
                 }}

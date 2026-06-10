@@ -95,12 +95,11 @@ export function DownloadMenu({
               role="menuitem"
               onClick={() => pick(f.key)}
               title={`Download v${version} as ${f.label}`}
-              className="w-full text-left px-3 py-2 font-sans"
+              className="rl-menu-item w-full text-left px-3 py-2 font-sans"
               style={{
                 fontSize: "12px",
                 fontWeight: 600,
                 color: "var(--color-ink)",
-                background: "transparent",
                 cursor: "pointer",
                 borderBottom:
                   idx < FORMATS.length - 1

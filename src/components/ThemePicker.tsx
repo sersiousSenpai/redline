@@ -105,11 +105,8 @@ export function ThemePicker({ theme, onThemeChange }: ThemePickerProps) {
                   if (!selected) onThemeChange(t.name);
                   setOpen(false);
                 }}
-                className="w-full text-left px-3 py-2 flex items-center gap-2"
+                className="rl-menu-item w-full text-left px-3 py-2 flex items-center gap-2"
                 style={{
-                  background: selected
-                    ? "var(--color-anchor-bg)"
-                    : "transparent",
                   cursor: "pointer",
                   borderBottom: "1px solid var(--color-rule)",
                 }}

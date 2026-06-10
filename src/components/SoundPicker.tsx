@@ -126,11 +126,8 @@ export function SoundPicker({ config, onChange, onPreview }: SoundPickerProps) {
               title={`Play ${v.name}`}
               aria-pressed={active}
               onClick={() => selectVoice(v)}
-              className="flex flex-col items-center gap-0.5 rounded-sm py-1"
+              className="rl-voice-tile flex flex-col items-center gap-0.5 rounded-sm py-1"
               style={{
-                background: active
-                  ? "var(--color-info)"
-                  : "var(--color-bg-elevated)",
                 border: "1px solid var(--color-rule)",
                 cursor: active ? "default" : "pointer",
               }}
@@ -173,10 +170,9 @@ export function SoundPicker({ config, onChange, onPreview }: SoundPickerProps) {
             onChange(DEFAULT_SOUND);
             onPreview(DEFAULT_SOUND);
           }}
-          className="rounded-sm px-2 py-0.5"
+          className="rl-btn-elevated rounded-sm px-2 py-0.5"
           style={{
             fontSize: "10px",
-            background: "var(--color-bg-elevated)",
             border: "1px solid var(--color-rule)",
             color: "var(--color-ink-muted)",
             cursor: "pointer",
