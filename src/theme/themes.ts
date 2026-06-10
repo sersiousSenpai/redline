@@ -105,7 +105,7 @@ export const THEMES: ThemeEntry[] = [
     // The selection hue is a vivid petal pink so commented spans and v-badges bloom.
     name: "blossom",
     label: "Blossom",
-    base: { bg: "#f2d2dd", fg: "#381b2b", blue: "#897ad9", yellow: "#d99a2c", green: "#4f9e57", selection: "#ff4f97" },
+    base: { bg: "#ecdcdd", fg: "#381b2b", blue: "#897ad9", yellow: "#d99a2c", green: "#4f9e57", selection: "#ff4f97" },
   },
 ];
 
