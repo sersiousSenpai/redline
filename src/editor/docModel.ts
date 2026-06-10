@@ -148,8 +148,20 @@ export function serializeBlocks(
   editor: Editor,
   anchors: Map<string, string>,
 ): SerializedBlock[] {
+  return serializeDocBlocks(editor.state.doc, anchors);
+}
+
+/** Doc-level form of {@link serializeBlocks} — works on any PM doc node, no
+ *  live editor needed. Lets the per-revision baseline be captured headlessly
+ *  from `planMarkdownToDoc(markdown)` even when the on-screen editor hydrates
+ *  asynchronously from a persisted Y.Doc (which may already carry uncommitted
+ *  edits and so must never be the baseline). */
+export function serializeDocBlocks(
+  doc: PMNode,
+  anchors: Map<string, string>,
+): SerializedBlock[] {
   const out: SerializedBlock[] = [];
-  editor.state.doc.forEach((node) => {
+  doc.forEach((node) => {
     const blockId = node.attrs?.blockId as string | undefined;
     if (!blockId) return;
     out.push({

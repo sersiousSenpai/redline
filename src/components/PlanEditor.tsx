@@ -9,6 +9,7 @@ import {
   type MutableRefObject,
 } from "react";
 import { EditorContent, useEditor } from "@tiptap/react";
+import * as Y from "yjs";
 
 import type { ParagraphDiff, SubBlockDiffEntry } from "../diff";
 import type {
@@ -35,11 +36,17 @@ import {
   redlineStatusByBlockId,
   revisionEditByBlockId,
   serializeBlocks,
+  serializeDocBlocks,
   type SerializedBlock,
 } from "../editor/docModel";
 import { commentsToBlockOverrides } from "../editor/changeLedger";
 import { planMarkdownToDoc } from "../editor/markdown";
 import { useTrackChangesSync } from "../editor/useTrackChangesSync";
+import {
+  clearStalePlanYDocs,
+  persistPlanYDoc,
+  seedPlanYDocIfEmpty,
+} from "../editor/yjs/planYDoc";
 
 interface PlanEditorProps {
   /** Sidecar-augmented markdown from the latest revision. */
@@ -49,6 +56,9 @@ interface PlanEditorProps {
   comments?: Comment[];
   /** Changes when a new revision/thread arrives → content fully reloads. */
   revisionKey: string;
+  /** Enables crash-recovery persistence (IndexedDB) for this session's
+   *  Y.Docs and scopes the stale-entry sweep. Omitted → in-memory only. */
+  sessionId?: string;
   onAddComment?: (req: NewCommentRequest) => Promise<unknown>;
   onUpdateComment?: (id: string, u: UpdateCommentRequest) => Promise<unknown>;
   onDeleteComment?: (id: string) => Promise<unknown>;
@@ -82,6 +92,7 @@ export function PlanEditor({
   diff,
   comments,
   revisionKey,
+  sessionId,
   onAddComment,
   onUpdateComment,
   onDeleteComment,
@@ -92,50 +103,97 @@ export function PlanEditor({
   const editable =
     !!onAddComment && !!onUpdateComment && !!onDeleteComment;
 
+  const anchors = useMemo(() => anchorByBlockId(sections), [sections]);
+
+  // Per-revision CRDT document — the editor's source of truth (M2). Content
+  // arrives via hydration below (IndexedDB restore, else markdown seed),
+  // never via useEditor `content`, so a restored doc is never double-seeded.
+  const ydoc = useMemo(() => new Y.Doc(), [revisionKey]);
+
+  // `hydrated` ⇔ this revision's Y.Doc is ready (restored and/or seeded).
+  // Stored as the key it was hydrated under, so a revision change flips it
+  // back to false with no reset effect.
+  const [hydratedKey, setHydratedKey] = useState<string | null>(null);
+  const hydrated = hydratedKey === revisionKey;
+
+  // Immutable per-revision baseline — the diff/revert basis for the
+  // changeLedger engine. Captured by the hydration effect below (see the
+  // comment there for why it is headless AND state). `key` tags the revision
+  // it belongs to so consumers can tell a fresh baseline from a stale one.
+  const [base, setBase] = useState<{ key: string; blocks: SerializedBlock[] }>(
+    { key: "", blocks: [] },
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    const persistence = sessionId ? persistPlanYDoc(revisionKey, ydoc) : null;
+    const ready = persistence?.whenSynced ?? Promise.resolve();
+    void ready.then(() => {
+      if (cancelled) return;
+      // Reconciliation rule: a persisted copy of the SAME revision wins (it
+      // is this exact seed plus any uncommitted edits) — only an empty doc
+      // gets seeded. A newer revision never reuses an old key, and its
+      // superseded entries are swept here, so crash recovery can never
+      // resurrect edits against an outdated plan version.
+      seedPlanYDocIfEmpty(ydoc, markdown);
+      if (sessionId) void clearStalePlanYDocs(sessionId, revisionKey);
+      // Baseline + readiness land in ONE commit. The base is computed
+      // headlessly from the revision markdown (byte-identical to the seed by
+      // the round-trip fixed point) — never from the editor: a restored doc
+      // may already carry uncommitted edits, which must not become the
+      // diff/revert basis. And it stays STATE rather than a render-time
+      // memo, deliberately: useTrackChangesSync flushes on unmount/disable,
+      // and a memo would let a revision bump pair the NEW base with the OLD
+      // editor content in that flush — phantom edit comments. As state it
+      // lags until this revision's doc is actually live, same as the old
+      // onCreate capture.
+      setBase({
+        key: revisionKey,
+        blocks: serializeDocBlocks(planMarkdownToDoc(markdown), anchors),
+      });
+      setHydratedKey(revisionKey);
+    });
+    return () => {
+      cancelled = true;
+      void persistence?.destroy();
+      // No explicit ydoc.destroy(): the editor bound to it tears down in a
+      // separate effect whose order isn't guaranteed; dropping all refs and
+      // letting GC reclaim it is safe and avoids destroy-order races.
+    };
+    // `markdown`/`anchors` deliberately omitted: content reloads only on
+    // revisionKey change — the same contract the old initialDoc memo had.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revisionKey, ydoc, sessionId]);
+
   const extensions = useMemo(
     () => [
-      ...planExtensions(),
+      ...planExtensions({ document: ydoc }),
       RedlineDecorations,
       CommentHighlights,
       CommentMarkers,
       SearchHighlight,
     ],
-    [],
-  );
-  const initialDoc = useMemo(
-    () => planMarkdownToDoc(markdown).toJSON(),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [revisionKey],
-  );
-  const anchors = useMemo(() => anchorByBlockId(sections), [sections]);
-
-  // Immutable per-revision baseline (captured once the doc mounts) — the
-  // diff/revert basis for the changeLedger engine. Tagged with the
-  // `revisionKey` it was captured under so the reconcile effect can tell a
-  // fresh baseline apart from a stale one left over from the prior revision.
-  const [base, setBase] = useState<{ key: string; blocks: SerializedBlock[] }>(
-    { key: "", blocks: [] },
+    [ydoc],
   );
   const scheduleRef = useRef<(() => void) | null>(null);
 
   const editor = useEditor(
     {
       extensions,
-      editable,
-      content: initialDoc,
+      // Read-only until hydration so a keystroke can't land in the Y.Doc
+      // before the seed/restore decision is made (a pre-seed keystroke would
+      // make the doc non-empty and suppress seeding entirely).
+      editable: editable && hydrated,
       editorProps: {
         attributes: {
           class: "rl-prose font-serif",
           "aria-label": "Plan document",
         },
       },
-      onCreate: ({ editor }) => {
-        setBase({
-          key: revisionKey,
-          blocks: serializeBlocks(editor, anchors),
-        });
-      },
       onUpdate: ({ editor, transaction }) => {
+        // Pre-hydration instance: ignore the Y.Doc binding's restore/seed
+        // writes — they are content arriving, not edits to sync.
+        if (!hydrated) return;
         // Ignore our own reverse-projection writes and pure selection moves.
         if (transaction.getMeta("rl-sync")) return;
         if (!transaction.docChanged) return;
@@ -143,7 +201,13 @@ export function PlanEditor({
         scheduleRef.current?.();
       },
     },
-    [revisionKey],
+    // Recreated when hydration completes, so every downstream [editor]
+    // effect re-runs against the populated document and the post-hydration
+    // sync semantics above hold. The first ySync transaction on the new
+    // instance (ydoc → fresh PM state) replays restored content; if it
+    // contains uncommitted pre-crash edits, the scheduled flush re-derives
+    // their comments against the clean base — that IS the crash recovery.
+    [revisionKey, hydrated],
   );
 
   const readCurrent = useCallback(
@@ -168,7 +232,11 @@ export function PlanEditor({
     comments: comments ?? [],
     backend,
     readCurrent,
-    enabled: editable && base.blocks.length > 0,
+    enabled:
+      editable &&
+      hydrated &&
+      base.key === revisionKey &&
+      base.blocks.length > 0,
   });
   scheduleRef.current = schedule;
 
@@ -223,16 +291,13 @@ export function PlanEditor({
   // edit comments to inline ins/del marks, then fold the revision redline
   // into the same language for any paragraph an edit comment doesn't own.
   useEffect(() => {
-    if (!editor || !editable || base.blocks.length === 0) return;
-    // Stale-base guard. On revisionKey change the editor is recreated, but
-    // Tiptap emits `create` on a deferred tick — so this effect can fire with
-    // the *new* editor while `base` is still the snapshot from the previous
-    // revision. Running `applyCommentOverridesToEditor` then would revert the
-    // new revision's prose back to the stale base (and the deferred onCreate
-    // would lock that revert into `base`). `base.key` is the `revisionKey` the
-    // snapshot was captured under; bail until it matches the current revision
-    // — the onCreate that follows captures the fresh base and re-runs this.
-    if (base.key !== revisionKey) return;
+    // Stale-base guard, hydration edition: bail until this revision's Y.Doc
+    // content is actually live in the editor AND the baseline was captured
+    // under this same revision — so the projection never runs over an empty,
+    // still-restoring, or cross-revision doc/base pairing (which would
+    // revert fresh prose to a stale baseline).
+    if (!editor || !editable || !hydrated || base.key !== revisionKey) return;
+    if (base.blocks.length === 0) return;
     const baseMap = new Map(base.blocks.map((b) => [b.blockId, b.markdown]));
     applyCommentOverridesToEditor(editor, comments ?? [], baseMap);
     const overridden = new Set(
@@ -243,7 +308,7 @@ export function PlanEditor({
       revisionEditByBlockId(sections, diff),
       overridden,
     );
-  }, [editor, editable, comments, base, sections, diff, revisionKey]);
+  }, [editor, editable, hydrated, comments, base, sections, diff, revisionKey]);
 
   // Resolve blockId from a comment's positional anchorId when the comment
   // itself carries none — covers comments persisted before blockId was

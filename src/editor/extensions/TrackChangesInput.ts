@@ -4,6 +4,7 @@ import { Extension, getMarkRange } from "@tiptap/core";
 import { ChangeSet } from "@tiptap/pm/changeset";
 import { Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
 import type { EditorState, Transaction } from "@tiptap/pm/state";
+import { ySyncPluginKey } from "y-prosemirror";
 
 export const trackChangesInputKey = new PluginKey("trackChangesInput");
 
@@ -155,7 +156,11 @@ export const TrackChangesInput = Extension.create({
             (tr) =>
               tr.docChanged &&
               !tr.getMeta("rl-sync") &&
-              !tr.getMeta("rl-trackchange"),
+              !tr.getMeta("rl-trackchange") &&
+              // CRDT binding writes — initial render of a (restored) Y.Doc,
+              // undo/redo, future remote edits — are content *arriving*,
+              // never a local user edit to mark as a suggestion.
+              !tr.getMeta(ySyncPluginKey),
           );
           if (relevant.length === 0) return null;
 
@@ -185,7 +190,15 @@ export const TrackChangesInput = Extension.create({
 
           if (tr.steps.length === 0) return null;
           tr.setMeta("rl-trackchange", true);
-          tr.setMeta("addToHistory", false);
+          // No `addToHistory: false` here, deliberately: this appended tr
+          // lands in the SAME dispatch batch as the user edit it decorates,
+          // and y-prosemirror derives one addToHistory flag per batch
+          // (last transaction wins) — tagging it would poison the batch and
+          // keep the user's own edit out of the Yjs undo stack. Captured
+          // together, undo reverts text + suggestion mark as one item,
+          // which is exactly right. Standalone derived writes (docModel's
+          // reconcile/projection) keep the tag — their batches are wholly
+          // derived and must stay un-undoable.
           return tr;
         },
       }),

@@ -576,6 +576,13 @@ function App() {
       setActiveId(next);
       if (next === null) setSession(null);
     }
+    // Sweep the session's crash-recovery Y.Docs from IndexedDB. Dynamic
+    // import: the yjs graph stays in the lazy PlanEditor chunk. Runs after
+    // the active-session switch so PlanEditor has released its connection
+    // and the deletes aren't left blocked.
+    void import("./editor/yjs/planYDoc")
+      .then((m) => m.clearStalePlanYDocs(id))
+      .catch(() => {});
   }
 
   async function loadSession(id: string | null): Promise<void> {
@@ -1410,6 +1417,7 @@ function App() {
                     revisionKey={`${activeId ?? ""}:${
                       threadRevisions[0]?.versionNumber ?? 0
                     }:${latest?.versionNumber ?? 0}`}
+                    sessionId={activeId ?? undefined}
                     onAddComment={addEditorComment}
                     onUpdateComment={updateComment}
                     onDeleteComment={deleteComment}
