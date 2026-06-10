@@ -7,9 +7,12 @@ use serde::Serialize;
 
 /// The canonical Redline review-protocol skill, embedded at compile time. The
 /// source of truth is `skills/redline/SKILL.md` at the repo root (the in-repo
-/// `.claude/skills/redline` and `.agents/skills/redline` paths are symlinks to
-/// it). `install` writes this exact content to `~/.claude/skills/redline/SKILL.md`
-/// so every Claude Code session that reaches Redline is fluent in the contract.
+/// `.agents/skills/redline` path is a symlink to it; there is deliberately no
+/// `.claude/skills` copy — the app installs to `~/.claude`, and a project-level
+/// copy would register the skill twice in Claude Code sessions inside this
+/// repo). `install` writes this exact content to
+/// `~/.claude/skills/redline/SKILL.md` so every Claude Code session that
+/// reaches Redline is fluent in the contract.
 ///
 /// `include_str!` resolves relative to this source file (`src-tauri/src/`), so
 /// `../../` is the repo root. A missing canonical file fails the build — the
@@ -18,7 +21,7 @@ const EMBEDDED_SKILL: &str = include_str!("../../skills/redline/SKILL.md");
 
 /// Bump in lockstep with the `version:` field in `skills/redline/SKILL.md`.
 /// `version_constant_matches_frontmatter` asserts the two never drift.
-const SKILL_VERSION: u32 = 1;
+const SKILL_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
