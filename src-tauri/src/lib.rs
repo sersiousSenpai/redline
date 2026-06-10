@@ -835,12 +835,12 @@ fn slugify(name: &str) -> String {
 /// `Redline-Fixes-Improvements-Pass-v3-20260608-143012.md`. `name` is the plan
 /// title (falling back to the project name). `stamp` is a pre-formatted local
 /// date/time supplied by the frontend; omitted → no stamp.
-fn export_file_name(name: &str, version: u32, stamp: Option<&str>) -> String {
+fn export_file_name(name: &str, version: u32, stamp: Option<&str>, ext: &str) -> String {
     let stem = slugify(name);
     let stem = if stem.is_empty() { "plan" } else { &stem };
     match stamp.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(s) => format!("{stem}-v{version}-{s}.md"),
-        None => format!("{stem}-v{version}.md"),
+        Some(s) => format!("{stem}-v{version}-{s}.{ext}"),
+        None => format!("{stem}-v{version}.{ext}"),
     }
 }
 
@@ -884,6 +884,7 @@ async fn export_revision_markdown(
             &name,
             version_number,
             stamp.as_deref(),
+            "md",
         ))
         .blocking_save_file();
 
@@ -895,6 +896,59 @@ async fn export_revision_markdown(
         .map_err(|e| format!("invalid save path: {e}"))?;
     std::fs::write(&path, clean).map_err(|e| e.to_string())?;
     tracing::info!(path = %path.display(), version = version_number, "exported revision markdown");
+    Ok(Some(path.to_string_lossy().to_string()))
+}
+
+/// Save a frontend-built `.docx` export of one plan revision. The bytes are
+/// produced by the JS export adapter (the format socket lives in the
+/// frontend); this command only resolves the file name from the revision's
+/// title, shows the save dialog, and writes. `async` for the same
+/// blocking-dialog reason as `export_revision_markdown`.
+#[tauri::command]
+async fn export_revision_docx(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    session_id: String,
+    version_number: u32,
+    stamp: Option<String>,
+    bytes: Vec<u8>,
+) -> Result<Option<String>, String> {
+    let (clean, project_name) = {
+        let session = store
+            .get(&session_id)
+            .ok_or_else(|| format!("no session for id {session_id}"))?;
+        let revision = session
+            .revisions
+            .iter()
+            .find(|r| r.version_number == version_number)
+            .ok_or_else(|| format!("revision v{version_number} not found"))?;
+        (
+            parser::strip_sidecar_lines(&revision.raw_plan_markdown),
+            session.project_name.clone(),
+        )
+    };
+    let name = plan_title_from_markdown(&clean).unwrap_or(project_name);
+
+    let picked = app
+        .dialog()
+        .file()
+        .add_filter("Word document", &["docx"])
+        .set_file_name(export_file_name(
+            &name,
+            version_number,
+            stamp.as_deref(),
+            "docx",
+        ))
+        .blocking_save_file();
+
+    let Some(file_path) = picked else {
+        return Ok(None); // user cancelled the save dialog
+    };
+    let path = file_path
+        .into_path()
+        .map_err(|e| format!("invalid save path: {e}"))?;
+    std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+    tracing::info!(path = %path.display(), version = version_number, "exported revision docx");
     Ok(Some(path.to_string_lossy().to_string()))
 }
 
@@ -1275,6 +1329,7 @@ pub fn run() {
             list_sessions,
             get_session,
             export_revision_markdown,
+            export_revision_docx,
             delete_session,
             add_comment,
             update_comment,
@@ -1521,7 +1576,7 @@ mod tests {
             Some("Redline — Fixes & Improvements Pass")
         );
         assert_eq!(
-            export_file_name(&title.unwrap(), 2, Some("20260608-234706")),
+            export_file_name(&title.unwrap(), 2, Some("20260608-234706"), "md"),
             "Redline-Fixes-Improvements-Pass-v2-20260608-234706.md"
         );
     }
@@ -1532,8 +1587,12 @@ mod tests {
         assert_eq!(plan_title_from_markdown("#!/bin/bash\n#fff\ntext"), None);
         // No title → caller falls back to the project name.
         assert_eq!(
-            export_file_name("my project", 1, None),
+            export_file_name("my project", 1, None, "md"),
             "my-project-v1.md"
+        );
+        assert_eq!(
+            export_file_name("my project", 1, None, "docx"),
+            "my-project-v1.docx"
         );
     }
 

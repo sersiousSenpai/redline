@@ -36,6 +36,8 @@ interface HeaderProps {
   onModeChange: (mode: InterceptionMode) => void;
   /** Download the currently-displayed revision as a clean .md file. */
   onExport: (sessionId: string, versionNumber: number) => void;
+  /** Download the currently-displayed revision as a Word .docx file. */
+  onExportDocx: (sessionId: string, versionNumber: number) => void;
   /** When the user is viewing a historical revision in the pane, the download
    *  button exports *that* version — "what you see is what you save". null
    *  means viewing the latest. */
@@ -60,6 +62,7 @@ export function Header({
   mode,
   onModeChange,
   onExport,
+  onExportDocx,
   viewedVersionNumber = null,
   flashEnabled,
   onFlashEnabledChange,
@@ -108,21 +111,38 @@ export function Header({
         />
         <ThemePicker theme={theme} onThemeChange={onThemeChange} />
         {session && downloadVersion !== undefined && (
-          <button
-            type="button"
-            onClick={() => onExport(session.sessionId, downloadVersion)}
-            title={`Download v${downloadVersion} as a Markdown file`}
-            className="rounded px-2.5 py-1 font-medium"
-            style={{
-              background: "var(--color-bg-elevated)",
-              border: "1px solid var(--color-rule)",
-              color: "var(--color-ink)",
-              fontSize: "12px",
-              cursor: "pointer",
-            }}
-          >
-            Download .md
-          </button>
+          <>
+            <button
+              type="button"
+              onClick={() => onExport(session.sessionId, downloadVersion)}
+              title={`Download v${downloadVersion} as a Markdown file`}
+              className="rounded px-2.5 py-1 font-medium"
+              style={{
+                background: "var(--color-bg-elevated)",
+                border: "1px solid var(--color-rule)",
+                color: "var(--color-ink)",
+                fontSize: "12px",
+                cursor: "pointer",
+              }}
+            >
+              Download .md
+            </button>
+            <button
+              type="button"
+              onClick={() => onExportDocx(session.sessionId, downloadVersion)}
+              title={`Download v${downloadVersion} as a Word document`}
+              className="rounded px-2.5 py-1 font-medium"
+              style={{
+                background: "var(--color-bg-elevated)",
+                border: "1px solid var(--color-rule)",
+                color: "var(--color-ink)",
+                fontSize: "12px",
+                cursor: "pointer",
+              }}
+            >
+              Download .docx
+            </button>
+          </>
         )}
         {latest && (
           <span

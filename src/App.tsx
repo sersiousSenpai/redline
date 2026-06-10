@@ -1076,27 +1076,73 @@ function App() {
     setTimeout(() => setToast(null), 4000);
   };
 
+  // Local date/time stamp embedded in export file names.
+  const exportStamp = () => {
+    const d = new Date();
+    const p = (n: number) => String(n).padStart(2, "0");
+    return (
+      `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}` +
+      `-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
+    );
+  };
+
+  const toastSaved = (saved: string | null) => {
+    if (!saved) return; // user cancelled the dialog
+    const name = saved.split(/[\\/]/).pop() ?? saved;
+    setToast(`Saved ${name}`);
+    setTimeout(() => setToast(null), 3500);
+  };
+
   // Save one plan revision as a clean .md file (sidecars stripped) through a
   // native save dialog. A resolved `null` means the user cancelled the dialog.
   const exportRevision = async (sessionId: string, versionNumber: number) => {
     try {
-      const d = new Date();
-      const p = (n: number) => String(n).padStart(2, "0");
-      const stamp =
-        `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}` +
-        `-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
       const saved = await invoke<string | null>("export_revision_markdown", {
         sessionId,
         versionNumber,
-        stamp,
+        stamp: exportStamp(),
       });
-      if (saved) {
-        const name = saved.split(/[\\/]/).pop() ?? saved;
-        setToast(`Saved ${name}`);
-        setTimeout(() => setToast(null), 3500);
-      }
+      toastSaved(saved);
     } catch (err) {
       console.error("export_revision_markdown failed", err);
+      alert(`Export failed: ${err}`);
+    }
+  };
+
+  // Save one plan revision as a Word file. The bytes are built in the
+  // frontend by the docx export adapter (dynamic import keeps the OOXML
+  // writer off the initial paint path); the Rust command owns the save
+  // dialog and the write, mirroring the markdown path.
+  const exportRevisionDocx = async (sessionId: string, versionNumber: number) => {
+    try {
+      const s =
+        session?.sessionId === sessionId
+          ? session
+          : await invoke<ReviewSession | null>("get_session", { id: sessionId });
+      const revision = s?.revisions.find(
+        (r) => r.versionNumber === versionNumber,
+      );
+      if (!revision) throw new Error(`revision v${versionNumber} not found`);
+      const [{ docxAdapter }, { planMarkdownToDoc }, { anchorByBlockId }] =
+        await Promise.all([
+          import("./editor/adapters/docx/exporter"),
+          import("./editor/markdown"),
+          import("./editor/docModel"),
+        ]);
+      const bytes = (await docxAdapter.export({
+        doc: planMarkdownToDoc(revision.rawPlanMarkdown),
+        anchors: anchorByBlockId(revision.sections),
+        comments: revision.comments,
+      })) as Uint8Array;
+      const saved = await invoke<string | null>("export_revision_docx", {
+        sessionId,
+        versionNumber,
+        stamp: exportStamp(),
+        bytes: Array.from(bytes),
+      });
+      toastSaved(saved);
+    } catch (err) {
+      console.error("export_revision_docx failed", err);
       alert(`Export failed: ${err}`);
     }
   };
@@ -1226,6 +1272,7 @@ function App() {
         mode={mode}
         onModeChange={changeMode}
         onExport={exportRevision}
+        onExportDocx={exportRevisionDocx}
         viewedVersionNumber={viewedVersionNumber}
         flashEnabled={flashEnabled}
         onFlashEnabledChange={setFlashEnabled}

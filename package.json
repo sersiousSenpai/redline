@@ -32,6 +32,7 @@
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-webgl": "^0.18.0",
     "@xterm/xterm": "^5.5.0",
+    "docx": "^9.7.1",
     "highlight.js": "^11",
     "lowlight": "^3",
     "markdown-it": "^14.1.1",
