@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { InterceptionMode, ReviewSession } from "../types";
 import type { ThemeName } from "../theme/themes";
 import { ThemePicker } from "./ThemePicker";
+import { DownloadMenu } from "./DownloadMenu";
 import { ModeToggle } from "./ModeToggle";
 import { AlertSettings } from "./AlertSettings";
 import type { SoundConfig } from "../audio/beep";
@@ -111,38 +112,15 @@ export function Header({
         />
         <ThemePicker theme={theme} onThemeChange={onThemeChange} />
         {session && downloadVersion !== undefined && (
-          <>
-            <button
-              type="button"
-              onClick={() => onExport(session.sessionId, downloadVersion)}
-              title={`Download v${downloadVersion} as a Markdown file`}
-              className="rounded px-2.5 py-1 font-medium"
-              style={{
-                background: "var(--color-bg-elevated)",
-                border: "1px solid var(--color-rule)",
-                color: "var(--color-ink)",
-                fontSize: "12px",
-                cursor: "pointer",
-              }}
-            >
-              Download .md
-            </button>
-            <button
-              type="button"
-              onClick={() => onExportDocx(session.sessionId, downloadVersion)}
-              title={`Download v${downloadVersion} as a Word document`}
-              className="rounded px-2.5 py-1 font-medium"
-              style={{
-                background: "var(--color-bg-elevated)",
-                border: "1px solid var(--color-rule)",
-                color: "var(--color-ink)",
-                fontSize: "12px",
-                cursor: "pointer",
-              }}
-            >
-              Download .docx
-            </button>
-          </>
+          <DownloadMenu
+            version={downloadVersion}
+            onExportMarkdown={() =>
+              onExport(session.sessionId, downloadVersion)
+            }
+            onExportDocx={() =>
+              onExportDocx(session.sessionId, downloadVersion)
+            }
+          />
         )}
         {latest && (
           <span
