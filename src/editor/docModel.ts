@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import type { Editor } from "@tiptap/react";
-import { Fragment, type Node as PMNode } from "@tiptap/pm/model";
+import type { Node as PMNode } from "@tiptap/pm/model";
 
 import type { ParagraphDiff, ParagraphDiffStatus } from "../diff";
-import type { Comment, Section } from "../types";
-import { commentsToBlockOverrides } from "./changeLedger";
+import type { Section } from "../types";
 import { diffWords } from "./wordDiff";
-import { planMarkdownToDoc, serializeBlockToMarkdown } from "./markdown";
+import { serializeBlockToMarkdown } from "./markdown";
+import { hasPendingSuggestions } from "./extensions/TrackChanges";
 
 /**
  * Project the per-anchor revision diff onto stable block ids, so the editor
@@ -174,95 +174,6 @@ export function serializeDocBlocks(
 }
 
 /**
- * Reverse projection (sidebar → document), Phase 2 plain form: force each
- * editor-owned block to the markdown its comment dictates, else back to base.
- * Whole-block replacement (no inline marks yet — Phase 3). The transaction is
- * tagged `rl-sync` so the debounced doc→sidebar pass ignores its own echo.
- * Idempotent: a block already equal to its target is skipped.
- */
-export function applyCommentOverridesToEditor(
-  editor: Editor,
-  comments: Comment[],
-  base: Map<string, string>,
-): string[] {
-  // Never rewrite the document mid-IME-composition (CJK/dead keys).
-  if (editor.view.composing) return [];
-  const overrides = commentsToBlockOverrides(comments);
-  const { state } = editor;
-  const sel = state.selection;
-  const targets: { from: number; to: number; id: string; md: string }[] = [];
-
-  state.doc.forEach((node, pos) => {
-    const id = node.attrs?.blockId as string | undefined;
-    if (!id) return;
-    const target = overrides.get(id) ?? base.get(id) ?? null;
-    if (target === null) return;
-    if (serializeBlockToMarkdown(node) === target) return; // reconciled
-    const from = pos;
-    const to = pos + node.nodeSize;
-    // Never fight the caret: skip a block the user is editing right now.
-    if (editor.isFocused && sel.from >= from && sel.from <= to) return;
-    targets.push({ from, to, id, md: target });
-  });
-
-  if (targets.length === 0) return [];
-
-  const schema = editor.schema;
-  const insMark = schema.marks.rl_ins;
-  const delMark = schema.marks.rl_del;
-
-  const tr = state.tr;
-  // Apply high → low so earlier offsets stay valid as we splice.
-  for (const t of targets.sort((a, b) => b.from - a.from)) {
-    const parsed = planMarkdownToDoc(t.md, schema);
-    if (parsed.childCount === 0) continue;
-    const first = parsed.child(0);
-    const original = base.get(t.id);
-
-    // Prose paragraph → render the change inline as Word-style tracked
-    // changes (struck-through deletions kept in place, proposed insertions).
-    // Structured blocks (headings/lists/code/tables) fall back to whole-block
-    // replacement (extended in a later phase).
-    if (
-      parsed.childCount === 1 &&
-      first.type.name === "paragraph" &&
-      original !== undefined
-    ) {
-      const runs = diffWords(original, t.md)
-        .filter((p) => p.text.length > 0)
-        .map((p) =>
-          p.kind === "equal"
-            ? schema.text(p.text)
-            : schema.text(p.text, [
-                (p.kind === "insert" ? insMark : delMark).create({
-                  blockId: t.id,
-                }),
-              ]),
-        );
-      const para = schema.nodes.paragraph.create(
-        { ...first.attrs, blockId: t.id },
-        runs,
-      );
-      tr.replaceWith(t.from, t.to, para);
-      continue;
-    }
-
-    const rebased = first.type.create(
-      { ...first.attrs, blockId: t.id },
-      first.content,
-      first.marks,
-    );
-    const rest = [];
-    for (let i = 1; i < parsed.childCount; i++) rest.push(parsed.child(i));
-    tr.replaceWith(t.from, t.to, Fragment.fromArray([rebased, ...rest]));
-  }
-  tr.setMeta("rl-sync", true);
-  tr.setMeta("addToHistory", false);
-  editor.view.dispatch(tr);
-  return targets.map((t) => t.id);
-}
-
-/**
  * Fold the revision-level redline (vN vs vN-1) into the *same* inline ins/del
  * language as edit track-changes — replacing the old separate struck-through
  * block. Only paragraphs not owned by an edit comment are touched; structured
@@ -286,6 +197,9 @@ export function applyRevisionRedline(
     if (node.type.name !== "paragraph") return;
     const id = node.attrs?.blockId as string | undefined;
     if (!id || overriddenIds.has(id)) return;
+    // M3: a block carrying open suggestions is owned by them — repainting it
+    // from the diff would destroy the only record of the user's proposal.
+    if (hasPendingSuggestions(node)) return;
     const rev = revisions.get(id);
     if (!rev || (rev.status !== "modified" && rev.status !== "added")) return;
     const from = pos;
@@ -307,9 +221,13 @@ export function applyRevisionRedline(
         p.kind === "equal"
           ? schema.text(p.text)
           : schema.text(p.text, [
+              // Presentation-only paint of Claude's vN-vs-vN-1 delta — never
+              // a pending suggestion, so the sidebar projection ignores it.
               insMark.create({
                 blockId: id,
-                changeId: `rev:${id}`,
+                authorId: "claude",
+                suggestionId: `rev:${id}`,
+                status: "display",
               }),
             ]),
       );

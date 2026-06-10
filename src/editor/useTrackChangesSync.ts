@@ -23,7 +23,15 @@ export type ReadCurrentBlocks = () => {
 }[];
 
 interface Options {
-  base: BaseBlock[];
+  /** The revision's published per-block markdown — a pure function of the
+   *  revision markdown (NOT a captured editor snapshot; M3 dropped that). */
+  seed: BaseBlock[];
+  /** Revision the seed was derived for. */
+  seedKey: string;
+  /** Revision whose content is actually live in the editor (hydratedKey).
+   *  Flush is a no-op while these disagree — at a revision flip the new seed
+   *  must never be diffed against the outgoing editor's blocks. */
+  editorKey: string | null;
   comments: Comment[];
   backend: SyncBackend;
   readCurrent: ReadCurrentBlocks;
@@ -35,14 +43,17 @@ interface Options {
 /**
  * Debounced doc→sidebar projection (D3: batched, not streamed to Claude).
  *
- * On a quiet point after edits it recomputes the change set, diffs it against
- * the persisted draft comments keyed by blockId, and applies the minimal
- * add/update/delete operations. Idempotency lives in `diffToCommentOps`
- * (Vitest-gated), so re-entrancy from the resulting `comments-changed` event
- * simply produces zero ops and the loop terminates.
+ * M3: one-way. Suggestion marks in the document are the source of truth; on
+ * a quiet point after edits this recomputes the accept-all change set against
+ * the revision seed, diffs it against the persisted draft comments keyed by
+ * blockId, and applies the minimal add/update/delete operations. Idempotency
+ * lives in `diffToCommentOps` (Vitest-gated), so re-entrancy from the
+ * resulting `comments-changed` event simply produces zero ops.
  */
 export function useTrackChangesSync({
-  base,
+  seed,
+  seedKey,
+  editorKey,
   comments,
   backend,
   readCurrent,
@@ -51,16 +62,21 @@ export function useTrackChangesSync({
 }: Options) {
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Latest values without re-arming the debounce on every render.
-  const live = useRef({ base, comments, backend, readCurrent });
-  live.current = { base, comments, backend, readCurrent };
+  const live = useRef({ seed, seedKey, editorKey, comments, backend, readCurrent });
+  live.current = { seed, seedKey, editorKey, comments, backend, readCurrent };
 
   const flush = useCallback(async () => {
     if (timer.current) {
       clearTimeout(timer.current);
       timer.current = null;
     }
-    const { base, comments, backend, readCurrent } = live.current;
-    const changes = buildChangeSet(base, readCurrent());
+    const { seed, seedKey, editorKey, comments, backend, readCurrent } =
+      live.current;
+    // Coherence guard: only diff a seed against editor content of the SAME
+    // revision. (Sub-debounce edits made in the instant a new revision lands
+    // are dropped rather than phantom-flushed against the wrong baseline.)
+    if (seedKey !== editorKey) return;
+    const changes = buildChangeSet(seed, readCurrent());
     const ops = diffToCommentOps(changes, comments);
     for (const op of ops) {
       try {

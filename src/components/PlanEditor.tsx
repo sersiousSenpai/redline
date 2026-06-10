@@ -30,16 +30,18 @@ import { PlanSearchBox } from "./PlanSearchBox";
 import {
   anchorByBlockId,
   applyAnchorIds,
-  applyCommentOverridesToEditor,
   applyRevisionRedline,
   blockIdByAnchorId,
   redlineStatusByBlockId,
   revisionEditByBlockId,
   serializeBlocks,
   serializeDocBlocks,
-  type SerializedBlock,
 } from "../editor/docModel";
-import { commentsToBlockOverrides } from "../editor/changeLedger";
+import { commentsToBlockOverrides, isProseEditComment } from "../editor/changeLedger";
+import {
+  materializeSuggestions,
+  rejectBlockSuggestions,
+} from "../editor/suggestions";
 import { planMarkdownToDoc } from "../editor/markdown";
 import { useTrackChangesSync } from "../editor/useTrackChangesSync";
 import {
@@ -116,12 +118,22 @@ export function PlanEditor({
   const [hydratedKey, setHydratedKey] = useState<string | null>(null);
   const hydrated = hydratedKey === revisionKey;
 
-  // Immutable per-revision baseline — the diff/revert basis for the
-  // changeLedger engine. Captured by the hydration effect below (see the
-  // comment there for why it is headless AND state). `key` tags the revision
-  // it belongs to so consumers can tell a fresh baseline from a stale one.
-  const [base, setBase] = useState<{ key: string; blocks: SerializedBlock[] }>(
-    { key: "", blocks: [] },
+  // The revision's published per-block markdown — the diff basis for the
+  // changeLedger projection and the reject/restore target. M3: a pure
+  // function of the revision markdown (byte-identical to the Y.Doc seed by
+  // the round-trip fixed point), never a captured editor snapshot — a
+  // restored Y.Doc may carry uncommitted suggestions, which live as marks in
+  // the document itself now and must not leak into the baseline.
+  const seedBlocks = useMemo(
+    () => serializeDocBlocks(planMarkdownToDoc(markdown), anchors),
+    // `markdown`/`anchors` deliberately reduced to revisionKey: content
+    // changes only on revision change — same contract as hydration below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [revisionKey],
+  );
+  const seedMap = useMemo(
+    () => new Map(seedBlocks.map((b) => [b.blockId, b.markdown])),
+    [seedBlocks],
   );
 
   useEffect(() => {
@@ -137,20 +149,9 @@ export function PlanEditor({
       // resurrect edits against an outdated plan version.
       seedPlanYDocIfEmpty(ydoc, markdown);
       if (sessionId) void clearStalePlanYDocs(sessionId, revisionKey);
-      // Baseline + readiness land in ONE commit. The base is computed
-      // headlessly from the revision markdown (byte-identical to the seed by
-      // the round-trip fixed point) — never from the editor: a restored doc
-      // may already carry uncommitted edits, which must not become the
-      // diff/revert basis. And it stays STATE rather than a render-time
-      // memo, deliberately: useTrackChangesSync flushes on unmount/disable,
-      // and a memo would let a revision bump pair the NEW base with the OLD
-      // editor content in that flush — phantom edit comments. As state it
-      // lags until this revision's doc is actually live, same as the old
-      // onCreate capture.
-      setBase({
-        key: revisionKey,
-        blocks: serializeDocBlocks(planMarkdownToDoc(markdown), anchors),
-      });
+      // Restored docs may already carry uncommitted suggestions as marks —
+      // they ARE the recovered state (M3), nothing to re-derive here. The
+      // sync flush projects them back to comments once the editor is live.
       setHydratedKey(revisionKey);
     });
     return () => {
@@ -228,15 +229,13 @@ export function PlanEditor({
   );
 
   const { schedule } = useTrackChangesSync({
-    base: base.blocks,
+    seed: seedBlocks,
+    seedKey: revisionKey,
+    editorKey: hydratedKey,
     comments: comments ?? [],
     backend,
     readCurrent,
-    enabled:
-      editable &&
-      hydrated &&
-      base.key === revisionKey &&
-      base.blocks.length > 0,
+    enabled: editable && hydrated && seedBlocks.length > 0,
   });
   scheduleRef.current = schedule;
 
@@ -287,19 +286,46 @@ export function PlanEditor({
     editor.commands.setRedlineSubBlocks(subBlocks);
   }, [editor, sections, diff]);
 
-  // Unified reconcile (idempotent; caret/echo-guarded inside): first project
-  // edit comments to inline ins/del marks, then fold the revision redline
-  // into the same language for any paragraph an edit comment doesn't own.
+  // Tracks which blocks were owned by a draft/reopened edit comment the last
+  // time the reconcile ran, keyed by revision — the "seen-then-gone" basis
+  // for translating sidebar intent into editor-side rejection.
+  const ownedRef = useRef<{ key: string | null; blocks: Set<string> }>({
+    key: null,
+    blocks: new Set(),
+  });
+
+  // M3 reconcile — the document's suggestion marks are the source of truth;
+  // the sidebar only ever (a) rejects or (b) seeds them, never rewrites them:
+  //  1. A block whose owning draft/reopened edit comment was seen here before
+  //     and is now gone (deleted) or submitted away has its open suggestions
+  //     rejected — pending insertions removed, pending deletions unstruck.
+  //  2. Proposals the document doesn't carry yet are materialized as marks —
+  //     reopen continuity on a fresh revision, and drafts whose local Y.Doc
+  //     copy was lost. Blocks already carrying suggestions are never touched.
+  //  3. The vN-vs-vN-1 revision redline is folded in as display-status marks
+  //     for paragraphs no suggestion or edit comment owns.
   useEffect(() => {
-    // Stale-base guard, hydration edition: bail until this revision's Y.Doc
-    // content is actually live in the editor AND the baseline was captured
-    // under this same revision — so the projection never runs over an empty,
-    // still-restoring, or cross-revision doc/base pairing (which would
-    // revert fresh prose to a stale baseline).
-    if (!editor || !editable || !hydrated || base.key !== revisionKey) return;
-    if (base.blocks.length === 0) return;
-    const baseMap = new Map(base.blocks.map((b) => [b.blockId, b.markdown]));
-    applyCommentOverridesToEditor(editor, comments ?? [], baseMap);
+    // Hydration guard: never reconcile over an empty, still-restoring, or
+    // cross-revision doc (the editor instance lags revisionKey by design).
+    if (!editor || !editable || !hydrated) return;
+    if (seedBlocks.length === 0) return;
+
+    const owned = new Set<string>();
+    for (const c of comments ?? []) {
+      if (isProseEditComment(c) && c.blockId) owned.add(c.blockId);
+    }
+    const prev = ownedRef.current;
+    if (prev.key === revisionKey) {
+      for (const blockId of prev.blocks) {
+        if (!owned.has(blockId)) {
+          rejectBlockSuggestions(editor, blockId, seedMap.get(blockId));
+        }
+      }
+    }
+    ownedRef.current = { key: revisionKey, blocks: owned };
+
+    materializeSuggestions(editor, comments ?? [], seedMap);
+
     const overridden = new Set(
       commentsToBlockOverrides(comments ?? []).keys(),
     );
@@ -308,7 +334,17 @@ export function PlanEditor({
       revisionEditByBlockId(sections, diff),
       overridden,
     );
-  }, [editor, editable, hydrated, comments, base, sections, diff, revisionKey]);
+  }, [
+    editor,
+    editable,
+    hydrated,
+    comments,
+    seedBlocks,
+    seedMap,
+    sections,
+    diff,
+    revisionKey,
+  ]);
 
   // Resolve blockId from a comment's positional anchorId when the comment
   // itself carries none — covers comments persisted before blockId was

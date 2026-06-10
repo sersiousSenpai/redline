@@ -161,6 +161,57 @@ describe("plan Y.Doc substrate", () => {
     expect(changes.some((c) => c.blockId === "blk-bbbb2222")).toBe(true);
   });
 
+  it("crash recovery M3: suggestion marks survive the persistence round-trip with identity intact", () => {
+    // Session A: a live tracked edit — insertion marked rl_ins by
+    // TrackChangesInput, deletion struck rl_del by the keymap.
+    const ydocA = new Y.Doc();
+    seedPlanYDocIfEmpty(ydocA, PLAN);
+    const editorA = makeYEditor(ydocA);
+    editorA.commands.insertContentAt(
+      endOfBlock(editorA, "blk-bbbb2222"),
+      " ADDED",
+    );
+    let start = -1;
+    editorA.state.doc.forEach((node, p) => {
+      if (node.attrs?.blockId === "blk-bbbb2222") start = p + 1;
+    });
+    editorA
+      .chain()
+      .setTextSelection({ from: start + 9, to: start + 14 }) // "body "
+      .run();
+    editorA.commands.keyboardShortcut("Backspace");
+    const persisted = Y.encodeStateAsUpdate(ydocA);
+
+    // Relaunch: the marks ARE the recovered suggestions — no re-derivation,
+    // no reverse projection; identity attrs come back with them.
+    const ydocB = new Y.Doc();
+    Y.applyUpdate(ydocB, persisted);
+    const editorB = makeYEditor(ydocB);
+    const restored: { name: string; status: string; author: string }[] = [];
+    editorB.state.doc.descendants((n) => {
+      n.marks.forEach((m) => {
+        if (m.type.name === "rl_ins" || m.type.name === "rl_del") {
+          restored.push({
+            name: m.type.name,
+            status: m.attrs.status,
+            author: m.attrs.authorId,
+          });
+        }
+      });
+    });
+    expect(restored.some((m) => m.name === "rl_ins")).toBe(true);
+    expect(restored.some((m) => m.name === "rl_del")).toBe(true);
+    expect(restored.every((m) => m.status === "pending")).toBe(true);
+    expect(restored.every((m) => m.author === "user")).toBe(true);
+
+    // Accept-all serialization yields the proposal the flush will project.
+    expect(
+      serializeBlocks(editorB, anchors).find(
+        (b) => b.blockId === "blk-bbbb2222",
+      )?.markdown,
+    ).toBe("Original paragraph. ADDED");
+  });
+
   it("a newer revision seeds fresh — stale content never leaks across keys", () => {
     // The revision bump gives the editor a brand-new Y.Doc (new key); the
     // old doc's edits must not appear in it.

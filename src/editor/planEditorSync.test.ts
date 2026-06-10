@@ -5,19 +5,24 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { buildChangeSet, diffToCommentOps } from "./changeLedger";
 import {
-  applyCommentOverridesToEditor,
   applyRevisionRedline,
   serializeBlocks,
   type RevisionEdit,
 } from "./docModel";
+import {
+  materializeSuggestions,
+  rejectBlockSuggestions,
+} from "./suggestions";
 import { planExtensions } from "./extensions/planExtensions";
 import { planMarkdownToDoc } from "./markdown";
 import type { Comment } from "../types";
 
 /**
- * Phase 2: the new serializeBlocks readCurrent feeds the existing
- * changeLedger engine, and the reverse projection is idempotent — same
- * contract the old per-block path had, now on one Tiptap document.
+ * M3: suggestion marks in the document are the source of truth; the sidebar
+ * is a projection. serializeBlocks (accept-all) feeds the changeLedger
+ * engine against the revision seed, materializeSuggestions imports proposals
+ * the doc doesn't carry yet, and rejectBlockSuggestions translates explicit
+ * sidebar intent (delete/submit) back into the document.
  */
 
 const editors: Editor[] = [];
@@ -82,35 +87,9 @@ describe("PlanEditor doc↔comment sync", () => {
     }
   });
 
-  it("reverse projection applies an edit comment and is idempotent", () => {
+  it("materializes an edit comment as pending marks, idempotently", () => {
     const editor = makeEditor(PLAN);
-    const base = new Map(
-      serializeBlocks(editor, anchors).map((b) => [b.blockId, b.markdown]),
-    );
-    const comment: Comment = {
-      id: "c-001",
-      type: "edit",
-      anchorId: "A.p1",
-      blockId: "blk-bbbb2222",
-      body: "(edit)",
-      edit: { original: "Original body paragraph.", revised: "New text here." },
-      createdAt: 0,
-      status: "draft",
-    };
-
-    const first = applyCommentOverridesToEditor(editor, [comment], base);
-    expect(first).toEqual(["blk-bbbb2222"]);
-    const after = serializeBlocks(editor, anchors);
-    expect(after[1].markdown).toBe("New text here.");
-    expect(after[0].blockId).toBe("blk-aaaa1111"); // untouched block intact
-
-    const second = applyCommentOverridesToEditor(editor, [comment], base);
-    expect(second).toEqual([]); // already reconciled → no-op
-  });
-
-  it("renders an edit as inline ins/del marks but serializes accepted text", () => {
-    const editor = makeEditor(PLAN);
-    const base = new Map(
+    const seed = new Map(
       serializeBlocks(editor, anchors).map((b) => [b.blockId, b.markdown]),
     );
     const comment: Comment = {
@@ -126,23 +105,31 @@ describe("PlanEditor doc↔comment sync", () => {
       createdAt: 0,
       status: "draft",
     };
-    applyCommentOverridesToEditor(editor, [comment], base);
 
-    // The document carries Word-style tracked-change marks…
-    const markNames = new Set<string>();
+    const first = materializeSuggestions(editor, [comment], seed);
+    expect(first).toEqual(["blk-bbbb2222"]);
+
+    // The document carries Word-style tracked-change marks with suggestion
+    // identity (pending status = open proposal feeding the projection)…
+    const pending = new Map<string, string>();
     editor.state.doc.descendants((n) => {
-      n.marks.forEach((m) => markNames.add(m.type.name));
+      n.marks.forEach((m) => {
+        if (m.type.name === "rl_ins" || m.type.name === "rl_del") {
+          pending.set(m.type.name, m.attrs.status);
+        }
+      });
     });
-    expect(markNames.has("rl_del")).toBe(true);
-    expect(markNames.has("rl_ins")).toBe(true);
+    expect(pending.get("rl_del")).toBe("pending");
+    expect(pending.get("rl_ins")).toBe("pending");
 
     // …yet accept-all serialization yields clean revised text, so the
-    // existing changeLedger still terminates (no phantom re-edit).
+    // changeLedger projection terminates (no phantom re-edit).
     const blocks = serializeBlocks(editor, anchors);
     expect(blocks[1].markdown).toBe("Original body sentence.");
+    expect(blocks[0].blockId).toBe("blk-aaaa1111"); // untouched block intact
     const ops = diffToCommentOps(
       buildChangeSet(
-        [...base].map(([blockId, markdown]) => ({
+        [...seed].map(([blockId, markdown]) => ({
           blockId,
           anchorId: anchors.get(blockId) ?? blockId,
           markdown,
@@ -152,6 +139,96 @@ describe("PlanEditor doc↔comment sync", () => {
       [comment],
     );
     expect(ops).toEqual([]); // sync sees the edit already mirrored
+
+    // Idempotent: the block now carries pending marks → never rewritten.
+    const second = materializeSuggestions(editor, [comment], seed);
+    expect(second).toEqual([]);
+  });
+
+  it("never rewrites a block the document has diverged on (doc wins)", () => {
+    const editor = makeEditor(PLAN);
+    const seed = new Map(
+      serializeBlocks(editor, anchors).map((b) => [b.blockId, b.markdown]),
+    );
+    // The user types into the block first (live suggestion marks land)…
+    const end = bodyTextStart(editor) + "Original body paragraph.".length;
+    editor.chain().setTextSelection(end).insertContent(" typed").run();
+
+    // …then a stale sidebar proposal for the same block must not clobber it.
+    const comment: Comment = {
+      id: "c-001",
+      type: "edit",
+      anchorId: "A.p1",
+      blockId: "blk-bbbb2222",
+      body: "(edit)",
+      edit: { original: "Original body paragraph.", revised: "Other text." },
+      createdAt: 0,
+      status: "draft",
+    };
+    expect(materializeSuggestions(editor, [comment], seed)).toEqual([]);
+    expect(serializeBlocks(editor, anchors)[1].markdown).toBe(
+      "Original body paragraph. typed",
+    );
+  });
+
+  it("rejectBlockSuggestions removes insertions and unstrikes deletions", () => {
+    const editor = makeEditor(PLAN);
+    const end = bodyTextStart(editor) + "Original body paragraph.".length;
+    editor.chain().setTextSelection(end).insertContent(" extra").run();
+    const start = bodyTextStart(editor);
+    editor
+      .chain()
+      .setTextSelection({ from: start + 9, to: start + 14 }) // "body "
+      .run();
+    editor.commands.keyboardShortcut("Backspace");
+    expect(serializeBlocks(editor, anchors)[1].markdown).toBe(
+      "Original paragraph. extra",
+    );
+
+    // Explicit sidebar intent (comment deleted) → proposal rejected in doc.
+    expect(
+      rejectBlockSuggestions(editor, "blk-bbbb2222", "Original body paragraph."),
+    ).toBe(true);
+    expect(serializeBlocks(editor, anchors)[1].markdown).toBe(
+      "Original body paragraph.",
+    );
+    expect(markNames(editor).has("rl_ins")).toBe(false);
+    expect(markNames(editor).has("rl_del")).toBe(false);
+    // Already pristine → no-op.
+    expect(
+      rejectBlockSuggestions(editor, "blk-bbbb2222", "Original body paragraph."),
+    ).toBe(false);
+  });
+
+  it("rejectBlockSuggestions restores a mark-less edit from the seed", () => {
+    const editor = makeEditor(PLAN);
+    // Simulate a mark-less divergence (e.g. a formatting toggle) by writing
+    // the block body directly with an rl-sync transaction.
+    let from = -1;
+    let to = -1;
+    editor.state.doc.forEach((node, pos) => {
+      if (node.attrs?.blockId === "blk-bbbb2222") {
+        from = pos;
+        to = pos + node.nodeSize;
+      }
+    });
+    const para = editor.schema.nodes.paragraph.create(
+      { blockId: "blk-bbbb2222" },
+      editor.schema.text("Silently different."),
+    );
+    const tr = editor.state.tr.replaceWith(from, to, para);
+    tr.setMeta("rl-sync", true);
+    editor.view.dispatch(tr);
+    expect(serializeBlocks(editor, anchors)[1].markdown).toBe(
+      "Silently different.",
+    );
+
+    expect(
+      rejectBlockSuggestions(editor, "blk-bbbb2222", "Original body paragraph."),
+    ).toBe(true);
+    expect(serializeBlocks(editor, anchors)[1].markdown).toBe(
+      "Original body paragraph.",
+    );
   });
 
   it("folds revision redline into inline insertions only, idempotently", () => {
@@ -191,6 +268,26 @@ describe("PlanEditor doc↔comment sync", () => {
       new Set(["blk-bbbb2222"]),
     );
     expect(skipped).toEqual([]);
+  });
+
+  it("revision redline never repaints a block carrying open suggestions", () => {
+    const editor = makeEditor(PLAN);
+    // The user strikes a word — the only record of the proposal is the mark.
+    const start = bodyTextStart(editor);
+    editor
+      .chain()
+      .setTextSelection({ from: start + 9, to: start + 14 }) // "body "
+      .run();
+    editor.commands.keyboardShortcut("Backspace");
+
+    const revisions = new Map<string, RevisionEdit>([
+      [
+        "blk-bbbb2222",
+        { status: "modified", originalText: "Original draft paragraph." },
+      ],
+    ]);
+    expect(applyRevisionRedline(editor, revisions, new Set())).toEqual([]);
+    expect(markNames(editor).has("rl_del")).toBe(true); // proposal intact
   });
 });
 
@@ -259,7 +356,7 @@ describe("live track-changes input (suggestion mode)", () => {
 
     // …and the reconcile must NOT wipe the struck text off the document.
     const baseMap = new Map(base.map((b) => [b.blockId, b.markdown]));
-    applyCommentOverridesToEditor(editor, [comment], baseMap);
+    materializeSuggestions(editor, [comment], baseMap);
     expect(markNames(editor).has("rl_del")).toBe(true);
     expect(serializeBlocks(editor, anchors)[1].markdown).toBe(
       "Original paragraph.",

@@ -4,9 +4,46 @@ import { Extension, getMarkRange } from "@tiptap/core";
 import { ChangeSet } from "@tiptap/pm/changeset";
 import { Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
 import type { EditorState, Transaction } from "@tiptap/pm/state";
+import type { Node as PMNode } from "@tiptap/pm/model";
 import { ySyncPluginKey } from "y-prosemirror";
 
+import {
+  isPendingSuggestionMark,
+  newSuggestionId,
+  USER_AUTHOR,
+} from "./TrackChanges";
+
 export const trackChangesInputKey = new PluginKey("trackChangesInput");
+
+/**
+ * Suggestion identity for a new mark at [from,to): reuse the suggestionId of
+ * an adjacent pending run of the same mark type by the same author, so
+ * keystroke-by-keystroke typing coalesces into ONE suggestion instead of one
+ * per character. Falls back to a fresh id.
+ */
+function suggestionIdAt(
+  doc: PMNode,
+  from: number,
+  to: number,
+  markName: string,
+): string {
+  const neighbor = (n: PMNode | null | undefined) => {
+    if (!n || !n.isText) return null;
+    const m = n.marks.find(
+      (m) =>
+        m.type.name === markName &&
+        isPendingSuggestionMark(m) &&
+        (m.attrs.authorId ?? USER_AUTHOR) === USER_AUTHOR &&
+        m.attrs.suggestionId,
+    );
+    return m ? (m.attrs.suggestionId as string) : null;
+  };
+  return (
+    neighbor(doc.resolve(from).nodeBefore) ??
+    neighbor(doc.resolve(to).nodeAfter) ??
+    newSuggestionId()
+  );
+}
 
 declare module "@tiptap/core" {
   interface Commands<ReturnType> {
@@ -97,7 +134,15 @@ function trackedDelete(
 
   if (dispatch) {
     const tr = state.tr;
-    tr.addMark(from, to, delMark.create());
+    tr.addMark(
+      from,
+      to,
+      delMark.create({
+        authorId: USER_AUTHOR,
+        suggestionId: suggestionIdAt(state.doc, from, to, "rl_del"),
+        status: "pending",
+      }),
+    );
     // Skip the struck text so the caret keeps flowing in the press direction.
     const caret = dir < 0 ? from : to;
     tr.setSelection(TextSelection.create(tr.doc, caret));
@@ -184,7 +229,22 @@ export const TrackChangesInput = Extension.create({
             if (ch.toB > ch.fromB) {
               const from = tr.mapping.map(ch.fromB);
               const to = tr.mapping.map(ch.toB);
-              if (to > from) tr.addMark(from, to, insMark.create());
+              if (to > from) {
+                tr.addMark(
+                  from,
+                  to,
+                  insMark.create({
+                    authorId: USER_AUTHOR,
+                    suggestionId: suggestionIdAt(
+                      newState.doc,
+                      from,
+                      to,
+                      "rl_ins",
+                    ),
+                    status: "pending",
+                  }),
+                );
+              }
             }
           }
 
