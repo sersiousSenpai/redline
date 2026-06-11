@@ -1285,6 +1285,29 @@ function App() {
     }
   };
 
+  // M4: accept a still-draft agent suggestion in place. Editor first — settle
+  // the marks before the backend write, so the comments-changed reload finds
+  // the block already settled and the reconcile has nothing to re-derive.
+  const acceptAgentSuggestion = async (c: Comment) => {
+    if (!session || !c.blockId) return;
+    planActionsRef.current?.acceptBlockSuggestions(c.blockId);
+    try {
+      await invoke("accept_agent_suggestion", {
+        sessionId: session.sessionId,
+        commentId: c.id,
+      });
+    } catch (err) {
+      console.error("accept_agent_suggestion failed", err);
+    }
+  };
+
+  // M4 lock feedback: a keystroke landed in a block owned by a pending agent
+  // suggestion and was filtered.
+  const lockedEditToast = () => {
+    setToast("Resolve the agent suggestion on this block first");
+    setTimeout(() => setToast(null), 3000);
+  };
+
   const reopenResolution = async (commentId: string, note?: string) => {
     if (!session) return;
     try {
@@ -1511,6 +1534,7 @@ function App() {
                     focusedCommentId={focusedCommentId}
                     onHighlightClick={(id) => setFocusedCommentId(id)}
                     actionsRef={planActionsRef}
+                    onLockedEdit={lockedEditToast}
                   />
                 </Suspense>
               )
@@ -2017,6 +2041,7 @@ function App() {
                 }
                 onDelete={() => deleteComment(c.id)}
                 onAccept={() => acceptResolution(c.id)}
+                onAcceptSuggestion={() => acceptAgentSuggestion(c)}
                 onReopen={(note) => reopenResolution(c.id, note)}
                 onPromote={(directive) => promoteToChange(c.id, directive)}
                 submitInFlight={busy}

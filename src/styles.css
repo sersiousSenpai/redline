@@ -518,6 +518,23 @@ p.rl-block-modified {
   background: color-mix(in srgb, var(--color-warning) 12%, transparent);
 }
 
+/* M4: agent-authored suggestions read in the info tint so authorship is
+   visible at a glance (data-rl-author is absent on user marks — the user
+   author id renders no attribute). */
+.rl-ins[data-rl-author]:not([data-rl-author="user"]) {
+  color: var(--color-info);
+  background: color-mix(in srgb, var(--color-info) 14%, transparent);
+}
+.rl-del[data-rl-author]:not([data-rl-author="user"]) {
+  background: color-mix(in srgb, var(--color-info) 14%, transparent);
+}
+/* An accepted agent suggestion is settled content: keep a faint authorship
+   wash, drop the "proposed" coloring. */
+.rl-ins[data-rl-status="accepted"] {
+  color: inherit;
+  background: color-mix(in srgb, var(--color-info) 7%, transparent);
+}
+
 /* Word-style comment highlight over the originally-selected text. Sits on
    top of inline ins/del marks (the editor renders the ins/del color through
    the highlight tint), and click-bridges with the sidebar card. */

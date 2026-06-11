@@ -24,6 +24,9 @@ interface CommentCardProps {
   onSelect?: () => void;
   onDelete: () => void;
   onAccept: () => void;
+  /** M4: accept a still-draft agent suggestion in place — the editor settles
+   *  the marks, the backend records agentState. Reject reuses onDelete. */
+  onAcceptSuggestion?: () => void;
   /** Reopen this resolution, optionally attaching a follow-up note that rides
    *  back to Claude (as continuity) on the next Submit. */
   onReopen: (note?: string) => void;
@@ -80,10 +83,19 @@ export function CommentCard({
   onSelect,
   onDelete,
   onAccept,
+  onAcceptSuggestion,
   onReopen,
   onPromote,
   submitInFlight = false,
 }: CommentCardProps) {
+  // M4: an agent-authored suggestion. While draft + undecided it shows
+  // Accept/Reject; once accepted in place it carries the settled chip (the
+  // comment stays draft and rides the next submit as a normal edit).
+  const agentUndecided =
+    !!comment.author &&
+    comment.type === "edit" &&
+    comment.status === "draft" &&
+    !comment.agentState;
   // A promoted question reads as a change request: relabel + recolor so it's
   // visibly a plan driver, not an answer-only question.
   const isPromoted = comment.type === "question" && !!comment.actionable;
@@ -235,6 +247,32 @@ export function CommentCard({
           </span>
           <AnchorPill anchorId={comment.anchorId} />
           <StatusChip status={comment.status} />
+          {comment.author && (
+            <span
+              className="rounded px-1 font-mono"
+              title={`Suggested by ${comment.author}`}
+              style={{
+                fontSize: "10px",
+                color: "var(--color-info)",
+                background: "var(--color-anchor-bg)",
+              }}
+            >
+              ✦ {comment.author}
+            </span>
+          )}
+          {comment.agentState === "accepted" && (
+            <span
+              className="rounded px-1 font-mono"
+              title="You accepted this suggestion — it rides the next submit as a normal edit"
+              style={{
+                fontSize: "10px",
+                color: "var(--color-success)",
+                background: "var(--color-anchor-bg)",
+              }}
+            >
+              accepted
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <span
@@ -583,6 +621,44 @@ export function CommentCard({
           {/* Action buttons (hidden while a composer is open). */}
           {!reopenOpen && !promoteOpen && (
             <div className="mt-2 flex items-center gap-2 flex-wrap">
+              {/* M4: in-place resolution of an undecided agent suggestion. */}
+              {agentUndecided && onAcceptSuggestion && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onAcceptSuggestion();
+                  }}
+                  title="Keep this suggestion — the text settles in place"
+                  className="rounded px-2 py-0.5 font-medium"
+                  style={{
+                    background: "var(--color-success)",
+                    color: "var(--color-on-accent)",
+                    fontSize: "11px",
+                  }}
+                >
+                  Accept suggestion
+                </button>
+              )}
+              {agentUndecided && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onDelete();
+                  }}
+                  title="Reject this suggestion — the block reverts in place"
+                  className="rounded px-2 py-0.5 font-medium"
+                  style={{
+                    background: "var(--color-bg-elevated)",
+                    border: "1px solid var(--color-rule)",
+                    color: "var(--color-ink)",
+                    fontSize: "11px",
+                  }}
+                >
+                  Reject
+                </button>
+              )}
               {comment.status === "resolved" && (
                 <button
                   type="button"

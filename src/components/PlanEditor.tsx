@@ -39,6 +39,7 @@ import {
 } from "../editor/docModel";
 import { commentsToBlockOverrides, isProseEditComment } from "../editor/changeLedger";
 import {
+  acceptBlockSuggestions,
   materializeSuggestions,
   rejectBlockSuggestions,
 } from "../editor/suggestions";
@@ -73,6 +74,9 @@ interface PlanEditorProps {
   /** Imperative escape hatch so the App-rendered SelectionMenu can drive
    *  editor commands (e.g. Strike) without owning the editor instance. */
   actionsRef?: MutableRefObject<PlanEditorActions | null>;
+  /** M4: a user edit was blocked because its block carries a pending agent
+   *  suggestion — surface "resolve the suggestion first" UI. */
+  onLockedEdit?: (blockId: string) => void;
 }
 
 /** Editor actions the App can invoke imperatively (it renders the
@@ -80,6 +84,9 @@ interface PlanEditorProps {
 export interface PlanEditorActions {
   /** Strike the current selection in place, identical to the Delete key. */
   strikeSelection: () => void;
+  /** M4: settle a block's pending agent suggestion in place (deletions
+   *  removed, insertions kept with status "accepted"). */
+  acceptBlockSuggestions: (blockId: string) => boolean;
 }
 
 /**
@@ -101,6 +108,7 @@ export function PlanEditor({
   onHighlightClick,
   focusedCommentId,
   actionsRef,
+  onLockedEdit,
 }: PlanEditorProps) {
   const editable =
     !!onAddComment && !!onUpdateComment && !!onDeleteComment;
@@ -166,9 +174,17 @@ export function PlanEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [revisionKey, ydoc, sessionId]);
 
+  // Stable identity for the lock callback so the extensions memo (and the
+  // editor instance) never recreates when the parent re-renders.
+  const onLockedEditRef = useRef(onLockedEdit);
+  onLockedEditRef.current = onLockedEdit;
+
   const extensions = useMemo(
     () => [
-      ...planExtensions({ document: ydoc }),
+      ...planExtensions({
+        document: ydoc,
+        onLockedEdit: (blockId) => onLockedEditRef.current?.(blockId),
+      }),
       RedlineDecorations,
       CommentHighlights,
       CommentMarkers,
@@ -247,6 +263,8 @@ export function PlanEditor({
           strikeSelection: () => {
             editor.commands.strikeSelection();
           },
+          acceptBlockSuggestions: (blockId: string) =>
+            acceptBlockSuggestions(editor, blockId),
         }
       : null;
     return () => {
@@ -345,6 +363,23 @@ export function PlanEditor({
     diff,
     revisionKey,
   ]);
+
+  // M4 lock: while a block is owned by a pending (no agentState yet) agent
+  // suggestion, user edits inside it are filtered — accept or reject first.
+  // Accepting sets agentState and drops the block out of this set.
+  useEffect(() => {
+    if (!editor) return;
+    const locked = (comments ?? [])
+      .filter(
+        (c) =>
+          !!c.author &&
+          !c.agentState &&
+          !!c.blockId &&
+          (c.status === "draft" || c.status === "reopened"),
+      )
+      .map((c) => c.blockId!);
+    editor.commands.setLockedBlocks(locked);
+  }, [editor, comments]);
 
   // Resolve blockId from a comment's positional anchorId when the comment
   // itself carries none — covers comments persisted before blockId was
