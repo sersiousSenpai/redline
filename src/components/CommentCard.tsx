@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import type { Comment, CommentStatus } from "../types";
 import { compactEditPreview } from "../editor/wordDiff";
 import { AnchorPill } from "./AnchorPill";
@@ -383,74 +382,10 @@ export function CommentCard({
         </div>
       )}
 
-      {/* Pre-round-trip rider: a Discuss-thread outcome attached to a draft
-          ("Add to plan" / "Attach to next submit"). Without a resolution the
-          rider would otherwise be invisible — the resolution block below only
-          renders post-round-trip. Pulses through the submitted wait, same as
-          the reopen continuity chip. */}
-      {!collapsed &&
-        !comment.resolution &&
-        comment.reopenNote &&
-        (comment.status === "draft" || comment.status === "submitted") && (
-          <div
-            className={`mt-3 rounded px-2 py-1${
-              comment.status === "submitted" ? " rl-pulse" : ""
-            }`}
-            style={{
-              background: "var(--color-anchor-bg)",
-              border: "1px solid var(--color-rule)",
-            }}
-          >
-            <div
-              className="flex items-center justify-between gap-2"
-              style={{
-                fontSize: "10px",
-                fontWeight: 600,
-                textTransform: "uppercase",
-                letterSpacing: "0.06em",
-                color: "var(--color-warning)",
-                marginBottom: "2px",
-              }}
-            >
-              <span>
-                {comment.status === "submitted"
-                  ? isPromoted
-                    ? "Decision sent · Claude is applying…"
-                    : "Discussion sent · riding with this submit…"
-                  : isPromoted
-                    ? "Your decision — applied on next submit"
-                    : "Discussion attached — rides with next submit"}
-              </span>
-              {comment.status === "draft" && (
-                <button
-                  type="button"
-                  title="Detach this discussion from the next submit"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void invoke("attach_discussion", {
-                      sessionId,
-                      commentId: comment.id,
-                      note: null,
-                      asChange: false,
-                    }).catch((err) =>
-                      console.error("detach discussion failed", err),
-                    );
-                  }}
-                  className="normal-case"
-                  style={{
-                    fontWeight: 400,
-                    color: "var(--color-ink-muted)",
-                    cursor: "pointer",
-                  }}
-                >
-                  ✕ detach
-                </button>
-              )}
-            </div>
-            <MarkdownView body={comment.reopenNote} compact />
-          </div>
-        )}
-
+      {/* A draft's attached Discuss-thread rider is flagged inside the
+          Discussion section itself (CommentThread) — the rider IS that
+          transcript, so rendering its body here would duplicate the thread
+          right above it. */}
       {!collapsed && comment.resolution && (
         <div
           className="mt-3 pt-3 border-t"

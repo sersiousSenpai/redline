@@ -185,6 +185,15 @@ export function CommentThread({ sessionId, comment }: CommentThreadProps) {
     void invoke("fork_thread_cancel", { sessionId, commentId }).catch(() => {});
   }
 
+  // The rider note a transcript would produce — also used to detect that the
+  // attached rider is stale (discussion continued after attaching).
+  function transcriptNote(transcript: ThreadMessage[]): string {
+    const body = transcript
+      .map((m) => `${m.role === "user" ? "Reviewer" : "Claude"}: ${m.body.trim()}`)
+      .join("\n\n");
+    return `Following a discussion with Claude:\n\n${body}`;
+  }
+
   // Route a read-only discussion into the main revise loop: attach the
   // transcript to the comment as its rider note, so the next Submit carries
   // the original feedback + everything we just worked out. Works on drafts
@@ -192,19 +201,24 @@ export function CommentThread({ sessionId, comment }: CommentThreadProps) {
   // (reopens with the transcript as follow-up). The card updates via the
   // comments-changed reload the backend emits.
   function sendToClaude(transcript: ThreadMessage[]) {
-    const body = transcript
-      .map((m) => `${m.role === "user" ? "Reviewer" : "Claude"}: ${m.body.trim()}`)
-      .join("\n\n");
-    const note = `Following a discussion with Claude:\n\n${body}`;
     // A discussed question that's escalated has become a decision — promote it
     // so the next Revise actually changes the plan, not just answers again.
     const asChange = comment.type === "question";
     void invoke("attach_discussion", {
       sessionId,
       commentId,
-      note,
+      note: transcriptNote(transcript),
       asChange,
     }).catch((err) => console.error("attach discussion failed", err));
+  }
+
+  function detachFromClaude() {
+    void invoke("attach_discussion", {
+      sessionId,
+      commentId,
+      note: null,
+      asChange: false,
+    }).catch((err) => console.error("detach discussion failed", err));
   }
 
   // Discarding a draft's thread discards the whole aside — comment included:
@@ -257,6 +271,21 @@ export function CommentThread({ sessionId, comment }: CommentThreadProps) {
     comment.status !== "submitted" &&
     comment.status !== "accepted" &&
     comment.status !== "withdrawn";
+  // A draft rider can only come from "Add to plan" / "Attach to next submit"
+  // on this very thread, so the attached state is flagged HERE, on the
+  // discussion itself — no duplicate copy of the transcript on the card.
+  const riderAttached =
+    comment.status === "draft" && !comment.resolution && !!comment.reopenNote;
+  // The batch went out with the rider aboard — show the in-flight cue.
+  const riderSent =
+    comment.status === "submitted" &&
+    !comment.resolution &&
+    !!comment.reopenNote;
+  // Discussion continued after attaching: the rider no longer matches the
+  // transcript — offer a one-click refresh instead of silently sending the
+  // stale snapshot.
+  const riderStale =
+    riderAttached && transcriptNote(visible) !== comment.reopenNote;
 
   // No thread yet (or only the suppressed seed) — the entry point.
   if (visible.length === 0 && status === "idle") {
@@ -332,6 +361,23 @@ export function CommentThread({ sessionId, comment }: CommentThreadProps) {
             — streaming…
           </span>
         )}
+        {/* The attached/sent flag lives on the discussion itself — the rider
+            IS this transcript, so there's nothing else to show. Visible
+            collapsed or expanded. */}
+        {riderAttached && (
+          <span style={{ color: "var(--color-warning)" }}>
+            {comment.actionable
+              ? "· added to plan — rides with next submit"
+              : "· attached — rides with next submit"}
+          </span>
+        )}
+        {riderSent && (
+          <span className="rl-pulse" style={{ color: "var(--color-warning)" }}>
+            {comment.actionable
+              ? "· decision sent · Claude is applying…"
+              : "· sent · riding with this submit…"}
+          </span>
+        )}
       </button>
 
       {!expanded && (
@@ -367,8 +413,10 @@ export function CommentThread({ sessionId, comment }: CommentThreadProps) {
               just worked out back into the revise loop — the fork itself
               can't change the plan. Available pre-submit (the rider bundles
               into the next Send to Claude Code) and post-resolution (reopens
-              with the transcript as follow-up). */}
-          {canEscalate && status === "idle" && (
+              with the transcript as follow-up). Once attached, the button
+              gives way to detach (and a refresh when the discussion has
+              continued past the attached snapshot). */}
+          {canEscalate && status === "idle" && !riderAttached && (
             <button
               type="button"
               onClick={() => sendToClaude(visible)}
@@ -389,7 +437,39 @@ export function CommentThread({ sessionId, comment }: CommentThreadProps) {
                 : "Attach to next submit →"}
             </button>
           )}
-          {comment.status === "submitted" && status === "idle" && (
+          {riderAttached && status === "idle" && (
+            <div className="flex items-center gap-2">
+              {riderStale && (
+                <button
+                  type="button"
+                  onClick={() => sendToClaude(visible)}
+                  title="The discussion continued after attaching — refresh the attached snapshot to include the new turns"
+                  className="rounded px-2 py-1 font-medium"
+                  style={{
+                    background: "var(--color-warning)",
+                    color: "var(--color-on-accent)",
+                    fontSize: "11px",
+                  }}
+                >
+                  Update attachment →
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={detachFromClaude}
+                title={
+                  comment.actionable
+                    ? "Remove from the next submit (also un-promotes the decision)"
+                    : "Remove this discussion from the next submit"
+                }
+                className="self-start hover:opacity-100 opacity-60"
+                style={{ fontSize: "10px", color: "var(--color-ink-muted)" }}
+              >
+                ✕ detach from next submit
+              </button>
+            </div>
+          )}
+          {comment.status === "submitted" && status === "idle" && !riderSent && (
             <span
               className="self-start italic"
               style={{ fontSize: "10px", color: "var(--color-ink-muted)" }}
