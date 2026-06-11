@@ -24,6 +24,9 @@ export interface PlanExtensionOptions {
    *  the headless schema (`getSchema` ignores plugins, so the node/mark model
    *  is identical either way) and for plain non-CRDT editors in tests. */
   document?: Y.Doc;
+  /** M4: a user edit was blocked because its block carries a pending agent
+   *  suggestion ("resolve it first" UI). */
+  onLockedEdit?: (blockId: string) => void;
 }
 
 /**
@@ -42,7 +45,7 @@ export interface PlanExtensionOptions {
 export function planExtensions(
   options: PlanExtensionOptions = {},
 ): Extensions {
-  const { document } = options;
+  const { document, onLockedEdit } = options;
   return [
     // StarterKit's bundled code block is swapped for `richCodeBlock()` —
     // CodeBlockLowlight + a NodeView for syntax highlighting and mermaid
@@ -76,6 +79,6 @@ export function planExtensions(
     AnchorIdAttribute,
     InsertionMark,
     DeletionMark,
-    TrackChangesInput,
+    TrackChangesInput.configure({ onLockedEdit }),
   ];
 }

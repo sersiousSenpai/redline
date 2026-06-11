@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { Editor } from "@tiptap/core";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildChangeSet, diffToCommentOps } from "./changeLedger";
 import { serializeBlocks } from "./docModel";
@@ -28,12 +28,15 @@ import type { Comment } from "../types";
  */
 
 const editors: Editor[] = [];
-function makeEditor(markdown: string): Editor {
+function makeEditor(
+  markdown: string,
+  onLockedEdit?: (blockId: string) => void,
+): Editor {
   const el = document.createElement("div");
   document.body.appendChild(el);
   const editor = new Editor({
     element: el,
-    extensions: planExtensions(),
+    extensions: planExtensions({ onLockedEdit }),
     content: planMarkdownToDoc(markdown).toJSON(),
   });
   editors.push(editor);
@@ -262,6 +265,114 @@ describe("accepted re-hydration (agentState)", () => {
         [accepted],
       ),
     ).toEqual([]);
+  });
+});
+
+describe("landmine #2 — blocks with pending agent suggestions are locked", () => {
+  /** Caret position just inside the body paragraph (blk-bbbb2222) text. */
+  function bodyTextStart(editor: Editor): number {
+    let at = -1;
+    editor.state.doc.forEach((node, pos) => {
+      if (node.attrs?.blockId === "blk-bbbb2222") at = pos + 1;
+    });
+    return at;
+  }
+
+  function lockAgentBlock(editor: Editor): Comment {
+    const comment = agentComment();
+    materializeSuggestions(editor, [comment], seedOf(editor));
+    editor.commands.setLockedBlocks(["blk-bbbb2222"]);
+    return comment;
+  }
+
+  it("typing into the locked block is filtered and onLockedEdit fires", () => {
+    const onLocked = vi.fn();
+    const editor = makeEditor(PLAN, onLocked);
+    lockAgentBlock(editor);
+    const before = editor.state.doc.toJSON();
+
+    editor
+      .chain()
+      .setTextSelection(bodyTextStart(editor) + 3)
+      .insertContent("X")
+      .run();
+
+    expect(editor.state.doc.toJSON()).toEqual(before);
+    expect(onLocked).toHaveBeenCalledWith("blk-bbbb2222");
+  });
+
+  it("Backspace strikes in the locked block are filtered too", () => {
+    const onLocked = vi.fn();
+    const editor = makeEditor(PLAN, onLocked);
+    lockAgentBlock(editor);
+    const before = editor.state.doc.toJSON();
+
+    const start = bodyTextStart(editor);
+    editor.chain().setTextSelection({ from: start, to: start + 8 }).run();
+    editor.commands.keyboardShortcut("Backspace");
+
+    expect(editor.state.doc.toJSON()).toEqual(before);
+    expect(onLocked).toHaveBeenCalledWith("blk-bbbb2222");
+  });
+
+  it("rl-sync transactions (accept/reject projections) pass the lock", () => {
+    const editor = makeEditor(PLAN, vi.fn());
+    lockAgentBlock(editor);
+
+    expect(acceptBlockSuggestions(editor, "blk-bbbb2222")).toBe(true);
+    expect(serializeBlocks(editor, anchors)[1].markdown).toBe(
+      "Original body sentence.",
+    );
+  });
+
+  it("edits in other blocks pass, and the flush never touches the agent comment", () => {
+    const onLocked = vi.fn();
+    const editor = makeEditor(PLAN, onLocked);
+    const seed = seedOf(editor);
+    const comment = lockAgentBlock(editor);
+
+    // Edit the title block — allowed, no lock callback.
+    let titleEnd = -1;
+    editor.state.doc.forEach((node, pos) => {
+      if (node.attrs?.blockId === "blk-aaaa1111")
+        titleEnd = pos + node.nodeSize - 1;
+    });
+    editor.chain().setTextSelection(titleEnd).insertContent(" v2").run();
+    expect(onLocked).not.toHaveBeenCalled();
+    expect(serializeBlocks(editor, anchors)[0].markdown).toBe("# Title v2");
+
+    // The debounced flush emits ops only for the user's block — it never
+    // updates or deletes the agent's comment (authorship stays clean).
+    const base = [...seed].map(([blockId, markdown]) => ({
+      blockId,
+      anchorId: anchors.get(blockId) ?? blockId,
+      markdown,
+    }));
+    const ops = diffToCommentOps(
+      buildChangeSet(base, serializeBlocks(editor, anchors)),
+      [comment],
+    );
+    expect(ops.length).toBeGreaterThan(0);
+    for (const op of ops) {
+      expect(op.op).toBe("add");
+      if (op.op === "add") expect(op.request.blockId).toBe("blk-aaaa1111");
+    }
+  });
+
+  it("unlocking after accept lets the user edit on top of the settled text", () => {
+    const onLocked = vi.fn();
+    const editor = makeEditor(PLAN, onLocked);
+    lockAgentBlock(editor);
+    acceptBlockSuggestions(editor, "blk-bbbb2222");
+    editor.commands.setLockedBlocks([]); // agentState set → out of lock set
+
+    editor
+      .chain()
+      .setTextSelection(bodyTextStart(editor) + 3)
+      .insertContent("X")
+      .run();
+    expect(onLocked).not.toHaveBeenCalled();
+    expect(serializeBlocks(editor, anchors)[1].markdown).toContain("X");
   });
 });
 
