@@ -7,6 +7,8 @@ interface FooterProps {
   canSubmit: boolean;
   canApprove: boolean;
   waiting: boolean;
+  /** The in-flight submit was an Ask batch — Claude is answering, not revising. */
+  waitingAsk: boolean;
   onSubmit: () => void;
   onApprove: () => void;
   /** Terminal dock collapsed (and not fullscreen) — show a peek segment. */
@@ -21,6 +23,7 @@ export function Footer({
   canSubmit,
   canApprove,
   waiting,
+  waitingAsk,
   onSubmit,
   onApprove,
   termCollapsed,
@@ -50,13 +53,15 @@ export function Footer({
     hasTerminalComment &&
     !waiting;
   // Ask-mode whenever the tray is non-empty and every pending comment is a
-  // question — the backend infers the same way, this is purely for UI
-  // labelling. Mixed batches stay in "Continue revising".
-  const askMode = total > 0 && pending.every((c) => c.type === "question");
-  const submitLabel = askMode ? "Ask Claude" : "Continue revising";
-  const waitingCopy = askMode
-    ? "Waiting for Claude's answer…"
-    : "Waiting for Claude's revision…";
+  // non-actionable question — mirrors the backend's SubmissionMode::infer
+  // exactly (a promoted question flips the batch to Revise). Purely for UI
+  // labelling.
+  const askMode =
+    total > 0 && pending.every((c) => c.type === "question" && !c.actionable);
+  const submitCaption = askMode ? "asks questions only" : "requests a revision";
+  const waitingCopy = waitingAsk
+    ? "Claude is working — answering in the terminal…"
+    : "Claude is working — revising in the terminal…";
 
   // Semantic status dot for the footer: amber while you have pending work,
   // info-blue while Claude is in-flight, success-green when the tray is clear.
@@ -87,7 +92,19 @@ export function Footer({
           }}
         />
         {waiting ? (
-          <span className="italic">{waitingCopy}</span>
+          <button
+            type="button"
+            onClick={onExpandTerminal}
+            title="Show terminal"
+            className="italic flex items-center gap-1"
+            style={{
+              color: "var(--color-ink-muted)",
+              fontSize: "12px",
+              cursor: "pointer",
+            }}
+          >
+            {waitingCopy}
+          </button>
         ) : allResolutionsHandled ? (
           <span style={{ color: "var(--color-success)" }}>
             All resolutions handled — Approve plan, or add another round of
@@ -157,7 +174,23 @@ export function Footer({
             fontSize: "12px",
           }}
         >
-          {submitLabel}
+          {/* One constant verb naming the destination — the real Claude Code
+              session, never the per-comment Discuss fork. The caption carries
+              the mode so the label can't be mistaken for the sidecar. */}
+          <span className="flex flex-col items-center leading-tight">
+            <span>Send to Claude Code</span>
+            {total > 0 && (
+              <span
+                style={{
+                  fontSize: "10px",
+                  fontWeight: 400,
+                  color: "var(--color-ink-muted)",
+                }}
+              >
+                {submitCaption}
+              </span>
+            )}
+          </span>
         </button>
         <button
           type="button"

@@ -16,10 +16,34 @@ export type ThemeName =
   | "solidcolors"
   | "grass";
 
+/** The 16 ANSI palette slots xterm accepts as theme overrides. */
+export type AnsiSlot =
+  | "black"
+  | "red"
+  | "green"
+  | "yellow"
+  | "blue"
+  | "magenta"
+  | "cyan"
+  | "white"
+  | "brightBlack"
+  | "brightRed"
+  | "brightGreen"
+  | "brightYellow"
+  | "brightBlue"
+  | "brightMagenta"
+  | "brightCyan"
+  | "brightWhite";
+
 export interface ThemeEntry {
   name: ThemeName;
   label: string;
   base: ThemeBase;
+  /** Hand-tuned ANSI overrides for the embedded terminal, merged over the
+   *  light/dark default palette in TerminalView. Only needed when a theme's
+   *  background defeats the defaults (mid-grey, saturated blue, pale paper);
+   *  a contrast clamp backstops every slot regardless. */
+  ansi?: Partial<Record<AnsiSlot, string>>;
 }
 
 // macOS Terminal.app's built-in profiles, as bg / fg / blue / yellow / green.
@@ -65,11 +89,26 @@ export const THEMES: ThemeEntry[] = [
     name: "ocean",
     label: "Ocean",
     base: { bg: "#224fbc", fg: "#ffffff", blue: "#bbdaff", yellow: "#ffe680", green: "#a6e22e", selection: "#ffd400" },
+    // Tango's dim grey + mid blue vanish on the saturated blue page; lift the
+    // dim/blue slots into pale tints and pin `black` to a deeper navy so
+    // background fills stay background.
+    ansi: {
+      black: "#0c1f4e",
+      blue: "#9ec3ff",
+      brightBlack: "#d4def5",
+      brightBlue: "#bbdaff",
+    },
   },
   {
     name: "novel",
     label: "Novel",
     base: { bg: "#dfdbc3", fg: "#3b2322", blue: "#3b5bb5", yellow: "#9c6f1b", green: "#5a7d2a", selection: "#1f6feb" },
+    // The theme's own blue reads thin on the parchment page — swap the blue
+    // slots to a deep rose that suits Novel's ink and carries more weight.
+    ansi: {
+      blue: "#8a2f4f",
+      brightBlue: "#a13d5d",
+    },
   },
   {
     // Renamed from "Man Page" — the internal name stays `manpage` so saved
@@ -77,6 +116,11 @@ export const THEMES: ThemeEntry[] = [
     name: "manpage",
     label: "Gecko",
     base: { bg: "#fef49c", fg: "#000000", blue: "#0000b2", yellow: "#8a6d00", green: "#007f00", selection: "#4f46e5" },
+    // Pure blue fights the yellow page; a deep magenta-pink pops against it.
+    ansi: {
+      blue: "#b00060",
+      brightBlue: "#d11b73",
+    },
   },
   {
     name: "redsand",
@@ -87,6 +131,14 @@ export const THEMES: ThemeEntry[] = [
     name: "silveraerogel",
     label: "Silver Aerogel",
     base: { bg: "#929292", fg: "#000000", blue: "#1f3fff", yellow: "#8a6d00", green: "#0f6b0f", selection: "#1430ff" },
+    // Mid-grey page eats both the stock dim grey (#6b6b6b) and the theme's
+    // electric blue — drop the dim slots to near-black and deepen the blues.
+    ansi: {
+      blue: "#0a1fb3",
+      brightBlack: "#292929",
+      brightBlue: "#1226b3",
+      white: "#f0f0f0",
+    },
   },
   {
     name: "solidcolors",

@@ -292,6 +292,7 @@ fn write_comment_block(out: &mut String, c: &Comment) {
                 let _ = writeln!(out, "  NOTE: {}", quoted(&c.body));
             }
             write_reopen_continuity(out, c);
+            write_discussion_context(out, c);
             let _ = writeln!(out, "  COMMENT_ID: {}", c.id);
             out.push('\n');
         }
@@ -306,6 +307,7 @@ fn write_comment_block(out: &mut String, c: &Comment) {
             out.push_str(&indent(c.body.trim(), "    "));
             out.push('\n');
             write_reopen_continuity(out, c);
+            write_discussion_context(out, c);
             let _ = writeln!(out, "  COMMENT_ID: {}", c.id);
             out.push('\n');
         }
@@ -343,6 +345,7 @@ fn write_comment_block(out: &mut String, c: &Comment) {
             out.push_str(&indent(c.body.trim(), "    "));
             out.push('\n');
             write_reopen_continuity(out, c);
+            write_discussion_context(out, c);
             let _ = writeln!(out, "  COMMENT_ID: {}", c.id);
             out.push('\n');
         }
@@ -378,6 +381,28 @@ fn write_reopen_continuity(out: &mut String, c: &Comment) {
             out.push('\n');
         }
     }
+}
+
+/// Context block for a draft comment carrying a Discuss-thread outcome the
+/// reviewer attached pre-submit ("Add to plan" / "Attach to next submit").
+/// Mutually exclusive with `write_reopen_continuity` by status, and skipped
+/// for actionable questions (their `[decision]` arc already prints the note
+/// as THE REVIEWER DECIDED). The transcript is user+fork text and MUST sit
+/// under a `(verbatim)` frame so the anti-injection invariant holds.
+fn write_discussion_context(out: &mut String, c: &Comment) {
+    if !matches!(c.status, CommentStatus::Draft) {
+        return;
+    }
+    let Some(note) = c.reopen_note.as_deref() else {
+        return;
+    };
+    if note.trim().is_empty() {
+        return;
+    }
+    out.push_str("  DISCUSSION WITH CLAUDE (verbatim):\n");
+    out.push_str("    ");
+    out.push_str(&indent(note.trim(), "    "));
+    out.push('\n');
 }
 
 fn display_anchor(anchor: &str) -> String {
@@ -854,6 +879,75 @@ mod tests {
     }
 
     #[test]
+    fn draft_rider_renders_discussion_context_verbatim() {
+        let sections = parse_plan("# A\n\npara.\n");
+        let mut c = mk_comment(
+            "c-001",
+            CommentKind::Feedback,
+            "A",
+            "Needs a rollback story.",
+            Some(CommentScope::Local),
+            None,
+        );
+        c.status = CommentStatus::Draft;
+        c.reopen_note = Some(
+            "Reviewer: what if it breaks prod?\n\nClaude: flag + one-step revert.".to_string(),
+        );
+
+        let payload = serialize_revise_payload(&sections, &[c], "");
+        assert!(payload.contains("DISCUSSION WITH CLAUDE (verbatim):"));
+        assert!(payload.contains("Claude: flag + one-step revert."));
+        // The transcript (user+fork text) sits under the verbatim frame —
+        // anti-injection invariant.
+        let note_idx = payload.find("Claude: flag + one-step revert.").unwrap();
+        let framed = payload.rfind("DISCUSSION WITH CLAUDE (verbatim):\n").unwrap();
+        assert!(framed < note_idx);
+        // Draft rider is not the reopen path.
+        assert!(!payload.contains("REOPENED —"));
+        assert!(!payload.contains("USER FOLLOW-UP (verbatim):"));
+    }
+
+    #[test]
+    fn draft_actionable_question_renders_decision_without_answer() {
+        let sections = parse_plan("# A\n\npara.\n");
+        let mut c = mk_comment(
+            "c-001",
+            CommentKind::Question,
+            "A",
+            "Do we need Beta in v1?",
+            None,
+            None,
+        );
+        c.status = CommentStatus::Draft;
+        c.actionable = true;
+        c.reopen_note = Some("Decision: cut Beta from v1.".to_string());
+
+        let payload = serialize_revise_payload(&sections, &[c], "");
+        // Pre-round-trip decision: the [decision] arc renders with no
+        // resolution on file — ASKED + DECIDED, never an empty YOU ANSWERED.
+        assert!(payload.contains("[decision — apply to the plan]"));
+        assert!(payload.contains("THE REVIEWER ASKED (verbatim):"));
+        assert!(payload.contains("THE REVIEWER DECIDED (verbatim):"));
+        assert!(payload.contains("Decision: cut Beta from v1."));
+        assert!(!payload.contains("YOU ANSWERED (verbatim):"));
+        // The actionable branch owns the note — no duplicate context block.
+        assert!(!payload.contains("DISCUSSION WITH CLAUDE (verbatim):"));
+    }
+
+    #[test]
+    fn ask_payload_carries_draft_discussion_context() {
+        let sections = parse_plan("# A\n\npara.\n");
+        let mut c = mk_comment("c-001", CommentKind::Question, "A", "Why X?", None, None);
+        c.status = CommentStatus::Draft;
+        c.reopen_note = Some("Claude: X guards against Y.".to_string());
+
+        let payload = serialize_ask_payload(&sections, &[c]);
+        assert!(payload.contains("QUESTIONS:\n\n"));
+        assert!(payload.contains("DISCUSSION WITH CLAUDE (verbatim):"));
+        assert!(payload.contains("Claude: X guards against Y."));
+    }
+
+    #[test]
     fn dispatcher_routes_by_mode() {
         use crate::state::SubmissionMode;
         let sections = parse_plan("# A\n\npara.\n");
@@ -958,6 +1052,37 @@ mod tests {
         });
         decision.reopen_note = Some("Yes — ship it behind a flag.".to_string());
 
+        // Draft feedback carrying a pre-submit Discuss-thread rider ("Attach
+        // to next submit") — renders a DISCUSSION WITH CLAUDE context block.
+        let mut discussed_feedback = mk_comment(
+            "c-007",
+            CommentKind::Feedback,
+            "B",
+            "Beta needs a rollback story.",
+            Some(CommentScope::Local),
+            None,
+        );
+        discussed_feedback.status = CommentStatus::Draft;
+        discussed_feedback.reopen_note = Some(
+            "Following a discussion with Claude:\n\nReviewer: What if Beta breaks prod?\n\nClaude: A feature flag plus a one-step revert covers it.".to_string(),
+        );
+
+        // Draft question promoted to a decision pre-round-trip ("Add to
+        // plan") — renders the [decision] arc with no YOU ANSWERED section.
+        let mut draft_decision = mk_comment(
+            "c-008",
+            CommentKind::Question,
+            "B",
+            "Do we need Beta at all in v1?",
+            None,
+            None,
+        );
+        draft_decision.status = CommentStatus::Draft;
+        draft_decision.actionable = true;
+        draft_decision.reopen_note = Some(
+            "Following a discussion with Claude:\n\nReviewer: Can Beta wait?\n\nClaude: Nothing in Alpha depends on it.\n\nDecision: cut Beta from v1.".to_string(),
+        );
+
         let comments = vec![
             mk_comment(
                 "c-001",
@@ -982,6 +1107,8 @@ mod tests {
             reopened_edit,
             block_delete,
             decision,
+            discussed_feedback,
+            draft_decision,
         ];
 
         let revise =

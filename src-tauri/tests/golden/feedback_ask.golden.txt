@@ -21,6 +21,19 @@ QUESTIONS:
     Yes — ship it behind a flag.
   COMMENT_ID: c-006
 
+§B [decision — apply to the plan]
+  THE REVIEWER ASKED (verbatim):
+    Do we need Beta at all in v1?
+  THE REVIEWER DECIDED (verbatim):
+    Following a discussion with Claude:
+    
+    Reviewer: Can Beta wait?
+    
+    Claude: Nothing in Alpha depends on it.
+    
+    Decision: cut Beta from v1.
+  COMMENT_ID: c-008
+
 REQUIRED RESPONSE FORMAT:
 
 The user has questions about your plan but is NOT requesting any plan changes. Call ExitPlanMode again with the plan body EXACTLY as you previously submitted it — do not add, remove, reword, or restructure anything. Answer each question in the resolution block at the top of the plan in this exact format:
@@ -28,7 +41,8 @@ The user has questions about your plan but is NOT requesting any plan changes. C
 <!-- REDLINE_RESOLUTIONS
 {
   "c-003": "<your answer to this question>",
-  "c-006": "<your answer to this question>"
+  "c-006": "<your answer to this question>",
+  "c-008": "<your answer to this question>"
 }
 -->
 

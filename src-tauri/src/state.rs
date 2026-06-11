@@ -131,6 +131,9 @@ pub struct SessionSummary {
     pub session_id: SessionId,
     pub project_name: String,
     pub project_path: String,
+    /// First `# heading` of the latest revision's plan — the session's display
+    /// name. Derived on `list()`, never persisted. `None` = heading-less plan.
+    pub plan_title: Option<String>,
     pub latest_version: u32,
     /// Every revision of this session, oldest-first — drives the sidebar tree.
     pub revisions: Vec<RevisionSummary>,
@@ -565,10 +568,15 @@ impl SessionStore {
                     })
                     .count() as u32;
                 let awaiting_review = matches!(s.status, SessionStatus::InReview);
+                let plan_title = s
+                    .revisions
+                    .last()
+                    .and_then(|r| crate::parser::plan_title_from_markdown(&r.raw_plan_markdown));
                 SessionSummary {
                     session_id: s.session_id.clone(),
                     project_name: s.project_name.clone(),
                     project_path: s.project_path.clone(),
+                    plan_title,
                     latest_version,
                     revisions: s
                         .revisions
@@ -783,19 +791,23 @@ impl SessionStore {
         for revision in session.revisions.iter_mut() {
             for comment in revision.comments.iter_mut() {
                 if let Some(body) = resolutions.get(&comment.id) {
-                    // Re-resolving a reopened comment closes a round: archive the
-                    // prior resolution + the note that drove this round, then
-                    // consume the note so a fresh reopen starts clean.
-                    if matches!(comment.status, CommentStatus::Reopened) {
-                        if let Some(prior) = comment.resolution.take() {
-                            comment.reopen_history.push(RoundHistoryEntry {
-                                resolution_body: prior.body,
-                                reopen_note: comment.reopen_note.take(),
-                                version: prior.appeared_in_version,
-                            });
-                        } else {
-                            comment.reopen_note = None;
-                        }
+                    // Re-resolving a comment that already carried a resolution
+                    // closes a round: archive the prior resolution + the note
+                    // that drove this round, then consume the note so a fresh
+                    // reopen starts clean. Keyed on the prior resolution, not
+                    // on `Reopened` — by attach time mark_submitted has already
+                    // flipped a reopened comment to Submitted.
+                    if let Some(prior) = comment.resolution.take() {
+                        comment.reopen_history.push(RoundHistoryEntry {
+                            resolution_body: prior.body,
+                            reopen_note: comment.reopen_note.take(),
+                            version: prior.appeared_in_version,
+                        });
+                    } else {
+                        // First resolution. Any draft-attached discussion rider
+                        // was consumed by this round — clear it (the transcript
+                        // itself persists in thread_messages).
+                        comment.reopen_note = None;
                     }
                     comment.resolution = Some(Resolution {
                         body: body.clone(),
@@ -971,6 +983,82 @@ impl SessionStore {
             }
         }
         false
+    }
+
+    /// Attach the outcome of a Discuss-with-Claude thread to its comment so it
+    /// rides into the next submit. This is the status-aware front door for the
+    /// thread's "Add to plan" / "Attach to next submit" affordance:
+    ///
+    /// - `Draft`: the rider (`reopen_note`) is set in place — no status change.
+    ///   The next submit bundles it as discussion context; `as_change` promotes
+    ///   a question to a `[decision]` driver. A blank `note` detaches the rider
+    ///   (and demotes a not-yet-submitted promoted question).
+    /// - `Resolved | Accepted | Reopened`: identical to `reopen_resolution` —
+    ///   the discussion outcome is a follow-up on an existing resolution.
+    /// - `Submitted`: rejected — the batch is in flight; escalate after Claude
+    ///   responds. `Withdrawn`: rejected.
+    pub fn attach_discussion(
+        &self,
+        session_id: &str,
+        comment_id: &str,
+        note: Option<&str>,
+        as_change: bool,
+    ) -> Result<(), String> {
+        let status = {
+            let map = self.inner.lock().unwrap();
+            let session = map
+                .get(session_id)
+                .ok_or_else(|| format!("session not found: {session_id}"))?;
+            session
+                .revisions
+                .iter()
+                .flat_map(|r| r.comments.iter())
+                .find(|c| c.id == comment_id)
+                .map(|c| c.status)
+                .ok_or_else(|| format!("comment not found: {comment_id}"))?
+        };
+        match status {
+            CommentStatus::Draft => {
+                let note = note.map(str::trim).filter(|s| !s.is_empty());
+                let mut map = self.inner.lock().unwrap();
+                let session = map
+                    .get_mut(session_id)
+                    .ok_or_else(|| format!("session not found: {session_id}"))?;
+                for revision in session.revisions.iter_mut() {
+                    for comment in revision.comments.iter_mut() {
+                        if comment.id == comment_id {
+                            comment.reopen_note = note.map(str::to_string);
+                            if matches!(comment.kind, CommentKind::Question) {
+                                if as_change {
+                                    comment.actionable = true;
+                                } else if note.is_none() {
+                                    // Detaching the rider un-promotes a draft
+                                    // question — without the discussion there
+                                    // is no decision to apply.
+                                    comment.actionable = false;
+                                }
+                            }
+                            if let Err(e) = self.db.update_comment(session_id, comment) {
+                                tracing::error!(error = %e, "failed to persist discussion attach");
+                            }
+                            return Ok(());
+                        }
+                    }
+                }
+                Err(format!("comment not found: {comment_id}"))
+            }
+            CommentStatus::Resolved | CommentStatus::Accepted | CommentStatus::Reopened => {
+                if self.reopen_resolution(session_id, comment_id, note, as_change) {
+                    Ok(())
+                } else {
+                    Err(format!("comment not found: {comment_id}"))
+                }
+            }
+            CommentStatus::Submitted => Err(
+                "comment already sent — wait for Claude's response, then reopen".to_string(),
+            ),
+            CommentStatus::Withdrawn => Err("comment was withdrawn".to_string()),
+        }
     }
 }
 

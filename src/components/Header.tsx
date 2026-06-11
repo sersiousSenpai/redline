@@ -43,6 +43,8 @@ interface HeaderProps {
    *  button exports *that* version — "what you see is what you save". null
    *  means viewing the latest. */
   viewedVersionNumber?: number | null;
+  /** The user is browsing files (folder view), not a plan — grey out Download. */
+  downloadDisabled?: boolean;
   // Flash-on-intercept alert preferences (owned by App, persisted).
   flashEnabled: boolean;
   onFlashEnabledChange: (next: boolean) => void;
@@ -65,6 +67,7 @@ export function Header({
   onExport,
   onExportDocx,
   viewedVersionNumber = null,
+  downloadDisabled = false,
   flashEnabled,
   onFlashEnabledChange,
   flashColor,
@@ -114,6 +117,7 @@ export function Header({
         {session && downloadVersion !== undefined && (
           <DownloadMenu
             version={downloadVersion}
+            disabled={downloadDisabled}
             onExportMarkdown={() =>
               onExport(session.sessionId, downloadVersion)
             }

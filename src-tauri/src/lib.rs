@@ -795,24 +795,6 @@ fn get_session(store: tauri::State<'_, SessionStore>, id: String) -> Option<Revi
     store.get(&id)
 }
 
-/// The plan's display name = the text of its first ATX heading (`# Title`).
-/// Used as the export filename stem so the file is named after the *plan*, not
-/// the project folder it ran in. Returns `None` when the plan has no heading.
-fn plan_title_from_markdown(md: &str) -> Option<String> {
-    md.lines().map(str::trim).find_map(|l| {
-        let hashes = l.chars().take_while(|&c| c == '#').count();
-        // A real heading is 1–6 hashes followed by a space (skips `#!/…`,
-        // hex colors, and `#` lines inside fenced code).
-        if (1..=6).contains(&hashes) && l[hashes..].starts_with(' ') {
-            let t = l[hashes..].trim();
-            if !t.is_empty() {
-                return Some(t.to_string());
-            }
-        }
-        None
-    })
-}
-
 /// Collapse an arbitrary name into a filesystem-safe slug: alphanumerics kept,
 /// every other run collapsed to a single `-`, trimmed, capped so a long title
 /// can't make an unwieldy filename.
@@ -874,7 +856,7 @@ async fn export_revision_markdown(
     };
 
     // Name the file after the plan's own title; fall back to the project name.
-    let name = plan_title_from_markdown(&clean).unwrap_or(project_name);
+    let name = parser::plan_title_from_markdown(&clean).unwrap_or(project_name);
 
     let picked = app
         .dialog()
@@ -927,7 +909,7 @@ async fn export_revision_docx(
             session.project_name.clone(),
         )
     };
-    let name = plan_title_from_markdown(&clean).unwrap_or(project_name);
+    let name = parser::plan_title_from_markdown(&clean).unwrap_or(project_name);
 
     let picked = app
         .dialog()
@@ -1206,6 +1188,34 @@ fn reopen_resolution(
     Ok(ok)
 }
 
+/// Attach a Discuss-thread outcome to its comment so it rides into the next
+/// submit — works on drafts (rider set in place) and on resolved/accepted/
+/// reopened comments (delegates to the reopen path). A blank note detaches.
+#[tauri::command]
+fn attach_discussion(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    session_id: String,
+    comment_id: String,
+    note: Option<String>,
+    as_change: Option<bool>,
+) -> Result<(), String> {
+    store.attach_discussion(
+        &session_id,
+        &comment_id,
+        note.as_deref(),
+        as_change.unwrap_or(false),
+    )?;
+    let _ = app.emit(
+        "comments-changed",
+        SessionEvent {
+            session_id: session_id.clone(),
+        },
+    );
+    refresh_tray(&app, &store);
+    Ok(())
+}
+
 #[tauri::command]
 fn get_interception_mode(settings: tauri::State<'_, Settings>) -> String {
     settings.get().as_str().to_string()
@@ -1338,6 +1348,7 @@ pub fn run() {
             approve_plan,
             accept_resolution,
             reopen_resolution,
+            attach_discussion,
             get_interception_mode,
             set_interception_mode,
             get_daemon_status,
@@ -1568,7 +1579,7 @@ mod tests {
 
     #[test]
     fn export_name_uses_plan_title() {
-        let title = plan_title_from_markdown(
+        let title = parser::plan_title_from_markdown(
             "<!-- rl:blk-1 -->\n# Redline — Fixes & Improvements Pass\n\nbody",
         );
         assert_eq!(
@@ -1584,7 +1595,7 @@ mod tests {
     #[test]
     fn export_name_falls_back_and_ignores_non_headings() {
         // A `#!`-style line or code `#` is not a heading.
-        assert_eq!(plan_title_from_markdown("#!/bin/bash\n#fff\ntext"), None);
+        assert_eq!(parser::plan_title_from_markdown("#!/bin/bash\n#fff\ntext"), None);
         // No title → caller falls back to the project name.
         assert_eq!(
             export_file_name("my project", 1, None, "md"),

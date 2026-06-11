@@ -5,6 +5,8 @@ import { useEffect, useRef, useState } from "react";
 interface DownloadMenuProps {
   /** Version whose export the menu offers ("what you see is what you save"). */
   version: number;
+  /** Greyed out — the user is browsing files, not viewing a plan. */
+  disabled?: boolean;
   /** Save the revision as a clean .md file. */
   onExportMarkdown: () => void;
   /** Save the revision as a Word .docx file. */
@@ -21,6 +23,7 @@ const FORMATS = [
 // shipped adapters; extend FORMATS when a new adapter lands.
 export function DownloadMenu({
   version,
+  disabled = false,
   onExportMarkdown,
   onExportDocx,
 }: DownloadMenuProps) {
@@ -56,8 +59,13 @@ export function DownloadMenu({
     <div ref={rootRef} className="relative">
       <button
         type="button"
-        onClick={() => setOpen((o) => !o)}
-        title={`Download v${version}`}
+        onClick={() => !disabled && setOpen((o) => !o)}
+        disabled={disabled}
+        title={
+          disabled
+            ? "Switch to a plan session to download"
+            : `Download v${version}`
+        }
         aria-haspopup="menu"
         aria-expanded={open}
         className="flex items-center gap-1.5 rounded px-2.5 py-1 font-medium"
@@ -66,7 +74,8 @@ export function DownloadMenu({
           border: "1px solid var(--color-rule)",
           color: "var(--color-ink)",
           fontSize: "12px",
-          cursor: "pointer",
+          cursor: disabled ? "default" : "pointer",
+          opacity: disabled ? 0.4 : 1,
         }}
       >
         Download

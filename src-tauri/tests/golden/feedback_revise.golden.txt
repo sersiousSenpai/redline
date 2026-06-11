@@ -49,6 +49,30 @@ FEEDBACK:
     Yes — ship it behind a flag.
   COMMENT_ID: c-006
 
+§B [feedback, local]
+  USER COMMENT (verbatim):
+    Beta needs a rollback story.
+  DISCUSSION WITH CLAUDE (verbatim):
+    Following a discussion with Claude:
+    
+    Reviewer: What if Beta breaks prod?
+    
+    Claude: A feature flag plus a one-step revert covers it.
+  COMMENT_ID: c-007
+
+§B [decision — apply to the plan]
+  THE REVIEWER ASKED (verbatim):
+    Do we need Beta at all in v1?
+  THE REVIEWER DECIDED (verbatim):
+    Following a discussion with Claude:
+    
+    Reviewer: Can Beta wait?
+    
+    Claude: Nothing in Alpha depends on it.
+    
+    Decision: cut Beta from v1.
+  COMMENT_ID: c-008
+
 STRUCTURAL CHANGES:
 
 §A.1 [structural: delete]
@@ -70,7 +94,9 @@ Produce plan v2 incorporating the edits above and addressing the feedback. Comme
   "c-002": "<your resolution for this comment>",
   "c-005": "<your resolution for this comment>",
   "c-003": "<your resolution for this comment>",
-  "c-006": "<your resolution for this comment>"
+  "c-006": "<your resolution for this comment>",
+  "c-007": "<your resolution for this comment>",
+  "c-008": "<your resolution for this comment>"
 }
 -->
 

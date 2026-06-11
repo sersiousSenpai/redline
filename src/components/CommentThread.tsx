@@ -185,11 +185,12 @@ export function CommentThread({ sessionId, comment }: CommentThreadProps) {
     void invoke("fork_thread_cancel", { sessionId, commentId }).catch(() => {});
   }
 
-  // Promote a read-only discussion into the main revise loop: reopen the
-  // comment with the discussion transcript as its follow-up note, so the next
-  // Submit carries the original feedback + prior resolution + everything we
-  // just worked out. The card flips to "reopened" via the comments-changed
-  // reload the backend emits.
+  // Route a read-only discussion into the main revise loop: attach the
+  // transcript to the comment as its rider note, so the next Submit carries
+  // the original feedback + everything we just worked out. Works on drafts
+  // (rider rides pre-submit, no wasted round-trip) and on resolved comments
+  // (reopens with the transcript as follow-up). The card updates via the
+  // comments-changed reload the backend emits.
   function sendToClaude(transcript: ThreadMessage[]) {
     const body = transcript
       .map((m) => `${m.role === "user" ? "Reviewer" : "Claude"}: ${m.body.trim()}`)
@@ -198,12 +199,12 @@ export function CommentThread({ sessionId, comment }: CommentThreadProps) {
     // A discussed question that's escalated has become a decision — promote it
     // so the next Revise actually changes the plan, not just answers again.
     const asChange = comment.type === "question";
-    void invoke("reopen_resolution", {
+    void invoke("attach_discussion", {
       sessionId,
       commentId,
       note,
       asChange,
-    }).catch((err) => console.error("reopen from discussion failed", err));
+    }).catch((err) => console.error("attach discussion failed", err));
   }
 
   function discard() {
@@ -230,12 +231,16 @@ export function CommentThread({ sessionId, comment }: CommentThreadProps) {
   const visible = messages.filter(
     (m, i) => !(i === 0 && m.role === "user" && m.body.trim() === seed),
   );
-  // Escalation only makes sense once Claude has resolved this comment — that's
-  // when "reopen with what we discussed" has something to reopen.
+  // Escalation is available the moment the discussion has substance — before
+  // any round-trip (a draft's rider rides with the next submit) and after a
+  // resolution (reopen with the transcript as follow-up). Excluded: submitted
+  // (batch in flight — nothing to attach to until Claude responds) and
+  // accepted/withdrawn (closed; CommentCard's Reopen is the deliberate way
+  // back in).
   const canEscalate =
-    comment.status === "resolved" ||
-    comment.status === "accepted" ||
-    comment.status === "reopened";
+    comment.status !== "submitted" &&
+    comment.status !== "accepted" &&
+    comment.status !== "withdrawn";
 
   // No thread yet (or only the suppressed seed) — the entry point.
   if (visible.length === 0 && status === "idle") {
@@ -342,9 +347,11 @@ export function CommentThread({ sessionId, comment }: CommentThreadProps) {
             onStop={cancel}
           />
 
-          {/* Once there's a resolution on the table and the exchange has
-              settled, let the reviewer route what they just worked out back
-              into the revise loop — the fork itself can't change the plan. */}
+          {/* Once the exchange has settled, let the reviewer route what they
+              just worked out back into the revise loop — the fork itself
+              can't change the plan. Available pre-submit (the rider bundles
+              into the next Send to Claude Code) and post-resolution (reopens
+              with the transcript as follow-up). */}
           {canEscalate && status === "idle" && (
             <button
               type="button"
@@ -357,14 +364,22 @@ export function CommentThread({ sessionId, comment }: CommentThreadProps) {
               }}
               title={
                 comment.type === "question"
-                  ? "Turn this discussion into a plan change for the next Submit"
-                  : "Reopen this item with the discussion as context for the next Submit"
+                  ? "Bundle this discussion into the next submit as a plan change"
+                  : "Bundle this discussion into the next submit as context"
               }
             >
               {comment.type === "question"
-                ? "Make this a change →"
-                : "Send to Claude for rework →"}
+                ? "Add to plan →"
+                : "Attach to next submit →"}
             </button>
+          )}
+          {comment.status === "submitted" && status === "idle" && (
+            <span
+              className="self-start italic"
+              style={{ fontSize: "10px", color: "var(--color-ink-muted)" }}
+            >
+              Sent — escalate after Claude responds.
+            </span>
           )}
 
           <button

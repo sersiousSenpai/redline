@@ -8,9 +8,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ApproveToast } from "./components/ApproveToast";
 import { CommentCard } from "./components/CommentCard";
 import { CommentComposer } from "./components/CommentComposer";
-import { MarkdownView } from "./components/MarkdownView";
 import { lazy, Suspense } from "react";
-import { stripSidecars } from "./editor/markdown/sidecar";
 import { installExternalLinkHandler } from "./lib/externalLinks";
 // Tiptap/ProseMirror is heavy; lazy-load so it's off the initial paint path.
 const PlanEditor = lazy(() =>
@@ -28,7 +26,7 @@ import { SidebarTabStrip } from "./components/SidebarTabStrip";
 import { FileTree } from "./components/FileTree";
 import { FileViewer } from "./components/FileViewer";
 import { useFolderWorkspaces } from "./hooks/useFolderWorkspaces";
-import { computeParagraphDiff } from "./diff";
+import { computeParagraphDiff, type ParagraphDiff } from "./diff";
 import { blockIdByAnchorId } from "./editor/docModel";
 import { useTextSelection } from "./hooks/useTextSelection";
 import { applyTheme, readStoredTheme, storeTheme } from "./theme/applyTheme";
@@ -50,6 +48,7 @@ import type {
   NewCommentRequest,
   PlanDecisionWindowEvent,
   PlanReceivedEvent,
+  Revision,
   ReviewSession,
   SessionSummary,
   SkillStatus,
@@ -306,6 +305,14 @@ function App() {
   // clicking a folder tab can focus its terminal. Each terminal maps to exactly
   // one folder (its live cwd); the poll keeps it pruned.
   const folderTermRef = useRef<Map<string, string>>(new Map());
+  // Per-terminal context: the folder this terminal lives in and the file last
+  // viewed *from* it. Switching terminal tabs restores this instantly (no
+  // 1.8s poll wait), so each terminal holds its own place even when several
+  // share a project. Stale ids are harmless — activeTermId only ever points
+  // at live tabs.
+  const termCtxRef = useRef<
+    Map<string, { folder: string | null; file: string | null }>
+  >(new Map());
   const terminalsRef = useRef<TerminalTabsHandle>(null);
 
   // Switch the sidebar to a folder and reopen the file last viewed there. The
@@ -358,6 +365,13 @@ function App() {
         if (t === termId && f !== dir) folderTermRef.current.delete(f);
       }
       folderTermRef.current.set(dir, termId);
+      // Track this terminal's own context. A `cd` to a different folder drops
+      // its remembered file — the file belonged to the old project.
+      const ctx = termCtxRef.current.get(termId);
+      termCtxRef.current.set(termId, {
+        folder: dir,
+        file: ctx?.folder === dir ? (ctx?.file ?? null) : null,
+      });
       if (linkNavRef.current) activateFolder(dir);
     };
     void poll();
@@ -368,23 +382,49 @@ function App() {
     };
   }, [activeTermId, openFolder, activateFolder]);
 
-  // Opening/closing a file records it as the active folder's remembered file,
-  // so it reopens whenever that folder is next activated.
+  // Opening/closing a file records it as the active folder's remembered file
+  // (so the folder reopens on it) AND as the active terminal's remembered file
+  // when that terminal lives in the folder (so switching terminals restores
+  // each one's own place).
   const handleOpenFile = useCallback(
     (path: string) => {
       setActiveFile(path);
       if (sidebarTab.kind === "folder") {
         folderFileRef.current.set(sidebarTab.id, path);
+        if (activeTermId) {
+          const ctx = termCtxRef.current.get(activeTermId);
+          if (ctx?.folder === sidebarTab.id) {
+            termCtxRef.current.set(activeTermId, { ...ctx, file: path });
+          }
+        }
       }
     },
-    [setActiveFile, sidebarTab],
+    [setActiveFile, sidebarTab, activeTermId],
   );
   const handleCloseFile = useCallback(() => {
     setActiveFile(null);
     if (sidebarTab.kind === "folder") {
       folderFileRef.current.set(sidebarTab.id, null);
+      if (activeTermId) {
+        const ctx = termCtxRef.current.get(activeTermId);
+        if (ctx?.folder === sidebarTab.id) {
+          termCtxRef.current.set(activeTermId, { ...ctx, file: null });
+        }
+      }
     }
-  }, [setActiveFile, sidebarTab]);
+  }, [setActiveFile, sidebarTab, activeTermId]);
+
+  // Terminal tab switch → instantly restore that terminal's folder + file
+  // (the poll above would catch up in ~1.8s; this makes it immediate).
+  // Respects the linked-nav toggle exactly like the poll does, and falls back
+  // to the folder's own memory when this terminal hasn't viewed a file yet.
+  useEffect(() => {
+    if (!activeTermId || !linkNavRef.current) return;
+    const ctx = termCtxRef.current.get(activeTermId);
+    if (!ctx?.folder) return;
+    selectFolder(ctx.folder);
+    setActiveFile(ctx.file ?? folderFileRef.current.get(ctx.folder) ?? null);
+  }, [activeTermId, selectFolder, setActiveFile]);
 
   const documentRef = useRef<HTMLElement | null>(null);
   const sidebarRef = useRef<HTMLElement | null>(null);
@@ -661,6 +701,9 @@ function App() {
         // plan, so flip the sidebar back to Sessions and select it.
         selectSessions();
         setActiveId(payload.sessionId);
+        // Land on the clean latest, even if the reviewer was parked on a
+        // historical version when the revision arrived.
+        setViewedVersionNumber(null);
         void loadSession(payload.sessionId);
       });
       if (
@@ -805,15 +848,7 @@ function App() {
     }
     return revs.slice(start);
   }, [session]);
-  const previous =
-    threadRevisions.length >= 2
-      ? threadRevisions[threadRevisions.length - 2]
-      : undefined;
   const sections = latest?.sections ?? [];
-  const diff = useMemo(
-    () => computeParagraphDiff(sections, previous?.sections),
-    [sections, previous],
-  );
   // anchorId → stable blockId for the current revision. Selection-originated
   // comments only capture a positional anchorId; the in-doc highlight
   // decoration is keyed by blockId, so resolve it at submit time.
@@ -821,19 +856,57 @@ function App() {
     () => blockIdByAnchorId(sections),
     [sections],
   );
-  const allComments = useMemo<Comment[]>(
+  // Every comment in the current review thread — drives the footer counts,
+  // waiting state, and action-items rail. The *pane and editor* scope tighter
+  // (clean slate): see `paneComments` below.
+  const threadComments = useMemo<Comment[]>(
     () => threadRevisions.flatMap((r) => r.comments),
     [threadRevisions],
   );
+  // Clean slate: a new revision arrives with zero highlights and an empty
+  // comment pane. The pane shows only the comments that live on the revision
+  // being displayed; prior rounds (and their resolution cards) are reviewed
+  // on the previous version via the revisions navigator.
+  const latestComments = useMemo<Comment[]>(
+    () => latest?.comments ?? [],
+    [latest],
+  );
+  const paneComments =
+    isViewingHistorical && viewedRevision
+      ? viewedRevision.comments
+      : latestComments;
+  // Own-era diff for a viewed historical revision: what changed when *it*
+  // arrived, i.e. against its predecessor in the session. Thread starts diff
+  // against nothing (a fresh plan has no meaningful redline).
+  const historicalDiff = useMemo(() => {
+    if (!session || !viewedRevision || viewedRevision.threadStart) {
+      return undefined;
+    }
+    const revs = session.revisions;
+    const idx = revs.findIndex(
+      (r) => r.versionNumber === viewedRevision.versionNumber,
+    );
+    const prev = idx > 0 ? revs[idx - 1] : undefined;
+    return computeParagraphDiff(viewedRevision.sections, prev?.sections);
+  }, [session, viewedRevision]);
+  // commentId → the revision it lives on, so action-item pills can navigate
+  // to the right version before focusing the card.
+  const commentVersionById = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const r of threadRevisions) {
+      for (const c of r.comments) m.set(c.id, r.versionNumber);
+    }
+    return m;
+  }, [threadRevisions]);
 
   const pendingComments = useMemo(
     () =>
-      allComments.filter(
+      threadComments.filter(
         (c) => c.status === "draft" || c.status === "reopened",
       ),
-    [allComments],
+    [threadComments],
   );
-  const submittedComments = allComments.filter(
+  const submittedComments = threadComments.filter(
     (c) => c.status === "submitted",
   );
   const submittedCount = submittedComments.length;
@@ -846,20 +919,22 @@ function App() {
   const waiting =
     awaitingNextPlan || (submittedCount > 0 && pendingComments.length === 0);
   // Mirror Footer's mode inference for the pane-side waiting card: if the
-  // in-flight batch is all questions, Claude is answering, not revising.
+  // in-flight batch is all non-actionable questions, Claude is answering,
+  // not revising (a promoted question flips the batch to Revise).
   const waitingAsk =
-    waiting && submittedComments.every((c) => c.type === "question");
+    waiting &&
+    submittedComments.every((c) => c.type === "question" && !c.actionable);
+  // The active session's plan is currently held (Claude Code blocked in its
+  // terminal awaiting review) — drives the in-dock "plan intercepted" strip.
+  // `summaries` refreshes on plan-received / status / comment events, so the
+  // strip tracks hold and release without its own wiring.
+  const activeHeld =
+    summaries.find((s) => s.sessionId === activeId)?.held ?? false;
   // A detached plan is no longer held by Claude — Approve / Continue Revising
   // would no-op against a dead channel, so disable them until the session is
   // restored (which clears `detached` on the next plan-received POST).
   const canSubmit = pendingComments.length > 0 && !detached;
   const canApprove = !!session && session.status !== "approved" && !detached;
-
-  // While Claude revises, the live terminal *is* the waiting state — make sure
-  // the dock is visible so "watch it below" actually points at something.
-  useEffect(() => {
-    if (waiting) setTermCollapsed(false);
-  }, [waiting, setTermCollapsed]);
 
   // Bidirectional focus: when the editor (or anything else) sets a focused
   // comment id, scroll the matching sidebar card into view. The editor side
@@ -1281,6 +1356,7 @@ function App() {
         onExport={exportRevision}
         onExportDocx={exportRevisionDocx}
         viewedVersionNumber={viewedVersionNumber}
+        downloadDisabled={sidebarTab.kind === "folder"}
         flashEnabled={flashEnabled}
         onFlashEnabledChange={setFlashEnabled}
         flashColor={flashColor}
@@ -1401,19 +1477,23 @@ function App() {
             ) : sessionReady ? (
               isViewingHistorical && viewedRevision ? (
                 <HistoricalRevisionView
-                  versionNumber={viewedRevision.versionNumber}
+                  sessionId={activeId ?? ""}
+                  revision={viewedRevision}
+                  diff={historicalDiff}
                   latestVersionNumber={latest?.versionNumber ?? 0}
-                  receivedAt={viewedRevision.receivedAt}
-                  markdown={viewedRevision.rawPlanMarkdown}
+                  focusedCommentId={focusedCommentId}
+                  onHighlightClick={(id) => setFocusedCommentId(id)}
                   onBackToLatest={() => setViewedVersionNumber(null)}
                 />
               ) : (
                 <Suspense fallback={null}>
+                  {/* Clean slate: the latest revision renders with no diff
+                      highlights and only its own comments — prior rounds live
+                      on the previous version (revisions navigator). */}
                   <PlanEditor
                     markdown={latest?.rawPlanMarkdown ?? ""}
                     sections={sections}
-                    diff={diff}
-                    comments={allComments}
+                    comments={latestComments}
                     revisionKey={`${activeId ?? ""}:${
                       threadRevisions[0]?.versionNumber ?? 0
                     }:${latest?.versionNumber ?? 0}`}
@@ -1617,7 +1697,7 @@ function App() {
                   the pane is too narrow to hold it (otherwise it wraps and looks
                   squished under "DISCUSSION"). */}
               {sidebarTab.kind === "sessions" &&
-                allComments.length > 0 &&
+                paneComments.length > 0 &&
                 (paneFullscreen || paneWidth >= 340) && (
                   <span
                     className="font-mono normal-case"
@@ -1629,7 +1709,8 @@ function App() {
                       whiteSpace: "nowrap",
                     }}
                   >
-                    {pendingComments.length} pending · {allComments.length} total
+                    {pendingComments.length} pending · {paneComments.length}{" "}
+                    {isViewingHistorical ? "on this version" : "total"}
                   </span>
                 )}
               <button
@@ -1783,32 +1864,86 @@ function App() {
                 }}
               >
                 {waitingAsk
-                  ? "Questions sent. Claude is answering — "
-                  : "Feedback sent. Claude is revising — "}
-                <span style={{ color: "var(--color-ink)" }}>
-                  watch it work in the terminal below ↓
-                </span>
+                  ? "Questions sent. Claude is answering in the background — "
+                  : "Feedback sent. Claude is revising in the background — "}
+                <button
+                  type="button"
+                  onClick={() => setTermCollapsed(false)}
+                  style={{
+                    color: "var(--color-ink)",
+                    cursor: "pointer",
+                    textDecoration: "underline",
+                  }}
+                >
+                  open the terminal to watch
+                </button>
               </div>
             )}
-            {allComments.length === 0 && !composing && (
-              <div
-                className="italic"
-                style={{
-                  fontSize: "12px",
-                  color: "var(--color-ink-muted)",
-                  lineHeight: 1.5,
-                }}
-              >
-                Select text in the plan to add a comment.
-              </div>
-            )}
+            {paneComments.length === 0 &&
+              !composing &&
+              (() => {
+                // Clean slate: the new revision's pane starts empty. If the
+                // prior round's discussions live on an earlier version, point
+                // there instead of pretending nothing happened.
+                const prior = !isViewingHistorical
+                  ? [...threadRevisions]
+                      .reverse()
+                      .find(
+                        (r) =>
+                          r.versionNumber !== latest?.versionNumber &&
+                          r.comments.length > 0,
+                      )
+                  : undefined;
+                if (prior) {
+                  return (
+                    <div
+                      className="rounded-md border p-3"
+                      style={{
+                        borderColor: "var(--color-rule)",
+                        background: "var(--color-bg-elevated)",
+                        fontSize: "12px",
+                        color: "var(--color-ink-muted)",
+                        lineHeight: 1.5,
+                      }}
+                    >
+                      Comments and resolutions from v{prior.versionNumber} live
+                      on that version —{" "}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setViewedVersionNumber(prior.versionNumber)
+                        }
+                        style={{
+                          color: "var(--color-ink)",
+                          cursor: "pointer",
+                          textDecoration: "underline",
+                        }}
+                      >
+                        review them →
+                      </button>
+                    </div>
+                  );
+                }
+                return (
+                  <div
+                    className="italic"
+                    style={{
+                      fontSize: "12px",
+                      color: "var(--color-ink-muted)",
+                      lineHeight: 1.5,
+                    }}
+                  >
+                    Select text in the plan to add a comment.
+                  </div>
+                );
+              })()}
             {/* Pin "Action items" (Claude's resolutions awaiting accept/
                 reopen) at the top of the pane so the affordance is visible
                 even when the "Claude is revising" banner sits above the
                 regular cards. Clicking a pill focuses + scrolls to the card
                 with the buttons. */}
             {(() => {
-              const actionItems = allComments.filter(
+              const actionItems = threadComments.filter(
                 (c) => c.status === "resolved",
               );
               if (actionItems.length === 0) return null;
@@ -1837,7 +1972,17 @@ function App() {
                       <button
                         key={c.id}
                         type="button"
-                        onClick={() => setFocusedCommentId(c.id)}
+                        onClick={() => {
+                          // Clean slate: the card may live on an earlier
+                          // version — navigate there before focusing it.
+                          const v = commentVersionById.get(c.id);
+                          if (v !== undefined) {
+                            setViewedVersionNumber(
+                              v === latest?.versionNumber ? null : v,
+                            );
+                          }
+                          setFocusedCommentId(c.id);
+                        }}
                         title={`Jump to ${c.id} — Accept or Reopen the resolution`}
                         className="font-mono rounded px-1.5 py-0.5"
                         style={{
@@ -1854,7 +1999,7 @@ function App() {
                 </div>
               );
             })()}
-            {allComments.map((c) => (
+            {paneComments.map((c) => (
               <CommentCard
                 key={`${session?.sessionId ?? ""}-${c.id}`}
                 sessionId={session?.sessionId ?? ""}
@@ -1892,7 +2037,7 @@ function App() {
           className={
             termFullscreen
               ? "absolute inset-0 z-30"
-              : "shrink-0 overflow-hidden"
+              : "relative shrink-0 overflow-hidden"
           }
           style={
             termFullscreen
@@ -1935,13 +2080,42 @@ function App() {
             collapsed={termFullscreen ? false : termCollapsed}
             onActiveTabChange={setActiveTermId}
           />
+          {/* Since text can't be injected into the held PTY, fake one line of
+              terminal output: a strip pinned to the dock's bottom edge,
+              terminal bg + mono font + matching padding so it sits on the
+              glyph grid and reads as native output. Click-through so the
+              shell underneath stays usable. */}
+          {activeHeld && (!termCollapsed || termFullscreen) && (
+            <div
+              aria-hidden
+              style={{
+                position: "absolute",
+                left: 0,
+                right: 0,
+                bottom: 0,
+                zIndex: 20,
+                pointerEvents: "none",
+                background: "var(--color-paper)",
+                fontFamily: "var(--font-mono)",
+                fontSize: 13,
+                lineHeight: "18px",
+                padding: "2px 8px",
+                color: "#e8553d",
+                whiteSpace: "pre",
+                overflow: "hidden",
+              }}
+            >
+              {"── plan intercepted by redline ──"}
+            </div>
+          )}
         </div>
       </main>
       <Footer
-        comments={allComments}
+        comments={threadComments}
         canSubmit={canSubmit}
         canApprove={canApprove}
         waiting={waiting}
+        waitingAsk={waitingAsk}
         onSubmit={submitReview}
         onApprove={approvePlan}
         termCollapsed={termCollapsed && !termFullscreen}
@@ -1989,21 +2163,31 @@ function cssEscape(s: string): string {
  *  Used when the reviewer clicks a historical revision in the sidebar to
  *  scroll back and compare against the current plan. Sidecar comments are
  *  stripped so the body reads as clean markdown. */
+/** A previous revision, rendered with the same Tiptap editor as the latest so
+ *  formatting matches — read-only (no comment handlers ⇒ `editable: false`)
+ *  with that revision's own-era diff highlights and comment cards alive in
+ *  the pane (Accept/Reopen work from here; the store mutators search every
+ *  revision). Known limitation: the reviewer's live-era ins/del marks aren't
+ *  replayed — they were serialized into [edit] comments at submit, and those
+ *  cards represent them. */
 function HistoricalRevisionView({
-  versionNumber,
+  sessionId,
+  revision,
+  diff,
   latestVersionNumber,
-  receivedAt,
-  markdown,
+  focusedCommentId,
+  onHighlightClick,
   onBackToLatest,
 }: {
-  versionNumber: number;
+  sessionId: string;
+  revision: Revision;
+  diff?: ParagraphDiff;
   latestVersionNumber: number;
-  receivedAt: number;
-  markdown: string;
+  focusedCommentId: string | null;
+  onHighlightClick: (commentId: string) => void;
   onBackToLatest: () => void;
 }) {
-  const clean = useMemo(() => stripSidecars(markdown).clean, [markdown]);
-  const when = new Date(receivedAt).toLocaleString();
+  const when = new Date(revision.receivedAt).toLocaleString();
   return (
     <div>
       <div
@@ -2021,7 +2205,7 @@ function HistoricalRevisionView({
             className="font-mono"
             style={{ color: "var(--color-ink)", fontWeight: 600 }}
           >
-            v{versionNumber}
+            v{revision.versionNumber}
           </span>{" "}
           · received {when} · read-only · latest is v{latestVersionNumber}
         </span>
@@ -2040,7 +2224,20 @@ function HistoricalRevisionView({
           Back to latest
         </button>
       </div>
-      <MarkdownView body={clean} />
+      <Suspense fallback={null}>
+        {/* `sessionId` deliberately omitted: the historical doc is in-memory
+            only — no IndexedDB persistence for a read-only view. The `hist`
+            revisionKey namespace can never collide with the live editor's. */}
+        <PlanEditor
+          markdown={revision.rawPlanMarkdown}
+          sections={revision.sections}
+          diff={diff}
+          comments={revision.comments}
+          revisionKey={`${sessionId}:hist:${revision.versionNumber}`}
+          focusedCommentId={focusedCommentId}
+          onHighlightClick={onHighlightClick}
+        />
+      </Suspense>
     </div>
   );
 }

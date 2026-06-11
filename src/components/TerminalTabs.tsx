@@ -49,14 +49,21 @@ export interface TerminalTabsHandle {
   openSessionTerminal: (cwd: string | null) => string;
 }
 
+/** Trailing-slash-insensitive path compare key. */
+function normPath(p: string): string {
+  return p.replace(/\/+$/, "") || "/";
+}
+
 // Owns the set of terminal tabs and their lifecycle. Every tab's
 // <TerminalView> stays mounted (shells + scrollback persist); only the tabs
 // shown in a pane are `visible`. The dock can show one pane or be split into
 // two side-by-side panes (`paneA` left, `paneB` right) — splitting is purely a
 // view change: toggling it on/off never spawns-and-kills the underlying shells,
 // so sessions and scrollback survive. The dock is never empty: closing the last
-// tab spawns a fresh replacement. Labels are positional (`zsh N` = the tab's
-// 1-based slot) and recompute on close, like iTerm2 / Terminal.app / VS Code.
+// tab spawns a fresh replacement. Labels are project-aware: each tab is named
+// after its live cwd's basename, numbered per project in tab order ("redline 1,
+// redline 2, zsh 1") — $HOME and / fall back to "zsh". Numbering recomputes on
+// close/reorder/cd, like iTerm2 / Terminal.app / VS Code.
 // New tabs open in $HOME by default; the "here" action opens in the focused
 // terminal's live working directory instead.
 export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
@@ -392,9 +399,68 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
     onActiveTabChange?.(focusedId);
   }, [focusedId, onActiveTabChange]);
 
-  // Positional labels: a tab's number is its 1-based slot, so closing one
-  // renumbers the rest with no gaps.
-  const barTabs = tabs.map((t, i) => ({ id: t.id, title: `zsh ${i + 1}` }));
+  // Live cwd per tab, polled so labels follow the shell's `cd`. Spawn cwd
+  // covers the gap until the first poll lands.
+  const [liveCwds, setLiveCwds] = useState<Map<string, string>>(
+    () => new Map(),
+  );
+  const [homePath, setHomePath] = useState<string | null>(null);
+  useEffect(() => {
+    void homeDir()
+      .then((h) => setHomePath(normPath(h)))
+      .catch(() => {});
+  }, []);
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      const entries = await Promise.all(
+        tabs.map(async (t) => {
+          try {
+            const dir = await invoke<string | null>("pty_cwd", { id: t.id });
+            return [t.id, dir] as const;
+          } catch {
+            return [t.id, null] as const;
+          }
+        }),
+      );
+      if (cancelled) return;
+      setLiveCwds((prev) => {
+        const next = new Map<string, string>();
+        let changed = false;
+        for (const [id, dir] of entries) {
+          const val = dir ?? prev.get(id);
+          if (val) next.set(id, val);
+          if (prev.get(id) !== next.get(id)) changed = true;
+        }
+        if (prev.size !== next.size) changed = true;
+        return changed ? next : prev;
+      });
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), 2500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [tabs]);
+
+  // Project-aware labels: basename of the tab's live cwd ($HOME / root →
+  // "zsh"), numbered per project in tab order — "redline 1, redline 2, zsh 1".
+  // Derived at render, so close/reorder/cd all renumber automatically.
+  const tabBaseLabel = (t: Tab): string => {
+    const dir = liveCwds.get(t.id) ?? t.cwd;
+    if (!dir) return "zsh";
+    const n = normPath(dir);
+    if (n === "/" || (homePath !== null && n === homePath)) return "zsh";
+    return n.slice(n.lastIndexOf("/") + 1) || "zsh";
+  };
+  const labelCounts = new Map<string, number>();
+  const barTabs = tabs.map((t) => {
+    const label = tabBaseLabel(t);
+    const n = (labelCounts.get(label) ?? 0) + 1;
+    labelCounts.set(label, n);
+    return { id: t.id, title: `${label} ${n}` };
+  });
 
   // Position each tab's wrapper by its pane role using CSS only — never by
   // moving it to a different JSX parent, which would unmount/remount the

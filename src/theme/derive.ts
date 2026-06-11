@@ -72,7 +72,7 @@ function toHex([r, g, b]: RGB): string {
 }
 
 // Mix color `a` toward color `b` by amount `t` (0 = a, 1 = b).
-function mix(a: string, b: string, t: number): string {
+export function mix(a: string, b: string, t: number): string {
   const [ar, ag, ab] = parseHex(a);
   const [br, bg, bb] = parseHex(b);
   return toHex([
@@ -87,14 +87,16 @@ function rgba(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
-// Relative luminance (sRGB, perceptual-ish) for contrast decisions.
-function luminance(hex: string): number {
+// Relative luminance (sRGB, perceptual-ish — deliberately NOT gamma-corrected;
+// the theme system's light/dark splits were tuned against this scale, so
+// changing it would reclassify mid-luminance themes like Silver Aerogel).
+export function luminance(hex: string): number {
   const [r, g, b] = parseHex(hex).map((v) => v / 255);
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
 
 // WCAG-style contrast ratio between two colors (1 = identical, 21 = max).
-function contrastRatio(a: string, b: string): number {
+export function contrastRatio(a: string, b: string): number {
   const la = luminance(a);
   const lb = luminance(b);
   const hi = Math.max(la, lb);

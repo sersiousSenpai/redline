@@ -1046,6 +1046,145 @@ mod tests {
     }
 
     #[test]
+    fn attach_discussion_matrix_and_rider_consumption() {
+        use std::collections::HashMap;
+
+        let store = make_store();
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("s-disc", "/tmp/d", md.to_string(), reparse_sections(md), true, false);
+        for (kind, body) in [
+            (CommentKind::Question, "Should we ship Beta?"),
+            (CommentKind::Feedback, "Beta needs a rollback story."),
+        ] {
+            store
+                .add_comment(
+                    "s-disc",
+                    NewCommentRequest {
+                        kind,
+                        scope: None,
+                        anchor_id: "A".to_string(),
+                        block_id: None,
+                        structural: None,
+                        body: body.to_string(),
+                        edit: None,
+                        selection: None,
+                    },
+                )
+                .expect("add comment");
+        }
+        let get = |id: &str| {
+            store
+                .get("s-disc")
+                .unwrap()
+                .revisions
+                .into_iter()
+                .flat_map(|r| r.comments)
+                .find(|c| c.id == id)
+                .unwrap()
+        };
+
+        // Draft + as_change: rider set in place, question promoted, status
+        // unchanged (the rider rides with the next submit).
+        store
+            .attach_discussion("s-disc", "c-001", Some("Decision: yes."), true)
+            .expect("draft attach");
+        let q = get("c-001");
+        assert!(matches!(q.status, CommentStatus::Draft));
+        assert_eq!(q.reopen_note.as_deref(), Some("Decision: yes."));
+        assert!(q.actionable);
+
+        // Blank note detaches the rider and demotes the draft question.
+        store
+            .attach_discussion("s-disc", "c-001", None, false)
+            .expect("detach");
+        let q = get("c-001");
+        assert!(matches!(q.status, CommentStatus::Draft));
+        assert_eq!(q.reopen_note, None);
+        assert!(!q.actionable);
+
+        // Feedback rider attaches without promotion, then the batch goes out:
+        // attaching to an in-flight comment is rejected.
+        store
+            .attach_discussion("s-disc", "c-002", Some("Claude: flag + revert."), false)
+            .expect("feedback attach");
+        store.mark_submitted("s-disc");
+        assert!(store
+            .attach_discussion("s-disc", "c-002", Some("late"), false)
+            .is_err());
+
+        // Resolution arrives: the draft rider is consumed with NO history
+        // entry (there was no prior resolution to archive).
+        let mut res = HashMap::new();
+        res.insert("c-002".to_string(), "Added the rollback section.".to_string());
+        store.attach_resolutions("s-disc", &res, 2);
+        let f = get("c-002");
+        assert!(matches!(f.status, CommentStatus::Resolved));
+        assert_eq!(f.reopen_note, None);
+        assert!(f.reopen_history.is_empty());
+        assert_eq!(f.resolution.as_ref().unwrap().body, "Added the rollback section.");
+
+        // Post-resolution attach delegates to the reopen path.
+        store
+            .attach_discussion("s-disc", "c-002", Some("Not quite — see §A."), false)
+            .expect("post-resolution attach");
+        let f = get("c-002");
+        assert!(matches!(f.status, CommentStatus::Reopened));
+        assert_eq!(f.reopen_note.as_deref(), Some("Not quite — see §A."));
+        assert!(f.resolution.is_some());
+    }
+
+    #[test]
+    fn attach_resolutions_archives_round_for_submitted_reopen() {
+        // Production flow: a reopened comment is flipped to Submitted by
+        // mark_submitted BEFORE Claude's next plan attaches the re-resolution.
+        // The archive must key on the prior resolution, not on `Reopened`.
+        use std::collections::HashMap;
+
+        let store = make_store();
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("s-arch", "/tmp/a", md.to_string(), reparse_sections(md), true, false);
+        store
+            .add_comment(
+                "s-arch",
+                NewCommentRequest {
+                    kind: CommentKind::Feedback,
+                    scope: None,
+                    anchor_id: "A".to_string(),
+                    block_id: None,
+                    structural: None,
+                    body: "Tighten this.".to_string(),
+                    edit: None,
+                    selection: None,
+                },
+            )
+            .expect("add comment");
+        store.mark_submitted("s-arch");
+        let mut r1 = HashMap::new();
+        r1.insert("c-001".to_string(), "Tightened.".to_string());
+        store.attach_resolutions("s-arch", &r1, 2);
+        assert!(store.reopen_resolution("s-arch", "c-001", Some("Go further."), false));
+        store.mark_submitted("s-arch"); // reopened → submitted, as in the real flow
+        let mut r2 = HashMap::new();
+        r2.insert("c-001".to_string(), "Cut it to one line.".to_string());
+        store.attach_resolutions("s-arch", &r2, 3);
+
+        let c = store
+            .get("s-arch")
+            .unwrap()
+            .revisions
+            .into_iter()
+            .flat_map(|r| r.comments)
+            .find(|c| c.id == "c-001")
+            .unwrap();
+        assert!(matches!(c.status, CommentStatus::Resolved));
+        assert_eq!(c.resolution.as_ref().unwrap().body, "Cut it to one line.");
+        assert_eq!(c.reopen_note, None);
+        assert_eq!(c.reopen_history.len(), 1);
+        assert_eq!(c.reopen_history[0].resolution_body, "Tightened.");
+        assert_eq!(c.reopen_history[0].reopen_note.as_deref(), Some("Go further."));
+    }
+
+    #[test]
     fn full_round_trip_state_machine() {
         use crate::feedback::serialize_revise_payload;
         use crate::resolutions::extract_resolutions;

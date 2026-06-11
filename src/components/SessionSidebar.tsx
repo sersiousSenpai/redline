@@ -266,7 +266,10 @@ function SessionRow({
             }}
             title={session.projectPath}
           >
-            {session.projectName || session.projectPath || session.sessionId}
+            {session.planTitle ||
+              session.projectName ||
+              session.projectPath ||
+              session.sessionId}
           </span>
           <span
             className="font-mono shrink-0 rounded-sm px-1.5 py-0.5"
@@ -279,6 +282,17 @@ function SessionRow({
             v{badgeVersion}
           </span>
         </div>
+        {/* When the plan title leads, keep the project visible underneath —
+            two sessions in one project stay tellable apart by title, and one
+            title across two projects by this line. */}
+        {session.planTitle && session.projectName && (
+          <div
+            className="truncate mb-1"
+            style={{ fontSize: "10px", color: "var(--color-ink-muted)" }}
+          >
+            {session.projectName}
+          </div>
+        )}
         <div
           className="flex items-center gap-2"
           style={{ fontSize: "10px", color: "var(--color-ink-muted)" }}

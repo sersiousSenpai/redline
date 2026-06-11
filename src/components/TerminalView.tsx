@@ -9,6 +9,8 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
+import { contrastRatio, luminance, mix } from "../theme/derive";
+import { getTheme, type AnsiSlot } from "../theme/themes";
 
 interface TerminalViewProps {
   /** Stable per-tab id; keys the backend PTY and filters its events. */
@@ -33,24 +35,51 @@ function shellQuote(p: string): string {
   return `'${p.replace(/'/g, `'\\''`)}'`;
 }
 
-// Relative luminance of a #rrggbb / #rgb color — used to decide whether the
-// terminal background is light (needs a darker ANSI palette).
-function luminance(hex: string): number {
-  const h = hex.replace("#", "");
-  const full =
-    h.length === 3
-      ? h
-          .split("")
-          .map((c) => c + c)
-          .join("")
-      : h;
-  const r = parseInt(full.slice(0, 2), 16) / 255;
-  const g = parseInt(full.slice(2, 4), 16) / 255;
-  const b = parseInt(full.slice(4, 6), 16) / 255;
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+// xterm.js's built-in defaults (the Tango palette), spelled out so the dark
+// branch goes through the same override-merge + contrast clamp as the light
+// branch — previously dark themes got these implicitly, which left Ocean's
+// blue page with an invisible #555753 dim grey.
+const DARK_ANSI: Record<AnsiSlot, string> = {
+  black: "#2e3436",
+  red: "#cc0000",
+  green: "#4e9a06",
+  yellow: "#c4a000",
+  blue: "#3465a4",
+  magenta: "#75507b",
+  cyan: "#06989a",
+  white: "#d3d7cf",
+  brightBlack: "#555753",
+  brightRed: "#ef2929",
+  brightGreen: "#8ae234",
+  brightYellow: "#fce94f",
+  brightBlue: "#729fcf",
+  brightMagenta: "#ad7fa8",
+  brightCyan: "#34e2e2",
+  brightWhite: "#eeeeec",
+};
+
+/** Per-slot contrast floor against the terminal background. `brightBlack`
+ *  renders Claude Code's dim/secondary text, so it gets the body-text floor;
+ *  `black` is conventionally a background/fill slot and is never clamped. */
+function slotFloor(slot: AnsiSlot): number {
+  return slot === "brightBlack" ? 4.5 : 3.0;
 }
 
-function readXtermTheme() {
+/** Raise `color` toward `fg` just enough to clear `floor` contrast vs `bg`.
+ *  Same monotonic binary search as derive.ts's mutedInk, inverted. */
+function clampSlot(color: string, bg: string, fg: string, floor: number): string {
+  if (contrastRatio(color, bg) >= floor) return color;
+  let lo = 0;
+  let hi = 1;
+  for (let i = 0; i < 24; i++) {
+    const mid = (lo + hi) / 2;
+    if (contrastRatio(mix(color, fg, mid), bg) >= floor) hi = mid;
+    else lo = mid;
+  }
+  return mix(color, fg, hi);
+}
+
+function readXtermTheme(themeName: string) {
   const s = getComputedStyle(document.documentElement);
   const v = (name: string, fallback: string) =>
     s.getPropertyValue(name).trim() || fallback;
@@ -63,35 +92,46 @@ function readXtermTheme() {
     cursorAccent: bg,
     selectionBackground: v("--color-rule", "#e5e3dd"),
   };
-  // Dark backgrounds: xterm's default ANSI palette already reads well — leave it.
-  if (luminance(bg) < 0.5) return base;
-  // Light themes (e.g. Novel, Silver Aerogel): xterm's dark-bg ANSI defaults
-  // (bright yellow/white/cyan) wash out against the pale paper, making Claude's
-  // colored TUI text hard to read. Map the palette to darker, saturated hues —
-  // reusing the theme's own accent tokens (already tuned for contrast) for the
-  // blue/green/yellow slots so the terminal stays on-brand and legible.
-  const info = v("--color-info", "#3b5bb5");
-  const warning = v("--color-warning", "#9c6f1b");
-  const success = v("--color-success", "#2f7d32");
-  return {
-    ...base,
-    black: "#3b3b3b",
-    red: "#b3261e",
-    green: success,
-    yellow: warning,
-    blue: info,
-    magenta: "#8a2a8a",
-    cyan: "#0e6b7a",
-    white: "#5c5c5c",
-    brightBlack: "#6b6b6b",
-    brightRed: "#c5341d",
-    brightGreen: success,
-    brightYellow: warning,
-    brightBlue: info,
-    brightMagenta: "#a23299",
-    brightCyan: "#1597a8",
-    brightWhite: fg,
-  };
+  let palette: Record<AnsiSlot, string>;
+  if (luminance(bg) < 0.5) {
+    palette = { ...DARK_ANSI };
+  } else {
+    // Light themes (e.g. Novel, Silver Aerogel): xterm's dark-bg ANSI defaults
+    // (bright yellow/white/cyan) wash out against the pale paper. Map the
+    // palette to darker, saturated hues — reusing the theme's own accent
+    // tokens for the blue/green/yellow slots so the terminal stays on-brand.
+    const info = v("--color-info", "#3b5bb5");
+    const warning = v("--color-warning", "#9c6f1b");
+    const success = v("--color-success", "#2f7d32");
+    palette = {
+      black: "#3b3b3b",
+      red: "#b3261e",
+      green: success,
+      yellow: warning,
+      blue: info,
+      magenta: "#8a2a8a",
+      cyan: "#0e6b7a",
+      white: "#5c5c5c",
+      brightBlack: "#6b6b6b",
+      brightRed: "#c5341d",
+      brightGreen: success,
+      brightYellow: warning,
+      brightBlue: info,
+      brightMagenta: "#a23299",
+      brightCyan: "#1597a8",
+      brightWhite: fg,
+    };
+  }
+  // Hand-tuned per-theme overrides win over the branch defaults…
+  Object.assign(palette, getTheme(themeName).ansi);
+  // …and a contrast clamp backstops every text slot, so a mid-luminance
+  // background (Silver Aerogel's grey, Ocean's blue) can never render
+  // invisible dim text no matter which branch it landed in.
+  for (const slot of Object.keys(palette) as AnsiSlot[]) {
+    if (slot === "black") continue;
+    palette[slot] = clampSlot(palette[slot], bg, fg, slotFloor(slot));
+  }
+  return { ...base, ...palette };
 }
 
 // One xterm instance bound to one backend PTY (keyed by `id`). Many of these
@@ -131,7 +171,7 @@ export function TerminalView({
           .trim() || "ui-monospace, Menlo, monospace",
       fontSize: 13,
       cursorBlink: true,
-      theme: readXtermTheme(),
+      theme: readXtermTheme(theme),
       scrollback: 5000,
     });
     const fit = new FitAddon();
@@ -280,7 +320,7 @@ export function TerminalView({
   // Re-theme in place when the app theme changes.
   useEffect(() => {
     const term = termRef.current;
-    if (term) term.options.theme = readXtermTheme();
+    if (term) term.options.theme = readXtermTheme(theme);
   }, [theme]);
 
   // Becoming visible: the host had no usable geometry while hidden, so re-fit

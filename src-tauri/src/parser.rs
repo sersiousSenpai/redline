@@ -560,6 +560,26 @@ pub fn strip_sidecar_lines(md: &str) -> String {
         .join("\n")
 }
 
+/// The plan's display name = the text of its first ATX heading (`# Title`).
+/// Used as the export filename stem and the session row's primary label, so
+/// both name the *plan*, not the project folder it ran in. Returns `None`
+/// when the plan has no heading. Sidecar `<!-- rl:blk-… -->` lines are not
+/// headings, so raw (uncleaned) markdown is safe input.
+pub fn plan_title_from_markdown(md: &str) -> Option<String> {
+    md.lines().map(str::trim).find_map(|l| {
+        let hashes = l.chars().take_while(|&c| c == '#').count();
+        // A real heading is 1–6 hashes followed by a space (skips `#!/…`,
+        // hex colors, and `#` lines inside fenced code).
+        if (1..=6).contains(&hashes) && l[hashes..].starts_with(' ') {
+            let t = l[hashes..].trim();
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+        }
+        None
+    })
+}
+
 fn is_block_container(tag: &Tag<'_>) -> bool {
     matches!(
         tag,
