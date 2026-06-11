@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -157,7 +157,21 @@ struct PtySession {
     /// Child shell pid — used to read its live working directory so a new
     /// terminal can open wherever this one has `cd`'d to.
     pid: Option<u32>,
+    /// Unique per-spawn token. A terminal id can be respawned (React dev
+    /// remounts spawn→kill→spawn under one id); the reaper compares this so a
+    /// dead predecessor can never evict its successor from the registry —
+    /// dropping the successor's entry would close its PTY master and EOF a
+    /// perfectly healthy shell.
+    generation: u64,
+    /// Set by the kill paths before killing. The flusher consults it so an
+    /// intentional teardown (remount cleanup, tab close, app exit) doesn't
+    /// emit `pty-exit` — that event means "your shell died", and printing
+    /// "[process exited]" into a successor terminal is pure noise.
+    expected_exit: Arc<AtomicBool>,
 }
+
+/// Monotonic spawn-generation counter (see `PtySession::generation`).
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 /// Registry of live PTYs keyed by the frontend-assigned terminal id. The outer
 /// mutex guards only the map structure (insert/remove/lookup, microsecond
@@ -237,6 +251,8 @@ pub fn pty_spawn(
 
     let flow = Flow::new();
     let pump = Pump::new();
+    let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+    let expected_exit = Arc::new(AtomicBool::new(false));
 
     guard.insert(
         id.clone(),
@@ -246,6 +262,8 @@ pub fn pty_spawn(
             killer,
             flow: flow.clone(),
             pid,
+            generation,
+            expected_exit: expected_exit.clone(),
         })),
     );
     drop(guard);
@@ -302,21 +320,36 @@ pub fn pty_spawn(
             }
             flow.on_sent(len);
         }
-        let _ = app_for_flusher.emit(
-            "pty-exit",
-            PtyExit {
-                id: id_for_flusher,
-            },
-        );
+        // An intentional kill (remount cleanup, tab close, app exit) already
+        // has a successor or no UI — only an *unexpected* shell death should
+        // surface as "[process exited]".
+        if !expected_exit.load(Ordering::SeqCst) {
+            let _ = app_for_flusher.emit(
+                "pty-exit",
+                PtyExit {
+                    id: id_for_flusher,
+                },
+            );
+        }
     });
 
     // Reaper: drop this id from the registry once its shell exits so a later
-    // spawn with the same id can restart it.
+    // spawn with the same id can restart it. Generation-guarded: by the time
+    // a killed shell's wait() returns, the same id may already be re-registered
+    // to a successor session (React dev remount) — removing blindly would drop
+    // the successor's PtySession, closing its master and EOF-killing its shell.
     let id_for_reaper = id;
     std::thread::spawn(move || {
         let _ = child.wait();
         if let Some(state) = app.try_state::<PtyState>() {
-            state.0.lock().unwrap().remove(&id_for_reaper);
+            let mut map = state.0.lock().unwrap();
+            let is_mine = map
+                .get(&id_for_reaper)
+                .map(|s| s.lock().unwrap().generation == generation)
+                .unwrap_or(false);
+            if is_mine {
+                map.remove(&id_for_reaper);
+            }
         }
     });
 
@@ -394,6 +427,7 @@ pub fn pty_kill(state: tauri::State<'_, PtyState>, id: String) -> Result<(), Str
     let session = { state.0.lock().unwrap().remove(&id) };
     if let Some(session) = session {
         let mut s = session.lock().unwrap();
+        s.expected_exit.store(true, Ordering::SeqCst); // suppress pty-exit
         s.flow.close(); // unpark the reader if it's gated on flow control
         let _ = s.killer.kill();
     }
@@ -479,6 +513,7 @@ pub fn pty_kill_all(state: tauri::State<'_, PtyState>) -> Result<(), String> {
     };
     for session in drained {
         let mut s = session.lock().unwrap();
+        s.expected_exit.store(true, Ordering::SeqCst); // suppress pty-exit
         s.flow.close();
         let _ = s.killer.kill();
     }

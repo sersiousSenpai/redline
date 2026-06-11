@@ -35,6 +35,24 @@ function shellQuote(p: string): string {
   return `'${p.replace(/'/g, `'\\''`)}'`;
 }
 
+// Per-terminal-id ordering fence for spawn/kill. React dev StrictMode mounts
+// every TerminalView twice — spawn → kill → spawn under one id — and the three
+// invokes race on the backend's command pool. If the respawn overtakes the
+// kill, pty_spawn no-ops (id still registered), the kill then destroys the
+// only shell, and the surviving mount's output channel was never bound: a
+// dead "[process exited]" terminal. Chaining each id's lifecycle ops makes
+// the order deterministic: spawn completes, then kill, then respawn.
+const ptyLifecycle = new Map<string, Promise<unknown>>();
+export function enqueuePtyOp(
+  id: string,
+  op: () => Promise<unknown>,
+): Promise<unknown> {
+  const prev = ptyLifecycle.get(id) ?? Promise.resolve();
+  const next = prev.then(op, op).catch(() => {});
+  ptyLifecycle.set(id, next);
+  return next;
+}
+
 // xterm.js's built-in defaults (the Tango palette), spelled out so the dark
 // branch goes through the same override-merge + contrast clamp as the light
 // branch — previously dark themes got these implicitly, which left Ocean's
@@ -210,13 +228,20 @@ export function TerminalView({
     // A hidden (display:none / zero-height) host makes fit() compute 0×0; a
     // 0-row PTY corrupts output. Fall back to a sane size when spawning while
     // not yet visible — the [visible] effect re-fits once shown.
-    void invoke("pty_spawn", {
-      id,
-      cwd,
-      cols: term.cols || 80,
-      rows: term.rows || 24,
-      onOutput,
-    }).catch((e) => term.writeln(`\r\n[redline: failed to start shell: ${e}]`));
+    void enqueuePtyOp(id, () =>
+      invoke("pty_spawn", {
+        id,
+        cwd,
+        cols: term.cols || 80,
+        rows: term.rows || 24,
+        onOutput,
+      }).catch((e) => {
+        // Skip the writeln if this mount was already torn down (StrictMode).
+        if (termRef.current === term) {
+          term.writeln(`\r\n[redline: failed to start shell: ${e}]`);
+        }
+      }),
+    );
 
     const dataSub = term.onData((d) => {
       void invoke("pty_write", { id, data: d }).catch(() => {});
@@ -307,7 +332,7 @@ export function TerminalView({
       void exitPromise.then((un) => un());
       void dropPromise.then((un) => un());
       void focusPromise.then((un) => un());
-      void invoke("pty_kill", { id }).catch(() => {});
+      void enqueuePtyOp(id, () => invoke("pty_kill", { id }));
       term.dispose();
       termRef.current = null;
       fitRef.current = null;

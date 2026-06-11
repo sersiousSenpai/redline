@@ -13,7 +13,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { homeDir } from "@tauri-apps/api/path";
 import { usePersistedState } from "../theme/usePersistedState";
 import { TerminalTabBar } from "./TerminalTabBar";
-import { TerminalView } from "./TerminalView";
+import { TerminalView, enqueuePtyOp } from "./TerminalView";
 import { TerminalSplitDivider } from "./TerminalSplitDivider";
 import { CloseConfirmModal } from "./CloseConfirmModal";
 
@@ -176,7 +176,9 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
   };
 
   const closeTab = (id: string) => {
-    void invoke("pty_kill", { id }).catch(() => {});
+    // Through the lifecycle fence: closing a tab the instant it opened must
+    // not let the kill overtake the still-queued spawn (orphan shell).
+    void enqueuePtyOp(id, () => invoke("pty_kill", { id }));
     clearUnseen(id);
 
     // Side effects (uuid, pane selection) live here, not in a setTabs updater —
