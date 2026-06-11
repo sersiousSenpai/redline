@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+mod agent;
 mod db;
 mod feedback;
 mod fork;
@@ -20,7 +21,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use axum::{extract::State, routing::post, Json, Router};
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, post},
+    Json, Router,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{
@@ -695,6 +702,13 @@ async fn run_server(state: AppState) {
     let app_handle = state.app_handle.clone();
     let app = Router::new()
         .route("/v1/plan", post(handle_plan))
+        // Agent-in-doc (M4): the per-user agent's surface — read the plan's
+        // block structure, post a tracked suggestion against a block id.
+        .route("/v1/sessions/:session_id/plan", get(handle_get_latest_plan))
+        .route(
+            "/v1/sessions/:session_id/suggestions",
+            post(handle_suggest_edit),
+        )
         .with_state(state);
     match tokio::net::TcpListener::bind("127.0.0.1:7676").await {
         Ok(listener) => {
@@ -717,6 +731,51 @@ async fn run_server(state: AppState) {
                 },
             );
         }
+    }
+}
+
+fn agent_error_response(err: agent::AgentError) -> (StatusCode, Json<Value>) {
+    let code = match err {
+        agent::AgentError::NotFound(_) => StatusCode::NOT_FOUND,
+        agent::AgentError::Conflict(_) => StatusCode::CONFLICT,
+        agent::AgentError::BadRequest(_) => StatusCode::BAD_REQUEST,
+    };
+    (code, Json(serde_json::json!({ "error": err.message() })))
+}
+
+async fn handle_get_latest_plan(
+    State(app_state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> axum::response::Response {
+    match agent::get_latest_plan_core(&app_state.store, &session_id) {
+        Ok(plan) => Json(plan).into_response(),
+        Err(e) => agent_error_response(e).into_response(),
+    }
+}
+
+async fn handle_suggest_edit(
+    State(app_state): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(req): Json<agent::SuggestEditRequest>,
+) -> axum::response::Response {
+    match agent::suggest_edit_core(&app_state.store, &session_id, req) {
+        Ok(comment) => {
+            tracing::info!(
+                session_id = %session_id,
+                comment_id = %comment.id,
+                author = comment.author.as_deref().unwrap_or(""),
+                "agent suggestion landed"
+            );
+            let _ = app_state.app_handle.emit(
+                "comments-changed",
+                SessionEvent {
+                    session_id: session_id.clone(),
+                },
+            );
+            refresh_tray(&app_state.app_handle, &app_state.store);
+            (StatusCode::CREATED, Json(comment)).into_response()
+        }
+        Err(e) => agent_error_response(e).into_response(),
     }
 }
 
@@ -991,6 +1050,78 @@ fn delete_comment(
         refresh_tray(&app, &store);
     }
     Ok(removed)
+}
+
+/// Agent-in-doc (M4): same core as POST /v1/sessions/:id/suggestions, for
+/// in-process callers. The suggestion lands as a draft [edit] comment with
+/// `author`; the editor materializes it as pending marks.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn agent_suggest_edit(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    session_id: String,
+    block_id: String,
+    kind: String,
+    original: Option<String>,
+    revised: String,
+    agent_id: String,
+    body: Option<String>,
+) -> Result<Comment, String> {
+    let comment = agent::suggest_edit_core(
+        &store,
+        &session_id,
+        agent::SuggestEditRequest {
+            block_id,
+            kind,
+            original,
+            revised,
+            agent_id,
+            body,
+        },
+    )
+    .map_err(|e| e.message().to_string())?;
+    let _ = app.emit(
+        "comments-changed",
+        SessionEvent {
+            session_id: session_id.clone(),
+        },
+    );
+    refresh_tray(&app, &store);
+    Ok(comment)
+}
+
+/// Agent-in-doc (M4): the published plan + flat block index, same core as
+/// GET /v1/sessions/:id/plan.
+#[tauri::command]
+fn get_latest_plan(
+    store: tauri::State<'_, SessionStore>,
+    session_id: String,
+) -> Result<agent::LatestPlanResponse, String> {
+    agent::get_latest_plan_core(&store, &session_id).map_err(|e| e.message().to_string())
+}
+
+/// Record the in-place acceptance of a still-draft agent suggestion. The
+/// editor has already applied the marks; this only persists the card state
+/// (the comment deliberately stays Draft — see state::set_agent_state).
+#[tauri::command]
+fn accept_agent_suggestion(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    session_id: String,
+    comment_id: String,
+) -> Result<bool, String> {
+    let updated = store.set_agent_state(&session_id, &comment_id, Some("accepted".to_string()));
+    if updated {
+        let _ = app.emit(
+            "comments-changed",
+            SessionEvent {
+                session_id: session_id.clone(),
+            },
+        );
+        refresh_tray(&app, &store);
+    }
+    Ok(updated)
 }
 
 /// Keystroke sequence that selects "give feedback" on Claude Code's plan-mode
@@ -1344,6 +1475,9 @@ pub fn run() {
             add_comment,
             update_comment,
             delete_comment,
+            agent_suggest_edit,
+            get_latest_plan,
+            accept_agent_suggestion,
             submit_review,
             approve_plan,
             accept_resolution,
