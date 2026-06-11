@@ -63,17 +63,21 @@ export function PaneDivider({
   const leading = side === "leading";
   const collapseGlyph = leading ? "‹" : "›";
   const expandGlyph = leading ? "›" : "‹";
-  const glyph = fullscreen
-    ? horizontal
-      ? "⌄"
-      : collapseGlyph
-    : horizontal
-      ? collapsed
-        ? "⌃"
-        : "⌄"
+  // Horizontal dividers reuse the same "›" chevron, CSS-rotated to point up or
+  // down. The dedicated arrowhead codepoints aren't safe here: U+2304 "⌄" is
+  // missing from many fonts (unlike its sibling U+2303 "⌃", which doubles as
+  // the control-key symbol), so the expanded state rendered as a fallback
+  // glyph that didn't read as a caret at all.
+  const glyph = horizontal
+    ? "›"
+    : fullscreen
+      ? collapseGlyph
       : collapsed
         ? expandGlyph
         : collapseGlyph;
+  // Down (+90°) collapses the bottom dock / exits fullscreen; up (-90°)
+  // re-opens a collapsed dock.
+  const rotation = horizontal ? (!fullscreen && collapsed ? -90 : 90) : 0;
 
   // The interactive grab zone extends a few px past the 6px visible bar on each
   // side so the resize cursor is easy to acquire even when a scrollbar gutter
@@ -129,7 +133,14 @@ export function PaneDivider({
           cursor: "pointer",
         }}
       >
-        {glyph}
+        <span
+          style={{
+            display: "inline-block",
+            transform: rotation ? `rotate(${rotation}deg)` : undefined,
+          }}
+        >
+          {glyph}
+        </span>
       </button>
       )}
     </div>
