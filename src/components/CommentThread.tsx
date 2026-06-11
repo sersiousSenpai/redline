@@ -207,10 +207,26 @@ export function CommentThread({ sessionId, comment }: CommentThreadProps) {
     }).catch((err) => console.error("attach discussion failed", err));
   }
 
+  // Discarding a draft's thread discards the whole aside — comment included:
+  // the user is abandoning the question/note they spun the discussion off
+  // from, and a leftover draft card would silently ride into the next submit.
+  // Submitted/resolved comments are part of the review contract (their ids
+  // are resolution keys), so for those only the discussion is removed — same
+  // rule as the card's ✕, which is also draft-only.
+  const discardRemovesComment = comment.status === "draft";
+
   function discard() {
-    void invoke("fork_thread_discard", { sessionId, commentId }).catch(
-      () => {},
-    );
+    const threadGone = invoke("fork_thread_discard", {
+      sessionId,
+      commentId,
+    }).catch(() => {});
+    if (discardRemovesComment) {
+      void threadGone.then(() =>
+        invoke("delete_comment", { sessionId, commentId }).catch((err) =>
+          console.error("delete comment with thread failed", err),
+        ),
+      );
+    }
     setMessages([]);
     setLiveText("");
     setStatus("idle");
@@ -385,10 +401,17 @@ export function CommentThread({ sessionId, comment }: CommentThreadProps) {
           <button
             type="button"
             onClick={discard}
+            title={
+              discardRemovesComment
+                ? "Remove this discussion and its draft comment"
+                : "Remove this discussion (the comment stays — it's part of the review)"
+            }
             className="self-start hover:opacity-100 opacity-60"
             style={{ fontSize: "10px", color: "var(--color-ink-muted)" }}
           >
-            Discard thread
+            {discardRemovesComment
+              ? "Discard thread & comment"
+              : "Discard thread"}
           </button>
         </>
       )}
