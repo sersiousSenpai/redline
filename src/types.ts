@@ -128,6 +128,14 @@ export interface Comment {
    *  Flips it from answer-only to a plan driver — rendered to Claude as a
    *  [decision]. Always false/absent for non-question kinds. */
   actionable?: boolean;
+  /** Agent-in-doc (M4): the agent id that proposed this comment via
+   *  agent_suggest_edit. Absent for every user-originated comment. */
+  author?: string;
+  /** In-place resolution of a still-draft agent suggestion: "accepted" once
+   *  the reviewer applied it in the editor. The comment stays draft (it keeps
+   *  owning its block and rides the submit payload as a normal [edit]);
+   *  this field only drives the card chip and unlocks the block. */
+  agentState?: string;
 }
 
 export interface NewCommentRequest {

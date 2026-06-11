@@ -243,6 +243,12 @@ impl Database {
             "ALTER TABLE comments ADD COLUMN actionable INTEGER NOT NULL DEFAULT 0",
             [],
         );
+        // Agent-in-doc (M4): the agent id that proposed the comment (NULL for
+        // every user-originated comment) and the in-place resolution of a
+        // still-draft agent suggestion ("accepted"). Post-rebuild ALTER group,
+        // same reasoning as `fork_session_id` above.
+        let _ = conn.execute("ALTER TABLE comments ADD COLUMN author TEXT", []);
+        let _ = conn.execute("ALTER TABLE comments ADD COLUMN agent_state TEXT", []);
         Ok(())
     }
 
@@ -349,8 +355,9 @@ impl Database {
                 resolution_body, resolution_version, resolution_accepted_at,
                 block_id, structural_json,
                 sel_char_start, sel_char_end, sel_quoted_text,
-                sel_sub_block_id, reopen_note, reopen_history, actionable
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+                sel_sub_block_id, reopen_note, reopen_history, actionable,
+                author, agent_state
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
             params![
                 comment.id,
                 session_id,
@@ -375,6 +382,8 @@ impl Database {
                 comment.reopen_note,
                 reopen_history_json,
                 comment.actionable as i64,
+                comment.author,
+                comment.agent_state,
             ],
         )?;
         Ok(())
@@ -423,8 +432,10 @@ impl Database {
                 sel_sub_block_id = ?14,
                 reopen_note = ?15,
                 reopen_history = ?16,
-                actionable = ?17
-             WHERE session_id = ?18 AND id = ?19",
+                actionable = ?17,
+                author = ?18,
+                agent_state = ?19
+             WHERE session_id = ?20 AND id = ?21",
             params![
                 comment.scope.map(|s| s.as_str()),
                 comment.body,
@@ -443,6 +454,8 @@ impl Database {
                 comment.reopen_note,
                 reopen_history_json,
                 comment.actionable as i64,
+                comment.author,
+                comment.agent_state,
                 session_id,
                 comment.id,
             ],
@@ -663,7 +676,8 @@ impl Database {
                     resolution_body, resolution_version, resolution_accepted_at,
                     block_id, structural_json,
                     sel_char_start, sel_char_end, sel_quoted_text,
-                    sel_sub_block_id, reopen_note, reopen_history, actionable
+                    sel_sub_block_id, reopen_note, reopen_history, actionable,
+                    author, agent_state
              FROM comments
              ORDER BY session_id, version_number, created_at",
         )?;
@@ -716,6 +730,8 @@ impl Database {
                 .and_then(|s| serde_json::from_str::<Vec<RoundHistoryEntry>>(s).ok())
                 .unwrap_or_default();
             let actionable: bool = row.get::<_, i64>(22)? != 0;
+            let author: Option<String> = row.get(23)?;
+            let agent_state: Option<String> = row.get(24)?;
             Ok((
                 row.get::<_, String>(1)?, // session_id
                 row.get::<_, u32>(2)?,    // version_number
@@ -735,6 +751,8 @@ impl Database {
                     reopen_note,
                     reopen_history,
                     actionable,
+                    author,
+                    agent_state,
                 },
             ))
         })?;
@@ -830,6 +848,7 @@ mod tests {
                     body: "q".to_string(),
                     edit: None,
                     selection: None,
+                    author: None,
                 },
             )
             .expect("add comment");
@@ -876,6 +895,7 @@ mod tests {
                     body: "why?".to_string(),
                     edit: None,
                     selection: None,
+                    author: None,
                 },
             )
             .expect("add comment");
@@ -906,6 +926,7 @@ mod tests {
             body: "rethink this entire section".to_string(),
             edit: None,
             selection: None,
+            author: None,
         };
         let c1 = store.add_comment("sess-1", req).expect("add");
         assert_eq!(c1.id, "c-001");
@@ -921,6 +942,7 @@ mod tests {
             body: "why?".to_string(),
             edit: None,
             selection: None,
+            author: None,
         };
         let c2 = store.add_comment("sess-1", req2).expect("add 2");
         assert_eq!(c2.id, "c-002");
@@ -928,6 +950,71 @@ mod tests {
 
         let session = store.get("sess-1").expect("get session");
         assert_eq!(session.revisions[0].comments.len(), 2);
+    }
+
+    // Agent-in-doc (M4): `author` and `agent_state` survive insert → reload,
+    // and `set_agent_state` refuses comments that aren't agent-authored.
+    #[test]
+    fn agent_author_and_state_round_trip() {
+        use crate::state::{CommentKind, EditPayload};
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let store = SessionStore::new(db.clone());
+        let md = "# A\n\nIntro paragraph.\n";
+        store.upsert_plan("sess-a", "/tmp/a", md.to_string(), reparse_sections(md), true, false);
+
+        let agent = store
+            .add_comment(
+                "sess-a",
+                NewCommentRequest {
+                    kind: CommentKind::Edit,
+                    scope: None,
+                    anchor_id: "A.p1".to_string(),
+                    block_id: Some("blk-1".to_string()),
+                    structural: None,
+                    body: "(edit)".to_string(),
+                    edit: Some(EditPayload {
+                        original: "Intro paragraph.".to_string(),
+                        revised: "Intro sentence.".to_string(),
+                    }),
+                    selection: None,
+                    author: Some("claude-code".to_string()),
+                },
+            )
+            .expect("add agent comment");
+        assert_eq!(agent.author.as_deref(), Some("claude-code"));
+        assert!(agent.agent_state.is_none());
+
+        let user = store
+            .add_comment(
+                "sess-a",
+                NewCommentRequest {
+                    kind: CommentKind::Question,
+                    scope: None,
+                    anchor_id: "A".to_string(),
+                    block_id: None,
+                    structural: None,
+                    body: "why?".to_string(),
+                    edit: None,
+                    selection: None,
+                    author: None,
+                },
+            )
+            .expect("add user comment");
+
+        assert!(store.set_agent_state("sess-a", &agent.id, Some("accepted".to_string())));
+        // Not agent-authored → refused.
+        assert!(!store.set_agent_state("sess-a", &user.id, Some("accepted".to_string())));
+        // Unknown comment → refused.
+        assert!(!store.set_agent_state("sess-a", "c-999", Some("accepted".to_string())));
+
+        let reloaded = SessionStore::new(db);
+        let s = reloaded.get("sess-a").expect("session");
+        let rc = &s.revisions[0].comments[0];
+        assert_eq!(rc.author.as_deref(), Some("claude-code"));
+        assert_eq!(rc.agent_state.as_deref(), Some("accepted"));
+        let ru = &s.revisions[0].comments[1];
+        assert!(ru.author.is_none());
+        assert!(ru.agent_state.is_none());
     }
 
     #[test]
@@ -982,6 +1069,7 @@ mod tests {
             body: "why?".to_string(),
             edit: None,
             selection: None,
+            author: None,
         };
         store.add_comment("s1", mk_q()).expect("add comment");
         let db = store.database();
@@ -1023,6 +1111,7 @@ mod tests {
                     body: "why?".to_string(),
                     edit: None,
                     selection: None,
+                    author: None,
                 },
             )
             .expect("add comment");
@@ -1068,6 +1157,7 @@ mod tests {
                         body: body.to_string(),
                         edit: None,
                         selection: None,
+                        author: None,
                     },
                 )
                 .expect("add comment");
@@ -1155,6 +1245,7 @@ mod tests {
                     body: "Tighten this.".to_string(),
                     edit: None,
                     selection: None,
+                    author: None,
                 },
             )
             .expect("add comment");
@@ -1216,6 +1307,7 @@ mod tests {
                 body: "Rethink the detail section.".to_string(),
                 edit: None,
                 selection: None,
+                author: None,
             },
         )
         .expect("add comment");
@@ -1230,6 +1322,7 @@ mod tests {
                 body: "Why this order?".to_string(),
                 edit: None,
                 selection: None,
+                author: None,
             },
         )
         .expect("add comment");
@@ -1381,6 +1474,7 @@ Restructured detail body.
                     body: "Why this order?".to_string(),
                     edit: None,
                     selection: None,
+                    author: None,
                 },
             )
             .expect("add q1");
@@ -1396,6 +1490,7 @@ Restructured detail body.
                     body: "Why is Beta last?".to_string(),
                     edit: None,
                     selection: None,
+                    author: None,
                 },
             )
             .expect("add q2");
@@ -1508,6 +1603,7 @@ body.
                         revised: "Substance.".to_string(),
                     }),
                     selection: None,
+                    author: None,
                 },
             )
             .expect("add comment");
@@ -1548,6 +1644,7 @@ body.
                         revised: "Prose.".to_string(),
                     }),
                     selection: None,
+                    author: None,
                 },
             )
             .expect("add");
@@ -1613,6 +1710,7 @@ body.
                     body: "reordered for flow".to_string(),
                     edit: None,
                     selection: None,
+                    author: None,
                 },
             )
             .expect("add structural");
@@ -1658,6 +1756,7 @@ body.
             body: body.to_string(),
             edit: None,
             selection: None,
+            author: None,
         };
 
         let a = store
@@ -1800,6 +1899,7 @@ body.
                     body: "new session comment".to_string(),
                     edit: None,
                     selection: None,
+                    author: None,
                 },
             )
             .expect("fresh session c-001 persists");

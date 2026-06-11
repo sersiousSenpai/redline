@@ -396,6 +396,19 @@ pub struct Comment {
     /// context. Always false for non-question kinds.
     #[serde(default)]
     pub actionable: bool,
+    /// Who proposed this comment when it wasn't the reviewer: the agent id
+    /// passed to `agent_suggest_edit` (M4). `None` for every user-originated
+    /// comment, which keeps the serialized shape — and the feedback payload —
+    /// byte-identical to the pre-M4 contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    /// In-place resolution of an agent suggestion while it is still a draft:
+    /// `"accepted"` once the reviewer applied it in the editor. The comment
+    /// deliberately stays Draft (it must keep owning its block and ride the
+    /// submit payload as a normal [edit]); this field only drives the card
+    /// chip. `None` for user comments and undecided agent suggestions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_state: Option<String>,
 }
 
 /// One turn in a comment's fork-agent discussion thread (Phase 2). Rows are
@@ -432,6 +445,9 @@ pub struct NewCommentRequest {
     pub structural: Option<StructuralPayload>,
     #[serde(default)]
     pub selection: Option<CommentSelection>,
+    /// Set only by the agent endpoints; the frontend never sends it.
+    #[serde(default)]
+    pub author: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -658,6 +674,8 @@ impl SessionStore {
             reopen_note: None,
             reopen_history: Vec::new(),
             actionable: false,
+            author: request.author,
+            agent_state: None,
         };
 
         let latest = session.revisions.last_mut().expect("non-empty checked above");
@@ -944,6 +962,35 @@ impl SessionStore {
         false
     }
 
+    /// Record the in-place resolution of an agent suggestion (M4): the comment
+    /// stays Draft — it must keep owning its block in the editor and ride the
+    /// submit payload as a normal [edit] — only `agent_state` changes (e.g.
+    /// `Some("accepted")`). Returns false when the comment doesn't exist or
+    /// isn't agent-authored.
+    pub fn set_agent_state(
+        &self,
+        session_id: &str,
+        comment_id: &str,
+        state: Option<String>,
+    ) -> bool {
+        let mut map = self.inner.lock().unwrap();
+        let Some(session) = map.get_mut(session_id) else {
+            return false;
+        };
+        for revision in session.revisions.iter_mut() {
+            for comment in revision.comments.iter_mut() {
+                if comment.id == comment_id && comment.author.is_some() {
+                    comment.agent_state = state;
+                    if let Err(e) = self.db.update_comment(session_id, comment) {
+                        tracing::error!(error = %e, "failed to persist agent state");
+                    }
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Reopen a resolved (or already-accepted) resolution, attaching an optional
     /// follow-up note for the next Revise round. The prior `resolution` body is
     /// kept (it's the continuity Claude needs) but un-accepted; `note` replaces
@@ -1114,6 +1161,8 @@ mod tests {
             reopen_note: None,
             reopen_history: Vec::new(),
             actionable: false,
+            author: None,
+            agent_state: None,
         }
     }
 

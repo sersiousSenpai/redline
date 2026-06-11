@@ -454,6 +454,8 @@ mod tests {
             reopen_note: None,
             reopen_history: Vec::new(),
             actionable: false,
+            author: None,
+            agent_state: None,
         }
     }
 
@@ -509,6 +511,36 @@ mod tests {
         assert!(payload.contains("MUST appear as a key in the resolution block"));
     }
 
+    // Agent-in-doc (M4): authorship is sidebar-only metadata — an
+    // agent-authored (and even accepted) edit must serialize byte-identically
+    // to the same edit without it. The hook contract never sees `author`.
+    #[test]
+    fn agent_author_never_changes_payload_bytes() {
+        let sections = parse_plan("# Alpha\n\nIntro paragraph.\n");
+        let plain = mk_comment(
+            "c-001",
+            CommentKind::Edit,
+            "A.p1",
+            "(edit)",
+            None,
+            Some(EditPayload {
+                original: "Intro paragraph.".to_string(),
+                revised: "Refined intro paragraph.".to_string(),
+            }),
+        );
+        let mut agent = plain.clone();
+        agent.author = Some("claude-code".to_string());
+        agent.agent_state = Some("accepted".to_string());
+        assert_eq!(
+            serialize_revise_payload(&sections, std::slice::from_ref(&plain), ""),
+            serialize_revise_payload(&sections, std::slice::from_ref(&agent), "")
+        );
+        assert_eq!(
+            serialize_ask_payload(&sections, std::slice::from_ref(&plain)),
+            serialize_ask_payload(&sections, std::slice::from_ref(&agent))
+        );
+    }
+
     #[test]
     fn comments_ordered_by_anchor_position() {
         let sections = parse_plan("# A\n\nfirst.\n\nsecond.\n\n# B\n\nbody.\n");
@@ -553,6 +585,8 @@ mod tests {
             reopen_note: None,
             reopen_history: Vec::new(),
             actionable: false,
+            author: None,
+            agent_state: None,
         };
         let prose = mk_comment(
             "c-001",
