@@ -21,7 +21,7 @@ const EMBEDDED_SKILL: &str = include_str!("../../skills/redline/SKILL.md");
 
 /// Bump in lockstep with the `version:` field in `skills/redline/SKILL.md`.
 /// `version_constant_matches_frontmatter` asserts the two never drift.
-const SKILL_VERSION: u32 = 2;
+const SKILL_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

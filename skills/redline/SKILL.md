@@ -6,7 +6,7 @@ description: >-
   [feedback], or [question], rl:blk- block-identity sidecars, or a
   REDLINE_RESOLUTIONS block. Covers presentation-aware plan markdown,
   preserving sidecars, and emitting resolutions.
-version: 2
+version: 3
 ---
 
 # Redline review protocol
@@ -112,3 +112,53 @@ a read-only fork of your session (Read, Grep, Glob — nothing else). If you are
 running as a discussion-thread fork, reply directly and concisely in markdown
 prose. Do **not** call `ExitPlanMode`, do not produce a new plan, and do not
 edit files.
+
+## 6. Suggesting edits into a live review (agent-in-doc)
+
+While the user reviews a plan you can propose a tracked edit directly into the
+open document. It appears inline as a tracked suggestion under your name and
+as a sidebar card with Accept/Reject — the user resolves it in place. Use it
+when the user asks you to (e.g. "suggest a fix for §B in Redline"), not to
+bypass the normal revise loop.
+
+Both endpoints are on the local daemon. The `session_id` is your Claude Code
+session id (the same one the review payload belongs to).
+
+**Read the plan's block structure first** — suggestions anchor by `blockId`,
+never by position. Always take ids from this response; never invent them:
+
+```bash
+curl -s http://127.0.0.1:7676/v1/sessions/<session_id>/plan
+```
+
+Returns `{ sessionId, versionNumber, rawPlanMarkdown, blocks }` where each
+block is `{ blockId, anchorId, kind, markdown, openComment }`. A block with
+`openComment: true` already carries an open comment — a suggestion against it
+will be rejected.
+
+**Post one suggestion per block:**
+
+```bash
+curl -s -X POST http://127.0.0.1:7676/v1/sessions/<session_id>/suggestions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "blockId": "blk-abc12345",
+    "kind": "edit",
+    "original": "<the block markdown exactly as the plan response gave it>",
+    "revised": "<your proposed block markdown>",
+    "agentId": "claude-code",
+    "body": "<optional one-line rationale shown on the card>"
+  }'
+```
+
+- **Always send `original`** (verbatim from the plan response). It is the
+  staleness guard: if the block changed since you read it, the POST fails
+  with 409 — re-fetch the plan and retry against the current content.
+- `409` also means the block already has an open comment (yours or the
+  user's): leave it alone or wait for the user to resolve it.
+- `kind` must be `"edit"`; `revised` must differ from the current block.
+- The store sees the published revision plus comments — user keystrokes from
+  the last second may not be visible yet; the 409 contract covers the rest.
+
+An accepted suggestion rides the next feedback payload as a normal `[edit]` —
+resolve it in `REDLINE_RESOLUTIONS` like any other comment id.
