@@ -55,9 +55,11 @@ export const THEMES: ThemeEntry[] = [
     base: { bg: "#000000", fg: "#f2f2f2", blue: "#3b6cd2", yellow: "#c7c400", green: "#28cd41", selection: "#4f9bff" },
   },
   {
+    // fg eased off Terminal.app's exact #28fe14: that value is tuned for thin
+    // terminal glyphs — on Redline's document-sized text it reads neon.
     name: "homebrew",
     label: "Homebrew",
-    base: { bg: "#000000", fg: "#28fe14", blue: "#3b6cd2", yellow: "#a6a300", green: "#28fe14", selection: "#ff9d28" },
+    base: { bg: "#000000", fg: "#2ce51b", blue: "#3b6cd2", yellow: "#a6a300", green: "#2ce51b", selection: "#ff9d28" },
   },
   {
     name: "ocean",
@@ -70,8 +72,10 @@ export const THEMES: ThemeEntry[] = [
     base: { bg: "#dfdbc3", fg: "#3b2322", blue: "#3b5bb5", yellow: "#9c6f1b", green: "#5a7d2a", selection: "#1f6feb" },
   },
   {
+    // Renamed from "Man Page" — the internal name stays `manpage` so saved
+    // theme preferences keep resolving.
     name: "manpage",
-    label: "Man Page",
+    label: "Gecko",
     base: { bg: "#fef49c", fg: "#000000", blue: "#0000b2", yellow: "#8a6d00", green: "#007f00", selection: "#4f46e5" },
   },
   {

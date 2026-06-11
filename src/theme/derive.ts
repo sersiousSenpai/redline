@@ -109,7 +109,7 @@ function contrastRatio(a: string, b: string): number {
  * contrast, so we take the largest blend ≤ maxT that still clears `minContrast`.
  *
  * On a well-separated theme (e.g. Studio) the full maxT clears the floor, so the
- * look is unchanged. On a low-contrast theme (Man Page, Silver Aerogel, Grass…)
+ * look is unchanged. On a low-contrast theme (Gecko, Silver Aerogel, Grass…)
  * the blend is pulled back toward `ink` only as far as readability requires.
  */
 function mutedInk(
@@ -169,7 +169,7 @@ export function deriveTokens(base: ThemeBase): ThemeTokens {
     "color-paper": bg,
     "color-ink": fg,
     // Secondary text must stay readable on every theme — not a flat 45% fade
-    // (that washed out Man Page / Silver Aerogel / Grass, etc.). 4.5:1 is the
+    // (that washed out Gecko / Silver Aerogel / Grass, etc.). 4.5:1 is the
     // WCAG AA floor for body text; well-separated themes are unaffected.
     "color-ink-muted": mutedInk(fg, bg, 0.45, 4.5),
     "color-rule": mix(fg, bg, 0.82),
