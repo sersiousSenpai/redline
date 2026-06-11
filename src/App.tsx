@@ -368,11 +368,18 @@ function App() {
       // Track this terminal's own context. A `cd` to a different folder drops
       // its remembered file — the file belonged to the old project.
       const ctx = termCtxRef.current.get(termId);
-      termCtxRef.current.set(termId, {
-        folder: dir,
-        file: ctx?.folder === dir ? (ctx?.file ?? null) : null,
-      });
-      if (linkNavRef.current) activateFolder(dir);
+      const file = ctx?.folder === dir ? (ctx?.file ?? null) : null;
+      termCtxRef.current.set(termId, { folder: dir, file });
+      // Terminal-aware activation: THIS terminal's remembered file wins over
+      // the folder's shared memory. Going through activateFolder here would
+      // clobber the per-terminal restore on every tab switch (the poll
+      // restarts per terminal, so its first tick always lands here) — with
+      // two terminals in one folder, both tabs would converge on whichever
+      // file was opened last anywhere in that folder.
+      if (linkNavRef.current) {
+        selectFolder(dir);
+        setActiveFile(file ?? folderFileRef.current.get(dir) ?? null);
+      }
     };
     void poll();
     const timer = window.setInterval(() => void poll(), 1800);
@@ -380,7 +387,7 @@ function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [activeTermId, openFolder, activateFolder]);
+  }, [activeTermId, openFolder, selectFolder, setActiveFile]);
 
   // Opening/closing a file records it as the active folder's remembered file
   // (so the folder reopens on it) AND as the active terminal's remembered file
