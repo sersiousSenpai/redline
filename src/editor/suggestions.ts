@@ -73,8 +73,14 @@ export function materializeSuggestions(
   const insMark = schema.marks.rl_ins;
   const delMark = schema.marks.rl_del;
 
-  const targets: { from: number; to: number; id: string; revised: string }[] =
-    [];
+  const targets: {
+    from: number;
+    to: number;
+    id: string;
+    revised: string;
+    author: string;
+    plain: boolean;
+  }[] = [];
   for (const c of comments) {
     if (!isProseEditComment(c) || !c.blockId || !c.edit) continue;
     const at = findBlock(editor, c.blockId);
@@ -89,7 +95,17 @@ export function materializeSuggestions(
     const from = at.pos;
     const to = at.pos + at.node.nodeSize;
     if (caretInside(editor, from, to)) continue;
-    targets.push({ from, to, id: c.blockId, revised: c.edit.revised });
+    targets.push({
+      from,
+      to,
+      id: c.blockId,
+      revised: c.edit.revised,
+      author: c.author ?? USER_AUTHOR,
+      // An agent suggestion the reviewer already accepted in place: on
+      // re-hydration (lost Y.Doc copy) the block must read as the settled
+      // revised text, not re-open as a pending proposal.
+      plain: c.agentState === "accepted",
+    });
   }
   if (targets.length === 0) return [];
 
@@ -102,7 +118,7 @@ export function materializeSuggestions(
     const original = seed.get(t.id)!;
     const attrs = (markName: "rl_ins" | "rl_del") => ({
       blockId: t.id,
-      authorId: USER_AUTHOR,
+      authorId: t.author,
       // Deterministic per block+kind, so re-materializing after an undo
       // converges on the same identity.
       suggestionId: `cmt:${t.id}:${markName}`,
@@ -111,9 +127,11 @@ export function materializeSuggestions(
 
     // Prose paragraph → Word-style inline tracked changes (struck deletions
     // kept in place, proposed insertions marked). Structured blocks
-    // (headings/lists/code/tables) fall back to whole-block replacement.
+    // (headings/lists/code/tables) fall back to whole-block replacement, as
+    // do already-accepted suggestions (plain settled content, no marks).
     const blockNode = editor.state.doc.nodeAt(t.from);
     if (
+      !t.plain &&
       parsed.childCount === 1 &&
       first.type.name === "paragraph" &&
       blockNode?.type.name === "paragraph"
@@ -220,6 +238,71 @@ export function rejectBlockSuggestions(
     at.pos + at.node.nodeSize,
     Fragment.fromArray([rebased, ...rest]),
   );
+  tr.setMeta("rl-sync", true);
+  tr.setMeta("addToHistory", false);
+  editor.view.dispatch(tr);
+  return true;
+}
+
+/**
+ * Accept a block's open suggestions in place (M4 agent suggestions): pending
+ * deletions are really removed, pending insertions keep their text with the
+ * mark flipped to `status: "accepted"` — authorship stays visible, the text
+ * is settled. The owning comment deliberately stays a draft (it keeps owning
+ * the block and rides the submit payload as a normal [edit]), so unlike
+ * rejection this NEVER falls through to a seed restore: a mark-less block
+ * means there is nothing to accept.
+ *
+ * @returns true if the document changed.
+ */
+export function acceptBlockSuggestions(editor: Editor, blockId: string): boolean {
+  if (editor.view.composing) return false;
+  const at = findBlock(editor, blockId);
+  if (!at) return false;
+  const schema = editor.schema;
+  if (!hasPendingSuggestions(at.node)) return false;
+
+  // Collect absolute leaf ranges first; apply high → low so positions hold.
+  const leaves: {
+    from: number;
+    to: number;
+    kind: "ins" | "del";
+    attrs: Record<string, unknown>;
+  }[] = [];
+  at.node.descendants((n, rel) => {
+    if (!n.isText) return true;
+    const pending = n.marks.filter(isPendingSuggestionMark);
+    if (pending.length === 0) return true;
+    const from = at.pos + 1 + rel;
+    const to = from + n.nodeSize;
+    // A pending deletion is accepted by really deleting the text — also when
+    // an ins mark rides on it (inserted-then-struck nets to nothing, the same
+    // outcome rejection gives that text). Otherwise settle the insertion.
+    const del = pending.find((m) => m.type.name === "rl_del");
+    if (del) {
+      leaves.push({ from, to, kind: "del", attrs: {} });
+    } else {
+      const ins = pending.find((m) => m.type.name === "rl_ins")!;
+      leaves.push({ from, to, kind: "ins", attrs: ins.attrs });
+    }
+    return true;
+  });
+  if (leaves.length === 0) return false;
+
+  const insMark = schema.marks.rl_ins;
+  const tr = editor.state.tr;
+  for (const leaf of leaves.sort((a, b) => b.from - a.from)) {
+    if (leaf.kind === "del") {
+      tr.delete(leaf.from, leaf.to);
+    } else {
+      tr.removeMark(leaf.from, leaf.to, insMark);
+      tr.addMark(
+        leaf.from,
+        leaf.to,
+        insMark.create({ ...leaf.attrs, status: "accepted" }),
+      );
+    }
+  }
   tr.setMeta("rl-sync", true);
   tr.setMeta("addToHistory", false);
   editor.view.dispatch(tr);

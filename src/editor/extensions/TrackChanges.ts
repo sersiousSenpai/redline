@@ -15,18 +15,19 @@ import type { Mark as PMMark, Node as PMNode } from "@tiptap/pm/model";
  * Each mark carries identity:
  *  - `authorId` — who proposed it ("user" today; agent ids in M4).
  *  - `suggestionId` — stable id for one contiguous suggestion run.
- *  - `status` — "pending" (an open proposal feeding the sidebar projection)
- *    or "display" (presentation-only paint, e.g. the vN-vs-vN-1 revision
- *    redline; never projected to comments). "accepted"/"rejected" are
- *    reserved for M4 in-place resolution — today both transitions remove the
- *    mark instead.
+ *  - `status` — "pending" (an open proposal feeding the sidebar projection),
+ *    "display" (presentation-only paint, e.g. the vN-vs-vN-1 revision
+ *    redline; never projected to comments), or "accepted" (M4: an agent
+ *    suggestion the reviewer applied in place — the text stays, rendered as
+ *    settled, no longer pending). Rejection still removes the mark instead
+ *    of a "rejected" status.
  *
  * The serializer accepts all changes (drops `rl_del` text, unwraps `rl_ins`)
  * so per-block accept-all serialization always yields the clean `revised`
  * text the changeLedger projects to the sidebar.
  */
 
-export type SuggestionStatus = "pending" | "display";
+export type SuggestionStatus = "pending" | "display" | "accepted";
 
 /** The local reviewer's author id (M4 introduces agent authors). */
 export const USER_AUTHOR = "user";

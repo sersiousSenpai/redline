@@ -56,7 +56,10 @@ declare module "@tiptap/core" {
   }
 }
 
-/** Every inline text leaf in [from,to) carries `markName`. */
+/** Every inline text leaf in [from,to) carries a still-PENDING `markName`.
+ *  Status matters: text whose `rl_ins` was accepted in place (M4 agent
+ *  suggestions) is settled content — deleting it must strike it like any
+ *  original text, not hard-remove it as "your own pending insertion". */
 function rangeAllMarked(
   state: EditorState,
   from: number,
@@ -68,7 +71,12 @@ function rangeAllMarked(
   state.doc.nodesBetween(from, to, (n) => {
     if (n.isText) {
       sawText = true;
-      if (!n.marks.some((m) => m.type.name === markName)) all = false;
+      if (
+        !n.marks.some(
+          (m) => m.type.name === markName && isPendingSuggestionMark(m),
+        )
+      )
+        all = false;
     }
   });
   return sawText && all;
