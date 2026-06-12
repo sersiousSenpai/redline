@@ -185,6 +185,11 @@ pub struct SessionSummary {
     /// its terminal waiting for review. Such a session must not be deleted.
     /// Set by the `list_sessions` command (the store can't see held POSTs).
     pub held: bool,
+    /// The dock terminal tab whose `claude` the held POST came from — scopes
+    /// the in-terminal "plan intercepted" strip to that tab only. `None`
+    /// while not held, or when the plan was intercepted from an external
+    /// terminal. Set by `list_sessions` alongside `held`.
+    pub held_terminal_id: Option<String>,
     /// Persisted attach state — `Detached` means the held POST died before a
     /// decision and the session needs a restore before submit/approve work.
     pub attach_state: AttachState,
@@ -713,6 +718,7 @@ impl SessionStore {
                     pending_count,
                     awaiting_review,
                     held: false,
+                    held_terminal_id: None,
                     attach_state: s.attach_state,
                 }
             })

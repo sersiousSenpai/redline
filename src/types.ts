@@ -204,6 +204,10 @@ export interface SessionSummary {
   awaitingReview: boolean;
   /** A POST is held for this session — its terminal is active; not deletable. */
   held: boolean;
+  /** The dock terminal tab whose `claude` the held POST came from — scopes the
+   *  in-terminal "plan intercepted" strip to that tab. Null while not held or
+   *  when the plan was intercepted from a terminal outside the dock. */
+  heldTerminalId?: string | null;
   /** Persisted attach state; "detached" needs a restore before submit/approve. */
   attachState: AttachState;
 }

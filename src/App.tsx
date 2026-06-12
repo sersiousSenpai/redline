@@ -953,13 +953,20 @@ function App() {
   );
   const submittedCount = submittedComments.length;
   // The active session's plan is currently held (Claude Code blocked in its
-  // terminal awaiting review) — drives the in-dock "plan intercepted" strip
-  // and anchors the "Claude is working" window below: held means the plan is
-  // back, so Claude is by definition not revising anymore. `summaries`
+  // terminal awaiting review) — anchors the "Claude is working" window below:
+  // held means the plan is back, so Claude is by definition not revising
+  // anymore. `summaries`
   // refreshes on plan-received / status / comment events, so this tracks hold
   // and release without its own wiring.
   const activeHeld =
     summaries.find((s) => s.sessionId === activeId)?.held ?? false;
+  // The focused terminal tab hosts a held plan (any session's): the backend
+  // pins each held POST to the dock terminal whose claude sent it, so the
+  // "plan intercepted" strip renders only inside that terminal — never in a
+  // sibling tab, and never for plans intercepted from external terminals.
+  const heldInFocusedTerm =
+    activeTermId !== null &&
+    summaries.some((s) => s.held && s.heldTerminalId === activeTermId);
   // Detached is *derived* from the active session's persisted attach state —
   // the backend records detachment (drop-guard, failed submit, startup sweep
   // for POSTs orphaned by a restart), so this survives restarts and detaches
@@ -2165,7 +2172,7 @@ function App() {
               terminal bg + mono font + matching padding so it sits on the
               glyph grid and reads as native output. Click-through so the
               shell underneath stays usable. */}
-          {activeHeld && (!termCollapsed || termFullscreen) && (
+          {heldInFocusedTerm && (!termCollapsed || termFullscreen) && (
             <div
               aria-hidden
               style={{

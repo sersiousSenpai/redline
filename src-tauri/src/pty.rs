@@ -434,6 +434,90 @@ pub fn pty_kill(state: tauri::State<'_, PtyState>, id: String) -> Result<(), Str
     Ok(())
 }
 
+/// Which terminal tab (if any) hosts the process that opened a TCP connection
+/// to the Redline daemon from local `peer_port`. Used to pin the "plan
+/// intercepted" strip to the exact terminal whose `claude` is blocked: the
+/// hook POST carries no process identity, but its socket does — `lsof` maps
+/// the client port to the owning pid, and walking that pid's ancestry lands
+/// on one of our spawned shells (claude is a descendant of the tab's shell).
+/// `None` when the POST came from outside the dock (external terminal) or the
+/// chain can't be resolved — callers must treat that as "no terminal".
+pub fn terminal_for_client_port(state: &PtyState, peer_port: u16) -> Option<String> {
+    let shells = shell_pid_to_terminal(state);
+    if shells.is_empty() {
+        return None;
+    }
+    let output = std::process::Command::new("lsof")
+        .args([
+            "-nP",
+            &format!("-iTCP:{peer_port}"),
+            "-sTCP:ESTABLISHED",
+            "-Fpn",
+        ])
+        .output()
+        .ok()?;
+    let client_pid =
+        parse_lsof_client_pid(&String::from_utf8_lossy(&output.stdout), peer_port)?;
+    walk_to_terminal(client_pid, &shells, ppid_of)
+}
+
+/// Snapshot of live shell pids → their terminal tab ids.
+fn shell_pid_to_terminal(state: &PtyState) -> HashMap<u32, String> {
+    let map = state.0.lock().unwrap();
+    map.iter()
+        .filter_map(|(id, s)| s.lock().unwrap().pid.map(|pid| (pid, id.clone())))
+        .collect()
+}
+
+/// Pick the pid that owns the *client* end of the connection out of `lsof
+/// -Fpn` output. Both endpoints match `-iTCP:<port>` (Redline holds
+/// `:7676-><port>`, the client holds `:<port>->:7676`), so key on the line
+/// whose local endpoint is the peer port — `:<port>->` only ever appears on
+/// the client's side.
+fn parse_lsof_client_pid(output: &str, peer_port: u16) -> Option<u32> {
+    let needle = format!(":{peer_port}->");
+    let mut current_pid: Option<u32> = None;
+    for line in output.lines() {
+        if let Some(pid) = line.strip_prefix('p') {
+            current_pid = pid.trim().parse().ok();
+        } else if let Some(name) = line.strip_prefix('n') {
+            if name.contains(&needle) {
+                return current_pid.filter(|&p| p != std::process::id());
+            }
+        }
+    }
+    None
+}
+
+/// Climb the parent chain from `start_pid` until a registered shell pid is
+/// hit. Bounded: the real chain is short (claude → shell), and a pid that
+/// escapes to launchd (pid ≤ 1) was never ours.
+fn walk_to_terminal(
+    start_pid: u32,
+    shells: &HashMap<u32, String>,
+    mut parent_of: impl FnMut(u32) -> Option<u32>,
+) -> Option<String> {
+    let mut pid = start_pid;
+    for _ in 0..16 {
+        if let Some(tid) = shells.get(&pid) {
+            return Some(tid.clone());
+        }
+        pid = parent_of(pid)?;
+        if pid <= 1 {
+            return None;
+        }
+    }
+    None
+}
+
+fn ppid_of(pid: u32) -> Option<u32> {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "ppid=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
 /// The live working directory of a terminal's shell — so "open a terminal
 /// here" can follow wherever the user `cd`'d. macOS/Linux: ask `lsof` for the
 /// shell pid's `cwd` fd. Returns `None` if it can't be determined.
@@ -491,6 +575,36 @@ mod tests {
         assert_eq!(flow.inner.lock().unwrap().unacked, 600);
         flow.ack(10_000);
         assert_eq!(flow.inner.lock().unwrap().unacked, 0);
+    }
+
+    #[test]
+    fn lsof_parse_picks_the_client_end_not_the_server_end() {
+        // -iTCP:<port> matches BOTH endpoints of the loopback connection; the
+        // strip must bind to the terminal hosting the *client* (claude), so
+        // the parser must skip Redline's own server-side line.
+        let lsof = "p100\nn127.0.0.1:7676->127.0.0.1:54321\np200\nn127.0.0.1:54321->127.0.0.1:7676\n";
+        assert_eq!(parse_lsof_client_pid(lsof, 54321), Some(200));
+        // No client line at all (connection already gone) → None, never a
+        // misattributed pid.
+        let server_only = "p100\nn127.0.0.1:7676->127.0.0.1:54321\n";
+        assert_eq!(parse_lsof_client_pid(server_only, 54321), None);
+    }
+
+    #[test]
+    fn ancestry_walk_finds_the_owning_shell_and_rejects_foreign_chains() {
+        // claude(300) → zsh(200, a registered tab) — must resolve to that tab.
+        let shells: HashMap<u32, String> = [(200u32, "tab-a".to_string())].into();
+        let parents: HashMap<u32, u32> = [(300u32, 200u32), (200, 50), (400, 1)].into();
+        let walk = |p: u32| parents.get(&p).copied();
+        assert_eq!(
+            walk_to_terminal(300, &shells, walk),
+            Some("tab-a".to_string())
+        );
+        // A process from an external terminal climbs to launchd without ever
+        // touching a registered shell → None (the strip must NOT show).
+        assert_eq!(walk_to_terminal(400, &shells, walk), None);
+        // Unknown pid with no parent info → None, no infinite loop.
+        assert_eq!(walk_to_terminal(999, &shells, walk), None);
     }
 
     #[test]

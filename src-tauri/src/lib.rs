@@ -22,12 +22,13 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use axum::{
-    extract::{Path, State},
+    extract::{ConnectInfo, Path, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
+use std::net::SocketAddr;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{
@@ -147,11 +148,19 @@ fn deny_response(reason: impl Into<String>) -> HookResponse {
     }
 }
 
+/// One held POST: the oneshot to answer it, the registration token that lets
+/// the drop-guard remove only its own entry, and the dock terminal the POST
+/// came from (`None` = external terminal / unresolvable) — drives the
+/// per-terminal "plan intercepted" strip.
+struct PendingEntry {
+    token: u64,
+    tx: oneshot::Sender<HookResponse>,
+    terminal_id: Option<String>,
+}
+
 #[derive(Clone)]
 struct PendingResponses {
-    // Value carries a unique registration token so a cancelled handle_plan can
-    // remove *only its own* held POST and never clobber a superseding one.
-    map: Arc<StdMutex<HashMap<String, (u64, oneshot::Sender<HookResponse>)>>>,
+    map: Arc<StdMutex<HashMap<String, PendingEntry>>>,
     next_token: Arc<AtomicU64>,
     // Woken on every register() so a take_or_wait() racing the next plan can
     // wake immediately when the new POST arrives instead of polling.
@@ -169,20 +178,31 @@ impl PendingResponses {
     /// Register a held POST for this session. Returns the receiver to await plus
     /// a unique token identifying *this* registration — used by the drop-guard
     /// (`take_if_owned`) so a cancelled request removes only its own entry.
-    fn register(&self, session_id: &str) -> Option<(oneshot::Receiver<HookResponse>, u64)> {
+    fn register(
+        &self,
+        session_id: &str,
+        terminal_id: Option<String>,
+    ) -> Option<(oneshot::Receiver<HookResponse>, u64)> {
         let mut map = self.map.lock().unwrap();
         if map.contains_key(session_id) {
             return None;
         }
         let token = self.next_token.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
-        map.insert(session_id.to_string(), (token, tx));
+        map.insert(
+            session_id.to_string(),
+            PendingEntry {
+                token,
+                tx,
+                terminal_id,
+            },
+        );
         drop(map);
         self.notify.notify_waiters();
         Some((rx, token))
     }
     fn take(&self, session_id: &str) -> Option<oneshot::Sender<HookResponse>> {
-        self.map.lock().unwrap().remove(session_id).map(|(_, tx)| tx)
+        self.map.lock().unwrap().remove(session_id).map(|e| e.tx)
     }
     /// Remove and return this session's sender *iff* it is still the one
     /// registered under `token`. Used by the drop-guard: a hit means the held
@@ -194,9 +214,18 @@ impl PendingResponses {
     ) -> Option<oneshot::Sender<HookResponse>> {
         let mut map = self.map.lock().unwrap();
         match map.get(session_id) {
-            Some((t, _)) if *t == token => map.remove(session_id).map(|(_, tx)| tx),
+            Some(e) if e.token == token => map.remove(session_id).map(|e| e.tx),
             _ => None,
         }
+    }
+    /// The dock terminal whose `claude` this session's held POST came from.
+    /// `None` when nothing is held, or the POST originated outside the dock.
+    fn terminal_of(&self, session_id: &str) -> Option<String> {
+        self.map
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .and_then(|e| e.terminal_id.clone())
     }
     /// Like `take` but if no sender is registered yet, wait up to `timeout` for
     /// the next `register` call (for any session) and retry. Closes the race
@@ -235,7 +264,7 @@ impl PendingResponses {
     /// from Active (the caller also settles each session's attach state).
     fn drain_all(&self) -> Vec<(String, oneshot::Sender<HookResponse>)> {
         let mut map = self.map.lock().unwrap();
-        map.drain().map(|(sid, (_, tx))| (sid, tx)).collect()
+        map.drain().map(|(sid, e)| (sid, e.tx)).collect()
     }
 }
 
@@ -412,6 +441,7 @@ fn refresh_tray(app: &AppHandle, store: &SessionStore) {
 }
 
 async fn handle_plan(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     State(app_state): State<AppState>,
     Json(payload): Json<Value>,
 ) -> Json<HookResponse> {
@@ -602,6 +632,22 @@ async fn handle_plan(
         "POST /v1/plan parsed; blocking for reviewer"
     );
 
+    // Pin this hold to the dock terminal whose `claude` sent it, by walking
+    // the TCP peer's process ancestry down to one of our spawned shells. None
+    // when the POST came from an external terminal (or resolution fails) —
+    // then no dock tab shows the "plan intercepted" strip, by design. The
+    // lsof/ps shell-outs block, so hop off the async runtime for them.
+    let held_terminal_id = {
+        let pty_state: pty::PtyState = (*app_state.app_handle.state::<pty::PtyState>()).clone();
+        let peer_port = peer.port();
+        tokio::task::spawn_blocking(move || {
+            pty::terminal_for_client_port(&pty_state, peer_port)
+        })
+        .await
+        .ok()
+        .flatten()
+    };
+
     // This POST is about to be held — record it before the event goes out so
     // the listener's summary refresh already sees Held (clearing any stale
     // Detached from a prior orphan).
@@ -629,7 +675,10 @@ async fn handle_plan(
     // Orphan fix: if a prior held POST for this session is still pending (Claude
     // re-entered plan mode, retried, or the earlier hold was abandoned), release
     // the stale waiter cleanly instead of leaving it hung, then take over.
-    let (mut rx, token) = match app_state.pending.register(&session_id) {
+    let (mut rx, token) = match app_state
+        .pending
+        .register(&session_id, held_terminal_id.clone())
+    {
         Some(pair) => pair,
         None => {
             if let Some(stale) = app_state.pending.take(&session_id) {
@@ -640,7 +689,7 @@ async fn handle_plan(
             }
             app_state
                 .pending
-                .register(&session_id)
+                .register(&session_id, held_terminal_id)
                 .expect("pending slot freed above")
         }
     };
@@ -734,7 +783,14 @@ async fn run_server(state: AppState) {
         Ok(listener) => {
             daemon_status.set_bound(true);
             tracing::info!("Redline daemon listening on http://127.0.0.1:7676");
-            if let Err(e) = axum::serve(listener, app).await {
+            // with_connect_info: handle_plan reads the peer's port to bind a
+            // held plan to the dock terminal whose claude sent it.
+            if let Err(e) = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            {
                 tracing::error!(error = %e, "axum::serve exited");
             }
         }
@@ -818,6 +874,7 @@ fn list_sessions(
         // show "detached" while a POST is actually held.
         if s.held {
             s.attach_state = AttachState::Held;
+            s.held_terminal_id = pending.terminal_of(&s.session_id);
         }
     }
     sessions
@@ -1785,7 +1842,7 @@ mod tests {
         let pending = PendingResponses::new();
         let md = "# Plan\n\nBody.\n";
         store.upsert_plan("s1", "/tmp/d", md.to_string(), reparse_sections(md), true, false);
-        let _rx = pending.register("s1").expect("register first time");
+        let _rx = pending.register("s1", None).expect("register first time");
 
         let err = delete_session_inner(&store, &pending, "s1", false)
             .expect_err("held session must be refused without force");
@@ -1800,7 +1857,7 @@ mod tests {
         let pending = PendingResponses::new();
         let md = "# Plan\n\nBody.\n";
         store.upsert_plan("s1", "/tmp/d", md.to_string(), reparse_sections(md), true, false);
-        let (rx, _token) = pending.register("s1").expect("register first time");
+        let (rx, _token) = pending.register("s1", None).expect("register first time");
 
         let removed = delete_session_inner(&store, &pending, "s1", true)
             .expect("force delete must succeed");
@@ -1824,7 +1881,7 @@ mod tests {
     #[tokio::test]
     async fn take_or_wait_returns_immediately_when_sender_present() {
         let pending = PendingResponses::new();
-        let _rx = pending.register("s1").expect("first register");
+        let _rx = pending.register("s1", None).expect("first register");
 
         let tx = pending
             .take_or_wait("s1", Duration::from_secs(5))
@@ -1853,7 +1910,7 @@ mod tests {
         };
         // Yield long enough that the waiter is parked on `notified()`.
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let _rx = pending.register("s2").expect("late register");
+        let _rx = pending.register("s2", None).expect("late register");
         let got = waiter.await.expect("waiter task panicked");
         assert!(got.is_some(), "take_or_wait must wake on register");
     }
@@ -1870,11 +1927,11 @@ mod tests {
     #[test]
     fn take_if_owned_only_removes_matching_token() {
         let pending = PendingResponses::new();
-        let (_rx1, token1) = pending.register("s1").expect("first register");
+        let (_rx1, token1) = pending.register("s1", None).expect("first register");
 
         // Supersede: take the original and register a fresh one (new token).
         let _ = pending.take("s1").expect("take original");
-        let (_rx2, token2) = pending.register("s1").expect("re-register");
+        let (_rx2, token2) = pending.register("s1", None).expect("re-register");
         assert_ne!(token1, token2, "tokens must be unique per registration");
 
         // The stale guard (token1) must NOT clobber the new registration.
@@ -1893,11 +1950,39 @@ mod tests {
     }
 
     #[test]
+    fn terminal_binding_lives_and_dies_with_the_held_entry() {
+        // The per-terminal "plan intercepted" strip reads terminal_of(); the
+        // binding must exist exactly while the POST is held — once the entry
+        // is taken (decision / supersede / detach), no tab may keep the strip.
+        let pending = PendingResponses::new();
+        let (_rx, _token) = pending
+            .register("s1", Some("tab-a".to_string()))
+            .expect("register");
+        assert_eq!(pending.terminal_of("s1"), Some("tab-a".to_string()));
+        assert_eq!(
+            pending.terminal_of("s2"),
+            None,
+            "unheld session has no binding"
+        );
+
+        let _ = pending.take("s1").expect("take");
+        assert_eq!(
+            pending.terminal_of("s1"),
+            None,
+            "binding must vanish with the held entry"
+        );
+
+        // External-terminal intercepts hold with no binding at all.
+        let (_rx2, _) = pending.register("s1", None).expect("re-register");
+        assert_eq!(pending.terminal_of("s1"), None);
+    }
+
+    #[test]
     fn send_into_dropped_receiver_is_an_error() {
         // Models the timed-out / detached held POST: submit_review must detect
         // this and roll back rather than report a false success.
         let pending = PendingResponses::new();
-        let (rx, _token) = pending.register("s1").expect("register");
+        let (rx, _token) = pending.register("s1", None).expect("register");
         drop(rx); // receiver gone — the held POST ended
         let tx = pending.take("s1").expect("sender still in map");
         assert!(
@@ -1911,8 +1996,8 @@ mod tests {
         // apply_mode settles each drained session's attach state, so the
         // drain must say *which* sessions it released.
         let pending = PendingResponses::new();
-        let (_rx1, _) = pending.register("s1").expect("register s1");
-        let (_rx2, _) = pending.register("s2").expect("register s2");
+        let (_rx1, _) = pending.register("s1", None).expect("register s1");
+        let (_rx2, _) = pending.register("s2", None).expect("register s2");
         let mut drained: Vec<String> = pending
             .drain_all()
             .into_iter()
