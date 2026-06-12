@@ -306,6 +306,26 @@ function SessionRow({
           >
             {STATUS_LABELS[session.status]}
           </span>
+          {/* Claude is no longer holding this review — comments and
+              discussions still save, but sending needs a restore first.
+              Surfaced here so the reviewer sees it BEFORE interacting. */}
+          {session.attachState === "detached" && (
+            <span
+              title="Claude Code is no longer waiting on this plan — open the session and use “Restore plan session” before sending."
+              style={{
+                color: "var(--color-warning, #b45309)",
+                border: "1px solid var(--color-warning, #b45309)",
+                borderRadius: "9999px",
+                padding: "0 6px",
+                fontSize: "9px",
+                fontWeight: 600,
+                textTransform: "uppercase",
+                letterSpacing: "0.06em",
+              }}
+            >
+              detached
+            </span>
+          )}
           {pending > 0 && (
             <span
               className="rounded-full px-1.5"

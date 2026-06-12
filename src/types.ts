@@ -158,6 +158,13 @@ export interface UpdateCommentRequest {
   selection?: CommentSelection;
 }
 
+/** Whether Claude Code is wired to this review right now. "held" = a hook
+ *  POST is blocked waiting; "detached" = the held POST died before a decision
+ *  (timeout, terminal closed, app restart) and the session needs a restore;
+ *  "idle" = nothing held, nothing unresolved. Persisted backend-side so
+ *  detachment survives restarts and background sessions. */
+export type AttachState = "idle" | "held" | "detached";
+
 export interface ReviewSession {
   sessionId: SessionId;
   projectPath: string;
@@ -165,6 +172,7 @@ export interface ReviewSession {
   createdAt: number;
   revisions: Revision[];
   status: SessionStatus;
+  attachState: AttachState;
 }
 
 /** Lightweight per-revision projection for the sidebar's revisions tree —
@@ -196,6 +204,8 @@ export interface SessionSummary {
   awaitingReview: boolean;
   /** A POST is held for this session — its terminal is active; not deletable. */
   held: boolean;
+  /** Persisted attach state; "detached" needs a restore before submit/approve. */
+  attachState: AttachState;
 }
 
 /** One entry in a directory listing from the `list_dir` command. `path` is
@@ -302,6 +312,9 @@ export interface PlanReceivedEvent {
   /** Present (true) only when the user submitted an Ask batch but Claude
    *  returned a modified plan body anyway. Surface a warning banner. */
   askModeViolated?: boolean;
+  /** This plan is a "Restore plan session" re-presentation (identical body) —
+   *  drafts from before the detach were carried onto it; nudge the reviewer. */
+  restored: boolean;
 }
 
 export type InterceptionMode = "active" | "ambient" | "paused";

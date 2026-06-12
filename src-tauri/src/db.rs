@@ -7,9 +7,9 @@ use std::sync::Mutex;
 use rusqlite::{params, Connection};
 
 use crate::state::{
-    reparse_sections, Comment, CommentKind, CommentScope, CommentSelection, CommentStatus,
-    EditPayload, Resolution, ReviewSession, Revision, RoundHistoryEntry, SessionStatus,
-    StructuralPayload, ThreadMessage,
+    reparse_sections, AttachState, Comment, CommentKind, CommentScope, CommentSelection,
+    CommentStatus, EditPayload, Resolution, ReviewSession, Revision, RoundHistoryEntry,
+    SessionStatus, StructuralPayload, ThreadMessage,
 };
 
 /// Serialize a comment's reopen-round history for the `reopen_history` column.
@@ -249,6 +249,13 @@ impl Database {
         // same reasoning as `fork_session_id` above.
         let _ = conn.execute("ALTER TABLE comments ADD COLUMN author TEXT", []);
         let _ = conn.execute("ALTER TABLE comments ADD COLUMN agent_state TEXT", []);
+        // Persisted attach state: lets detachment survive app restarts and be
+        // visible for background sessions (the live `held` flag is recomputed
+        // from in-memory senders and tells nothing after a crash).
+        let _ = conn.execute(
+            "ALTER TABLE sessions ADD COLUMN attach_state TEXT NOT NULL DEFAULT 'idle'",
+            [],
+        );
         Ok(())
     }
 
@@ -275,18 +282,20 @@ impl Database {
     pub fn upsert_session(&self, session: &ReviewSession) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO sessions (session_id, project_path, project_name, created_at, status)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO sessions (session_id, project_path, project_name, created_at, status, attach_state)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(session_id) DO UPDATE SET
                 project_path = excluded.project_path,
                 project_name = excluded.project_name,
-                status = excluded.status",
+                status = excluded.status,
+                attach_state = excluded.attach_state",
             params![
                 session.session_id,
                 session.project_path,
                 session.project_name,
                 session.created_at,
                 session_status_str(session.status),
+                session.attach_state.as_str(),
             ],
         )?;
         Ok(())
@@ -463,6 +472,49 @@ impl Database {
         Ok(())
     }
 
+    /// Targeted attach-state write — callable from the detach drop-guard with
+    /// just a session id, no session clone needed.
+    pub fn set_session_attach_state(
+        &self,
+        session_id: &str,
+        state: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET attach_state = ?1 WHERE session_id = ?2",
+            params![state, session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Startup sweep: a held POST never survives a restart, so every session
+    /// persisted as 'held' was orphaned by the previous instance.
+    pub fn detach_held_sessions(&self) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET attach_state = 'detached' WHERE attach_state = 'held'",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// Move a comment to another revision. `update_comment` deliberately never
+    /// touches `version_number`; carrying drafts onto a restored revision is
+    /// the one place that re-homes a comment.
+    pub fn set_comment_revision(
+        &self,
+        session_id: &str,
+        comment_id: &str,
+        version_number: u32,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE comments SET version_number = ?1 WHERE session_id = ?2 AND id = ?3",
+            params![version_number, session_id, comment_id],
+        )?;
+        Ok(())
+    }
+
     pub fn delete_comment(&self, session_id: &str, comment_id: &str) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         // Cascade the comment's discussion thread. Comment ids are reused
@@ -620,10 +672,11 @@ impl Database {
         let mut sessions: HashMap<String, ReviewSession> = HashMap::new();
 
         let mut stmt = conn.prepare(
-            "SELECT session_id, project_path, project_name, created_at, status FROM sessions",
+            "SELECT session_id, project_path, project_name, created_at, status, attach_state FROM sessions",
         )?;
         let rows = stmt.query_map([], |row| {
             let status_str: String = row.get(4)?;
+            let attach_str: String = row.get(5)?;
             Ok(ReviewSession {
                 session_id: row.get(0)?,
                 project_path: row.get(1)?,
@@ -631,6 +684,7 @@ impl Database {
                 created_at: row.get(3)?,
                 revisions: Vec::new(),
                 status: session_status_from(&status_str),
+                attach_state: AttachState::from_str(&attach_str).unwrap_or(AttachState::Idle),
             })
         })?;
         for row in rows {
@@ -827,6 +881,101 @@ mod tests {
         let rs = reloaded.get("s").expect("reloaded session");
         assert!(!rs.revisions[0].restored);
         assert!(rs.revisions[1].restored);
+    }
+
+    #[test]
+    fn attach_state_persists_and_flips_on_reload() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let store = SessionStore::new(db.clone());
+        let md = "# Plan\n\nBody.\n";
+        for sid in ["held-s", "idle-s", "det-s"] {
+            store.upsert_plan(sid, "/tmp/p", md.to_string(), reparse_sections(md), true, false);
+        }
+        store.set_attach_state("held-s", AttachState::Held);
+        store.set_attach_state("det-s", AttachState::Detached);
+        assert_eq!(store.get("held-s").unwrap().attach_state, AttachState::Held);
+        assert_eq!(store.get("idle-s").unwrap().attach_state, AttachState::Idle);
+
+        // Restart: a held POST can't survive, so Held must load as Detached —
+        // in memory and on disk; the other states reload unchanged.
+        let reloaded = SessionStore::new(db.clone());
+        assert_eq!(
+            reloaded.get("held-s").unwrap().attach_state,
+            AttachState::Detached,
+            "held must flip to detached across a restart"
+        );
+        assert_eq!(reloaded.get("idle-s").unwrap().attach_state, AttachState::Idle);
+        assert_eq!(reloaded.get("det-s").unwrap().attach_state, AttachState::Detached);
+
+        // The flip itself was persisted, not just computed in memory.
+        let row: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT attach_state FROM sessions WHERE session_id = 'held-s'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(row, "detached");
+    }
+
+    #[test]
+    fn restored_revision_carries_open_comments_forward() {
+        use crate::state::{CommentKind, CommentStatus};
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let store = SessionStore::new(db.clone());
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("s", "/tmp/s", md.to_string(), reparse_sections(md), true, false);
+        let comment = |body: &str| NewCommentRequest {
+            kind: CommentKind::Feedback,
+            scope: None,
+            anchor_id: "A".to_string(),
+            block_id: Some("rl:blk-1".to_string()),
+            structural: None,
+            body: body.to_string(),
+            edit: None,
+            selection: None,
+            author: None,
+        };
+        // A submitted comment (stays on v1), a reopened one and a draft (carried).
+        let settled = store.add_comment("s", comment("settled")).unwrap();
+        store.mark_submitted("s");
+        store.reopen_resolution("s", &settled.id, Some("follow-up"), false);
+        let submitted = store.add_comment("s", comment("in flight")).unwrap();
+        store.mark_submitted("s");
+        store.reopen_resolution("s", &settled.id, Some("follow-up"), false);
+        let draft = store.add_comment("s", comment("still drafting")).unwrap();
+
+        // Same body re-presented via "Restore plan session".
+        store.upsert_plan("s", "/tmp/s", md.to_string(), reparse_sections(md), true, true);
+
+        let check = |store: &SessionStore, label: &str| {
+            let session = store.get("s").expect("session");
+            assert_eq!(session.revisions.len(), 2, "{label}");
+            let v1 = &session.revisions[0];
+            let v2 = &session.revisions[1];
+            // Open work moved to the restored revision (the pane shows only
+            // the latest revision's comments); settled work stayed put.
+            assert_eq!(
+                v1.comments.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+                vec![submitted.id.as_str()],
+                "{label}: only the in-flight comment stays on v1"
+            );
+            let carried: Vec<&Comment> = v2.comments.iter().collect();
+            assert_eq!(carried.len(), 2, "{label}");
+            let reopened = carried.iter().find(|c| c.id == settled.id).unwrap();
+            assert!(matches!(reopened.status, CommentStatus::Reopened), "{label}");
+            assert_eq!(reopened.reopen_note.as_deref(), Some("follow-up"), "{label}");
+            let moved_draft = carried.iter().find(|c| c.id == draft.id).unwrap();
+            assert!(matches!(moved_draft.status, CommentStatus::Draft), "{label}");
+            // Identical body → anchors resolve unchanged; nothing was rewritten.
+            assert_eq!(moved_draft.anchor_id, "A", "{label}");
+            assert_eq!(moved_draft.block_id.as_deref(), Some("rl:blk-1"), "{label}");
+        };
+        check(&store, "in memory");
+        check(&SessionStore::new(db), "after reload");
     }
 
     #[test]

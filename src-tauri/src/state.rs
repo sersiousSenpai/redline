@@ -102,6 +102,45 @@ pub enum SessionStatus {
     Aborted,
 }
 
+/// Whether Claude Code is wired to this review right now.
+///
+/// - `Idle`     — no POST held and nothing unresolved: the last decision was
+///                delivered (or the session is brand new / approved).
+/// - `Held`     — a hook POST is currently held; Claude is blocked waiting.
+/// - `Detached` — the held POST died before a decision (hook timeout, terminal
+///                closed, app restart). Submitting/approving would no-op until
+///                the reviewer restores the session.
+///
+/// Persisted so detachment survives app restarts and is visible for
+/// background sessions — unlike the real-time `held` flag, which is
+/// recomputed from live senders on every `list_sessions`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AttachState {
+    Idle,
+    Held,
+    Detached,
+}
+
+impl AttachState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AttachState::Idle => "idle",
+            AttachState::Held => "held",
+            AttachState::Detached => "detached",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "idle" => Some(AttachState::Idle),
+            "held" => Some(AttachState::Held),
+            "detached" => Some(AttachState::Detached),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewSession {
@@ -111,6 +150,7 @@ pub struct ReviewSession {
     pub created_at: i64,
     pub revisions: Vec<Revision>,
     pub status: SessionStatus,
+    pub attach_state: AttachState,
 }
 
 /// A lightweight per-revision projection for the sidebar's revisions tree —
@@ -145,6 +185,9 @@ pub struct SessionSummary {
     /// its terminal waiting for review. Such a session must not be deleted.
     /// Set by the `list_sessions` command (the store can't see held POSTs).
     pub held: bool,
+    /// Persisted attach state — `Detached` means the held POST died before a
+    /// decision and the session needs a restore before submit/approve work.
+    pub attach_state: AttachState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -483,14 +526,46 @@ pub struct UpsertResult {
 
 impl SessionStore {
     pub fn new(db: Arc<Database>) -> Self {
-        let map = db.load_all().unwrap_or_else(|e| {
+        let mut map = db.load_all().unwrap_or_else(|e| {
             tracing::error!(error = %e, "failed to load sessions from db; starting empty");
             HashMap::new()
         });
+        // A held POST can never survive a process restart — any session
+        // persisted as Held was orphaned when the previous instance died, so
+        // it is detached now. Flip in memory and in one sweep on disk.
+        let mut any_flipped = false;
+        for s in map.values_mut() {
+            if s.attach_state == AttachState::Held {
+                s.attach_state = AttachState::Detached;
+                any_flipped = true;
+            }
+        }
+        if any_flipped {
+            if let Err(e) = db.detach_held_sessions() {
+                tracing::error!(error = %e, "failed to persist startup held→detached flip");
+            }
+        }
         Self {
             inner: Arc::new(Mutex::new(map)),
             db,
             pending_restores: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    /// Record the session's attach state (held / detached / idle), in memory
+    /// and on disk. Callable with just a session id so the detach drop-guard
+    /// can persist without cloning a session.
+    pub fn set_attach_state(&self, session_id: &str, state: AttachState) {
+        let mut map = self.inner.lock().unwrap();
+        let Some(session) = map.get_mut(session_id) else {
+            return;
+        };
+        if session.attach_state == state {
+            return;
+        }
+        session.attach_state = state;
+        if let Err(e) = self.db.set_session_attach_state(session_id, state.as_str()) {
+            tracing::error!(error = %e, "failed to persist attach state");
         }
     }
 
@@ -539,6 +614,7 @@ impl SessionStore {
                 created_at: now,
                 revisions: Vec::new(),
                 status: SessionStatus::InReview,
+                attach_state: AttachState::Idle,
             };
             if let Err(e) = self.db.upsert_session(&s) {
                 tracing::error!(error = %e, "failed to persist session");
@@ -560,6 +636,34 @@ impl SessionStore {
             tracing::error!(error = %e, "failed to persist revision");
         }
         session.revisions.push(revision);
+        // A restored revision re-presents the identical body (that's the only
+        // way `restored` gets set), so every anchor/block id resolves the same
+        // — carry the reviewer's open work forward so the pane, which shows
+        // only the latest revision's comments, doesn't hide it. Settled
+        // comments stay put for the history views; drafts/reopens were already
+        // included in submits via the all-revisions flat-map, this makes them
+        // *visible* again.
+        if restored {
+            let mut carried: Vec<Comment> = Vec::new();
+            let last_idx = session.revisions.len() - 1;
+            for revision in &mut session.revisions[..last_idx] {
+                let mut kept = Vec::with_capacity(revision.comments.len());
+                for c in revision.comments.drain(..) {
+                    if matches!(c.status, CommentStatus::Draft | CommentStatus::Reopened) {
+                        carried.push(c);
+                    } else {
+                        kept.push(c);
+                    }
+                }
+                revision.comments = kept;
+            }
+            for c in &carried {
+                if let Err(e) = self.db.set_comment_revision(session_id, &c.id, version_number) {
+                    tracing::error!(error = %e, "failed to persist carried-forward comment");
+                }
+            }
+            session.revisions[last_idx].comments.extend(carried);
+        }
         UpsertResult {
             version_number,
             is_new_session,
@@ -609,6 +713,7 @@ impl SessionStore {
                     pending_count,
                     awaiting_review,
                     held: false,
+                    attach_state: s.attach_state,
                 }
             })
             .collect();
@@ -1143,6 +1248,14 @@ pub fn reparse_sections(raw: &str) -> Vec<Section> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attach_state_round_trips_through_str() {
+        for state in [AttachState::Idle, AttachState::Held, AttachState::Detached] {
+            assert_eq!(AttachState::from_str(state.as_str()), Some(state));
+        }
+        assert_eq!(AttachState::from_str("bogus"), None);
+    }
 
     fn comment(kind: CommentKind, scope: Option<CommentScope>) -> Comment {
         Comment {

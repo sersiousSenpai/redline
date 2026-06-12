@@ -10,6 +10,7 @@ import { CommentCard } from "./components/CommentCard";
 import { CommentComposer } from "./components/CommentComposer";
 import { lazy, Suspense } from "react";
 import { installExternalLinkHandler } from "./lib/externalLinks";
+import { isClaudeWorking } from "./lib/claudeWorking";
 // Tiptap/ProseMirror is heavy; lazy-load so it's off the initial paint path.
 const PlanEditor = lazy(() =>
   import("./components/PlanEditor").then((m) => ({ default: m.PlanEditor })),
@@ -39,6 +40,7 @@ import type { TerminalTabsHandle } from "./components/TerminalTabs";
 import { DecisionWindowBanner } from "./components/DecisionWindowBanner";
 import { FlashOverlay } from "./components/FlashOverlay";
 import { playInterceptBeep, DEFAULT_SOUND } from "./audio/beep";
+import { buildResumeCommand } from "./lib/resumeCommand";
 import type {
   Comment,
   CommentType,
@@ -135,11 +137,16 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [composing, setComposing] = useState<ComposingState | null>(null);
   const [busy, setBusy] = useState(false);
-  // True between a successful submit and the next plan-received POST for the
-  // same session. Keeps the submit/approve buttons disabled across the brief
-  // gap where the new plan's sender hasn't yet been registered — otherwise
-  // the user can re-fire submit and silently drop feedback (bug #5).
-  const [awaitingNextPlan, setAwaitingNextPlan] = useState(false);
+  // Session ids with a submit in flight: added on a successful submit, removed
+  // by that session's next plan-received (or detach) event. Keeps the
+  // submit/approve buttons disabled across the brief gap where the new plan's
+  // sender hasn't yet been registered — otherwise the user can re-fire submit
+  // and silently drop feedback (bug #5). Per-session so the lock survives
+  // sidebar switches and clears even when the plan lands while another
+  // session is in the foreground.
+  const [awaitingSessions, setAwaitingSessions] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   // null = "viewing the latest revision in the document pane" (normal editing
   // mode). A specific number puts the pane into read-only historical view of
   // that revision so the reviewer can scroll back and compare against the
@@ -152,9 +159,11 @@ function App() {
   // Set false when this window's daemon could not bind :7676 (another process
   // holds it): this window captures no plans, so we block it with a banner.
   const [daemonBound, setDaemonBound] = useState<boolean>(true);
-  // True when the active session's held POST detached (timed out / terminal
-  // closed) — Claude is no longer waiting, so the reviewer must re-run the plan.
-  const [detached, setDetached] = useState<boolean>(false);
+  // The detached banner's manual dismiss. The detached state itself is
+  // derived from the active session's persisted `attachState` (see below) so
+  // it survives app restarts and background-session detaches; this flag only
+  // hides the banner until the next session switch / plan arrival.
+  const [detachDismissed, setDetachDismissed] = useState<boolean>(false);
   const [toast, setToast] = useState<string | null>(null);
   const [hookStatus, setHookStatus] = useState<HookStatus | null>(null);
   const [skillStatus, setSkillStatus] = useState<SkillStatus | null>(null);
@@ -696,12 +705,33 @@ function App() {
         setFlashSeq((n) => n + 1);
         if (flashSoundRef.current) playInterceptBeep(flashSoundConfigRef.current);
       }
+      // The round-trip for this session is over — release its submit lock no
+      // matter which session is in the foreground.
+      setAwaitingSessions((prev) => {
+        if (!prev.has(payload.sessionId)) return prev;
+        const next = new Set(prev);
+        next.delete(payload.sessionId);
+        return next;
+      });
       if (payload.sessionId === activeId) {
-        setAwaitingNextPlan(false);
-        // A fresh plan means Claude is waiting again — clear any stale detach.
-        setDetached(false);
+        // A fresh plan means Claude is waiting again — re-arm the banner for
+        // any future detach (the derived state clears via attachState=held).
+        setDetachDismissed(false);
       }
-      void refreshSummaries().then(() => {
+      void refreshSummaries().then((list) => {
+        // Restore landed: drafts from before the detach were carried onto the
+        // re-presented revision. Nudge — the user's next move is theirs.
+        if (payload.restored) {
+          const pending =
+            list.find((s) => s.sessionId === payload.sessionId)
+              ?.pendingCount ?? 0;
+          if (pending > 0) {
+            setToast(
+              `${pending} pending comment${pending === 1 ? "" : "s"} carried over — Send to Claude Code when ready`,
+            );
+            setTimeout(() => setToast(null), 4000);
+          }
+        }
         // Bring the intercepted plan to the foreground no matter the current
         // view — browsing project files, sitting on another session, or no
         // session at all. The whole point of an intercept is to review the new
@@ -731,14 +761,19 @@ function App() {
     });
     // The held POST for a session detached before a decision (hook timeout,
     // terminal/session closed, app restart). Claude is no longer waiting.
+    // The backend persisted attachState=detached before emitting, so the
+    // summary refresh is what flips the derived `detached` — this listener
+    // just makes that immediate.
     const detachedUnlisten = listen<{ sessionId: string }>(
       "session-detached",
       (e) => {
         void refreshSummaries();
-        if (e.payload.sessionId === activeId) {
-          setAwaitingNextPlan(false);
-          setDetached(true);
-        }
+        setAwaitingSessions((prev) => {
+          if (!prev.has(e.payload.sessionId)) return prev;
+          const next = new Set(prev);
+          next.delete(e.payload.sessionId);
+          return next;
+        });
       },
     );
     // This window's daemon could not bind :7676 — it captures no plans.
@@ -805,13 +840,13 @@ function App() {
       void loadSession(activeId);
       setWarning(null);
       setAskModeViolation(false);
-      setDetached(false);
+      setDetachDismissed(false);
     } else {
       setSession(null);
     }
-    // Switching sessions invalidates the awaiting-next-plan lock — it was
-    // scoped to the prior session's in-flight submit.
-    setAwaitingNextPlan(false);
+    // The awaiting-next-plan lock is per-session (`awaitingSessions`), so a
+    // sidebar switch neither clears nor leaks it — switching back to a session
+    // mid-revision correctly resumes its "Claude is working" state.
     // Historical-view state is per-session; fall back to "latest" on switch.
     setViewedVersionNumber(null);
   }, [activeId]);
@@ -917,26 +952,42 @@ function App() {
     (c) => c.status === "submitted",
   );
   const submittedCount = submittedComments.length;
-  // `waiting` gates the submit/approve buttons. Two conditions hold it true:
-  //   1) Comments are submitted but none are pending (Claude has the ball).
-  //   2) `awaitingNextPlan` — a submit just fired and we have not yet seen the
-  //      next plan-received POST. Without this, on the second feedback round
-  //      the user could re-fire submit while the new plan's sender hasn't
-  //      registered yet, and the second batch would silently drop.
-  const waiting =
-    awaitingNextPlan || (submittedCount > 0 && pendingComments.length === 0);
+  // The active session's plan is currently held (Claude Code blocked in its
+  // terminal awaiting review) — drives the in-dock "plan intercepted" strip
+  // and anchors the "Claude is working" window below: held means the plan is
+  // back, so Claude is by definition not revising anymore. `summaries`
+  // refreshes on plan-received / status / comment events, so this tracks hold
+  // and release without its own wiring.
+  const activeHeld =
+    summaries.find((s) => s.sessionId === activeId)?.held ?? false;
+  // Detached is *derived* from the active session's persisted attach state —
+  // the backend records detachment (drop-guard, failed submit, startup sweep
+  // for POSTs orphaned by a restart), so this survives restarts and detaches
+  // that fire while another session is in the foreground. `detachDismissed`
+  // only mutes the banner; the disabled submit/approve gating stays.
+  const activeDetached =
+    summaries.find((s) => s.sessionId === activeId)?.attachState ===
+    "detached";
+  const detached = activeDetached && !detachDismissed;
+  // `waiting` shows the "Claude is working" indicators and gates the
+  // submit/approve buttons — true from "Send to Claude Code" until that
+  // session's next plan arrives. See isClaudeWorking for the exact rules
+  // (notably: comments stuck at "submitted" after the plan is back must NOT
+  // keep the indicator lit — the unresolved-ids warning owns that).
+  const waiting = isClaudeWorking({
+    awaitingNextPlan: activeId !== null && awaitingSessions.has(activeId),
+    held: activeHeld,
+    detached,
+    sessionStatus: session?.status,
+    submittedCount,
+    pendingCount: pendingComments.length,
+  });
   // Mirror Footer's mode inference for the pane-side waiting card: if the
   // in-flight batch is all non-actionable questions, Claude is answering,
   // not revising (a promoted question flips the batch to Revise).
   const waitingAsk =
     waiting &&
     submittedComments.every((c) => c.type === "question" && !c.actionable);
-  // The active session's plan is currently held (Claude Code blocked in its
-  // terminal awaiting review) — drives the in-dock "plan intercepted" strip.
-  // `summaries` refreshes on plan-received / status / comment events, so the
-  // strip tracks hold and release without its own wiring.
-  const activeHeld =
-    summaries.find((s) => s.sessionId === activeId)?.held ?? false;
   // A detached plan is no longer held by Claude — Approve / Continue Revising
   // would no-op against a dead channel, so disable them until the session is
   // restored (which clears `detached` on the next plan-received POST).
@@ -1089,11 +1140,15 @@ function App() {
       // Lock submit/approve until the next plan-received POST arrives — closes
       // the window where the user could re-fire submit before the new revision
       // is fully wired up.
-      setAwaitingNextPlan(true);
+      setAwaitingSessions((prev) => new Set(prev).add(session.sessionId));
     } catch (err) {
       console.error("submit_review failed", err);
-      if (isDetachError(err)) setDetached(true);
-      else alert(`Submit failed: ${err}`);
+      // The backend persisted attachState=detached on this failure — pull the
+      // fresh summaries so the derived banner/gating pick it up.
+      if (isDetachError(err)) {
+        setDetachDismissed(false);
+        void refreshSummaries();
+      } else alert(`Submit failed: ${err}`);
     } finally {
       setBusy(false);
     }
@@ -1108,8 +1163,10 @@ function App() {
       setTimeout(() => setToast(null), 3500);
     } catch (err) {
       console.error("approve_plan failed", err);
-      if (isDetachError(err)) setDetached(true);
-      else alert(`Approve failed: ${err}`);
+      if (isDetachError(err)) {
+        setDetachDismissed(false);
+        void refreshSummaries();
+      } else alert(`Approve failed: ${err}`);
     } finally {
       setBusy(false);
     }
@@ -1122,12 +1179,7 @@ function App() {
   // comments, revisions and reopen history intact (no phantom new review).
   const restorePlanSession = () => {
     if (!session) return;
-    const shq = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
-    const prompt =
-      "The reviewer reopened this plan in Redline for continued review. " +
-      "Please re-enter plan mode and call ExitPlanMode to re-present your " +
-      "current plan for review (no changes needed unless you have them).";
-    const cmd = `claude --resume ${shq(session.sessionId)} ${shq(prompt)}\r`;
+    const cmd = `${buildResumeCommand(session.sessionId)}\r`;
     const cwd = session.projectPath || null;
     // Arm a one-shot restore so the resumed session's re-presented plan is
     // labeled "vN restored" rather than counted as a fresh version/thread.
@@ -1142,7 +1194,9 @@ function App() {
         void invoke("pty_write", { id, data: cmd });
       }, 900);
     }
-    setDetached(false);
+    // Hide the banner while the resume runs; the re-presented plan flips
+    // attachState back to held, which clears the derived state for real.
+    setDetachDismissed(true);
     setToast("Resuming the session in the terminal below ↓");
     setTimeout(() => setToast(null), 4000);
   };
@@ -1151,16 +1205,10 @@ function App() {
   // resume command so the user can paste it into their own terminal.
   const copyRestoreCommand = () => {
     if (!session) return;
-    const shq = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
-    const prompt =
-      "The reviewer reopened this plan in Redline for continued review. " +
-      "Please re-enter plan mode and call ExitPlanMode to re-present your " +
-      "current plan for review (no changes needed unless you have them).";
-    const cmd = `claude --resume ${shq(session.sessionId)} ${shq(prompt)}`;
     // Same one-shot restore arming as restorePlanSession — the resumed plan,
     // whichever terminal runs it, should land as "vN restored".
     void invoke("arm_restore", { sessionId: session.sessionId });
-    void navigator.clipboard?.writeText(cmd);
+    void navigator.clipboard?.writeText(buildResumeCommand(session.sessionId));
     setToast("Resume command copied — paste it into your terminal");
     setTimeout(() => setToast(null), 4000);
   };
@@ -1857,7 +1905,7 @@ function App() {
                 </span>
                 <button
                   type="button"
-                  onClick={() => setDetached(false)}
+                  onClick={() => setDetachDismissed(true)}
                   aria-label="Dismiss"
                   style={{
                     background: "transparent",

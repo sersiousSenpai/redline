@@ -42,8 +42,8 @@ use crate::db::Database;
 use crate::hook::HookStatus;
 use crate::skill::SkillStatus;
 use crate::state::{
-    now_millis, Comment, InterceptionMode, NewCommentRequest, ReviewSession, SessionStatus,
-    SessionStore, SessionSummary, SubmissionMode, UpdateCommentRequest,
+    now_millis, AttachState, Comment, InterceptionMode, NewCommentRequest, ReviewSession,
+    SessionStatus, SessionStore, SessionSummary, SubmissionMode, UpdateCommentRequest,
 };
 
 const SETTING_MODE: &str = "interception_mode";
@@ -230,11 +230,12 @@ impl PendingResponses {
     fn has(&self, session_id: &str) -> bool {
         self.map.lock().unwrap().contains_key(session_id)
     }
-    /// Remove and return every pending sender — used to release orphaned held
-    /// POSTs when the interception mode changes away from Active.
-    fn drain_all(&self) -> Vec<oneshot::Sender<HookResponse>> {
+    /// Remove and return every pending sender with its session id — used to
+    /// release orphaned held POSTs when the interception mode changes away
+    /// from Active (the caller also settles each session's attach state).
+    fn drain_all(&self) -> Vec<(String, oneshot::Sender<HookResponse>)> {
         let mut map = self.map.lock().unwrap();
-        map.drain().map(|(_, (_, tx))| tx).collect()
+        map.drain().map(|(sid, (_, tx))| (sid, tx)).collect()
     }
 }
 
@@ -249,6 +250,7 @@ impl PendingResponses {
 struct DetachGuard {
     pending: PendingResponses,
     app_handle: AppHandle,
+    store: SessionStore,
     session_id: String,
     token: u64,
 }
@@ -264,6 +266,10 @@ impl Drop for DetachGuard {
                 session_id = %self.session_id,
                 "held POST detached before a decision — releasing orphan and notifying UI"
             );
+            // Persist BEFORE emitting: the event listener refreshes summaries,
+            // which must already observe the detached state.
+            self.store
+                .set_attach_state(&self.session_id, AttachState::Detached);
             let _ = self.app_handle.emit(
                 "session-detached",
                 SessionEvent {
@@ -351,6 +357,9 @@ struct PlanReceivedEvent {
     /// the change is processed as a normal Revise revision.
     #[serde(skip_serializing_if = "Option::is_none")]
     ask_mode_violated: Option<bool>,
+    /// This plan is a "Restore plan session" re-presentation (identical body,
+    /// no version semantics) — the UI nudges about carried-over drafts.
+    restored: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -593,6 +602,12 @@ async fn handle_plan(
         "POST /v1/plan parsed; blocking for reviewer"
     );
 
+    // This POST is about to be held — record it before the event goes out so
+    // the listener's summary refresh already sees Held (clearing any stale
+    // Detached from a prior orphan).
+    app_state
+        .store
+        .set_attach_state(&session_id, AttachState::Held);
     let event = PlanReceivedEvent {
         session_id: session_id.clone(),
         version: version_number,
@@ -604,6 +619,7 @@ async fn handle_plan(
         resolution_parse_error: resolution_result.parse_error,
         mode: event_mode,
         ask_mode_violated,
+        restored,
     };
     if let Err(e) = app_state.app_handle.emit("plan-received", event) {
         tracing::warn!(error = %e, "failed to emit plan-received");
@@ -634,6 +650,7 @@ async fn handle_plan(
     let _detach_guard = DetachGuard {
         pending: app_state.pending.clone(),
         app_handle: app_state.app_handle.clone(),
+        store: app_state.store.clone(),
         session_id: session_id.clone(),
         token,
     };
@@ -681,6 +698,9 @@ async fn handle_plan(
                         // Window elapsed unclaimed — auto-approve and drop the
                         // pending sender so it is never orphaned.
                         let _ = app_state.pending.take(&session_id);
+                        app_state
+                            .store
+                            .set_attach_state(&session_id, AttachState::Idle);
                         tracing::info!(session_id = %session_id, "Ambient: decision window elapsed — auto-approving");
                         allow_response(
                             "Auto-approved (Ambient mode — the plan was not opened for review within the decision window).",
@@ -794,6 +814,11 @@ fn list_sessions(
     let mut sessions = store.list();
     for s in &mut sessions {
         s.held = pending.has(&s.session_id);
+        // A live sender is ground truth — never let a lagging persisted state
+        // show "detached" while a POST is actually held.
+        if s.held {
+            s.attach_state = AttachState::Held;
+        }
     }
     sessions
 }
@@ -1200,6 +1225,15 @@ async fn submit_review(
     if tx.send(deny_response(payload)).is_err() {
         expected_modes.take(&session_id);
         store.unmark_submitted(&session_id, &submitted);
+        // Detachment discovered at decision time — we held the sender, so the
+        // drop-guard can't fire for it anymore. Persist and announce it here.
+        store.set_attach_state(&session_id, AttachState::Detached);
+        let _ = app.emit(
+            "session-detached",
+            SessionEvent {
+                session_id: session_id.clone(),
+            },
+        );
         let _ = app.emit(
             "comments-changed",
             SessionEvent {
@@ -1218,6 +1252,7 @@ async fn submit_review(
                 .to_string(),
         );
     }
+    store.set_attach_state(&session_id, AttachState::Idle);
 
     // Best-effort: skip Claude Code's "Auto-accept / Edit / Feedback / Reject"
     // prompt by feeding the configured keystroke into the embedded terminal.
@@ -1261,6 +1296,7 @@ fn approve_plan(
     let _ = expected_modes.take(&session_id);
     store.set_status(&session_id, SessionStatus::Approved);
     let _ = tx.send(allow_response("Reviewer approved via Redline."));
+    store.set_attach_state(&session_id, AttachState::Idle);
     tracing::info!(session_id = %session_id, "approve_plan fired");
     let _ = app.emit(
         "session-status-changed",
@@ -1358,10 +1394,12 @@ fn get_interception_mode(settings: tauri::State<'_, Settings>) -> String {
 fn apply_mode(app: &AppHandle, mode: InterceptionMode) {
     app.state::<Settings>().set(mode);
     if mode != InterceptionMode::Active {
-        for tx in app.state::<PendingResponses>().drain_all() {
+        for (session_id, tx) in app.state::<PendingResponses>().drain_all() {
             let _ = tx.send(allow_response(
                 "Superseded — Redline interception mode changed; plan auto-approved.",
             ));
+            app.state::<SessionStore>()
+                .set_attach_state(&session_id, AttachState::Idle);
         }
     }
     tracing::info!(mode = %mode.as_str(), "interception mode changed");
@@ -1866,6 +1904,24 @@ mod tests {
             tx.send(allow_response("late")).is_err(),
             "sending into a dropped receiver must fail"
         );
+    }
+
+    #[test]
+    fn drain_all_returns_session_ids_with_senders() {
+        // apply_mode settles each drained session's attach state, so the
+        // drain must say *which* sessions it released.
+        let pending = PendingResponses::new();
+        let (_rx1, _) = pending.register("s1").expect("register s1");
+        let (_rx2, _) = pending.register("s2").expect("register s2");
+        let mut drained: Vec<String> = pending
+            .drain_all()
+            .into_iter()
+            .map(|(sid, _tx)| sid)
+            .collect();
+        drained.sort();
+        assert_eq!(drained, vec!["s1".to_string(), "s2".to_string()]);
+        assert!(!pending.has("s1"));
+        assert!(!pending.has("s2"));
     }
 
     #[test]
