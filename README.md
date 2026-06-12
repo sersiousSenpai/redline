@@ -1,6 +1,6 @@
 # Redline
 
-**The planning IDE for Claude Code.**
+**The planning IDE for Claude Code.** — [redline.dev](https://redline.dev)
 
 Redline is a desktop app where Claude Code plans live. When Claude Code finishes planning, the plan opens in Redline instead of a terminal prompt — mark it up with Word-style tracked changes and margin comments, ask questions, iterate through revisions, and approve it only when it's right. Your markup flows back into the live session as structured feedback Claude Code can act on precisely.
 
