@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -167,6 +168,10 @@ function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [hookStatus, setHookStatus] = useState<HookStatus | null>(null);
   const [skillStatus, setSkillStatus] = useState<SkillStatus | null>(null);
+  // First-run setup modal: "setup" until an in-app install fully succeeds,
+  // then "done" shows the one-time what-now explainer until dismissed.
+  const [setupPhase, setSetupPhase] = useState<"setup" | "done">("setup");
+  const [installError, setInstallError] = useState<string | null>(null);
   const [mode, setMode] = useState<InterceptionMode>("active");
   const [decisionWindow, setDecisionWindow] =
     useState<PlanDecisionWindowEvent | null>(null);
@@ -1396,22 +1401,31 @@ function App() {
   // Installs both pieces of the Redline integration. The hook (a JSON merge
   // into the user's settings.json) and the skill (a whole-file write) have
   // independent failure modes — install each in its own try/catch so one
-  // failing still installs the other.
+  // failing still installs the other. Failures render inline in the setup
+  // modal (which is unskippable, so it must own its error display); full
+  // success advances it to the post-install explainer.
   const installIntegration = async () => {
+    const errors: string[] = [];
+    let hookOk = false;
+    let skillOk = false;
     try {
       const status = await invoke<HookStatus>("install_hook");
       setHookStatus(status);
+      hookOk = status.installed;
     } catch (err) {
       console.error("install_hook failed", err);
-      alert(`Hook install failed: ${err}`);
+      errors.push(`Hook install failed: ${err}`);
     }
     try {
       const skill = await invoke<SkillStatus>("install_skill");
       setSkillStatus(skill);
+      skillOk = skill.installed;
     } catch (err) {
       console.error("install_skill failed", err);
-      alert(`Skill install failed: ${err}`);
+      errors.push(`Skill install failed: ${err}`);
     }
+    setInstallError(errors.length > 0 ? errors.join(" ") : null);
+    if (errors.length === 0 && hookOk && skillOk) setSetupPhase("done");
   };
 
   return (
@@ -1596,7 +1610,15 @@ function App() {
             ) : (
               <EmptyState
                 title="No plans yet"
-                body="Run Claude Code in plan mode in any project. When Claude calls ExitPlanMode, the plan will appear here."
+                body={
+                  <>
+                    Open any project in a terminal, run{" "}
+                    <code className="font-mono">claude</code>, and press{" "}
+                    <code className="font-mono">shift+tab</code> to switch into
+                    plan mode. When Claude finishes planning, the plan opens
+                    here for review.
+                  </>
+                }
               />
             )}
           </article>
@@ -2199,6 +2221,7 @@ function App() {
       </main>
       <Footer
         comments={threadComments}
+        sessionReady={sessionReady}
         canSubmit={canSubmit}
         canApprove={canApprove}
         waiting={waiting}
@@ -2220,19 +2243,20 @@ function App() {
       {toast && <ApproveToast message={toast} />}
       {hookStatus &&
         skillStatus &&
-        (!hookStatus.installed || !skillStatus.installed) && (
+        (!hookStatus.installed ||
+          !skillStatus.installed ||
+          setupPhase === "done") && (
           <HookSetupModal
+            phase={
+              !hookStatus.installed || !skillStatus.installed
+                ? "setup"
+                : "done"
+            }
             hookStatus={hookStatus}
             skillStatus={skillStatus}
             onInstall={installIntegration}
-            onSkip={() => {
-              setHookStatus({ ...hookStatus, installed: true });
-              setSkillStatus({
-                ...skillStatus,
-                installed: true,
-                outdated: false,
-              });
-            }}
+            onDismiss={() => setSetupPhase("setup")}
+            error={installError}
           />
         )}
     </div>
@@ -2354,7 +2378,7 @@ async function isUninterestingDir(dir: string): Promise<boolean> {
   return home != null && d === home;
 }
 
-function EmptyState({ title, body }: { title: string; body: string }) {
+function EmptyState({ title, body }: { title: string; body: ReactNode }) {
   return (
     <div className="font-sans" style={{ color: "var(--color-ink-muted)" }}>
       <div

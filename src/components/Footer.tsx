@@ -4,6 +4,8 @@ import type { Comment } from "../types";
 
 interface FooterProps {
   comments: Comment[];
+  /** A session is open in the main pane — false when the app sits idle. */
+  sessionReady: boolean;
   canSubmit: boolean;
   canApprove: boolean;
   waiting: boolean;
@@ -20,6 +22,7 @@ interface FooterProps {
 
 export function Footer({
   comments,
+  sessionReady,
   canSubmit,
   canApprove,
   waiting,
@@ -63,13 +66,21 @@ export function Footer({
     ? "Claude is working — answering in the terminal…"
     : "Claude is working — revising in the terminal…";
 
+  // No session open and nothing in flight — the app is waiting for a plan.
+  // Surface the one piece of workflow knowledge a new user lacks: Redline
+  // begins when Claude Code is in plan mode.
+  const idle = !sessionReady && !waiting;
+
   // Semantic status dot for the footer: amber while you have pending work,
-  // info-blue while Claude is in-flight, success-green when the tray is clear.
+  // info-blue while Claude is in-flight, success-green when the tray is clear,
+  // muted while idle.
   const dotColor = waiting
     ? "var(--color-info)"
-    : total > 0
-      ? "var(--color-warning)"
-      : "var(--color-success)";
+    : idle
+      ? "var(--color-ink-muted)"
+      : total > 0
+        ? "var(--color-warning)"
+        : "var(--color-success)";
 
   return (
     <footer
@@ -105,6 +116,10 @@ export function Footer({
           >
             {waitingCopy}
           </button>
+        ) : idle ? (
+          <span>
+            Waiting for a plan — work in plan mode (shift+tab) in Claude Code
+          </span>
         ) : allResolutionsHandled ? (
           <span style={{ color: "var(--color-success)" }}>
             All resolutions handled — Approve plan, or add another round of
