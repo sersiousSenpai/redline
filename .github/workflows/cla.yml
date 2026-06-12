@@ -23,10 +23,10 @@ jobs:
         uses: contributor-assistant/github-action@v2.6.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # A repo-scoped Personal Access Token (or fine-grained PAT with
-          # Contents: read/write). Set it as the repo/org secret
-          # PERSONAL_ACCESS_TOKEN. Without it the action cannot persist
-          # signatures.
+          # Only needed if signatures are ever stored in a REMOTE repository.
+          # We store them in this repo (branch below), so the default
+          # GITHUB_TOKEN with the contents:write permission above is enough
+          # and this secret may stay unset.
           PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
         with:
           # Signatures are stored in THIS repository (no third-party
