@@ -651,9 +651,7 @@ async fn handle_plan(
     // This POST is about to be held — record it before the event goes out so
     // the listener's summary refresh already sees Held (clearing any stale
     // Detached from a prior orphan).
-    app_state
-        .store
-        .set_attach_state(&session_id, AttachState::Held);
+    settle_inbound_plan_state(&app_state.store, &session_id);
     let event = PlanReceivedEvent {
         session_id: session_id.clone(),
         version: version_number,
@@ -878,6 +876,19 @@ fn list_sessions(
         }
     }
     sessions
+}
+
+/// Session-state side effects of an inbound plan POST, recorded before the
+/// `plan-received` event goes out so the listener's summary refresh already
+/// observes them: the hold itself, and the return to review. The status
+/// reset matters when a prior thread on this terminal session was approved —
+/// a stale `Approved` would disable the Approve button for every later
+/// thread. It must run AFTER classification: `has_outstanding_review` reads
+/// the *old* status to tag a post-approval plan as a fresh thread. Factored
+/// out so the invariant is unit-testable without a `tauri::AppHandle`.
+fn settle_inbound_plan_state(store: &SessionStore, session_id: &str) {
+    store.set_attach_state(session_id, AttachState::Held);
+    store.set_status(session_id, SessionStatus::InReview);
 }
 
 /// Core of `delete_session` minus the Tauri-runtime concerns (event emit,
@@ -2007,6 +2018,56 @@ mod tests {
         assert_eq!(drained, vec!["s1".to_string(), "s2".to_string()]);
         assert!(!pending.has("s1"));
         assert!(!pending.has("s2"));
+    }
+
+    #[test]
+    fn inbound_plan_resets_stale_approved_status() {
+        // The same-terminal-session repro: a thread is reviewed and approved,
+        // then a fresh plan reuses the session. Without the status reset the
+        // session stays `approved` forever and the frontend's
+        // `status !== "approved"` gate disables the Approve button for every
+        // later thread.
+        use crate::state::{CommentKind, SessionStatus};
+        let store = make_store();
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("s1", "/tmp/d", md.to_string(), reparse_sections(md), true, false);
+        // A submitted comment from the approved thread must not leak into the
+        // next plan's classification once the session is approved.
+        store
+            .add_comment(
+                "s1",
+                NewCommentRequest {
+                    kind: CommentKind::Feedback,
+                    scope: None,
+                    anchor_id: "A".to_string(),
+                    block_id: Some("rl:blk-1".to_string()),
+                    structural: None,
+                    body: "tighten this".to_string(),
+                    edit: None,
+                    selection: None,
+                    author: None,
+                },
+            )
+            .unwrap();
+        store.mark_submitted("s1");
+        store.set_status("s1", SessionStatus::Approved);
+
+        // Classification reads the OLD status: an approved session has no
+        // outstanding review, so the next plan starts a fresh thread.
+        assert!(
+            !store.has_outstanding_review("s1"),
+            "approved session must classify the next plan as thread_start"
+        );
+
+        // The fresh plan arrives — upsert alone must not touch status...
+        store.upsert_plan("s1", "/tmp/d", md.to_string(), reparse_sections(md), true, false);
+        assert_eq!(store.get("s1").unwrap().status, SessionStatus::Approved);
+        // ...the settle step (what handle_plan runs before emitting) does.
+        settle_inbound_plan_state(&store, "s1");
+
+        let s = store.get("s1").expect("session");
+        assert_eq!(s.status, SessionStatus::InReview);
+        assert_eq!(s.attach_state, AttachState::Held);
     }
 
     #[test]

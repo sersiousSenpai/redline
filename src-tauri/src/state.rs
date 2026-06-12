@@ -93,7 +93,7 @@ impl InterceptionMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[allow(dead_code)]
 pub enum SessionStatus {
@@ -1043,6 +1043,9 @@ impl SessionStore {
     pub fn set_status(&self, session_id: &str, status: SessionStatus) {
         let mut map = self.inner.lock().unwrap();
         if let Some(session) = map.get_mut(session_id) {
+            if session.status == status {
+                return;
+            }
             session.status = status;
             if let Err(e) = self.db.upsert_session(session) {
                 tracing::error!(error = %e, "failed to persist session status");
