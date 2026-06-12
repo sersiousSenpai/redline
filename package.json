@@ -12,6 +12,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
+    "redline": "bash scripts/redline.sh",
     "test": "vitest run",
     "tauri": "tauri"
   },

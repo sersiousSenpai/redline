@@ -55,24 +55,16 @@ There are no prebuilt binaries yet; for now, build from source.
 git clone https://github.com/sersiousSenpai/redline.git
 cd redline
 npm install
-npm run tauri build
+npm run redline
 ```
 
-The first build takes several minutes — it compiles the app's native dependencies (including a C regex engine and the syntax-highlighting grammars) from source. When it finishes, drag the app to your Applications folder:
+`npm run redline` builds the app, installs it into **/Applications**, and launches it. From then on, open Redline like any Mac app — Spotlight, Dock, Launchpad. The first build takes several minutes (it compiles the app's native dependencies from source); after that, builds are fast.
+
+**Updating** (until prebuilt downloads ship):
 
 ```bash
-open src-tauri/target/release/bundle/macos
+git pull && npm run redline
 ```
-
-…then drag **Redline.app** into **Applications** and launch it.
-
-**Updating** (until prebuilt downloads ship): pull and rebuild, then re-drag the app —
-
-```bash
-git pull && npm run tauri build
-```
-
-> For hacking on Redline itself, `npm run tauri dev` runs the hot-reload development build (needs the terminal kept open).
 
 **First-run setup**
 
