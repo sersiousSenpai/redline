@@ -4,7 +4,7 @@
 
 Redline is a desktop app where Claude Code plans live. When Claude Code finishes planning, the plan opens in Redline instead of a terminal prompt — mark it up with Word-style tracked changes and margin comments, ask questions, iterate through revisions, and approve it only when it's right. Your markup flows back into the live session as structured feedback Claude Code can act on precisely.
 
-<!-- SCREENSHOT PLACEHOLDER: hero shot — a plan open in the editor with tracked changes visible and the comment pane on the right. This is the single most important image in the README. -->
+![A plan open in Redline's track-changes editor, with tracked edits inline and the comment pane on the right](docs/assets/hero.png)
 
 ## Why
 
@@ -43,20 +43,36 @@ There are no prebuilt binaries yet; for now, build from source.
 
 **Prerequisites**
 
+- macOS 11 or later (Apple Silicon or Intel)
 - [Claude Code](https://claude.com/claude-code)
-- Node.js and npm
+- Node.js ≥ 20 and npm
 - Rust (stable, via [rustup](https://rustup.rs))
-- The [Tauri 2 system dependencies](https://v2.tauri.app/start/prerequisites/) for your platform
+- Xcode Command Line Tools (`xcode-select --install`)
 
-**Build and run**
+**Build and install**
 
 ```bash
 git clone https://github.com/sersiousSenpai/redline.git
 cd redline
 npm install
-npm run tauri dev     # development
-npm run tauri build   # production bundle
+npm run tauri build
 ```
+
+The first build takes several minutes — it compiles the app's native dependencies (including a C regex engine and the syntax-highlighting grammars) from source. When it finishes, drag the app to your Applications folder:
+
+```bash
+open src-tauri/target/release/bundle/macos
+```
+
+…then drag **Redline.app** into **Applications** and launch it.
+
+**Updating** (until prebuilt downloads ship): pull and rebuild, then re-drag the app —
+
+```bash
+git pull && npm run tauri build
+```
+
+> For hacking on Redline itself, `npm run tauri dev` runs the hot-reload development build (needs the terminal kept open).
 
 **First-run setup**
 
@@ -69,7 +85,7 @@ Both are inspectable, and the hook can be paused from inside the app at any time
 
 ## Status
 
-Redline is an early release (v0.1) under active development. macOS is the primary development platform; Windows and Linux are build targets but get less exercise. Bug reports and feedback are welcome — please [open an issue](https://github.com/sersiousSenpai/redline/issues).
+Redline is an early release (v0.1) under active development. It currently supports **macOS only** — Windows and Linux are on the roadmap but not yet supported. Bug reports and feedback are welcome — please [open an issue](https://github.com/sersiousSenpai/redline/issues).
 
 ## Roadmap
 
