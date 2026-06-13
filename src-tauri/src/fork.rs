@@ -15,6 +15,7 @@
 //! when a turn finishes — live streaming is frontend-only state.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
@@ -85,18 +86,62 @@ impl ForkState {
 
 /// Resolve the absolute path to the `claude` binary. A Finder-launched macOS
 /// app gets a minimal PATH with no shell rc, so `Command::new("claude")` can
-/// fail even though `claude` works in a terminal — ask a login shell. Falls
-/// back to the bare name (correct when the app is launched from a terminal).
+/// fail even though `claude` works in a terminal. Three layers:
+///
+/// 1. Ask an *interactive* login shell (`-ilc`). zsh sources `~/.zshrc` only
+///    for interactive shells, and that is where nvm (the most common Claude
+///    Code install) and the native installer put their PATH lines — a plain
+///    `-lc` probe misses both. Interactive rcs may print banners, so only an
+///    output line that is an existing file is accepted.
+/// 2. Probe well-known install locations directly, for users whose shell
+///    probe fails (broken rc, exotic shell).
+/// 3. Fall back to the bare name (correct when launched from a terminal).
 pub fn resolve_claude_bin() -> String {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    std::process::Command::new(&shell)
-        .args(["-lc", "command -v claude"])
+    let probed = std::process::Command::new(&shell)
+        .args(["-ilc", "command -v claude"])
+        // An interactive rc that reads stdin must hit EOF, not hang.
+        .stdin(Stdio::null())
         .output()
         .ok()
         .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .rev()
+                .map(str::trim)
+                .find(|line| Path::new(line).is_file())
+                .map(str::to_string)
+        });
+    if let Some(path) = probed {
+        return path;
+    }
+    known_install_locations()
+        .into_iter()
+        .find(|p| p.is_file())
+        .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| "claude".to_string())
+}
+
+/// Well-known `claude` install locations to probe when the shell can't tell
+/// us. nvm versions are checked newest-first (lexicographic, close enough —
+/// any hit is a working binary).
+fn known_install_locations() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        paths.push(home.join(".claude/local/claude")); // claude migrate-installer
+        paths.push(home.join(".local/bin/claude")); // native installer
+        paths.push(home.join("Library/pnpm/claude")); // pnpm global
+        paths.push(home.join(".bun/bin/claude")); // bun global
+        if let Ok(entries) = std::fs::read_dir(home.join(".nvm/versions/node")) {
+            let mut versions: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+            versions.sort();
+            paths.extend(versions.into_iter().rev().map(|v| v.join("bin/claude")));
+        }
+    }
+    paths.push(PathBuf::from("/opt/homebrew/bin/claude"));
+    paths.push(PathBuf::from("/usr/local/bin/claude"));
+    paths
 }
 
 // --- Event payloads --------------------------------------------------------
@@ -372,7 +417,15 @@ pub async fn fork_thread_send(
     }
 
     // Spawn. Take stdout/stderr before the child enters the registry.
-    let mut child = Command::new(&fork.claude_bin)
+    // A Dock-launched app passes a minimal PATH to children; prepend the
+    // resolved binary's directory so an `#!/usr/bin/env node` shebang (npm
+    // installs) finds the `node` that lives alongside `claude`.
+    let mut cmd = Command::new(&fork.claude_bin);
+    if let Some(bin_dir) = Path::new(&fork.claude_bin).parent().filter(|p| p.is_dir()) {
+        let inherited = std::env::var("PATH").unwrap_or_default();
+        cmd.env("PATH", format!("{}:{inherited}", bin_dir.display()));
+    }
+    let mut child = cmd
         .current_dir(&cwd)
         .args(&args)
         .stdin(Stdio::null())
@@ -380,7 +433,18 @@ pub async fn fork_thread_send(
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|e| format!("failed to spawn claude: {e}"))?;
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                format!(
+                    "could not find the `claude` CLI (looked for `{}`). \
+                     Install Claude Code, or launch Redline from a terminal \
+                     so it inherits your shell's PATH.",
+                    fork.claude_bin
+                )
+            } else {
+                format!("failed to spawn claude: {e}")
+            }
+        })?;
     let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
     let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
 
