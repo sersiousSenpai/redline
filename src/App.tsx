@@ -21,6 +21,7 @@ import { Footer } from "./components/Footer";
 import { Header } from "./components/Header";
 import { HookSetupModal } from "./components/HookSetupModal";
 import { ReadmeModal } from "./components/ReadmeModal";
+import { FeedbackModal } from "./components/FeedbackModal";
 import { AskModeViolationBanner } from "./components/AskModeViolationBanner";
 import { ResolutionWarningBanner } from "./components/ResolutionWarningBanner";
 import { SelectionMenu } from "./components/SelectionMenu";
@@ -701,15 +702,20 @@ function App() {
   // browser instead of letting them navigate — and replace — the webview.
   useEffect(() => installExternalLinkHandler(), []);
 
-  // Native app menu → README overlay. Mount-once: the menu item's identity
-  // never changes, so this must not re-subscribe with session state.
+  // Native app menu → README / feedback overlays. Mount-once: the menu items'
+  // identities never change, so this must not re-subscribe with session state.
   const [showReadme, setShowReadme] = useState(false);
+  const [showFeedback, setShowFeedback] = useState(false);
   useEffect(() => {
     const readmeUnlisten = listen("menu-open-readme", () =>
       setShowReadme(true),
     );
+    const feedbackUnlisten = listen("menu-open-feedback", () =>
+      setShowFeedback(true),
+    );
     return () => {
       void readmeUnlisten.then((u) => u());
+      void feedbackUnlisten.then((u) => u());
     };
   }, []);
 
@@ -2257,6 +2263,9 @@ function App() {
       )}
       {toast && <ApproveToast message={toast} />}
       {showReadme && <ReadmeModal onClose={() => setShowReadme(false)} />}
+      {showFeedback && (
+        <FeedbackModal onClose={() => setShowFeedback(false)} />
+      )}
       {hookStatus &&
         skillStatus &&
         (!hookStatus.installed ||

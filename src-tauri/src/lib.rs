@@ -1861,6 +1861,8 @@ pub fn run() {
             )?;
             let view_readme =
                 MenuItem::with_id(app, "view_readme", "View README", true, None::<&str>)?;
+            let send_feedback =
+                MenuItem::with_id(app, "send_feedback", "Send Feedback…", true, None::<&str>)?;
             let remove_hook = MenuItem::with_id(
                 app,
                 "remove_hook",
@@ -1876,6 +1878,7 @@ pub fn run() {
                         &PredefinedMenuItem::separator(app)?,
                         &check_updates,
                         &view_readme,
+                        &send_feedback,
                         &PredefinedMenuItem::separator(app)?,
                         &remove_hook,
                     ],
@@ -1887,13 +1890,18 @@ pub fn run() {
             // every event, so each matches its own IDs and falls through.
             app.on_menu_event(|app, event: MenuEvent| match event.id().as_ref() {
                 "check_updates" => update::check_for_updates(app.clone()),
-                "view_readme" => {
+                id @ ("view_readme" | "send_feedback") => {
                     // Surface the window first so the modal never opens hidden.
                     if let Some(w) = app.get_webview_window("main") {
                         let _ = w.show();
                         let _ = w.set_focus();
                     }
-                    let _ = app.emit("menu-open-readme", ());
+                    let event = if id == "view_readme" {
+                        "menu-open-readme"
+                    } else {
+                        "menu-open-feedback"
+                    };
+                    let _ = app.emit(event, ());
                 }
                 "remove_hook" => remove_hook_via_menu(app),
                 _ => {}
