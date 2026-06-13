@@ -51,6 +51,13 @@ if [ "$NODE_MAJOR" -lt 20 ]; then
   exit 1
 fi
 
+# Sync JS dependencies before building. `npm run redline` is also the update path
+# (git pull && npm run redline, including the in-app "Check for Updates"), so a
+# package.json bump must land in node_modules here — otherwise the build links
+# against stale deps. Near-instant when already current.
+echo "Installing/refreshing JS dependencies…"
+npm install
+
 # Sign with a stable identity when one is available. macOS keys TCC folder
 # permissions (Downloads, Desktop, …) to the code signature; the default
 # ad-hoc signature changes on every build, so each reinstall would reset the
