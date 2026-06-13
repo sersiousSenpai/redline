@@ -51,6 +51,19 @@ if [ "$NODE_MAJOR" -lt 20 ]; then
   exit 1
 fi
 
+# Sign with a stable identity when one is available. macOS keys TCC folder
+# permissions (Downloads, Desktop, …) to the code signature; the default
+# ad-hoc signature changes on every build, so each reinstall would reset the
+# user's grants. Any local code-signing certificate (e.g. a self-signed
+# "Redline Dev" made in Keychain Access) keeps grants across rebuilds. With
+# no identity, fall back to ad-hoc exactly as before.
+if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
+  if security find-identity -v -p codesigning 2>/dev/null | grep -q '"Redline Dev"'; then
+    export APPLE_SIGNING_IDENTITY="Redline Dev"
+    echo "Signing with local identity: Redline Dev"
+  fi
+fi
+
 npm run tauri build
 
 APP_SRC="src-tauri/target/release/bundle/macos/Redline.app"

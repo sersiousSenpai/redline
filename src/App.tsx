@@ -1204,7 +1204,7 @@ function App() {
   // comments, revisions and reopen history intact (no phantom new review).
   const restorePlanSession = () => {
     if (!session) return;
-    const cmd = `${buildResumeCommand(session.sessionId)}\r`;
+    const cmd = `${buildResumeCommand(session.sessionId, new Date())}\r`;
     const cwd = session.projectPath || null;
     // Arm a one-shot restore so the resumed session's re-presented plan is
     // labeled "vN restored" rather than counted as a fresh version/thread.
@@ -1233,7 +1233,9 @@ function App() {
     // Same one-shot restore arming as restorePlanSession — the resumed plan,
     // whichever terminal runs it, should land as "vN restored".
     void invoke("arm_restore", { sessionId: session.sessionId });
-    void navigator.clipboard?.writeText(buildResumeCommand(session.sessionId));
+    void navigator.clipboard?.writeText(
+      buildResumeCommand(session.sessionId, new Date()),
+    );
     setToast("Resume command copied — paste it into your terminal");
     setTimeout(() => setToast(null), 4000);
   };

@@ -1740,9 +1740,12 @@ pub fn run() {
             }
             app.manage(highlighter);
 
-            // Resolve `claude` once — a Finder-launched app has a minimal PATH.
+            // `claude` resolution is deliberately lazy (first fork use): the
+            // probe can shell out through the user's rc files, and macOS
+            // attributes that child's file access to Redline — running it at
+            // startup caused TCC folder prompts on every launch.
             // Built before SessionStore::new consumes the `db` Arc.
-            let fork_state = fork::ForkState::new(db.clone(), fork::resolve_claude_bin());
+            let fork_state = fork::ForkState::new(db.clone());
             app.manage(fork_state.clone());
 
             let store = SessionStore::new(db);
