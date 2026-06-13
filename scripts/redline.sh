@@ -64,6 +64,8 @@ osascript -e 'tell application "Redline" to quit' >/dev/null 2>&1 && sleep 1 || 
 
 rm -rf /Applications/Redline.app
 ditto "$APP_SRC" /Applications/Redline.app
+# Remove the build-output copy so Spotlight doesn't index two Redlines.
+rm -rf "$APP_SRC"
 open /Applications/Redline.app
 
 echo

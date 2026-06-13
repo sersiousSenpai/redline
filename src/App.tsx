@@ -20,6 +20,7 @@ import type { PlanEditorActions } from "./components/PlanEditor";
 import { Footer } from "./components/Footer";
 import { Header } from "./components/Header";
 import { HookSetupModal } from "./components/HookSetupModal";
+import { ReadmeModal } from "./components/ReadmeModal";
 import { AskModeViolationBanner } from "./components/AskModeViolationBanner";
 import { ResolutionWarningBanner } from "./components/ResolutionWarningBanner";
 import { SelectionMenu } from "./components/SelectionMenu";
@@ -699,6 +700,18 @@ function App() {
   // Route external links (markdown READMEs, comment panes, etc.) to the system
   // browser instead of letting them navigate — and replace — the webview.
   useEffect(() => installExternalLinkHandler(), []);
+
+  // Native app menu → README overlay. Mount-once: the menu item's identity
+  // never changes, so this must not re-subscribe with session state.
+  const [showReadme, setShowReadme] = useState(false);
+  useEffect(() => {
+    const readmeUnlisten = listen("menu-open-readme", () =>
+      setShowReadme(true),
+    );
+    return () => {
+      void readmeUnlisten.then((u) => u());
+    };
+  }, []);
 
   // Event subscriptions
   useEffect(() => {
@@ -2241,6 +2254,7 @@ function App() {
         />
       )}
       {toast && <ApproveToast message={toast} />}
+      {showReadme && <ReadmeModal onClose={() => setShowReadme(false)} />}
       {hookStatus &&
         skillStatus &&
         (!hookStatus.installed ||

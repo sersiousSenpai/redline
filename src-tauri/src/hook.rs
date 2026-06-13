@@ -207,6 +207,67 @@ pub fn install_at(path: &std::path::Path) -> Result<HookStatus, String> {
     Ok(get_status_at(path))
 }
 
+pub fn uninstall() -> Result<HookStatus, String> {
+    uninstall_at(&settings_path())
+}
+
+/// Remove Redline's ExitPlanMode entry from settings.json, touching nothing
+/// else the user has configured there. An entry whose hook points at a
+/// different URL is not ours — leave it alone. Empty `PreToolUse`/`hooks`
+/// containers left behind by the removal are dropped so the file doesn't
+/// accumulate stubs across install/remove cycles.
+pub fn uninstall_at(path: &std::path::Path) -> Result<HookStatus, String> {
+    let Ok(content) = fs::read_to_string(path) else {
+        return Ok(get_status_at(path)); // nothing to remove
+    };
+    if content.trim().is_empty() {
+        return Ok(get_status_at(path));
+    }
+    let mut root: Value = serde_json::from_str(&content)
+        .map_err(|e| format!("existing settings.json is not valid JSON: {e}"))?;
+
+    if let Some(pre_arr) = root
+        .pointer_mut("/hooks/PreToolUse")
+        .and_then(|v| v.as_array_mut())
+    {
+        pre_arr.retain(|entry| {
+            let ours = entry.get("matcher").and_then(|v| v.as_str()) == Some("ExitPlanMode")
+                && entry
+                    .get("hooks")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|hooks| {
+                        hooks
+                            .iter()
+                            .any(|h| h.get("url").and_then(|v| v.as_str()) == Some(HOOK_URL))
+                    });
+            !ours
+        });
+    }
+    if root
+        .pointer("/hooks/PreToolUse")
+        .and_then(|v| v.as_array())
+        .is_some_and(|a| a.is_empty())
+    {
+        if let Some(hooks) = root.pointer_mut("/hooks").and_then(|v| v.as_object_mut()) {
+            hooks.remove("PreToolUse");
+        }
+    }
+    if root
+        .pointer("/hooks")
+        .and_then(|v| v.as_object())
+        .is_some_and(|o| o.is_empty())
+    {
+        if let Some(obj) = root.as_object_mut() {
+            obj.remove("hooks");
+        }
+    }
+
+    let serialized = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    fs::write(path, format!("{}\n", serialized)).map_err(|e| e.to_string())?;
+
+    Ok(get_status_at(path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,5 +368,87 @@ mod tests {
         assert!(status.installed);
         assert!(path.exists());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn uninstall_removes_only_our_entry() {
+        let path = tmppath();
+        let existing = json!({
+            "effortLevel": "high",
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "ExitPlanMode",
+                        "hooks": [ { "type": "http", "url": HOOK_URL, "timeout": HOOK_TIMEOUT_SECS } ]
+                    },
+                    {
+                        "matcher": "Bash",
+                        "hooks": [ { "type": "command", "command": "echo hi" } ]
+                    }
+                ],
+                "PostToolUse": [ { "matcher": "Edit", "hooks": [] } ]
+            }
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&existing).unwrap()).unwrap();
+
+        let status = uninstall_at(&path).unwrap();
+        assert!(!status.installed);
+
+        let json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(json["effortLevel"], "high");
+        // The unrelated Bash hook and PostToolUse section survive.
+        let pre = json["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre.len(), 1);
+        assert_eq!(pre[0]["matcher"], "Bash");
+        assert!(json["hooks"]["PostToolUse"].is_array());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn uninstall_leaves_foreign_exitplanmode_hook() {
+        let path = tmppath();
+        let existing = json!({
+            "hooks": { "PreToolUse": [ {
+                "matcher": "ExitPlanMode",
+                "hooks": [ { "type": "http", "url": "http://elsewhere", "timeout": 30 } ]
+            } ] }
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&existing).unwrap()).unwrap();
+
+        uninstall_at(&path).unwrap();
+        let json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            json["hooks"]["PreToolUse"][0]["hooks"][0]["url"],
+            "http://elsewhere"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn uninstall_drops_empty_containers_and_roundtrips() {
+        let path = tmppath();
+        install_at(&path).unwrap();
+        assert!(get_status_at(&path).installed);
+
+        let status = uninstall_at(&path).unwrap();
+        assert!(!status.installed);
+        let json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // No empty hooks stubs left behind after a full install/remove cycle.
+        assert!(json.get("hooks").is_none());
+
+        // And a re-install works on the cleaned file.
+        assert!(install_at(&path).unwrap().installed);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn uninstall_is_noop_without_settings_file() {
+        let path = tmppath();
+        let status = uninstall_at(&path).unwrap();
+        assert!(!status.installed);
+        assert!(!path.exists());
     }
 }

@@ -15,6 +15,7 @@ mod pty;
 mod resolutions;
 mod skill;
 mod state;
+mod update;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -32,12 +33,12 @@ use std::net::SocketAddr;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{
-    menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
+    menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, MenuItemKind, PredefinedMenuItem},
     tray::TrayIconBuilder,
     AppHandle, Emitter, Listener, Manager,
 };
 use tokio::sync::{oneshot, Notify};
-use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 use crate::db::Database;
 use crate::hook::HookStatus;
@@ -1526,6 +1527,59 @@ fn install_hook() -> Result<HookStatus, String> {
     result
 }
 
+/// "Remove Redline Hook…" app-menu flow: confirm, remove Redline's entry from
+/// ~/.claude/settings.json, report. Removal is reversible — the next launch
+/// detects the missing hook and the setup modal offers the one-click install
+/// again — but it silently disconnects Claude Code, so a stray menu click
+/// must not be enough.
+fn remove_hook_via_menu(app: &AppHandle) {
+    const TITLE: &str = "Remove Redline Hook";
+    if !hook::get_status().installed {
+        app.dialog()
+            .message("The Redline hook isn't installed — nothing to remove.")
+            .title(TITLE)
+            .kind(MessageDialogKind::Info)
+            .show(|_| {});
+        return;
+    }
+    let app_for_confirm = app.clone();
+    app.dialog()
+        .message(
+            "Remove Redline's hook from Claude Code?\n\nNew plans will stop \
+             opening in Redline. The next time you launch Redline, it will \
+             offer to set the hook up again.",
+        )
+        .title(TITLE)
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Remove".to_string(),
+            "Cancel".to_string(),
+        ))
+        .show(move |confirmed| {
+            if !confirmed {
+                return;
+            }
+            let app = app_for_confirm;
+            match hook::uninstall() {
+                Ok(status) => {
+                    tracing::info!(path = %status.settings_path, "removed redline hook");
+                    app.dialog()
+                        .message("The Redline hook was removed.")
+                        .title(TITLE)
+                        .kind(MessageDialogKind::Info)
+                        .show(|_| {});
+                }
+                Err(e) => {
+                    app.dialog()
+                        .message(format!("Couldn't remove the hook:\n\n{e}"))
+                        .title(TITLE)
+                        .kind(MessageDialogKind::Error)
+                        .show(|_| {});
+                }
+            }
+        });
+}
+
 #[tauri::command]
 fn get_skill_status() -> SkillStatus {
     skill::get_status()
@@ -1789,6 +1843,58 @@ pub fn run() {
                 .build(app)?;
 
             refresh_tray(app.handle(), &store);
+
+            // macOS app menu: take the stock menu (the default Edit submenu's
+            // copy/paste must survive — this app is an editor) and slot
+            // Check for Updates… / View README into the application submenu,
+            // right after About — the standard macOS position.
+            let app_menu = Menu::default(app.handle())?;
+            let check_updates = MenuItem::with_id(
+                app,
+                "check_updates",
+                "Check for Updates…",
+                true,
+                None::<&str>,
+            )?;
+            let view_readme =
+                MenuItem::with_id(app, "view_readme", "View README", true, None::<&str>)?;
+            let remove_hook = MenuItem::with_id(
+                app,
+                "remove_hook",
+                "Remove Redline Hook…",
+                true,
+                None::<&str>,
+            )?;
+            if let Some(MenuItemKind::Submenu(app_submenu)) =
+                app_menu.items()?.into_iter().next()
+            {
+                app_submenu.insert_items(
+                    &[
+                        &PredefinedMenuItem::separator(app)?,
+                        &check_updates,
+                        &view_readme,
+                        &PredefinedMenuItem::separator(app)?,
+                        &remove_hook,
+                    ],
+                    1,
+                )?;
+            }
+            app.set_menu(app_menu)?;
+            // Menu event IDs are global: this handler and the tray's both see
+            // every event, so each matches its own IDs and falls through.
+            app.on_menu_event(|app, event: MenuEvent| match event.id().as_ref() {
+                "check_updates" => update::check_for_updates(app.clone()),
+                "view_readme" => {
+                    // Surface the window first so the modal never opens hidden.
+                    if let Some(w) = app.get_webview_window("main") {
+                        let _ = w.show();
+                        let _ = w.set_focus();
+                    }
+                    let _ = app.emit("menu-open-readme", ());
+                }
+                "remove_hook" => remove_hook_via_menu(app),
+                _ => {}
+            });
 
             Ok(())
         })
