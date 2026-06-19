@@ -21,6 +21,12 @@ use tauri::AppHandle;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 const DIALOG_TITLE: &str = "Check for Updates";
+/// The commit this binary was compiled from, stamped by `build.rs`. `None` when
+/// the build happened outside a git checkout. Lets the updater catch an
+/// installed binary that's older than the source (e.g. an interrupted rebuild
+/// advanced HEAD but never produced a new build) — something the git-only
+/// upstream comparison can't see.
+const BUILT_SHA: Option<&str> = option_env!("REDLINE_BUILD_SHA");
 /// Manual fallback shown whenever the automated path can't run.
 const MANUAL_HINT: &str = "To update manually, run:\n\n    git pull && npm run redline\n\nin your Redline checkout.";
 /// A fetch over a flaky connection can hang far longer than a user will wait.
@@ -132,21 +138,68 @@ async fn run_check(app: &AppHandle) {
             return;
         }
     };
-    if behind == 0 {
-        info_dialog(app, "Redline is up to date.".to_string());
+
+    // Two distinct ways to be out of date:
+    //   1. the checkout is behind upstream — new commits to pull, then rebuild;
+    //   2. the checkout is current with upstream, but the *installed binary* was
+    //      built from an older commit (an interrupted rebuild left HEAD ahead of
+    //      the last build it produced). The git comparison alone can't see #2.
+    // Both are resolved by the same Terminal flow (`git pull` is a no-op in #2,
+    // then rebuild + relaunch).
+    if behind > 0 {
+        let noun = if behind == 1 { "update" } else { "updates" };
+        prompt_rebuild(
+            app,
+            repo,
+            format!(
+                "{behind} {noun} available.\n\nUpdate Now opens Terminal, pulls \
+                 the latest code, rebuilds, and relaunches Redline."
+            ),
+            "Update Now",
+        );
         return;
     }
-    let noun = if behind == 1 { "update" } else { "updates" };
+
+    if binary_is_stale(&repo).await {
+        prompt_rebuild(
+            app,
+            repo,
+            "Your installed Redline is older than your source checkout — a \
+             previous update may not have finished building.\n\nRebuild Now \
+             opens Terminal, rebuilds, and relaunches Redline."
+                .to_string(),
+            "Rebuild Now",
+        );
+        return;
+    }
+
+    info_dialog(app, "Redline is up to date.".to_string());
+}
+
+/// True when this binary was built from a different commit than the checkout's
+/// current HEAD — the source moved on but the rebuild never landed. Conservative
+/// on every uncertainty (no stamped sha, unreadable HEAD): returns false so we
+/// never nag a user we can't be sure about.
+async fn binary_is_stale(repo: &Path) -> bool {
+    let Some(built) = BUILT_SHA.filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    match git(repo, &["rev-parse", "HEAD"]).await {
+        Ok(head) => !head.is_empty() && head != built,
+        Err(_) => false,
+    }
+}
+
+/// Confirm, then hand the rebuild to Terminal.app. Shared by the behind-upstream
+/// and stale-binary paths — only the copy differs.
+fn prompt_rebuild(app: &AppHandle, repo: PathBuf, message: String, ok_label: &str) {
     let app_for_confirm = app.clone();
     app.dialog()
-        .message(format!(
-            "{behind} {noun} available.\n\nUpdate Now opens Terminal, pulls the \
-             latest code, rebuilds, and relaunches Redline."
-        ))
+        .message(message)
         .title(DIALOG_TITLE)
         .kind(MessageDialogKind::Info)
         .buttons(MessageDialogButtons::OkCancelCustom(
-            "Update Now".to_string(),
+            ok_label.to_string(),
             "Later".to_string(),
         ))
         .show(move |confirmed| {
