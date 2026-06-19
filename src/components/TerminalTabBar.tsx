@@ -25,6 +25,9 @@ interface TerminalTabBarProps {
   onNew: () => void;
   /** New terminal in the active terminal's live working directory. */
   onNewHere: () => void;
+  /** New terminal in the active terminal's directory, then auto-launch Claude
+   *  in plan mode. */
+  onNewHereClaude: () => void;
   onClose: (id: string) => void;
   onToggleSplit: () => void;
   onToggleFullscreen: () => void;
@@ -60,6 +63,7 @@ export function TerminalTabBar({
   onSelect,
   onNew,
   onNewHere,
+  onNewHereClaude,
   onClose,
   onToggleSplit,
   onToggleFullscreen,
@@ -279,6 +283,25 @@ export function TerminalTabBar({
           }}
         >
           ↳
+        </button>
+        <button
+          type="button"
+          onClick={onNewHereClaude}
+          title="New terminal here + Claude (plan mode)"
+          aria-label="New terminal in active terminal's directory and launch Claude in plan mode"
+          className="flex items-center justify-center rounded"
+          style={{
+            width: "20px",
+            height: "20px",
+            fontSize: "12px",
+            lineHeight: 1,
+            background: "var(--color-bg-elevated)",
+            border: "1px solid var(--color-rule)",
+            color: "var(--color-ink-muted)",
+            cursor: "pointer",
+          }}
+        >
+          ✳
         </button>
         <button
           type="button"

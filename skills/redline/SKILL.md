@@ -6,7 +6,7 @@ description: >-
   [feedback], or [question], rl:blk- block-identity sidecars, or a
   REDLINE_RESOLUTIONS block. Covers presentation-aware plan markdown,
   preserving sidecars, and emitting resolutions.
-version: 3
+version: 5
 ---
 
 # Redline review protocol
@@ -162,3 +162,28 @@ curl -s -X POST http://127.0.0.1:7676/v1/sessions/<session_id>/suggestions \
 
 An accepted suggestion rides the next feedback payload as a normal `[edit]` —
 resolve it in `REDLINE_RESOLUTIONS` like any other comment id.
+
+## 7. Restoring a reopened plan
+
+When a reviewer reopens a detached plan, Redline resumes your session and asks
+you to re-present your current plan. Two things are true of a resumed session:
+
+- You start **outside** plan mode (a `--resume` lands you there even with
+  `--permission-mode plan`).
+- Your plan body is **not** in the restored context.
+
+Neither matters, because **Redline already holds your current plan and
+re-presents it itself** — a restore just needs you to re-establish the held
+`ExitPlanMode`. Do the minimum; do **not** fetch the plan from the daemon or
+retype it. Follow this fixed sequence:
+
+1. **`EnterPlanMode`** — establishes plan mode and gives you a fresh plan-file
+   path. (Don't list session directories.)
+2. **Write exactly `<!-- REDLINE_RESTORE -->`** as your plan file's contents —
+   a one-line placeholder. Redline recognizes this marker, restores the plan it
+   holds, and **ignores** whatever body you submit.
+3. **`ExitPlanMode`** — the hook reopens the held plan in Redline's editor.
+
+A restore is a **re-presentation, not a revision**: don't fetch the body, don't
+retype it, and don't add a `REDLINE_RESOLUTIONS` block. Any actual changes flow
+through the normal review/revise loop after the plan reopens.

@@ -176,7 +176,7 @@ export function Footer({
           </>
         )}
       </span>
-      <span className="flex items-center gap-2">
+      <span data-tour="footer" className="flex items-center gap-2">
         <button
           type="button"
           onClick={onSubmit}

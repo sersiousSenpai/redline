@@ -52,6 +52,13 @@ const SETTING_MODE: &str = "interception_mode";
 /// Seconds the Ambient decision window stays open before auto-approving.
 const AMBIENT_WINDOW_SECS: u64 = 20;
 
+/// Marker a resumed `claude` writes into its plan file on "Restore plan session"
+/// (see `src/lib/resumeCommand.ts`). The daemon already holds the authoritative
+/// plan, so on restore it re-presents its own latest revision and ignores the
+/// submitted body — this sentinel both triggers that path and guards against a
+/// stray submission overwriting a real plan with the placeholder.
+const REDLINE_RESTORE_SENTINEL: &str = "<!-- REDLINE_RESTORE -->";
+
 /// Interception mode, persisted to the `app_settings` table and mirrored in memory.
 #[derive(Clone)]
 struct Settings {
@@ -310,6 +317,28 @@ impl Drop for DetachGuard {
     }
 }
 
+/// Reconcile a session to `Detached` when an action (approve / submit)
+/// discovers there is no held POST registered for it. The drop-guard and the
+/// startup held→detached sweep catch *most* detaches, but a session can still
+/// land in "sender gone, attach_state not Detached" through a timing gap (e.g.
+/// a connection that closed without cancelling the held future). Without this,
+/// the UI keeps showing a healthy-looking in-review plan whose Approve / Submit
+/// buttons silently no-op and whose detached banner + Restore affordance never
+/// appear. Mirror the `submit_review` send-failure path: persist Detached, tell
+/// the UI, refresh the tray. Called right before returning the "no plan is
+/// waiting" error so the frontend's `isDetachError` recovery (refresh summaries
+/// → derived `detached`) has real state to pick up.
+fn mark_session_detached(app: &AppHandle, store: &SessionStore, session_id: &str) {
+    store.set_attach_state(session_id, AttachState::Detached);
+    let _ = app.emit(
+        "session-detached",
+        SessionEvent {
+            session_id: session_id.to_string(),
+        },
+    );
+    refresh_tray(app, store);
+}
+
 /// Records, per session, the submission mode of the most recent
 /// `submit_review` so the *next* inbound plan can be classified as an
 /// Ask round-trip (plan body unchanged + answers in resolutions) rather
@@ -332,6 +361,81 @@ impl ExpectedModes {
     fn take(&self, session_id: &str) -> Option<SubmissionMode> {
         self.0.lock().unwrap().remove(session_id)
     }
+}
+
+/// How long, after a revise's feedback is delivered, we wait for Claude to come
+/// back with a fresh plan before assuming the feedback was lost. A revise's
+/// `deny` send *succeeds* even when the held POST's Claude has quietly abandoned
+/// the wait (the socket lingered) — so the feedback vanishes silently and the
+/// reviewer is left staring at a review that will never update. Claude normally
+/// answers a revise by re-entering plan mode and re-POSTing within a few
+/// seconds; this window is deliberately generous so a slow-but-alive re-plan is
+/// never mistaken for a drop. See `arm_revise_watchdog`.
+const REVISE_WATCHDOG: Duration = Duration::from_secs(90);
+
+/// Per-session generation counter, bumped on every `submit_review`. The revise
+/// watchdog captures the generation it armed under and bails if a newer submit
+/// has since superseded it — so back-to-back revisions don't let an older
+/// watchdog fire against a younger round-trip.
+#[derive(Clone, Default)]
+struct ReviseWatch(Arc<StdMutex<HashMap<String, u64>>>);
+
+impl ReviseWatch {
+    fn new() -> Self {
+        Self::default()
+    }
+    /// Increment this session's generation and return the new value.
+    fn bump(&self, session_id: &str) -> u64 {
+        let mut map = self.0.lock().unwrap();
+        let gen = map.entry(session_id.to_string()).or_insert(0);
+        *gen += 1;
+        *gen
+    }
+    fn current(&self, session_id: &str) -> u64 {
+        self.0.lock().unwrap().get(session_id).copied().unwrap_or(0)
+    }
+}
+
+/// Safety net for a revise whose feedback was delivered into a held POST that
+/// Claude had already abandoned: spawn a task that, after `REVISE_WATCHDOG`,
+/// checks whether Claude actually picked the feedback up. "Picked up" means
+/// either a fresh plan is now held for the session (`pending.has`) or a newer
+/// revise has since been submitted (generation advanced). If neither — and the
+/// session is still in review (not approved/closed in the meantime) — the
+/// feedback was lost, so reconcile to `Detached` and surface the Restore
+/// affordance. A late plan that *does* eventually arrive re-registers as `Held`
+/// and clears the derived detached state, so flipping here is self-correcting.
+fn arm_revise_watchdog(
+    app: AppHandle,
+    store: SessionStore,
+    pending: PendingResponses,
+    revise_watch: ReviseWatch,
+    session_id: String,
+) {
+    let armed_gen = revise_watch.bump(&session_id);
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(REVISE_WATCHDOG).await;
+        // Claude re-planned (a new POST is held) — feedback landed.
+        if pending.has(&session_id) {
+            return;
+        }
+        // A newer revise superseded this one — its own watchdog now owns the wait.
+        if revise_watch.current(&session_id) != armed_gen {
+            return;
+        }
+        // Approved or otherwise resolved since the revise — nothing to recover.
+        if !matches!(
+            store.get(&session_id).map(|s| s.status),
+            Some(SessionStatus::InReview)
+        ) {
+            return;
+        }
+        tracing::warn!(
+            session_id = %session_id,
+            "revise watchdog: no new plan within window — feedback likely lost, marking detached"
+        );
+        mark_session_detached(&app, &store, &session_id);
+    });
 }
 
 /// Whether the daemon successfully bound `127.0.0.1:7676`. False means another
@@ -533,12 +637,17 @@ async fn handle_plan(
     let ask_round_trip = expected_mode == Some(SubmissionMode::Ask) && same_as_prev;
 
     // One-shot restore: the reviewer re-presented an already-reviewed plan via
-    // "Restore plan session" (frontend armed the flag). Tag it only when the
-    // body is genuinely unchanged; if Claude actually revised during the
-    // restore, it falls through to a normal new revision (it really is one).
-    // Always consume the flag so it is strictly one-shot.
+    // "Restore plan session". The daemon already holds the authoritative plan,
+    // so restore re-presents its own latest revision and ignores the submitted
+    // body (a resumed `claude` need only fire ExitPlanMode). Triggered by the
+    // armed flag (always consumed, strictly one-shot) or the restore sentinel
+    // the resume prompt writes — the sentinel also guards against a stray
+    // submission clobbering a real plan with the placeholder. A restore only
+    // applies to a session that has a revision to re-present.
     let restore_armed = app_state.store.take_restore(&session_id);
-    let restored = restore_armed && same_as_prev && !ask_round_trip;
+    let restore_requested =
+        (restore_armed || raw_plan.contains(REDLINE_RESTORE_SENTINEL)) && !ask_round_trip;
+    let restored = restore_requested && session_existed;
 
     // Ask-mode was expected but Claude modified the plan anyway. Surface
     // a soft warning to the UI and proceed as a normal Revise revision —
@@ -594,7 +703,10 @@ async fn handle_plan(
     };
 
     // Skip upsert_plan for an Ask round-trip — the latest revision is the
-    // same plan, just with resolutions attached.
+    // same plan, just with resolutions attached. Likewise for a restore: the
+    // submitted body is the placeholder, so re-present the latest revision the
+    // daemon already holds (cloned into a new `restored` revision) rather than
+    // parsing what Claude sent.
     let (version_number, is_new_session) = if ask_round_trip {
         let latest = app_state
             .store
@@ -602,7 +714,18 @@ async fn handle_plan(
             .and_then(|s| s.revisions.last().map(|r| r.version_number))
             .unwrap_or(1);
         (latest, false)
+    } else if let Some(upsert) = restored
+        .then(|| app_state.store.restore_latest(&session_id))
+        .flatten()
+    {
+        (upsert.version_number, upsert.is_new_session)
     } else {
+        if restore_requested && !session_existed {
+            tracing::warn!(
+                session_id = %session_id,
+                "restore requested for a session with no revision to re-present; storing submitted plan"
+            );
+        }
         let upsert = app_state.store.upsert_plan(
             &session_id,
             &cwd,
@@ -1242,6 +1365,7 @@ async fn submit_review(
     store: tauri::State<'_, SessionStore>,
     pending: tauri::State<'_, PendingResponses>,
     expected_modes: tauri::State<'_, ExpectedModes>,
+    revise_watch: tauri::State<'_, ReviseWatch>,
     pty: tauri::State<'_, pty::PtyState>,
     session_id: String,
     terminal_id: Option<String>,
@@ -1276,10 +1400,31 @@ async fn submit_review(
 
     // Close the second-revision race: when a new plan POST is in flight but
     // its sender hasn't been registered yet, wait briefly instead of bailing.
-    let tx = pending
+    let Some(tx) = pending
         .take_or_wait(&session_id, Duration::from_millis(2000))
         .await
-        .ok_or_else(|| "no plan is currently waiting for review on this session".to_string())?;
+    else {
+        // No held POST even after the grace window: the session detached before
+        // the reviewer hit submit, and neither the drop-guard nor the startup
+        // sweep reconciled it. Roll the submit back (submitted → draft so the
+        // feedback isn't stranded) and persist Detached + notify, so the UI
+        // shows the detached banner and Restore button instead of a dead
+        // in-review screen with no-op buttons.
+        store.unmark_submitted(&session_id, &submitted);
+        mark_session_detached(&app, &store, &session_id);
+        let _ = app.emit(
+            "comments-changed",
+            SessionEvent {
+                session_id: session_id.clone(),
+            },
+        );
+        return Err(
+            "Claude is no longer waiting for this plan — the Claude Code session \
+             ended or the hold timed out. Use \"Restore plan session\" to resume \
+             it, then submit your review again."
+                .to_string(),
+        );
+    };
     // Ordering invariant: set expected_mode BEFORE unblocking the hook.
     // Claude can't possibly send the next ExitPlanMode POST before this
     // tx.send() returns to the held handle_plan task, so the next
@@ -1346,6 +1491,19 @@ async fn submit_review(
         },
     );
     refresh_tray(&app, &store);
+
+    // The deny send above succeeds even into a held POST whose Claude has
+    // quietly stopped listening, silently dropping the feedback. Arm a watchdog
+    // that flips the session to Detached (→ Restore affordance) if no fresh plan
+    // arrives within the window. Clone the managed handles out of their `State`
+    // guards so the spawned task can outlive this command.
+    arm_revise_watchdog(
+        app.clone(),
+        (*store).clone(),
+        (*pending).clone(),
+        (*revise_watch).clone(),
+        session_id.clone(),
+    );
     Ok(())
 }
 
@@ -1357,9 +1515,13 @@ fn approve_plan(
     expected_modes: tauri::State<'_, ExpectedModes>,
     session_id: String,
 ) -> Result<(), String> {
-    let tx = pending
-        .take(&session_id)
-        .ok_or_else(|| "no plan is currently waiting for review on this session".to_string())?;
+    let Some(tx) = pending.take(&session_id) else {
+        // The held POST is gone but this session wasn't reconciled to Detached
+        // (drop-guard/sweep gap). Persist it now so the UI surfaces the detached
+        // banner + Restore button instead of leaving Approve a silent no-op.
+        mark_session_detached(&app, &store, &session_id);
+        return Err("no plan is currently waiting for review on this session".to_string());
+    };
     // Approving short-circuits any in-flight Ask round-trip — no follow-up
     // plan will arrive to consume the mode, so drop it here to avoid leaks.
     let _ = expected_modes.take(&session_id);
@@ -1680,6 +1842,11 @@ pub fn run() {
             // hold without re-running setup. No-op if not installed / current.
             hook::ensure_timeout_current();
 
+            // Backfill the restore-curl permission for installs that predate it,
+            // so "Restore plan session" runs its daemon fetch hands-free instead
+            // of stalling on an approval prompt. No-op if not installed / present.
+            hook::ensure_restore_permission();
+
             // Open at a generous, Safari-style fraction of whatever display the
             // window lands on, centered — a fixed pixel size feels small on a
             // large monitor and oversized on a laptop, so size relative to the
@@ -1756,6 +1923,8 @@ pub fn run() {
 
             let expected_modes = ExpectedModes::new();
             app.manage(expected_modes.clone());
+
+            app.manage(ReviseWatch::new());
 
             let daemon_status = DaemonStatus::new();
             app.manage(daemon_status.clone());
@@ -1859,6 +2028,13 @@ pub fn run() {
                 true,
                 None::<&str>,
             )?;
+            let show_tutorial = MenuItem::with_id(
+                app,
+                "show_tutorial",
+                "Getting Started",
+                true,
+                None::<&str>,
+            )?;
             let view_readme =
                 MenuItem::with_id(app, "view_readme", "View README", true, None::<&str>)?;
             let send_feedback =
@@ -1877,6 +2053,7 @@ pub fn run() {
                     &[
                         &PredefinedMenuItem::separator(app)?,
                         &check_updates,
+                        &show_tutorial,
                         &view_readme,
                         &send_feedback,
                         &PredefinedMenuItem::separator(app)?,
@@ -1890,16 +2067,16 @@ pub fn run() {
             // every event, so each matches its own IDs and falls through.
             app.on_menu_event(|app, event: MenuEvent| match event.id().as_ref() {
                 "check_updates" => update::check_for_updates(app.clone()),
-                id @ ("view_readme" | "send_feedback") => {
+                id @ ("view_readme" | "send_feedback" | "show_tutorial") => {
                     // Surface the window first so the modal never opens hidden.
                     if let Some(w) = app.get_webview_window("main") {
                         let _ = w.show();
                         let _ = w.set_focus();
                     }
-                    let event = if id == "view_readme" {
-                        "menu-open-readme"
-                    } else {
-                        "menu-open-feedback"
+                    let event = match id {
+                        "view_readme" => "menu-open-readme",
+                        "send_feedback" => "menu-open-feedback",
+                        _ => "menu-open-tutorial",
                     };
                     let _ = app.emit(event, ());
                 }
@@ -2050,6 +2227,30 @@ mod tests {
             .take_or_wait("nobody", Duration::from_millis(50))
             .await;
         assert!(out.is_none(), "take_or_wait must time out cleanly");
+    }
+
+    #[test]
+    fn revise_watch_generation_detects_supersession() {
+        let watch = ReviseWatch::new();
+        // No revise yet → generation reads 0.
+        assert_eq!(watch.current("s1"), 0);
+
+        // First revise: a watchdog armed under gen 1 still owns the wait.
+        let armed_first = watch.bump("s1");
+        assert_eq!(armed_first, 1);
+        assert_eq!(watch.current("s1"), armed_first);
+
+        // A second revise bumps the generation; the first watchdog must now see
+        // itself superseded and bail, while the second one owns the wait.
+        let armed_second = watch.bump("s1");
+        assert_eq!(armed_second, 2);
+        assert_ne!(watch.current("s1"), armed_first);
+        assert_eq!(watch.current("s1"), armed_second);
+
+        // Counters are per-session — an unrelated session is unaffected.
+        assert_eq!(watch.current("s2"), 0);
+        assert_eq!(watch.bump("s2"), 1);
+        assert_eq!(watch.current("s1"), 2);
     }
 
     #[test]

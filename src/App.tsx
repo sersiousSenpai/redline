@@ -22,6 +22,7 @@ import { Header } from "./components/Header";
 import { HookSetupModal } from "./components/HookSetupModal";
 import { ReadmeModal } from "./components/ReadmeModal";
 import { FeedbackModal } from "./components/FeedbackModal";
+import { OnboardingTour } from "./components/OnboardingTour";
 import { AskModeViolationBanner } from "./components/AskModeViolationBanner";
 import { ResolutionWarningBanner } from "./components/ResolutionWarningBanner";
 import { SelectionMenu } from "./components/SelectionMenu";
@@ -229,6 +230,14 @@ function App() {
   // Document zoom (content font-scale, not webview zoom). Persisted; clamped
   // 0.8–1.6. Driven by the in-pane control and Cmd +/-/0 shortcuts.
   const [docZoom, setDocZoom] = usePersistedState("redline.docZoom", 1);
+
+  // First-run onboarding tour. The flag persists so the tour auto-runs once;
+  // `tourOpen` force-shows it (menu replay) regardless of the flag.
+  const [onboardingDone, setOnboardingDone] = usePersistedState(
+    "redline.onboardingDone",
+    false,
+  );
+  const [tourOpen, setTourOpen] = useState(false);
   const clampZoom = (z: number) =>
     Math.min(1.6, Math.max(0.8, Math.round(z * 100) / 100));
   const zoomIn = () => setDocZoom((z) => clampZoom(z + 0.1));
@@ -289,6 +298,36 @@ function App() {
   const [termTabCount, setTermTabCount] = useState(1);
   const [termHasUnseen, setTermHasUnseen] = useState(false);
   const [activeTermId, setActiveTermId] = useState<string | null>(null);
+
+  // Onboarding tour reveal/restore: the spotlight needs its target on-screen, so
+  // when a step points at a collapsed pane we expand it, remembering the prior
+  // state to put back when the step moves on (or the tour closes). One pane at a
+  // time — each call undoes the previous reveal first.
+  const tourRevealRestore = useRef<(() => void) | null>(null);
+  const handleTourAnchor = useCallback(
+    (anchor: string | undefined) => {
+      tourRevealRestore.current?.();
+      tourRevealRestore.current = null;
+      if (anchor === "terminal" && termCollapsed) {
+        setTermCollapsed(false);
+        tourRevealRestore.current = () => setTermCollapsed(true);
+      } else if (anchor === "sessions" && sidebarCollapsed) {
+        setSidebarCollapsed(false);
+        tourRevealRestore.current = () => setSidebarCollapsed(true);
+      } else if (anchor === "discussion" && paneCollapsed) {
+        setPaneCollapsed(false);
+        tourRevealRestore.current = () => setPaneCollapsed(true);
+      }
+    },
+    [
+      termCollapsed,
+      sidebarCollapsed,
+      paneCollapsed,
+      setTermCollapsed,
+      setSidebarCollapsed,
+      setPaneCollapsed,
+    ],
+  );
   // Project-folder explorer: open folders (sidebar tabs), the active tab, the
   // file shown in the center pane, and the linked-nav toggle.
   const {
@@ -355,6 +394,73 @@ function App() {
     },
     [activateFolder],
   );
+
+  // Shift + arrows toggle the surrounding panes (← sidebar, → comment pane,
+  // ↓ terminal dock) and cycle the sidebar tab (↑). A capture-phase window
+  // listener so the keystroke is caught — and swallowed — even when the xterm
+  // terminal has focus (its handler sits on a bubble-phase helper textarea, so
+  // capture runs first and stopPropagation keeps the shell from seeing the
+  // escape sequence). Real editors (Tiptap, composer inputs) keep native
+  // Shift+Arrow text selection; the xterm helper textarea is exempted so the
+  // hotkeys still fire there.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.shiftKey || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (
+        e.key !== "ArrowLeft" &&
+        e.key !== "ArrowRight" &&
+        e.key !== "ArrowUp" &&
+        e.key !== "ArrowDown"
+      )
+        return;
+
+      const el = e.target as HTMLElement | null;
+      const editing =
+        el &&
+        !el.classList?.contains("xterm-helper-textarea") &&
+        (el.tagName === "INPUT" ||
+          el.tagName === "TEXTAREA" ||
+          el.isContentEditable);
+      if (editing) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      switch (e.key) {
+        case "ArrowLeft":
+          setSidebarCollapsed((c) => !c);
+          break;
+        case "ArrowRight":
+          setPaneCollapsed((c) => !c);
+          break;
+        case "ArrowDown":
+          setTermCollapsed((c) => !c);
+          break;
+        case "ArrowUp": {
+          // Ordered tabs: index 0 = sessions, 1..n = open folders. Wrap forward.
+          const len = openFolders.length + 1;
+          const cur =
+            sidebarTab.kind === "sessions"
+              ? 0
+              : openFolders.findIndex((f) => f.id === sidebarTab.id) + 1;
+          const next = (cur + 1) % len;
+          if (next === 0) selectSessions();
+          else selectFolderTab(openFolders[next - 1].path);
+          break;
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey, true); // capture phase
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [
+    setSidebarCollapsed,
+    setPaneCollapsed,
+    setTermCollapsed,
+    openFolders,
+    sidebarTab,
+    selectSessions,
+    selectFolderTab,
+  ]);
 
   useEffect(() => {
     const termId = activeTermId;
@@ -713,9 +819,13 @@ function App() {
     const feedbackUnlisten = listen("menu-open-feedback", () =>
       setShowFeedback(true),
     );
+    const tutorialUnlisten = listen("menu-open-tutorial", () =>
+      setTourOpen(true),
+    );
     return () => {
       void readmeUnlisten.then((u) => u());
       void feedbackUnlisten.then((u) => u());
+      void tutorialUnlisten.then((u) => u());
     };
   }, []);
 
@@ -1513,6 +1623,7 @@ function App() {
           }}
         >
         <aside
+          data-tour="sessions"
           className="flex flex-col shrink-0"
           style={{ width: `${revealSidebarW}px` }}
         >
@@ -1576,6 +1687,7 @@ function App() {
           <div className="rl-thin-scroll-y flex-1 overflow-y-auto">
           <article
             ref={documentRef}
+            data-tour="editor"
             className="doc-article mx-auto pl-16 pr-8 py-10"
             style={
               {
@@ -1771,6 +1883,7 @@ function App() {
         >
         <aside
           ref={sidebarRef as React.RefObject<HTMLElement>}
+          data-tour="discussion"
           className={
             paneFullscreen
               ? "absolute inset-0 z-30 overflow-y-auto"
@@ -2284,6 +2397,28 @@ function App() {
             error={installError}
           />
         )}
+      {/* Onboarding tour: replay from the menu always, or auto-run once on first
+          launch — but only after the hook/skill setup modal is out of the way,
+          so the two never overlap. */}
+      {(() => {
+        const setupActive =
+          !!hookStatus &&
+          !!skillStatus &&
+          (!hookStatus.installed ||
+            !skillStatus.installed ||
+            setupPhase === "done");
+        const show = tourOpen || (!onboardingDone && !setupActive);
+        if (!show) return null;
+        return (
+          <OnboardingTour
+            onAnchorChange={handleTourAnchor}
+            onClose={() => {
+              setTourOpen(false);
+              setOnboardingDone(true);
+            }}
+          />
+        );
+      })()}
     </div>
   );
 }

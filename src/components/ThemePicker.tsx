@@ -56,7 +56,7 @@ export function ThemePicker({ theme, onThemeChange }: ThemePickerProps) {
   }, [open]);
 
   return (
-    <div ref={rootRef} className="relative">
+    <div ref={rootRef} data-tour="theme" className="relative">
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}

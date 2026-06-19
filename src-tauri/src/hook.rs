@@ -14,6 +14,16 @@ const HOOK_URL: &str = "http://127.0.0.1:7676/v1/plan";
 // desk session; if a hold genuinely ends, the UI offers "Restore plan session".
 const HOOK_TIMEOUT_SECS: u32 = 43_200;
 
+/// Pre-authorizes the one loopback GET the redline skill's agent-in-doc flow
+/// runs to read a plan's block structure before posting a suggestion (SKILL.md
+/// §6: `curl -s http://127.0.0.1:7676/v1/sessions/<id>/plan`). Pre-authorizing
+/// the exact command keeps that hands-free instead of stalling on an
+/// interactive approval prompt. Scoped to the daemon's localhost URL only — the
+/// trailing `/*` glob matches that GET. Installed globally because Claude runs
+/// in the user's own project cwd, not Redline's repo. (Restore no longer curls
+/// — it re-presents the plan Redline already holds; see resumeCommand.ts.)
+const RESTORE_CURL_ALLOW: &str = "Bash(curl -s http://127.0.0.1:7676/*)";
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HookStatus {
@@ -147,6 +157,53 @@ fn ensure_timeout_current_at(path: &std::path::Path) {
     }
 }
 
+/// Backfill the restore-curl allow for installs that predate it. `install_at`
+/// adds it for fresh installs, but `ensure_timeout_current` only rewrites when
+/// the timeout is stale, so an up-to-date existing install would never gain the
+/// allow without this. No-op when the hook isn't installed (a fresh install
+/// handles it) or the allow is already present. Called once at startup.
+pub fn ensure_restore_permission() {
+    ensure_restore_permission_at(&settings_path());
+}
+
+fn allow_present_at(path: &std::path::Path) -> bool {
+    let Ok(content) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(json) = serde_json::from_str::<Value>(&content) else {
+        return false;
+    };
+    json.pointer("/permissions/allow")
+        .and_then(|v| v.as_array())
+        .is_some_and(|a| a.iter().any(|v| v.as_str() == Some(RESTORE_CURL_ALLOW)))
+}
+
+fn ensure_restore_permission_at(path: &std::path::Path) {
+    if !get_status_at(path).installed || allow_present_at(path) {
+        return;
+    }
+    let Ok(content) = fs::read_to_string(path) else {
+        return;
+    };
+    let Ok(mut root) = serde_json::from_str::<Value>(&content) else {
+        return;
+    };
+    let Some(obj) = root.as_object_mut() else {
+        return;
+    };
+    if ensure_allow(obj, RESTORE_CURL_ALLOW).is_err() {
+        return;
+    }
+    match serde_json::to_string_pretty(&root) {
+        Ok(serialized) => {
+            if fs::write(path, format!("{}\n", serialized)).is_ok() {
+                tracing::info!("backfilled redline restore-curl permission");
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "failed to backfill restore permission"),
+    }
+}
+
 pub fn install_at(path: &std::path::Path) -> Result<HookStatus, String> {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
@@ -201,10 +258,36 @@ pub fn install_at(path: &std::path::Path) -> Result<HookStatus, String> {
         }));
     }
 
+    let obj = root.as_object_mut().expect("checked above");
+    ensure_allow(obj, RESTORE_CURL_ALLOW)?;
+
     let serialized = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
     fs::write(path, format!("{}\n", serialized)).map_err(|e| e.to_string())?;
 
     Ok(get_status_at(path))
+}
+
+/// Idempotently ensure `permissions.allow` (a JSON array under `permissions`)
+/// contains `rule`, creating the containers if absent and preserving any allows
+/// the user already configured. Mirrors the JSON-shape error handling the hook
+/// merge uses.
+fn ensure_allow(obj: &mut serde_json::Map<String, Value>, rule: &str) -> Result<(), String> {
+    let permissions = obj
+        .entry("permissions".to_string())
+        .or_insert_with(|| json!({}));
+    let permissions_obj = permissions
+        .as_object_mut()
+        .ok_or_else(|| "permissions field is not a JSON object".to_string())?;
+    let allow = permissions_obj
+        .entry("allow".to_string())
+        .or_insert_with(|| json!([]));
+    let allow_arr = allow
+        .as_array_mut()
+        .ok_or_else(|| "permissions.allow is not a JSON array".to_string())?;
+    if !allow_arr.iter().any(|v| v.as_str() == Some(rule)) {
+        allow_arr.push(Value::String(rule.to_string()));
+    }
+    Ok(())
 }
 
 pub fn uninstall() -> Result<HookStatus, String> {
@@ -259,6 +342,34 @@ pub fn uninstall_at(path: &std::path::Path) -> Result<HookStatus, String> {
     {
         if let Some(obj) = root.as_object_mut() {
             obj.remove("hooks");
+        }
+    }
+
+    // Remove our restore-curl allow, leaving any other user allows untouched,
+    // then drop empty `allow`/`permissions` containers so the file doesn't
+    // accumulate stubs across install/remove cycles (mirrors the hooks cleanup).
+    if let Some(allow_arr) = root
+        .pointer_mut("/permissions/allow")
+        .and_then(|v| v.as_array_mut())
+    {
+        allow_arr.retain(|v| v.as_str() != Some(RESTORE_CURL_ALLOW));
+    }
+    if root
+        .pointer("/permissions/allow")
+        .and_then(|v| v.as_array())
+        .is_some_and(|a| a.is_empty())
+    {
+        if let Some(permissions) = root.pointer_mut("/permissions").and_then(|v| v.as_object_mut()) {
+            permissions.remove("allow");
+        }
+    }
+    if root
+        .pointer("/permissions")
+        .and_then(|v| v.as_object())
+        .is_some_and(|o| o.is_empty())
+    {
+        if let Some(obj) = root.as_object_mut() {
+            obj.remove("permissions");
         }
     }
 
@@ -450,5 +561,103 @@ mod tests {
         let status = uninstall_at(&path).unwrap();
         assert!(!status.installed);
         assert!(!path.exists());
+    }
+
+    fn allow_entries(json: &Value) -> Vec<String> {
+        json.pointer("/permissions/allow")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn install_adds_restore_curl_allow() {
+        let path = tmppath();
+        install_at(&path).unwrap();
+        let json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(allow_entries(&json).contains(&RESTORE_CURL_ALLOW.to_string()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn install_does_not_duplicate_allow_or_clobber_existing() {
+        let path = tmppath();
+        let existing = json!({
+            "permissions": { "allow": ["Bash(git push *)"] }
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&existing).unwrap()).unwrap();
+
+        // Two installs must not produce two copies of our entry.
+        install_at(&path).unwrap();
+        install_at(&path).unwrap();
+
+        let json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let allows = allow_entries(&json);
+        // Pre-existing user allow survives.
+        assert!(allows.contains(&"Bash(git push *)".to_string()));
+        // Ours is present exactly once.
+        assert_eq!(
+            allows.iter().filter(|a| *a == RESTORE_CURL_ALLOW).count(),
+            1
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn uninstall_removes_only_our_allow() {
+        let path = tmppath();
+        let existing = json!({
+            "permissions": { "allow": ["Bash(git push *)", RESTORE_CURL_ALLOW] }
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&existing).unwrap()).unwrap();
+        install_at(&path).unwrap(); // also adds the hook
+
+        uninstall_at(&path).unwrap();
+        let json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let allows = allow_entries(&json);
+        assert!(allows.contains(&"Bash(git push *)".to_string()));
+        assert!(!allows.contains(&RESTORE_CURL_ALLOW.to_string()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn uninstall_drops_empty_permissions_container() {
+        let path = tmppath();
+        // Fresh install creates permissions.allow with only our entry.
+        install_at(&path).unwrap();
+        uninstall_at(&path).unwrap();
+        let json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // No empty permissions stub left behind.
+        assert!(json.get("permissions").is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn startup_backfills_missing_allow_on_existing_install() {
+        let path = tmppath();
+        // An install that predates the allow: hook present, no permissions.
+        let existing = json!({
+            "hooks": { "PreToolUse": [ {
+                "matcher": "ExitPlanMode",
+                "hooks": [ { "type": "http", "url": HOOK_URL, "timeout": HOOK_TIMEOUT_SECS } ]
+            } ] }
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&existing).unwrap()).unwrap();
+        assert!(!allow_present_at(&path));
+
+        ensure_restore_permission_at(&path);
+        assert!(allow_present_at(&path));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn startup_backfill_is_noop_when_hook_absent() {
+        let path = tmppath();
+        // No hook installed → don't materialize a permissions block.
+        std::fs::write(&path, serde_json::to_string_pretty(&json!({})).unwrap()).unwrap();
+        ensure_restore_permission_at(&path);
+        let json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(json.get("permissions").is_none());
+        let _ = std::fs::remove_file(&path);
     }
 }

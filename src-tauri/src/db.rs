@@ -860,6 +860,9 @@ mod tests {
         let store = SessionStore::new(db.clone());
         let md = "# Plan\n\nBody.\n";
 
+        // Nothing to restore before any plan exists.
+        assert!(store.restore_latest("s").is_none());
+
         // v1: a genuine plan.
         store.upsert_plan("s", "/tmp/s", md.to_string(), reparse_sections(md), true, false);
 
@@ -868,13 +871,21 @@ mod tests {
         assert!(store.take_restore("s"));
         assert!(!store.take_restore("s"));
 
-        // The restore re-presents the same plan, tagged restored.
-        store.upsert_plan("s", "/tmp/s", md.to_string(), reparse_sections(md), true, true);
+        // The restore re-presents the plan the store already holds (cloned —
+        // no body resupplied), tagged restored.
+        let res = store.restore_latest("s").expect("restored");
+        assert_eq!(res.version_number, 2);
+        assert!(!res.is_new_session);
 
         let session = store.get("s").expect("session");
         assert_eq!(session.revisions.len(), 2);
         assert!(!session.revisions[0].restored);
         assert!(session.revisions[1].restored);
+        // The clone is byte-for-byte the held latest revision.
+        assert_eq!(
+            session.revisions[1].raw_plan_markdown,
+            session.revisions[0].raw_plan_markdown
+        );
 
         // The restored flag survives a reload from the DB.
         let reloaded = SessionStore::new(db);
@@ -948,8 +959,9 @@ mod tests {
         store.reopen_resolution("s", &settled.id, Some("follow-up"), false);
         let draft = store.add_comment("s", comment("still drafting")).unwrap();
 
-        // Same body re-presented via "Restore plan session".
-        store.upsert_plan("s", "/tmp/s", md.to_string(), reparse_sections(md), true, true);
+        // Re-presented via "Restore plan session" — the store clones the body
+        // it holds; no plan is resupplied.
+        store.restore_latest("s").expect("restored");
 
         let check = |store: &SessionStore, label: &str| {
             let session = store.get("s").expect("session");

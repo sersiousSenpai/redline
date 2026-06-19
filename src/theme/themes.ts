@@ -14,7 +14,8 @@ export type ThemeName =
   | "redsand"
   | "silveraerogel"
   | "solidcolors"
-  | "grass";
+  | "grass"
+  | "redline";
 
 /** The 16 ANSI palette slots xterm accepts as theme overrides. */
 export type AnsiSlot =
@@ -162,6 +163,24 @@ export const THEMES: ThemeEntry[] = [
     name: "blossom",
     label: "Blossom",
     base: { bg: "#ecdcdd", fg: "#381b2b", blue: "#897ad9", yellow: "#d99a2c", green: "#4f9e57", selection: "#ff4f97" },
+  },
+  {
+    // Redline — the brand theme: redline.dev's red on a warm near-black. The
+    // signature red-orange (#e8553d) stays the selection accent so commented
+    // spans and v-badges read as "redline" marks; the body ink is a brighter
+    // coral so document-length text stays legible on the dark page. Info /
+    // warning / success keep Studio's blue/yellow/green so the edit/feedback/
+    // question comment categories stay distinguishable from the red body text.
+    name: "redline",
+    label: "Redline",
+    base: {
+      bg: "#16131a",        // warm near-black page
+      fg: "#ff5c5c",        // vivid coral-red ink
+      blue: "#5b9fe4",      // info / edit  (shared with Studio)
+      yellow: "#d6c060",    // warning / feedback
+      green: "#5dc585",     // success / question
+      selection: "#e8553d", // the redline accent — commented spans & v-badges
+    },
   },
 ];
 

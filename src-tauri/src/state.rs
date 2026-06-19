@@ -641,38 +641,79 @@ impl SessionStore {
             tracing::error!(error = %e, "failed to persist revision");
         }
         session.revisions.push(revision);
-        // A restored revision re-presents the identical body (that's the only
-        // way `restored` gets set), so every anchor/block id resolves the same
-        // — carry the reviewer's open work forward so the pane, which shows
-        // only the latest revision's comments, doesn't hide it. Settled
-        // comments stay put for the history views; drafts/reopens were already
-        // included in submits via the all-revisions flat-map, this makes them
-        // *visible* again.
         if restored {
-            let mut carried: Vec<Comment> = Vec::new();
-            let last_idx = session.revisions.len() - 1;
-            for revision in &mut session.revisions[..last_idx] {
-                let mut kept = Vec::with_capacity(revision.comments.len());
-                for c in revision.comments.drain(..) {
-                    if matches!(c.status, CommentStatus::Draft | CommentStatus::Reopened) {
-                        carried.push(c);
-                    } else {
-                        kept.push(c);
-                    }
-                }
-                revision.comments = kept;
-            }
-            for c in &carried {
-                if let Err(e) = self.db.set_comment_revision(session_id, &c.id, version_number) {
-                    tracing::error!(error = %e, "failed to persist carried-forward comment");
-                }
-            }
-            session.revisions[last_idx].comments.extend(carried);
+            self.carry_open_comments_forward(session, session_id, version_number);
         }
         UpsertResult {
             version_number,
             is_new_session,
         }
+    }
+
+    /// Re-present the session's latest revision as a new restored revision —
+    /// cloning its body and sections from the store rather than from a plan
+    /// Claude re-typed. This is the "Restore plan session" path: the daemon
+    /// already holds the authoritative plan, so a resumed `claude` only needs to
+    /// fire `ExitPlanMode` (the submitted body is ignored). Because the new
+    /// revision is a byte-exact clone, every anchor/block id resolves the same
+    /// and the open-comment carry-forward is correct by construction. Returns
+    /// `None` if the session has no revisions to restore.
+    pub fn restore_latest(&self, session_id: &str) -> Option<UpsertResult> {
+        let mut map = self.inner.lock().unwrap();
+        let session = map.get_mut(session_id)?;
+        let latest = session.revisions.last()?;
+        let version_number = (session.revisions.len() as u32) + 1;
+        let revision = Revision {
+            version_number,
+            received_at: now_millis(),
+            raw_plan_markdown: latest.raw_plan_markdown.clone(),
+            sections: latest.sections.clone(),
+            comments: Vec::new(),
+            thread_start: false,
+            restored: true,
+        };
+        if let Err(e) = self.db.insert_revision(session_id, &revision) {
+            tracing::error!(error = %e, "failed to persist restored revision");
+        }
+        session.revisions.push(revision);
+        self.carry_open_comments_forward(session, session_id, version_number);
+        Some(UpsertResult {
+            version_number,
+            is_new_session: false,
+        })
+    }
+
+    /// Carry the reviewer's open work onto the just-pushed (restored) revision
+    /// so the comment pane — which shows only the latest revision's comments —
+    /// doesn't hide it. A restored revision re-presents the identical body, so
+    /// every anchor/block id resolves the same. Settled comments stay put for
+    /// the history views; drafts/reopens were already included in submits via
+    /// the all-revisions flat-map, this makes them *visible* again.
+    fn carry_open_comments_forward(
+        &self,
+        session: &mut ReviewSession,
+        session_id: &str,
+        version_number: u32,
+    ) {
+        let mut carried: Vec<Comment> = Vec::new();
+        let last_idx = session.revisions.len() - 1;
+        for revision in &mut session.revisions[..last_idx] {
+            let mut kept = Vec::with_capacity(revision.comments.len());
+            for c in revision.comments.drain(..) {
+                if matches!(c.status, CommentStatus::Draft | CommentStatus::Reopened) {
+                    carried.push(c);
+                } else {
+                    kept.push(c);
+                }
+            }
+            revision.comments = kept;
+        }
+        for c in &carried {
+            if let Err(e) = self.db.set_comment_revision(session_id, &c.id, version_number) {
+                tracing::error!(error = %e, "failed to persist carried-forward comment");
+            }
+        }
+        session.revisions[last_idx].comments.extend(carried);
     }
 
     pub fn list(&self) -> Vec<SessionSummary> {

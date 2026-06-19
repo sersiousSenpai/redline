@@ -122,6 +122,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
     const id = crypto.randomUUID();
     setTabs((prev) => [...prev, { id, cwd }]);
     showInFocusedPane(id);
+    return id;
   };
 
   // Open a new tab in whatever directory the focused terminal is currently in
@@ -135,6 +136,24 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
         /* fall back to home */
       }
       addTab(dir);
+    })();
+  };
+
+  // Like addTabHere, but auto-launches Claude in plan mode in the new shell —
+  // same PTY-injection pattern as restorePlanSession (wait for the shell's rc
+  // files, then write the command with a trailing \r so it runs).
+  const addTabHereClaude = () => {
+    void (async () => {
+      let dir: string | null = null;
+      try {
+        dir = await invoke<string | null>("pty_cwd", { id: focusedId });
+      } catch {
+        /* fall back to home */
+      }
+      const id = addTab(dir);
+      window.setTimeout(() => {
+        void invoke("pty_write", { id, data: "claude --permission-mode plan\r" });
+      }, 900);
     })();
   };
 
@@ -481,6 +500,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
     split,
     onNew: () => addTab(null),
     onNewHere: addTabHere,
+    onNewHereClaude: addTabHereClaude,
     onToggleSplit: toggleSplit,
     onToggleFullscreen: () => onFullscreenChange(!fullscreen),
     onClose: closeTab,
@@ -488,7 +508,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
   };
 
   return (
-    <div className="flex flex-col h-full">
+    <div data-tour="terminal" className="flex flex-col h-full">
       {split && paneB ? (
         // One tab strip per pane, aligned over its pane so a split session's
         // tab indicator sits above the pane it's actually running in.

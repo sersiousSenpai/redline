@@ -64,7 +64,7 @@ export function ModeToggle({ mode, onChange }: ModeToggleProps) {
   }, [open]);
 
   return (
-    <div ref={rootRef} className="relative">
+    <div ref={rootRef} data-tour="mode" className="relative">
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
