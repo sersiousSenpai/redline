@@ -308,9 +308,28 @@ function App() {
     (anchor: string | undefined) => {
       tourRevealRestore.current?.();
       tourRevealRestore.current = null;
-      if (anchor === "terminal" && termCollapsed) {
-        setTermCollapsed(false);
-        tourRevealRestore.current = () => setTermCollapsed(true);
+      if (anchor === "terminal") {
+        // Open the terminal partway for the tour — never its full saved height
+        // (which can be near full-screen) and never fullscreen, both of which
+        // swamp the window and look funky mid-tutorial. Restore the real size
+        // when the step moves on.
+        const prevCollapsed = termCollapsed;
+        const prevFullscreen = termFullscreen;
+        const prevHeight = termHeight;
+        const partial = Math.max(
+          180,
+          Math.min(prevHeight, Math.round(window.innerHeight * 0.32)),
+        );
+        if (termCollapsed || termFullscreen || termHeight !== partial) {
+          if (termFullscreen) setTermFullscreen(false);
+          if (termCollapsed) setTermCollapsed(false);
+          if (termHeight !== partial) setTermHeight(partial);
+          tourRevealRestore.current = () => {
+            setTermCollapsed(prevCollapsed);
+            setTermFullscreen(prevFullscreen);
+            setTermHeight(prevHeight);
+          };
+        }
       } else if (anchor === "sessions" && sidebarCollapsed) {
         setSidebarCollapsed(false);
         tourRevealRestore.current = () => setSidebarCollapsed(true);
@@ -321,9 +340,13 @@ function App() {
     },
     [
       termCollapsed,
+      termFullscreen,
+      termHeight,
       sidebarCollapsed,
       paneCollapsed,
       setTermCollapsed,
+      setTermFullscreen,
+      setTermHeight,
       setSidebarCollapsed,
       setPaneCollapsed,
     ],
