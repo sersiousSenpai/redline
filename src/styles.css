@@ -60,9 +60,10 @@ body {
   margin: 0;
   background: var(--color-paper);
   color: var(--color-ink);
-  /* Chrome is monospace/terminal-styled; the plan body scopes sans/serif
-     back on via .doc-article / .md-block below. */
-  font-family: var(--font-mono);
+  /* The app font (--font-sans) drives all chrome and the document; the user
+     picks it via the FontPicker. The terminal and code blocks pin themselves
+     to --font-mono below, so they stay monospace regardless of the choice. */
+  font-family: var(--font-sans);
   font-size: 13px;
   -webkit-font-smoothing: antialiased;
 }
@@ -90,7 +91,7 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.18em;
   color: var(--color-ink-muted);
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
 }
 
 /* Keep horizontal scroll on a squished strip (e.g. the sidebar tab strip when
@@ -375,7 +376,7 @@ body {
 .rl-prose h2,
 .rl-prose h3,
 .rl-prose h4 {
-  font-family: var(--font-serif);
+  font-family: var(--font-sans);
   font-weight: 600;
   line-height: 1.3;
   /* Generous space above for sectioning rhythm; tight below so the heading

@@ -34,8 +34,16 @@ import { useFolderWorkspaces } from "./hooks/useFolderWorkspaces";
 import { computeParagraphDiff, type ParagraphDiff } from "./diff";
 import { blockIdByAnchorId } from "./editor/docModel";
 import { useTextSelection } from "./hooks/useTextSelection";
-import { applyTheme, readStoredTheme, storeTheme } from "./theme/applyTheme";
+import {
+  applyFont,
+  applyTheme,
+  readStoredFont,
+  readStoredTheme,
+  storeFont,
+  storeTheme,
+} from "./theme/applyTheme";
 import type { ThemeName } from "./theme/themes";
+import type { FontName } from "./theme/fonts";
 import { usePersistedState } from "./theme/usePersistedState";
 import { useResizablePane } from "./hooks/useResizablePane";
 import { PaneDivider } from "./components/PaneDivider";
@@ -179,6 +187,7 @@ function App() {
   const [decisionWindow, setDecisionWindow] =
     useState<PlanDecisionWindowEvent | null>(null);
   const [theme, setTheme] = useState<ThemeName>(() => readStoredTheme());
+  const [font, setFont] = useState<FontName>(() => readStoredFont());
   // Flash-on-intercept alert: an opt-in full-window pulse (+ optional beep)
   // fired whenever a plan is intercepted. `flashSeq` bumps to (re)trigger the
   // overlay; the three prefs persist via localStorage.
@@ -665,6 +674,12 @@ function App() {
     setTheme(name);
     applyTheme(name);
     storeTheme(name);
+  };
+
+  const onFontChange = (name: FontName) => {
+    setFont(name);
+    applyFont(name);
+    storeFont(name);
   };
 
   // Track the viewport width so each side pane's max can be "up to the other
@@ -1604,6 +1619,8 @@ function App() {
         session={session}
         theme={theme}
         onThemeChange={onThemeChange}
+        font={font}
+        onFontChange={onFontChange}
         mode={mode}
         onModeChange={changeMode}
         onExport={exportRevision}

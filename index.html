@@ -24,7 +24,12 @@
             if (vars["--color-paper"])
               el.style.backgroundColor = vars["--color-paper"];
             if (vars["--color-ink"]) el.style.color = vars["--color-ink"];
-          } else {
+          }
+          /* Replay the chosen app font (independent of the color theme), kept
+             in sync with applyTheme.ts (FONT_STACK_KEY = "redline.fontStack"). */
+          var f = localStorage.getItem("redline.fontStack");
+          if (f) el.style.setProperty("--font-sans", f);
+          if (!raw) {
             /* First-ever launch: match the Studio (default) @theme so the first
                paint is dark, never white. */
             el.style.backgroundColor = "#1a1a1f";

@@ -3,7 +3,9 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { InterceptionMode, ReviewSession } from "../types";
 import type { ThemeName } from "../theme/themes";
+import type { FontName } from "../theme/fonts";
 import { ThemePicker } from "./ThemePicker";
+import { FontPicker } from "./FontPicker";
 import { DownloadMenu } from "./DownloadMenu";
 import { ModeToggle } from "./ModeToggle";
 import { AlertSettings } from "./AlertSettings";
@@ -33,6 +35,8 @@ interface HeaderProps {
   session: ReviewSession | null;
   theme: ThemeName;
   onThemeChange: (name: ThemeName) => void;
+  font: FontName;
+  onFontChange: (name: FontName) => void;
   mode: InterceptionMode;
   onModeChange: (mode: InterceptionMode) => void;
   /** Download the currently-displayed revision as a clean .md file. */
@@ -62,6 +66,8 @@ export function Header({
   session,
   theme,
   onThemeChange,
+  font,
+  onFontChange,
   mode,
   onModeChange,
   onExport,
@@ -114,6 +120,7 @@ export function Header({
           onTest={onFlashTest}
         />
         <ThemePicker theme={theme} onThemeChange={onThemeChange} />
+        <FontPicker font={font} onFontChange={onFontChange} />
         {session && downloadVersion !== undefined && (
           <DownloadMenu
             version={downloadVersion}
