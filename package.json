@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2.7.1",
     "@tauri-apps/plugin-opener": "^2",
     "@tiptap/core": "^2.27.2",
     "@tiptap/extension-code": "^2.27.2",
@@ -28,6 +29,8 @@
     "@tiptap/extension-table-cell": "^2.27.2",
     "@tiptap/extension-table-header": "^2.27.2",
     "@tiptap/extension-table-row": "^2.27.2",
+    "@tiptap/extension-text-align": "^2.27.2",
+    "@tiptap/extension-underline": "^2.27.2",
     "@tiptap/pm": "^2.27.2",
     "@tiptap/react": "^2.27.2",
     "@tiptap/starter-kit": "^2.27.2",

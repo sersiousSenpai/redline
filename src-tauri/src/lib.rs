@@ -33,7 +33,10 @@ use std::net::SocketAddr;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{
-    menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, MenuItemKind, PredefinedMenuItem},
+    menu::{
+        CheckMenuItem, Menu, MenuBuilder, MenuEvent, MenuItem, MenuItemBuilder, MenuItemKind,
+        PredefinedMenuItem, SubmenuBuilder,
+    },
     tray::TrayIconBuilder,
     AppHandle, Emitter, Listener, Manager,
 };
@@ -57,7 +60,24 @@ const AMBIENT_WINDOW_SECS: u64 = 20;
 /// plan, so on restore it re-presents its own latest revision and ignores the
 /// submitted body — this sentinel both triggers that path and guards against a
 /// stray submission overwriting a real plan with the placeholder.
-const REDLINE_RESTORE_SENTINEL: &str = "<!-- REDLINE_RESTORE -->";
+/// Prefix of the marker a resumed `claude` writes to its plan file on restore.
+/// The bare form is `<!-- REDLINE_RESTORE -->`; the resume command embeds the
+/// held plan's session id as `<!-- REDLINE_RESTORE:<id> -->` so the daemon can
+/// rebind the restore when the handshake arrives under a forked or foreign id
+/// (see `restore_target_id`). Must stay in sync with `restoreSentinel()` in
+/// `src/lib/resumeCommand.ts`.
+const REDLINE_RESTORE_PREFIX: &str = "<!-- REDLINE_RESTORE";
+
+/// The held plan's session id carried inside a restore sentinel, if any:
+/// `<!-- REDLINE_RESTORE:abc-123 -->` → `Some("abc-123")`; the bare
+/// `<!-- REDLINE_RESTORE -->` → `None`.
+fn restore_target_id(raw_plan: &str) -> Option<String> {
+    let needle = "<!-- REDLINE_RESTORE:";
+    let start = raw_plan.find(needle)? + needle.len();
+    let end = raw_plan[start..].find("-->")?;
+    let id = raw_plan[start..start + end].trim();
+    (!id.is_empty()).then(|| id.to_string())
+}
 
 /// Interception mode, persisted to the `app_settings` table and mirrored in memory.
 #[derive(Clone)]
@@ -591,6 +611,27 @@ async fn handle_plan(
         ));
     }
 
+    // Bulletproof restore rebind: a restore handshake carries the held plan's
+    // session id (`<!-- REDLINE_RESTORE:<id> -->`). It can arrive under a
+    // *different* id than the plan it names — `claude --resume` forks a new
+    // session id, and a resume command pasted into an already-running Claude
+    // REPL runs the handshake under that REPL's own id. When the sentinel names
+    // a held session that isn't this one, re-key it onto the incoming id so the
+    // rest of this handler — and every future revision from this terminal — sees
+    // the held plan under the live session and restores it, instead of capturing
+    // the placeholder as a brand-new plan.
+    if let Some(target) = restore_target_id(&raw_plan) {
+        if target != session_id
+            && !app_state.store.has_session(&session_id)
+            && app_state.store.rekey_session(&target, &session_id)
+        {
+            tracing::info!(
+                from = %target, to = %session_id,
+                "rebound restore handshake to the live session id"
+            );
+        }
+    }
+
     let resolution_result = resolutions::extract_resolutions(&raw_plan);
     // Parse and stamp every block with a stable sidecar id; the augmented
     // markdown is what we persist so block ids survive the reparse-on-load
@@ -646,8 +687,24 @@ async fn handle_plan(
     // applies to a session that has a revision to re-present.
     let restore_armed = app_state.store.take_restore(&session_id);
     let restore_requested =
-        (restore_armed || raw_plan.contains(REDLINE_RESTORE_SENTINEL)) && !ask_round_trip;
+        (restore_armed || raw_plan.contains(REDLINE_RESTORE_PREFIX)) && !ask_round_trip;
     let restored = restore_requested && session_existed;
+
+    // A restore sentinel that we still couldn't bind to any held plan — the
+    // rebind above found no session under the named target, and none exists
+    // under the incoming id either. The body is only the placeholder, so
+    // persisting it would mint a phantom v1 rendering the literal sentinel
+    // instead of a plan. Refuse and store nothing; nothing was lost.
+    if raw_plan.contains(REDLINE_RESTORE_PREFIX) && !session_existed {
+        tracing::warn!(
+            session_id = %session_id,
+            "restore sentinel matched no held plan — refusing to persist the placeholder"
+        );
+        return Json(allow_response(
+            "Redline couldn't restore this plan: no held plan matched. The original \
+             review session may have been deleted. Re-open the plan from Redline.",
+        ));
+    }
 
     // Ask-mode was expected but Claude modified the plan anyway. Surface
     // a soft warning to the UI and proceed as a normal Revise revision —
@@ -1649,6 +1706,57 @@ fn set_interception_mode(app: AppHandle, mode: String) -> Result<(), String> {
     Ok(())
 }
 
+const SETTING_VAULT_PATH: &str = "obsidian_vault_path";
+const SETTING_CLIPPINGS_SUBDIR: &str = "obsidian_clippings_subdir";
+const DEFAULT_CLIPPINGS_SUBDIR: &str = "Web Clippings";
+
+/// The user's Obsidian integration config: where their vault lives and which
+/// subfolder web clippings land in. Both persist in `app_settings`; the subdir
+/// defaults rather than ever being empty so saves always have a target folder.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ObsidianConfig {
+    vault_path: Option<String>,
+    clippings_subdir: String,
+}
+
+#[tauri::command]
+fn get_obsidian_config(settings: tauri::State<'_, Settings>) -> ObsidianConfig {
+    ObsidianConfig {
+        vault_path: settings
+            .db
+            .get_setting(SETTING_VAULT_PATH)
+            .filter(|s| !s.is_empty()),
+        clippings_subdir: settings
+            .db
+            .get_setting(SETTING_CLIPPINGS_SUBDIR)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| DEFAULT_CLIPPINGS_SUBDIR.to_string()),
+    }
+}
+
+#[tauri::command]
+fn set_obsidian_config(
+    settings: tauri::State<'_, Settings>,
+    vault_path: String,
+    clippings_subdir: String,
+) -> Result<(), String> {
+    let subdir = if clippings_subdir.trim().is_empty() {
+        DEFAULT_CLIPPINGS_SUBDIR
+    } else {
+        clippings_subdir.trim()
+    };
+    settings
+        .db
+        .set_setting(SETTING_VAULT_PATH, vault_path.trim())
+        .map_err(|e| e.to_string())?;
+    settings
+        .db
+        .set_setting(SETTING_CLIPPINGS_SUBDIR, subdir)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Reviewer explicitly opened an Ambient-mode plan for full review — cancels the
 /// auto-approve and keeps the held POST waiting for an explicit decision.
 #[tauri::command]
@@ -1672,6 +1780,455 @@ fn show_main_window(app: AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.show();
         let _ = win.set_focus();
+    }
+}
+
+/// Navigate one of the embedded browser tab webviews to a URL. The JS
+/// `Webview` class can create/position/show/hide a child webview but cannot
+/// navigate it or run scripts in it, so the browser pane routes those here.
+/// `label` identifies the tab's webview (e.g. "browser-t0").
+#[tauri::command]
+fn browser_navigate(app: AppHandle, label: String, url: String) -> Result<(), String> {
+    let wv = app
+        .get_webview(&label)
+        .ok_or_else(|| format!("browser webview '{label}' not found"))?;
+    let parsed = url
+        .parse()
+        .map_err(|_| format!("invalid url: {url}"))?;
+    wv.navigate(parsed).map_err(|e| e.to_string())
+}
+
+/// Evaluate JavaScript inside a browser tab's webview. This is the foundation
+/// for the AI/scripting layer (DOM scraping, JSON export) — each tab can be
+/// scripted independently by label; for now the pane uses it for back/forward.
+#[tauri::command]
+fn browser_eval(app: AppHandle, label: String, script: String) -> Result<(), String> {
+    let wv = app
+        .get_webview(&label)
+        .ok_or_else(|| format!("browser webview '{label}' not found"))?;
+    wv.eval(&script).map_err(|e| e.to_string())
+}
+
+/// Current URL of a browser tab's webview. The JS `Webview` API exposes no
+/// navigation events or URL getter, so the pane polls this to keep the address
+/// bar / tab title in sync with in-page navigation (link clicks, redirects).
+#[tauri::command]
+fn browser_url(app: AppHandle, label: String) -> Result<String, String> {
+    let wv = app
+        .get_webview(&label)
+        .ok_or_else(|| format!("browser webview '{label}' not found"))?;
+    wv.url().map(|u| u.to_string()).map_err(|e| e.to_string())
+}
+
+/// Turn on WKWebView's two-finger back/forward swipe on a browser tab. Tauri
+/// 2.11 doesn't surface `setAllowsBackForwardNavigationGestures`, so we reach
+/// the native WKWebView through `with_webview()` and send the selector with
+/// objc2. No-op on non-macOS platforms.
+#[tauri::command]
+fn browser_enable_gestures(app: AppHandle, label: String) -> Result<(), String> {
+    let wv = app
+        .get_webview(&label)
+        .ok_or_else(|| format!("browser webview '{label}' not found"))?;
+    #[cfg(target_os = "macos")]
+    {
+        wv.with_webview(|pw| {
+            let ptr = pw.inner() as *mut objc2::runtime::AnyObject;
+            // SAFETY: `with_webview` runs this on the UI thread and `inner()`
+            // hands back the live WKWebView; the selector takes a single BOOL.
+            unsafe {
+                if let Some(obj) = ptr.as_ref() {
+                    let _: () = objc2::msg_send![
+                        obj,
+                        setAllowsBackForwardNavigationGestures: objc2::runtime::Bool::new(true)
+                    ];
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = wv;
+    }
+    Ok(())
+}
+
+/// Let macOS resize a browser tab's webview in lockstep with the window instead
+/// of us pushing new bounds over IPC every frame (which lags visibly during the
+/// fullscreen animation). We set the WKWebView's `autoresizingMask` to flexible
+/// width + height (`NSViewWidthSizable | NSViewHeightSizable` = 2 | 16 = 18),
+/// keeping its margins fixed — so as the window grows the view fills the new
+/// space natively and smoothly. `syncBounds` still sets the exact rect at settle
+/// and on split/divider changes. macOS-only; a no-op elsewhere.
+#[tauri::command]
+fn browser_enable_autoresize(app: AppHandle, label: String) -> Result<(), String> {
+    let wv = app
+        .get_webview(&label)
+        .ok_or_else(|| format!("browser webview '{label}' not found"))?;
+    #[cfg(target_os = "macos")]
+    {
+        wv.with_webview(|pw| {
+            let ptr = pw.inner() as *mut objc2::runtime::AnyObject;
+            // SAFETY: runs on the UI thread; `inner()` is the live WKWebView (an
+            // NSView). `setAutoresizingMask:` takes a single NSUInteger.
+            unsafe {
+                if let Some(obj) = ptr.as_ref() {
+                    let _: () = objc2::msg_send![obj, setAutoresizingMask: 18usize];
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = wv;
+    }
+    Ok(())
+}
+
+/// Build the idempotent JS that installs (or removes) the Redline "View" filter
+/// stylesheet on a page. Used both as the document-start user script — so the
+/// filter is present *before* the page paints on every navigation (no flash) —
+/// and as an immediate eval into the already-loaded page so a toggle applies
+/// now. An empty `css` removes the stylesheet. The CSS is JSON-encoded into a
+/// safe JS string literal so it can't break out of the snippet.
+#[cfg(target_os = "macos")]
+fn view_inject_js(css: &str) -> String {
+    let css_lit = serde_json::to_string(css).unwrap_or_else(|_| "\"\"".into());
+    format!(
+        r#"(function(){{
+  var id='__redline_view__';
+  var css={css_lit};
+  var s=document.getElementById(id);
+  if(!css){{ if(s) s.remove(); return; }}
+  if(!s){{ s=document.createElement('style'); s.id=id; (document.head||document.documentElement).appendChild(s); }}
+  s.textContent=css;
+}})();"#
+    )
+}
+
+/// Make an autoreleased NSString from a Rust str without an objc2-foundation
+/// dependency. SAFETY: caller must be on a thread with an active autorelease
+/// pool (the UI thread is); the returned string is valid until that pool drains
+/// or it's retained by a consumer (here `initWithSource:` copies it).
+#[cfg(target_os = "macos")]
+unsafe fn ns_string(s: &str) -> *mut objc2::runtime::AnyObject {
+    let c = std::ffi::CString::new(s).unwrap_or_default();
+    let cls = objc2::class!(NSString);
+    objc2::msg_send![cls, stringWithUTF8String: c.as_ptr()]
+}
+
+/// Apply (or clear) a Redline "View" filter — dark mode, sepia, dim, etc. — to
+/// a browser tab. The stylesheet is installed as a document-start `WKUserScript`
+/// on the tab's WKWebView so it's painted before first frame on every load (no
+/// flicker across navigation), and is also eval'd into the current page so the
+/// toggle takes effect immediately. An empty `css` clears the filter. macOS-
+/// only; a no-op elsewhere. The CSS comes from the pane's own presets.
+#[tauri::command]
+fn browser_set_view(app: AppHandle, label: String, css: String) -> Result<(), String> {
+    let wv = app
+        .get_webview(&label)
+        .ok_or_else(|| format!("browser webview '{label}' not found"))?;
+    #[cfg(target_os = "macos")]
+    {
+        let source = view_inject_js(&css);
+        let has_css = !css.is_empty();
+        let user_script = source.clone();
+        wv.with_webview(move |pw| {
+            let ptr = pw.inner() as *mut objc2::runtime::AnyObject;
+            // SAFETY: `with_webview` runs on the UI thread and `inner()` is the
+            // live WKWebView. We manage exactly one user script of our own here;
+            // `removeAllUserScripts` only clears this tab's controller, and these
+            // external-content browser webviews don't depend on injected Tauri
+            // init scripts after creation (navigation/eval/url go through native
+            // commands, not the JS IPC bridge).
+            unsafe {
+                let Some(webview) = ptr.as_ref() else { return };
+                let config: *mut objc2::runtime::AnyObject =
+                    objc2::msg_send![webview, configuration];
+                let ucc: *mut objc2::runtime::AnyObject =
+                    objc2::msg_send![config, userContentController];
+                let _: () = objc2::msg_send![ucc, removeAllUserScripts];
+                if has_css {
+                    let ns_source = ns_string(&user_script);
+                    let cls = objc2::class!(WKUserScript);
+                    let script: *mut objc2::runtime::AnyObject = objc2::msg_send![cls, alloc];
+                    // injectionTime 0 = AtDocumentStart; forMainFrameOnly true so
+                    // sub-iframes (ads/embeds) aren't separately inverted.
+                    let script: *mut objc2::runtime::AnyObject = objc2::msg_send![
+                        script,
+                        initWithSource: ns_source,
+                        injectionTime: 0isize,
+                        forMainFrameOnly: objc2::runtime::Bool::new(true),
+                    ];
+                    let _: () = objc2::msg_send![ucc, addUserScript: script];
+                    // Balance the +1 from alloc/init; the controller retains it.
+                    let _: () = objc2::msg_send![script, release];
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?;
+        // Apply to the page that's already loaded so the change is instant.
+        wv.eval(&source).map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (wv, css);
+    }
+    Ok(())
+}
+
+/// Evaluate `script` in a browser tab and route WKWebView's
+/// `evaluateJavaScript:completionHandler:` result back to the caller through a
+/// completion block. The script MUST evaluate to a string (WKWebView hands the
+/// result back as an NSString; a non-string return coerces to ""). This is the
+/// shared machinery behind both `browser_scrape` (a fixed clip script) and the
+/// generic `browser_eval_result` (the schema-driven scrape kernel). macOS-only.
+#[cfg(target_os = "macos")]
+async fn eval_with_result(
+    app: &AppHandle,
+    label: &str,
+    script: &str,
+) -> Result<String, String> {
+    use std::sync::{Arc, Mutex};
+    let wv = app
+        .get_webview(label)
+        .ok_or_else(|| format!("browser webview '{label}' not found"))?;
+    let (tx, rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+    let tx = Arc::new(Mutex::new(Some(tx)));
+    let tx_cb = tx.clone();
+    let script = script.to_owned();
+    wv.with_webview(move |pw| {
+        let ptr = pw.inner() as *mut objc2::runtime::AnyObject;
+        let handler = block2::RcBlock::new(
+            move |result: *mut objc2::runtime::AnyObject,
+                  _err: *mut objc2::runtime::AnyObject| {
+                // SAFETY: WKWebView invokes the completion handler on the UI
+                // thread; `result` is an NSString (our script returns one) or
+                // null on failure.
+                let out = unsafe {
+                    if result.is_null() {
+                        String::new()
+                    } else {
+                        let c: *const std::os::raw::c_char =
+                            objc2::msg_send![result, UTF8String];
+                        if c.is_null() {
+                            String::new()
+                        } else {
+                            std::ffi::CStr::from_ptr(c).to_string_lossy().into_owned()
+                        }
+                    }
+                };
+                if let Some(s) = tx_cb.lock().unwrap().take() {
+                    let _ = s.send(Ok(out));
+                }
+            },
+        );
+        // SAFETY: runs on the UI thread via `with_webview`; `inner()` hands
+        // back the live WKWebView. WKWebView copies the completion block, so
+        // it outlives this `RcBlock` drop at the end of the closure.
+        unsafe {
+            let Some(webview) = ptr.as_ref() else {
+                if let Some(s) = tx.lock().unwrap().take() {
+                    let _ = s.send(Err("browser webview gone".into()));
+                }
+                return;
+            };
+            let js = ns_string(&script);
+            let _: () = objc2::msg_send![
+                webview,
+                evaluateJavaScript: js,
+                completionHandler: &*handler,
+            ];
+        }
+    })
+    .map_err(|e| e.to_string())?;
+    rx.await.map_err(|_| "page eval cancelled".to_string())?
+}
+
+/// Scrape the live DOM of a browser tab, returning a JSON string
+/// `{"url","title","selection","body"}`. Unlike `browser_eval` (fire-and-forget),
+/// this captures the result, so the "save page to Obsidian" flow can capture
+/// rendered, JS-built content (and any active text selection) without re-fetching
+/// the URL. macOS-only; errors on other platforms.
+#[tauri::command(async)]
+async fn browser_scrape(app: AppHandle, label: String) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        // The page returns a JSON blob; on any error it still returns the URL so
+        // a clip is never empty. innerText (not innerHTML) keeps the body as
+        // clean readable text suitable to drop straight into a note.
+        let script = r#"(function(){try{var s=window.getSelection?String(window.getSelection()):"";return JSON.stringify({url:location.href,title:document.title||"",selection:s,body:document.body?document.body.innerText:""});}catch(e){return JSON.stringify({url:location.href,title:document.title||"",selection:"",body:""});}})()"#;
+        eval_with_result(&app, &label, script).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, label);
+        Err("page scrape is only supported on macOS".into())
+    }
+}
+
+/// Evaluate a self-contained JS program in a browser tab and return its STRING
+/// result (unlike fire-and-forget `browser_eval`). This is the generic kernel
+/// behind the schema-driven scrape feature: the frontend builds a program from a
+/// `ScrapeSchema` that returns a JSON string, and this routes the result back.
+/// The program must return a string — non-string results coerce to "". macOS-only.
+#[tauri::command(async)]
+async fn browser_eval_result(
+    app: AppHandle,
+    label: String,
+    script: String,
+) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        eval_with_result(&app, &label, &script).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, label, script);
+        Err("scrape is only supported on macOS".into())
+    }
+}
+
+/// Resolve a window to anchor a native popup menu over. The default label is
+/// "main", but once the browser pane attaches its child webviews the main
+/// window drops out of `webview_windows()` (it's no longer a 1:1 webview-window),
+/// so `get_webview_window("main")` returns None. The underlying `Window` still
+/// exists, so resolve that and fall back to any open window.
+fn menu_anchor_window(app: &AppHandle) -> Option<tauri::Window> {
+    app.get_window("main")
+        .or_else(|| app.windows().into_values().next())
+}
+
+/// Build and pop up a native bookmarks menu over the embedded browser. HTML
+/// can't overlay a native webview, so the menu must itself be native. Item
+/// clicks return through `on_menu_event` as `bm-*` ids, forwarded to the
+/// frontend as a `bookmark-menu-action` event. `titles` are the saved bookmark
+/// names in order; the frontend acts by index.
+#[tauri::command]
+fn show_bookmarks_menu(
+    app: AppHandle,
+    titles: Vec<String>,
+    current_bookmarked: bool,
+    has_current: bool,
+    x: f64,
+    y: f64,
+) -> Result<(), String> {
+    let win = menu_anchor_window(&app).ok_or_else(|| "no main window".to_string())?;
+    let mut mb = MenuBuilder::new(&app);
+    if has_current {
+        mb = if current_bookmarked {
+            mb.text("bm-remove-current", "Remove this page")
+        } else {
+            mb.text("bm-add", "Add bookmark…")
+        };
+        mb = mb.separator();
+    }
+    if titles.is_empty() {
+        let none = MenuItemBuilder::with_id("bm-none", "No bookmarks yet")
+            .enabled(false)
+            .build(&app)
+            .map_err(|e| e.to_string())?;
+        mb = mb.item(&none);
+    } else {
+        for (i, title) in titles.iter().enumerate() {
+            let label = if title.is_empty() {
+                "(untitled)"
+            } else {
+                title.as_str()
+            };
+            let sm = SubmenuBuilder::new(&app, label)
+                .text(format!("bm-open-{i}"), "Open")
+                .text(format!("bm-newtab-{i}"), "Open in New Tab")
+                .text(format!("bm-rename-{i}"), "Rename…")
+                .separator()
+                .text(format!("bm-remove-{i}"), "Remove")
+                .build()
+                .map_err(|e| e.to_string())?;
+            mb = mb.item(&sm);
+        }
+    }
+    let menu = mb.build().map_err(|e| e.to_string())?;
+    // Pop up at an explicit position (the ★ button, in window coords). Without
+    // a position, muda relies on the current NSEvent — which is gone by the
+    // time this async command runs on the main thread, so the menu never shows.
+    win.popup_menu_at(&menu, tauri::LogicalPosition::new(x, y))
+        .map_err(|e| e.to_string())
+}
+
+/// Pop up the native "View" filter menu over the embedded browser (HTML can't
+/// overlay a native webview, same as bookmarks). `active` is the current filter
+/// id ("dark", "sepia", … or "none") so the matching item shows a check. Clicks
+/// return through `on_menu_event` as `view-*` ids, forwarded to the frontend as
+/// a `view-menu-action` event; the pane maps them back to a filter mode.
+#[tauri::command]
+fn show_view_menu(app: AppHandle, active: String, x: f64, y: f64) -> Result<(), String> {
+    let win = menu_anchor_window(&app).ok_or_else(|| "no main window".to_string())?;
+    let filters = [
+        ("view-dark", "Dark mode"),
+        ("view-sepia", "Sepia"),
+        ("view-gray", "Grayscale"),
+        ("view-dim", "Dim"),
+        ("view-contrast", "High contrast"),
+    ];
+    let mut mb = MenuBuilder::new(&app);
+    for (id, label) in filters {
+        let mode = id.strip_prefix("view-").unwrap_or(id);
+        let item = CheckMenuItem::with_id(&app, id, label, true, active == mode, None::<&str>)
+            .map_err(|e| e.to_string())?;
+        mb = mb.item(&item);
+    }
+    mb = mb.separator().text("view-none", "Reset to normal");
+    let menu = mb.build().map_err(|e| e.to_string())?;
+    win.popup_menu_at(&menu, tauri::LogicalPosition::new(x, y))
+        .map_err(|e| e.to_string())
+}
+
+/// Native text prompt used to name / rename a bookmark — a native menu can't
+/// host a text field. Uses macOS `display dialog`; returns None on cancel.
+#[tauri::command]
+fn prompt_text(message: String, default_value: String) -> Result<Option<String>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        fn as_quote(s: &str) -> String {
+            let mut out = String::with_capacity(s.len() + 2);
+            out.push('"');
+            for c in s.chars() {
+                match c {
+                    '\\' => out.push_str("\\\\"),
+                    '"' => out.push_str("\\\""),
+                    _ => out.push(c),
+                }
+            }
+            out.push('"');
+            out
+        }
+        let script = format!(
+            "display dialog {} default answer {} with title \"Redline\" \
+             buttons {{\"Cancel\", \"Save\"}} default button \"Save\"",
+            as_quote(&message),
+            as_quote(&default_value),
+        );
+        let out = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .output()
+            .map_err(|e| e.to_string())?;
+        // Non-zero exit = user pressed Cancel (osascript errors on cancel).
+        if !out.status.success() {
+            return Ok(None);
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let name = stdout
+            .split("text returned:")
+            .nth(1)
+            .map(|s| s.trim_end().to_string());
+        Ok(name)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (message, default_value);
+        Ok(None)
     }
 }
 
@@ -1807,6 +2364,8 @@ pub fn run() {
             attach_discussion,
             get_interception_mode,
             set_interception_mode,
+            get_obsidian_config,
+            set_obsidian_config,
             get_daemon_status,
             claim_review,
             arm_restore,
@@ -1825,6 +2384,8 @@ pub fn run() {
             fsbrowse::list_dir,
             fsbrowse::read_text_file,
             fsbrowse::read_file_base64,
+            fsbrowse::save_text_file,
+            fsbrowse::ensure_dir,
             fsbrowse::home_dir,
             highlight::open_doc,
             highlight::doc_lines,
@@ -1835,6 +2396,17 @@ pub fn run() {
             fork::fork_thread_cancel,
             fork::fork_thread_discard,
             fork::fork_kill_all,
+            browser_navigate,
+            browser_eval,
+            browser_url,
+            browser_scrape,
+            browser_eval_result,
+            browser_enable_gestures,
+            browser_enable_autoresize,
+            browser_set_view,
+            show_bookmarks_menu,
+            show_view_menu,
+            prompt_text,
         ])
         .setup(|app| {
             // Silently bring an existing install's hook timeout up to date, so a
@@ -2081,6 +2653,14 @@ pub fn run() {
                     let _ = app.emit(event, ());
                 }
                 "remove_hook" => remove_hook_via_menu(app),
+                // Bookmarks popup-menu clicks → let the browser pane act on them.
+                id if id.starts_with("bm-") => {
+                    let _ = app.emit("bookmark-menu-action", id.to_string());
+                }
+                // View-filter menu clicks → let the browser pane apply them.
+                id if id.starts_with("view-") => {
+                    let _ = app.emit("view-menu-action", id.to_string());
+                }
                 _ => {}
             });
 
@@ -2139,6 +2719,29 @@ mod tests {
             export_file_name("my project", 1, None, "docx"),
             "my-project-v1.docx"
         );
+    }
+
+    #[test]
+    fn restore_target_id_parses_embedded_session_id() {
+        // Id-bearing sentinel → the held plan's session id (resume forks the id,
+        // or the command was pasted into a running REPL).
+        assert_eq!(
+            restore_target_id("<!-- rl:blk-1 -->\n<!-- REDLINE_RESTORE:36c1d078-abc -->"),
+            Some("36c1d078-abc".to_string())
+        );
+        // Whitespace inside the marker is tolerated.
+        assert_eq!(
+            restore_target_id("<!-- REDLINE_RESTORE:  s-9  -->"),
+            Some("s-9".to_string())
+        );
+        // Bare sentinel → no target (same-session, in-place restore).
+        assert_eq!(restore_target_id("<!-- REDLINE_RESTORE -->"), None);
+        // Empty id and non-restore bodies → no target.
+        assert_eq!(restore_target_id("<!-- REDLINE_RESTORE: -->"), None);
+        assert_eq!(restore_target_id("# A real plan\n\nbody"), None);
+        // Both forms are detected as restore handshakes by the prefix.
+        assert!("<!-- REDLINE_RESTORE:x -->".contains(REDLINE_RESTORE_PREFIX));
+        assert!("<!-- REDLINE_RESTORE -->".contains(REDLINE_RESTORE_PREFIX));
     }
 
     #[test]

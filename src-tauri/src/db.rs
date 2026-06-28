@@ -533,6 +533,40 @@ impl Database {
 
     /// Delete a session and its revisions/comments. Explicit child deletes so
     /// this is correct regardless of the `foreign_keys` PRAGMA.
+    /// Move every row for `old_id` to `new_id` across the session-scoped tables.
+    /// Used to rebind a held plan onto the live session when a restore handshake
+    /// lands under a different id than the plan it names (resume forks the id, or
+    /// the command was pasted into a running Claude REPL). Foreign keys aren't
+    /// enforced on this connection (see `delete_session`, which deletes each
+    /// table by hand), so a straight per-table column UPDATE is safe and
+    /// order-independent. Caller guarantees `new_id` holds no session yet.
+    pub fn rekey_session(&self, old_id: &str, new_id: &str) -> rusqlite::Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        // Foreign keys are enforced on this connection, and the session-scoped
+        // tables form a chain (comments/briefs → revisions → sessions). Renaming
+        // them one at a time transiently dangles a child, so defer FK checks to
+        // commit, by which point every table is consistent again.
+        tx.execute_batch("PRAGMA defer_foreign_keys = ON")?;
+        // `briefs` is created lazily and absent from fresh (test) DBs; skip any
+        // table that doesn't exist. Order is irrelevant under deferred checks.
+        for table in ["thread_messages", "comments", "briefs", "revisions", "sessions"] {
+            let present: i64 = tx.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name = ?1",
+                params![table],
+                |r| r.get(0),
+            )?;
+            if present == 0 {
+                continue;
+            }
+            tx.execute(
+                &format!("UPDATE {table} SET session_id = ?1 WHERE session_id = ?2"),
+                params![new_id, old_id],
+            )?;
+        }
+        tx.commit()
+    }
+
     pub fn delete_session(&self, session_id: &str) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -1025,6 +1059,64 @@ mod tests {
         let reloaded = SessionStore::new(db);
         assert!(reloaded.get("doomed").is_none());
         assert!(reloaded.get("keep").is_some());
+    }
+
+    #[test]
+    fn rekey_session_moves_plan_and_comments_onto_the_live_id() {
+        use crate::state::{CommentKind, NewCommentRequest};
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let store = SessionStore::new(db.clone());
+        let md = "# Held Plan\n\nBody.\n";
+        // The held plan lives under the original review session id.
+        store.upsert_plan("old", "/tmp/p", md.to_string(), reparse_sections(md), true, false);
+        let draft = store
+            .add_comment(
+                "old",
+                NewCommentRequest {
+                    kind: CommentKind::Feedback,
+                    scope: None,
+                    anchor_id: "A".to_string(),
+                    block_id: Some("rl:blk-1".to_string()),
+                    structural: None,
+                    body: "in flight".to_string(),
+                    edit: None,
+                    selection: None,
+                    author: None,
+                },
+            )
+            .expect("add comment");
+
+        // Restore handshake arrives under a forked/foreign id → rebind onto it.
+        assert!(store.rekey_session("old", "new"));
+        assert!(!store.has_session("old"));
+        assert!(store.has_session("new"));
+
+        // No-op guards: equal ids, missing source, occupied destination.
+        assert!(!store.rekey_session("new", "new"));
+        assert!(!store.rekey_session("missing", "new2"));
+        store.upsert_plan("occupied", "/tmp/o", md.to_string(), reparse_sections(md), true, false);
+        assert!(!store.rekey_session("new", "occupied"));
+
+        let check = |store: &SessionStore, label: &str| {
+            let s = store.get("new").expect("session under new id");
+            assert_eq!(s.session_id, "new", "{label}");
+            assert_eq!(s.revisions.len(), 1, "{label}");
+            assert_eq!(s.revisions[0].raw_plan_markdown, md, "{label}");
+            // The reviewer's open comment rode along with the session.
+            let c = &s.revisions[0].comments;
+            assert_eq!(c.len(), 1, "{label}");
+            assert_eq!(c[0].id, draft.id, "{label}");
+        };
+        check(&store, "in memory");
+
+        // Survives a reload — the DB rows moved, not just the in-memory map.
+        let reloaded = SessionStore::new(db);
+        assert!(reloaded.get("old").is_none());
+        check(&reloaded, "after reload");
+
+        // And the held plan now restores cleanly under the live id.
+        let restored = store.restore_latest("new").expect("restore under new id");
+        assert_eq!(restored.version_number, 2);
     }
 
     // Mirrors the `handle_plan` thread-classification predicate:

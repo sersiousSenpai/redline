@@ -360,14 +360,22 @@ After running, fold results into "Accumulated findings" below and update `~/.cla
 ```bash
 claude -p "<prompt>" --resume <main_session_id> --fork-session \
   --output-format stream-json --include-partial-messages --verbose \
-  --permission-mode default --tools "Read,Grep,Glob" --strict-mcp-config
+  --permission-mode default --tools "Read,Grep,Glob,WebFetch,WebSearch" --strict-mcp-config
 ```
 **Follow-up turn** (resumes the fork — no `--fork-session`):
 ```bash
 claude -p "<prompt>" --resume <fork_session_id> \
   --output-format stream-json --include-partial-messages --verbose \
-  --permission-mode default --tools "Read,Grep,Glob" --strict-mcp-config
+  --permission-mode default --tools "Read,Grep,Glob,WebFetch,WebSearch" --strict-mcp-config
 ```
+
+> **Update 2026-06-27:** the fork tool set now includes `WebFetch` and
+> `WebSearch` so a discussion can ground its answer in external docs. The web
+> tools are read-only with no repo/plan side effects, so the read-only
+> guarantee below is unchanged — `Edit`/`Write`/`Bash`/`ExitPlanMode` stay
+> excluded and `--strict-mcp-config` still strips MCP. The checklist bullets
+> below record the original 2026-05-21 verification with the `Read,Grep,Glob`
+> set; only the web tools were added since.
 
 - [x] **`--fork-session` mints a new session id.** The first turn resumed `d8111931-…`; the `system/init` event reported a *different* `session_id` (`5cd5f058-…`). `result.session_id` matched `init`.
 - [x] **The resumed transcript is untouched.** The main session's `.jsonl` was byte- and mtime-identical before and after the fork.

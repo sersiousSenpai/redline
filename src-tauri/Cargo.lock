@@ -3115,7 +3115,9 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "block2",
  "notify-debouncer-mini",
+ "objc2",
  "portable-pty",
  "pulldown-cmark",
  "rusqlite",

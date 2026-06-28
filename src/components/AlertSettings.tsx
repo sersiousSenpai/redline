@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { SoundConfig } from "../audio/beep";
 import { SoundPicker } from "./SoundPicker";
+import { useMenuOverlay } from "./menuOverlay";
 
 interface AlertSettingsProps {
   enabled: boolean;
@@ -35,6 +36,9 @@ export function AlertSettings({
 }: AlertSettingsProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+
+  // Hide the native browser webview while this menu is up (see useMenuOverlay).
+  useMenuOverlay(open);
 
   useEffect(() => {
     if (!open) return;

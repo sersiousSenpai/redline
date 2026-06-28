@@ -323,7 +323,8 @@ fn build_first_turn_prompt(
         "\nRespond to the reviewer directly and concisely, in plain markdown \
          prose. This is a read-only discussion thread — do not edit files, do \
          not produce a new plan, and do not call ExitPlanMode. You may read \
-         files and search the code to ground your answer.",
+         files, search the code, and fetch web pages or search the web to \
+         ground your answer.",
     );
     p
 }
@@ -400,8 +401,11 @@ pub async fn fork_thread_send(
         Some(_) => text.clone(),
     };
 
-    // Read-only fork: built-in tools limited to Read/Grep/Glob, MCP stripped,
-    // never plan mode. See docs/protocol-verification.md Experiment (i).
+    // Read-only fork: built-in tools limited to Read/Grep/Glob plus the web
+    // tools (WebFetch/WebSearch) so the discussion can ground answers in external
+    // docs. The web tools have no repo or plan side effects, so the read-only
+    // guarantee holds: Edit/Write/Bash/ExitPlanMode stay excluded and MCP is
+    // stripped. Never plan mode. See docs/protocol-verification.md Experiment (i).
     let mut args: Vec<String> = vec![
         "-p".to_string(),
         prompt,
@@ -412,7 +416,7 @@ pub async fn fork_thread_send(
         "--permission-mode".to_string(),
         "default".to_string(),
         "--tools".to_string(),
-        "Read,Grep,Glob".to_string(),
+        "Read,Grep,Glob,WebFetch,WebSearch".to_string(),
         "--strict-mcp-config".to_string(),
     ];
     match &prior_fork {

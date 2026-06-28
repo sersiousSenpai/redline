@@ -6,7 +6,7 @@ description: >-
   [feedback], or [question], rl:blk- block-identity sidecars, or a
   REDLINE_RESOLUTIONS block. Covers presentation-aware plan markdown,
   preserving sidecars, and emitting resolutions.
-version: 5
+version: 6
 ---
 
 # Redline review protocol
@@ -179,9 +179,13 @@ retype it. Follow this fixed sequence:
 
 1. **`EnterPlanMode`** — establishes plan mode and gives you a fresh plan-file
    path. (Don't list session directories.)
-2. **Write exactly `<!-- REDLINE_RESTORE -->`** as your plan file's contents —
-   a one-line placeholder. Redline recognizes this marker, restores the plan it
-   holds, and **ignores** whatever body you submit.
+2. **Write exactly the `<!-- REDLINE_RESTORE:… -->` marker the resume command
+   gave you** as your plan file's contents — a one-line placeholder carrying the
+   held plan's session id (e.g. `<!-- REDLINE_RESTORE:36c1d078-… -->`). Write it
+   verbatim, including the id; that id lets Redline rebind the restore even if
+   this resumed session got a new id. Redline recognizes the marker, restores the
+   plan it holds, and **ignores** whatever body you submit. (A bare
+   `<!-- REDLINE_RESTORE -->` still works for an in-place restore.)
 3. **`ExitPlanMode`** — the hook reopens the held plan in Redline's editor.
 
 A restore is a **re-presentation, not a revision**: don't fetch the body, don't

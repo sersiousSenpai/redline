@@ -908,6 +908,28 @@ impl SessionStore {
     /// Permanently remove a session and all its revisions/comments (memory +
     /// DB). Returns false if no such session. Callers must ensure no POST is
     /// currently held for it (an active terminal).
+    /// Rebind a held session onto `new_id` (the live session id a restore
+    /// handshake arrived under). No-op returning false if the source is absent,
+    /// the ids are equal, or `new_id` already holds a session (never clobber a
+    /// live one). The whole in-memory session moves wholesale, so its
+    /// revisions / open comments / attach-state ride along unchanged, and the
+    /// DB rows follow via `db.rekey_session`.
+    pub fn rekey_session(&self, old_id: &str, new_id: &str) -> bool {
+        let mut map = self.inner.lock().unwrap();
+        if old_id == new_id || map.contains_key(new_id) {
+            return false;
+        }
+        let Some(mut session) = map.remove(old_id) else {
+            return false;
+        };
+        session.session_id = new_id.to_string();
+        if let Err(e) = self.db.rekey_session(old_id, new_id) {
+            tracing::error!(error = %e, "failed to rekey session in db");
+        }
+        map.insert(new_id.to_string(), session);
+        true
+    }
+
     pub fn delete_session(&self, session_id: &str) -> bool {
         let mut map = self.inner.lock().unwrap();
         if map.remove(session_id).is_none() {

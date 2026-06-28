@@ -37,6 +37,8 @@ mod tests {
         assert_async_command(src, "fsbrowse.rs", "list_dir");
         assert_async_command(src, "fsbrowse.rs", "read_text_file");
         assert_async_command(src, "fsbrowse.rs", "read_file_base64");
+        assert_async_command(src, "fsbrowse.rs", "save_text_file");
+        assert_async_command(src, "fsbrowse.rs", "ensure_dir");
     }
 
     /// PTY output must stay batched over a per-terminal raw-byte Channel — never

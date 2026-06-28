@@ -30,12 +30,25 @@ import { SessionSidebar } from "./components/SessionSidebar";
 import { SidebarTabStrip } from "./components/SidebarTabStrip";
 import { FileTree } from "./components/FileTree";
 import { FileViewer } from "./components/FileViewer";
+import { BrowserPane } from "./components/BrowserPane";
+import { MenuOverlayProvider } from "./components/menuOverlay";
+import { SplitPane } from "./components/SplitPane";
+import { PromptDrafter } from "./components/PromptDrafter";
+import type { ProjectOption } from "./components/ProjectPicker";
 import { useFolderWorkspaces } from "./hooks/useFolderWorkspaces";
 import { computeParagraphDiff, type ParagraphDiff } from "./diff";
 import { blockIdByAnchorId } from "./editor/docModel";
 import { useTextSelection } from "./hooks/useTextSelection";
-import { applyTheme, readStoredTheme, storeTheme } from "./theme/applyTheme";
+import {
+  applyFont,
+  applyTheme,
+  readStoredFont,
+  readStoredTheme,
+  storeFont,
+  storeTheme,
+} from "./theme/applyTheme";
 import type { ThemeName } from "./theme/themes";
+import type { FontName } from "./theme/fonts";
 import { usePersistedState } from "./theme/usePersistedState";
 import { useResizablePane } from "./hooks/useResizablePane";
 import { PaneDivider } from "./components/PaneDivider";
@@ -45,6 +58,8 @@ import { DecisionWindowBanner } from "./components/DecisionWindowBanner";
 import { FlashOverlay } from "./components/FlashOverlay";
 import { playInterceptBeep, DEFAULT_SOUND } from "./audio/beep";
 import { buildResumeCommand } from "./lib/resumeCommand";
+import { buildPlanLaunchCommand } from "./lib/planLaunchCommand";
+import type { JSONContent } from "@tiptap/react";
 import type {
   Comment,
   CommentType,
@@ -137,6 +152,15 @@ function ZoomButton({
 function App() {
   const [summaries, setSummaries] = useState<SessionSummary[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
+  // Count of open header dropdowns (theme, mode, alerts, download). Folded into
+  // `browserVisible` below so the native browser webview hides while a menu is
+  // up — otherwise the OS-composited webview paints over the DOM menu. Header
+  // dropdowns register via the MenuOverlayProvider / useMenuOverlay context.
+  const [openMenuCount, setOpenMenuCount] = useState(0);
+  const adjustMenuOverlay = useCallback(
+    (delta: number) => setOpenMenuCount((c) => Math.max(0, c + delta)),
+    [],
+  );
   const [session, setSession] = useState<ReviewSession | null>(null);
   const [loading, setLoading] = useState(true);
   const [composing, setComposing] = useState<ComposingState | null>(null);
@@ -179,6 +203,7 @@ function App() {
   const [decisionWindow, setDecisionWindow] =
     useState<PlanDecisionWindowEvent | null>(null);
   const [theme, setTheme] = useState<ThemeName>(() => readStoredTheme());
+  const [font, setFont] = useState<FontName>(() => readStoredFont());
   // Flash-on-intercept alert: an opt-in full-window pulse (+ optional beep)
   // fired whenever a plan is intercepted. `flashSeq` bumps to (re)trigger the
   // overlay; the three prefs persist via localStorage.
@@ -226,6 +251,45 @@ function App() {
   const [paneFullscreen, setPaneFullscreen] = usePersistedState(
     "redline.commentPane.fullscreen",
     false,
+  );
+  // The center pane hosts two independently-toggleable views: the document
+  // (editor/plan) and the embedded browser. Each has a toolbar toggle. When
+  // both are on, they share the pane as a foldable split (see SplitPane);
+  // `splitVertical` flips between side-by-side (default) and stacked, and
+  // `splitRatio` is the document's share. `splitDragging` hides the native
+  // webview during a split-divider drag so it doesn't swallow the pointer.
+  // `docOpen` only matters while the browser is open: it adds the document to a
+  // split alongside the browser. With the browser closed, the document is the
+  // default full view regardless. So the document toolbar toggle is shown only
+  // when the browser is open.
+  const [docOpen, setDocOpen] = usePersistedState("redline.doc.open", false);
+  const [browserOpen, setBrowserOpen] = usePersistedState(
+    "redline.browser.open",
+    false,
+  );
+  const [splitVertical, setSplitVertical] = usePersistedState(
+    "redline.split.vertical",
+    false,
+  );
+  const [splitRatio, setSplitRatio] = usePersistedState(
+    "redline.split.ratio",
+    0.5,
+  );
+  const [splitDragging, setSplitDragging] = useState(false);
+  // The Prompt Drafter — a Word-style authoring surface that takes over the
+  // center pane (mutually exclusive with the browser). Its draft (Tiptap JSON)
+  // and the project it launches into persist across reloads.
+  const [drafterOpen, setDrafterOpen] = usePersistedState(
+    "redline.drafter.open",
+    false,
+  );
+  const [drafterDoc, setDrafterDoc] = usePersistedState<JSONContent | null>(
+    "redline.drafter.doc",
+    null,
+  );
+  const [drafterProject, setDrafterProject] = usePersistedState<string | null>(
+    "redline.drafter.project",
+    null,
   );
   // Document zoom (content font-scale, not webview zoom). Persisted; clamped
   // 0.8–1.6. Driven by the in-pane control and Cmd +/-/0 shortcuts.
@@ -418,6 +482,25 @@ function App() {
     [activateFolder],
   );
 
+  // Open the Obsidian vault as a folder tab — reusing the project-folder
+  // explorer wholesale, since a vault is just a directory of markdown. Reads the
+  // config fresh each click (BrowserPane can also set it), and falls back to the
+  // native folder picker when no vault is configured yet.
+  const openVault = useCallback(async () => {
+    const { getObsidianConfig, setObsidianConfig, pickFolder } = await import(
+      "./lib/obsidian"
+    );
+    const cfg = await getObsidianConfig();
+    let vault = cfg.vaultPath;
+    if (!vault) {
+      vault = await pickFolder("Choose your Obsidian vault");
+      if (!vault) return;
+      await setObsidianConfig(vault, cfg.clippingsSubdir);
+    }
+    openFolder(vault);
+    selectFolderTab(vault);
+  }, [openFolder, selectFolderTab]);
+
   // Shift + arrows toggle the surrounding panes (← sidebar, → comment pane,
   // ↓ terminal dock) and cycle the sidebar tab (↑). A capture-phase window
   // listener so the keystroke is caught — and swallowed — even when the xterm
@@ -541,6 +624,13 @@ function App() {
   const handleOpenFile = useCallback(
     (path: string) => {
       setActiveFile(path);
+      // If a secondary pane (browser or drafter) is filling the center pane on
+      // its own, opening a document would otherwise load hidden behind it.
+      // Bring up the split so both show.
+      if ((browserOpen || drafterOpen) && !docOpen) {
+        setSplitRatio(0.5);
+        setDocOpen(true);
+      }
       if (sidebarTab.kind === "folder") {
         folderFileRef.current.set(sidebarTab.id, path);
         if (activeTermId) {
@@ -551,7 +641,7 @@ function App() {
         }
       }
     },
-    [setActiveFile, sidebarTab, activeTermId],
+    [setActiveFile, sidebarTab, activeTermId, browserOpen, drafterOpen, docOpen, setDocOpen, setSplitRatio],
   );
   const handleCloseFile = useCallback(() => {
     setActiveFile(null);
@@ -665,6 +755,12 @@ function App() {
     setTheme(name);
     applyTheme(name);
     storeTheme(name);
+  };
+
+  const onFontChange = (name: FontName) => {
+    setFont(name);
+    applyFont(name);
+    storeFont(name);
   };
 
   // Track the viewport width so each side pane's max can be "up to the other
@@ -1343,8 +1439,8 @@ function App() {
   // comments, revisions and reopen history intact (no phantom new review).
   const restorePlanSession = () => {
     if (!session) return;
-    const cmd = `${buildResumeCommand(session.sessionId, new Date())}\r`;
     const cwd = session.projectPath || null;
+    const cmd = `${buildResumeCommand(session.sessionId, new Date(), cwd)}\r`;
     // Arm a one-shot restore so the resumed session's re-presented plan is
     // labeled "vN restored" rather than counted as a fresh version/thread.
     void invoke("arm_restore", { sessionId: session.sessionId });
@@ -1365,6 +1461,40 @@ function App() {
     setTimeout(() => setToast(null), 4000);
   };
 
+  // Candidate project directories for the drafter's launch picker: every review
+  // session's project plus each open folder workspace, deduped by path.
+  const projectOptions = useMemo<ProjectOption[]>(() => {
+    const seen = new Map<string, ProjectOption>();
+    const add = (path: string, name: string, source: ProjectOption["source"]) => {
+      if (!path) return;
+      const key = path.replace(/\/+$/, "") || "/";
+      if (!seen.has(key)) seen.set(key, { path, name, source });
+    };
+    for (const s of summaries) add(s.projectPath, s.projectName, "session");
+    for (const f of openFolders) add(f.path, f.name, "folder");
+    return [...seen.values()];
+  }, [summaries, openFolders]);
+
+  // Send the drafted prompt to a *fresh* Claude Code plan session: spawn a
+  // terminal in the chosen project and launch `claude --permission-mode plan`
+  // seeded with the prompt — the same spawn → 900ms → write pattern as
+  // restorePlanSession (let the shell's rc files settle before the command lands).
+  const launchPromptDraft = (markdown: string, projectPath: string | null) => {
+    const trimmed = markdown.trim();
+    if (!trimmed) return;
+    const cmd = `${buildPlanLaunchCommand(trimmed, projectPath)}\r`;
+    setTermFullscreen(false);
+    setTermCollapsed(false);
+    const id = terminalsRef.current?.openSessionTerminal(projectPath) ?? null;
+    if (id) {
+      window.setTimeout(() => {
+        void invoke("pty_write", { id, data: cmd });
+      }, 900);
+    }
+    setToast("Launching plan in the terminal below ↓");
+    setTimeout(() => setToast(null), 4000);
+  };
+
   // Fallback for a Claude running in a terminal Redline doesn't own: copy the
   // resume command so the user can paste it into their own terminal.
   const copyRestoreCommand = () => {
@@ -1373,9 +1503,9 @@ function App() {
     // whichever terminal runs it, should land as "vN restored".
     void invoke("arm_restore", { sessionId: session.sessionId });
     void navigator.clipboard?.writeText(
-      buildResumeCommand(session.sessionId, new Date()),
+      buildResumeCommand(session.sessionId, new Date(), session.projectPath || null),
     );
-    setToast("Resume command copied — paste it into your terminal");
+    setToast("Resume command copied — paste it into a shell prompt");
     setTimeout(() => setToast(null), 4000);
   };
 
@@ -1582,7 +1712,32 @@ function App() {
     if (errors.length === 0 && hookOk && skillOk) setSetupPhase("done");
   };
 
+  // A native child webview paints on top of all React DOM, so when a
+  // full-pane overlay is up the browser must be hidden underneath it. Mirrors
+  // the setup-modal / tour gating used in the JSX below.
+  const setupModalActive =
+    !!hookStatus &&
+    !!skillStatus &&
+    (!hookStatus.installed ||
+      !skillStatus.installed ||
+      setupPhase === "done");
+  const tourActive = tourOpen || (!onboardingDone && !setupModalActive);
+  const browserOverlayActive =
+    showReadme || showFeedback || setupModalActive || tourActive;
+  // The native webview must be hidden whenever a pane divider is mid-drag —
+  // otherwise it swallows the pointer and the resize freezes. This makes the
+  // sidebar, comment pane, terminal, and the document/browser split all
+  // draggable over the browser, exactly as they are over the document.
+  const browserVisible =
+    !browserOverlayActive &&
+    !sidebarDragging &&
+    !isDragging &&
+    !termDragging &&
+    !splitDragging &&
+    openMenuCount === 0;
+
   return (
+    <MenuOverlayProvider value={adjustMenuOverlay}>
     <div className="h-full flex flex-col">
       <FlashOverlay seq={flashSeq} color={flashColor} />
       {!daemonBound && (
@@ -1604,6 +1759,8 @@ function App() {
         session={session}
         theme={theme}
         onThemeChange={onThemeChange}
+        font={font}
+        onFontChange={onFontChange}
         mode={mode}
         onModeChange={changeMode}
         onExport={exportRevision}
@@ -1623,6 +1780,39 @@ function App() {
           setFlashSeq((n) => n + 1);
           if (flashSound) playInterceptBeep(flashSoundConfig);
         }}
+        docOpen={docOpen}
+        onToggleDoc={() => {
+          // Entering/leaving a split — start it even so both panes are visible.
+          setSplitRatio(0.5);
+          setDocOpen((v) => !v);
+        }}
+        browserOpen={browserOpen}
+        onToggleBrowser={() => {
+          // Browser and drafter share the single "secondary pane" slot, so
+          // opening one closes the other; the split resets to even so a folded
+          // pane reappears.
+          setSplitRatio(0.5);
+          setBrowserOpen((v) => {
+            if (!v) setDrafterOpen(false);
+            return !v;
+          });
+        }}
+        drafterOpen={drafterOpen}
+        onToggleDrafter={() => {
+          setSplitRatio(0.5);
+          setDrafterOpen((v) => {
+            if (!v) setBrowserOpen(false);
+            return !v;
+          });
+        }}
+        splitActive={docOpen && (browserOpen || drafterOpen)}
+        splitVertical={splitVertical}
+        onToggleSplitOrientation={() => {
+          // Flipping orientation resets to 50/50 so a folded-away pane reappears.
+          setSplitRatio(0.5);
+          setSplitVertical((v) => !v);
+        }}
+        onOpenVault={() => void openVault()}
       />
       {decisionWindow && (
         <DecisionWindowBanner
@@ -1704,8 +1894,14 @@ function App() {
           className="flex-1 overflow-hidden flex flex-col relative"
           style={{ background: "var(--color-paper)" }}
         >
-          {sidebarTab.kind === "folder" && activeFile ? (
-            <FileViewer path={activeFile} onClose={handleCloseFile} />
+          {(() => {
+            const documentBody =
+              sidebarTab.kind === "folder" && activeFile ? (
+            <FileViewer
+              path={activeFile}
+              onClose={handleCloseFile}
+              onSaved={toastSaved}
+            />
           ) : (
           <div className="rl-thin-scroll-y flex-1 overflow-y-auto">
           <article
@@ -1779,10 +1975,53 @@ function App() {
             )}
           </article>
           </div>
-          )}
+              );
+            const browserBody = (
+              <BrowserPane
+                onClose={() => setBrowserOpen(false)}
+                visible={browserVisible}
+                onSaved={toastSaved}
+                projectDir={sidebarTab.kind === "folder" ? sidebarTab.id : null}
+              />
+            );
+            const drafterBody = (
+              <PromptDrafter
+                doc={drafterDoc}
+                onDocChange={setDrafterDoc}
+                projectOptions={projectOptions}
+                selectedProject={drafterProject}
+                onSelectedProjectChange={setDrafterProject}
+                onLaunch={launchPromptDraft}
+              />
+            );
+            // The browser and drafter are mutually-exclusive "secondary" panes;
+            // whichever is open splits against the document with the exact same
+            // SplitPane (orientation toggle, ratio and fold-to-edge divider) the
+            // browser has always used. With `docOpen` off, the secondary pane
+            // takes the whole column; the 📄 toggle adds the document back.
+            const secondaryBody = browserOpen
+              ? browserBody
+              : drafterOpen
+                ? drafterBody
+                : null;
+            if (secondaryBody && docOpen)
+              return (
+                <SplitPane
+                  vertical={splitVertical}
+                  ratio={splitRatio}
+                  onRatioChange={setSplitRatio}
+                  onDraggingChange={setSplitDragging}
+                  first={documentBody}
+                  second={secondaryBody}
+                />
+              );
+            if (secondaryBody) return secondaryBody;
+            // No secondary pane open → the document is the default full view.
+            return documentBody;
+          })()}
           {/* Floating document-zoom control — pinned to the pane (doesn't scroll
               with the plan). Hidden over the folder file viewer. */}
-          {!(sidebarTab.kind === "folder" && activeFile) && zoomVisible && (
+          {!browserOpen && !drafterOpen && !(sidebarTab.kind === "folder" && activeFile) && zoomVisible && (
             <div
               ref={zoomCtrlRef}
               className="absolute flex items-center gap-1 rounded-full"
@@ -2443,6 +2682,7 @@ function App() {
         );
       })()}
     </div>
+    </MenuOverlayProvider>
   );
 }
 

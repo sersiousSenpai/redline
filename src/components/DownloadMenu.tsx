@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { useEffect, useRef, useState } from "react";
+import { useMenuOverlay } from "./menuOverlay";
 
 interface DownloadMenuProps {
   /** Version whose export the menu offers ("what you see is what you save"). */
@@ -29,6 +30,9 @@ export function DownloadMenu({
 }: DownloadMenuProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
+
+  // Hide the native browser webview while this menu is up (see useMenuOverlay).
+  useMenuOverlay(open);
 
   // Close on outside click or Escape.
   useEffect(() => {

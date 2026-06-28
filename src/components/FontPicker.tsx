@@ -1,52 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { useEffect, useRef, useState } from "react";
-import { THEMES } from "../theme/themes";
-import type { ThemeName } from "../theme/themes";
+import { FONTS } from "../theme/fonts";
+import type { FontName } from "../theme/fonts";
 import { useMenuOverlay } from "./menuOverlay";
 
-interface ThemePickerProps {
-  theme: ThemeName;
-  onThemeChange: (name: ThemeName) => void;
+interface FontPickerProps {
+  font: FontName;
+  onFontChange: (name: FontName) => void;
 }
 
-// A small two-tone chip previewing a theme: the paper (bg) fill with an ink (fg)
-// ring, so light/dark and contrast read at a glance. Mirrors the mode picker's
-// status dot.
-function Swatch({ bg, fg }: { bg: string; fg: string }) {
-  return (
-    <span
-      aria-hidden
-      style={{
-        width: "11px",
-        height: "11px",
-        borderRadius: "50%",
-        background: bg,
-        boxShadow: `inset 0 0 0 2px ${fg}`,
-        border: "1px solid var(--color-rule)",
-        flexShrink: 0,
-      }}
-    />
-  );
-}
-
-// Compact dropdown matching ModeToggle: a trigger showing the current theme and
-// a popover that previews each theme with a color swatch.
-export function ThemePicker({ theme, onThemeChange }: ThemePickerProps) {
+// Compact dropdown matching ThemePicker: a trigger showing the current font
+// (rendered in that font) and a popover that previews each option in its own
+// typeface, so the look reads at a glance.
+export function FontPicker({ font, onFontChange }: FontPickerProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
-  const current = THEMES.find((t) => t.name === theme) ?? THEMES[0];
+  const current = FONTS.find((f) => f.name === font) ?? FONTS[0];
 
   // Hide the native browser webview while this menu is up (see useMenuOverlay).
   useMenuOverlay(open);
-
-  // Display order: the brand theme leads the list; the rest keep their
-  // declared order. THEMES[0] stays the fallback elsewhere, so we only
-  // reorder for presentation here.
-  const ordered = [
-    ...THEMES.filter((t) => t.name === "redline"),
-    ...THEMES.filter((t) => t.name !== "redline"),
-  ];
 
   // Close on outside click or Escape.
   useEffect(() => {
@@ -68,23 +41,26 @@ export function ThemePicker({ theme, onThemeChange }: ThemePickerProps) {
   }, [open]);
 
   return (
-    <div ref={rootRef} data-tour="theme" className="relative">
+    <div ref={rootRef} data-tour="font" className="relative">
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        title="Theme"
+        title="Font"
         aria-haspopup="listbox"
         aria-expanded={open}
-        className="flex items-center gap-1.5 rounded-sm px-2 py-0.5 font-sans"
+        className="flex items-center gap-1.5 rounded-sm px-2 py-0.5"
         style={{
           fontSize: "11px",
+          fontFamily: current.stack,
           border: "1px solid var(--color-rule)",
           background: "var(--color-bg-elevated)",
           color: "var(--color-ink)",
           cursor: "pointer",
         }}
       >
-        <Swatch bg={current.base.bg} fg={current.base.fg} />
+        <span aria-hidden style={{ fontSize: "12px", lineHeight: 1 }}>
+          Aa
+        </span>
         {current.label}
         <span style={{ color: "var(--color-ink-muted)", fontSize: "9px" }}>
           ▾
@@ -94,27 +70,27 @@ export function ThemePicker({ theme, onThemeChange }: ThemePickerProps) {
       {open && (
         <div
           role="listbox"
-          aria-label="Theme"
+          aria-label="Font"
           className="absolute right-0 z-50 rounded-md overflow-y-auto"
           style={{
             top: "calc(100% + 6px)",
-            width: "200px",
-            maxHeight: "300px",
+            width: "220px",
+            maxHeight: "320px",
             border: "1px solid var(--color-rule)",
             background: "var(--color-bg-elevated)",
             boxShadow: "0 8px 24px rgba(0,0,0,0.28)",
           }}
         >
-          {ordered.map((t) => {
-            const selected = t.name === theme;
+          {FONTS.map((f) => {
+            const selected = f.name === font;
             return (
               <button
-                key={t.name}
+                key={f.name}
                 type="button"
                 role="option"
                 aria-selected={selected}
                 onClick={() => {
-                  if (!selected) onThemeChange(t.name);
+                  if (!selected) onFontChange(f.name);
                   setOpen(false);
                 }}
                 className="rl-menu-item w-full text-left px-3 py-2 flex items-center gap-2"
@@ -123,18 +99,17 @@ export function ThemePicker({ theme, onThemeChange }: ThemePickerProps) {
                   borderBottom: "1px solid var(--color-rule)",
                 }}
               >
-                <Swatch bg={t.base.bg} fg={t.base.fg} />
                 <span
-                  className="font-sans"
                   style={{
-                    fontSize: "12px",
-                    fontWeight: 600,
+                    // Preview each option in its own face.
+                    fontFamily: f.stack,
+                    fontSize: "14px",
                     color: "var(--color-ink)",
                     flex: 1,
                     minWidth: 0,
                   }}
                 >
-                  {t.label}
+                  {f.label}
                 </span>
                 {selected && (
                   <span
