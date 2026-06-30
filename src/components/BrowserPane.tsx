@@ -196,6 +196,10 @@ export function BrowserPane({
   // native resources we create/destroy imperatively, not render outputs.
   const wvMapRef = useRef<Map<string, Webview>>(new Map());
   const creatingRef = useRef<Set<string>>(new Set());
+  // Per-tab count of consecutive failed webview-creation attempts, so the
+  // reconcile retry backs off and eventually gives up instead of spinning.
+  // Reset to 0 the moment a webview is created successfully.
+  const wakeAttemptsRef = useRef<Map<string, number>>(new Map());
   // Restore the persisted tab list once (stable across renders), and seed the
   // new-tab sequence above any restored id.
   const initialTabsRef = useRef<Tab[] | null>(null);
@@ -258,6 +262,19 @@ export function BrowserPane({
   const markLive = useCallback((id: string) => {
     if (!liveIntentRef.current.has(id)) {
       liveIntentRef.current.add(id);
+      setLiveVersion((v) => v + 1);
+    }
+  }, []);
+  // Like markLive, but also kicks reconcile when the tab has NO live webview
+  // right now — healing a tab whose webview died or whose creation failed.
+  // markLive alone is a silent no-op once the id is in `liveIntentRef`, so a
+  // tab stuck in that state (in liveIntent, but absent from `wvMapRef`) would
+  // stay blank forever, unrecoverable by re-clicking or refreshing. This is the
+  // wake path for any user action that should make a tab live and visible.
+  const ensureLive = useCallback((id: string) => {
+    liveIntentRef.current.add(id);
+    if (!wvMapRef.current.has(id) && !creatingRef.current.has(id)) {
+      wakeAttemptsRef.current.delete(id); // user action → fresh retry budget
       setLiveVersion((v) => v + 1);
     }
   }, []);
@@ -541,6 +558,7 @@ export function BrowserPane({
             return;
           }
           wvMapRef.current.set(tab.id, wv);
+          wakeAttemptsRef.current.delete(tab.id); // created → clear retry count
           // Carry the active view filter onto the freshly created tab so new
           // tabs match the others (the user script makes it survive navigation).
           if (viewModeRef.current !== "none") {
@@ -576,6 +594,16 @@ export function BrowserPane({
         .catch((e) => {
           creatingRef.current.delete(tab.id);
           console.error("browser tab webview failed to create", e);
+          // Don't strand the tab blank: a failed create is usually the prior
+          // webview for this label still tearing down (suspend's close() is
+          // async). Retry a bounded number of times by re-running reconcile;
+          // selectTab/navigate also re-trigger this on user action. Give up
+          // after a few tries so a genuinely broken tab can't spin forever.
+          const n = (wakeAttemptsRef.current.get(tab.id) ?? 0) + 1;
+          wakeAttemptsRef.current.set(tab.id, n);
+          if (n <= 3 && tabsRef.current.some((t) => t.id === tab.id)) {
+            window.setTimeout(() => setLiveVersion((v) => v + 1), 300 * n);
+          }
         });
     }
     for (const [id] of [...wvMapRef.current]) {
@@ -631,7 +659,10 @@ export function BrowserPane({
     }
     prevActiveIdRef.current = activeId;
     // The active tab must be live and most-recent; then trim the rest to budget.
-    markLive(activeId);
+    // `ensureLive` (not `markLive`) so an activation reached by any path — tab
+    // close shifting focus, an agent opening a tab — also recreates a webview
+    // that died or failed to materialize, instead of showing a blank pane.
+    ensureLive(activeId);
     touchMru(activeId);
     enforceLiveBudget();
     for (const [id, wv] of wvMapRef.current) {
@@ -641,7 +672,7 @@ export function BrowserPane({
     if (t) setAddr(t.url);
     lastRectRef.current = null; // different webview — force a position/size apply
     syncBounds();
-  }, [activeId, markLive, touchMru, enforceLiveBudget, syncBounds]);
+  }, [activeId, ensureLive, touchMru, enforceLiveBudget, syncBounds]);
 
   // (Visibility/chat/divider reflows are handled by the active-tracking effect
   // below, which keys on effectiveVisible/chatOpen/chatRatio.)
@@ -868,9 +899,9 @@ export function BrowserPane({
   // the discussion where it is, so the conversation that opened the tab keeps
   // streaming and keeps driving it.
   const selectTab = (id: string) => {
-    // Selecting a suspended tab wakes it: mark it live so reconcile recreates
-    // its webview, and bump its recency.
-    markLive(id);
+    // Selecting a suspended tab wakes it: ensure it has a live webview (recreate
+    // if its prior one died or never materialized), and bump its recency.
+    ensureLive(id);
     touchMru(id);
     setActiveId(id);
     setDiscussionId(id);
@@ -1101,8 +1132,22 @@ export function BrowserPane({
       ),
     );
     if (id === activeIdRef.current) setAddr(url);
-    void invoke("browser_navigate", { label: `browser-${id}`, url }).catch((e) =>
-      console.error("browser_navigate failed", e),
+    // No live webview for this tab (suspended, or a prior creation failed)?
+    // Recreate it — the fresh webview loads `url` (just written into the tab),
+    // so Go/refresh heals a blank, webview-less tab instead of being a silent
+    // no-op (`browser_navigate` would just error on the missing label).
+    if (!wvMapRef.current.has(id)) {
+      ensureLive(id);
+      return;
+    }
+    void invoke("browser_navigate", { label: `browser-${id}`, url }).catch(
+      (e) => {
+        console.error("browser_navigate failed", e);
+        // The webview vanished under us (e.g. its process was reclaimed and the
+        // handle is stale) — drop the dead handle and recreate at `url`.
+        wvMapRef.current.delete(id);
+        ensureLive(id);
+      },
     );
   };
 
@@ -1219,13 +1264,13 @@ export function BrowserPane({
   // (hidden, since it's not the active tab) — no foregrounding, no discussion-
   // pane move. It stays at the back of the recency order, so it's the first
   // re-suspended on the next budget pass.
-  const markLiveRef = useRef(markLive);
-  markLiveRef.current = markLive;
+  const ensureLiveRef = useRef(ensureLive);
+  ensureLiveRef.current = ensureLive;
   useEffect(() => {
     const p = listen<BrowseWakeTabEvent>("browse-wake-tab", (e) => {
       const id = e.payload?.id;
       if (id && tabsRef.current.some((t) => t.id === id)) {
-        markLiveRef.current(id);
+        ensureLiveRef.current(id);
       }
     });
     return () => {
