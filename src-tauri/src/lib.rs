@@ -1563,8 +1563,7 @@ async fn refresh_snapshot_cache(app_state: &AppState, label: &str, json: &str) {
     let url = app_state
         .app_handle
         .get_webview(label)
-        .and_then(|wv| wv.url().ok())
-        .map(|u| u.to_string())
+        .and_then(|wv| webview_current_url(&wv))
         .unwrap_or_default();
     app_state.snapshot_cache.put(
         label.to_string(),
@@ -2098,9 +2097,9 @@ async fn handle_browser_download(
         None => match label
             .as_deref()
             .and_then(|l| app_state.app_handle.get_webview(l))
-            .and_then(|wv| wv.url().ok())
+            .and_then(|wv| webview_current_url(&wv))
         {
-            Some(u) => u.to_string(),
+            Some(u) => u,
             None => return browser_error_response("could not read the tab's current url"),
         },
     };
@@ -2366,8 +2365,7 @@ async fn browser_cache_snapshot(app: AppHandle, label: String) -> Result<(), Str
     let json = daemon_eval(&app, &label, SNAPSHOT_JS).await?;
     let url = app
         .get_webview(&label)
-        .and_then(|wv| wv.url().ok())
-        .map(|u| u.to_string())
+        .and_then(|wv| webview_current_url(&wv))
         .unwrap_or_default();
     app.state::<SnapshotCache>().put(
         label,
@@ -2448,8 +2446,7 @@ async fn browser_suspend(app: AppHandle, label: String) -> Result<(), String> {
     let json = daemon_eval(&app, &label, SNAPSHOT_JS).await?;
     let url = app
         .get_webview(&label)
-        .and_then(|wv| wv.url().ok())
-        .map(|u| u.to_string())
+        .and_then(|wv| webview_current_url(&wv))
         .unwrap_or_default();
     let scroll = daemon_eval(
         &app,
@@ -3232,15 +3229,74 @@ fn browser_close(app: AppHandle, label: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Read a browser tab's current URL **without** tripping wry's
+/// `WKWebView.URL().unwrap()`. A freshly-created tab reports a nil `URL` until
+/// it commits its first navigation, and wry's `Webview::url()` unwraps that nil
+/// on the main event-loop thread — an abort that takes down the whole app (the
+/// `.ok()` at our call sites never runs because the panic is inside wry). So we
+/// reach the native WKWebView via `with_webview` and read `URL.absoluteString`
+/// ourselves, mapping nil (and the empty string) to `None`. On non-macOS we fall
+/// back to wry's getter, which doesn't have this flaw off WKWebView.
+fn webview_current_url<R: tauri::Runtime>(wv: &tauri::Webview<R>) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
+        if wv
+            .with_webview(move |pw| {
+                let ptr = pw.inner() as *mut objc2::runtime::AnyObject;
+                // SAFETY: `with_webview` runs this on the UI thread and `inner()`
+                // hands back the live WKWebView. `URL`/`absoluteString`/`UTF8String`
+                // are nil-returning reads; we null-check each before chasing it.
+                let url = unsafe {
+                    ptr.as_ref().and_then(|obj| {
+                        let nsurl: *mut objc2::runtime::AnyObject =
+                            objc2::msg_send![obj, URL];
+                        if nsurl.is_null() {
+                            return None;
+                        }
+                        let abs: *mut objc2::runtime::AnyObject =
+                            objc2::msg_send![nsurl, absoluteString];
+                        if abs.is_null() {
+                            return None;
+                        }
+                        let c: *const std::os::raw::c_char =
+                            objc2::msg_send![abs, UTF8String];
+                        if c.is_null() {
+                            return None;
+                        }
+                        let s = std::ffi::CStr::from_ptr(c).to_string_lossy().into_owned();
+                        (!s.is_empty()).then_some(s)
+                    })
+                };
+                let _ = tx.send(url);
+            })
+            .is_err()
+        {
+            return None;
+        }
+        // When called off the main thread `with_webview` dispatches to the event
+        // loop and returns before the closure runs, so block on the result.
+        rx.recv_timeout(std::time::Duration::from_secs(2))
+            .ok()
+            .flatten()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        wv.url().ok().map(|u| u.to_string())
+    }
+}
+
 /// Current URL of a browser tab's webview. The JS `Webview` API exposes no
 /// navigation events or URL getter, so the pane polls this to keep the address
 /// bar / tab title in sync with in-page navigation (link clicks, redirects).
+/// A nil URL (tab not yet navigated) reports as the empty string, which the
+/// pane's poll treats as "no change".
 #[tauri::command]
 fn browser_url(app: AppHandle, label: String) -> Result<String, String> {
     let wv = app
         .get_webview(&label)
         .ok_or_else(|| format!("browser webview '{label}' not found"))?;
-    wv.url().map(|u| u.to_string()).map_err(|e| e.to_string())
+    Ok(webview_current_url(&wv).unwrap_or_default())
 }
 
 /// Turn on WKWebView's two-finger back/forward swipe and trackpad pinch
