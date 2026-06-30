@@ -2,6 +2,7 @@
 // Copyright 2026 Yusuf Al-Bazian
 import { useEffect, useRef, useState } from "react";
 import type { InterceptionMode } from "../types";
+import { useMenuOverlay } from "./menuOverlay";
 
 interface ModeToggleProps {
   mode: InterceptionMode;
@@ -43,6 +44,9 @@ export function ModeToggle({ mode, onChange }: ModeToggleProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const current = OPTIONS.find((o) => o.value === mode) ?? OPTIONS[0];
+
+  // Hide the native browser webview while this menu is up (see useMenuOverlay).
+  useMenuOverlay(open);
 
   // Close on outside click or Escape.
   useEffect(() => {

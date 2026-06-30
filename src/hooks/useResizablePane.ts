@@ -121,6 +121,16 @@ export function useResizablePane({
     if (!isDragging) return;
 
     const sign = side === "leading" ? 1 : -1;
+    // Coalesce pointer moves to one commit per animation frame. Pointer events
+    // can fire well above the display refresh rate (120Hz+ trackpads), and each
+    // commit re-renders the layout; without this a fast drag fires several
+    // `onWidthChange` setStates per frame for no visual gain. `lastWidth` always
+    // holds the latest target, so the rAF flush commits the freshest value.
+    let rafId = 0;
+    const flush = () => {
+      rafId = 0;
+      onWidthChange(lastWidth.current);
+    };
     const onMove = (e: PointerEvent) => {
       const cur = axis === "x" ? e.clientX : e.clientY;
       const delta = cur - start.current.pos;
@@ -130,6 +140,10 @@ export function useResizablePane({
       // drag (so it can't immediately re-resize from under the pointer). Skipped
       // while re-opening (the drawer is allowed below min during the reveal).
       if (!reopening.current && onCollapse && intended < min - collapseOvershoot) {
+        if (rafId) {
+          cancelAnimationFrame(rafId);
+          rafId = 0;
+        }
         setDragging(false);
         onCollapse();
         return;
@@ -139,9 +153,15 @@ export function useResizablePane({
       const lower = reopening.current ? 0 : min;
       const next = clamp(intended, lower, maxSize());
       lastWidth.current = next;
-      onWidthChange(next);
+      if (!rafId) rafId = requestAnimationFrame(flush);
     };
     const onUp = () => {
+      // Commit any frame still pending so the rest position is exact.
+      if (rafId) {
+        cancelAnimationFrame(rafId);
+        rafId = 0;
+        onWidthChange(lastWidth.current);
+      }
       setDragging(false);
       // Releasing a partway drawer settles it smoothly open to min.
       if (reopening.current) {
@@ -165,6 +185,7 @@ export function useResizablePane({
     document.body.style.userSelect = "none";
 
     return () => {
+      if (rafId) cancelAnimationFrame(rafId);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       document.body.style.cursor = prevCursor;

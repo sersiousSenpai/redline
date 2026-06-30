@@ -2,6 +2,7 @@
 // Copyright 2026 Yusuf Al-Bazian
 import {
   forwardRef,
+  useCallback,
   useEffect,
   useImperativeHandle,
   useRef,
@@ -376,21 +377,33 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
     };
   }, []);
 
-  const handleActivity = (id: string) => {
-    const visibleNow = id === paneA || id === paneB;
-    if (!visibleNow || collapsed) {
-      setUnseen((prev) => {
-        if (prev.has(id)) return prev;
-        const next = new Set(prev);
-        next.add(id);
-        return next;
-      });
-    }
-  };
+  // Stable handlers so the memoized TerminalView fleet doesn't re-render on
+  // every TerminalTabs render. handleActivity only re-identities when the
+  // visible panes / collapse change (a tab switch), which is exactly when its
+  // visibility test should be re-evaluated.
+  const handleActivity = useCallback(
+    (id: string) => {
+      const visibleNow = id === paneA || id === paneB;
+      if (!visibleNow || collapsed) {
+        setUnseen((prev) => {
+          if (prev.has(id)) return prev;
+          const next = new Set(prev);
+          next.add(id);
+          return next;
+        });
+      }
+    },
+    [paneA, paneB, collapsed],
+  );
 
-  const handleExit = (_id: string) => {
+  const handleExit = useCallback((_id: string) => {
     // Keep the tab around so the user sees "[process exited]"; they close it.
-  };
+  }, []);
+
+  // One stable callback per split role — avoids minting a fresh onPaneFocus for
+  // every tab on each render.
+  const focusPaneA = useCallback(() => setFocusedPane("A"), []);
+  const focusPaneB = useCallback(() => setFocusedPane("B"), []);
 
   useEffect(() => {
     onTabsChange(tabs.length);
@@ -431,30 +444,39 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
       .then((h) => setHomePath(normPath(h)))
       .catch(() => {});
   }, []);
+  // Live-cwd polling, scoped to the *visible* panes. Each `pty_cwd` spawns an
+  // `lsof` subprocess, so polling all N tabs every 2.5s was N subprocesses a
+  // tick for labels the user mostly can't see. Hidden tabs keep their
+  // last-known label and refresh the instant they're shown again (paneA/paneB
+  // change re-runs this effect). Drops the steady-state spawn rate from one per
+  // tab to at most two.
   useEffect(() => {
     let cancelled = false;
+    const visibleIds = Array.from(
+      new Set([paneA, paneB].filter((id): id is string => id !== null)),
+    );
     const poll = async () => {
       const entries = await Promise.all(
-        tabs.map(async (t) => {
+        visibleIds.map(async (id) => {
           try {
-            const dir = await invoke<string | null>("pty_cwd", { id: t.id });
-            return [t.id, dir] as const;
+            const dir = await invoke<string | null>("pty_cwd", { id });
+            return [id, dir] as const;
           } catch {
-            return [t.id, null] as const;
+            return [id, null] as const;
           }
         }),
       );
       if (cancelled) return;
       setLiveCwds((prev) => {
-        const next = new Map<string, string>();
-        let changed = false;
+        // Merge onto prior values so hidden tabs keep their last-known cwd.
+        let next: Map<string, string> | null = null;
         for (const [id, dir] of entries) {
-          const val = dir ?? prev.get(id);
-          if (val) next.set(id, val);
-          if (prev.get(id) !== next.get(id)) changed = true;
+          if (dir && prev.get(id) !== dir) {
+            if (!next) next = new Map(prev);
+            next.set(id, dir);
+          }
         }
-        if (prev.size !== next.size) changed = true;
-        return changed ? next : prev;
+        return next ?? prev;
       });
     };
     void poll();
@@ -463,7 +485,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [tabs]);
+  }, [paneA, paneB]);
 
   // Project-aware labels: basename of the tab's live cwd ($HOME / root →
   // "zsh"), numbered per project in tab order — "redline 1, redline 2, zsh 1".
@@ -561,7 +583,9 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
                 visible={role !== null && !collapsed}
                 onActivity={handleActivity}
                 onExit={handleExit}
-                onPaneFocus={role ? () => setFocusedPane(role) : undefined}
+                onPaneFocus={
+                  role === "A" ? focusPaneA : role === "B" ? focusPaneB : undefined
+                }
               />
             </div>
           );

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Extra Info.plist keys merged into the generated bundle by the Tauri macOS
+  bundler. These TCC usage strings are what make the first-run microphone and
+  speech-recognition permission prompts appear (and supply their copy) for the
+  voice agent's push-to-talk dictation (`src/dictation.rs`). Without them the
+  OS denies access silently. The bundler merges these on top of the keys it
+  generates, so only the additions live here.
+-->
+<plist version="1.0">
+<dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Redline uses the microphone for push-to-talk so you can discuss your plan with the voice agent out loud.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Redline transcribes your speech on-device to send what you say to the voice agent. Audio is processed locally and never leaves your Mac.</string>
+</dict>
+</plist>

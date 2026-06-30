@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import type { Comment, CommentStatus } from "../types";
 import { compactEditPreview } from "../editor/wordDiff";
 import { AnchorPill } from "./AnchorPill";
@@ -15,23 +15,29 @@ interface CommentCardProps {
    *  highlight click bridge or a direct click on the card). Surfaces a
    *  focused outline. */
   focused?: boolean;
+  /** True once, when a voice-authored comment was just created: force the card
+   *  open and expand its discussion sidecar so the reviewer sees it. */
+  autoOpen?: boolean;
+  /** Called after `autoOpen` has been honored, so the parent can clear it and
+   *  stop fighting a later manual collapse. */
+  onAutoOpenConsumed?: () => void;
   /** Click anywhere on the card to mirror focus over to the editor's
    *  matching highlight or block. Behaves as a toggle in the parent. Always
    *  active — PlanEditor's focus effect falls back to scrolling the comment's
    *  block when no in-doc highlight exists (orphaned blockId, non-selection
    *  comment types). */
-  onSelect?: () => void;
-  onDelete: () => void;
-  onAccept: () => void;
+  onSelect?: (id: string) => void;
+  onDelete: (id: string) => void;
+  onAccept: (id: string) => void;
   /** M4: accept a still-draft agent suggestion in place — the editor settles
    *  the marks, the backend records agentState. Reject reuses onDelete. */
-  onAcceptSuggestion?: () => void;
+  onAcceptSuggestion?: (comment: Comment) => void;
   /** Reopen this resolution, optionally attaching a follow-up note that rides
    *  back to Claude (as continuity) on the next Submit. */
-  onReopen: (note?: string) => void;
+  onReopen: (id: string, note?: string) => void;
   /** Promote a question into a plan-driving directive — the reviewer resolved
    *  their question into a decision Claude must apply. */
-  onPromote: (directive: string) => void;
+  onPromote: (id: string, directive: string) => void;
   /** True while a submit_review / approve_plan invoke is mid-flight. The only
    *  state that should disable Accept/Reopen — outside of this brief window,
    *  including the entire "Claude is revising" wait, resolution is always
@@ -75,10 +81,17 @@ const STATUS_COLORS: Record<CommentStatus, string> = {
   withdrawn: "var(--color-ink-muted)",
 };
 
-export function CommentCard({
+// Memoized: with the callbacks above kept identity-stable by App and the
+// markdown bodies memoized inside MarkdownView, an unrelated App re-render (a
+// focus flip on another card, a divider drag, a zoom change) no longer re-renders
+// this card or its discussion thread. Only a change to *this* comment, its
+// focus, or the in-flight flag re-renders it.
+export const CommentCard = memo(function CommentCard({
   comment,
   sessionId,
   focused = false,
+  autoOpen = false,
+  onAutoOpenConsumed,
   onSelect,
   onDelete,
   onAccept,
@@ -126,6 +139,12 @@ export function CommentCard({
     prevStatusRef.current = comment.status;
   }, [comment.status]);
 
+  // A just-captured voice comment: make sure the card is open so its discussion
+  // sidecar (which only mounts when expanded) can auto-expand below.
+  useEffect(() => {
+    if (autoOpen) setCollapsed(false);
+  }, [autoOpen]);
+
   // Inline "reopen with a follow-up note" composer. Seeded from any pending
   // note so reopening an already-reopened card edits the same note.
   const [reopenOpen, setReopenOpen] = useState(false);
@@ -138,7 +157,7 @@ export function CommentCard({
     setReopenOpen(true);
   };
   const confirmReopen = () => {
-    onReopen(noteDraft.trim() || undefined);
+    onReopen(comment.id, noteDraft.trim() || undefined);
     setReopenOpen(false);
   };
 
@@ -155,7 +174,7 @@ export function CommentCard({
   const confirmPromote = () => {
     const directive = directiveDraft.trim();
     if (!directive) return;
-    onPromote(directive);
+    onPromote(comment.id, directive);
     setPromoteOpen(false);
   };
   // Edit comments default to a compact one-line word-diff; the full
@@ -192,8 +211,8 @@ export function CommentCard({
   return (
     <div
       data-comment-id={comment.id}
-      className="rounded-md border p-3"
-      onClick={onSelect ? () => onSelect() : undefined}
+      className="rl-comment-card rounded-md border p-3"
+      onClick={onSelect ? () => onSelect(comment.id) : undefined}
       style={{
         borderColor: focused ? color : "var(--color-rule)",
         background: "var(--color-bg-elevated)",
@@ -283,7 +302,7 @@ export function CommentCard({
           {canDelete && (
             <button
               type="button"
-              onClick={onDelete}
+              onClick={() => onDelete(comment.id)}
               title="Delete comment"
               className="opacity-50 hover:opacity-100"
               style={{
@@ -562,7 +581,7 @@ export function CommentCard({
                   type="button"
                   onClick={(e) => {
                     e.stopPropagation();
-                    onAcceptSuggestion();
+                    onAcceptSuggestion(comment);
                   }}
                   title="Keep this suggestion — the text settles in place"
                   className="rounded px-2 py-0.5 font-medium"
@@ -580,7 +599,7 @@ export function CommentCard({
                   type="button"
                   onClick={(e) => {
                     e.stopPropagation();
-                    onDelete();
+                    onDelete(comment.id);
                   }}
                   title="Reject this suggestion — the block reverts in place"
                   className="rounded px-2 py-0.5 font-medium"
@@ -597,7 +616,7 @@ export function CommentCard({
               {comment.status === "resolved" && (
                 <button
                   type="button"
-                  onClick={onAccept}
+                  onClick={() => onAccept(comment.id)}
                   disabled={submitInFlight}
                   title={
                     submitInFlight
@@ -821,10 +840,17 @@ export function CommentCard({
         </div>
       )}
 
-      {!collapsed && <CommentThread sessionId={sessionId} comment={comment} />}
+      {!collapsed && (
+        <CommentThread
+          sessionId={sessionId}
+          comment={comment}
+          autoOpen={autoOpen}
+          onAutoOpenConsumed={onAutoOpenConsumed}
+        />
+      )}
     </div>
   );
-}
+});
 
 function StatusChip({ status }: { status: CommentStatus }) {
   if (status === "draft") return null;

@@ -478,6 +478,79 @@ pub struct ThreadMessage {
     pub created_at: i64,
 }
 
+/// One turn in a browser tab's browse-agent discussion thread. Mirrors
+/// `ThreadMessage`, but scoped to a per-tab `browse_id` (a stable UUID the
+/// frontend persists alongside its tab list) rather than a plan
+/// session/comment — the browse agent is a standalone `claude` session, not a
+/// fork of a plan. Rows are terminal (`complete` | `error`); live streaming
+/// text is frontend-only state. The agent's own resumable session id lives in
+/// the `browse_threads` table, not here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowseMessage {
+    pub id: String,
+    pub browse_id: String,
+    /// "user" | "assistant".
+    pub role: String,
+    pub body: String,
+    /// "complete" | "error".
+    pub status: String,
+    pub created_at: i64,
+}
+
+/// A research **Mission**: an orchestrator that sits a tier above the per-tab
+/// browse agents, holding a shared goal across the whole browser pane. Backed by
+/// the `missions` table; the orchestrator's own resumable `claude` session id
+/// lives on the row (`claude_session_id`), so re-opening a mission resumes its
+/// conversation. One active mission at a time per pane; archived missions stay
+/// resumable. See `src-tauri/src/mission.rs`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Mission {
+    pub mission_id: String,
+    pub title: String,
+    pub goal: String,
+    /// "active" | "archived".
+    pub status: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// One **pin**: a curated finding the user pulled into a mission ("I like this
+/// part / their tone here"). Captures the pinned text plus where it came from,
+/// so the orchestrator and the findings board can attribute it. `browse_id` ties
+/// it back to the source tab's discussion; all source fields are nullable so a
+/// free-form note can be pinned too.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MissionFinding {
+    pub id: String,
+    pub mission_id: String,
+    pub browse_id: Option<String>,
+    pub source_url: Option<String>,
+    pub source_title: Option<String>,
+    pub body: String,
+    pub note: Option<String>,
+    pub created_at: i64,
+}
+
+/// One turn in a mission's orchestrator discussion thread. Mirrors
+/// `BrowseMessage`, scoped to a `mission_id`. Rows are terminal
+/// (`complete` | `error`); live streaming text is frontend-only state. The
+/// orchestrator's resumable session id lives on the `missions` row, not here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MissionMessage {
+    pub id: String,
+    pub mission_id: String,
+    /// "user" | "assistant".
+    pub role: String,
+    pub body: String,
+    /// "complete" | "error".
+    pub status: String,
+    pub created_at: i64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewCommentRequest {
@@ -908,6 +981,28 @@ impl SessionStore {
     /// Permanently remove a session and all its revisions/comments (memory +
     /// DB). Returns false if no such session. Callers must ensure no POST is
     /// currently held for it (an active terminal).
+    /// Rebind a held session onto `new_id` (the live session id a restore
+    /// handshake arrived under). No-op returning false if the source is absent,
+    /// the ids are equal, or `new_id` already holds a session (never clobber a
+    /// live one). The whole in-memory session moves wholesale, so its
+    /// revisions / open comments / attach-state ride along unchanged, and the
+    /// DB rows follow via `db.rekey_session`.
+    pub fn rekey_session(&self, old_id: &str, new_id: &str) -> bool {
+        let mut map = self.inner.lock().unwrap();
+        if old_id == new_id || map.contains_key(new_id) {
+            return false;
+        }
+        let Some(mut session) = map.remove(old_id) else {
+            return false;
+        };
+        session.session_id = new_id.to_string();
+        if let Err(e) = self.db.rekey_session(old_id, new_id) {
+            tracing::error!(error = %e, "failed to rekey session in db");
+        }
+        map.insert(new_id.to_string(), session);
+        true
+    }
+
     pub fn delete_session(&self, session_id: &str) -> bool {
         let mut map = self.inner.lock().unwrap();
         if map.remove(session_id).is_none() {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { describe, expect, it } from "vitest";
-import { buildResumeCommand, REDLINE_RESTORE_SENTINEL } from "./resumeCommand";
+import { buildResumeCommand, restoreSentinel } from "./resumeCommand";
 
 const NOW = new Date(2026, 5, 12, 18, 7); // 2026-06-12 18:07 local
 
@@ -20,7 +20,10 @@ describe("buildResumeCommand", () => {
     // The lightweight sequence: EnterPlanMode, drop the marker, ExitPlanMode.
     expect(cmd).toContain("call EnterPlanMode");
     expect(cmd).toContain("call ExitPlanMode");
-    expect(cmd).toContain(REDLINE_RESTORE_SENTINEL);
+    // The marker carries the held plan's session id so the daemon can rebind
+    // the restore even when the handshake lands under a forked/foreign id.
+    expect(cmd).toContain(restoreSentinel("abc-123"));
+    expect(cmd).toContain("<!-- REDLINE_RESTORE:abc-123 -->");
   });
 
   it("never makes Claude curl the daemon or retype the plan body on restore", () => {
@@ -41,5 +44,25 @@ describe("buildResumeCommand", () => {
   it("escapes single quotes in the session id for POSIX shells", () => {
     const cmd = buildResumeCommand("we'rd", NOW);
     expect(cmd).toContain(`--resume 'we'\\''rd'`);
+  });
+
+  it("cd's into the project dir so resume resolves wherever it's pasted", () => {
+    // Claude scopes resumable sessions per project; without the cd, `--resume`
+    // from another cwd fails ("No conversation found") and spawns a fresh
+    // session that writes the sentinel under an unheld id.
+    const cmd = buildResumeCommand("abc-123", NOW, "/Users/me/redline");
+    expect(cmd).toMatch(
+      /^cd '\/Users\/me\/redline' && claude --resume 'abc-123' /,
+    );
+  });
+
+  it("escapes single quotes in the project path", () => {
+    const cmd = buildResumeCommand("abc-123", NOW, "/tmp/o'brien");
+    expect(cmd).toContain(`cd '/tmp/o'\\''brien' && claude`);
+  });
+
+  it("omits the cd when no project path is known", () => {
+    const cmd = buildResumeCommand("abc-123", NOW, null);
+    expect(cmd).toMatch(/^claude --resume /);
   });
 });

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useEffect, useRef } from "react";
+import { memo, useCallback, useEffect, useRef } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -42,6 +42,12 @@ function shellQuote(p: string): string {
 // only shell, and the surviving mount's output channel was never bound: a
 // dead "[process exited]" terminal. Chaining each id's lifecycle ops makes
 // the order deterministic: spawn completes, then kill, then respawn.
+// Cap on raw bytes stashed for a hidden terminal before the oldest are dropped.
+// ~2 MB comfortably covers a full screen + the 5000-line scrollback xterm keeps
+// after the drain, so the visible result is identical to never having hidden it
+// (minus ancient output a flood would have evicted from scrollback anyway).
+const MAX_HIDDEN_BUFFER_BYTES = 2 * 1024 * 1024;
+
 const ptyLifecycle = new Map<string, Promise<unknown>>();
 export function enqueuePtyOp(
   id: string,
@@ -155,7 +161,11 @@ function readXtermTheme(themeName: string) {
 // One xterm instance bound to one backend PTY (keyed by `id`). Many of these
 // stay mounted at once (one per tab) so shells + scrollback persist while
 // hidden; only the active, non-collapsed view is `visible` and drives fit().
-export function TerminalView({
+// Memoized so an App/TerminalTabs re-render that doesn't change this tab's props
+// (a comment focus flip, a divider drag commit, a sibling tab's activity) skips
+// reconciling all 8 mounted terminals. The heavy lifting lives in effects keyed
+// on `id`; memo just spares the needless render pass across the fleet.
+export const TerminalView = memo(function TerminalView({
   id,
   cwd,
   theme,
@@ -176,6 +186,32 @@ export function TerminalView({
   visibleRef.current = visible;
   onActivityRef.current = onActivity;
   onExitRef.current = onExit;
+
+  // Raw PTY bytes that arrived while this tab was hidden. We skip xterm's ANSI
+  // parse for off-screen terminals (the dominant background cost with a fleet
+  // of tabs) and stash the bytes here, draining them in a single write the
+  // moment the tab is shown. Bounded so a flooding background shell can't grow
+  // it without limit — oldest bytes drop, mirroring xterm's own scrollback
+  // eviction. With 8 tabs and one running `yes`, the 7 hidden terminals do zero
+  // parse work until looked at.
+  const pendingRef = useRef<{ chunks: Uint8Array[]; size: number }>({
+    chunks: [],
+    size: 0,
+  });
+  const drainPending = useCallback(() => {
+    const term = termRef.current;
+    const p = pendingRef.current;
+    if (!term || p.chunks.length === 0) return;
+    const merged = new Uint8Array(p.size);
+    let off = 0;
+    for (const c of p.chunks) {
+      merged.set(c, off);
+      off += c.length;
+    }
+    p.chunks = [];
+    p.size = 0;
+    term.write(merged);
+  }, []);
 
   // Create the terminal + PTY once.
   useEffect(() => {
@@ -219,10 +255,25 @@ export function TerminalView({
     const onOutput = new Channel<ArrayBuffer>();
     onOutput.onmessage = (buf) => {
       const bytes = new Uint8Array(buf);
+      // Hidden tab: stash the raw bytes (bounded) and ack immediately so the
+      // backend keeps flowing — but pay no parse cost until the tab is shown.
+      if (!visibleRef.current) {
+        const p = pendingRef.current;
+        p.chunks.push(bytes);
+        p.size += bytes.length;
+        while (p.size > MAX_HIDDEN_BUFFER_BYTES && p.chunks.length > 1) {
+          p.size -= p.chunks.shift()!.length;
+        }
+        void invoke("pty_ack", { id, n: bytes.length }).catch(() => {});
+        onActivityRef.current(id);
+        return;
+      }
+      // Visible: drain anything buffered while hidden first so byte order is
+      // preserved, then write this chunk (its ack gates the backend as before).
+      drainPending();
       term.write(bytes, () => {
         void invoke("pty_ack", { id, n: bytes.length }).catch(() => {});
       });
-      if (!visibleRef.current) onActivityRef.current(id);
     };
 
     // A hidden (display:none / zero-height) host makes fit() compute 0×0; a
@@ -263,13 +314,17 @@ export function TerminalView({
       const paths = event.payload.paths;
       if (!paths || paths.length === 0) return;
 
-      // Only act when the drop lands over the terminal host element.
+      // Only act when the drop lands over the terminal host element. wry
+      // reports the position in logical AppKit points (relabeled "physical"
+      // without scaling by Tauri), and the webview's top-left is the CSS
+      // viewport origin — so compare to getBoundingClientRect() directly. Do
+      // NOT divide by devicePixelRatio: on Retina that halves the point and
+      // rejects any terminal not pinned to the top-left.
       const h = hostRef.current;
       if (h) {
         const r = h.getBoundingClientRect();
-        const dpr = window.devicePixelRatio || 1;
-        const x = event.payload.position.x / dpr;
-        const y = event.payload.position.y / dpr;
+        const x = event.payload.position.x;
+        const y = event.payload.position.y;
         if (x < r.left || x > r.right || y < r.top || y > r.bottom) return;
       }
 
@@ -277,6 +332,27 @@ export function TerminalView({
       void invoke("pty_write", { id, data: text }).catch(() => {});
       termRef.current?.focus();
     });
+
+    // Defensive guard: if a drag or paste ever slips past Tauri's native
+    // handler (e.g. a drag carrying no file URL, or an image on the clipboard),
+    // WebKit's default behavior inserts a synthetic "[image 1]" into xterm's
+    // hidden textarea. Swallow those DOM events so no fake image content ever
+    // reaches the terminal. When the native handler consumes a drop (the normal
+    // path) these never fire and the guard is inert.
+    const swallowDrag = (e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    const onPaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (items && Array.from(items).some((it) => it.kind === "file")) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+    host.addEventListener("dragover", swallowDrag);
+    host.addEventListener("drop", swallowDrag);
+    host.addEventListener("paste", onPaste, true);
 
     const ro = new ResizeObserver(() => {
       // A hidden or zero-sized view yields 0 cols/rows; never push that to the
@@ -329,6 +405,9 @@ export function TerminalView({
     return () => {
       ro.disconnect();
       dataSub.dispose();
+      host.removeEventListener("dragover", swallowDrag);
+      host.removeEventListener("drop", swallowDrag);
+      host.removeEventListener("paste", onPaste, true);
       void exitPromise.then((un) => un());
       void dropPromise.then((un) => un());
       void focusPromise.then((un) => un());
@@ -354,6 +433,9 @@ export function TerminalView({
     if (!visible) return;
     const raf = requestAnimationFrame(() => {
       const term = termRef.current;
+      // Flush whatever streamed in while hidden, in one write, before re-fitting
+      // and repainting — so the tab shows fully caught up the instant it opens.
+      drainPending();
       try {
         fitRef.current?.fit();
       } catch {
@@ -372,7 +454,7 @@ export function TerminalView({
       term?.focus();
     });
     return () => cancelAnimationFrame(raf);
-  }, [visible, id]);
+  }, [visible, id, drainPending]);
 
   return (
     <div
@@ -393,4 +475,4 @@ export function TerminalView({
       <div ref={hostRef} className="h-full w-full" />
     </div>
   );
-}
+});

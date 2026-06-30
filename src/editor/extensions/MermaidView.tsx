@@ -25,7 +25,29 @@ async function loadMermaid() {
       // The diagram source is plan content under review — never grant it raw
       // HTML or click handlers.
       securityLevel: "strict",
+      // `neutral` is internally consistent on a light background; we always
+      // render onto the fixed light figure plate (`.rl-mermaid--ready`), so a
+      // single global palette is correct regardless of the app theme. The
+      // themeVariables below pin contrast (dark ink + crisp lines) and give the
+      // diagram a branded, designed look rather than raw mermaid defaults.
       theme: "neutral",
+      themeVariables: {
+        // Match the figure plate so mermaid's own background rect blends in.
+        background: "#f7f8f6",
+        // High-contrast ink for labels, edge text, and lifelines on the plate.
+        textColor: "#1c1c1c",
+        primaryTextColor: "#1c1c1c",
+        lineColor: "#3a3a3a",
+        // Branded node/actor fills — a soft tint with a Redline-green accent
+        // border, so boxes read as designed cards, not stark white.
+        primaryColor: "#eef1ec",
+        mainBkg: "#eef1ec",
+        primaryBorderColor: "#2f6f4f",
+        actorBkg: "#eef1ec",
+        actorBorder: "#2f6f4f",
+        noteBkg: "#fbf7e8",
+        noteBorderColor: "#d8c98a",
+      },
       fontFamily:
         'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
     });
@@ -99,7 +121,10 @@ export function MermaidView({ code }: MermaidViewProps) {
   }
   return (
     <div
-      className="rl-mermaid"
+      // `--ready` flips the card to the fixed light figure plate (see CSS); the
+      // pending/error states above keep the bare `rl-mermaid` elevated surface
+      // so their muted/warning text stays legible on dark themes.
+      className="rl-mermaid rl-mermaid--ready"
       contentEditable={false}
       // mermaid output, sanitized by `securityLevel: "strict"`.
       dangerouslySetInnerHTML={{ __html: svg }}

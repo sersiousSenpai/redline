@@ -83,7 +83,7 @@ export function SessionSidebar({
 
   return (
     <div
-      className="flex-1 overflow-y-auto"
+      className="flex-1 overflow-y-auto rl-thin-scroll-y"
       style={{ background: "var(--color-paper)" }}
     >
       <div
@@ -179,8 +179,15 @@ function SessionRow({
       </button>
       {confirming ? (
         <div
-          className="absolute right-2 top-2 z-10 flex items-center gap-1"
+          className="absolute right-3 top-2 z-10 flex items-center gap-1"
           onClick={(e) => e.stopPropagation()}
+          style={{
+            background: "var(--color-bg-elevated)",
+            border: "1px solid var(--color-rule)",
+            borderRadius: "6px",
+            padding: "2px",
+            boxShadow: "0 2px 8px rgba(0,0,0,0.25)",
+          }}
         >
           <button
             type="button"
@@ -236,10 +243,11 @@ function SessionRow({
             e.stopPropagation();
             setConfirming(true);
           }}
-          className="absolute right-2 top-2 z-10 rounded px-1.5 opacity-0 group-hover:opacity-100 transition-opacity"
+          className="absolute right-3 top-2 z-10 rounded px-1.5 opacity-0 group-hover:opacity-100 transition-opacity"
           style={{
             color: "var(--color-ink-muted)",
-            background: "var(--color-anchor-bg)",
+            background: "var(--color-bg-elevated)",
+            border: "1px solid var(--color-rule)",
             fontSize: "12px",
             lineHeight: 1.4,
           }}
@@ -272,7 +280,7 @@ function SessionRow({
               session.sessionId}
           </span>
           <span
-            className="font-mono shrink-0 rounded-sm px-1.5 py-0.5"
+            className="font-mono shrink-0 rounded-sm px-1.5 py-0.5 transition-opacity group-hover:opacity-0"
             style={{
               background: "var(--color-anchor-bg)",
               color: "var(--color-anchor-text)",

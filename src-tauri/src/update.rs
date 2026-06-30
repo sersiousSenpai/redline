@@ -66,75 +66,91 @@ fn info_dialog(app: &AppHandle, message: String) {
         .show(|_| {});
 }
 
+/// Shared re-entrancy guard: one check at a time, whether triggered by the menu
+/// or the startup background sweep. Keeps a launch-time check and an immediate
+/// menu click from racing two `git fetch`es (and two dialogs) at once.
+static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
 /// Menu-item entry point. Returns immediately; the whole check runs on the
 /// async runtime so the menu handler never blocks the main thread, and a
 /// static guard ignores re-clicks while a check (or its dialog) is still up.
+/// Loud: reports every outcome, including "up to date" and errors, because the
+/// user explicitly asked.
 pub fn check_for_updates(app: AppHandle) {
-    static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
-    if IN_FLIGHT.swap(true, Ordering::SeqCst) {
-        return;
-    }
+    spawn_check(app, false, Duration::ZERO);
+}
+
+/// Startup entry point. Same comparison, but *quiet*: it only ever surfaces a
+/// dialog to offer a real rebuild — "up to date" and every error path (offline,
+/// no upstream, moved checkout) stay silent, so a normal launch (or a launch
+/// with no network) pops nothing. A short delay lets the heavy startup work
+/// (db open, syntect warm, first paint) settle before we reach for the network.
+pub fn check_for_updates_in_background(app: AppHandle) {
+    spawn_check(app, true, Duration::from_secs(3));
+}
+
+fn spawn_check(app: AppHandle, quiet: bool, delay: Duration) {
     tauri::async_runtime::spawn(async move {
-        run_check(&app).await;
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        // Acquire the guard *after* any startup delay so a menu click during
+        // that window isn't silently swallowed.
+        if IN_FLIGHT.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        run_check(&app, quiet).await;
         IN_FLIGHT.store(false, Ordering::SeqCst);
     });
 }
 
-async fn run_check(app: &AppHandle) {
+async fn run_check(app: &AppHandle, quiet: bool) {
+    // In quiet (startup) mode every informational/error dialog is suppressed;
+    // only the rebuild prompt below is allowed to interrupt the user.
+    let info = |message: String| {
+        if !quiet {
+            info_dialog(app, message);
+        }
+    };
     let Some(repo) = repo_root() else {
-        info_dialog(
-            app,
-            format!(
-                "Redline can't find the source checkout it was built from \
-                 (it may have been moved or deleted).\n\n{MANUAL_HINT}"
-            ),
-        );
+        info(format!(
+            "Redline can't find the source checkout it was built from \
+             (it may have been moved or deleted).\n\n{MANUAL_HINT}"
+        ));
         return;
     };
     if git(&repo, &["rev-parse", "--is-inside-work-tree"]).await.is_err() {
-        info_dialog(
-            app,
-            format!(
-                "The folder Redline was built from ({}) is no longer a git \
-                 checkout.\n\n{MANUAL_HINT}",
-                repo.display()
-            ),
-        );
+        info(format!(
+            "The folder Redline was built from ({}) is no longer a git \
+             checkout.\n\n{MANUAL_HINT}",
+            repo.display()
+        ));
         return;
     }
     // Detached HEAD or a branch with no tracking remote: nothing to compare.
     if git(&repo, &["rev-parse", "--abbrev-ref", "@{upstream}"]).await.is_err() {
-        info_dialog(
-            app,
-            format!(
-                "Your Redline checkout isn't tracking an upstream branch, so \
-                 there's nothing to compare against.\n\n{MANUAL_HINT}"
-            ),
-        );
+        info(format!(
+            "Your Redline checkout isn't tracking an upstream branch, so \
+             there's nothing to compare against.\n\n{MANUAL_HINT}"
+        ));
         return;
     }
     let fetched = tokio::time::timeout(FETCH_TIMEOUT, git(&repo, &["fetch", "--quiet"])).await;
     match fetched {
         Ok(Ok(_)) => {}
         Ok(Err(stderr)) => {
-            info_dialog(
-                app,
-                format!("Couldn't check for updates — are you online?\n\n{stderr}"),
-            );
+            info(format!("Couldn't check for updates — are you online?\n\n{stderr}"));
             return;
         }
         Err(_) => {
-            info_dialog(
-                app,
-                "Couldn't check for updates — the network request timed out.".to_string(),
-            );
+            info("Couldn't check for updates — the network request timed out.".to_string());
             return;
         }
     }
     let behind: u64 = match git(&repo, &["rev-list", "--count", "HEAD..@{upstream}"]).await {
         Ok(count) => count.parse().unwrap_or(0),
         Err(stderr) => {
-            info_dialog(app, format!("Couldn't compare versions:\n\n{stderr}"));
+            info(format!("Couldn't compare versions:\n\n{stderr}"));
             return;
         }
     };
@@ -173,7 +189,7 @@ async fn run_check(app: &AppHandle) {
         return;
     }
 
-    info_dialog(app, "Redline is up to date.".to_string());
+    info("Redline is up to date.".to_string());
 }
 
 /// True when this binary was built from a different commit than the checkout's

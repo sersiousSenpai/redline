@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { useAdjustDiscussionZoom } from "./DiscussionViewContext";
 import type {
   Comment,
   ForkCancelledEvent,
@@ -17,6 +18,11 @@ interface CommentThreadProps {
   /** The review session id — keys the fork backend with the comment id. */
   sessionId: string;
   comment: Comment;
+  /** True once, when a voice-authored comment was just created: expand the
+   *  thread so the captured feedback is visible without a click. */
+  autoOpen?: boolean;
+  /** Called after `autoOpen` is honored, so the parent clears it. */
+  onAutoOpenConsumed?: () => void;
 }
 
 type ThreadStatus = "idle" | "streaming" | "error";
@@ -40,18 +46,44 @@ function discussSeed(c: Comment): string {
 /** A per-comment discussion with a Claude Code fork of the main session.
  *  Rendered inside `CommentCard`; collapses to a one-line summary. Mirrors
  *  `TerminalView`'s listen()/unlisten streaming pattern for `fork-*` events. */
-export function CommentThread({ sessionId, comment }: CommentThreadProps) {
+// Memoized: receives only `sessionId` + `comment`, both identity-stable from
+// the parent card, so it sits out the comment pane's frequent re-renders (focus
+// flips, divider drags, zoom changes). It only re-renders when *its* comment
+// changes or its own stream state advances.
+export const CommentThread = memo(function CommentThread({
+  sessionId,
+  comment,
+  autoOpen = false,
+  onAutoOpenConsumed,
+}: CommentThreadProps) {
   const commentId = comment.id;
+  // The shared text size is applied via the `--rl-discussion-zoom` CSS var set
+  // once on the discussion pane; here we only need the stable adjuster for A−/A+.
+  const adjustZoom = useAdjustDiscussionZoom();
   const [messages, setMessages] = useState<ThreadMessage[]>([]);
   const [liveText, setLiveText] = useState("");
   const [status, setStatus] = useState<ThreadStatus>("idle");
   const [expanded, setExpanded] = useState(false);
+  // Per-discussion focus: lifts the 320px message-list cap so the full reply
+  // renders in place. Independent of collapse; defaults on so a discussion opens
+  // at full height (structured replies + diagrams are meant to be read in full).
+  // The reviewer can still collapse to compact via the ⤡ button.
+  const [enlarged, setEnlarged] = useState(true);
   const [loaded, setLoaded] = useState(false);
   const [draft, setDraft] = useState("");
   // When the reviewer manually collapses an expanded thread, suppress the
   // streaming auto-expand until the next send — otherwise a long Claude reply
   // keeps re-opening a thread they're deliberately trying to set aside.
   const userCollapsedRef = useRef(false);
+
+  // A just-captured voice comment: open the discussion sidecar once, then let
+  // the parent clear the flag so a later manual collapse isn't fought.
+  useEffect(() => {
+    if (!autoOpen) return;
+    userCollapsedRef.current = false;
+    setExpanded(true);
+    onAutoOpenConsumed?.();
+  }, [autoOpen, onAutoOpenConsumed]);
 
   // Load persisted turns + subscribe to this comment's fork events. Re-runs if
   // the card is reused for another (session, comment) — App.tsx keys by both.
@@ -326,59 +358,106 @@ export function CommentThread({ sessionId, comment }: CommentThreadProps) {
       style={{ borderColor: "var(--color-rule)" }}
       onClick={(e) => e.stopPropagation()}
     >
-      <button
-        type="button"
-        onClick={() =>
-          setExpanded((x) => {
-            // Track manual collapse so a streaming reply doesn't immediately
-            // re-open what the user just folded away.
-            userCollapsedRef.current = x;
-            return !x;
-          })
-        }
-        className="flex items-center gap-1.5 text-left"
-        style={{
-          fontSize: "10px",
-          fontWeight: 600,
-          textTransform: "uppercase",
-          letterSpacing: "0.06em",
-          color: "var(--color-info)",
-        }}
-      >
-        <span aria-hidden>{expanded ? "▾" : "▸"}</span>
-        <span>Discussion</span>
-        <span
-          className="font-mono normal-case"
-          style={{ color: "var(--color-ink-muted)" }}
+      <div className="flex items-center gap-1.5">
+        <button
+          type="button"
+          onClick={() =>
+            setExpanded((x) => {
+              // Track manual collapse so a streaming reply doesn't immediately
+              // re-open what the user just folded away.
+              userCollapsedRef.current = x;
+              return !x;
+            })
+          }
+          className="flex items-center gap-1.5 text-left"
+          style={{
+            fontSize: "10px",
+            fontWeight: 600,
+            textTransform: "uppercase",
+            letterSpacing: "0.06em",
+            color: "var(--color-info)",
+          }}
         >
-          · {visible.length}
-        </span>
-        {status === "streaming" && (
+          <span aria-hidden>{expanded ? "▾" : "▸"}</span>
+          <span>Discussion</span>
           <span
-            className="normal-case"
-            style={{ color: "var(--color-ink-muted)", fontWeight: 400 }}
+            className="font-mono normal-case"
+            style={{ color: "var(--color-ink-muted)" }}
           >
-            — streaming…
+            · {visible.length}
           </span>
+          {status === "streaming" && (
+            <span
+              className="normal-case"
+              style={{ color: "var(--color-ink-muted)", fontWeight: 400 }}
+            >
+              — streaming…
+            </span>
+          )}
+          {/* The attached/sent flag lives on the discussion itself — the rider
+              IS this transcript, so there's nothing else to show. Visible
+              collapsed or expanded. */}
+          {riderAttached && (
+            <span style={{ color: "var(--color-warning)" }}>
+              {comment.actionable
+                ? "· added to plan — rides with next submit"
+                : "· attached — rides with next submit"}
+            </span>
+          )}
+          {riderSent && (
+            <span className="rl-pulse" style={{ color: "var(--color-warning)" }}>
+              {comment.actionable
+                ? "· decision sent · Claude is applying…"
+                : "· sent · riding with this submit…"}
+            </span>
+          )}
+        </button>
+
+        {/* Focus + text-size controls — only meaningful while the thread is
+            open. Siblings of the collapse button (buttons can't nest); each
+            stops propagation so it never toggles collapse. */}
+        {expanded && (
+          <div className="flex items-center gap-1 ml-auto">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                adjustZoom(-0.1);
+              }}
+              title="Smaller discussion text"
+              className="px-1 leading-none hover:opacity-100 opacity-60"
+              style={{ fontSize: "10px", color: "var(--color-ink-muted)" }}
+            >
+              A−
+            </button>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                adjustZoom(0.1);
+              }}
+              title="Larger discussion text"
+              className="px-1 leading-none hover:opacity-100 opacity-60"
+              style={{ fontSize: "12px", color: "var(--color-ink-muted)" }}
+            >
+              A+
+            </button>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setEnlarged((x) => !x);
+              }}
+              title={enlarged ? "Collapse to compact" : "Expand to full height"}
+              aria-pressed={enlarged}
+              className="px-1 leading-none hover:opacity-100 opacity-60"
+              style={{ fontSize: "11px", color: "var(--color-ink-muted)" }}
+            >
+              {enlarged ? "⤡" : "⤢"}
+            </button>
+          </div>
         )}
-        {/* The attached/sent flag lives on the discussion itself — the rider
-            IS this transcript, so there's nothing else to show. Visible
-            collapsed or expanded. */}
-        {riderAttached && (
-          <span style={{ color: "var(--color-warning)" }}>
-            {comment.actionable
-              ? "· added to plan — rides with next submit"
-              : "· attached — rides with next submit"}
-          </span>
-        )}
-        {riderSent && (
-          <span className="rl-pulse" style={{ color: "var(--color-warning)" }}>
-            {comment.actionable
-              ? "· decision sent · Claude is applying…"
-              : "· sent · riding with this submit…"}
-          </span>
-        )}
-      </button>
+      </div>
 
       {!expanded && (
         <div
@@ -391,7 +470,11 @@ export function CommentThread({ sessionId, comment }: CommentThreadProps) {
 
       {expanded && (
         <>
-          <div className="flex flex-col gap-2.5 rl-thread-scroll">
+          <div
+            className={`flex flex-col gap-2.5 rl-thin-scroll-y ${
+              enlarged ? "rl-thread-scroll-tall" : "rl-thread-scroll"
+            }`}
+          >
             {visible.map((m) => (
               <MessageBubble key={m.id} msg={m} />
             ))}
@@ -497,7 +580,7 @@ export function CommentThread({ sessionId, comment }: CommentThreadProps) {
       )}
     </div>
   );
-}
+});
 
 function MessageBubble({ msg }: { msg: ThreadMessage }) {
   const isUser = msg.role === "user";
@@ -518,7 +601,7 @@ function MessageBubble({ msg }: { msg: ThreadMessage }) {
       {isError ? (
         <div
           style={{
-            fontSize: "12.5px",
+            fontSize: "calc(12.5px * var(--rl-discussion-zoom, 1))",
             lineHeight: 1.5,
             whiteSpace: "pre-wrap",
             color: "var(--color-warning)",
@@ -527,7 +610,7 @@ function MessageBubble({ msg }: { msg: ThreadMessage }) {
           {msg.body}
         </div>
       ) : (
-        <MarkdownView body={msg.body} compact />
+        <MarkdownView body={msg.body} compact rich />
       )}
     </div>
   );
@@ -555,7 +638,7 @@ function StreamingBubble({ text }: { text: string }) {
       ) : (
         <div
           style={{
-            fontSize: "12.5px",
+            fontSize: "calc(12.5px * var(--rl-discussion-zoom, 1))",
             lineHeight: 1.5,
             color: "var(--color-ink-muted)",
           }}
@@ -580,11 +663,26 @@ function Composer({
   onSend: () => void;
   onStop: () => void;
 }) {
+  // Auto-grow to fit content — no cap, no scrollbar. Recomputed on input and
+  // whenever `draft` changes — the latter catches the parent's clear-on-send so
+  // the box snaps back to its 2-row baseline.
+  const taRef = useRef<HTMLTextAreaElement>(null);
+  const autosize = () => {
+    const el = taRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  };
+  useEffect(autosize, [draft]);
   return (
     <div className="flex items-end gap-1.5">
       <textarea
+        ref={taRef}
         value={draft}
-        onChange={(e) => setDraft(e.target.value)}
+        onChange={(e) => {
+          setDraft(e.target.value);
+          autosize();
+        }}
         onKeyDown={(e) => {
           if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
@@ -596,16 +694,14 @@ function Composer({
         disabled={streaming}
         className="flex-1 rounded px-2 py-1"
         style={{
-          fontSize: "12px",
+          fontSize: "calc(12px * var(--rl-discussion-zoom, 1))",
           border: "1px solid var(--color-rule)",
           background: "var(--color-paper)",
           color: "var(--color-ink)",
           fontFamily: "inherit",
-          // Big pastes scroll inside the composer instead of blowing out the
-          // card; reviewer can still drag-grow the textarea vertically.
-          resize: "vertical",
-          maxHeight: "200px",
-          overflowY: "auto",
+          // Grows to fit its content — no inner scroll, no manual resize handle.
+          resize: "none",
+          overflow: "hidden",
         }}
       />
       {streaming ? (

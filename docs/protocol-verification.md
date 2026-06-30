@@ -360,14 +360,22 @@ After running, fold results into "Accumulated findings" below and update `~/.cla
 ```bash
 claude -p "<prompt>" --resume <main_session_id> --fork-session \
   --output-format stream-json --include-partial-messages --verbose \
-  --permission-mode default --tools "Read,Grep,Glob" --strict-mcp-config
+  --permission-mode default --tools "Read,Grep,Glob,WebFetch,WebSearch" --strict-mcp-config
 ```
 **Follow-up turn** (resumes the fork — no `--fork-session`):
 ```bash
 claude -p "<prompt>" --resume <fork_session_id> \
   --output-format stream-json --include-partial-messages --verbose \
-  --permission-mode default --tools "Read,Grep,Glob" --strict-mcp-config
+  --permission-mode default --tools "Read,Grep,Glob,WebFetch,WebSearch" --strict-mcp-config
 ```
+
+> **Update 2026-06-27:** the fork tool set now includes `WebFetch` and
+> `WebSearch` so a discussion can ground its answer in external docs. The web
+> tools are read-only with no repo/plan side effects, so the read-only
+> guarantee below is unchanged — `Edit`/`Write`/`Bash`/`ExitPlanMode` stay
+> excluded and `--strict-mcp-config` still strips MCP. The checklist bullets
+> below record the original 2026-05-21 verification with the `Read,Grep,Glob`
+> set; only the web tools were added since.
 
 - [x] **`--fork-session` mints a new session id.** The first turn resumed `d8111931-…`; the `system/init` event reported a *different* `session_id` (`5cd5f058-…`). `result.session_id` matched `init`.
 - [x] **The resumed transcript is untouched.** The main session's `.jsonl` was byte- and mtime-identical before and after the fork.
@@ -389,6 +397,40 @@ claude -p "<prompt>" --resume <fork_session_id> \
 | `result` / `success` | authoritative final: `result` (full text), `session_id`, `is_error` |
 
 **Verdict:** the fork mechanism is viable for Phase 2 discussion threads. `fork.rs` keys a process registry by `(session_id, comment_id)`, parses the table above, and persists terminal turns to `thread_messages`.
+
+---
+
+## Experiment (ii) — persistent warm session (`--input-format stream-json`)
+
+| | |
+|---|---|
+| Status | **complete** |
+| Date | 2026-06-29 |
+| Result | **Confirmed.** A single long-lived `claude` process carries context across multiple stdin turns. Locks the voice-agent "warm session" design (`voice.rs`). |
+
+**Question:** for the voice agent, can one persistent `claude` process serve many turns — so per-turn latency is ~network-only (~1–2s to first token) instead of the ~2.5–4.5s cold-start of spawning a fresh `claude -p` per turn (the `fork.rs` model)? Two sub-questions: does the process stay alive awaiting more stdin after a turn completes, and does it *remember* prior turns?
+
+**Method.** Drive `claude --print --verbose --input-format stream-json --output-format stream-json --include-partial-messages --permission-mode default` with a feeder that keeps `stdin` open, writes one user message, waits for the turn's `result`, then writes a second message. Each turn is a newline-delimited JSON line:
+
+```json
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"…"}]}}
+```
+
+Turn 1: *"Remember this codeword: PLUMERIA. Reply with just OK."* → Turn 2: *"What codeword did I tell you?"*
+
+**Observed.**
+
+- [x] Process stayed alive after turn 1's `result` and accepted turn 2 on the same `stdin`.
+- [x] Turn 1 `result.result == "OK"`; turn 2 `result.result == "PLUMERIA"` — **context carried.**
+- [x] `session_id` was stable across both turns (`c8f15b35-…`), and a fresh `system`/`init` line is re-emitted at the start of each turn.
+
+**Gotchas (load-bearing for `voice.rs`):**
+
+1. `--output-format stream-json` with `--print` **requires `--verbose`** (errors out otherwise) — `fork.rs` already passes it.
+2. A **static `stdin` redirect (`< file`) does not work** — `claude` hits EOF before the stream reader initializes and the turns never run (only startup `hook_started`/`hook_response` system lines are emitted). The driver must hold `stdin` open and write turns incrementally. `voice.rs` keeps the `tokio` child's `stdin` handle and writes a line per `voice_send`.
+3. Unlike `fork.rs`'s `read_fork` (which reaps on **process exit**), the warm reader must emit a **turn-complete on each `result` line** while leaving the process running. `classify_line` from `fork.rs` already distinguishes `init` / `text_delta` / `result`, so it is reused as-is.
+
+**Verdict:** warm-session design confirmed. `voice.rs` holds one persistent child per plan session, writes a user-message line per turn, streams `text_delta` → `voice-delta`, and closes each turn on `result` → `voice-done`. Fallback to per-turn `--resume` spawn is unnecessary.
 
 ---
 

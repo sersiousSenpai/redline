@@ -6,7 +6,7 @@ description: >-
   [feedback], or [question], rl:blk- block-identity sidecars, or a
   REDLINE_RESOLUTIONS block. Covers presentation-aware plan markdown,
   preserving sidecars, and emitting resolutions.
-version: 5
+version: 8
 ---
 
 # Redline review protocol
@@ -14,10 +14,32 @@ version: 5
 Redline is a desktop plan-review companion for Claude Code. A hook intercepts
 `ExitPlanMode`: the plan opens in Redline's track-changes editor, the user
 marks it up, and Redline returns the review to you as a structured feedback
-payload (the `permissionDecisionReason` of the denied call). Treat that payload
-as the user's reviewed, attested feedback on your plan. This document is that
-contract, given up front so your first plan renders well and revisions
-round-trip cleanly.
+payload. Treat that payload as the user's reviewed, attested feedback on your
+plan. This document is that contract, given up front so your first plan renders
+well and revisions round-trip cleanly.
+
+Sending a plan back keeps you in plan mode by **denying** the `ExitPlanMode`
+call, which Claude Code renders as a red `Error:` line. **Nothing failed** — that
+is the normal review round-trip. The denial reason is a single calm line that
+hands you a URL; the full review is delivered out-of-band (see §0) so the denial
+stays one line instead of a wall of text.
+
+## 0. When a send-back denies ExitPlanMode — fetch the review
+
+When your `ExitPlanMode` is denied with a reason that begins
+`✅ Plan returned to Redline` (revise) or `✅ Returned to Redline` (questions),
+the reviewer has sent the plan back. The reason carries a loopback URL; fetch the
+full review from it before doing anything else:
+
+```bash
+curl -s http://127.0.0.1:7676/v1/sessions/<session_id>/feedback
+```
+
+`<session_id>` is your Claude Code session id (the reason gives you the exact
+URL). The response body is the structured payload covered by §2–§4 — read it,
+then revise (or, for a questions-only Ask, re-submit unchanged) per the rest of
+this contract. A `404` means nothing is pending (a duplicate fetch) — safe to
+ignore.
 
 ## 1. Write presentation-aware markdown — never raw HTML
 
@@ -108,10 +130,11 @@ The payload comes in two shapes:
 ## 5. Discussion-thread forks
 
 A reviewer can open a discussion thread on any comment; Redline answers it with
-a read-only fork of your session (Read, Grep, Glob — nothing else). If you are
-running as a discussion-thread fork, reply directly and concisely in markdown
-prose. Do **not** call `ExitPlanMode`, do not produce a new plan, and do not
-edit files.
+a read-only fork of your session (Read, Grep, Glob, WebFetch, WebSearch — nothing
+else). If you are running as a discussion-thread fork, follow the **`sidecar`
+skill** for how to structure the reply. The invariants hold regardless: reply in
+markdown prose, do **not** call `ExitPlanMode`, do not produce a new plan, and do
+not edit files.
 
 ## 6. Suggesting edits into a live review (agent-in-doc)
 
@@ -179,9 +202,13 @@ retype it. Follow this fixed sequence:
 
 1. **`EnterPlanMode`** — establishes plan mode and gives you a fresh plan-file
    path. (Don't list session directories.)
-2. **Write exactly `<!-- REDLINE_RESTORE -->`** as your plan file's contents —
-   a one-line placeholder. Redline recognizes this marker, restores the plan it
-   holds, and **ignores** whatever body you submit.
+2. **Write exactly the `<!-- REDLINE_RESTORE:… -->` marker the resume command
+   gave you** as your plan file's contents — a one-line placeholder carrying the
+   held plan's session id (e.g. `<!-- REDLINE_RESTORE:36c1d078-… -->`). Write it
+   verbatim, including the id; that id lets Redline rebind the restore even if
+   this resumed session got a new id. Redline recognizes the marker, restores the
+   plan it holds, and **ignores** whatever body you submit. (A bare
+   `<!-- REDLINE_RESTORE -->` still works for an in-place restore.)
 3. **`ExitPlanMode`** — the hook reopens the held plan in Redline's editor.
 
 A restore is a **re-presentation, not a revision**: don't fetch the body, don't

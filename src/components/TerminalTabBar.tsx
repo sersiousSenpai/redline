@@ -156,6 +156,11 @@ export function TerminalTabBar({
         background: "var(--color-bg-elevated)",
       }}
     >
+      {/* The tab list scrolls horizontally when it overflows so the action
+          cluster is never pushed off the edge. min-w-0 lets this flex child
+          shrink below its content width (the precondition for overflow), and
+          flex-1 lets it claim the space the actions don't. */}
+      <div className="flex items-stretch flex-1 min-w-0 overflow-x-auto rl-thin-scroll-x">
       {tabs.map((t, i) => {
         const active = t.id === activeId;
         const isDragged = drag.started && t.id === drag.id;
@@ -188,7 +193,7 @@ export function TerminalTabBar({
             }}
             onPointerCancel={endDrag}
             title={t.title}
-            className="flex items-center gap-1 px-3 cursor-pointer select-none"
+            className="flex items-center gap-1 px-3 shrink-0 cursor-pointer select-none"
             style={{
               color: active ? "var(--color-ink)" : "var(--color-ink-muted)",
               background: active ? "var(--color-paper)" : "transparent",
@@ -244,8 +249,9 @@ export function TerminalTabBar({
           </div>
         );
       })}
+      </div>
       {showActions && (
-      <div className="flex items-center gap-1 px-2" style={{ marginLeft: "auto" }}>
+      <div className="flex items-center gap-1 px-2 shrink-0">
         <button
           type="button"
           onClick={onNew}

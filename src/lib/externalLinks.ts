@@ -33,6 +33,10 @@ function onDocumentClick(e: MouseEvent) {
   }
 
   if (WEB_SCHEMES.has(url.protocol)) {
+    // A view that owns its own link clicks (the page-discussion pane routes them
+    // to a Redline browser tab) handles web links itself — don't ALSO open them
+    // in the OS browser, or the link opens in two places at once.
+    if (anchor.closest(".rl-md-own-links")) return;
     e.preventDefault();
     void openUrl(url.href).catch(() => {});
     return;

@@ -25,8 +25,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::state::{
-    Comment, CommentKind, CommentStatus, EditPayload, NewCommentRequest, ReviewSession, Section,
-    SessionStore,
+    Comment, CommentKind, CommentScope, CommentStatus, EditPayload, NewCommentRequest,
+    ReviewSession, Section, SessionStore,
 };
 
 #[derive(Debug, Clone, Deserialize)]
@@ -47,6 +47,21 @@ pub struct SuggestEditRequest {
     /// feedback payload). Defaults to the editor's "(edit)" placeholder.
     #[serde(default)]
     pub body: Option<String>,
+}
+
+/// A directive feedback comment posted by an agent (e.g. the voice agent when
+/// the reviewer asks to capture a change out loud). Unlike an edit suggestion it
+/// carries no verbatim rewrite — it lands as a `[feedback]` driver anchored to a
+/// block, exactly like a reviewer's own feedback comment, and rides the next
+/// Revise round. Vague feedback should anchor to a heading block (section-level).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SuggestFeedbackRequest {
+    /// An `rl:blk-` id from `GET .../plan` — a heading block for section-level feedback.
+    pub block_id: String,
+    /// The feedback directive, verbatim.
+    pub body: String,
+    pub agent_id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -238,6 +253,65 @@ pub fn suggest_edit_core(
         .map_err(AgentError::BadRequest)
 }
 
+/// Land a directive `[feedback]` comment on a block, anchored by id. Mirrors a
+/// reviewer's own feedback comment (kind `Feedback`, local scope, carries
+/// `author`) and rides Revise by `anchor_id`. Deliberately has **no**
+/// staleness/no-op/exclusivity guards: feedback is conversational and coexists
+/// with other comments on the same anchor (the one-open-per-block lock is an
+/// edit-suggestion invariant only — see `suggest_edit_core`).
+pub fn add_feedback_core(
+    store: &SessionStore,
+    session_id: &str,
+    req: SuggestFeedbackRequest,
+) -> Result<Comment, AgentError> {
+    if req.agent_id.trim().is_empty() {
+        return Err(AgentError::BadRequest("agentId must not be empty".into()));
+    }
+    if req.body.trim().is_empty() {
+        return Err(AgentError::BadRequest(
+            "feedback body must not be empty".into(),
+        ));
+    }
+
+    let session = store
+        .get(session_id)
+        .ok_or_else(|| AgentError::NotFound(format!("no session found for id {session_id}")))?;
+    let latest = session
+        .revisions
+        .last()
+        .ok_or_else(|| AgentError::NotFound(format!("session {session_id} has no revisions")))?;
+
+    let mut flat = Vec::new();
+    flatten_blocks(&latest.sections, &mut flat);
+    let anchor_id = flat
+        .iter()
+        .find(|(block_id, ..)| *block_id == req.block_id)
+        .map(|(_, anchor, _, _)| anchor.clone())
+        .ok_or_else(|| {
+            AgentError::NotFound(format!(
+                "no block {} in the latest revision — re-read the plan",
+                req.block_id
+            ))
+        })?;
+
+    store
+        .add_comment(
+            session_id,
+            NewCommentRequest {
+                kind: CommentKind::Feedback,
+                scope: Some(CommentScope::Local),
+                anchor_id,
+                block_id: Some(req.block_id),
+                body: req.body.trim().to_string(),
+                edit: None,
+                structural: None,
+                selection: None,
+                author: Some(req.agent_id),
+            },
+        )
+        .map_err(AgentError::BadRequest)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,5 +468,80 @@ mod tests {
             suggest_edit_core(&store, "sess-1", suggest(&block, None)),
             Err(AgentError::Conflict(_))
         ));
+    }
+
+    fn feedback(block: &BlockInfo, body: &str) -> SuggestFeedbackRequest {
+        SuggestFeedbackRequest {
+            block_id: block.block_id.clone(),
+            body: body.to_string(),
+            agent_id: "voice".to_string(),
+        }
+    }
+
+    #[test]
+    fn feedback_unknown_session_and_block_are_not_found() {
+        let store = make_store();
+        let block = paragraph_block(&store);
+        let mut req = feedback(&block, "make the timeout configurable");
+        req.block_id = "blk-does-not-exist".to_string();
+        assert!(matches!(
+            add_feedback_core(&store, "sess-1", req.clone()),
+            Err(AgentError::NotFound(_))
+        ));
+        assert!(matches!(
+            add_feedback_core(&store, "nope", req),
+            Err(AgentError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn feedback_empty_body_or_agent_is_rejected() {
+        let store = make_store();
+        let block = paragraph_block(&store);
+        assert!(matches!(
+            add_feedback_core(&store, "sess-1", feedback(&block, "   ")),
+            Err(AgentError::BadRequest(_))
+        ));
+        let mut req = feedback(&block, "real feedback");
+        req.agent_id = "  ".to_string();
+        assert!(matches!(
+            add_feedback_core(&store, "sess-1", req),
+            Err(AgentError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn feedback_lands_a_draft_feedback_with_author_and_anchor() {
+        let store = make_store();
+        let block = paragraph_block(&store);
+        let c = add_feedback_core(&store, "sess-1", feedback(&block, "  make the timeout configurable  "))
+            .unwrap();
+        assert!(matches!(c.kind, CommentKind::Feedback));
+        assert!(matches!(c.status, CommentStatus::Draft));
+        assert!(matches!(c.scope, Some(CommentScope::Local)));
+        assert_eq!(c.author.as_deref(), Some("voice"));
+        assert_eq!(c.block_id.as_deref(), Some(block.block_id.as_str()));
+        assert_eq!(c.anchor_id, block.anchor_id);
+        assert_eq!(c.body, "make the timeout configurable"); // trimmed
+        assert!(c.edit.is_none());
+    }
+
+    #[test]
+    fn feedback_has_no_lock_and_coexists_across_blocks() {
+        let store = make_store();
+        let block = paragraph_block(&store);
+        // Two feedback comments on the same block both succeed: add_feedback_core
+        // itself holds no one-open-per-block lock.
+        add_feedback_core(&store, "sess-1", feedback(&block, "first note")).unwrap();
+        add_feedback_core(&store, "sess-1", feedback(&block, "second note")).unwrap();
+        // Feedback on one block does not block an edit suggestion on a *different*,
+        // clean block (the edit lock is per-block).
+        let other = get_latest_plan_core(&store, "sess-1")
+            .unwrap()
+            .blocks
+            .into_iter()
+            .find(|b| b.kind == "paragraph" && b.block_id != block.block_id)
+            .expect("a second paragraph block");
+        assert!(suggest_edit_core(&store, "sess-1", suggest(&other, Some(&other.markdown))).is_ok());
     }
 }

@@ -9,6 +9,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ApproveToast } from "./components/ApproveToast";
 import { CommentCard } from "./components/CommentCard";
 import { CommentComposer } from "./components/CommentComposer";
+import { DiscussionZoomContext } from "./components/DiscussionViewContext";
 import { lazy, Suspense } from "react";
 import { installExternalLinkHandler } from "./lib/externalLinks";
 import { isClaudeWorking } from "./lib/claudeWorking";
@@ -30,6 +31,12 @@ import { SessionSidebar } from "./components/SessionSidebar";
 import { SidebarTabStrip } from "./components/SidebarTabStrip";
 import { FileTree } from "./components/FileTree";
 import { FileViewer } from "./components/FileViewer";
+import { BrowserPane } from "./components/BrowserPane";
+import { MenuOverlayProvider } from "./components/menuOverlay";
+import { SplitPane } from "./components/SplitPane";
+import { PromptDrafter } from "./components/PromptDrafter";
+import { VoicePanel } from "./components/VoicePanel";
+import type { ProjectOption } from "./components/ProjectPicker";
 import { useFolderWorkspaces } from "./hooks/useFolderWorkspaces";
 import { computeParagraphDiff, type ParagraphDiff } from "./diff";
 import { blockIdByAnchorId } from "./editor/docModel";
@@ -53,6 +60,8 @@ import { DecisionWindowBanner } from "./components/DecisionWindowBanner";
 import { FlashOverlay } from "./components/FlashOverlay";
 import { playInterceptBeep, DEFAULT_SOUND } from "./audio/beep";
 import { buildResumeCommand } from "./lib/resumeCommand";
+import { buildPlanLaunchCommand } from "./lib/planLaunchCommand";
+import type { JSONContent } from "@tiptap/react";
 import type {
   Comment,
   CommentType,
@@ -145,6 +154,15 @@ function ZoomButton({
 function App() {
   const [summaries, setSummaries] = useState<SessionSummary[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
+  // Count of open header dropdowns (theme, mode, alerts, download). Folded into
+  // `browserVisible` below so the native browser webview hides while a menu is
+  // up — otherwise the OS-composited webview paints over the DOM menu. Header
+  // dropdowns register via the MenuOverlayProvider / useMenuOverlay context.
+  const [openMenuCount, setOpenMenuCount] = useState(0);
+  const adjustMenuOverlay = useCallback(
+    (delta: number) => setOpenMenuCount((c) => Math.max(0, c + delta)),
+    [],
+  );
   const [session, setSession] = useState<ReviewSession | null>(null);
   const [loading, setLoading] = useState(true);
   const [composing, setComposing] = useState<ComposingState | null>(null);
@@ -236,6 +254,49 @@ function App() {
     "redline.commentPane.fullscreen",
     false,
   );
+  // The center pane hosts two independently-toggleable views: the document
+  // (editor/plan) and the embedded browser. Each has a toolbar toggle. When
+  // both are on, they share the pane as a foldable split (see SplitPane);
+  // `splitVertical` flips between side-by-side (default) and stacked, and
+  // `splitRatio` is the document's share. `splitDragging` hides the native
+  // webview during a split-divider drag so it doesn't swallow the pointer.
+  // `docOpen` only matters while the browser is open: it adds the document to a
+  // split alongside the browser. With the browser closed, the document is the
+  // default full view regardless. So the document toolbar toggle is shown only
+  // when the browser is open.
+  const [docOpen, setDocOpen] = usePersistedState("redline.doc.open", false);
+  const [browserOpen, setBrowserOpen] = usePersistedState(
+    "redline.browser.open",
+    false,
+  );
+  const [splitVertical, setSplitVertical] = usePersistedState(
+    "redline.split.vertical",
+    false,
+  );
+  const [splitRatio, setSplitRatio] = usePersistedState(
+    "redline.split.ratio",
+    0.5,
+  );
+  const [splitDragging, setSplitDragging] = useState(false);
+  // The Prompt Drafter — a Word-style authoring surface that takes over the
+  // center pane (mutually exclusive with the browser). Its draft (Tiptap JSON)
+  // and the project it launches into persist across reloads.
+  const [drafterOpen, setDrafterOpen] = usePersistedState(
+    "redline.drafter.open",
+    false,
+  );
+  // The voice agent — a drawer docked to the plan pane that reads the plan
+  // aloud or discusses it (spoken) via the warm Claude session. Kept on the
+  // plan surface (not the Header) so it reads as a plan feature.
+  const [voiceOpen, setVoiceOpen] = useState(false);
+  const [drafterDoc, setDrafterDoc] = usePersistedState<JSONContent | null>(
+    "redline.drafter.doc",
+    null,
+  );
+  const [drafterProject, setDrafterProject] = usePersistedState<string | null>(
+    "redline.drafter.project",
+    null,
+  );
   // Document zoom (content font-scale, not webview zoom). Persisted; clamped
   // 0.8–1.6. Driven by the in-pane control and Cmd +/-/0 shortcuts.
   const [docZoom, setDocZoom] = usePersistedState("redline.docZoom", 1);
@@ -252,6 +313,24 @@ function App() {
   const zoomIn = () => setDocZoom((z) => clampZoom(z + 0.1));
   const zoomOut = () => setDocZoom((z) => clampZoom(z - 0.1));
   const zoomReset = () => setDocZoom(1);
+  // Sidecar-discussion text-size. Persisted; same 0.8–1.6 clamp as docZoom.
+  // Drives the `--rl-discussion-zoom` multiplier on each discussion via the
+  // A−/A+ control in the discussion header; one shared preference for all.
+  const [discussionZoom, setDiscussionZoom] = usePersistedState(
+    "redline.discussionZoom",
+    1,
+  );
+  // Stable adjuster handed to every discussion's A−/A+ via context. The current
+  // zoom is never passed down as a prop — the size rides the
+  // `--rl-discussion-zoom` CSS var set once on the discussion pane — so changing
+  // it re-renders nothing in the comment list.
+  const adjustDiscussionZoom = useCallback(
+    (delta: number) =>
+      setDiscussionZoom((z) =>
+        Math.min(1.6, Math.max(0.8, Math.round((z + delta) * 100) / 100)),
+      ),
+    [setDiscussionZoom],
+  );
   // The floating zoom control lives in the right gutter; it hides once the
   // (centered) text column grows wide enough to reach it, so it never sits on
   // top of the document text. Driven by the overlap effect below.
@@ -276,6 +355,21 @@ function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [setDocZoom]);
+
+  // Cmd+W (native File ▸ Close Tab) closes a browser tab when the browser pane
+  // is open — BrowserPane handles that itself. When it's NOT open there's no tab
+  // to close, so fall back to the conventional macOS behaviour and close the
+  // window. (Both listeners fire; this one no-ops while the browser is open so
+  // the keystroke doesn't both close a tab AND the window.)
+  useEffect(() => {
+    if (browserOpen) return;
+    const p = listen("menu-close-tab", () => {
+      void getCurrentWindow().close();
+    });
+    return () => {
+      void p.then((un) => un());
+    };
+  }, [browserOpen]);
 
   // Reveal the native window once the first themed frame has painted (the
   // window starts hidden), so launch never shows a flash of white. Two rAFs:
@@ -550,6 +644,13 @@ function App() {
   const handleOpenFile = useCallback(
     (path: string) => {
       setActiveFile(path);
+      // If a secondary pane (browser or drafter) is filling the center pane on
+      // its own, opening a document would otherwise load hidden behind it.
+      // Bring up the split so both show.
+      if ((browserOpen || drafterOpen) && !docOpen) {
+        setSplitRatio(0.5);
+        setDocOpen(true);
+      }
       if (sidebarTab.kind === "folder") {
         folderFileRef.current.set(sidebarTab.id, path);
         if (activeTermId) {
@@ -560,7 +661,7 @@ function App() {
         }
       }
     },
-    [setActiveFile, sidebarTab, activeTermId],
+    [setActiveFile, sidebarTab, activeTermId, browserOpen, drafterOpen, docOpen, setDocOpen, setSplitRatio],
   );
   const handleCloseFile = useCallback(() => {
     setActiveFile(null);
@@ -602,7 +703,10 @@ function App() {
   // right gutter to host the control; as the pane narrows the text column grows
   // toward the right edge — once its text (minus the article's right padding)
   // reaches the control's left edge, drop the control. Recomputed on any pane
-  // resize via a ResizeObserver on the scroll container.
+  // resize via a ResizeObserver on the scroll container. Re-runs on the
+  // browser/drafter/docOpen toggles too: those unmount and remount the document,
+  // giving a fresh ref/observer — otherwise the pill would stay stale-hidden
+  // after the secondary pane is toggled back off.
   useEffect(() => {
     const article = documentRef.current;
     const container = article?.parentElement ?? null;
@@ -624,7 +728,7 @@ function App() {
     const ro = new ResizeObserver(recompute);
     ro.observe(container);
     return () => ro.disconnect();
-  }, [sidebarTab, activeFile, activeId]);
+  }, [sidebarTab, activeFile, activeId, browserOpen, drafterOpen, docOpen]);
 
   // Track when the document column has been squeezed to a sliver so the latch
   // can replace the two colliding divider chevrons. Position is relative to the
@@ -669,6 +773,17 @@ function App() {
   // source of truth: card click sets it; highlight click sets it; effects
   // mirror the change in each direction.
   const [focusedCommentId, setFocusedCommentId] = useState<string | null>(null);
+  // A comment the agent just created by voice — auto-expand its discussion
+  // sidecar once (then cleared, so a later manual collapse isn't fought).
+  const [autoOpenCommentId, setAutoOpenCommentId] = useState<string | null>(null);
+  // Comment ids already on the displayed revision, scoped to the session so a
+  // session switch doesn't read its comments as "new". Drives auto-open below.
+  const seenCommentsRef = useRef<{ sid: string | null; ids: Set<string> }>({
+    sid: null,
+    ids: new Set(),
+  });
+  // Stable so it doesn't defeat the memo on CommentCard / CommentThread.
+  const clearAutoOpen = useCallback(() => setAutoOpenCommentId(null), []);
 
   const onThemeChange = (name: ThemeName) => {
     setTheme(name);
@@ -1089,6 +1204,31 @@ function App() {
     isViewingHistorical && viewedRevision
       ? viewedRevision.comments
       : latestComments;
+  // When a voice-authored comment newly appears on the displayed revision (the
+  // agent captured a spoken change over the curl bridge, so we never saw the
+  // returned Comment), focus it and auto-open its discussion sidecar.
+  useEffect(() => {
+    const sid = session?.sessionId ?? null;
+    const prev = seenCommentsRef.current;
+    const ids = new Set<string>();
+    let fresh: Comment | null = null;
+    for (const c of paneComments) {
+      ids.add(c.id);
+      if (prev.sid === sid && !prev.ids.has(c.id) && c.author === "voice") {
+        fresh = c;
+      }
+    }
+    seenCommentsRef.current = { sid, ids };
+    if (fresh) {
+      // Reveal the outer comment pane too — otherwise the card/thread expand
+      // inside a collapsed sidecar and nothing becomes visible (the common case
+      // while the user is just talking to the voice agent). Mirrors the
+      // `setPaneCollapsed(false)` that the manual `beginCompose` gesture does.
+      setPaneCollapsed(false);
+      setAutoOpenCommentId(fresh.id);
+      setFocusedCommentId(fresh.id);
+    }
+  }, [paneComments, session?.sessionId]);
   // Own-era diff for a viewed historical revision: what changed when *it*
   // arrived, i.e. against its predecessor in the session. Thread starts diff
   // against nothing (a fresh plan has no meaningful redline).
@@ -1358,8 +1498,8 @@ function App() {
   // comments, revisions and reopen history intact (no phantom new review).
   const restorePlanSession = () => {
     if (!session) return;
-    const cmd = `${buildResumeCommand(session.sessionId, new Date())}\r`;
     const cwd = session.projectPath || null;
+    const cmd = `${buildResumeCommand(session.sessionId, new Date(), cwd)}\r`;
     // Arm a one-shot restore so the resumed session's re-presented plan is
     // labeled "vN restored" rather than counted as a fresh version/thread.
     void invoke("arm_restore", { sessionId: session.sessionId });
@@ -1380,6 +1520,79 @@ function App() {
     setTimeout(() => setToast(null), 4000);
   };
 
+  // Candidate project directories for the drafter's launch picker: every review
+  // session's project plus each open folder workspace, deduped by path.
+  const projectOptions = useMemo<ProjectOption[]>(() => {
+    const seen = new Map<string, ProjectOption>();
+    const add = (path: string, name: string, source: ProjectOption["source"]) => {
+      if (!path) return;
+      const key = path.replace(/\/+$/, "") || "/";
+      if (!seen.has(key)) seen.set(key, { path, name, source });
+    };
+    for (const s of summaries) add(s.projectPath, s.projectName, "session");
+    for (const f of openFolders) add(f.path, f.name, "folder");
+    return [...seen.values()];
+  }, [summaries, openFolders]);
+
+  // Send the drafted prompt to a *fresh* Claude Code plan session: spawn a
+  // terminal in the chosen project and launch `claude --permission-mode plan`
+  // seeded with the prompt — the same spawn → 900ms → write pattern as
+  // restorePlanSession (let the shell's rc files settle before the command lands).
+  const launchPromptDraft = (markdown: string, projectPath: string | null) => {
+    const trimmed = markdown.trim();
+    if (!trimmed) return;
+    const cmd = `${buildPlanLaunchCommand(trimmed, projectPath)}\r`;
+    setTermFullscreen(false);
+    setTermCollapsed(false);
+    const id = terminalsRef.current?.openSessionTerminal(projectPath) ?? null;
+    if (id) {
+      window.setTimeout(() => {
+        void invoke("pty_write", { id, data: cmd });
+      }, 900);
+    }
+    setToast("Launching plan in the terminal below ↓");
+    setTimeout(() => setToast(null), 4000);
+  };
+
+  // "Send to Redline" from a browser page-discussion reply. The browser is a
+  // native child webview that paints OVER the React DOM, so it must be closed —
+  // not just left behind — or it strands itself on top of the doc/terminal.
+  // Then bring the document pane forward and launch the plan in the terminal:
+  // Claude picks up the drafted plan, exits plan mode, and it lands in the doc
+  // pane as a review session — the normal plan-editing workflow.
+  const sendBrowserDraftToRedline = (markdown: string) => {
+    if (!markdown.trim()) return;
+    setBrowserOpen(false);
+    setDrafterOpen(false);
+    setDocOpen(true);
+    launchPromptDraft(
+      markdown,
+      sidebarTab.kind === "folder" ? sidebarTab.id : null,
+    );
+  };
+
+  // "Synthesize → Drafter" from a mission: the orchestrator's brief (markdown)
+  // becomes a Tiptap doc seeding the Prompt Drafter, where the user shapes the
+  // real document and then "Send to Claude Code" launches a plan session. Reuses
+  // the same markdown→doc parser that loads a plan into the editor.
+  const seedDrafterFromMission = async (markdown: string) => {
+    if (!markdown.trim()) return;
+    try {
+      const { planMarkdownToDoc } = await import("./editor/markdown/parser");
+      setDrafterDoc(planMarkdownToDoc(markdown).toJSON() as JSONContent);
+    } catch {
+      // Fall back to a single text block if the parser import/parse fails.
+      setDrafterDoc({
+        type: "doc",
+        content: [{ type: "paragraph", content: [{ type: "text", text: markdown }] }],
+      } as unknown as JSONContent);
+    }
+    setBrowserOpen(false);
+    setDrafterOpen(true);
+    setToast("Mission brief opened in the drafter ✍️");
+    setTimeout(() => setToast(null), 4000);
+  };
+
   // Fallback for a Claude running in a terminal Redline doesn't own: copy the
   // resume command so the user can paste it into their own terminal.
   const copyRestoreCommand = () => {
@@ -1388,9 +1601,9 @@ function App() {
     // whichever terminal runs it, should land as "vN restored".
     void invoke("arm_restore", { sessionId: session.sessionId });
     void navigator.clipboard?.writeText(
-      buildResumeCommand(session.sessionId, new Date()),
+      buildResumeCommand(session.sessionId, new Date(), session.projectPath || null),
     );
-    setToast("Resume command copied — paste it into your terminal");
+    setToast("Resume command copied — paste it into a shell prompt");
     setTimeout(() => setToast(null), 4000);
   };
 
@@ -1567,6 +1780,51 @@ function App() {
     }
   };
 
+  // Stable, id-based callbacks for the comment cards. Each card's `React.memo`
+  // only pays off if its props keep referential identity across unrelated App
+  // re-renders (a focus flip, a layout tweak); inline `() => deleteComment(c.id)`
+  // closures would defeat that by minting a new function every render. We route
+  // through a ref that always holds the latest handlers, so the wrappers stay
+  // identity-stable for the component's lifetime with no stale-closure risk.
+  const commentHandlersRef = useRef({
+    select: (id: string) =>
+      setFocusedCommentId((prev) => (prev === id ? null : id)),
+    remove: deleteComment,
+    accept: acceptResolution,
+    acceptSuggestion: acceptAgentSuggestion,
+    reopen: reopenResolution,
+    promote: promoteToChange,
+  });
+  commentHandlersRef.current = {
+    select: (id: string) =>
+      setFocusedCommentId((prev) => (prev === id ? null : id)),
+    remove: deleteComment,
+    accept: acceptResolution,
+    acceptSuggestion: acceptAgentSuggestion,
+    reopen: reopenResolution,
+    promote: promoteToChange,
+  };
+  // Stable so PlanEditor / HistoricalRevisionView don't re-bind their highlight
+  // click handler on every App render (notably ~60×/s during a divider drag).
+  const handleHighlightClick = useCallback(
+    (id: string) => setFocusedCommentId(id),
+    [],
+  );
+  const commentCallbacks = useMemo(
+    () => ({
+      onSelect: (id: string) => commentHandlersRef.current.select(id),
+      onDelete: (id: string) => commentHandlersRef.current.remove(id),
+      onAccept: (id: string) => commentHandlersRef.current.accept(id),
+      onAcceptSuggestion: (c: Comment) =>
+        commentHandlersRef.current.acceptSuggestion(c),
+      onReopen: (id: string, note?: string) =>
+        commentHandlersRef.current.reopen(id, note),
+      onPromote: (id: string, directive: string) =>
+        commentHandlersRef.current.promote(id, directive),
+    }),
+    [],
+  );
+
   // Installs both pieces of the Redline integration. The hook (a JSON merge
   // into the user's settings.json) and the skill (a whole-file write) have
   // independent failure modes — install each in its own try/catch so one
@@ -1597,7 +1855,32 @@ function App() {
     if (errors.length === 0 && hookOk && skillOk) setSetupPhase("done");
   };
 
+  // A native child webview paints on top of all React DOM, so when a
+  // full-pane overlay is up the browser must be hidden underneath it. Mirrors
+  // the setup-modal / tour gating used in the JSX below.
+  const setupModalActive =
+    !!hookStatus &&
+    !!skillStatus &&
+    (!hookStatus.installed ||
+      !skillStatus.installed ||
+      setupPhase === "done");
+  const tourActive = tourOpen || (!onboardingDone && !setupModalActive);
+  const browserOverlayActive =
+    showReadme || showFeedback || setupModalActive || tourActive;
+  // The native webview must be hidden whenever a pane divider is mid-drag —
+  // otherwise it swallows the pointer and the resize freezes. This makes the
+  // sidebar, comment pane, terminal, and the document/browser split all
+  // draggable over the browser, exactly as they are over the document.
+  const browserVisible =
+    !browserOverlayActive &&
+    !sidebarDragging &&
+    !isDragging &&
+    !termDragging &&
+    !splitDragging &&
+    openMenuCount === 0;
+
   return (
+    <MenuOverlayProvider value={adjustMenuOverlay}>
     <div className="h-full flex flex-col">
       <FlashOverlay seq={flashSeq} color={flashColor} />
       {!daemonBound && (
@@ -1639,6 +1922,38 @@ function App() {
         onFlashTest={() => {
           setFlashSeq((n) => n + 1);
           if (flashSound) playInterceptBeep(flashSoundConfig);
+        }}
+        docOpen={docOpen}
+        onToggleDoc={() => {
+          // Entering/leaving a split — start it even so both panes are visible.
+          setSplitRatio(0.5);
+          setDocOpen((v) => !v);
+        }}
+        browserOpen={browserOpen}
+        onToggleBrowser={() => {
+          // Browser and drafter share the single "secondary pane" slot, so
+          // opening one closes the other; the split resets to even so a folded
+          // pane reappears.
+          setSplitRatio(0.5);
+          setBrowserOpen((v) => {
+            if (!v) setDrafterOpen(false);
+            return !v;
+          });
+        }}
+        drafterOpen={drafterOpen}
+        onToggleDrafter={() => {
+          setSplitRatio(0.5);
+          setDrafterOpen((v) => {
+            if (!v) setBrowserOpen(false);
+            return !v;
+          });
+        }}
+        splitActive={docOpen && (browserOpen || drafterOpen)}
+        splitVertical={splitVertical}
+        onToggleSplitOrientation={() => {
+          // Flipping orientation resets to 50/50 so a folded-away pane reappears.
+          setSplitRatio(0.5);
+          setSplitVertical((v) => !v);
         }}
       />
       {decisionWindow && (
@@ -1721,8 +2036,14 @@ function App() {
           className="flex-1 overflow-hidden flex flex-col relative"
           style={{ background: "var(--color-paper)" }}
         >
-          {sidebarTab.kind === "folder" && activeFile ? (
-            <FileViewer path={activeFile} onClose={handleCloseFile} />
+          {(() => {
+            const documentBody =
+              sidebarTab.kind === "folder" && activeFile ? (
+            <FileViewer
+              path={activeFile}
+              onClose={handleCloseFile}
+              onSaved={toastSaved}
+            />
           ) : (
           <div className="rl-thin-scroll-y flex-1 overflow-y-auto">
           <article
@@ -1754,7 +2075,7 @@ function App() {
                   diff={historicalDiff}
                   latestVersionNumber={latest?.versionNumber ?? 0}
                   focusedCommentId={focusedCommentId}
-                  onHighlightClick={(id) => setFocusedCommentId(id)}
+                  onHighlightClick={handleHighlightClick}
                   onBackToLatest={() => setViewedVersionNumber(null)}
                 />
               ) : (
@@ -1774,7 +2095,7 @@ function App() {
                     onUpdateComment={updateComment}
                     onDeleteComment={deleteComment}
                     focusedCommentId={focusedCommentId}
-                    onHighlightClick={(id) => setFocusedCommentId(id)}
+                    onHighlightClick={handleHighlightClick}
                     actionsRef={planActionsRef}
                     onLockedEdit={lockedEditToast}
                   />
@@ -1796,10 +2117,110 @@ function App() {
             )}
           </article>
           </div>
-          )}
+              );
+            const browserBody = (
+              <BrowserPane
+                onClose={() => setBrowserOpen(false)}
+                visible={browserVisible}
+                projectDir={sidebarTab.kind === "folder" ? sidebarTab.id : null}
+                // Drop a plan/prompt drafted while browsing into a fresh Redline
+                // plan session: close the browser overlay, show the doc pane,
+                // and launch the plan in the terminal (see handler).
+                onSendToRedline={sendBrowserDraftToRedline}
+                // A synthesized mission brief seeds the Prompt Drafter.
+                onSynthesizeToDrafter={seedDrafterFromMission}
+                // Re-sync the native webview whenever a surrounding pane toggles
+                // and reflows the slot without a drag (e.g. closing the comment
+                // pane, which otherwise leaves the webview stranded at its old
+                // size with a gap of blank space).
+                layoutKey={`${paneCollapsed}|${sidebarCollapsed}|${docOpen}|${splitVertical}`}
+              />
+            );
+            const drafterBody = (
+              <PromptDrafter
+                doc={drafterDoc}
+                onDocChange={setDrafterDoc}
+                projectOptions={projectOptions}
+                selectedProject={drafterProject}
+                onSelectedProjectChange={setDrafterProject}
+                onLaunch={launchPromptDraft}
+              />
+            );
+            // The browser and drafter are mutually-exclusive "secondary" panes;
+            // whichever is open splits against the document with the exact same
+            // SplitPane (orientation toggle, ratio and fold-to-edge divider) the
+            // browser has always used. With `docOpen` off, the secondary pane
+            // takes the whole column; the 📄 toggle adds the document back.
+            const secondaryBody = browserOpen
+              ? browserBody
+              : drafterOpen
+                ? drafterBody
+                : null;
+            if (secondaryBody && docOpen)
+              return (
+                <SplitPane
+                  vertical={splitVertical}
+                  ratio={splitRatio}
+                  onRatioChange={setSplitRatio}
+                  onDraggingChange={setSplitDragging}
+                  first={documentBody}
+                  second={secondaryBody}
+                />
+              );
+            if (secondaryBody) return secondaryBody;
+            // No secondary pane open → the document is the default full view.
+            return documentBody;
+          })()}
+          {/* Voice agent — entry point and drawer live ON the plan pane (not the
+              Header), so it reads as a plan feature reached while working with
+              the plan. Only over an actual plan (not the browser/drafter/folder
+              viewer). */}
+          {sessionReady &&
+            latest &&
+            !browserOpen &&
+            !drafterOpen &&
+            !(sidebarTab.kind === "folder" && activeFile) && (
+              <>
+                {!voiceOpen && (
+                  <button
+                    type="button"
+                    onClick={() => setVoiceOpen(true)}
+                    title="Discuss the plan by voice"
+                    aria-label="Discuss the plan by voice"
+                    className="absolute flex items-center gap-1.5 rounded-full"
+                    style={{
+                      left: "16px",
+                      bottom: "16px",
+                      padding: "6px 12px",
+                      fontSize: "13px",
+                      background: "var(--color-bg-elevated)",
+                      border: "1px solid var(--color-rule)",
+                      color: "var(--color-ink)",
+                      boxShadow: "0 4px 14px rgba(0,0,0,0.18)",
+                      cursor: "pointer",
+                      zIndex: 20,
+                    }}
+                  >
+                    🎙️ Discuss
+                  </button>
+                )}
+                {voiceOpen && (
+                  <VoicePanel
+                    // Remount cleanly if the active session changes (a revision
+                    // arriving calls setActiveId) instead of mutating sessionId
+                    // under a live warm session.
+                    key={activeId ?? ""}
+                    sessionId={activeId ?? ""}
+                    markdown={latest.rawPlanMarkdown}
+                    sections={sections}
+                    onClose={() => setVoiceOpen(false)}
+                  />
+                )}
+              </>
+            )}
           {/* Floating document-zoom control — pinned to the pane (doesn't scroll
               with the plan). Hidden over the folder file viewer. */}
-          {!(sidebarTab.kind === "folder" && activeFile) && zoomVisible && (
+          {!browserOpen && !drafterOpen && !(sidebarTab.kind === "folder" && activeFile) && zoomVisible && (
             <div
               ref={zoomCtrlRef}
               className="absolute flex items-center gap-1 rounded-full"
@@ -1930,16 +2351,16 @@ function App() {
               : "overflow-y-auto border-l shrink-0"
           }
           style={
-            paneFullscreen
-              ? {
-                  background: "var(--color-paper)",
-                  borderColor: "var(--color-rule)",
-                }
-              : {
-                  width: `${revealPaneW}px`,
-                  borderColor: "var(--color-rule)",
-                  background: "var(--color-paper)",
-                }
+            {
+              background: "var(--color-paper)",
+              borderColor: "var(--color-rule)",
+              // Fullscreen lets the aside fill its absolute box (no fixed width).
+              width: paneFullscreen ? undefined : `${revealPaneW}px`,
+              // One place to drive every discussion's text size — descendants
+              // read `--rl-discussion-zoom` via CSS, so the A−/A+ controls never
+              // re-render the comment list.
+              "--rl-discussion-zoom": discussionZoom,
+            } as React.CSSProperties
           }
         >
           {/* In fullscreen, mirror the terminal's overlay divider so the
@@ -2281,23 +2702,25 @@ function App() {
                 </div>
               );
             })()}
+            <DiscussionZoomContext.Provider value={adjustDiscussionZoom}>
             {paneComments.map((c) => (
               <CommentCard
                 key={`${session?.sessionId ?? ""}-${c.id}`}
                 sessionId={session?.sessionId ?? ""}
                 comment={c}
                 focused={focusedCommentId === c.id}
-                onSelect={() =>
-                  setFocusedCommentId((prev) => (prev === c.id ? null : c.id))
-                }
-                onDelete={() => deleteComment(c.id)}
-                onAccept={() => acceptResolution(c.id)}
-                onAcceptSuggestion={() => acceptAgentSuggestion(c)}
-                onReopen={(note) => reopenResolution(c.id, note)}
-                onPromote={(directive) => promoteToChange(c.id, directive)}
+                autoOpen={autoOpenCommentId === c.id}
+                onAutoOpenConsumed={clearAutoOpen}
+                onSelect={commentCallbacks.onSelect}
+                onDelete={commentCallbacks.onDelete}
+                onAccept={commentCallbacks.onAccept}
+                onAcceptSuggestion={commentCallbacks.onAcceptSuggestion}
+                onReopen={commentCallbacks.onReopen}
+                onPromote={commentCallbacks.onPromote}
                 submitInFlight={busy}
               />
             ))}
+            </DiscussionZoomContext.Provider>
               </>
             )}
           </div>
@@ -2460,6 +2883,7 @@ function App() {
         );
       })()}
     </div>
+    </MenuOverlayProvider>
   );
 }
 

@@ -24,6 +24,18 @@ const HOOK_TIMEOUT_SECS: u32 = 43_200;
 /// — it re-presents the plan Redline already holds; see resumeCommand.ts.)
 const RESTORE_CURL_ALLOW: &str = "Bash(curl -s http://127.0.0.1:7676/*)";
 
+/// The full set of bridge-curl allow rules backfilled into settings.json. The
+/// permission matcher is a literal command-prefix glob, so a quoted URL
+/// (`curl -s 'http://…`) does NOT match the unquoted prefix — agents that add a
+/// `?tab=` query single-quote the URL to protect the shell `?`/`&`, and without
+/// the quoted variants those calls bounce for approval. All three stay scoped to
+/// the same localhost daemon; only the quoting tolerance differs.
+const RESTORE_CURL_ALLOWS: &[&str] = &[
+    RESTORE_CURL_ALLOW,
+    "Bash(curl -s 'http://127.0.0.1:7676/*)",
+    "Bash(curl -s \"http://127.0.0.1:7676/*)",
+];
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HookStatus {
@@ -175,7 +187,11 @@ fn allow_present_at(path: &std::path::Path) -> bool {
     };
     json.pointer("/permissions/allow")
         .and_then(|v| v.as_array())
-        .is_some_and(|a| a.iter().any(|v| v.as_str() == Some(RESTORE_CURL_ALLOW)))
+        .is_some_and(|a| {
+            let present: std::collections::HashSet<&str> =
+                a.iter().filter_map(|v| v.as_str()).collect();
+            RESTORE_CURL_ALLOWS.iter().all(|r| present.contains(r))
+        })
 }
 
 fn ensure_restore_permission_at(path: &std::path::Path) {
@@ -191,8 +207,10 @@ fn ensure_restore_permission_at(path: &std::path::Path) {
     let Some(obj) = root.as_object_mut() else {
         return;
     };
-    if ensure_allow(obj, RESTORE_CURL_ALLOW).is_err() {
-        return;
+    for rule in RESTORE_CURL_ALLOWS {
+        if ensure_allow(obj, rule).is_err() {
+            return;
+        }
     }
     match serde_json::to_string_pretty(&root) {
         Ok(serialized) => {
@@ -259,7 +277,9 @@ pub fn install_at(path: &std::path::Path) -> Result<HookStatus, String> {
     }
 
     let obj = root.as_object_mut().expect("checked above");
-    ensure_allow(obj, RESTORE_CURL_ALLOW)?;
+    for rule in RESTORE_CURL_ALLOWS {
+        ensure_allow(obj, rule)?;
+    }
 
     let serialized = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
     fs::write(path, format!("{}\n", serialized)).map_err(|e| e.to_string())?;
@@ -352,7 +372,7 @@ pub fn uninstall_at(path: &std::path::Path) -> Result<HookStatus, String> {
         .pointer_mut("/permissions/allow")
         .and_then(|v| v.as_array_mut())
     {
-        allow_arr.retain(|v| v.as_str() != Some(RESTORE_CURL_ALLOW));
+        allow_arr.retain(|v| !v.as_str().is_some_and(|s| RESTORE_CURL_ALLOWS.contains(&s)));
     }
     if root
         .pointer("/permissions/allow")

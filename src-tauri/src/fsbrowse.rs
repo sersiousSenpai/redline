@@ -153,6 +153,33 @@ pub fn read_file_base64(path: String) -> Result<BinaryFile, String> {
     })
 }
 
+/// Write UTF-8 text to a file, creating parent directories as needed. Used by
+/// the in-app markdown note editor. Returns the absolute path written so the UI
+/// can show it in a toast.
+///
+/// Like the read commands above, this trusts the path the user pointed the app
+/// at — the app already runs the user's shell with full privileges, so writing
+/// where they can already write grants nothing new. `(async)` keeps disk I/O off
+/// the UI thread.
+#[tauri::command(async)]
+pub fn save_text_file(path: String, content: String) -> Result<String, String> {
+    let p = Path::new(&path);
+    if let Some(parent) = p.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    fs::write(p, content).map_err(|e| format!("{path}: {e}"))?;
+    Ok(p.to_string_lossy().into_owned())
+}
+
+/// Create a directory (and any missing parents), returning its absolute path.
+/// Lets the clipping flow ensure `<vault>/<clippings-subdir>` exists before
+/// listing it for filename de-duplication.
+#[tauri::command(async)]
+pub fn ensure_dir(path: String) -> Result<String, String> {
+    fs::create_dir_all(&path).map_err(|e| format!("{path}: {e}"))?;
+    Ok(Path::new(&path).to_string_lossy().into_owned())
+}
+
 /// The user's home directory — where new shells spawn (see `pty_spawn`). The
 /// explorer uses it to avoid surfacing a terminal sitting in $HOME as a
 /// "project" folder. Returns `None` if $HOME is unset.

@@ -377,3 +377,146 @@ export interface ForkCancelledEvent {
   sessionId: SessionId;
   commentId: string;
 }
+
+/** One persisted turn in a browser tab's browse-agent discussion thread.
+ *  Scoped to a per-tab `browseId` rather than a plan session/comment. Terminal
+ *  rows only (status "complete" | "error"); live text is frontend-only. */
+export interface BrowseMessage {
+  id: string;
+  browseId: string;
+  /** "user" | "assistant". */
+  role: string;
+  body: string;
+  /** "complete" | "error". */
+  status: string;
+  createdAt: number;
+}
+
+/** A chunk of streaming assistant text for a tab's browse thread. */
+export interface BrowseDeltaEvent {
+  browseId: string;
+  text: string;
+}
+
+/** A browse turn finished — `body` is the authoritative full reply. */
+export interface BrowseDoneEvent {
+  browseId: string;
+  messageId: string;
+  body: string;
+}
+
+/** A browse turn failed; `error` is also persisted as a terminal message. */
+export interface BrowseErrorEvent {
+  browseId: string;
+  error: string;
+}
+
+/** A browse turn was cancelled — nothing was persisted for it. */
+export interface BrowseCancelledEvent {
+  browseId: string;
+}
+
+/** One open browser tab, mirrored to the backend (`browser_set_tabs`) so the
+ *  browse agent's `/v1/browser/tabs` registry + cross-tab routes can resolve a
+ *  tab selector. Mirrors the Rust `TabInfo`. */
+export interface BrowseTabInfo {
+  id: string;
+  label: string;
+  url: string;
+  title: string;
+  browseId: string;
+}
+
+/** The browse agent asked to open a URL in a new tab (it can't create a native
+ *  webview itself). `BrowserPane` foregrounds the new tab while keeping the
+ *  discussion anchored to the conversation that opened it. */
+export interface BrowseOpenTabEvent {
+  url: string;
+}
+
+/** The browse agent asked to switch the user INTO an existing tab. `BrowserPane`
+ *  foregrounds it and moves the discussion into its thread — a full switch, like
+ *  the user clicking that tab. */
+export interface BrowseFocusTabEvent {
+  id: string;
+}
+
+/** The daemon needs a suspended tab's webview live to run a query/action.
+ *  `BrowserPane` materializes it in the BACKGROUND — no foregrounding, no
+ *  discussion-pane move (distinct from `browse-focus-tab`). */
+export interface BrowseWakeTabEvent {
+  id: string;
+}
+
+/** A research Mission: an orchestrator that holds one shared goal across the
+ *  whole browser pane, a tier above the per-tab browse agents. Mirrors the Rust
+ *  `Mission`. The orchestrator's resumable session lives backend-side. */
+export interface Mission {
+  missionId: string;
+  title: string;
+  goal: string;
+  /** "active" | "archived". */
+  status: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** One pin: a curated finding the user pulled into a mission. Mirrors the Rust
+ *  `MissionFinding`; source fields tie it back to the tab it came from. */
+export interface MissionFinding {
+  id: string;
+  missionId: string;
+  browseId: string | null;
+  sourceUrl: string | null;
+  sourceTitle: string | null;
+  body: string;
+  note: string | null;
+  createdAt: number;
+}
+
+/** One tab in a mission's saved workspace (mirrors the Rust `MissionTab`). `id`
+ *  is informational — re-minted on reopen; `browseId` is the durable key that
+ *  reattaches the tab's discussion thread. */
+export interface MissionTab {
+  id?: string | null;
+  url: string;
+  title: string;
+  browseId: string;
+}
+
+/** One persisted turn in a mission's orchestrator discussion. Mirrors
+ *  `BrowseMessage`, scoped to a `missionId`. */
+export interface MissionMessage {
+  id: string;
+  missionId: string;
+  /** "user" | "assistant". */
+  role: string;
+  body: string;
+  /** "complete" | "error". */
+  status: string;
+  createdAt: number;
+}
+
+/** A chunk of streaming orchestrator text for a mission. */
+export interface MissionDeltaEvent {
+  missionId: string;
+  text: string;
+}
+
+/** An orchestrator turn finished — `body` is the authoritative full reply. */
+export interface MissionDoneEvent {
+  missionId: string;
+  messageId: string;
+  body: string;
+}
+
+/** An orchestrator turn failed; `error` is also persisted as a terminal row. */
+export interface MissionErrorEvent {
+  missionId: string;
+  error: string;
+}
+
+/** An orchestrator turn was cancelled — nothing was persisted for it. */
+export interface MissionCancelledEvent {
+  missionId: string;
+}

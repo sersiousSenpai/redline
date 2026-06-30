@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { THEMES } from "../theme/themes";
 import type { ThemeName } from "../theme/themes";
+import { useMenuOverlay } from "./menuOverlay";
 
 interface ThemePickerProps {
   theme: ThemeName;
@@ -35,6 +36,17 @@ export function ThemePicker({ theme, onThemeChange }: ThemePickerProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const current = THEMES.find((t) => t.name === theme) ?? THEMES[0];
+
+  // Hide the native browser webview while this menu is up (see useMenuOverlay).
+  useMenuOverlay(open);
+
+  // Display order: the brand theme leads the list; the rest keep their
+  // declared order. THEMES[0] stays the fallback elsewhere, so we only
+  // reorder for presentation here.
+  const ordered = [
+    ...THEMES.filter((t) => t.name === "redline"),
+    ...THEMES.filter((t) => t.name !== "redline"),
+  ];
 
   // Close on outside click or Escape.
   useEffect(() => {
@@ -93,7 +105,7 @@ export function ThemePicker({ theme, onThemeChange }: ThemePickerProps) {
             boxShadow: "0 8px 24px rgba(0,0,0,0.28)",
           }}
         >
-          {THEMES.map((t) => {
+          {ordered.map((t) => {
             const selected = t.name === theme;
             return (
               <button

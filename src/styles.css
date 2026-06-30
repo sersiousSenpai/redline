@@ -277,6 +277,206 @@ body {
 .rl-prose[contenteditable="true"] {
   cursor: text;
 }
+/* The Prompt Drafter gets an accent caret so the blinking cursor is clearly
+   visible across themes (the browser default can blend into the paper). */
+.rl-prose[data-drafter="true"] {
+  caret-color: var(--color-info);
+}
+/* ── Word-style document canvas (Prompt Drafter) ──────────────────────────
+   A white "page" floating on a muted "desk". Theme-aware: the desk is the
+   paper tone nudged toward ink (a light grey on light themes; a lifted frame
+   on dark themes), and the page keeps the designed --color-paper so body
+   contrast is exactly as tuned. A soft shadow + hairline carry the lift on
+   every theme regardless of which way the desk/paper tones fall. The --rl-*
+   knobs are layout state (page geometry), kept overridable for later tuning. */
+.rl-page-workspace {
+  --rl-page-width: 816px; /* ≈ 8.5in @ 96dpi */
+  --rl-page-pad-x: 84px; /* generous Word-like side margins */
+  --rl-page-pad-y: 88px; /* ≈ 1in top/bottom */
+  --rl-page-gap: 28px; /* breathing room between page and the desk edges */
+  --rl-page-desk: color-mix(in srgb, var(--color-paper) 92%, var(--color-ink) 8%);
+  background: var(--rl-page-desk);
+}
+.rl-page {
+  width: min(var(--rl-page-width), 100% - calc(var(--rl-page-gap) * 2));
+  margin: var(--rl-page-gap) auto;
+  padding: var(--rl-page-pad-y) var(--rl-page-pad-x);
+  background: var(--color-paper);
+  border: 1px solid var(--color-rule);
+  border-radius: 2px;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.18),
+    0 8px 28px rgba(0, 0, 0, 0.22);
+  /* The page is the only typable target — let clicks anywhere in its margins
+     land the caret (PromptDrafter focuses the editor on click). */
+  cursor: text;
+  min-height: calc(100% - var(--rl-page-gap) * 2);
+  /* Positioning context for the floating table handle (rendered into the page,
+     so it scrolls with the content). */
+  position: relative;
+}
+/* Word-style table move-handle: a grip in the left margin of the table the
+   cursor is in. Click it to select the whole table, then ⌫ deletes it. */
+.rl-table-grip {
+  position: fixed;
+  z-index: 200;
+  width: 17px;
+  height: 17px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--color-rule);
+  border-radius: 4px;
+  background: var(--color-bg-elevated);
+  color: var(--color-ink-muted);
+  cursor: pointer;
+  opacity: 0.85;
+}
+.rl-table-grip:hover {
+  background: var(--color-info);
+  color: var(--color-on-accent);
+  border-color: var(--color-info);
+  opacity: 1;
+}
+/* ── Drafter ribbon ───────────────────────────────────────────────────────
+   A Word-style formatting ribbon: real lucide icons, grouped controls, and a
+   clearly visible active state. Groups wrap as whole units (never mid-group)
+   and are separated by a hairline so the bar reads as distinct sections
+   rather than one cramped strip. */
+.rl-ribbon {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--color-rule);
+  background: var(--color-paper);
+}
+.rl-ribbon-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  flex-wrap: nowrap;
+  padding-right: 5px;
+  margin-right: 4px;
+  border-right: 1px solid var(--color-rule);
+}
+.rl-ribbon-group:last-child {
+  border-right: none;
+  margin-right: 0;
+  padding-right: 0;
+}
+.rl-ribbon-btn:hover:not(:disabled),
+.rl-ribbon-trigger:hover:not(:disabled) {
+  background: var(--color-bg-elevated);
+  border-color: var(--color-rule);
+}
+/* Active = an unmistakable accent fill + ring, so "Bold is on" is obvious. */
+.rl-ribbon-btn--active,
+.rl-ribbon-btn--active:hover {
+  background: color-mix(in srgb, var(--color-info) 20%, transparent) !important;
+  border-color: color-mix(
+    in srgb,
+    var(--color-info) 55%,
+    transparent
+  ) !important;
+  color: var(--color-info) !important;
+}
+.rl-ribbon-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 8px;
+  font-size: 12.5px;
+  color: var(--color-ink);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  justify-content: space-between;
+}
+.rl-ribbon-trigger-label {
+  display: inline-flex;
+  align-items: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rl-ribbon-pop {
+  position: absolute;
+  top: calc(100% + 5px);
+  left: 0;
+  z-index: 50;
+  max-height: 340px;
+  overflow-y: auto;
+  padding: 5px;
+  background: var(--color-paper);
+  border: 1px solid var(--color-rule);
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+}
+.rl-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 6px 9px;
+  font-size: 13px;
+  color: var(--color-ink);
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.rl-menu-row:hover:not(:disabled) {
+  background: var(--color-bg-elevated);
+}
+.rl-menu-row:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.rl-menu-row--active {
+  background: color-mix(in srgb, var(--color-info) 18%, transparent);
+  color: var(--color-info);
+}
+/* Delayed CSS tooltip for icon buttons — replaces bare title= so hints read
+   consistently across platforms and can carry a shortcut. */
+.rl-tipwrap {
+  position: relative;
+  display: inline-flex;
+}
+.rl-tipwrap::after {
+  content: attr(data-tip);
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 60;
+  padding: 3px 7px;
+  font-size: 11px;
+  line-height: 1.3;
+  white-space: nowrap;
+  color: var(--color-on-accent, #fff);
+  background: var(--color-overlay, rgba(0, 0, 0, 0.85));
+  border-radius: 5px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease 0.45s;
+}
+.rl-tipwrap:hover::after {
+  opacity: 1;
+}
+/* Highlighter mark (Word-style) — a warm wash that reads as a highlighter
+   while keeping the ink legible. */
+.rl-prose mark {
+  background: color-mix(in srgb, var(--color-warning) 38%, transparent);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 0.05em;
+}
 .rl-prose > :first-child {
   margin-top: 0;
 }
@@ -358,6 +558,8 @@ body {
   border: 1px solid var(--color-rule);
   padding: 0.4em 0.7em;
   text-align: left;
+  /* Anchor the cell-selection overlay and the column resize handle. */
+  position: relative;
 }
 .rl-prose th {
   background: var(--color-anchor-bg);
@@ -366,6 +568,82 @@ body {
 /* Zebra striping keeps wide tables readable across a row. */
 .rl-prose tbody tr:nth-child(even) td {
   background: color-mix(in srgb, var(--color-anchor-bg) 45%, transparent);
+}
+/* Make ProseMirror's cell selection VISIBLE — without this, drag-selecting a
+   table highlights nothing, so "highlighting" looks broken. An accent wash over
+   each selected cell (drawn above the cell's own background). */
+.rl-prose .selectedCell::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--color-info) 24%, transparent);
+  pointer-events: none;
+  z-index: 2;
+}
+/* Resizable-column drag handle (Table is configured `resizable: true`). */
+.rl-prose .tableWrapper {
+  overflow-x: auto;
+}
+/* Whole-table page alignment (TableAlign). The decoration class lands on the
+   table's outer DOM; margin-auto shifts a content-width table left/center/right
+   within the page, like Word. Selectors cover the resizable NodeView wrapper
+   and a bare table. */
+.rl-prose .tableWrapper.rl-talign-center > table,
+.rl-prose table.rl-talign-center {
+  margin-left: auto;
+  margin-right: auto;
+}
+.rl-prose .tableWrapper.rl-talign-right > table,
+.rl-prose table.rl-talign-right {
+  margin-left: auto;
+  margin-right: 0;
+}
+.rl-prose .tableWrapper.rl-talign-left > table,
+.rl-prose table.rl-talign-left {
+  margin-left: 0;
+  margin-right: auto;
+}
+.rl-prose .column-resize-handle {
+  position: absolute;
+  right: -1px;
+  top: 0;
+  bottom: -1px;
+  width: 3px;
+  background: var(--color-info);
+  pointer-events: none;
+}
+.rl-prose.resize-cursor {
+  cursor: col-resize;
+}
+/* A node-selected block (whole table, image, hr) gets a clear accent ring. */
+.rl-prose .ProseMirror-selectednode {
+  outline: 2px solid var(--color-info);
+  outline-offset: 1px;
+  border-radius: 2px;
+}
+/* Gap cursor so you can place the caret above/below a table (or other
+   isolating node) and type or delete around it. */
+.rl-prose .ProseMirror-gapcursor {
+  display: none;
+  pointer-events: none;
+  position: absolute;
+}
+.rl-prose .ProseMirror-gapcursor::after {
+  content: "";
+  display: block;
+  position: absolute;
+  top: -2px;
+  width: 1.2em;
+  border-top: 1px solid var(--color-ink);
+  animation: rl-gapcursor-blink 1.1s steps(2, start) infinite;
+}
+.rl-prose.ProseMirror-focused .ProseMirror-gapcursor {
+  display: block;
+}
+@keyframes rl-gapcursor-blink {
+  to {
+    visibility: hidden;
+  }
 }
 .rl-prose hr {
   border: none;
@@ -539,14 +817,25 @@ p.rl-block-modified {
 /* Word-style comment highlight over the originally-selected text. Sits on
    top of inline ins/del marks (the editor renders the ins/del color through
    the highlight tint), and click-bridges with the sidebar card. */
+/* Each discussion card is an independent layout/paint island: a streaming reply
+   or an expand/collapse inside one card can't invalidate the layout of its
+   siblings or the pane, and the browser can skip painting cards scrolled out of
+   view. `content` = layout + paint + style containment (not size — cards still
+   grow to fit their content). No card content escapes its box (inset bars only),
+   so paint clipping is safe here. */
+.rl-comment-card {
+  contain: content;
+}
+
 .rl-comment-highlight {
   background: color-mix(in srgb, var(--color-warning) 22%, transparent);
   box-shadow: inset 2px 0 0 var(--color-warning);
   border-radius: 2px;
   cursor: pointer;
-  transition:
-    background 120ms ease,
-    box-shadow 120ms ease;
+  /* Only the background tint eases; the 2px bar snaps. Transitioning box-shadow
+     forces a repaint of the (potentially many) highlighted spans whenever focus
+     toggles — the snap is visually indistinguishable for a hairline bar. */
+  transition: background 120ms ease;
 }
 .rl-comment-highlight--focused {
   background: color-mix(in srgb, var(--color-warning) 42%, transparent);
@@ -722,9 +1011,8 @@ p.rl-block-modified {
   border-radius: 2px;
   background: color-mix(in srgb, var(--color-warning) 22%, transparent);
   box-shadow: inset 2px 0 0 var(--color-warning);
-  transition:
-    background 120ms ease,
-    box-shadow 120ms ease;
+  /* Background eases, bar snaps — see .rl-comment-highlight. */
+  transition: background 120ms ease;
 }
 .rl-html-hl--focused {
   background: color-mix(in srgb, var(--color-warning) 42%, transparent);
@@ -816,6 +1104,21 @@ p.rl-block-modified {
   opacity: 0.4;
   cursor: default;
 }
+/* Drafter find-and-replace: stack the find and replace rows in one floating
+   panel, each row reusing the shared .rl-search-* controls. */
+.rl-find-col {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+.rl-find-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.rl-find-row .rl-search-input {
+  flex: 1;
+}
 .rl-search-match {
   background: color-mix(in srgb, var(--color-warning) 28%, transparent);
   border-radius: 2px;
@@ -879,7 +1182,11 @@ p.rl-block-modified {
   overflow-x: auto;
 }
 
-/* Mermaid diagram: a rendered SVG on a light surface + collapsible source. */
+/* Mermaid diagram: a rendered SVG on a light figure plate + collapsible source.
+   The base .rl-mermaid carries layout + the elevated (dark) surface used by the
+   pending/error states; the rendered SVG flips to the light plate via --ready so
+   mermaid's `neutral` palette (dark ink, see MermaidView) is legible in every
+   theme. */
 .rl-mermaid-block {
   margin: 1em 0;
 }
@@ -891,9 +1198,32 @@ p.rl-block-modified {
   border: 1px solid var(--color-rule);
   border-radius: 8px;
 }
+/* The rendered diagram: a fixed light "plate" — theme-independent so the diagram
+   reads as a printed figure on dark, light, and the cycling themes alike. */
+.rl-mermaid--ready {
+  background: #f7f8f6;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 10px;
+  padding: 16px 18px;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.18),
+    0 6px 16px rgba(0, 0, 0, 0.1);
+}
 .rl-mermaid svg {
   max-width: 100%;
   height: auto;
+}
+/* Figure chrome: round the node/actor boxes and give them a faint lift so the
+   diagram looks composed rather than raw. SVG geometry, so it can't be themed by
+   mermaid vars — kept under our control here. */
+.rl-mermaid--ready svg .node rect,
+.rl-mermaid--ready svg rect.actor {
+  rx: 6px;
+  ry: 6px;
+}
+.rl-mermaid--ready svg g.node,
+.rl-mermaid--ready svg g.actor {
+  filter: drop-shadow(0 1px 1.5px rgba(0, 0, 0, 0.16));
 }
 .rl-mermaid--pending,
 .rl-mermaid--error {
@@ -968,7 +1298,9 @@ p.rl-block-modified {
 /* highlight.js token palette — tuned for the warm-dark code surface. lowlight
    emits these `hljs-*` classes as inline decorations inside the <code>. */
 .rl-prose .hljs-comment,
-.rl-prose .hljs-quote {
+.rl-prose .hljs-quote,
+.rl-md .hljs-comment,
+.rl-md .hljs-quote {
   color: var(--color-hl-comment);
   font-style: italic;
 }
@@ -976,39 +1308,62 @@ p.rl-block-modified {
 .rl-prose .hljs-selector-tag,
 .rl-prose .hljs-literal,
 .rl-prose .hljs-section,
-.rl-prose .hljs-link {
+.rl-prose .hljs-link,
+.rl-md .hljs-keyword,
+.rl-md .hljs-selector-tag,
+.rl-md .hljs-literal,
+.rl-md .hljs-section,
+.rl-md .hljs-link {
   color: var(--color-hl-keyword);
 }
 .rl-prose .hljs-string,
 .rl-prose .hljs-attr,
 .rl-prose .hljs-regexp,
-.rl-prose .hljs-addition {
+.rl-prose .hljs-addition,
+.rl-md .hljs-string,
+.rl-md .hljs-attr,
+.rl-md .hljs-regexp,
+.rl-md .hljs-addition {
   color: var(--color-hl-string);
 }
 .rl-prose .hljs-number,
 .rl-prose .hljs-built_in,
 .rl-prose .hljs-type,
 .rl-prose .hljs-symbol,
-.rl-prose .hljs-bullet {
+.rl-prose .hljs-bullet,
+.rl-md .hljs-number,
+.rl-md .hljs-built_in,
+.rl-md .hljs-type,
+.rl-md .hljs-symbol,
+.rl-md .hljs-bullet {
   color: var(--color-hl-number);
 }
 .rl-prose .hljs-title,
 .rl-prose .hljs-name,
-.rl-prose .hljs-attribute {
+.rl-prose .hljs-attribute,
+.rl-md .hljs-title,
+.rl-md .hljs-name,
+.rl-md .hljs-attribute {
   color: var(--color-hl-title);
 }
 .rl-prose .hljs-variable,
 .rl-prose .hljs-template-variable,
-.rl-prose .hljs-meta {
+.rl-prose .hljs-meta,
+.rl-md .hljs-variable,
+.rl-md .hljs-template-variable,
+.rl-md .hljs-meta {
   color: var(--color-hl-variable);
 }
-.rl-prose .hljs-deletion {
+.rl-prose .hljs-deletion,
+.rl-md .hljs-deletion {
   color: var(--color-hl-deletion);
 }
-.rl-prose .hljs-emphasis {
+.rl-prose .hljs-emphasis,
+.rl-md .hljs-emphasis {
   font-style: italic;
 }
-.rl-prose .hljs-strong {
+.rl-prose .hljs-strong,
+.rl-md .hljs-strong {
   font-weight: 700;
 }
 
@@ -1079,8 +1434,12 @@ p.rl-block-modified {
   font-size: 13px;
   line-height: 1.45;
   color: var(--color-ink);
+  /* break-word, not anywhere: a genuinely over-long token (URL, hash) still
+     breaks to stay inside the pane, but normal words keep their min-content
+     width — so table columns and other renders can't be starved to 1ch and
+     shattered character-by-character. */
   word-wrap: break-word;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 
 /* Cap the height of a comment body and a discussion-thread message list so a
@@ -1094,6 +1453,13 @@ p.rl-block-modified {
   max-height: 320px;
   overflow-y: auto;
 }
+/* Focused discussion: lift the cap so the full transcript renders in place,
+ * growing with content. Still drag-resizable if the reviewer wants to bound it. */
+.rl-thread-scroll-tall {
+  max-height: none;
+  overflow-y: visible;
+  resize: vertical;
+}
 .rl-md p {
   margin: 0 0 6px;
 }
@@ -1103,16 +1469,40 @@ p.rl-block-modified {
 .rl-md > :last-child {
   margin-bottom: 0;
 }
+/* Heading hierarchy: a modest scale gives structured replies real rhythm
+   instead of a flat run of same-size bold lines. */
 .rl-md h1,
 .rl-md h2,
 .rl-md h3,
 .rl-md h4,
 .rl-md h5,
 .rl-md h6 {
-  font-size: 13.5px;
   font-weight: 600;
-  margin: 8px 0 4px;
+  margin: 10px 0 4px;
   line-height: 1.3;
+}
+.rl-md h1 {
+  font-size: 16px;
+}
+.rl-md h2 {
+  font-size: 14.5px;
+  padding-bottom: 3px;
+  border-bottom: 1px solid var(--color-rule);
+}
+.rl-md h3 {
+  font-size: 13.5px;
+}
+.rl-md h4,
+.rl-md h5,
+.rl-md h6 {
+  font-size: 13px;
+  color: var(--color-ink-muted);
+}
+/* Lead emphasis: the sidecar skill leads with the answer — make the first
+   paragraph carry a touch more weight so that shape is visible at a glance. */
+.rl-md > p:first-child {
+  font-size: 13.5px;
+  font-weight: 450;
 }
 .rl-md ul,
 .rl-md ol {
@@ -1135,27 +1525,74 @@ p.rl-block-modified {
   color: var(--color-info);
   text-decoration: underline;
 }
+/* Inline code reads as a "chip": subtle border + tint, distinct from prose. */
 .rl-md code {
   background: var(--color-code-bg);
   color: var(--color-code-fg);
-  padding: 0 4px;
-  border-radius: 3px;
+  padding: 0.5px 5px;
+  border: 1px solid color-mix(in srgb, var(--color-code-fg) 14%, transparent);
+  border-radius: 4px;
   font-size: 0.9em;
   font-family: var(--font-mono);
 }
 .rl-md pre {
   background: var(--color-code-bg);
   color: var(--color-code-fg);
-  padding: 8px 10px;
-  border-radius: 4px;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--color-code-fg) 12%, transparent);
+  border-radius: 8px;
   overflow-x: auto;
   margin: 6px 0;
   font-size: 11.5px;
   line-height: 1.4;
 }
+/* Code is meant to be grabbed — make selection explicit so WebKit doesn't get
+   finicky selecting inside a <pre> that floats over the native browser webview. */
+.rl-md pre,
+.rl-md code {
+  -webkit-user-select: text;
+  user-select: text;
+}
+/* Per-block copy affordance. The fence renderer wraps each code block in
+   `.rl-codeblock`; the button floats top-right and is copied via delegation in
+   MarkdownView. Faintly visible always (discoverable), solid on hover/focus. */
+.rl-md .rl-codeblock {
+  position: relative;
+}
+.rl-md .rl-copy-btn {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  padding: 2px 6px;
+  font-size: 11px;
+  line-height: 1;
+  border: 1px solid var(--color-rule);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--color-code-bg) 78%, var(--color-paper));
+  color: var(--color-ink-muted);
+  cursor: pointer;
+  opacity: 0.4;
+  transition: opacity 0.12s ease, color 0.12s ease;
+}
+.rl-md .rl-codeblock:hover .rl-copy-btn,
+.rl-md .rl-copy-btn:focus-visible {
+  opacity: 0.95;
+}
+.rl-md .rl-copy-btn:hover {
+  color: var(--color-ink);
+}
+.rl-md .rl-copy-btn.rl-copied {
+  opacity: 1;
+  color: var(--color-info);
+}
+.rl-md .rl-copy-btn.rl-copied::after {
+  content: " ✓";
+}
+/* Inside a fenced block the <pre> carries the frame — neutralise the chip. */
 .rl-md pre code {
   background: transparent;
   padding: 0;
+  border: 0;
   border-radius: 0;
   font-size: inherit;
 }
@@ -1170,8 +1607,110 @@ p.rl-block-modified {
   border-top: 1px solid var(--color-rule);
   margin: 8px 0;
 }
+/* GFM tables (markdown-it parses these; this is their only styling). A designed
+   data table: outer frame, light row rules, zebra striping. Wide tables get a
+   horizontal scroll rather than blowing out the bubble. */
+.rl-md table {
+  border-collapse: collapse;
+  /* auto + min-width:100% — fills the pane when it fits, but a content-wider
+     table exceeds the container and scrolls (overflow-x) instead of starving
+     columns. */
+  width: auto;
+  min-width: 100%;
+  margin: 8px 0;
+  font-size: inherit;
+  display: block;
+  overflow-x: auto;
+  border: 1px solid var(--color-rule);
+  border-radius: 8px;
+}
+.rl-md th,
+.rl-md td {
+  /* Horizontal row rules only — the outer frame lives on the table. */
+  border-bottom: 1px solid color-mix(in srgb, var(--color-rule) 60%, transparent);
+  padding: 5px 9px;
+  text-align: left;
+  vertical-align: top;
+  /* A readable floor so no column collapses to a sliver; break at word
+     boundaries, not mid-word. */
+  min-width: 4.5em;
+  word-break: normal;
+}
+.rl-md tbody tr:last-child td {
+  border-bottom: 0;
+}
+.rl-md tbody tr:nth-child(even) {
+  background: color-mix(in srgb, var(--color-ink) 4%, transparent);
+}
+.rl-md th {
+  font-weight: 600;
+  background: var(--color-bg-elevated);
+  border-bottom-color: var(--color-rule);
+}
+/* Task-list checkboxes (markdown-it-task-lists). Drop the bullet and align the
+   checkbox with the surrounding text. */
+.rl-md .task-list-item {
+  list-style: none;
+  margin-left: -18px;
+}
+.rl-md .task-list-item input[type="checkbox"] {
+  margin: 0 6px 0 0;
+  vertical-align: middle;
+}
+/* GitHub-style callouts: an accent bar + a tint mixed from the same accent, so
+   each kind reads as a designed admonition rather than a grey box. */
+.rl-md .rl-callout {
+  --rl-callout-accent: var(--color-info);
+  border-left: 3px solid var(--rl-callout-accent);
+  background: color-mix(in srgb, var(--rl-callout-accent) 10%, var(--color-bg-elevated));
+  padding: 7px 11px;
+  margin: 8px 0;
+  border-radius: 0 6px 6px 0;
+  color: var(--color-ink);
+}
+/* Uppercase kind label — the `[!NOTE]` marker line is stripped at parse time,
+   so this re-surfaces the kind as a small designed eyebrow. */
+.rl-md .rl-callout::before {
+  content: "NOTE";
+  display: block;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  margin-bottom: 3px;
+  color: var(--rl-callout-accent);
+}
+.rl-md .rl-callout-tip {
+  --rl-callout-accent: var(--color-success);
+}
+.rl-md .rl-callout-tip::before {
+  content: "TIP";
+}
+.rl-md .rl-callout-warning,
+.rl-md .rl-callout-caution {
+  --rl-callout-accent: var(--color-warning);
+}
+.rl-md .rl-callout-warning::before {
+  content: "WARNING";
+}
+.rl-md .rl-callout-caution::before {
+  content: "CAUTION";
+}
+.rl-md .rl-callout-important {
+  --rl-callout-accent: var(--color-info);
+}
+.rl-md .rl-callout-important::before {
+  content: "IMPORTANT";
+}
+/* Mermaid diagrams inside a bubble: keep the SVG within the bubble width. */
+.rl-md .rl-mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
 .rl-md-compact {
-  font-size: 12.5px;
+  /* Sidecar discussions set --rl-discussion-zoom on their container to scale
+   * this; everywhere else the var is unset and defaults to 1 (unchanged). */
+  font-size: calc(12.5px * var(--rl-discussion-zoom, 1));
   line-height: 1.5;
 }
 .rl-md-compact p {
@@ -1247,4 +1786,37 @@ p.rl-block-modified {
 }
 .rl-voice-tile:not([aria-pressed="true"]):hover {
   background: color-mix(in srgb, var(--color-ink) 8%, var(--color-bg-elevated));
+}
+
+/* Enrolled-tab aura: while a research mission is active, every open browser tab
+   gets a soft theme-accent glow in the strip — an ambient signal of which tabs
+   are under the mission's purview. Tabs that have contributed a pin glow
+   stronger (.rl-tab--mined), hinting at which you've already mined. Reads as one
+   system with the toolbar 🎯 (same --color-info accent). */
+.rl-tab--mission {
+  border-color: color-mix(in srgb, var(--color-info) 45%, var(--color-rule)) !important;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-info) 30%, transparent),
+    0 0 8px color-mix(in srgb, var(--color-info) 28%, transparent);
+  animation: rl-tab-pulse 2.6s ease-in-out infinite;
+}
+.rl-tab--mission.rl-tab--mined {
+  border-color: color-mix(in srgb, var(--color-info) 70%, var(--color-rule)) !important;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-info) 50%, transparent),
+    0 0 12px color-mix(in srgb, var(--color-info) 45%, transparent);
+}
+@keyframes rl-tab-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-info) 28%, transparent),
+      0 0 6px color-mix(in srgb, var(--color-info) 22%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-info) 40%, transparent),
+      0 0 12px color-mix(in srgb, var(--color-info) 38%, transparent);
+  }
+}
+/* Respect reduced-motion: keep the static glow, drop the pulse. */
+@media (prefers-reduced-motion: reduce) {
+  .rl-tab--mission {
+    animation: none;
+  }
 }

@@ -54,6 +54,8 @@ interface FileViewerProps {
   /** Absolute path of the file to show. */
   path: string;
   onClose: () => void;
+  /** Called with the saved path after an in-place markdown edit is written. */
+  onSaved?: (path: string) => void;
 }
 
 function basename(path: string): string {
@@ -69,7 +71,7 @@ function isMarkdown(path: string): boolean {
 // Read-only viewer for a single file picked from the FileTree. Images render
 // inline; markdown renders rich; everything else shows syntax-highlighted
 // source. Oversized files report why they weren't loaded.
-export function FileViewer({ path, onClose }: FileViewerProps) {
+export function FileViewer({ path, onClose, onSaved }: FileViewerProps) {
   const mime = imageMime(path);
 
   return (
@@ -108,7 +110,7 @@ export function FileViewer({ path, onClose }: FileViewerProps) {
         {mime ? (
           <ImageBody path={path} mime={mime} />
         ) : (
-          <TextBody path={path} />
+          <TextBody path={path} onSaved={onSaved} />
         )}
       </div>
     </div>
@@ -179,8 +181,14 @@ function ImageBody({ path, mime }: { path: string; mime: string }) {
 
 // Markdown renders rich (full read); everything else goes to the virtualized,
 // off-thread-tokenized code viewer so a large file never freezes the UI.
-function TextBody({ path }: { path: string }) {
-  if (isMarkdown(path)) return <MarkdownBody path={path} />;
+function TextBody({
+  path,
+  onSaved,
+}: {
+  path: string;
+  onSaved?: (path: string) => void;
+}) {
+  if (isMarkdown(path)) return <MarkdownBody path={path} onSaved={onSaved} />;
   return (
     // Blank (not a "Loading…" notice) while the chunk loads: it's preloaded on
     // explorer open so this rarely shows, and a silent hold avoids stacking a
@@ -196,15 +204,29 @@ function TextBody({ path }: { path: string }) {
 // is the right guard here. Loads are stale-while-revalidate: the prior file's
 // content stays on screen until the new one resolves, so switching never flashes
 // a blank "Loading…" frame (the same anti-flicker contract as CodeView).
-function MarkdownBody({ path }: { path: string }) {
+function MarkdownBody({
+  path,
+  onSaved,
+}: {
+  path: string;
+  onSaved?: (path: string) => void;
+}) {
   const [displayed, setDisplayed] = useState<{ path: string; file: FileContent } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showLoading, setShowLoading] = useState(false);
+  // In-place editing of the raw markdown. `draft` lives independently of the
+  // rendered `displayed`, so an fs-change reload (including our own save echo)
+  // never clobbers what's in the textarea.
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
   const latestPath = useRef(path);
 
   useEffect(() => {
     latestPath.current = path;
     setError(null);
+    // Switching files leaves edit mode — the draft belongs to the old file.
+    setEditing(false);
   }, [path]);
 
   const load = useCallback(() => {
@@ -257,10 +279,114 @@ function MarkdownBody({ path }: { path: string }) {
     );
   }
   if (file.isBinary) return <Notice>Binary file — no preview.</Notice>;
+
+  const beginEdit = () => {
+    setDraft(file.content ?? "");
+    setEditing(true);
+  };
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      const saved = await invoke<string>("save_text_file", {
+        path,
+        content: draft,
+      });
+      // Reflect the save immediately; the fswatch echo will re-read the same
+      // bytes a moment later, which is a no-op.
+      setDisplayed({ path, file: { ...file, content: draft } });
+      setEditing(false);
+      onSaved?.(saved);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
-    <div className="rl-prose px-6 py-6" style={{ maxWidth: "820px" }}>
-      <MarkdownView body={file.content ?? ""} />
+    <div className="flex flex-col h-full">
+      <div
+        className="flex items-center justify-end gap-2 px-6 pt-3"
+        style={{ fontSize: "12px" }}
+      >
+        {editing ? (
+          <>
+            <EditBtn onClick={() => setEditing(false)} disabled={saving}>
+              Cancel
+            </EditBtn>
+            <EditBtn onClick={() => void save()} disabled={saving} primary>
+              {saving ? "Saving…" : "Save"}
+            </EditBtn>
+          </>
+        ) : (
+          <EditBtn onClick={beginEdit}>Edit</EditBtn>
+        )}
+      </div>
+      {editing ? (
+        <textarea
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+              e.preventDefault();
+              void save();
+            }
+          }}
+          spellCheck={false}
+          autoFocus
+          className="rl-thin-scroll-y flex-1 mx-6 mb-6 mt-2 p-3 font-mono"
+          style={{
+            fontSize: "13px",
+            lineHeight: 1.6,
+            resize: "none",
+            background: "var(--color-bg-elevated)",
+            color: "var(--color-ink)",
+            border: "1px solid var(--color-rule)",
+            borderRadius: "4px",
+            outline: "none",
+          }}
+        />
+      ) : (
+        <div className="rl-prose px-6 pb-6 pt-2" style={{ maxWidth: "820px" }}>
+          <MarkdownView body={file.content ?? ""} />
+        </div>
+      )}
     </div>
+  );
+}
+
+function EditBtn({
+  children,
+  onClick,
+  disabled,
+  primary,
+}: {
+  children: React.ReactNode;
+  onClick: () => void;
+  disabled?: boolean;
+  primary?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className="rounded-sm px-2 py-0.5"
+      style={{
+        fontSize: "12px",
+        lineHeight: 1.4,
+        border: "1px solid var(--color-rule)",
+        background: primary
+          ? "var(--color-anchor-bg)"
+          : "var(--color-bg-elevated)",
+        color: primary ? "var(--color-anchor-text)" : "var(--color-ink)",
+        cursor: disabled ? "default" : "pointer",
+        opacity: disabled ? 0.6 : 1,
+      }}
+    >
+      {children}
+    </button>
   );
 }
 

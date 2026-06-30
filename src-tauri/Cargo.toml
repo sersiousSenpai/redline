@@ -15,7 +15,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+# `unstable` enables the multi-webview API (embedding a native child webview
+# inside the main window — the embedded browser pane). It's the only supported
+# way to do in-window child webviews in Tauri 2 today; the JS `new Webview(...)`
+# path requires it on the Rust side too.
+tauri = { version = "2", features = ["tray-icon", "unstable"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
@@ -23,7 +27,7 @@ tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 axum = "0.7"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "fs"] }
 tower = "0.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -49,4 +53,29 @@ syntect = { version = "5", default-features = false, features = ["default-onig"]
 # live in THIRD_PARTY_NOTICES.md (from two_face::acknowledgement::listing()).
 # `syntect-default-onig` pins the same oniguruma syntect build as above.
 two-face = { version = "0.5", default-features = false, features = ["syntect-default-onig"] }
+# HTTP client for the voice agent's premium (cloud) TTS — the synth call is made
+# from Rust so the user's API key never enters the webview and there's no browser
+# CORS. Default TLS (Security.framework on macOS), JSON bodies.
+reqwest = { version = "0.13.4", features = ["json"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Enable WKWebView's back/forward swipe gestures on the embedded browser.
+# Tauri 2.11 doesn't expose `setAllowsBackForwardNavigationGestures`, so we
+# reach the WKWebView via `with_webview()` and send the selector with objc2
+# (already in the dependency tree via wry/tauri).
+objc2 = "0.6"
+# Build the WKWebView `evaluateJavaScript:completionHandler:` block used by
+# `browser_scrape` to read the live page DOM back into Rust (already in the tree
+# via wry/objc2).
+block2 = "0.6"
+# Native on-device speech-to-text (`dictation.rs`, push-to-talk). The typed
+# objc2 framework crates give compile-checked Speech / AVFAudio methods and
+# `Retained<T>` lifetime safety (vs. hand-rolled `msg_send!`), which matters
+# because the unsafe audio/TCC path can't be exercised by `cargo test` — only by
+# a signed run. They also emit the `-framework Speech` / `AVFAudio` link
+# directives, so no `build.rs` linker lines are needed. Same objc2 0.6 family
+# already in the tree via wry/tauri.
+objc2-speech = "0.3.2"     # SFSpeechRecognizer + recognition request/result/task
+objc2-avf-audio = "0.3.2"  # AVAudioEngine mic tap + PCM buffers
+objc2-foundation = "0.3.2" # NSString/NSLocale/NSError bridging
 

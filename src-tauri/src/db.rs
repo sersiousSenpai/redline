@@ -4,12 +4,13 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::state::{
-    reparse_sections, AttachState, Comment, CommentKind, CommentScope, CommentSelection,
-    CommentStatus, EditPayload, Resolution, ReviewSession, Revision, RoundHistoryEntry,
-    SessionStatus, StructuralPayload, ThreadMessage,
+    reparse_sections, AttachState, BrowseMessage, Comment, CommentKind, CommentScope,
+    CommentSelection, CommentStatus, EditPayload, Mission, MissionFinding, MissionMessage,
+    Resolution, ReviewSession, Revision, RoundHistoryEntry, SessionStatus, StructuralPayload,
+    ThreadMessage,
 };
 
 /// Serialize a comment's reopen-round history for the `reopen_history` column.
@@ -103,6 +104,81 @@ impl Database {
 
             CREATE INDEX IF NOT EXISTS idx_thread_messages
                 ON thread_messages (session_id, comment_id, created_at);
+
+            -- Browser browse-agent discussion threads. Scoped to a per-tab
+            -- `browse_id` (frontend-persisted UUID), independent of any plan
+            -- session. `browse_threads` holds the agent's resumable claude
+            -- session id so a tab's follow-ups resume rather than re-spawn.
+            CREATE TABLE IF NOT EXISTS browse_messages (
+                id TEXT PRIMARY KEY,
+                browse_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                body TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_browse_messages
+                ON browse_messages (browse_id, created_at);
+
+            CREATE TABLE IF NOT EXISTS browse_threads (
+                browse_id TEXT PRIMARY KEY,
+                claude_session_id TEXT
+            );
+
+            -- The voice agent's per-plan memory: the forked `claude` session id
+            -- that holds the spoken discussion, keyed by the plan's session id.
+            -- Re-entering voice mode resumes the same conversation, and it
+            -- survives app restarts. The live process is disposable; this row
+            -- is the memory. See src-tauri/src/voice.rs.
+            CREATE TABLE IF NOT EXISTS voice_sessions (
+                session_id TEXT PRIMARY KEY,
+                fork_session_id TEXT NOT NULL
+            );
+
+            -- Research Missions: an orchestrator that holds one shared goal
+            -- across the whole browser pane, a tier above the per-tab browse
+            -- agents. The orchestrator's resumable claude session id lives on
+            -- the row, so re-opening a mission resumes its conversation.
+            -- `mission_findings` are the user's pins (curated findings pulled
+            -- from any tab); `mission_messages` are the orchestrator chat turns
+            -- (terminal rows, mirroring browse_messages). See mission.rs.
+            CREATE TABLE IF NOT EXISTS missions (
+                mission_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                goal TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                claude_session_id TEXT,
+                tabs_json TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS mission_findings (
+                id TEXT PRIMARY KEY,
+                mission_id TEXT NOT NULL,
+                browse_id TEXT,
+                source_url TEXT,
+                source_title TEXT,
+                body TEXT NOT NULL,
+                note TEXT,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_mission_findings
+                ON mission_findings (mission_id, created_at);
+
+            CREATE TABLE IF NOT EXISTS mission_messages (
+                id TEXT PRIMARY KEY,
+                mission_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                body TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_mission_messages
+                ON mission_messages (mission_id, created_at);
             "#,
         )?;
         // Best-effort additive migrations (errors on existing columns are ignored)
@@ -118,6 +194,9 @@ impl Database {
             "ALTER TABLE comments ADD COLUMN resolution_accepted_at INTEGER",
             [],
         );
+        // A mission's saved tab workspace (JSON `[{id,url,title,browseId}]`), so
+        // re-entering a mission reopens its exact tabs with their discussions.
+        let _ = conn.execute("ALTER TABLE missions ADD COLUMN tabs_json TEXT", []);
 
         // Migration: comment ids are session-scoped (`c-001` restarts per
         // session), but legacy databases declared `id TEXT PRIMARY KEY`
@@ -533,6 +612,40 @@ impl Database {
 
     /// Delete a session and its revisions/comments. Explicit child deletes so
     /// this is correct regardless of the `foreign_keys` PRAGMA.
+    /// Move every row for `old_id` to `new_id` across the session-scoped tables.
+    /// Used to rebind a held plan onto the live session when a restore handshake
+    /// lands under a different id than the plan it names (resume forks the id, or
+    /// the command was pasted into a running Claude REPL). Foreign keys aren't
+    /// enforced on this connection (see `delete_session`, which deletes each
+    /// table by hand), so a straight per-table column UPDATE is safe and
+    /// order-independent. Caller guarantees `new_id` holds no session yet.
+    pub fn rekey_session(&self, old_id: &str, new_id: &str) -> rusqlite::Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        // Foreign keys are enforced on this connection, and the session-scoped
+        // tables form a chain (comments/briefs → revisions → sessions). Renaming
+        // them one at a time transiently dangles a child, so defer FK checks to
+        // commit, by which point every table is consistent again.
+        tx.execute_batch("PRAGMA defer_foreign_keys = ON")?;
+        // `briefs` is created lazily and absent from fresh (test) DBs; skip any
+        // table that doesn't exist. Order is irrelevant under deferred checks.
+        for table in ["thread_messages", "comments", "briefs", "revisions", "sessions"] {
+            let present: i64 = tx.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name = ?1",
+                params![table],
+                |r| r.get(0),
+            )?;
+            if present == 0 {
+                continue;
+            }
+            tx.execute(
+                &format!("UPDATE {table} SET session_id = ?1 WHERE session_id = ?2"),
+                params![new_id, old_id],
+            )?;
+        }
+        tx.commit()
+    }
+
     pub fn delete_session(&self, session_id: &str) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -655,16 +768,370 @@ impl Database {
         Ok(())
     }
 
-    /// True if `session_id` is the forked session of any comment — used by
-    /// `handle_plan` to ignore stray `ExitPlanMode` POSTs from a fork agent.
+    /// True if `session_id` is the forked session of any comment *or* the voice
+    /// agent — used by `handle_plan` to ignore stray `ExitPlanMode` POSTs from a
+    /// fork agent.
     pub fn is_known_fork_session(&self, session_id: &str) -> bool {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT 1 FROM comments WHERE fork_session_id = ?1 LIMIT 1",
+            "SELECT 1 FROM comments WHERE fork_session_id = ?1
+             UNION ALL
+             SELECT 1 FROM voice_sessions WHERE fork_session_id = ?1
+             LIMIT 1",
             params![session_id],
             |_| Ok(()),
         )
         .is_ok()
+    }
+
+    // --- Browser browse-agent threads --------------------------------------
+    // Mirrors the fork-thread helpers above, keyed by a per-tab `browse_id`
+    // instead of (session_id, comment_id). The agent's resumable claude
+    // session id is tracked in `browse_threads`, not on any in-memory struct.
+
+    pub fn insert_browse_message(&self, msg: &BrowseMessage) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO browse_messages
+                (id, browse_id, role, body, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                msg.id,
+                msg.browse_id,
+                msg.role,
+                msg.body,
+                msg.status,
+                msg.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_browse_thread(&self, browse_id: &str) -> rusqlite::Result<Vec<BrowseMessage>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, browse_id, role, body, status, created_at
+             FROM browse_messages
+             WHERE browse_id = ?1
+             ORDER BY created_at, id",
+        )?;
+        let rows = stmt.query_map(params![browse_id], |row| {
+            Ok(BrowseMessage {
+                id: row.get(0)?,
+                browse_id: row.get(1)?,
+                role: row.get(2)?,
+                body: row.get(3)?,
+                status: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Delete a tab's whole thread: its turns and its persisted agent session.
+    pub fn delete_browse_thread(&self, browse_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM browse_messages WHERE browse_id = ?1",
+            params![browse_id],
+        )?;
+        conn.execute(
+            "DELETE FROM browse_threads WHERE browse_id = ?1",
+            params![browse_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_browse_session(&self, browse_id: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT claude_session_id FROM browse_threads WHERE browse_id = ?1",
+            params![browse_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+    }
+
+    pub fn set_browse_session(
+        &self,
+        browse_id: &str,
+        claude_session_id: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO browse_threads (browse_id, claude_session_id)
+             VALUES (?1, ?2)
+             ON CONFLICT(browse_id) DO UPDATE SET claude_session_id = ?2",
+            params![browse_id, claude_session_id],
+        )?;
+        Ok(())
+    }
+
+    // --- Missions ----------------------------------------------------------
+    // The research-mission orchestrator: one shared goal across the browser
+    // pane, with curated pins (`mission_findings`) and a resumable chat
+    // (`mission_messages` + the `claude_session_id` on the row). Mirrors the
+    // browse helpers above but keyed by `mission_id`. See mission.rs.
+
+    pub fn insert_mission(&self, m: &Mission) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO missions
+                (mission_id, title, goal, status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![m.mission_id, m.title, m.goal, m.status, m.created_at, m.updated_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_mission(&self, mission_id: &str) -> rusqlite::Result<Option<Mission>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT mission_id, title, goal, status, created_at, updated_at
+             FROM missions WHERE mission_id = ?1",
+            params![mission_id],
+            |row| {
+                Ok(Mission {
+                    mission_id: row.get(0)?,
+                    title: row.get(1)?,
+                    goal: row.get(2)?,
+                    status: row.get(3)?,
+                    created_at: row.get(4)?,
+                    updated_at: row.get(5)?,
+                })
+            },
+        )
+        .optional()
+    }
+
+    /// Missions newest-first (active before archived, then by recency), for the
+    /// start/switch/resume menu.
+    pub fn list_missions(&self) -> rusqlite::Result<Vec<Mission>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT mission_id, title, goal, status, created_at, updated_at
+             FROM missions
+             ORDER BY (status = 'active') DESC, updated_at DESC, created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Mission {
+                mission_id: row.get(0)?,
+                title: row.get(1)?,
+                goal: row.get(2)?,
+                status: row.get(3)?,
+                created_at: row.get(4)?,
+                updated_at: row.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Update a mission's goal (and/or title) and bump `updated_at`.
+    pub fn update_mission_goal(
+        &self,
+        mission_id: &str,
+        title: &str,
+        goal: &str,
+        updated_at: i64,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE missions SET title = ?2, goal = ?3, updated_at = ?4
+             WHERE mission_id = ?1",
+            params![mission_id, title, goal, updated_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_mission_session(&self, mission_id: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT claude_session_id FROM missions WHERE mission_id = ?1",
+            params![mission_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+    }
+
+    pub fn set_mission_session(
+        &self,
+        mission_id: &str,
+        claude_session_id: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE missions SET claude_session_id = ?2 WHERE mission_id = ?1",
+            params![mission_id, claude_session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Save a mission's tab workspace (JSON). Deliberately does NOT bump
+    /// `updated_at` — tab churn shouldn't reorder the mission list.
+    pub fn set_mission_tabs(&self, mission_id: &str, tabs_json: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE missions SET tabs_json = ?2 WHERE mission_id = ?1",
+            params![mission_id, tabs_json],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_mission_tabs(&self, mission_id: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT tabs_json FROM missions WHERE mission_id = ?1",
+            params![mission_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+    }
+
+    /// Hard-delete a mission and all its data (pins + orchestrator chat). The
+    /// caller purges the saved tabs' browse threads first (those are keyed by
+    /// `browse_id`, independent of the mission row).
+    pub fn delete_mission(&self, mission_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM mission_findings WHERE mission_id = ?1",
+            params![mission_id],
+        )?;
+        conn.execute(
+            "DELETE FROM mission_messages WHERE mission_id = ?1",
+            params![mission_id],
+        )?;
+        conn.execute("DELETE FROM missions WHERE mission_id = ?1", params![mission_id])?;
+        Ok(())
+    }
+
+    // --- Mission findings (pins) -------------------------------------------
+
+    pub fn insert_finding(&self, f: &MissionFinding) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO mission_findings
+                (id, mission_id, browse_id, source_url, source_title, body, note, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                f.id,
+                f.mission_id,
+                f.browse_id,
+                f.source_url,
+                f.source_title,
+                f.body,
+                f.note,
+                f.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_findings(&self, mission_id: &str) -> rusqlite::Result<Vec<MissionFinding>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, mission_id, browse_id, source_url, source_title, body, note, created_at
+             FROM mission_findings
+             WHERE mission_id = ?1
+             ORDER BY created_at, id",
+        )?;
+        let rows = stmt.query_map(params![mission_id], |row| {
+            Ok(MissionFinding {
+                id: row.get(0)?,
+                mission_id: row.get(1)?,
+                browse_id: row.get(2)?,
+                source_url: row.get(3)?,
+                source_title: row.get(4)?,
+                body: row.get(5)?,
+                note: row.get(6)?,
+                created_at: row.get(7)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn delete_finding(&self, finding_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM mission_findings WHERE id = ?1",
+            params![finding_id],
+        )?;
+        Ok(())
+    }
+
+    // --- Mission chat turns ------------------------------------------------
+
+    pub fn insert_mission_message(&self, msg: &MissionMessage) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO mission_messages
+                (id, mission_id, role, body, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![msg.id, msg.mission_id, msg.role, msg.body, msg.status, msg.created_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_mission_thread(&self, mission_id: &str) -> rusqlite::Result<Vec<MissionMessage>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, mission_id, role, body, status, created_at
+             FROM mission_messages
+             WHERE mission_id = ?1
+             ORDER BY created_at, id",
+        )?;
+        let rows = stmt.query_map(params![mission_id], |row| {
+            Ok(MissionMessage {
+                id: row.get(0)?,
+                mission_id: row.get(1)?,
+                role: row.get(2)?,
+                body: row.get(3)?,
+                status: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    // --- Voice-agent session (per-plan memory) -----------------------------
+    // The voice agent's conversation is a forked claude session, persisted by
+    // the plan's session id so re-entering voice mode resumes it. The live
+    // process is disposable (`voice.rs`); this row is the memory.
+
+    pub fn get_voice_fork_session(&self, session_id: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT fork_session_id FROM voice_sessions WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+    }
+
+    pub fn set_voice_fork_session(
+        &self,
+        session_id: &str,
+        fork_session_id: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO voice_sessions (session_id, fork_session_id)
+             VALUES (?1, ?2)
+             ON CONFLICT(session_id) DO UPDATE SET fork_session_id = ?2",
+            params![session_id, fork_session_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_voice_fork_session(&self, session_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM voice_sessions WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        Ok(())
     }
 
     pub fn load_all(&self) -> rusqlite::Result<HashMap<String, ReviewSession>> {
@@ -855,6 +1322,88 @@ mod tests {
     }
 
     #[test]
+    fn mission_round_trips_with_findings_thread_and_session() {
+        use crate::state::{Mission, MissionFinding, MissionMessage};
+        let db = Database::open_in_memory().unwrap();
+
+        let m = Mission {
+            mission_id: "m1".to_string(),
+            title: "Data-breach page".to_string(),
+            goal: "Draft my firm's data-breach practice page".to_string(),
+            status: "active".to_string(),
+            created_at: 100,
+            updated_at: 100,
+        };
+        db.insert_mission(&m).unwrap();
+        assert_eq!(db.get_mission("m1").unwrap().unwrap().goal, m.goal);
+        assert_eq!(db.list_missions().unwrap().len(), 1);
+
+        // Resumable session id lives on the row.
+        assert!(db.get_mission_session("m1").is_none());
+        db.set_mission_session("m1", "sess-abc").unwrap();
+        assert_eq!(db.get_mission_session("m1").as_deref(), Some("sess-abc"));
+
+        // Editing the goal bumps updated_at.
+        db.update_mission_goal("m1", "Breach page", "new goal", 200).unwrap();
+        let edited = db.get_mission("m1").unwrap().unwrap();
+        assert_eq!(edited.goal, "new goal");
+        assert_eq!(edited.updated_at, 200);
+
+        // Tab workspace round-trips as an opaque JSON blob (and does not bump
+        // updated_at).
+        assert!(db.get_mission_tabs("m1").is_none());
+        db.set_mission_tabs("m1", r#"[{"id":"t0","url":"https://a","browseId":"b1"}]"#)
+            .unwrap();
+        assert!(db.get_mission_tabs("m1").unwrap().contains("b1"));
+        assert_eq!(db.get_mission("m1").unwrap().unwrap().updated_at, 200);
+
+        // Pins: insert, list (oldest first), delete.
+        let f1 = MissionFinding {
+            id: "f1".to_string(),
+            mission_id: "m1".to_string(),
+            browse_id: Some("b1".to_string()),
+            source_url: Some("https://acme.example".to_string()),
+            source_title: Some("Acme".to_string()),
+            body: "great tone".to_string(),
+            note: Some("liked this".to_string()),
+            created_at: 110,
+        };
+        let f2 = MissionFinding {
+            id: "f2".to_string(),
+            created_at: 120,
+            ..f1.clone()
+        };
+        db.insert_finding(&f1).unwrap();
+        db.insert_finding(&f2).unwrap();
+        let pins = db.list_findings("m1").unwrap();
+        assert_eq!(pins.len(), 2);
+        assert_eq!(pins[0].id, "f1");
+        db.delete_finding("f1").unwrap();
+        assert_eq!(db.list_findings("m1").unwrap().len(), 1);
+
+        // Orchestrator chat turns round-trip oldest-first.
+        db.insert_mission_message(&MissionMessage {
+            id: "msg1".to_string(),
+            mission_id: "m1".to_string(),
+            role: "user".to_string(),
+            body: "compare the tabs".to_string(),
+            status: "complete".to_string(),
+            created_at: 130,
+        })
+        .unwrap();
+        let thread = db.load_mission_thread("m1").unwrap();
+        assert_eq!(thread.len(), 1);
+        assert_eq!(thread[0].role, "user");
+
+        // Delete cascades: mission row + its pins + its chat all go.
+        db.delete_mission("m1").unwrap();
+        assert!(db.get_mission("m1").unwrap().is_none());
+        assert_eq!(db.list_missions().unwrap().len(), 0);
+        assert_eq!(db.list_findings("m1").unwrap().len(), 0);
+        assert_eq!(db.load_mission_thread("m1").unwrap().len(), 0);
+    }
+
+    #[test]
     fn restore_flag_is_one_shot_and_persists() {
         let db = Arc::new(Database::open_in_memory().unwrap());
         let store = SessionStore::new(db.clone());
@@ -1025,6 +1574,64 @@ mod tests {
         let reloaded = SessionStore::new(db);
         assert!(reloaded.get("doomed").is_none());
         assert!(reloaded.get("keep").is_some());
+    }
+
+    #[test]
+    fn rekey_session_moves_plan_and_comments_onto_the_live_id() {
+        use crate::state::{CommentKind, NewCommentRequest};
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let store = SessionStore::new(db.clone());
+        let md = "# Held Plan\n\nBody.\n";
+        // The held plan lives under the original review session id.
+        store.upsert_plan("old", "/tmp/p", md.to_string(), reparse_sections(md), true, false);
+        let draft = store
+            .add_comment(
+                "old",
+                NewCommentRequest {
+                    kind: CommentKind::Feedback,
+                    scope: None,
+                    anchor_id: "A".to_string(),
+                    block_id: Some("rl:blk-1".to_string()),
+                    structural: None,
+                    body: "in flight".to_string(),
+                    edit: None,
+                    selection: None,
+                    author: None,
+                },
+            )
+            .expect("add comment");
+
+        // Restore handshake arrives under a forked/foreign id → rebind onto it.
+        assert!(store.rekey_session("old", "new"));
+        assert!(!store.has_session("old"));
+        assert!(store.has_session("new"));
+
+        // No-op guards: equal ids, missing source, occupied destination.
+        assert!(!store.rekey_session("new", "new"));
+        assert!(!store.rekey_session("missing", "new2"));
+        store.upsert_plan("occupied", "/tmp/o", md.to_string(), reparse_sections(md), true, false);
+        assert!(!store.rekey_session("new", "occupied"));
+
+        let check = |store: &SessionStore, label: &str| {
+            let s = store.get("new").expect("session under new id");
+            assert_eq!(s.session_id, "new", "{label}");
+            assert_eq!(s.revisions.len(), 1, "{label}");
+            assert_eq!(s.revisions[0].raw_plan_markdown, md, "{label}");
+            // The reviewer's open comment rode along with the session.
+            let c = &s.revisions[0].comments;
+            assert_eq!(c.len(), 1, "{label}");
+            assert_eq!(c[0].id, draft.id, "{label}");
+        };
+        check(&store, "in memory");
+
+        // Survives a reload — the DB rows moved, not just the in-memory map.
+        let reloaded = SessionStore::new(db);
+        assert!(reloaded.get("old").is_none());
+        check(&reloaded, "after reload");
+
+        // And the held plan now restores cleanly under the live id.
+        let restored = store.restore_latest("new").expect("restore under new id");
+        assert_eq!(restored.version_number, 2);
     }
 
     // Mirrors the `handle_plan` thread-classification predicate:
@@ -1214,6 +1821,34 @@ mod tests {
         assert!(db.load_thread("s1", "c-001").unwrap().is_empty());
         // The scoped delete left the other comment's message intact.
         assert_eq!(db.load_thread("s1", "c-002").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn voice_fork_session_round_trip_and_is_known() {
+        let db = Database::open_in_memory().unwrap();
+        // No memory yet → re-entry would fork fresh.
+        assert!(db.get_voice_fork_session("plan-1").is_none());
+        assert!(!db.is_known_fork_session("voice-xyz"));
+
+        // First turn persists the fork id; re-entry resumes the same id.
+        db.set_voice_fork_session("plan-1", "voice-xyz").unwrap();
+        assert_eq!(
+            db.get_voice_fork_session("plan-1").as_deref(),
+            Some("voice-xyz"),
+        );
+        // A stray ExitPlanMode from the voice fork is recognized and ignored.
+        assert!(db.is_known_fork_session("voice-xyz"));
+
+        // Upsert replaces (e.g. a revision keeps one thread under a new id).
+        db.set_voice_fork_session("plan-1", "voice-2").unwrap();
+        assert_eq!(
+            db.get_voice_fork_session("plan-1").as_deref(),
+            Some("voice-2"),
+        );
+
+        db.clear_voice_fork_session("plan-1").unwrap();
+        assert!(db.get_voice_fork_session("plan-1").is_none());
+        assert!(!db.is_known_fork_session("voice-2"));
     }
 
     #[test]
