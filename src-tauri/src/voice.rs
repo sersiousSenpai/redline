@@ -752,6 +752,11 @@ async fn read_voice(
     // came up — surface *why* (the stderr tail) instead of a silent exit, so a
     // spawn/resume failure shows as a real error rather than a stuck "Ready".
     if !saw_result {
+        // stdout and stderr hit EOF near-simultaneously on a crash; give the
+        // concurrent stderr drainer a moment to flush claude's last lines
+        // (e.g. "No conversation found with session ID …") so the message we
+        // compose carries the real reason instead of an empty tail.
+        tokio::time::sleep(Duration::from_millis(200)).await;
         let _ = app.emit(
             "voice-error",
             VoiceError {

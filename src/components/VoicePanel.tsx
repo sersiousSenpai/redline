@@ -295,18 +295,36 @@ export function VoicePanel({
       })
         .then((p) => {
           if (!alive || sessionUpRef.current) return;
-          const base = p.alive
-            ? "The voice session is taking longer than expected to start."
-            : "The voice session failed to start — the `claude` process exited.";
-          const detail = p.stderrTail
-            ? `\n\nClaude reported:\n${p.stderrTail}`
-            : " Check that Claude Code runs in this project, or launch Redline " +
-              "from a terminal so it inherits your PATH.";
-          setError(base + detail);
+          if (p.alive) {
+            // Genuinely still coming up (hooks/resume replay) but not yet
+            // ready — surface what it has printed so far, if anything.
+            const detail = p.stderrTail
+              ? `\n\nClaude reported:\n${p.stderrTail}`
+              : "";
+            setError(
+              (prev) =>
+                prev ??
+                "The voice session is taking longer than expected to start." +
+                  detail,
+            );
+          } else {
+            // The child has already exited. `read_voice` owns this case: it
+            // emits `voice-error` with the captured stderr tail (the *real*
+            // reason). The proc is already out of the registry by now, so the
+            // probe can't see that tail — only fall back to a generic line if
+            // no error surfaced, and never clobber the accurate one.
+            setError(
+              (prev) =>
+                prev ??
+                "The voice session failed to start — the `claude` process " +
+                  "exited. Check that Claude Code runs in this project, or " +
+                  "launch Redline from a terminal so it inherits your PATH.",
+            );
+          }
         })
         .catch(() => {
           if (alive && !sessionUpRef.current) {
-            setError("The voice session hasn't started yet.");
+            setError((prev) => prev ?? "The voice session hasn't started yet.");
           }
         });
     }, 15000);
