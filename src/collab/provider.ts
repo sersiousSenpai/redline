@@ -19,6 +19,10 @@ import type { Awareness } from "y-protocols/awareness";
 import { collabRoomName, type CollabConfig, type CollabRoomId } from "./collabConfig";
 
 export interface CollabProviderHandle {
+  /** The room doc this provider is attached to — the comments map and meta
+   *  live on it, so presence-level consumers (App) reach them through the
+   *  handle instead of threading the Y.Doc separately. */
+  ydoc: Y.Doc;
   awareness: Awareness;
   /** True once the doc has completed an initial sync with at least one peer.
    *  An owner alone in a room stays unsynced — that's fine, the owner never
@@ -95,6 +99,7 @@ export function createCollabProvider(
   );
 
   return {
+    ydoc,
     awareness: provider.awareness,
     get synced() {
       return synced;

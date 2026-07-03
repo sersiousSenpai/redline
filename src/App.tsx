@@ -31,6 +31,8 @@ import {
   type CollabConfig,
 } from "./collab/collabConfig";
 import type { CollabProviderHandle } from "./collab/provider";
+import { useCommentMirror } from "./collab/useCommentMirror";
+import { createYjsCommentBackend } from "./collab/yjsCommentBackend";
 import { HookSetupModal } from "./components/HookSetupModal";
 import { ReadmeModal } from "./components/ReadmeModal";
 import { FeedbackModal } from "./components/FeedbackModal";
@@ -1304,6 +1306,29 @@ function App() {
       onProvider: setCollabPresence,
     };
   }, [joinedRoom]);
+
+  // Collaborator comment backend (Phase 1b): SyncBackend-shaped writes into
+  // the room's comments map; the owner's mirror lands them in SQLite. The
+  // local read side feeds the joined editor's highlight/gutter decorations.
+  const yjsBackend = useMemo(
+    () =>
+      joinedRoom && collabPresence
+        ? createYjsCommentBackend(
+            collabPresence.ydoc,
+            collabPresence.awareness.clientID,
+          )
+        : null,
+    [joinedRoom, collabPresence],
+  );
+  const [collabComments, setCollabComments] = useState<Comment[]>([]);
+  useEffect(() => {
+    if (!yjsBackend) {
+      setCollabComments([]);
+      return;
+    }
+    setCollabComments(yjsBackend.list());
+    return yjsBackend.observe(() => setCollabComments(yjsBackend.list()));
+  }, [yjsBackend]);
   // When a voice-authored comment newly appears on the displayed revision (the
   // agent captured a spoken change over the curl bridge, so we never saw the
   // returned Comment), focus it and auto-open its discussion sidecar.
@@ -1538,6 +1563,21 @@ function App() {
       console.error("failed to delete comment", err);
     }
   };
+
+  // Owner-side comment mirror (Phase 1b): SQLite ⇄ the shared comments map.
+  // Runs only while sharing; remote (collaborator) writes land through the
+  // normal comment commands, so `comments-changed` → reload → re-mirror is
+  // the same loop local edits already take.
+  useCommentMirror({
+    ydoc: ownerCollab && collabPresence ? collabPresence.ydoc : null,
+    enabled: !!ownerCollab && !!collabPresence,
+    comments: latestComments,
+    backend: {
+      addComment: addEditorComment,
+      updateComment,
+      deleteComment,
+    },
+  });
 
   const submitReview = async () => {
     if (!session || busy) return;
@@ -2191,8 +2231,11 @@ function App() {
                   key={`joined:${collabRevisionKey(joinedRoom.config)}`}
                   markdown=""
                   sections={[]}
-                  comments={[]}
+                  comments={collabComments}
                   revisionKey={collabRevisionKey(joinedRoom.config)}
+                  onAddComment={yjsBackend?.addComment}
+                  onUpdateComment={yjsBackend?.updateComment}
+                  onDeleteComment={yjsBackend?.deleteComment}
                   collab={collaboratorCollab}
                 />
               </Suspense>

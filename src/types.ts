@@ -139,6 +139,11 @@ export interface Comment {
 }
 
 export interface NewCommentRequest {
+  /** Live collab: caller-minted id so one comment keeps one identity across
+   *  the mesh (collaborator format `c-{client}-{ts}`). The backend honors it
+   *  when unique and it never perturbs the owner's `c-NNN` sequence. Normal
+   *  frontend paths omit it. */
+  id?: string;
   type: CommentType;
   scope?: CommentScope;
   anchorId: AnchorId;

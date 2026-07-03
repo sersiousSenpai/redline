@@ -232,6 +232,7 @@ pub fn suggest_edit_core(
         .add_comment(
             session_id,
             NewCommentRequest {
+                id: None,
                 kind: CommentKind::Edit,
                 scope: None,
                 anchor_id,
@@ -298,6 +299,7 @@ pub fn add_feedback_core(
         .add_comment(
             session_id,
             NewCommentRequest {
+                id: None,
                 kind: CommentKind::Feedback,
                 scope: Some(CommentScope::Local),
                 anchor_id,
@@ -449,6 +451,7 @@ mod tests {
             .add_comment(
                 "sess-1",
                 NewCommentRequest {
+                id: None,
                     kind: CommentKind::Edit,
                     scope: None,
                     anchor_id: block.anchor_id.clone(),

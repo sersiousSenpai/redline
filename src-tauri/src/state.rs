@@ -554,6 +554,13 @@ pub struct MissionMessage {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewCommentRequest {
+    /// Optional caller-minted id (live collab: a collaborator mints
+    /// `c-{client}-{ts}` so one comment has one identity on both sides).
+    /// Honored only when unique in the session; foreign-format ids parse as
+    /// `None` in `parse_comment_id`, so the owner's `c-NNN` sequence is
+    /// unperturbed.
+    #[serde(default)]
+    pub id: Option<String>,
     #[serde(rename = "type")]
     pub kind: CommentKind,
     pub scope: Option<CommentScope>,
@@ -860,15 +867,35 @@ impl SessionStore {
             return Err(format!("session {session_id} has no revisions yet"));
         }
 
-        let next_n = session
-            .revisions
-            .iter()
-            .flat_map(|r| r.comments.iter())
-            .filter_map(|c| parse_comment_id(&c.id))
-            .max()
-            .unwrap_or(0)
-            + 1;
-        let id = format!("c-{:03}", next_n);
+        // Explicit ids make delivery idempotent: re-adding an id the session
+        // already has returns the existing comment unchanged instead of
+        // minting a duplicate (the live-collab mirror can replay an add —
+        // e.g. an IndexedDB-restored map entry — and must converge, not
+        // multiply). Absent an explicit id, mint the next c-NNN.
+        if let Some(id) = request.id.as_deref().filter(|id| !id.is_empty()) {
+            if let Some(existing) = session
+                .revisions
+                .iter()
+                .flat_map(|r| r.comments.iter())
+                .find(|c| c.id == id)
+            {
+                return Ok(existing.clone());
+            }
+        }
+        let id = match request.id.as_deref().filter(|id| !id.is_empty()) {
+            Some(id) => id.to_string(),
+            None => {
+                let next_n = session
+                    .revisions
+                    .iter()
+                    .flat_map(|r| r.comments.iter())
+                    .filter_map(|c| parse_comment_id(&c.id))
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+                format!("c-{:03}", next_n)
+            }
+        };
 
         let scope = match request.kind {
             CommentKind::Feedback => Some(request.scope.unwrap_or(CommentScope::Local)),

@@ -4871,6 +4871,7 @@ mod tests {
             .add_comment(
                 "s1",
                 NewCommentRequest {
+                id: None,
                     kind: CommentKind::Feedback,
                     scope: None,
                     anchor_id: "A".to_string(),

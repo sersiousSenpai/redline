@@ -1482,6 +1482,46 @@ mod tests {
     }
 
     #[test]
+    fn add_comment_honors_explicit_id_without_perturbing_sequence() {
+        use crate::state::CommentKind;
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let store = SessionStore::new(db);
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("s", "/tmp/s", md.to_string(), reparse_sections(md), true, false);
+        let req = |id: Option<&str>| NewCommentRequest {
+            id: id.map(|s| s.to_string()),
+            kind: CommentKind::Feedback,
+            scope: None,
+            anchor_id: "A".to_string(),
+            block_id: None,
+            structural: None,
+            body: "b".to_string(),
+            edit: None,
+            selection: None,
+            author: None,
+        };
+        // Normal mint starts the c-NNN sequence.
+        let a = store.add_comment("s", req(None)).unwrap();
+        assert_eq!(a.id, "c-001");
+        // A collaborator-minted id (never plain c-NNN) is honored verbatim…
+        let b = store.add_comment("s", req(Some("c-1187249-42"))).unwrap();
+        assert_eq!(b.id, "c-1187249-42");
+        // …and does not perturb the owner's sequence.
+        let c = store.add_comment("s", req(None)).unwrap();
+        assert_eq!(c.id, "c-002");
+        // Re-delivering an existing id is idempotent: the existing comment
+        // comes back untouched, nothing new is minted.
+        let d = store.add_comment("s", req(Some("c-001"))).unwrap();
+        assert_eq!(d.id, "c-001");
+        assert_eq!(d.created_at, a.created_at);
+        let all = store.get("s").unwrap().revisions.last().unwrap().comments.len();
+        assert_eq!(all, 3);
+        // Empty string is treated as absent.
+        let e = store.add_comment("s", req(Some(""))).unwrap();
+        assert_eq!(e.id, "c-003");
+    }
+
+    #[test]
     fn restored_revision_carries_open_comments_forward() {
         use crate::state::{CommentKind, CommentStatus};
         let db = Arc::new(Database::open_in_memory().unwrap());
@@ -1489,6 +1529,7 @@ mod tests {
         let md = "# Plan\n\nBody.\n";
         store.upsert_plan("s", "/tmp/s", md.to_string(), reparse_sections(md), true, false);
         let comment = |body: &str| NewCommentRequest {
+                id: None,
             kind: CommentKind::Feedback,
             scope: None,
             anchor_id: "A".to_string(),
@@ -1550,6 +1591,7 @@ mod tests {
             .add_comment(
                 "doomed",
                 NewCommentRequest {
+                id: None,
                     kind: CommentKind::Question,
                     scope: None,
                     anchor_id: "A".to_string(),
@@ -1588,6 +1630,7 @@ mod tests {
             .add_comment(
                 "old",
                 NewCommentRequest {
+                id: None,
                     kind: CommentKind::Feedback,
                     scope: None,
                     anchor_id: "A".to_string(),
@@ -1655,6 +1698,7 @@ mod tests {
             .add_comment(
                 "sess-c",
                 NewCommentRequest {
+                id: None,
                     kind: CommentKind::Question,
                     scope: None,
                     anchor_id: "A".to_string(),
@@ -1686,6 +1730,7 @@ mod tests {
         store.upsert_plan("sess-1", "/tmp/proj", "# A\n\nIntro paragraph.\n".to_string(), sections, true, false);
 
         let req = NewCommentRequest {
+                id: None,
             kind: CommentKind::Feedback,
             scope: Some(CommentScope::Structural),
             anchor_id: "A".to_string(),
@@ -1702,6 +1747,7 @@ mod tests {
         assert!(matches!(c1.scope, Some(CommentScope::Structural)));
 
         let req2 = NewCommentRequest {
+                id: None,
             kind: CommentKind::Question,
             scope: None,
             anchor_id: "A".to_string(),
@@ -1734,6 +1780,7 @@ mod tests {
             .add_comment(
                 "sess-a",
                 NewCommentRequest {
+                id: None,
                     kind: CommentKind::Edit,
                     scope: None,
                     anchor_id: "A.p1".to_string(),
@@ -1756,6 +1803,7 @@ mod tests {
             .add_comment(
                 "sess-a",
                 NewCommentRequest {
+                id: None,
                     kind: CommentKind::Question,
                     scope: None,
                     anchor_id: "A".to_string(),
@@ -1857,6 +1905,7 @@ mod tests {
         let md = "# Plan\n\nBody.\n";
         store.upsert_plan("s1", "/tmp/x", md.to_string(), reparse_sections(md), true, false);
         let mk_q = || NewCommentRequest {
+                id: None,
             kind: CommentKind::Question,
             scope: None,
             anchor_id: "A".to_string(),
@@ -1899,6 +1948,7 @@ mod tests {
             .add_comment(
                 "s-fork",
                 NewCommentRequest {
+                id: None,
                     kind: CommentKind::Question,
                     scope: None,
                     anchor_id: "A".to_string(),
@@ -1945,6 +1995,7 @@ mod tests {
                 .add_comment(
                     "s-disc",
                     NewCommentRequest {
+                id: None,
                         kind,
                         scope: None,
                         anchor_id: "A".to_string(),
@@ -2033,6 +2084,7 @@ mod tests {
             .add_comment(
                 "s-arch",
                 NewCommentRequest {
+                id: None,
                     kind: CommentKind::Feedback,
                     scope: None,
                     anchor_id: "A".to_string(),
@@ -2095,6 +2147,7 @@ mod tests {
         store.add_comment(
             "sess-rt",
             NewCommentRequest {
+                id: None,
                 kind: CommentKind::Feedback,
                 scope: Some(CommentScope::Structural),
                 anchor_id: "A.1".to_string(),
@@ -2110,6 +2163,7 @@ mod tests {
         store.add_comment(
             "sess-rt",
             NewCommentRequest {
+                id: None,
                 kind: CommentKind::Question,
                 scope: None,
                 anchor_id: "A".to_string(),
@@ -2262,6 +2316,7 @@ Restructured detail body.
             .add_comment(
                 "sess-ask",
                 NewCommentRequest {
+                id: None,
                     kind: CommentKind::Question,
                     scope: None,
                     anchor_id: "A".to_string(),
@@ -2278,6 +2333,7 @@ Restructured detail body.
             .add_comment(
                 "sess-ask",
                 NewCommentRequest {
+                id: None,
                     kind: CommentKind::Question,
                     scope: None,
                     anchor_id: "B".to_string(),
@@ -2388,6 +2444,7 @@ body.
             store.add_comment(
                 "sess-x",
                 NewCommentRequest {
+                id: None,
                     kind: CommentKind::Edit,
                     scope: None,
                     anchor_id: "A.p1".to_string(),
@@ -2429,6 +2486,7 @@ body.
             .add_comment(
                 "s",
                 NewCommentRequest {
+                id: None,
                     kind: CommentKind::Edit,
                     scope: None,
                     anchor_id: "A.p1".to_string(),
@@ -2492,6 +2550,7 @@ body.
             .add_comment(
                 "s",
                 NewCommentRequest {
+                id: None,
                     kind: CommentKind::BlockMove,
                     scope: None,
                     anchor_id: "A.p1".to_string(),
@@ -2544,6 +2603,7 @@ body.
         store.upsert_plan("sess-b", "/tmp/b", md.to_string(), reparse_sections(md), true, false);
 
         let mk = |body: &str| NewCommentRequest {
+                id: None,
             kind: CommentKind::Question,
             scope: None,
             anchor_id: "A".to_string(),
@@ -2687,6 +2747,7 @@ body.
             .add_comment(
                 "fresh",
                 NewCommentRequest {
+                id: None,
                     kind: CommentKind::Question,
                     scope: None,
                     anchor_id: "T".to_string(),
