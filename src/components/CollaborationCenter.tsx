@@ -17,7 +17,7 @@ import {
   type ImportSummary,
   type ReviewRequest,
 } from "../collab/reviewRequest";
-import { snapshotLink } from "../collab/snapshot";
+import { normalizeViewerBase, snapshotLink } from "../collab/snapshot";
 
 interface CollaborationCenterProps {
   /** Display name of the session the requests belong to. */
@@ -137,10 +137,11 @@ export function CollaborationCenter({
     }
   };
 
-  const linkFor = (token: string) =>
-    viewerBase.trim()
-      ? snapshotLink(viewerBase.trim(), token)
-      : token;
+  // A link is only a link when the base normalizes to a real http(s) URL —
+  // otherwise the request is delivered as a bare snapshot code. Anything
+  // non-empty that fails to normalize gets an inline warning below.
+  const normalizedBase = normalizeViewerBase(viewerBase);
+  const viewerBaseInvalid = !!viewerBase.trim() && !normalizedBase;
 
   const showToken = (
     requestId: string,
@@ -150,8 +151,8 @@ export function CollaborationCenter({
     setFreshLink({
       requestId,
       reviewerName,
-      text: linkFor(token),
-      isLink: !!viewerBase.trim(),
+      text: normalizedBase ? snapshotLink(normalizedBase, token) : token,
+      isLink: !!normalizedBase,
     });
     setCopiedFresh(false);
   };
@@ -388,6 +389,21 @@ export function CollaborationCenter({
                 Create
               </button>
             </div>
+            {viewerBaseInvalid && (
+              <p
+                role="alert"
+                style={{
+                  fontSize: "11px",
+                  color: "var(--color-warning)",
+                  marginTop: 6,
+                }}
+              >
+                “{viewerBase.trim()}” isn’t a web address — requests will be
+                minted as bare snapshot codes until this is a valid http(s)
+                URL (e.g. http://localhost:8080 or
+                https://reviews.example.com).
+              </p>
+            )}
             <p
               style={{
                 fontSize: "10.5px",
@@ -418,6 +434,13 @@ export function CollaborationCenter({
             >
               {freshLink.isLink ? "Review link" : "Snapshot code"} for{" "}
               <strong>{freshLink.reviewerName}</strong>
+              {!freshLink.isLink && (
+                <span style={{ color: "var(--color-ink-muted)" }}>
+                  {" "}
+                  — not a link; the reviewer pastes it into the viewer's open
+                  screen
+                </span>
+              )}
             </div>
             <textarea
               readOnly

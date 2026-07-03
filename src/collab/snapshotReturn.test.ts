@@ -12,6 +12,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import {
   decodeSnapshot,
   encodeSnapshot,
+  normalizeViewerBase,
   snapshotLink,
   tokenFromLink,
   type SnapshotPayload,
@@ -90,6 +91,43 @@ describe("snapshot", () => {
     expect(tokenFromLink(link)).toBe(token);
     expect(tokenFromLink(token)).toBe(token);
     expect(tokenFromLink("https://reviews.example/#nope")).toBeNull();
+  });
+});
+
+describe("normalizeViewerBase", () => {
+  it("accepts real http(s) URLs as-is", () => {
+    expect(normalizeViewerBase("https://reviews.example.com/viewer/")).toBe(
+      "https://reviews.example.com/viewer/",
+    );
+    expect(normalizeViewerBase("http://localhost:8080")).toBe(
+      "http://localhost:8080/",
+    );
+  });
+
+  it("upgrades plausible bare hosts to https", () => {
+    expect(normalizeViewerBase("reviews.example.com/viewer")).toBe(
+      "https://reviews.example.com/viewer",
+    );
+    expect(normalizeViewerBase("localhost:8080")).toBe(
+      "https://localhost:8080/",
+    );
+  });
+
+  it("rejects stray text — the T1#RLS1 bug", () => {
+    // A leftover keystroke persisted in the field must NOT mint "T1#RLS1.…"
+    // labeled as a review link.
+    expect(normalizeViewerBase("T1")).toBeNull();
+    expect(normalizeViewerBase("viewer")).toBeNull();
+    expect(normalizeViewerBase("")).toBeNull();
+    expect(normalizeViewerBase("   ")).toBeNull();
+  });
+
+  it("rejects non-web schemes and strips fragments", () => {
+    expect(normalizeViewerBase("file:///tmp/viewer.html")).toBeNull();
+    expect(normalizeViewerBase("javascript://alert(1)")).toBeNull();
+    expect(normalizeViewerBase("https://reviews.example.com/#old")).toBe(
+      "https://reviews.example.com/",
+    );
   });
 });
 

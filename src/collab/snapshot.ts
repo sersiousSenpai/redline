@@ -165,6 +165,36 @@ export function snapshotLink(viewerBase: string, token: string): string {
   return `${base}#${token}`;
 }
 
+/**
+ * Validate/normalize a user-typed viewer base into an absolute http(s) URL,
+ * or null when it can't be one. Guards the Collaboration Center against
+ * minting `T1#RLS1.…`-style non-links out of a stray persisted keystroke —
+ * anything that doesn't normalize is delivered as a bare snapshot code
+ * instead of being labeled a link.
+ *
+ * A bare host is upgraded to https:// but only when it plausibly IS a host
+ * (contains a dot, or is localhost/loopback — `T1` doesn't qualify); an
+ * explicit scheme is taken at its word so intranet hosts still work.
+ */
+export function normalizeViewerBase(input: string): string | null {
+  const s = input.trim().replace(/#.*$/, "");
+  if (!s) return null;
+  const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(s);
+  if (!hasScheme) {
+    const host = s.replace(/\/.*$/, "").replace(/:\d+$/, "");
+    const plausible =
+      host.includes(".") || host === "localhost" || host === "127.0.0.1";
+    if (!plausible) return null;
+  }
+  try {
+    const url = new URL(hasScheme ? s : `https://${s}`);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
 /** Pull the snapshot token out of a viewer URL or a bare pasted token. */
 export function tokenFromLink(linkOrToken: string): string | null {
   const s = linkOrToken.trim();
