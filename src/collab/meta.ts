@@ -19,6 +19,8 @@ export interface CollabMeta {
   threadStart?: number;
   ownerName?: string;
   projectName?: string;
+  /** First heading of the plan — the joined session's display name. */
+  planTitle?: string;
   /** Session status as the owner last published it (display only). */
   status?: string;
 }
@@ -28,6 +30,7 @@ const META_KEYS: (keyof CollabMeta)[] = [
   "threadStart",
   "ownerName",
   "projectName",
+  "planTitle",
   "status",
 ];
 

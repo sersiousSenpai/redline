@@ -34,6 +34,10 @@ export interface CollabRoomId {
   sessionId: string;
   threadStart: number;
   version: number;
+  /** Key-rotation epoch. A revoke rotates the room secret and bumps this —
+   *  the room name changes so the revoked peer's old secret opens nothing.
+   *  Absent/0 = the original key (room name stays pre-rotation-compatible). */
+  epoch?: number;
 }
 
 export interface CollabConfig {
@@ -52,12 +56,27 @@ export interface CollabConfig {
   invite: string;
   /** Owner display name, for the joiner's UI before presence arrives. */
   ownerName?: string;
+  /** Current key-rotation epoch (see CollabRoomId.epoch). NOT part of the
+   *  join-code wire format — a joiner discovers the live epoch (and the
+   *  rotated secret, sealed to its invite token) from the signaling server's
+   *  access channel. */
+  epoch?: number;
 }
 
 const JOIN_CODE_PREFIX = "RLC1.";
 
 export function collabRoomName(id: CollabRoomId): string {
-  return `redline:${id.sessionId}:${id.threadStart}:v${id.version}`;
+  const base = `redline:${id.sessionId}:${id.threadStart}:v${id.version}`;
+  return id.epoch && id.epoch > 0 ? `${base}:e${id.epoch}` : base;
+}
+
+/** The room-family key a signaling server manages access by: every version
+ *  and epoch of one review session shares this prefix. */
+export function collabRoomBase(id: {
+  sessionId: string;
+  threadStart: number;
+}): string {
+  return `redline:${id.sessionId}:${id.threadStart}`;
 }
 
 /** The `revisionKey` used by planYDoc persistence, for the same triple. */

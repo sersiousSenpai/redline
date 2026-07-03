@@ -457,6 +457,14 @@ pub struct Comment {
     /// chip. `None` for user comments and undecided agent suggestions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_state: Option<String>,
+    /// Human attribution for comments that arrived from another person — a
+    /// collaborator in a live room or an async Review Request return ("John
+    /// Doe"). Distinct from `author`, which is an AGENT id and drives the M4
+    /// block-lock; this field is display/attribution only. `None` for every
+    /// comment the session owner wrote themselves, which keeps the serialized
+    /// shape byte-identical to the pre-collab contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewer: Option<String>,
 }
 
 /// One turn in a comment's fork-agent discussion thread (Phase 2). Rows are
@@ -576,6 +584,11 @@ pub struct NewCommentRequest {
     /// Set only by the agent endpoints; the frontend never sends it.
     #[serde(default)]
     pub author: Option<String>,
+    /// Human attribution for imported/collaborator comments (see
+    /// `Comment::reviewer`). Sent by the Review Request import path and the
+    /// live-collab mirror; absent on every owner-originated comment.
+    #[serde(default)]
+    pub reviewer: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -928,6 +941,7 @@ impl SessionStore {
             actionable: false,
             author: request.author,
             agent_state: None,
+            reviewer: request.reviewer,
         };
 
         let latest = session.revisions.last_mut().expect("non-empty checked above");
@@ -1448,6 +1462,7 @@ mod tests {
             actionable: false,
             author: None,
             agent_state: None,
+            reviewer: None,
         }
     }
 

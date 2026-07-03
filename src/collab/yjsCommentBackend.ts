@@ -36,6 +36,9 @@ export interface YjsCommentBackend {
 export function createYjsCommentBackend(
   ydoc: Y.Doc,
   clientId: number | string,
+  /** This collaborator's display name — stamped as `reviewer` so the owner
+   *  side persists attribution ("who wrote this comment"). */
+  reviewerName?: string,
 ): YjsCommentBackend {
   const origin = `rl-collab-${clientId}`;
   let seq = 0;
@@ -54,6 +57,7 @@ export function createYjsCommentBackend(
         createdAt: Date.now(),
         status: "draft",
         ...(req.selection ? { selection: req.selection } : {}),
+        ...(reviewerName ? { reviewer: reviewerName } : {}),
       };
       upsertComment(ydoc, comment, origin);
       return Promise.resolve(comment);

@@ -249,6 +249,7 @@ pub fn suggest_edit_core(
                 structural: None,
                 selection: None,
                 author: Some(req.agent_id),
+                reviewer: None,
             },
         )
         .map_err(AgentError::BadRequest)
@@ -309,6 +310,7 @@ pub fn add_feedback_core(
                 structural: None,
                 selection: None,
                 author: Some(req.agent_id),
+                reviewer: None,
             },
         )
         .map_err(AgentError::BadRequest)
@@ -464,6 +466,7 @@ mod tests {
                     structural: None,
                     selection: None,
                     author: None,
+                    reviewer: None,
                 },
             )
             .unwrap();

@@ -26,6 +26,8 @@ import { JoinDialog } from "./components/JoinDialog";
 import { PresenceBar } from "./components/PresenceBar";
 import {
   collabRevisionKey,
+  collabRoomBase,
+  encodeJoinCode,
   presenceColor,
   randomToken,
   type CollabConfig,
@@ -34,6 +36,32 @@ import type { CollabProviderHandle } from "./collab/provider";
 import { useCommentMirror } from "./collab/useCommentMirror";
 import { createYjsCommentBackend } from "./collab/yjsCommentBackend";
 import { observeMeta, publishMeta, readMeta } from "./collab/meta";
+import {
+  connectRoomAccess,
+  hashToken,
+  openEnvelope,
+  sealEnvelope,
+  type RoomAccess,
+} from "./collab/access";
+import {
+  activeLiveRequests,
+  isExpired,
+  type ImportSummary,
+} from "./collab/reviewRequest";
+import { useReviewRequests } from "./collab/useReviewRequests";
+import {
+  isJoinedSessionId,
+  joinedSessionKey,
+  useJoinedSession,
+} from "./collab/useJoinedSession";
+import { encodeSnapshot, type SnapshotPayload } from "./collab/snapshot";
+import {
+  deriveSigningKey,
+  peekReturn,
+  reanchorReturn,
+  verifyReturn,
+} from "./collab/returnBlob";
+import { CollaborationCenter } from "./components/CollaborationCenter";
 import { HookSetupModal } from "./components/HookSetupModal";
 import { ReadmeModal } from "./components/ReadmeModal";
 import { FeedbackModal } from "./components/FeedbackModal";
@@ -53,7 +81,7 @@ import { VoicePanel } from "./components/VoicePanel";
 import type { ProjectOption } from "./components/ProjectPicker";
 import { useFolderWorkspaces } from "./hooks/useFolderWorkspaces";
 import { computeParagraphDiff, type ParagraphDiff } from "./diff";
-import { blockIdByAnchorId } from "./editor/docModel";
+import { anchorByBlockId, blockIdByAnchorId } from "./editor/docModel";
 import { useTextSelection } from "./hooks/useTextSelection";
 import {
   applyFont,
@@ -922,7 +950,9 @@ function App() {
   }
 
   async function loadSession(id: string | null): Promise<void> {
-    if (!id) {
+    if (!id || isJoinedSessionId(id)) {
+      // A joined room has no backend session — its pane renders entirely
+      // from Yjs (the joined-session shadow), so there is nothing to fetch.
       setSession(null);
       return;
     }
@@ -1231,18 +1261,30 @@ function App() {
       ? viewedRevision.comments
       : latestComments;
 
-  // ── Live collaboration (Phase 1a) ────────────────────────────────────
-  // Owner side: one active share, scoped to the session it was minted for.
-  // Collaborator side: one joined room. Both attach through PlanEditor's
-  // `collab` prop; the provider handle surfaces back here for presence UI.
+  // ── Live collaboration (Phases 1a–1d) ─────────────────────────────────
+  // Owner side: one active share scoped to the session it was minted for,
+  // plus the per-session Review Request registry (live invites + async
+  // snapshot requests). Collaborator side: one joined room — the shadow
+  // session. Both attach through PlanEditor's `collab` prop; the provider
+  // handles surface back here for presence UI, mirrors, and access control.
   const [inviteOpen, setInviteOpen] = useState(false);
   const [joinOpen, setJoinOpen] = useState(false);
+  const [collabCenterOpen, setCollabCenterOpen] = useState(false);
   const [collabShare, setCollabShare] = useState<CollabConfig | null>(null);
+  // The room's admin token — the credential the signaling server ties
+  // manage (allowlist/revoke) rights to. Never leaves this machine.
+  const [shareAdmin, setShareAdmin] = useState<string | null>(null);
   const [joinedRoom, setJoinedRoom] = useState<{
     config: CollabConfig;
     name: string;
+    /** SHA-256 of our invite token, advertised in awareness. */
+    inviteHash?: string;
+    /** The owner revoked our invite — transport access is gone. */
+    revoked?: boolean;
   } | null>(null);
-  const [collabPresence, setCollabPresence] =
+  const [sharePresence, setSharePresence] =
+    useState<CollabProviderHandle | null>(null);
+  const [joinedPresence, setJoinedPresence] =
     useState<CollabProviderHandle | null>(null);
   const [collabPeers, setCollabPeers] = useState(0);
   // Read inside loadSession (defined earlier, runs later) so the rollover
@@ -1250,7 +1292,7 @@ function App() {
   const collabShareRef = useRef<CollabConfig | null>(null);
   collabShareRef.current = collabShare;
   const collabPresenceRef = useRef<CollabProviderHandle | null>(null);
-  collabPresenceRef.current = collabPresence;
+  collabPresenceRef.current = sharePresence;
   const [relayDefaults, setRelayDefaults] = useState<{
     displayName: string;
     signaling: string[];
@@ -1265,33 +1307,399 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!collabPresence) {
+    if (!sharePresence) {
       setCollabPeers(0);
       return;
     }
-    setCollabPeers(collabPresence.peerCount);
-    return collabPresence.onPeersChanged(setCollabPeers);
-  }, [collabPresence]);
+    setCollabPeers(sharePresence.peerCount);
+    return sharePresence.onPeersChanged(setCollabPeers);
+  }, [sharePresence]);
+
+  // Which invite hashes are in the owner's room right now — drives the
+  // "connected" chips and maps roster entries back to Review Requests.
+  const [presentHashes, setPresentHashes] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  useEffect(() => {
+    if (!sharePresence) {
+      setPresentHashes(new Set());
+      return;
+    }
+    const awareness = sharePresence.awareness;
+    const read = () => {
+      const next = new Set<string>();
+      for (const [, state] of awareness.getStates()) {
+        const hash = (state as { user?: { inviteHash?: string } }).user
+          ?.inviteHash;
+        if (hash) next.add(hash);
+      }
+      setPresentHashes(next);
+    };
+    read();
+    awareness.on("change", read);
+    return () => awareness.off("change", read);
+  }, [sharePresence]);
+
+  // Review Requests are per-session. While sharing, the registry stays bound
+  // to the SHARED session even if the sidebar views another — the signaling
+  // allowlist must keep tracking the room being shared.
+  const requestsSessionId =
+    collabShare?.sessionId ??
+    (activeId && !isJoinedSessionId(activeId) ? activeId : null);
+  const reviewRequests = useReviewRequests(requestsSessionId);
+  const activePlanTitle =
+    summaries.find((s) => s.sessionId === (session?.sessionId ?? ""))
+      ?.planTitle ?? null;
 
   const startShare = useCallback(
     (displayName: string, signaling: string[]) => {
-      if (!activeId || !latest) return;
+      if (!activeId || !latest || isJoinedSessionId(activeId)) return;
       // Persist the relay settings so the next invite is prefilled.
       void invoke("set_relay_config", { displayName, signaling }).catch(
         () => undefined,
       );
       setRelayDefaults({ displayName, signaling });
-      setCollabShare({
-        sessionId: activeId,
-        threadStart: threadRevisions[0]?.versionNumber ?? 0,
-        version: latest.versionNumber,
-        signaling,
-        secret: randomToken(),
-        invite: randomToken(8),
-        ownerName: displayName,
-      });
+      const sessionId = activeId;
+      const threadStart = threadRevisions[0]?.versionNumber ?? 0;
+      const version = latest.versionNumber;
+      void (async () => {
+        // Reuse the persisted room identity (secret/epoch/admin) so a
+        // restart doesn't strand join codes minted before it.
+        let persisted: { secret?: string; epoch?: number; admin?: string } = {};
+        try {
+          const json = await invoke<string | null>("get_collab_share", {
+            sessionId,
+          });
+          if (json) persisted = JSON.parse(json) as typeof persisted;
+        } catch {
+          // Fresh share.
+        }
+        const secret = persisted.secret ?? randomToken();
+        const epoch = persisted.epoch ?? 0;
+        const admin = persisted.admin ?? randomToken(16);
+        if (!persisted.secret || !persisted.admin) {
+          void invoke("set_collab_share", {
+            sessionId,
+            json: JSON.stringify({ secret, epoch, admin }),
+          }).catch(() => undefined);
+        }
+        setShareAdmin(admin);
+        setCollabShare({
+          sessionId,
+          threadStart,
+          version,
+          signaling,
+          secret,
+          invite: "",
+          ownerName: displayName,
+          ...(epoch ? { epoch } : {}),
+        });
+      })();
     },
     [activeId, latest, threadRevisions],
+  );
+
+  const stopShare = useCallback(() => {
+    setCollabShare(null);
+    setShareAdmin(null);
+    setInviteOpen(false);
+  }, []);
+
+  // Owner access channels: one per signaling server, authed with the admin
+  // token. They carry the allowlist/revocation state (rl-manage) and let the
+  // server push room facts (epoch, envelopes, current version) to joiners.
+  const accessClientsRef = useRef<RoomAccess[]>([]);
+  useEffect(() => {
+    if (!collabShare || !shareAdmin) return;
+    const base = collabRoomBase(collabShare);
+    const clients = collabShare.signaling.map((url) =>
+      connectRoomAccess({ url, base, token: shareAdmin }),
+    );
+    accessClientsRef.current = clients;
+    return () => {
+      for (const client of clients) client.close();
+      accessClientsRef.current = [];
+    };
+    // Session identity + admin change ⇒ new channels; secret/epoch churn is
+    // pushed through manage() below, not by reconnecting.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [collabShare?.sessionId, collabShare?.threadStart, shareAdmin]);
+
+  // Push the current access state whenever it changes: the live allowlist,
+  // revocations, key epoch (+ per-invite secret envelopes after a rotation),
+  // and the current revision so late joiners find the live room.
+  useEffect(() => {
+    const share = collabShare;
+    if (!share || !shareAdmin || !reviewRequests.ready) return;
+    let cancelled = false;
+    void (async () => {
+      const base = collabRoomBase(share);
+      const epoch = share.epoch ?? 0;
+      const allowed: string[] = [];
+      const envelopes: Record<string, string> = {};
+      for (const r of activeLiveRequests(reviewRequests.requests)) {
+        const hash = r.inviteHash ?? (await hashToken(r.invite!));
+        allowed.push(hash);
+        if (epoch > 0) {
+          envelopes[hash] = await sealEnvelope(r.invite!, base, {
+            secret: share.secret,
+            epoch,
+          });
+        }
+      }
+      const revoked = reviewRequests.requests
+        .filter(
+          (r) => r.mode === "live" && r.status === "revoked" && r.inviteHash,
+        )
+        .map((r) => r.inviteHash!);
+      if (cancelled) return;
+      for (const client of accessClientsRef.current) {
+        client.manage({
+          allowed,
+          revoked,
+          envelopes,
+          epoch,
+          extra: { version: latest?.versionNumber ?? share.version },
+        });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [collabShare, shareAdmin, reviewRequests.ready, reviewRequests.requests, latest]);
+
+  // Mint a join code for a live invite against the room's CURRENT state.
+  const mintJoinCode = useCallback(
+    (invite: string): string | null => {
+      const share = collabShare;
+      if (!share || !invite) return null;
+      return encodeJoinCode({
+        ...share,
+        version: latest?.versionNumber ?? share.version,
+        invite,
+      });
+    },
+    [collabShare, latest],
+  );
+
+  const createLiveInvite = useCallback(
+    async (reviewerName: string): Promise<string | null> => {
+      const share = collabShare;
+      if (!share || !reviewRequests.ready) return null;
+      const invite = randomToken(16);
+      const inviteHash = await hashToken(invite);
+      reviewRequests.add({
+        id: `rr-${randomToken(8)}`,
+        reviewerName,
+        mode: "live",
+        status: "pending",
+        createdAt: Date.now(),
+        baseVersion: latest?.versionNumber ?? share.version,
+        invite,
+        inviteHash,
+      });
+      return mintJoinCode(invite);
+    },
+    [collabShare, reviewRequests, latest, mintJoinCode],
+  );
+
+  // Transport-side revoke: mark the request revoked and ROTATE the room key.
+  // The manage push evicts the peer at the signaling server (no new WebRTC
+  // conns for them, ever), remaining peers re-key from their sealed
+  // envelopes, and the revoked peer's old secret opens a room nobody is in.
+  const revokeRequest = useCallback(
+    (requestId: string) => {
+      const req = reviewRequests.requests.find((r) => r.id === requestId);
+      if (!req) return;
+      reviewRequests.update(requestId, { status: "revoked" });
+      const share = collabShare;
+      if (share && req.mode === "live") {
+        const epoch = (share.epoch ?? 0) + 1;
+        const secret = randomToken();
+        setCollabShare({ ...share, secret, epoch });
+        void invoke("set_collab_share", {
+          sessionId: share.sessionId,
+          json: JSON.stringify({ secret, epoch, admin: shareAdmin }),
+        }).catch(() => undefined);
+      }
+    },
+    [reviewRequests, collabShare, shareAdmin],
+  );
+
+  const revokeByHash = useCallback(
+    (inviteHash: string) => {
+      const req = reviewRequests.requests.find(
+        (r) => r.inviteHash === inviteHash,
+      );
+      if (req) revokeRequest(req.id);
+    },
+    [reviewRequests, revokeRequest],
+  );
+
+  // Async Review Request (1d): encrypt the CURRENT revision into a snapshot
+  // token for the browser viewer. The per-request signing key (derived from
+  // the owner secret) rides inside so the viewer can sign its return.
+  const buildSnapshotToken = useCallback(
+    async (req: {
+      id: string;
+      reviewerName: string;
+      expiresAt?: number;
+      note?: string;
+    }): Promise<string | null> => {
+      if (!session || !latest) return null;
+      const ownerSecret = await invoke<string>("get_owner_secret");
+      const signingKey = await deriveSigningKey(ownerSecret, req.id);
+      const payload: SnapshotPayload = {
+        v: 1,
+        requestId: req.id,
+        baseVersion: latest.versionNumber,
+        reviewerName: req.reviewerName,
+        ...(relayDefaults.displayName
+          ? { ownerName: relayDefaults.displayName }
+          : {}),
+        projectName: session.projectName,
+        ...(activePlanTitle ? { planTitle: activePlanTitle } : {}),
+        markdown: latest.rawPlanMarkdown,
+        signingKey,
+        ...(req.expiresAt ? { expiresAt: req.expiresAt } : {}),
+        ...(req.note ? { note: req.note } : {}),
+        createdAt: Date.now(),
+      };
+      return encodeSnapshot(payload);
+    },
+    [session, latest, relayDefaults, activePlanTitle],
+  );
+
+  const createAsyncRequest = useCallback(
+    async (
+      reviewerName: string,
+      expiresDays: number | null,
+      note: string,
+    ): Promise<string | null> => {
+      if (!session || !latest || !reviewRequests.ready) return null;
+      // The registry is bound to the shared session while sharing — refuse
+      // creating requests for a different session under that key.
+      if (collabShare && collabShare.sessionId !== session.sessionId) {
+        return null;
+      }
+      const id = `rr-${randomToken(8)}`;
+      const expiresAt = expiresDays
+        ? Date.now() + expiresDays * 86_400_000
+        : undefined;
+      const trimmedNote = note.trim() || undefined;
+      const token = await buildSnapshotToken({
+        id,
+        reviewerName,
+        ...(expiresAt ? { expiresAt } : {}),
+        ...(trimmedNote ? { note: trimmedNote } : {}),
+      });
+      if (!token) return null;
+      reviewRequests.add({
+        id,
+        reviewerName,
+        mode: "async",
+        status: "pending",
+        createdAt: Date.now(),
+        baseVersion: latest.versionNumber,
+        ...(expiresAt ? { expiresAt } : {}),
+        ...(trimmedNote ? { note: trimmedNote } : {}),
+      });
+      return token;
+    },
+    [session, latest, reviewRequests, collabShare, buildSnapshotToken],
+  );
+
+  // Regenerate an async request's link against the CURRENT revision (the
+  // token is never stored — it embeds the whole encrypted plan). Same
+  // request id ⇒ same derived signing key ⇒ old and new links both verify.
+  const remintAsyncRequest = useCallback(
+    async (requestId: string): Promise<string | null> => {
+      const req = reviewRequests.requests.find((r) => r.id === requestId);
+      if (!req || req.mode !== "async" || !latest) return null;
+      const token = await buildSnapshotToken({
+        id: req.id,
+        reviewerName: req.reviewerName,
+        ...(req.expiresAt ? { expiresAt: req.expiresAt } : {}),
+        ...(req.note ? { note: req.note } : {}),
+      });
+      if (token) {
+        reviewRequests.update(requestId, {
+          baseVersion: latest.versionNumber,
+        });
+      }
+      return token;
+    },
+    [reviewRequests, latest, buildSnapshotToken],
+  );
+
+  // Import a signed return (1d): verify against the derived key, re-anchor
+  // by blockId onto the CURRENT revision, attribute to the reviewer, and
+  // surface anything that no longer anchors instead of dropping it.
+  const importReturn = useCallback(
+    async (
+      blob: string,
+    ): Promise<{ summary?: ImportSummary; error?: string }> => {
+      if (!session || !latest) return { error: "Open the plan session first." };
+      const peeked = peekReturn(blob);
+      if (!peeked) {
+        return { error: "That doesn’t look like a Redline return blob." };
+      }
+      const req = reviewRequests.requests.find(
+        (r) => r.id === peeked.requestId,
+      );
+      if (!req) {
+        return { error: "No matching review request in this session." };
+      }
+      if (req.status === "revoked") {
+        return {
+          error: "That request was cancelled — its returns are no longer accepted.",
+        };
+      }
+      if (isExpired(req, Date.now())) {
+        return { error: "That request expired." };
+      }
+      const ownerSecret = await invoke<string>("get_owner_secret");
+      const key = await deriveSigningKey(ownerSecret, req.id);
+      const verified = await verifyReturn(blob, key);
+      if (!verified) {
+        return {
+          error:
+            "Signature check failed — the blob was tampered with or belongs to a different request.",
+        };
+      }
+      const anchors = anchorByBlockId(latest.sections);
+      const { placed, orphans } = reanchorReturn(verified, anchors);
+      const imported: Comment[] = [];
+      for (const request of placed) {
+        try {
+          imported.push(
+            await invoke<Comment>("add_comment", {
+              sessionId: session.sessionId,
+              request,
+            }),
+          );
+        } catch (err) {
+          console.error("failed to import returned comment", err);
+        }
+      }
+      reviewRequests.update(req.id, {
+        status: "returned",
+        returnedAt: Date.now(),
+        importedCommentIds: imported.map((c) => c.id),
+        orphans,
+        importedIntoVersion: latest.versionNumber,
+      });
+      await loadSession(session.sessionId);
+      return {
+        summary: {
+          imported,
+          orphans,
+          baseVersion: verified.baseVersion,
+          currentVersion: latest.versionNumber,
+        },
+      };
+    },
+    [session, latest, reviewRequests],
   );
 
   // The room follows the CURRENT revision (a revise round rolls the room);
@@ -1310,34 +1718,117 @@ function App() {
         sessionId: activeId,
         threadStart: threadRevisions[0]?.versionNumber ?? 0,
         version: latest.versionNumber,
+        ...(collabShare.epoch ? { epoch: collabShare.epoch } : {}),
       },
-      onProvider: setCollabPresence,
+      ...(shareAdmin ? { authToken: shareAdmin } : {}),
+      onProvider: setSharePresence,
     };
-  }, [collabShare, activeId, latest, threadRevisions]);
+  }, [collabShare, shareAdmin, activeId, latest, threadRevisions]);
 
   const collaboratorCollab = useMemo<PlanEditorCollab | undefined>(() => {
-    if (!joinedRoom) return undefined;
+    if (!joinedRoom || joinedRoom.revoked) return undefined;
     const name = joinedRoom.name || "Guest";
     return {
       config: joinedRoom.config,
       role: "collaborator",
       user: { name, color: presenceColor(name) },
-      onProvider: setCollabPresence,
+      ...(joinedRoom.inviteHash ? { inviteHash: joinedRoom.inviteHash } : {}),
+      onProvider: setJoinedPresence,
     };
   }, [joinedRoom]);
+
+  // Joined-session shadow (1c): the sidebar row + pane header facts are
+  // synthesized entirely from the room's Yjs state — no backend session.
+  const joinedInfo = useJoinedSession(joinedRoom, joinedPresence);
+  const joinedActive = !!joinedInfo && activeId === joinedInfo.key;
+
+  const joinRoom = useCallback((config: CollabConfig, name: string) => {
+    setJoinedRoom({ config, name });
+    setJoinOpen(false);
+    setActiveId(joinedSessionKey(config));
+    void hashToken(config.invite).then((hash) =>
+      setJoinedRoom((r) =>
+        r && r.config.sessionId === config.sessionId
+          ? { ...r, inviteHash: hash }
+          : r,
+      ),
+    );
+  }, []);
+
+  const leaveJoined = useCallback(() => {
+    setJoinedRoom(null);
+    setActiveId((prev) => {
+      if (!isJoinedSessionId(prev)) return prev;
+      return summaries[0]?.sessionId ?? null;
+    });
+  }, [summaries]);
+
+  // Collaborator access channel: epoch/envelope discovery (key rotation),
+  // current-version discovery (late join after a rollover), and the
+  // revocation notice. Keyed to the joined room's identity — survives
+  // re-keys, dies with leave.
+  useEffect(() => {
+    if (!joinedRoom) return;
+    const config = joinedRoom.config; // identity fields are stable per join
+    const base = collabRoomBase(config);
+    const url = config.signaling[0];
+    if (!url) return;
+    const client = connectRoomAccess({
+      url,
+      base,
+      token: config.invite,
+      onUpdate: (info) => {
+        if (info.managed && !info.allowed) {
+          setJoinedRoom((r) => (r ? { ...r, revoked: true } : r));
+          return;
+        }
+        const version = info.extra["version"];
+        if (typeof version === "number") {
+          setJoinedRoom((r) =>
+            r && version > r.config.version
+              ? { ...r, config: { ...r.config, version } }
+              : r,
+          );
+        }
+        if (info.envelope) {
+          void openEnvelope(config.invite, base, info.envelope).then(
+            (sealed) => {
+              if (!sealed) return;
+              setJoinedRoom((r) =>
+                r && sealed.epoch > (r.config.epoch ?? 0)
+                  ? {
+                      ...r,
+                      config: {
+                        ...r.config,
+                        secret: sealed.secret,
+                        epoch: sealed.epoch,
+                      },
+                    }
+                  : r,
+              );
+            },
+          );
+        }
+      },
+      onDenied: () => setJoinedRoom((r) => (r ? { ...r, revoked: true } : r)),
+    });
+    return () => client.close();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [joinedRoom?.config.sessionId, joinedRoom?.config.threadStart]);
 
   // Collaborator comment backend (Phase 1b): SyncBackend-shaped writes into
   // the room's comments map; the owner's mirror lands them in SQLite. The
   // local read side feeds the joined editor's highlight/gutter decorations.
   const yjsBackend = useMemo(
     () =>
-      joinedRoom && collabPresence
+      joinedRoom && !joinedRoom.revoked && joinedPresence
         ? createYjsCommentBackend(
-            collabPresence.ydoc,
-            collabPresence.awareness.clientID,
+            joinedPresence.ydoc,
+            joinedPresence.awareness.clientID,
+            joinedRoom.name || "Guest",
           )
         : null,
-    [joinedRoom, collabPresence],
+    [joinedRoom, joinedPresence],
   );
   const [collabComments, setCollabComments] = useState<Comment[]>([]);
   useEffect(() => {
@@ -1353,23 +1844,31 @@ function App() {
   // Rollover bumps happen separately in loadSession — they must reach the
   // OLD room before the editor re-keys; this effect covers steady state.
   useEffect(() => {
-    if (!ownerCollab || !collabPresence || !session || !latest) return;
-    publishMeta(collabPresence.ydoc, {
+    if (!ownerCollab || !sharePresence || !session || !latest) return;
+    publishMeta(sharePresence.ydoc, {
       currentVersion: latest.versionNumber,
       threadStart: threadRevisions[0]?.versionNumber ?? 0,
       ownerName: ownerCollab.user.name,
       projectName: session.projectName,
+      ...(activePlanTitle ? { planTitle: activePlanTitle } : {}),
       status: session.status,
     });
-  }, [ownerCollab, collabPresence, session, latest, threadRevisions]);
+  }, [
+    ownerCollab,
+    sharePresence,
+    session,
+    latest,
+    threadRevisions,
+    activePlanTitle,
+  ]);
 
   // Collaborator: follow the rollover forwarding address. When the room's
   // meta says the plan moved to a newer revision, re-point the joined config
   // — the revisionKey changes, PlanEditor re-keys onto a fresh Y.Doc, and
   // the provider reattaches to the new room and hydrates from the mesh.
   useEffect(() => {
-    if (!joinedRoom || !collabPresence) return;
-    const ydoc = collabPresence.ydoc;
+    if (!joinedRoom || !joinedPresence) return;
+    const ydoc = joinedPresence.ydoc;
     const check = () => {
       const v = readMeta(ydoc).currentVersion;
       if (typeof v === "number" && v > joinedRoom.config.version) {
@@ -1380,7 +1879,7 @@ function App() {
     };
     check();
     return observeMeta(ydoc, check);
-  }, [joinedRoom, collabPresence]);
+  }, [joinedRoom, joinedPresence]);
   // When a voice-authored comment newly appears on the displayed revision (the
   // agent captured a spoken change over the curl bridge, so we never saw the
   // returned Comment), focus it and auto-open its discussion sidecar.
@@ -1621,8 +2120,8 @@ function App() {
   // normal comment commands, so `comments-changed` → reload → re-mirror is
   // the same loop local edits already take.
   useCommentMirror({
-    ydoc: ownerCollab && collabPresence ? collabPresence.ydoc : null,
-    enabled: !!ownerCollab && !!collabPresence,
+    ydoc: ownerCollab && sharePresence ? sharePresence.ydoc : null,
+    enabled: !!ownerCollab && !!sharePresence,
     comments: latestComments,
     backend: {
       addComment: addEditorComment,
@@ -2063,7 +2562,8 @@ function App() {
     setupModalActive ||
     tourActive ||
     inviteOpen ||
-    joinOpen;
+    joinOpen ||
+    collabCenterOpen;
   // The native webview must be hidden whenever a pane divider is mid-drag —
   // otherwise it swallows the pointer and the resize freezes. This makes the
   // sidebar, comment pane, terminal, and the document/browser split all
@@ -2147,7 +2647,9 @@ function App() {
         }}
         collabActive={!!collabShare || !!joinedRoom}
         canInvite={sessionReady && !!latest}
-        onInvite={() => setInviteOpen(true)}
+        // 👥 opens the Collaboration Center — the request list; live
+        // sharing (the invite dialog) is one step inside it.
+        onInvite={() => setCollabCenterOpen(true)}
         onJoinSession={() => setJoinOpen(true)}
         splitActive={docOpen && (browserOpen || drafterOpen)}
         splitVertical={splitVertical}
@@ -2165,20 +2667,24 @@ function App() {
           onExpire={dismissDecisionWindow}
         />
       )}
-      {collabPresence && (collabShare || joinedRoom) && (
+      {joinedActive && joinedPresence && joinedRoom && !joinedRoom.revoked ? (
         <PresenceBar
-          handle={collabPresence}
-          role={joinedRoom ? "collaborator" : "owner"}
-          onInvite={joinedRoom ? undefined : () => setInviteOpen(true)}
-          onEnd={() => {
-            if (joinedRoom) setJoinedRoom(null);
-            else {
-              setCollabShare(null);
-              setInviteOpen(false);
-            }
-          }}
+          handle={joinedPresence}
+          role="collaborator"
+          onEnd={leaveJoined}
         />
-      )}
+      ) : !joinedActive &&
+        sharePresence &&
+        collabShare &&
+        activeId === collabShare.sessionId ? (
+        <PresenceBar
+          handle={sharePresence}
+          role="owner"
+          onInvite={() => setInviteOpen(true)}
+          onEnd={stopShare}
+          onRevokePeer={(inviteHash) => revokeByHash(inviteHash)}
+        />
+      ) : null}
       <main className="relative flex-1 overflow-hidden flex flex-col">
         <div className="flex-1 overflow-hidden flex">
         {!sidebarCollapsed && (
@@ -2211,6 +2717,11 @@ function App() {
               sessions={summaries}
               activeId={activeId}
               pendingCounts={pendingPerSession}
+              joined={joinedInfo}
+              onSelectJoined={() =>
+                joinedInfo && setActiveId(joinedInfo.key)
+              }
+              onLeaveJoined={leaveJoined}
               onSelect={(id) => setActiveId(id)}
               onDelete={deleteSession}
               onExport={exportRevision}
@@ -2272,26 +2783,50 @@ function App() {
               } as React.CSSProperties
             }
           >
-            {joinedRoom && collaboratorCollab ? (
-              // Joined (collaborator) view: no local session, no markdown —
-              // the body hydrates from the mesh and the editor renders it
-              // with full track-changes co-editing. Phase 1c adds the
-              // synthesized sidebar session; for now the room takes over
-              // the document pane while joined.
-              <Suspense fallback={null}>
-                <PlanEditor
-                  key={`joined:${collabRevisionKey(joinedRoom.config)}`}
-                  markdown=""
-                  sections={[]}
-                  comments={collabComments}
-                  revisionKey={collabRevisionKey(joinedRoom.config)}
-                  onAddComment={yjsBackend?.addComment}
-                  onUpdateComment={yjsBackend?.updateComment}
-                  onDeleteComment={yjsBackend?.deleteComment}
-                  collab={collaboratorCollab}
-                />
-              </Suspense>
-            ) : sidebarTab.kind === "folder" ? (
+            {/* Joined (collaborator) view: no local session, no markdown —
+                the body hydrates from the mesh and the editor renders it
+                with full track-changes co-editing. Kept MOUNTED (hidden)
+                while another session is selected: the editor owns the
+                provider, and unmounting it would drop us out of the room. */}
+            {joinedRoom && collaboratorCollab && (
+              <div style={{ display: joinedActive ? undefined : "none" }}>
+                <Suspense fallback={null}>
+                  <PlanEditor
+                    key={`joined:${collabRevisionKey(joinedRoom.config)}`}
+                    markdown=""
+                    sections={[]}
+                    comments={collabComments}
+                    revisionKey={collabRevisionKey(joinedRoom.config)}
+                    onAddComment={yjsBackend?.addComment}
+                    onUpdateComment={yjsBackend?.updateComment}
+                    onDeleteComment={yjsBackend?.deleteComment}
+                    collab={collaboratorCollab}
+                  />
+                </Suspense>
+              </div>
+            )}
+            {joinedActive && joinedRoom?.revoked ? (
+              <EmptyState
+                title="Access revoked"
+                body={
+                  <>
+                    The session owner removed your invite — the live room is
+                    no longer reachable from this instance.{" "}
+                    <button
+                      type="button"
+                      onClick={leaveJoined}
+                      style={{
+                        textDecoration: "underline",
+                        color: "var(--color-accent)",
+                        cursor: "pointer",
+                      }}
+                    >
+                      Leave the session
+                    </button>
+                  </>
+                }
+              />
+            ) : joinedActive ? null : sidebarTab.kind === "folder" ? (
               <EmptyState
                 title="Browsing files"
                 body="Select a file from the tree to view it here."
@@ -3079,19 +3614,51 @@ function App() {
           peerCount={collabPeers}
           defaultDisplayName={relayDefaults.displayName}
           defaultSignaling={relayDefaults.signaling}
+          liveRequests={reviewRequests.requests.filter(
+            (r) => r.mode === "live",
+          )}
+          connectedHashes={presentHashes}
+          onCreateInvite={createLiveInvite}
+          onRevoke={revokeRequest}
+          mintCode={mintJoinCode}
           onStart={startShare}
-          onStop={() => setCollabShare(null)}
+          onStop={stopShare}
           onClose={() => setInviteOpen(false)}
         />
       )}
       {joinOpen && (
         <JoinDialog
           defaultDisplayName={relayDefaults.displayName}
-          onJoin={(config, name) => {
-            setJoinedRoom({ config, name });
-            setJoinOpen(false);
-          }}
+          onJoin={joinRoom}
           onClose={() => setJoinOpen(false)}
+        />
+      )}
+      {collabCenterOpen && (
+        <CollaborationCenter
+          sessionLabel={
+            activePlanTitle ??
+            session?.projectName ??
+            (collabShare ? "shared session" : "this session")
+          }
+          scopedElsewhere={
+            !!collabShare && !!activeId && collabShare.sessionId !== activeId
+          }
+          requests={reviewRequests.requests}
+          ready={reviewRequests.ready}
+          connectedHashes={presentHashes}
+          sharing={!!collabShare}
+          currentVersion={latest?.versionNumber ?? 0}
+          onOpenInvite={() => setInviteOpen(true)}
+          onCreateAsync={createAsyncRequest}
+          onRemintAsync={remintAsyncRequest}
+          onImportReturn={importReturn}
+          onRevoke={revokeRequest}
+          onResolve={(id) =>
+            reviewRequests.update(id, { status: "resolved" })
+          }
+          onRemove={(id) => reviewRequests.remove(id)}
+          mintCode={mintJoinCode}
+          onClose={() => setCollabCenterOpen(false)}
         />
       )}
       {showReadme && <ReadmeModal onClose={() => setShowReadme(false)} />}

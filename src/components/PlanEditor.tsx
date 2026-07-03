@@ -80,6 +80,13 @@ export interface PlanEditorCollab {
   room?: CollabRoomId;
   /** Extra ICE servers (self-hosted TURN) from the relay settings. */
   iceServers?: RTCIceServer[];
+  /** Signaling credential: the owner's admin token (collaborators default
+   *  to the config's invite token). Managed relays enforce it. */
+  authToken?: string;
+  /** SHA-256 of this side's invite token, advertised in awareness so the
+   *  owner can map a roster entry to its Review Request (targeted revoke).
+   *  Owners have no invite and leave it unset. */
+  inviteHash?: string;
   /** Surfaces the live provider so the parent can render presence UI.
    *  Called with null when the provider tears down. */
   onProvider?: (handle: CollabProviderHandle | null) => void;
@@ -204,14 +211,17 @@ export function PlanEditor({
     const handle = createCollabProvider(ydoc, c.config, {
       ...(c.room ? { room: c.room } : {}),
       ...(c.iceServers ? { iceServers: c.iceServers } : {}),
+      ...(c.authToken ? { authToken: c.authToken } : {}),
     });
     // CollaborationCursor also writes `user`; setting it here too means the
     // roster is correct even before the editor instance exists. `role` lets
-    // presence UI badge the owner.
+    // presence UI badge the owner; `inviteHash` lets the owner's roster map
+    // an entry back to its Review Request for targeted revoke.
     handle.awareness.setLocalStateField("user", {
       name: c.user.name,
       color: c.user.color,
       role: c.role,
+      ...(c.inviteHash ? { inviteHash: c.inviteHash } : {}),
     });
     setCollabHandle(handle);
     c.onProvider?.(handle);

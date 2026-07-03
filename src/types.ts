@@ -136,6 +136,11 @@ export interface Comment {
    *  owning its block and rides the submit payload as a normal [edit]);
    *  this field only drives the card chip and unlocks the block. */
   agentState?: string;
+  /** Human attribution for comments that arrived from another person — a
+   *  live-room collaborator or an async Review Request return ("John Doe").
+   *  Distinct from `author` (an AGENT id, drives the M4 block-lock); absent
+   *  for every comment the session owner wrote themselves. */
+  reviewer?: string;
 }
 
 export interface NewCommentRequest {
@@ -152,6 +157,10 @@ export interface NewCommentRequest {
   edit?: EditPayload;
   structural?: StructuralPayload;
   selection?: CommentSelection;
+  /** Human attribution for imported/collaborator comments (see
+   *  `Comment.reviewer`). Sent by the Review Request import path and the
+   *  live-collab mirror; omitted on every owner-originated comment. */
+  reviewer?: string;
 }
 
 export interface UpdateCommentRequest {

@@ -10,6 +10,8 @@ interface PresenceEntry {
   name: string;
   color: string;
   role?: CollabRole;
+  /** SHA-256 of the peer's invite token — the revocation handle. */
+  inviteHash?: string;
 }
 
 interface PresenceBarProps {
@@ -20,6 +22,9 @@ interface PresenceBarProps {
   onInvite?: () => void;
   /** Owner: stop sharing; collaborator: leave the session. */
   onEnd: () => void;
+  /** Owner: revoke the peer's invite — transport-side eviction plus a room
+   *  key rotation, so the peer can't rejoin or follow future edits. */
+  onRevokePeer?: (inviteHash: string, name: string) => void;
 }
 
 /**
@@ -27,7 +32,13 @@ interface PresenceBarProps {
  * awareness. Rendered only while a session is being shared/joined, directly
  * under the header so it reads as session chrome, not document content.
  */
-export function PresenceBar({ handle, role, onInvite, onEnd }: PresenceBarProps) {
+export function PresenceBar({
+  handle,
+  role,
+  onInvite,
+  onEnd,
+  onRevokePeer,
+}: PresenceBarProps) {
   const [entries, setEntries] = useState<PresenceEntry[]>([]);
 
   useEffect(() => {
@@ -42,6 +53,7 @@ export function PresenceBar({ handle, role, onInvite, onEnd }: PresenceBarProps)
           name: user.name,
           color: user.color ?? "var(--color-ink-muted)",
           role: user.role,
+          inviteHash: user.inviteHash,
         });
       }
       next.sort((a, b) => a.clientId - b.clientId);
@@ -98,6 +110,26 @@ export function PresenceBar({ handle, role, onInvite, onEnd }: PresenceBarProps)
             {e.role === "owner" && (
               <span style={{ color: "var(--color-ink-muted)" }}>· owner</span>
             )}
+            {role === "owner" &&
+              onRevokePeer &&
+              e.clientId !== selfId &&
+              e.inviteHash && (
+                <button
+                  type="button"
+                  aria-label={`Remove ${e.name} from the session`}
+                  title={`Remove ${e.name} — revokes their invite and rotates the room key`}
+                  onClick={() => onRevokePeer(e.inviteHash!, e.name)}
+                  className="rounded-full px-1 opacity-60 hover:opacity-100"
+                  style={{
+                    color: "var(--color-warning)",
+                    fontSize: "11px",
+                    lineHeight: 1,
+                    cursor: "pointer",
+                  }}
+                >
+                  ✕
+                </button>
+              )}
           </span>
         ))}
         {others === 0 && (

@@ -17,6 +17,7 @@ import { WebrtcProvider } from "y-webrtc";
 import type { Awareness } from "y-protocols/awareness";
 
 import { collabRoomName, type CollabConfig, type CollabRoomId } from "./collabConfig";
+import { withAuth } from "./access";
 
 export interface CollabProviderHandle {
   /** The room doc this provider is attached to — the comments map and meta
@@ -44,6 +45,11 @@ export interface CreateProviderOptions {
   /** Extra ICE servers (STUN/TURN). A reachable TURN relay is mandatory for
    *  symmetric-NAT peers — configured via relay settings, not hardcoded. */
   iceServers?: RTCIceServer[];
+  /** Credential presented to the signaling server (`?auth=`): the owner's
+   *  admin token, or a collaborator's per-invite token. Defaults to the
+   *  config's invite token. Managed rooms enforce it; unmanaged relays
+   *  ignore it. */
+  authToken?: string;
 }
 
 /** y-webrtc's ICE default is Google STUN only; keep it explicit so the relay
@@ -62,8 +68,12 @@ export function createCollabProvider(
     threadStart: config.threadStart,
     version: config.version,
   };
+  // Auth rides the signaling URL so reconnects re-present it automatically
+  // (y-webrtc also keys its shared signaling conns by exact URL, so distinct
+  // tokens never share a socket).
+  const auth = options.authToken ?? config.invite;
   const provider = new WebrtcProvider(collabRoomName(room), ydoc, {
-    signaling: config.signaling,
+    signaling: config.signaling.map((u) => withAuth(u, auth)),
     // y-webrtc derives an encryption key from the password and encrypts all
     // signaling payloads with it — the signaling server relays ciphertext.
     // Media/data between peers is DTLS-SRTP end-to-end encrypted by WebRTC.

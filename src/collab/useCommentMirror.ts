@@ -48,6 +48,9 @@ function toNewCommentRequest(c: Comment): NewCommentRequest {
     ...(c.edit ? { edit: c.edit } : {}),
     ...(c.structural ? { structural: c.structural } : {}),
     ...(c.selection ? { selection: c.selection } : {}),
+    // Live-collab attribution: a collaborator-minted comment carries its
+    // author's display name; SQLite persists it as `reviewer`.
+    ...(c.reviewer ? { reviewer: c.reviewer } : {}),
   };
 }
 
