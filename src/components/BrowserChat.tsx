@@ -35,9 +35,15 @@ interface BrowserChatProps {
    *  spawns a terminal running `claude --permission-mode plan` seeded with it.
    *  Lets a plan/prompt drafted while browsing drop straight into Redline. */
   onSendToRedline?: (markdown: string) => void;
+  /** Open an assistant reply in the Prompt Drafter (target repo pre-guessed) to
+   *  shape before sending — the review-first alternative to `onSendToRedline`. */
+  onSendToDrafter?: (markdown: string) => void;
   /** Pin an assistant reply to the active mission ("I like this part"). Present
    *  only when a mission is active; the parent attaches the source tab. */
   onAddToMission?: (markdown: string) => void;
+  /** Tandem agent mode is on. Sent to the agent so it opens the best page and
+   *  surfaces a rateable sources block, and gates the per-source thumbs UI. */
+  tandem?: boolean;
 }
 
 type ChatStatus = "idle" | "streaming" | "error";
@@ -53,6 +59,63 @@ function loadZoom(): number {
   return Number.isFinite(raw) && raw > 0 ? clampZoom(raw) : 1;
 }
 
+/** One source the tandem agent surfaced: the page it opened (`primary`) plus the
+ *  alternatives it offered. Parsed out of the reply's `rl-sources` fenced block. */
+interface Source {
+  url: string;
+  title?: string;
+  primary?: boolean;
+}
+
+const SOURCES_FENCE = "```rl-sources";
+const SOURCES_FENCE_RE = /```rl-sources\s*([\s\S]*?)```/;
+
+/** Split a settled reply into its visible prose and the structured sources the
+ *  agent listed in a trailing ```rl-sources``` block. The block is stripped from
+ *  the prose so the raw JSON never renders; a malformed block is simply dropped. */
+function parseSources(body: string): { text: string; sources: Source[] } {
+  const m = body.match(SOURCES_FENCE_RE);
+  if (!m) return { text: body, sources: [] };
+  let sources: Source[] = [];
+  try {
+    const arr = JSON.parse(m[1].trim());
+    if (Array.isArray(arr)) {
+      sources = arr
+        .filter((s) => s && typeof s.url === "string")
+        .map((s) => ({
+          url: s.url as string,
+          title: typeof s.title === "string" ? s.title : undefined,
+          primary: !!s.primary,
+        }));
+    }
+  } catch {
+    // Malformed block — leave sources empty; keep the prose readable.
+  }
+  return { text: body.replace(SOURCES_FENCE_RE, "").trimEnd(), sources };
+}
+
+/** Hide the sources fence while it streams in — the block lands at the very end,
+ *  so cut a complete fence and any partial marker being typed at the tail. */
+function stripStreamingSources(text: string): string {
+  const full = text.indexOf(SOURCES_FENCE);
+  if (full !== -1) return text.slice(0, full).trimEnd();
+  for (let n = Math.min(SOURCES_FENCE.length - 1, text.length); n >= 3; n--) {
+    if (text.endsWith(SOURCES_FENCE.slice(0, n))) {
+      return text.slice(0, text.length - n).trimEnd();
+    }
+  }
+  return text;
+}
+
+/** Bare host for a source label, e.g. `https://www.wikipedia.org/DAG` → `wikipedia.org`. */
+function domainOf(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
+
 /** A discussion with a browse agent that can see and drive the active browser
  *  tab. Standalone analog of `CommentThread` (browse-* events, `--rl-discussion-zoom`,
  *  auto-grow composer), keyed by a per-tab `browseId` rather than a comment. */
@@ -64,7 +127,9 @@ export const BrowserChat = memo(function BrowserChat({
   onOpenLink,
   anchoredFromTitle,
   onSendToRedline,
+  onSendToDrafter,
   onAddToMission,
+  tandem,
 }: BrowserChatProps) {
   const [messages, setMessages] = useState<BrowseMessage[]>([]);
   const [liveText, setLiveText] = useState("");
@@ -72,6 +137,9 @@ export const BrowserChat = memo(function BrowserChat({
   const [draft, setDraft] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [zoom, setZoom] = useState(loadZoom);
+  // Per-source thumbs verdicts for this tab's thread (url → +1 / -1), restored
+  // from the backend so ratings survive a reload. Only meaningful in tandem mode.
+  const [feedback, setFeedback] = useState<Record<string, number>>({});
   const scrollRef = useRef<HTMLDivElement>(null);
   // Whether to keep the newest content in view as it streams. True only while
   // the user is parked at (or near) the bottom — scroll up to read mid-stream
@@ -81,6 +149,38 @@ export const BrowserChat = memo(function BrowserChat({
   // the user switches mid-capture.
   const browseIdRef = useRef(browseId);
   browseIdRef.current = browseId;
+
+  // Restore this tab's source thumbs on mount / tab switch.
+  useEffect(() => {
+    let cancelled = false;
+    void invoke<Array<{ sourceUrl: string; verdict: number }>>(
+      "get_source_feedback",
+      { browseId },
+    )
+      .then((rows) => {
+        if (cancelled) return;
+        const map: Record<string, number> = {};
+        for (const r of rows) map[r.sourceUrl] = r.verdict;
+        setFeedback(map);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [browseId]);
+
+  // Record a thumbs verdict for a source. Optimistic: update local state, then
+  // persist. Clicking the active thumb again clears it back to neutral (0).
+  function setVerdict(s: Source, verdict: number) {
+    const next = feedback[s.url] === verdict ? 0 : verdict;
+    setFeedback((f) => ({ ...f, [s.url]: next }));
+    void invoke("set_source_feedback", {
+      browseId,
+      sourceUrl: s.url,
+      sourceTitle: s.title ?? null,
+      verdict: next,
+    }).catch((e) => console.error("set_source_feedback failed", e));
+  }
 
   function adjustZoom(delta: number) {
     setZoom((z) => {
@@ -225,6 +325,7 @@ export const BrowserChat = memo(function BrowserChat({
       text: trimmed,
       snapshot,
       cwd: projectDir ?? null,
+      tandem: tandem ?? false,
     }).catch((err) => {
       setStatus("error");
       setMessages((m) => [
@@ -361,12 +462,19 @@ export const BrowserChat = memo(function BrowserChat({
               msg={m}
               onOpenLink={onOpenLink}
               onSendToRedline={onSendToRedline}
+              onSendToDrafter={onSendToDrafter}
               onAddToMission={onAddToMission}
+              showSources={!!tandem}
+              feedback={feedback}
+              onVerdict={setVerdict}
             />
           ))
         )}
         {status === "streaming" && (
-          <StreamingBubble text={liveText} onOpenLink={onOpenLink} />
+          <StreamingBubble
+            text={tandem ? stripStreamingSources(liveText) : liveText}
+            onOpenLink={onOpenLink}
+          />
         )}
       </div>
 
@@ -390,16 +498,30 @@ function MessageBubble({
   msg,
   onOpenLink,
   onSendToRedline,
+  onSendToDrafter,
   onAddToMission,
+  showSources,
+  feedback,
+  onVerdict,
 }: {
   msg: BrowseMessage;
   onOpenLink?: (url: string) => void;
   onSendToRedline?: (markdown: string) => void;
+  onSendToDrafter?: (markdown: string) => void;
   onAddToMission?: (markdown: string) => void;
+  showSources?: boolean;
+  feedback?: Record<string, number>;
+  onVerdict?: (source: Source, verdict: number) => void;
 }) {
   const isUser = msg.role === "user";
   const isError = msg.status === "error";
-  const showActions = !isUser && !isError && msg.body.trim().length > 0;
+  // In tandem mode a reply may carry a trailing sources block; split it off so
+  // the JSON never renders and the sources get their own rateable strip.
+  const { text, sources } =
+    showSources && !isUser && !isError
+      ? parseSources(msg.body)
+      : { text: msg.body, sources: [] as Source[] };
+  const showActions = !isUser && !isError && text.trim().length > 0;
   return (
     <div className="flex flex-col gap-0.5 group/msg">
       <span
@@ -425,12 +547,21 @@ function MessageBubble({
           {msg.body}
         </div>
       ) : (
-        <MarkdownView body={msg.body} compact rich onLinkClick={onOpenLink} />
+        <MarkdownView body={text} compact rich onLinkClick={onOpenLink} />
+      )}
+      {sources.length > 0 && (
+        <SourcesStrip
+          sources={sources}
+          feedback={feedback ?? {}}
+          onOpenLink={onOpenLink}
+          onVerdict={onVerdict}
+        />
       )}
       {showActions && (
         <MessageActions
-          body={msg.body}
+          body={text}
           onSendToRedline={onSendToRedline}
+          onSendToDrafter={onSendToDrafter}
           onAddToMission={onAddToMission}
         />
       )}
@@ -438,16 +569,112 @@ function MessageBubble({
   );
 }
 
+/** The rateable sources the tandem agent surfaced beneath a reply: the page it
+ *  opened (marked "opened") plus its alternatives, each with a 👍/👎 the user can
+ *  toggle. Verdicts persist and feed the agent's future source picks. */
+function SourcesStrip({
+  sources,
+  feedback,
+  onOpenLink,
+  onVerdict,
+}: {
+  sources: Source[];
+  feedback: Record<string, number>;
+  onOpenLink?: (url: string) => void;
+  onVerdict?: (source: Source, verdict: number) => void;
+}) {
+  const thumb = (active: boolean): React.CSSProperties => ({
+    fontSize: "11px",
+    lineHeight: 1,
+    padding: "1px 4px",
+    border: "1px solid var(--color-rule)",
+    borderRadius: "5px",
+    background: active ? "var(--color-info)" : "var(--color-paper)",
+    filter: active ? undefined : "grayscale(1) opacity(0.6)",
+    cursor: "pointer",
+  });
+  return (
+    <div className="flex flex-col gap-1 mt-1">
+      <span
+        style={{
+          fontSize: "9px",
+          fontWeight: 600,
+          textTransform: "uppercase",
+          letterSpacing: "0.07em",
+          color: "var(--color-ink-muted)",
+        }}
+      >
+        Sources
+      </span>
+      {sources.map((s) => {
+        const v = feedback[s.url] ?? 0;
+        return (
+          <div key={s.url} className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => onOpenLink?.(s.url)}
+              title={s.url}
+              style={{
+                flex: 1,
+                minWidth: 0,
+                textAlign: "left",
+                fontSize: "11.5px",
+                lineHeight: 1.3,
+                color: "var(--color-info)",
+                background: "transparent",
+                border: "none",
+                padding: 0,
+                cursor: "pointer",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {s.primary ? "→ " : ""}
+              {s.title || domainOf(s.url)}
+              <span style={{ color: "var(--color-ink-muted)" }}>
+                {" "}· {domainOf(s.url)}
+                {s.primary ? " · opened" : ""}
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onVerdict?.(s, 1)}
+              title="Helpful"
+              aria-pressed={v === 1}
+              style={thumb(v === 1)}
+            >
+              👍
+            </button>
+            <button
+              type="button"
+              onClick={() => onVerdict?.(s, -1)}
+              title="Not helpful"
+              aria-pressed={v === -1}
+              style={thumb(v === -1)}
+            >
+              👎
+            </button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 /** Footer actions on a settled assistant reply: copy the whole message (covers
  *  prose, where per-block buttons don't reach), and — when wired — ship the
- *  reply into a fresh Redline plan session. Revealed on hover over the bubble. */
+ *  reply into Redline, either straight to Claude Code (after confirming the
+ *  target repo) or via the Prompt Drafter. Revealed on hover over the bubble. */
 function MessageActions({
   body,
   onSendToRedline,
+  onSendToDrafter,
   onAddToMission,
 }: {
   body: string;
   onSendToRedline?: (markdown: string) => void;
+  onSendToDrafter?: (markdown: string) => void;
   onAddToMission?: (markdown: string) => void;
 }) {
   const [copied, setCopied] = useState(false);
@@ -488,14 +715,24 @@ function MessageActions({
           {pinned ? "Pinned ✓" : "📌 Add to mission"}
         </button>
       )}
+      {onSendToDrafter && (
+        <button
+          type="button"
+          onClick={() => onSendToDrafter(body)}
+          title="Open this reply in the Prompt Drafter to shape before sending"
+          style={{ ...actionStyle, color: "var(--color-info)" }}
+        >
+          ✍️ Open in Drafter
+        </button>
+      )}
       {onSendToRedline && (
         <button
           type="button"
           onClick={() => onSendToRedline(body)}
-          title="Open a Redline plan session seeded with this reply"
+          title="Send this reply to Claude Code — you'll confirm the target repo"
           style={{ ...actionStyle, color: "var(--color-info)" }}
         >
-          Send to Redline ▶
+          Send to Claude Code ▶
         </button>
       )}
     </div>

@@ -19,6 +19,18 @@ export function buildPlanLaunchCommand(
   prompt: string,
   projectPath?: string | null,
 ): string {
-  const launch = `claude --permission-mode plan ${shq(prompt)}`;
+  // Read-only research tools + Bash, pre-approved so a fresh plan session can
+  // scout the project without surfacing a permission prompt per tool call — the
+  // interactive counterpart to the `--allowedTools` allow-lists the agent spawns
+  // (browse.rs / mission.rs / fork.rs / voice.rs) carry. The list sits *before*
+  // `--permission-mode` so its variadic values are terminated by the next flag,
+  // leaving the prompt as the sole positional arg. Plan mode still gates every
+  // edit/write behind the user's plan approval, so Bash here only runs
+  // read-style research commands before ExitPlanMode.
+  const launch = `claude --allowedTools ${ALLOWED_TOOLS} --permission-mode plan ${shq(prompt)}`;
   return projectPath ? `cd ${shq(projectPath)} && ${launch}` : launch;
 }
+
+/** Tools the launched plan session may use without prompting. Space-separated
+ *  for the `--allowedTools` variadic flag, matching the agent-spawn convention. */
+const ALLOWED_TOOLS = "Read Grep Glob WebSearch WebFetch Bash";

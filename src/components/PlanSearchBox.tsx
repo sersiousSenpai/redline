@@ -11,6 +11,8 @@ interface PlanSearchBoxProps {
   onNext: () => void;
   onPrev: () => void;
   onClose: () => void;
+  /** Input placeholder — defaults to the plan editor's. */
+  placeholder?: string;
 }
 
 /** The floating find bar for the plan editor. Presentational — PlanEditor owns
@@ -25,6 +27,7 @@ export function PlanSearchBox({
   onNext,
   onPrev,
   onClose,
+  placeholder = "Find in plan…",
 }: PlanSearchBoxProps) {
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -47,7 +50,7 @@ export function PlanSearchBox({
         ref={inputRef}
         type="text"
         value={query}
-        placeholder="Find in plan…"
+        placeholder={placeholder}
         onChange={(e) => onQueryChange(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Enter") {

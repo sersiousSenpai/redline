@@ -17,10 +17,13 @@ import { MermaidView } from "./MermaidView";
 /**
  * Rich rendering for the plan's ` ``` ` fenced blocks (Planning-IDE Phase 1).
  *
- * This is additive: the `codeBlock` ProseMirror node — its name, `language`
- * attribute, and `text*` content — is unchanged, so `planSchema()` stays
- * schema-equivalent and the markdown parser/serializer and the round-trip
- * idempotency gate are untouched. Only the on-screen presentation changes.
+ * Mostly additive: the `codeBlock` node keeps its name, `language` attribute and
+ * `text*` content, so the markdown parser/serializer and the round-trip
+ * idempotency gate are untouched. The ONE deliberate schema difference is that
+ * `richCodeBlock()` widens the node's `marks` from the base `code_block` spec's
+ * `marks: ''` (which forbids every mark) to permit the two track-change marks
+ * (`rl_ins`/`rl_del`) — see the comment on {@link richCodeBlock}. Everything
+ * else here is presentation only.
  *
  * One shared `lowlight` instance highlights every code block; `common` bundles
  * ~37 languages — the set Claude routinely emits in plans. An unrecognised
@@ -175,13 +178,25 @@ function domCodeBlockView(node: PMNode): NodeView {
 
 /**
  * The plan editor's code-block extension: `CodeBlockLowlight` (syntax-highlight
- * decorations over a node spec identical to StarterKit's `codeBlock`) plus a
- * NodeView that branches by language — the React {@link CodeBlockView} for
- * `mermaid` diagrams, a plain editable {@link domCodeBlockView} for everything
- * else. Replaces StarterKit's bundled `codeBlock` in {@link planExtensions}.
+ * decorations) plus a NodeView that branches by language — the React
+ * {@link CodeBlockView} for `mermaid` diagrams, a plain editable
+ * {@link domCodeBlockView} for everything else. Replaces StarterKit's bundled
+ * `codeBlock` in {@link planExtensions}.
+ *
+ * `marks: "rl_ins rl_del"` is load-bearing, NOT decoration. Word-style
+ * track-changes deletes text by *marking* it `rl_del` in place (never removing
+ * it — see `trackedDelete` in TrackChangesInput.ts). The base `code_block` spec
+ * ships `marks: ''`, so ProseMirror SILENTLY dropped that `addMark` and
+ * strike/delete inside a fenced block did nothing — a bug that regressed every
+ * time this node was rebuilt. Permitting only the two track-change marks keeps
+ * code text literal (bold/italic/etc. stay forbidden) while letting strikes
+ * land. Additive & round-trip-safe: existing plans carry no such marks, and the
+ * serializer accepts them away (drops `rl_del` text) back to clean markdown.
+ * The schema guard in `schema.test.ts` pins this so it can't silently regress.
  */
 export function richCodeBlock() {
   return CodeBlockLowlight.extend({
+    marks: "rl_ins rl_del",
     addNodeView() {
       const renderReact = ReactNodeViewRenderer(CodeBlockView);
       return (props) => {

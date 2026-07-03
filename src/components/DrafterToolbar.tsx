@@ -24,6 +24,7 @@ import {
   MoveVertical,
   Redo2,
   Strikethrough,
+  Superscript,
   Table as TableIcon,
   Underline as UnderlineIcon,
   Undo2,
@@ -271,6 +272,54 @@ const HIGHLIGHT_COLORS = [
 
 const FONT_SIZES = [12, 13, 14, 15, 16, 18, 20, 24, 28, 32, 40, 48];
 
+// Ordered-list marker styles. `key` matches the `listStyle` attribute and the
+// serializer's marker logic; `preview` shows the on-screen glyphs. Grouped by
+// family with a heading so the ~dozen permutations stay scannable.
+const ORDERED_STYLE_GROUPS: {
+  heading: string;
+  styles: { key: string; preview: string }[];
+}[] = [
+  {
+    heading: "Numbers",
+    styles: [
+      { key: "decimal", preview: "1. 2. 3." },
+      { key: "decimal-paren", preview: "1) 2) 3)" },
+      { key: "decimal-leading-zero", preview: "01. 02. 03." },
+    ],
+  },
+  {
+    heading: "Letters",
+    styles: [
+      { key: "lower-alpha", preview: "a. b. c." },
+      { key: "lower-alpha-paren", preview: "a) b) c)" },
+      { key: "lower-alpha-parenthetical", preview: "(a) (b) (c)" },
+      { key: "upper-alpha", preview: "A. B. C." },
+      { key: "upper-alpha-paren", preview: "A) B) C)" },
+    ],
+  },
+  {
+    heading: "Roman",
+    styles: [
+      { key: "lower-roman", preview: "i. ii. iii." },
+      { key: "lower-roman-paren", preview: "i) ii) iii)" },
+      { key: "lower-roman-parenthetical", preview: "(i) (ii) (iii)" },
+      { key: "upper-roman", preview: "I. II. III." },
+      { key: "upper-roman-paren", preview: "I) II) III)" },
+    ],
+  },
+  {
+    heading: "Greek",
+    styles: [{ key: "lower-greek", preview: "α. β. γ." }],
+  },
+];
+
+const BULLET_STYLES: { key: string; preview: string; label: string }[] = [
+  { key: "disc", preview: "●", label: "Disc" },
+  { key: "circle", preview: "○", label: "Circle" },
+  { key: "square", preview: "▪", label: "Square" },
+  { key: "dash", preview: "–", label: "Dash" },
+];
+
 // Word's "drag to size" table inserter: hover the grid to choose columns × rows.
 function TableGrid({ onPick }: { onPick: (rows: number, cols: number) => void }) {
   const MAX_ROWS = 8;
@@ -355,6 +404,20 @@ export function DrafterToolbar({ editor }: DrafterToolbarProps) {
       .run();
   };
 
+  // Insert a new footnote, or edit the one currently selected. Uses
+  // window.prompt like the link control — no extra popover to manage.
+  const footnote = () => {
+    if (!editor) return;
+    const editing = editor.isActive("footnote");
+    const prev = editing
+      ? (editor.getAttributes("footnote").text as string | undefined)
+      : "";
+    const text = window.prompt("Footnote text", prev ?? "");
+    if (text === null) return; // cancelled
+    if (editing) editor.chain().focus().updateFootnote(text).run();
+    else editor.chain().focus().insertFootnote(text).run();
+  };
+
   // Live reflections of the current selection for the dropdown labels.
   const activeStyle = editor
     ? PARAGRAPH_STYLES.find((s) => s.isActive(editor))
@@ -373,6 +436,14 @@ export function DrafterToolbar({ editor }: DrafterToolbarProps) {
     (editor?.getAttributes("textStyle").color as string | undefined) || "";
   const activeHighlight =
     (editor?.getAttributes("highlight").color as string | undefined) || "";
+  const inOrdered = !!editor?.isActive("orderedList");
+  const inBullet = !!editor?.isActive("bulletList");
+  const orderedStyle =
+    (editor?.getAttributes("orderedList").listStyle as string | undefined) ||
+    "decimal";
+  const bulletStyle =
+    (editor?.getAttributes("bulletList").listStyle as string | undefined) ||
+    "disc";
   const inTable = !!editor?.isActive("table");
   // A table is the alignment target when the cursor is inside it OR the whole
   // table is node-selected (via the move-handle). In either case the ribbon's
@@ -698,22 +769,87 @@ export function DrafterToolbar({ editor }: DrafterToolbarProps) {
 
       {/* Lists + indent + spacing */}
       <Group>
-        <ToolButton
-          title="Bullet list"
+        <RibbonMenu
+          title="Bulleted list"
+          label={<List size={ICON} strokeWidth={STROKE} />}
+          minWidth={42}
           disabled={disabled}
-          active={editor?.isActive("bulletList")}
-          onClick={() => editor?.chain().focus().toggleBulletList().run()}
         >
-          <List size={ICON} strokeWidth={STROKE} />
-        </ToolButton>
-        <ToolButton
+          {(close) => (
+            <div style={{ minWidth: "148px" }}>
+              <MenuRow
+                active={inBullet}
+                onClick={() => {
+                  editor?.chain().focus().toggleBulletList().run();
+                  close();
+                }}
+              >
+                {inBullet ? "Remove bullets" : "Bulleted list"}
+              </MenuRow>
+              <div className="rl-menu-sep" />
+              {BULLET_STYLES.map((s) => (
+                <MenuRow
+                  key={s.key}
+                  active={inBullet && bulletStyle === s.key}
+                  onClick={() => {
+                    editor?.chain().focus().setBulletListStyle(s.key).run();
+                    close();
+                  }}
+                >
+                  <span
+                    style={{
+                      display: "inline-block",
+                      width: "1.4em",
+                      textAlign: "center",
+                    }}
+                  >
+                    {s.preview}
+                  </span>
+                  {s.label}
+                </MenuRow>
+              ))}
+            </div>
+          )}
+        </RibbonMenu>
+        <RibbonMenu
           title="Numbered list"
+          label={<ListOrdered size={ICON} strokeWidth={STROKE} />}
+          minWidth={42}
           disabled={disabled}
-          active={editor?.isActive("orderedList")}
-          onClick={() => editor?.chain().focus().toggleOrderedList().run()}
         >
-          <ListOrdered size={ICON} strokeWidth={STROKE} />
-        </ToolButton>
+          {(close) => (
+            <div style={{ minWidth: "170px" }}>
+              <MenuRow
+                active={inOrdered}
+                onClick={() => {
+                  editor?.chain().focus().toggleOrderedList().run();
+                  close();
+                }}
+              >
+                {inOrdered ? "Remove numbering" : "Numbered list"}
+              </MenuRow>
+              {ORDERED_STYLE_GROUPS.map((group) => (
+                <div key={group.heading}>
+                  <div className="rl-menu-sep" />
+                  <div className="rl-menu-heading">{group.heading}</div>
+                  {group.styles.map((s) => (
+                    <MenuRow
+                      key={s.key}
+                      active={inOrdered && orderedStyle === s.key}
+                      onClick={() => {
+                        editor?.chain().focus().setOrderedListStyle(s.key).run();
+                        close();
+                      }}
+                      style={{ fontVariantNumeric: "tabular-nums" }}
+                    >
+                      {s.preview}
+                    </MenuRow>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
+        </RibbonMenu>
         <ToolButton
           title="Decrease indent"
           disabled={disabled}
@@ -842,6 +978,16 @@ export function DrafterToolbar({ editor }: DrafterToolbarProps) {
           onClick={setLink}
         >
           <LinkIcon size={ICON} strokeWidth={STROKE} />
+        </ToolButton>
+        <ToolButton
+          title={
+            editor?.isActive("footnote") ? "Edit footnote" : "Insert footnote"
+          }
+          disabled={disabled}
+          active={editor?.isActive("footnote")}
+          onClick={footnote}
+        >
+          <Superscript size={ICON} strokeWidth={STROKE} />
         </ToolButton>
         <ToolButton
           title="Horizontal divider"

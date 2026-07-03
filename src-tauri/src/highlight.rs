@@ -18,10 +18,11 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
 
 /// Files larger than this are paged as plain text (no tokenization) — syntect
@@ -39,6 +40,16 @@ const MAX_DOC_BYTES: u64 = 64 * 1024 * 1024;
 /// blank frame — the common case. Above it the viewer pages the visible window
 /// via `doc_lines`, keeping the DOM and IPC bounded for genuinely huge files.
 const INLINE_MAX_LINES: usize = 5_000;
+
+/// A single diff file whose segments total more lines than this renders plain —
+/// bounds the worst single `highlight_diff` IPC + tokenize. (The frontend's
+/// cost-∝-visible discipline is separate: it only *requests* files that have
+/// scrolled into view.)
+const MAX_DIFF_HIGHLIGHT_LINES: usize = 5_000;
+
+/// Diff-segment cache ceiling. Segments are small (a hunk side); wholesale
+/// eviction past this keeps the map bounded without LRU bookkeeping.
+const DIFF_CACHE_MAX: usize = 4_096;
 
 /// Metadata for an opened document — enough for the viewer to size its scroll
 /// area and decide how to render, without shipping any line content.
@@ -142,10 +153,12 @@ impl CachedDoc {
 }
 
 /// Tokenizer + cache, managed as Tauri state. The `SyntaxSet` is built once
-/// (it's expensive) and shared; the cache is keyed by absolute path.
+/// (it's expensive) and shared; the file cache is keyed by absolute path, the
+/// diff-segment cache by content hash (diff text has no path or mtime).
 pub struct Highlighter {
     syntaxes: SyntaxSet,
     cache: Mutex<HashMap<String, Arc<CachedDoc>>>,
+    diff_cache: Mutex<HashMap<u64, Arc<Vec<Vec<Token>>>>>,
 }
 
 impl Highlighter {
@@ -159,6 +172,7 @@ impl Highlighter {
             // also `_newlines` so `ParseState` still gets its trailing '\n'.
             syntaxes: two_face::syntax::extra_newlines(),
             cache: Mutex::new(HashMap::new()),
+            diff_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -298,7 +312,60 @@ impl Highlighter {
         if syntax.name == self.syntaxes.find_syntax_plain_text().name {
             return None;
         }
+        Some(self.tokenize_content(syntax, content))
+    }
 
+    /// Grammar for a *diff* display path. Pure name matching — never touches the
+    /// filesystem (`find_syntax_for_file` opens the file for first-line sniffing
+    /// when the extension is unknown, but a diff path may be repo-relative or
+    /// deleted). Extension first, then full filename (`Makefile`), then aliases.
+    fn syntax_for_diff_path(&self, path: &str) -> Option<&SyntaxReference> {
+        let p = std::path::Path::new(path);
+        let syntax = p
+            .extension()
+            .and_then(|e| e.to_str())
+            .and_then(|e| self.syntaxes.find_syntax_by_extension(e))
+            .or_else(|| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .and_then(|n| self.syntaxes.find_syntax_by_extension(n))
+            })
+            .or_else(|| self.syntax_for_alias(path))?;
+        if syntax.name == self.syntaxes.find_syntax_plain_text().name {
+            return None;
+        }
+        Some(syntax)
+    }
+
+    /// Tokenize one diff segment (a hunk's old or new side) with a fresh
+    /// `ParseState`, cached by (grammar, content) hash — diff text has no path
+    /// or mtime to key on. A hunk side is the largest contiguous run of one
+    /// side's lines, so line-stateful parsing is exact within the segment and
+    /// only approximate at its start (e.g. a hunk beginning mid-block-comment).
+    fn tokenize_segment_cached(&self, syntax: &SyntaxReference, segment: &str) -> Arc<Vec<Vec<Token>>> {
+        let key = {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            syntax.name.hash(&mut h);
+            0u8.hash(&mut h);
+            segment.hash(&mut h);
+            h.finish()
+        };
+        if let Some(hit) = self.diff_cache.lock().unwrap().get(&key).cloned() {
+            return hit;
+        }
+        // Tokenize outside the lock (same discipline as `load`).
+        let toks = Arc::new(self.tokenize_content(syntax, segment));
+        let mut cache = self.diff_cache.lock().unwrap();
+        if cache.len() >= DIFF_CACHE_MAX {
+            cache.clear();
+        }
+        cache.insert(key, toks.clone());
+        toks
+    }
+
+    /// The classed-run tokenizer body, shared by the file path (`tokenize`) and
+    /// the diff-segment path. Result rows are parallel to `content.lines()`.
+    fn tokenize_content(&self, syntax: &SyntaxReference, content: &str) -> Vec<Vec<Token>> {
         let mut state = ParseState::new(syntax);
         let mut stack = ScopeStack::new();
         let mut out: Vec<Vec<Token>> = Vec::new();
@@ -338,7 +405,7 @@ impl Highlighter {
             }
             out.push(tokens);
         }
-        Some(out)
+        out
     }
 
     /// Extension aliases the bundled grammars don't claim themselves. The TS/JS
@@ -584,6 +651,46 @@ pub fn open_doc(
     Ok(DocOpen { meta, lines })
 }
 
+/// Highlight request for one diff file: `path` picks the grammar (by name only —
+/// the file is never opened), `segments` carry one entry per (hunk, side) — the
+/// side's lines joined with '\n'.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffHighlightRequest {
+    pub path: String,
+    pub segments: Vec<String>,
+}
+
+/// `None` = no grammar / over the line cap → the frontend keeps plain text for
+/// this file permanently (it never re-requests). Serializes as `null` or
+/// `[segment][line][token]`.
+#[derive(Serialize)]
+pub struct DiffHighlight(pub Option<Vec<Arc<Vec<Vec<Token>>>>>);
+
+/// Tokenize a diff file's hunk segments into `.hljs-*` classed runs. Content-
+/// keyed (segment hash) rather than path+mtime — diff text isn't a file on
+/// disk. `(async)` is load-bearing: the syntect parse must not run on the
+/// WebView main thread.
+#[tauri::command(async)]
+pub fn highlight_diff(
+    req: DiffHighlightRequest,
+    hl: tauri::State<'_, Arc<Highlighter>>,
+) -> Result<DiffHighlight, String> {
+    let total: usize = req.segments.iter().map(|s| s.lines().count()).sum();
+    if total > MAX_DIFF_HIGHLIGHT_LINES {
+        return Ok(DiffHighlight(None));
+    }
+    let Some(syntax) = hl.syntax_for_diff_path(&req.path) else {
+        return Ok(DiffHighlight(None));
+    };
+    let out = req
+        .segments
+        .iter()
+        .map(|s| hl.tokenize_segment_cached(syntax, s))
+        .collect();
+    Ok(DiffHighlight(Some(out)))
+}
+
 /// Return display lines for `[start, end)` (clamped) — the paging path for docs
 /// too large to inline. Lines carry `tokens` when the doc is highlightable, else
 /// raw `text`. `(async)` so a first-window tokenize never lands on the main
@@ -769,6 +876,37 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].text.as_deref(), Some("b"));
         assert!(got[0].tokens.is_none());
+    }
+
+    #[test]
+    fn diff_segments_tokenize_parallel_to_lines_and_cache_by_content() {
+        let hl = Highlighter::new();
+        let syntax = hl
+            .syntax_for_diff_path("src/lib/foo.ts")
+            .expect("ts grammar by extension, no file I/O");
+
+        // Rows parallel to the segment's lines; classed runs present.
+        let seg = "const x: number = 1;\nconst y = \"s\";";
+        let toks = hl.tokenize_segment_cached(syntax, seg);
+        assert_eq!(toks.len(), 2);
+        assert!(toks.iter().flatten().any(|t| t.class.is_some()));
+
+        // Same (grammar, content) → the cached Arc, not a re-parse.
+        let again = hl.tokenize_segment_cached(syntax, seg);
+        assert!(Arc::ptr_eq(&toks, &again));
+
+        // Empty segment (e.g. an add-only hunk's old side) → zero rows.
+        assert!(hl.tokenize_segment_cached(syntax, "").is_empty());
+    }
+
+    #[test]
+    fn syntax_for_diff_path_never_touches_the_fs_and_rejects_unknown() {
+        let hl = Highlighter::new();
+        // Deleted/repo-relative paths must still resolve by extension alone.
+        assert!(hl.syntax_for_diff_path("gone/away/deleted.rs").is_some());
+        assert!(hl.syntax_for_diff_path("a/b.jsx").is_some(), "alias path");
+        assert!(hl.syntax_for_diff_path("notes.zzz").is_none());
+        assert!(hl.syntax_for_diff_path("no_extension").is_none());
     }
 
     #[test]

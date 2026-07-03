@@ -49,9 +49,11 @@ export function planExtensions(
   return [
     // StarterKit's bundled code block is swapped for `richCodeBlock()` —
     // CodeBlockLowlight + a NodeView for syntax highlighting and mermaid
-    // diagrams. The `codeBlock` node spec (name, `language` attr, `text*`
-    // content) is identical, so the schema and markdown round-trip are
-    // unaffected; only the rendering is richer.
+    // diagrams. The `codeBlock` node spec keeps the same name, `language` attr
+    // and `text*` content, and differs by exactly ONE field: it widens `marks`
+    // to permit the `rl_ins`/`rl_del` track-change marks so strike/delete works
+    // inside fenced blocks (the base spec's `marks: ''` silently dropped them).
+    // Additive and round-trip-safe — see the comment on `richCodeBlock()`.
     // StarterKit's inline `code` mark ships `excludes: '_'` (exclude ALL other
     // marks). That silently blocked the rl_ins/rl_del track-change marks from
     // ever attaching to inline code, so Backspace/Strike did nothing on the

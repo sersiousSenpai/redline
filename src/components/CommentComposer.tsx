@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import type {
   CommentScope,
   CommentType,
   NewCommentRequest,
 } from "../types";
+import { useAutoGrow } from "../hooks/useAutoGrow";
 import { AnchorPill } from "./AnchorPill";
 
 interface CommentComposerProps {
@@ -47,6 +48,18 @@ const TYPE_COLORS: Record<CommentType, string> = {
   "block-move": "var(--color-info)",
 };
 
+// Shared sizing for the auto-grown composer textareas: no manual resize handle
+// or inner scrollbar (the hook owns height), a `minEm`-line floor for breathing
+// room, and a viewport-relative cap past which the box finally scrolls.
+function growStyle(minEm: number): React.CSSProperties {
+  return {
+    resize: "none",
+    overflowY: "auto",
+    minHeight: `${minEm}em`,
+    maxHeight: "50vh",
+  };
+}
+
 export function CommentComposer({
   type,
   anchorId,
@@ -62,12 +75,21 @@ export function CommentComposer({
   const [scope, setScope] = useState<CommentScope>("local");
   const [revised, setRevised] = useState(presetRevised ?? selectedText);
   const [saving, setSaving] = useState(false);
-  const firstFieldRef = useRef<HTMLTextAreaElement | null>(null);
+  // Auto-grow the composer fields so a multi-line selection opens fully sized —
+  // no cramped inner scroll. `revisedRef` fits the "Revised" edit field to the
+  // highlighted text on mount; `bodyRef` grows whichever body/note field the
+  // active `type` renders. A `minHeight` floor gives short edits breathing room
+  // and a `maxHeight` cap keeps a huge selection from swallowing the pane.
+  const revisedRef = useAutoGrow<HTMLTextAreaElement>(revised);
+  const bodyRef = useAutoGrow<HTMLTextAreaElement>(body);
   // A cross-out: the composer was opened pre-set to delete the span.
   const isCrossOut = presetRevised === "";
 
   useEffect(() => {
-    firstFieldRef.current?.focus();
+    // The edit card focuses "Revised" (the highlighted text); the others focus
+    // their single body field.
+    (type === "edit" ? revisedRef.current : bodyRef.current)?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // An edit submits when the revised text differs from the original — including
@@ -167,29 +189,28 @@ export function CommentComposer({
           </div>
           <Label>{isCrossOut ? "Revised (empty = delete)" : "Revised"}</Label>
           <textarea
-            ref={firstFieldRef}
+            ref={revisedRef}
             value={revised}
             onChange={(e) => setRevised(e.target.value)}
-            rows={3}
             className="w-full font-serif rounded-sm border px-2 py-1"
             style={{
               borderColor: "var(--color-rule)",
               fontSize: "13px",
               lineHeight: 1.4,
-              resize: "vertical",
+              ...growStyle(4.5),
             }}
           />
           <Label className="mt-2">Note (optional)</Label>
           <textarea
+            ref={bodyRef}
             value={body}
             onChange={(e) => setBody(e.target.value)}
-            rows={2}
             placeholder="Optional context for the editor"
             className="w-full rounded-sm border px-2 py-1"
             style={{
               borderColor: "var(--color-rule)",
               fontSize: "12px",
-              resize: "vertical",
+              ...growStyle(2.4),
             }}
           />
         </div>
@@ -212,17 +233,16 @@ export function CommentComposer({
             />
           </div>
           <textarea
-            ref={firstFieldRef}
+            ref={bodyRef}
             value={body}
             onChange={(e) => setBody(e.target.value)}
-            rows={4}
             placeholder="What's the feedback?"
             className="w-full rounded-sm border px-2 py-1"
             style={{
               borderColor: "var(--color-rule)",
               fontSize: "13px",
               lineHeight: 1.4,
-              resize: "vertical",
+              ...growStyle(4.5),
             }}
           />
         </div>
@@ -231,17 +251,16 @@ export function CommentComposer({
       {type === "question" && (
         <div className="mb-2">
           <textarea
-            ref={firstFieldRef}
+            ref={bodyRef}
             value={body}
             onChange={(e) => setBody(e.target.value)}
-            rows={3}
             placeholder="What do you want to ask?"
             className="w-full rounded-sm border px-2 py-1"
             style={{
               borderColor: "var(--color-rule)",
               fontSize: "13px",
               lineHeight: 1.4,
-              resize: "vertical",
+              ...growStyle(3.6),
             }}
           />
         </div>

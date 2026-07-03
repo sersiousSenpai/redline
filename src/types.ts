@@ -520,3 +520,379 @@ export interface MissionErrorEvent {
 export interface MissionCancelledEvent {
   missionId: string;
 }
+
+/** A Linked discussion: ONE continuous conversation that follows the user across
+ *  every browser tab (no goal, unlike a Mission). Mirrors the Rust `Linked`; the
+ *  resumable session lives backend-side. */
+export interface Linked {
+  linkedId: string;
+  title: string;
+  /** "active" | "archived". */
+  status: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** One persisted turn in a linked discussion. Mirrors the Rust `LinkedMessage`.
+ *  Each turn is tab-tagged (`tab*`) with the tab the user was on at the time, so
+ *  the UI can show "on tab N — Title" per message. */
+export interface LinkedMessage {
+  id: string;
+  linkedId: string;
+  /** "user" | "assistant". */
+  role: string;
+  body: string;
+  /** "complete" | "error". */
+  status: string;
+  tabBrowseId: string | null;
+  tabN: number | null;
+  tabTitle: string | null;
+  tabUrl: string | null;
+  createdAt: number;
+}
+
+/** A chunk of streaming linked-discussion text. */
+export interface LinkedDeltaEvent {
+  linkedId: string;
+  text: string;
+}
+
+/** A linked turn finished — `body` is the authoritative full reply. */
+export interface LinkedDoneEvent {
+  linkedId: string;
+  messageId: string;
+  body: string;
+}
+
+/** A linked turn failed; `error` is also persisted as a terminal row. */
+export interface LinkedErrorEvent {
+  linkedId: string;
+  error: string;
+}
+
+/** A linked turn was cancelled — nothing was persisted for it. */
+export interface LinkedCancelledEvent {
+  linkedId: string;
+}
+
+// ── Loop Orchestrator ──────────────────────────────────────────────────────
+// A tier above a single plan approval: the Loop Orchestrator decomposes an
+// approved plan into a DAG of subtasks and drives each to completion in its own
+// git worktree (planner → executor → reviewer), pausing at held checkpoints
+// (merge / land / stuck / destructive) for the reviewer. Mirrors the Rust
+// `loop_*` command family; the run's sessions live backend-side.
+
+/** One orchestrated run over an approved plan. Mirrors the Rust `LoopRun`. */
+export interface LoopRun {
+  runId: string;
+  sessionId: string;
+  title: string;
+  planMd: string;
+  repoPath: string;
+  baseRef: string;
+  integrationBranch: string;
+  /** planning | running | paused_checkpoint | review | done | failed | cancelled. */
+  status:
+    | "planning"
+    | "running"
+    | "paused_checkpoint"
+    | "review"
+    | "done"
+    | "failed"
+    | "cancelled";
+  plannerSessionId?: string | null;
+  maxParallel: number;
+  maxAttempts: number;
+  turnBudget: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** One node in a run's DAG — an isolated unit of work in its own worktree.
+ *  `deps` are the subtaskIds that must merge first. Mirrors `LoopSubtask`. */
+export interface LoopSubtask {
+  subtaskId: string;
+  runId: string;
+  seq: number;
+  title: string;
+  instructions: string;
+  rubric: string;
+  deps: string[];
+  touchedPaths: string[];
+  /** pending | blocked | running | reviewing | needs_changes | awaiting_merge
+   *  | merged | stuck | failed | skipped. */
+  status:
+    | "pending"
+    | "blocked"
+    | "running"
+    | "reviewing"
+    | "needs_changes"
+    | "awaiting_merge"
+    | "merged"
+    | "stuck"
+    | "failed"
+    | "skipped";
+  branch?: string | null;
+  worktreePath?: string | null;
+  attempts: number;
+  executorSessionId?: string | null;
+  irreversible: boolean;
+}
+
+/** One executor or reviewer pass at a subtask. Mirrors `LoopAttempt`. */
+export interface LoopAttempt {
+  attemptId: string;
+  subtaskId: string;
+  attemptNo: number;
+  role: "executor" | "reviewer";
+  status: string;
+  verdict?: "pass" | "fail" | null;
+  score?: number | null;
+  feedback?: string | null;
+  diffStat?: string | null;
+  claudeSessionId?: string | null;
+  createdAt: number;
+}
+
+/** A held gate the reviewer must decide before the run proceeds. Mirrors
+ *  `LoopCheckpoint`. `decisionJson` carries kind-specific detail (e.g. a diff
+ *  stat) as an opaque JSON blob. */
+export interface LoopCheckpoint {
+  checkpointId: string;
+  runId: string;
+  subtaskId?: string | null;
+  /** merge | subtask_stuck | land | destructive | plan_approval. */
+  kind: "merge" | "subtask_stuck" | "land" | "destructive" | "plan_approval";
+  summary: string;
+  decisionJson?: string | null;
+  /** pending | approved | denied | expired. */
+  status: "pending" | "approved" | "denied" | "expired";
+  createdAt: number;
+  decidedAt?: number | null;
+}
+
+/** An append-only trace row for a run (planner/executor/reviewer artifacts).
+ *  Mirrors `LoopTrace`. */
+export interface LoopTrace {
+  id: string;
+  runId: string;
+  subtaskId?: string | null;
+  attemptId?: string | null;
+  kind: string;
+  body: string;
+  createdAt: number;
+}
+
+/** A full run snapshot: the run plus its subtasks and checkpoints. Returned by
+ *  `loop_get`. */
+export interface LoopSnapshot {
+  run: LoopRun;
+  subtasks: LoopSubtask[];
+  checkpoints: LoopCheckpoint[];
+}
+
+/** A chunk of streaming text from one of a run's agents. `subtaskId` scopes it
+ *  to a subtask transcript (absent for run-level planner chatter). */
+export interface LoopDeltaEvent {
+  runId: string;
+  subtaskId?: string;
+  role: "planner" | "executor" | "reviewer";
+  text: string;
+}
+
+/** A subtask changed state — the payload is the full authoritative subtask,
+ *  replaced in the list by `subtaskId`. */
+export type LoopSubtaskStatusEvent = LoopSubtask;
+
+/** A run changed top-level state. */
+export interface LoopRunStatusEvent {
+  runId: string;
+  status: LoopRun["status"];
+}
+
+/** A new held checkpoint opened — the payload is the full checkpoint. */
+export type LoopCheckpointEvent = LoopCheckpoint;
+
+/** A run reached a terminal state. */
+export interface LoopDoneEvent {
+  runId: string;
+  status: LoopRun["status"];
+}
+
+/** A run errored. */
+export interface LoopErrorEvent {
+  runId: string;
+  error: string;
+}
+
+/** Periodic "still working" pulse for an in-flight turn: `elapsedMs` is how long
+ *  the turn has run, and the event's arrival proves the turn is alive. Scoped to
+ *  a subtask by `subtaskId` (absent for the run-level planner turn). */
+export interface LoopHeartbeatEvent {
+  runId: string;
+  subtaskId?: string;
+  role: "planner" | "executor" | "reviewer";
+  elapsedMs: number;
+}
+
+// --- Code Review surface (mirrors src-tauri/src/review.rs + state.rs) --------
+
+/** Which diff the reviewer is looking at. `vsBase`/`commitSha` carry their ref
+ *  in the separate `base`/`sha` args of the `review_diff` command. */
+export type DiffSource =
+  | "uncommitted"
+  | "staged"
+  | "unstagedPlusUntracked"
+  | "lastCommit"
+  | "vsBase"
+  | "commitSha";
+
+export type DiffLineKind = "context" | "add" | "del";
+
+export type DiffFileStatus = "added" | "modified" | "deleted" | "renamed" | "binary";
+
+/** One diff line; text carries NO leading +/-/space sign. Line numbers are
+ *  per-side: added lines have no `oldLine`, deleted lines no `newLine`. */
+export interface DiffLine {
+  kind: DiffLineKind;
+  oldLine: number | null;
+  newLine: number | null;
+  text: string;
+}
+
+export interface DiffHunk {
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  /** The `@@ … @@` trailer (enclosing context), possibly empty. */
+  header: string;
+  lines: DiffLine[];
+}
+
+export interface DiffFile {
+  oldPath: string;
+  newPath: string;
+  status: DiffFileStatus;
+  binary: boolean;
+  hunks: DiffHunk[];
+}
+
+/** Full-file contents for context expansion (`review_file_contents`). A side
+ *  is null when it doesn't exist there (added/deleted), is binary, or the
+ *  ref/path couldn't resolve. */
+export interface ReviewFileContents {
+  oldLines: string[] | null;
+  newLines: string[] | null;
+}
+
+/** Branch names for the vsBase picker (`review_branches`). */
+export interface ReviewBranches {
+  local: string[];
+  remote: string[];
+  head: string | null;
+}
+
+/** One row of the commit picker (`review_commits`). */
+export interface ReviewCommit {
+  sha: string;
+  shortSha: string;
+  subject: string;
+  author: string;
+  committedAt: number;
+}
+
+/** One code-review session — the diff-review analog of a plan session.
+ *  `round` increments on each Submit → agent-fix → re-review cycle. */
+export interface CodeReviewSession {
+  reviewId: string;
+  repoPath: string;
+  source: DiffSource;
+  baseRef?: string;
+  commitSha?: string;
+  terminalId?: string;
+  round: number;
+  createdAt: number;
+}
+
+export type ReviewAnnotationKind = "comment" | "deletion" | "suggestion";
+
+export type ReviewAnnotationStatus = "draft" | "submitted" | "carried" | "orphaned";
+
+/** What an annotation anchors to: a line range, a whole file, or the whole
+ *  change. File scope keeps `filePath` with zeroed lines; general also has an
+ *  empty `filePath`. */
+export type ReviewAnnotationScope = "line" | "file" | "general";
+
+/** Conventional-comment labels (serializer-whitelisted). */
+export type ReviewLabel =
+  | "praise"
+  | "nitpick"
+  | "suggestion"
+  | "issue"
+  | "todo"
+  | "question"
+  | "thought"
+  | "chore"
+  | "note"
+  | "typo"
+  | "polish";
+
+export type ReviewBlocking = "blocking" | "non-blocking" | "if-minor";
+
+/** One annotation on a review diff. For line scope, `quotedText` (the
+ *  selected lines' verbatim text) is the durable anchor that re-locates
+ *  across rounds; `startLine`/`endLine` are a hint into one round's diff. */
+export interface ReviewAnnotation {
+  id: string;
+  reviewId: string;
+  round: number;
+  filePath: string;
+  side: "old" | "new";
+  startLine: number;
+  endLine: number;
+  kind: ReviewAnnotationKind;
+  body: string;
+  suggestionReplacement?: string;
+  quotedText: string;
+  status: ReviewAnnotationStatus;
+  resolution?: string;
+  createdAt: number;
+  scope: ReviewAnnotationScope;
+  label?: ReviewLabel;
+  blocking?: ReviewBlocking;
+  /** "user" | "ai" | an external tool's source tag. */
+  source: string;
+}
+
+/** An Ask-AI question about a diff selection — the reviewer's private
+ *  consultation. Never serialized into the feedback payload; not carried
+ *  across rounds. Its thread lives under `(reviewId, ask-NNN)`. */
+export interface ReviewQuestion {
+  id: string;
+  reviewId: string;
+  filePath: string;
+  side: "old" | "new";
+  startLine: number;
+  endLine: number;
+  quotedText: string;
+  createdAt: number;
+}
+
+/** AI pre-review streaming events. */
+export interface AiReviewLogEvent {
+  reviewId: string;
+  text: string;
+}
+export interface AiReviewDoneEvent {
+  reviewId: string;
+  added: number;
+  important: number;
+  nits: number;
+  preExisting: number;
+}
+export interface AiReviewErrorEvent {
+  reviewId: string;
+  error: string;
+  cancelled: boolean;
+}

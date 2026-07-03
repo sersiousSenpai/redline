@@ -1,27 +1,37 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 mod agent;
+mod ai_review;
 mod browse;
+#[cfg(target_os = "macos")]
+mod browser_popup;
 mod claude_proc;
+mod code;
 mod db;
 mod dictation;
+mod dictation_whisper;
 mod feedback;
 mod fork;
 mod fsbrowse;
 mod fswatch;
 mod highlight;
 mod hook;
+mod linked;
+mod looporch;
 mod mission;
 mod parser;
 #[cfg(test)]
 mod perf_guard;
 mod pty;
 mod resolutions;
+mod review;
+mod review_feedback;
 mod skill;
 mod state;
 mod tts;
 mod update;
 mod voice;
+mod worktree;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -54,7 +64,8 @@ use crate::hook::HookStatus;
 use crate::skill::SkillStatus;
 use crate::state::{
     now_millis, AttachState, Comment, InterceptionMode, NewCommentRequest, ReviewSession,
-    SessionStatus, SessionStore, SessionSummary, SubmissionMode, UpdateCommentRequest,
+    SessionStatus, SessionStore, SessionSummary, SourceFeedback, SubmissionMode,
+    UpdateCommentRequest,
 };
 
 const SETTING_MODE: &str = "interception_mode";
@@ -302,6 +313,92 @@ impl PendingResponses {
     }
 }
 
+/// One held code-review curl (`GET /v1/reviews/start`): the oneshot that will
+/// carry the serialized feedback payload back as the response body, plus the
+/// registration token that lets the drop-guard remove only its own entry.
+/// The review analog of `PendingEntry` — answering plain text, keyed by
+/// `review_id`, no terminal strip (the review pane itself is the indicator).
+struct PendingReviewEntry {
+    token: u64,
+    tx: oneshot::Sender<String>,
+}
+
+#[derive(Clone)]
+struct PendingReviews {
+    map: Arc<StdMutex<HashMap<String, PendingReviewEntry>>>,
+    next_token: Arc<AtomicU64>,
+}
+
+impl PendingReviews {
+    fn new() -> Self {
+        Self {
+            map: Arc::new(StdMutex::new(HashMap::new())),
+            next_token: Arc::new(AtomicU64::new(1)),
+        }
+    }
+    /// Register a held review curl. A stale entry for the same review (an
+    /// earlier `/redline-review` the agent abandoned or re-ran) is released
+    /// with a benign superseded message rather than left hanging.
+    fn register(&self, review_id: &str) -> (oneshot::Receiver<String>, u64) {
+        let mut map = self.map.lock().unwrap();
+        if let Some(stale) = map.remove(review_id) {
+            tracing::warn!(review_id = %review_id, "superseding a stale held review curl");
+            let _ = stale
+                .tx
+                .send("Superseded by a newer /redline-review from the same repo.".to_string());
+        }
+        let token = self.next_token.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = oneshot::channel();
+        map.insert(review_id.to_string(), PendingReviewEntry { token, tx });
+        (rx, token)
+    }
+    fn take(&self, review_id: &str) -> Option<oneshot::Sender<String>> {
+        self.map.lock().unwrap().remove(review_id).map(|e| e.tx)
+    }
+    /// Drop-guard removal: only if this registration still owns the slot.
+    fn take_if_owned(&self, review_id: &str, token: u64) -> Option<oneshot::Sender<String>> {
+        let mut map = self.map.lock().unwrap();
+        match map.get(review_id) {
+            Some(e) if e.token == token => map.remove(review_id).map(|e| e.tx),
+            _ => None,
+        }
+    }
+    /// A curl is currently held for this review (Submit will answer it live).
+    fn has(&self, review_id: &str) -> bool {
+        self.map.lock().unwrap().contains_key(review_id)
+    }
+}
+
+/// Held for the lifetime of a `handle_review_start` await; on drop (curl
+/// cancelled, cap fired, response sent) it clears its own registration and
+/// tells the UI the hold ended so the pane leaves "submit will reply" mode.
+struct ReviewDetachGuard {
+    pending: PendingReviews,
+    app_handle: AppHandle,
+    review_id: String,
+    token: u64,
+}
+
+impl Drop for ReviewDetachGuard {
+    fn drop(&mut self) {
+        if self
+            .pending
+            .take_if_owned(&self.review_id, self.token)
+            .is_some()
+        {
+            tracing::info!(review_id = %self.review_id, "held review curl detached before a decision");
+        }
+        // Emitted unconditionally: whether answered, cancelled, or capped, the
+        // hold is over — the frontend re-checks `review_hold_active`.
+        let _ = self.app_handle.emit(
+            "review-released",
+            ReviewReleasedEvent {
+                review_id: self.review_id.clone(),
+            },
+        );
+    }
+}
+
 /// Held for the lifetime of a `handle_plan` await. On drop it removes the
 /// session's pending sender *iff it is still our own* (`take_if_owned`). A hit
 /// means the future was cancelled — the held POST's connection dropped (hook
@@ -356,6 +453,9 @@ impl Drop for DetachGuard {
 /// → derived `detached`) has real state to pick up.
 fn mark_session_detached(app: &AppHandle, store: &SessionStore, session_id: &str) {
     store.set_attach_state(session_id, AttachState::Detached);
+    // The claude process behind this session is gone (or unverifiable); drop its
+    // stale pid so a later, unrelated process can't be mistaken for it.
+    app.state::<LastClaudePid>().clear(session_id);
     let _ = app.emit(
         "session-detached",
         SessionEvent {
@@ -481,45 +581,167 @@ impl ReviseWatch {
     }
 }
 
+/// The OS process behind a session's held POST — the long-lived `claude`/node
+/// process that opened the hook connection. Captured on every plan POST and
+/// probed by the revise watchdog: a live process means Claude is busy (or
+/// blocked on a tool-permission prompt), not gone, so we must not declare it
+/// detached just because a fresh plan hasn't arrived yet.
+#[derive(Clone)]
+struct ClaudeProc {
+    pid: u32,
+    /// `ps -o comm=` snapshot at capture time. Compared verbatim at probe time
+    /// so a reused pid now running something else reads as dead (we never parse
+    /// it — only test equality — so full-path vs basename doesn't matter).
+    comm: String,
+}
+
+impl ClaudeProc {
+    /// Alive iff a process with this pid exists *and* its command still matches
+    /// what we captured (guards pid reuse). `comm_of` is injected for testing.
+    fn is_alive_with(&self, comm_of: impl FnOnce(u32) -> Option<String>) -> bool {
+        comm_of(self.pid).is_some_and(|c| c == self.comm)
+    }
+    fn is_alive(&self) -> bool {
+        self.is_alive_with(current_comm)
+    }
+}
+
+/// `ps -p <pid> -o comm=` — `None` when no such process (dead) or the output is
+/// empty. One call yields both liveness and identity (for the reuse guard),
+/// and shells out like the neighbouring `ppid_of`, so no new dependency.
+fn current_comm(pid: u32) -> Option<String> {
+    let out = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!s.is_empty()).then_some(s)
+}
+
+/// Per-session record of the claude process behind the most recent plan POST.
+/// In-memory (not persisted): a pid is only meaningful within one app-process
+/// lifetime, and the watchdog task that reads it never survives a restart, so a
+/// persisted pid would only risk matching a reused pid after relaunch. Refreshed
+/// on every POST in `handle_plan`.
+#[derive(Clone, Default)]
+struct LastClaudePid(Arc<StdMutex<HashMap<String, ClaudeProc>>>);
+
+impl LastClaudePid {
+    fn set(&self, session_id: &str, proc: ClaudeProc) {
+        self.0.lock().unwrap().insert(session_id.to_string(), proc);
+    }
+    fn get(&self, session_id: &str) -> Option<ClaudeProc> {
+        self.0.lock().unwrap().get(session_id).cloned()
+    }
+    fn clear(&self, session_id: &str) {
+        self.0.lock().unwrap().remove(session_id);
+    }
+}
+
+/// What the revise watchdog should do when it wakes — extracted as a pure
+/// function so the decision table is testable without 90s sleeps. `liveness` is
+/// `None` when no pid was ever captured (lsof failed / unresolvable), in which
+/// case we fall back to the original blind-timer detach.
+#[derive(Debug, PartialEq, Eq)]
+enum WatchdogStep {
+    Stop,
+    ReArm,
+    Detach,
+}
+
+fn watchdog_step(
+    has_plan: bool,
+    gen_ok: bool,
+    in_review: bool,
+    liveness: Option<bool>,
+) -> WatchdogStep {
+    if has_plan || !gen_ok || !in_review {
+        // A fresh plan landed, a newer revise superseded us, or the session was
+        // approved/closed — nothing left to recover.
+        return WatchdogStep::Stop;
+    }
+    match liveness {
+        // Claude is alive: busy re-planning, or blocked on a permission prompt.
+        // Keep watching so we still recover if it later dies.
+        Some(true) => WatchdogStep::ReArm,
+        // Dead, or pid never captured — the feedback was lost.
+        Some(false) | None => WatchdogStep::Detach,
+    }
+}
+
 /// Safety net for a revise whose feedback was delivered into a held POST that
 /// Claude had already abandoned: spawn a task that, after `REVISE_WATCHDOG`,
 /// checks whether Claude actually picked the feedback up. "Picked up" means
 /// either a fresh plan is now held for the session (`pending.has`) or a newer
 /// revise has since been submitted (generation advanced). If neither — and the
-/// session is still in review (not approved/closed in the meantime) — the
-/// feedback was lost, so reconcile to `Detached` and surface the Restore
-/// affordance. A late plan that *does* eventually arrive re-registers as `Held`
-/// and clears the derived detached state, so flipping here is self-correcting.
+/// session is still in review (not approved/closed in the meantime) — we probe
+/// whether the session's `claude` process is still alive: if it is, Claude is
+/// merely busy or blocked on a tool-permission prompt (the daemon can't see the
+/// prompt — it never parses the terminal), so we re-arm and keep watching
+/// rather than falsely declaring the session dead. Only when the process is gone
+/// (or was never captured) is the feedback truly lost — then reconcile to
+/// `Detached` and surface the Restore affordance. A late plan that *does*
+/// eventually arrive re-registers as `Held` and clears the derived detached
+/// state, so flipping here is self-correcting.
 fn arm_revise_watchdog(
     app: AppHandle,
     store: SessionStore,
     pending: PendingResponses,
     revise_watch: ReviseWatch,
+    last_pid: LastClaudePid,
     session_id: String,
 ) {
     let armed_gen = revise_watch.bump(&session_id);
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(REVISE_WATCHDOG).await;
-        // Claude re-planned (a new POST is held) — feedback landed.
-        if pending.has(&session_id) {
-            return;
+        loop {
+            tokio::time::sleep(REVISE_WATCHDOG).await;
+
+            let has_plan = pending.has(&session_id);
+            let gen_ok = revise_watch.current(&session_id) == armed_gen;
+            let in_review = matches!(
+                store.get(&session_id).map(|s| s.status),
+                Some(SessionStatus::InReview)
+            );
+            // Only probe the process when the cheap checks haven't already
+            // settled it — keeps a single `ps` per live, still-waiting session.
+            let liveness = if has_plan || !gen_ok || !in_review {
+                None
+            } else if let Some(proc) = last_pid.get(&session_id) {
+                Some(
+                    tokio::task::spawn_blocking(move || proc.is_alive())
+                        .await
+                        .unwrap_or(false),
+                )
+            } else {
+                None
+            };
+
+            match watchdog_step(has_plan, gen_ok, in_review, liveness) {
+                WatchdogStep::Stop => return,
+                WatchdogStep::ReArm => {
+                    // Alive: busy re-planning or blocked on a permission prompt.
+                    // Sleep another window; we'll detach if it later dies.
+                    tracing::debug!(
+                        session_id = %session_id,
+                        "revise watchdog: claude still alive (busy or blocked on a \
+                         permission prompt) — re-arming"
+                    );
+                    continue;
+                }
+                WatchdogStep::Detach => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        "revise watchdog: no new plan and claude not alive — feedback \
+                         likely lost, marking detached"
+                    );
+                    mark_session_detached(&app, &store, &session_id);
+                    return;
+                }
+            }
         }
-        // A newer revise superseded this one — its own watchdog now owns the wait.
-        if revise_watch.current(&session_id) != armed_gen {
-            return;
-        }
-        // Approved or otherwise resolved since the revise — nothing to recover.
-        if !matches!(
-            store.get(&session_id).map(|s| s.status),
-            Some(SessionStatus::InReview)
-        ) {
-            return;
-        }
-        tracing::warn!(
-            session_id = %session_id,
-            "revise watchdog: no new plan within window — feedback likely lost, marking detached"
-        );
-        mark_session_detached(&app, &store, &session_id);
     });
 }
 
@@ -548,6 +770,8 @@ struct AppState {
     store: SessionStore,
     app_handle: AppHandle,
     pending: PendingResponses,
+    /// Held code-review curls (`/v1/reviews/start`), keyed by review id.
+    pending_reviews: PendingReviews,
     expected_modes: ExpectedModes,
     /// Out-of-band feedback bodies served by `GET /v1/sessions/:id/feedback`,
     /// so the denied `ExitPlanMode` reason stays a single calm line. See
@@ -1039,16 +1263,26 @@ async fn handle_plan(
     // when the POST came from an external terminal (or resolution fails) —
     // then no dock tab shows the "plan intercepted" strip, by design. The
     // lsof/ps shell-outs block, so hop off the async runtime for them.
-    let held_terminal_id = {
+    let (held_terminal_id, claude_proc) = {
         let pty_state: pty::PtyState = (*app_state.app_handle.state::<pty::PtyState>()).clone();
         let peer_port = peer.port();
         tokio::task::spawn_blocking(move || {
-            pty::terminal_for_client_port(&pty_state, peer_port)
+            let (pid, terminal) = pty::client_pid_and_terminal_for_port(&pty_state, peer_port);
+            // Snapshot the process identity now (off-runtime), so the revise
+            // watchdog can later tell "Claude busy/blocked" from "Claude gone".
+            let proc = pid.and_then(|p| current_comm(p).map(|comm| ClaudeProc { pid: p, comm }));
+            (terminal, proc)
         })
         .await
         .ok()
-        .flatten()
+        .unwrap_or((None, None))
     };
+    if let Some(proc) = claude_proc {
+        app_state
+            .app_handle
+            .state::<LastClaudePid>()
+            .set(&session_id, proc);
+    }
 
     // This POST is about to be held — record it before the event goes out so
     // the listener's summary refresh already sees Held (clearing any stale
@@ -1214,6 +1448,40 @@ async fn run_server(state: AppState) {
         // reaches the tabs themselves through the `/v1/browser/*` routes above.
         .route("/v1/mission/active", get(handle_mission_active))
         .route("/v1/mission/findings", get(handle_mission_findings))
+        // Linked discussion (browser pane): the "check in with a colleague" seam.
+        // The linked agent POSTs here to run a tab's own browse agent for a
+        // synthesized digest, keeping that tab's heavy thread out of its context.
+        .route("/v1/linked/consult", post(handle_linked_consult))
+        // Loop Orchestrator: the executor/reviewer agents curl these from inside
+        // their worktrees. `Bash(curl -s http://127.0.0.1:7676/*)` is already
+        // hook-authorized, and the executor runs under `bypassPermissions`.
+        .route("/v1/loop/subtask", get(handle_loop_subtask))
+        .route("/v1/loop/rubric", get(handle_loop_rubric))
+        .route(
+            "/v1/loop/state",
+            get(handle_loop_state_get).post(handle_loop_state_set),
+        )
+        .route("/v1/loop/run", get(handle_loop_run))
+        .route("/v1/loop/feedback", get(handle_loop_feedback))
+        // Code access (browse agent): read-only. `/projects` is the agent's map
+        // of the user's known project folders; `/git` runs a whitelisted set of
+        // read-only git ops (status/branch/log/diff/show) in one of them, so the
+        // agent can "check our local branch" without fighting the Bash sandbox.
+        // Both ride the same pre-authorized `curl` allow as `/v1/browser/*`.
+        .route("/v1/code/projects", get(handle_code_projects))
+        .route("/v1/code/git", get(handle_code_git))
+        // Code Review surface: the `/redline-review` skill's blocking curl.
+        // Captures the diff, opens the review pane, and HOLDS the response
+        // until the reviewer submits — the plan-review hold applied to code.
+        .route("/v1/reviews/start", get(handle_review_start))
+        // External annotations: local tools read/post findings into a live
+        // review (see the handler block's security notes).
+        .route(
+            "/v1/reviews/annotations",
+            get(handle_review_annotations_list)
+                .post(handle_review_annotations_add)
+                .delete(handle_review_annotations_clear),
+        )
         .with_state(state);
     match tokio::net::TcpListener::bind("127.0.0.1:7676").await {
         Ok(listener) => {
@@ -1883,6 +2151,677 @@ async fn handle_mission_findings(State(app_state): State<AppState>) -> axum::res
         }
         Err(e) => browser_error_response(format!("failed to load findings: {e}")),
     }
+}
+
+#[derive(Deserialize)]
+struct ConsultReq {
+    /// Tab selector — a 1-based tab number (from `/v1/browser/tabs`), id, or
+    /// label. Absent → the active tab.
+    tab: Option<String>,
+    question: String,
+}
+
+/// `POST /v1/linked/consult` — the linked discussion "checks in with a
+/// colleague". Runs the selected tab's OWN browse agent (which already holds
+/// that tab's full thread) with a synthesis-framed question and returns only its
+/// digest: `{digest, n, title}`. This is the map-reduce seam that lets one
+/// conversation span many tabs without the linked agent re-deriving each tab's
+/// heavy context itself. Blocks for the turn (bounded by `BrowseState::consult`'s
+/// timeout); a busy tab returns a 502 the agent surfaces and retries.
+async fn handle_linked_consult(
+    State(app_state): State<AppState>,
+    Json(req): Json<ConsultReq>,
+) -> axum::response::Response {
+    if req.question.trim().is_empty() {
+        return browser_error_response("consult needs a question");
+    }
+    let browse_id = match resolve_browse_id(&app_state, req.tab.clone()) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    // Grounding snapshot for the colleague's first turn (best-effort from cache;
+    // the colleague can /snapshot itself if there's none).
+    let snapshot = match resolve_label_any(&app_state, req.tab.clone()) {
+        Ok(label) => app_state.snapshot_cache.get(&label).map(|s| s.json),
+        Err(_) => None,
+    };
+    // The tab's number + title for the response envelope, so the linked agent can
+    // attribute the digest ("tab 2 — Example").
+    let (n, title) = app_state
+        .browser_tabs
+        .get()
+        .into_iter()
+        .enumerate()
+        .find(|(_, t)| t.browse_id == browse_id)
+        .map(|(i, t)| (Some(i as i64 + 1), t.title))
+        .unwrap_or((None, String::new()));
+
+    let browse = app_state
+        .app_handle
+        .state::<browse::BrowseState>()
+        .inner()
+        .clone();
+    match browse
+        .consult(
+            app_state.app_handle.clone(),
+            browse_id,
+            req.question,
+            snapshot,
+        )
+        .await
+    {
+        Ok(digest) => Json(serde_json::json!({
+            "digest": digest,
+            "n": n,
+            "title": title,
+        }))
+        .into_response(),
+        Err(e) => browser_error_response(e),
+    }
+}
+
+// --- Loop Orchestrator daemon routes ---------------------------------------
+
+#[derive(Deserialize)]
+struct LoopIdQ {
+    id: Option<String>,
+}
+
+/// Query for `GET /v1/code/git`. `ref` is a reserved word, so it's carried as
+/// `git_ref` with a serde rename.
+#[derive(Deserialize)]
+struct CodeGitQ {
+    repo: Option<String>,
+    op: Option<String>,
+    n: Option<u32>,
+    #[serde(rename = "ref")]
+    git_ref: Option<String>,
+    base: Option<String>,
+    file: Option<String>,
+    stat: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct LoopStateQ {
+    run: Option<String>,
+    scope: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct LoopStateBody {
+    run: String,
+    scope: String,
+    key: String,
+    value: Value,
+}
+
+/// `GET /v1/loop/subtask?id=<subtask_id>` — the executor's contract (title,
+/// instructions, rubric, worktree, attempt, branch). The executor is told its
+/// own id in its prompt so it knows what to fetch.
+async fn handle_loop_subtask(
+    State(app_state): State<AppState>,
+    Query(q): Query<LoopIdQ>,
+) -> axum::response::Response {
+    let Some(id) = q.id.filter(|s| !s.trim().is_empty()) else {
+        return browser_error_response("missing ?id=".to_string());
+    };
+    let engine = app_state.app_handle.state::<looporch::LoopState>();
+    match engine.subtask(&id) {
+        Some(s) => Json(serde_json::json!({
+            "subtaskId": s.subtask_id,
+            "runId": s.run_id,
+            "title": s.title,
+            "instructions": s.instructions,
+            "rubric": s.rubric,
+            "touchedPaths": s.touched_paths,
+            "worktreePath": s.worktree_path,
+            "branch": s.branch,
+            "attemptNo": s.attempts,
+            "status": s.status,
+        }))
+        .into_response(),
+        None => browser_error_response(format!("no subtask `{id}`")),
+    }
+}
+
+/// `GET /v1/code/projects` — the browse agent's map of the user's known
+/// projects (path, name, is_git, current branch), most-recent first. Read-only.
+/// A code review is being requested by a held curl — the frontend opens the
+/// review pane on this repo/source and enters "submit answers the agent" mode.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ReviewRequestedEvent {
+    review_id: String,
+    repo_path: String,
+    source: String,
+    round: i64,
+}
+
+/// A held review curl ended (answered, dismissed, capped, or cancelled).
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ReviewReleasedEvent {
+    review_id: String,
+}
+
+#[derive(Deserialize)]
+struct ReviewStartQ {
+    repo: Option<String>,
+    source: Option<String>,
+    base: Option<String>,
+    sha: Option<String>,
+}
+
+/// Server-side cap on a held review curl. Deliberately just under Claude
+/// Code's 10-minute Bash-tool ceiling (the skill asks for `timeout: 600000`):
+/// the agent then receives our calm "still reviewing — re-run when ready"
+/// line as the curl's output instead of a Bash timeout error killing the
+/// call mid-flight. An abandoned review can also always be Dismissed.
+const REVIEW_HOLD_CAP: Duration = Duration::from_secs(9 * 60 + 20);
+
+/// `GET /v1/reviews/start?repo=<path>&source=<tag>[&base=][&sha=]` — the
+/// blocking entry of the code-review loop:
+/// resolve + parse the diff (empty → answer immediately, never hold); bump
+/// the review round and re-anchor prior annotations onto the new diff; bind
+/// the review to the dock terminal whose claude sent it; tell the UI to open
+/// the pane; then HOLD until `submit_review_feedback` / `dismiss_review`
+/// resolves the oneshot (or the cap fires). The resolved string is the curl's
+/// stdout — the same session addresses it, exactly like a plan revise.
+async fn handle_review_start(
+    State(app_state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Query(q): Query<ReviewStartQ>,
+) -> axum::response::Response {
+    let db = app_state.store.database();
+    let repo = q.repo.as_deref().unwrap_or("").trim().to_string();
+    if repo.is_empty() {
+        return (StatusCode::BAD_REQUEST, "missing ?repo= (pass $PWD)").into_response();
+    }
+    let source = match review::parse_source_tag(q.source.as_deref().unwrap_or("uncommitted")) {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    let base = q.base.as_deref().filter(|s| !s.trim().is_empty());
+    let sha = q.sha.as_deref().filter(|s| !s.trim().is_empty());
+
+    // Capture the diff. Empty → answer immediately; never open a blocking
+    // review over nothing.
+    let (repo_canon, files) = match review::resolve_for_route(&db, &repo, source, base, sha).await
+    {
+        Ok(pair) => pair,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    if files.is_empty() {
+        return (StatusCode::OK, "no changes to review\n").into_response();
+    }
+
+    // Continue the repo's review session; a re-run is the next ROUND, and
+    // prior annotations re-anchor onto the fresh diff by content.
+    let existing = db.latest_code_review_for_repo(&repo_canon);
+    let mut session =
+        match review::open_or_continue_review(&db, &repo_canon, source, base, sha) {
+            Ok(s) => s,
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        };
+    if existing.is_some() {
+        session.round += 1;
+        if let Err(e) = db.upsert_code_review(&session) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        }
+        match review::carry_annotations_forward(&db, &session.review_id, session.round, &files)
+        {
+            Ok((carried, orphaned)) => {
+                tracing::info!(
+                    review_id = %session.review_id,
+                    round = session.round,
+                    carried,
+                    orphaned,
+                    "review round advanced; annotations re-anchored"
+                );
+            }
+            Err(e) => tracing::warn!(error = %e, "carry_annotations_forward failed"),
+        }
+        let _ = app_state
+            .app_handle
+            .emit("review-annotations-changed", session.review_id.clone());
+    }
+
+    // Bind the review to the dock terminal whose claude sent this curl (the
+    // intercept-strip ancestry walk). Off-runtime: lsof/ps shell-outs block.
+    let terminal_id = {
+        let pty_state: pty::PtyState = (*app_state.app_handle.state::<pty::PtyState>()).clone();
+        let peer_port = peer.port();
+        tokio::task::spawn_blocking(move || {
+            pty::client_pid_and_terminal_for_port(&pty_state, peer_port).1
+        })
+        .await
+        .ok()
+        .flatten()
+    };
+    if terminal_id.is_some() {
+        session.terminal_id = terminal_id;
+        let _ = db.upsert_code_review(&session);
+    }
+
+    // Open the pane, then hold.
+    let event = ReviewRequestedEvent {
+        review_id: session.review_id.clone(),
+        repo_path: session.repo_path.clone(),
+        source: session.source.clone(),
+        round: session.round,
+    };
+    if let Err(e) = app_state.app_handle.emit("review-requested", event) {
+        tracing::warn!(error = %e, "failed to emit review-requested");
+    }
+
+    let (rx, token) = app_state.pending_reviews.register(&session.review_id);
+    let _guard = ReviewDetachGuard {
+        pending: app_state.pending_reviews.clone(),
+        app_handle: app_state.app_handle.clone(),
+        review_id: session.review_id.clone(),
+        token,
+    };
+    tracing::info!(
+        review_id = %session.review_id,
+        round = session.round,
+        files = files.len(),
+        "review curl held; blocking for reviewer"
+    );
+
+    let body = tokio::select! {
+        r = rx => match r {
+            Ok(text) => text,
+            Err(_) => "The review was closed without feedback. Continue with what you were doing.\n".to_string(),
+        },
+        _ = tokio::time::sleep(REVIEW_HOLD_CAP) => {
+            tracing::info!(review_id = %session.review_id, "review hold cap fired");
+            format!("{}\n", review_feedback::CAP_EXPIRED_MESSAGE)
+        }
+    };
+    (StatusCode::OK, body).into_response()
+}
+
+/// Whether a held review curl is waiting on this review — drives the pane's
+/// "Submit sends to the agent" affordance (vs. read-only browsing).
+#[tauri::command]
+fn review_hold_active(
+    pending: tauri::State<'_, PendingReviews>,
+    review_id: String,
+) -> bool {
+    pending.has(&review_id)
+}
+
+/// Submit the review: serialize the current annotation set (or the approval
+/// line) into the held curl's response. The review analog of `submit_review`.
+#[tauri::command]
+fn submit_review_feedback(
+    app: AppHandle,
+    review_state: tauri::State<'_, review::ReviewState>,
+    pending: tauri::State<'_, PendingReviews>,
+    review_id: String,
+    approve: bool,
+    approve_message: Option<String>,
+) -> Result<(), String> {
+    let tx = pending.take(&review_id).ok_or(
+        "no agent is waiting on this review — run /redline-review in the terminal first",
+    )?;
+    let payload = if approve {
+        let msg = approve_message
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or_else(|| review_feedback::DEFAULT_APPROVE_MESSAGE.to_string());
+        format!("{msg}\n")
+    } else {
+        let session = review_state
+            .db
+            .get_code_review(&review_id)
+            .ok_or_else(|| format!("no review {review_id}"))?;
+        let annotations = review_state
+            .db
+            .list_review_annotations(&review_id)
+            .map_err(|e| e.to_string())?;
+        let text = review_feedback::serialize_review_payload(
+            &session.repo_path,
+            session.round,
+            &annotations,
+        );
+        // Everything serialized is now on the agent's desk.
+        for mut a in annotations {
+            if a.status == "draft" || a.status == "carried" {
+                a.status = "submitted".to_string();
+                let _ = review_state.db.update_review_annotation(&a);
+            }
+        }
+        let _ = app.emit("review-annotations-changed", review_id.clone());
+        text
+    };
+    tracing::info!(review_id = %review_id, approve, "submit_review_feedback fired");
+    tx.send(payload).map_err(|_| {
+        "the review curl is no longer listening — re-run /redline-review".to_string()
+    })
+}
+
+/// Dismiss hatch: unblock a held review the reviewer walked away from, with a
+/// benign no-feedback reply. The pane stays open for later browsing.
+#[tauri::command]
+fn dismiss_review(
+    pending: tauri::State<'_, PendingReviews>,
+    review_id: String,
+) -> Result<(), String> {
+    let tx = pending
+        .take(&review_id)
+        .ok_or("no agent is waiting on this review")?;
+    tracing::info!(review_id = %review_id, "review dismissed");
+    tx.send(format!("{}\n", review_feedback::DISMISS_MESSAGE))
+        .map_err(|_| "the review curl is no longer listening".to_string())
+}
+
+// --- external annotations API (`/v1/reviews/annotations`) -------------------
+//
+// Lets local tools (linters, scripts, other agents) read and post findings
+// into a live review. Security posture: loopback-only bind + the known-projects
+// allowlist + schema-only body validation + a required per-tool `source` tag
+// (`user`/`ai` reserved). No session auto-creation: 404 without an existing
+// review. Findings ingest through `review::ingest_annotation`, so a matched
+// quote re-anchors across rounds exactly like a hand-placed annotation.
+
+#[derive(serde::Deserialize)]
+struct ExtAnnQ {
+    repo: Option<String>,
+    review: Option<String>,
+    source: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ExtAnnBody {
+    #[serde(default)]
+    file_path: Option<String>,
+    #[serde(default)]
+    side: Option<String>,
+    #[serde(default)]
+    quoted: Option<String>,
+    #[serde(default)]
+    line_hint: Option<i64>,
+    body: String,
+    #[serde(default)]
+    suggestion: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    blocking: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+}
+
+/// Per-tool source tag: short, lowercase, and never the reserved authors.
+fn valid_source_tag(s: &str) -> bool {
+    (1..=32).contains(&s.len())
+        && s != "user"
+        && s != "ai"
+        && s
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+/// Resolve `?repo=` (+ optional `?review=`) to an existing review session.
+async fn resolve_review_for_api(
+    db: &db::Database,
+    repo: Option<&str>,
+    review: Option<&str>,
+) -> Result<state::CodeReviewSession, String> {
+    let repo = repo.map(str::trim).filter(|s| !s.is_empty()).ok_or("missing ?repo=")?;
+    if !code::is_known_project(db, repo) {
+        return Err(format!("`{repo}` is not one of your known projects"));
+    }
+    // Sessions key on the canonical path (see review_open).
+    let canon = std::fs::canonicalize(repo)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| repo.to_string());
+    let session = match review.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(id) => db.get_code_review(id).filter(|s| s.repo_path == canon),
+        None => db.latest_code_review_for_repo(&canon),
+    };
+    session.ok_or_else(|| {
+        "no review session for this repo — open one in Redline (or run \
+         /redline-review) first"
+            .to_string()
+    })
+}
+
+/// `GET /v1/reviews/annotations?repo=<path>[&review=<id>]`
+async fn handle_review_annotations_list(
+    State(app_state): State<AppState>,
+    Query(q): Query<ExtAnnQ>,
+) -> axum::response::Response {
+    let db = app_state.store.database();
+    let session = match resolve_review_for_api(&db, q.repo.as_deref(), q.review.as_deref()).await
+    {
+        Ok(s) => s,
+        Err(e) => return browser_error_response(e),
+    };
+    match db.list_review_annotations(&session.review_id) {
+        Ok(annotations) => Json(serde_json::json!({
+            "reviewId": session.review_id,
+            "round": session.round,
+            "annotations": annotations,
+        }))
+        .into_response(),
+        Err(e) => browser_error_response(e.to_string()),
+    }
+}
+
+/// `POST /v1/reviews/annotations?repo=<path>[&review=<id>]` — one finding.
+async fn handle_review_annotations_add(
+    State(app_state): State<AppState>,
+    Query(q): Query<ExtAnnQ>,
+    Json(body): Json<ExtAnnBody>,
+) -> axum::response::Response {
+    let db = app_state.store.database();
+    let session = match resolve_review_for_api(&db, q.repo.as_deref(), q.review.as_deref()).await
+    {
+        Ok(s) => s,
+        Err(e) => return browser_error_response(e),
+    };
+    let source = body.source.as_deref().unwrap_or("external");
+    if !valid_source_tag(source) {
+        return browser_error_response(
+            "invalid source tag (1-32 chars of [a-z0-9_-]; `user`/`ai` reserved)".to_string(),
+        );
+    }
+    if body.body.trim().is_empty() || body.body.len() > 20_000 {
+        return browser_error_response("body must be 1..20000 chars".to_string());
+    }
+    if let Some(side) = body.side.as_deref() {
+        if side != "old" && side != "new" {
+            return browser_error_response("side must be `old` or `new`".to_string());
+        }
+    }
+    // Resolve the review's CURRENT diff so quote placement matches the pane.
+    let source_tag = match review::parse_source_tag(&session.source) {
+        Ok(s) => s,
+        Err(e) => return browser_error_response(e),
+    };
+    let diff = match review::resolve_for_route(
+        &db,
+        &session.repo_path,
+        source_tag,
+        session.base_ref.as_deref(),
+        session.commit_sha.as_deref(),
+    )
+    .await
+    {
+        Ok((_, d)) => d,
+        Err(e) => return browser_error_response(e),
+    };
+    let finding = review::IncomingFinding {
+        file: body.file_path,
+        side: body.side,
+        quoted: body.quoted,
+        line_hint: body.line_hint,
+        body: body.body,
+        suggestion: body.suggestion,
+        label: body.label,
+        blocking: body.blocking,
+    };
+    match review::ingest_annotation(&db, &session, &diff, finding, "ext", source) {
+        Ok(annotation) => {
+            let _ = app_state
+                .app_handle
+                .emit("review-annotations-changed", session.review_id.clone());
+            Json(serde_json::json!({ "ok": true, "annotation": annotation })).into_response()
+        }
+        Err(e) => browser_error_response(e),
+    }
+}
+
+/// `DELETE /v1/reviews/annotations?repo=<path>&source=<tag>` — clear one
+/// source's draft findings (`user` refused; submitted history stays).
+async fn handle_review_annotations_clear(
+    State(app_state): State<AppState>,
+    Query(q): Query<ExtAnnQ>,
+) -> axum::response::Response {
+    let db = app_state.store.database();
+    let session = match resolve_review_for_api(&db, q.repo.as_deref(), q.review.as_deref()).await
+    {
+        Ok(s) => s,
+        Err(e) => return browser_error_response(e),
+    };
+    let Some(source) = q.source.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+        return browser_error_response("missing ?source=".to_string());
+    };
+    if source == "user" {
+        return browser_error_response(
+            "refusing to bulk-clear the reviewer's own annotations".to_string(),
+        );
+    }
+    match db.clear_review_annotations_by_source(&session.review_id, source) {
+        Ok(n) => {
+            if n > 0 {
+                let _ = app_state
+                    .app_handle
+                    .emit("review-annotations-changed", session.review_id.clone());
+            }
+            Json(serde_json::json!({ "ok": true, "cleared": n })).into_response()
+        }
+        Err(e) => browser_error_response(e.to_string()),
+    }
+}
+
+async fn handle_code_projects(State(app_state): State<AppState>) -> axum::response::Response {
+    let db = app_state.store.database();
+    let projects = code::list_projects(&db).await;
+    Json(serde_json::json!({ "projects": projects })).into_response()
+}
+
+/// `GET /v1/code/git?repo=<path>&op=<status|branch|log|diff|show>&n=&ref=&base=&file=&stat=`
+/// — run a whitelisted read-only git op in one of the user's known projects.
+/// `repo` is validated against the known-projects allowlist and the op against a
+/// fixed whitelist (see `code::run_git`); nothing here writes.
+async fn handle_code_git(
+    State(app_state): State<AppState>,
+    Query(q): Query<CodeGitQ>,
+) -> axum::response::Response {
+    let db = app_state.store.database();
+    let stat = matches!(q.stat.as_deref(), Some("1") | Some("true"));
+    let req = code::GitRequest {
+        repo: q.repo.as_deref().unwrap_or("").trim(),
+        op: q.op.as_deref().unwrap_or("").trim(),
+        n: q.n,
+        git_ref: q.git_ref.as_deref().filter(|s| !s.trim().is_empty()),
+        base: q.base.as_deref().filter(|s| !s.trim().is_empty()),
+        file: q.file.as_deref().filter(|s| !s.trim().is_empty()),
+        stat,
+    };
+    match code::run_git(&db, req).await {
+        Ok(output) => Json(serde_json::json!({ "ok": true, "output": output })).into_response(),
+        Err(e) => browser_error_response(e),
+    }
+}
+
+/// `GET /v1/loop/rubric?id=<subtask_id>` — the reviewer's rubric, on its own.
+async fn handle_loop_rubric(
+    State(app_state): State<AppState>,
+    Query(q): Query<LoopIdQ>,
+) -> axum::response::Response {
+    let Some(id) = q.id.filter(|s| !s.trim().is_empty()) else {
+        return browser_error_response("missing ?id=".to_string());
+    };
+    let engine = app_state.app_handle.state::<looporch::LoopState>();
+    match engine.subtask(&id) {
+        Some(s) => Json(serde_json::json!({ "rubric": s.rubric })).into_response(),
+        None => browser_error_response(format!("no subtask `{id}`")),
+    }
+}
+
+/// `GET /v1/loop/state?run=<run>&scope=<scope>` — the durable scratch store.
+async fn handle_loop_state_get(
+    State(app_state): State<AppState>,
+    Query(q): Query<LoopStateQ>,
+) -> axum::response::Response {
+    let (Some(run), Some(scope)) = (q.run, q.scope) else {
+        return browser_error_response("missing ?run= and ?scope=".to_string());
+    };
+    let engine = app_state.app_handle.state::<looporch::LoopState>();
+    let entries: Vec<Value> = engine
+        .db_state_list(&run, &scope)
+        .into_iter()
+        .map(|(k, v)| serde_json::json!({ "key": k, "value": v }))
+        .collect();
+    Json(serde_json::json!({ "run": run, "scope": scope, "entries": entries })).into_response()
+}
+
+/// `POST /v1/loop/state {run,scope,key,value}` — write to the scratch store.
+async fn handle_loop_state_set(
+    State(app_state): State<AppState>,
+    Json(body): Json<LoopStateBody>,
+) -> axum::response::Response {
+    let engine = app_state.app_handle.state::<looporch::LoopState>();
+    let value = match &body.value {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    engine.state_set(&body.run, &body.scope, &body.key, &value);
+    Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+/// `GET /v1/loop/run?id=<run_id>` — the run + its subtask statuses, so a subtask
+/// can see its siblings' progress.
+async fn handle_loop_run(
+    State(app_state): State<AppState>,
+    Query(q): Query<LoopIdQ>,
+) -> axum::response::Response {
+    let Some(id) = q.id.filter(|s| !s.trim().is_empty()) else {
+        return browser_error_response("missing ?id=".to_string());
+    };
+    let engine = app_state.app_handle.state::<looporch::LoopState>();
+    let Some(run) = engine.run(&id) else {
+        return browser_error_response(format!("no run `{id}`"));
+    };
+    let subtasks: Vec<Value> = engine
+        .run_subtasks(&id)
+        .into_iter()
+        .map(|s| serde_json::json!({ "subtaskId": s.subtask_id, "title": s.title, "status": s.status, "seq": s.seq }))
+        .collect();
+    Json(serde_json::json!({
+        "runId": run.run_id,
+        "title": run.title,
+        "status": run.status,
+        "subtasks": subtasks,
+    }))
+    .into_response()
+}
+
+/// `GET /v1/loop/feedback?id=<subtask_id>` — the latest reviewer feedback, which
+/// a resumed executor fetches out-of-band (mirrors `/v1/sessions/:id/feedback`).
+async fn handle_loop_feedback(
+    State(app_state): State<AppState>,
+    Query(q): Query<LoopIdQ>,
+) -> axum::response::Response {
+    let Some(id) = q.id.filter(|s| !s.trim().is_empty()) else {
+        return browser_error_response("missing ?id=".to_string());
+    };
+    let engine = app_state.app_handle.state::<looporch::LoopState>();
+    Json(serde_json::json!({ "feedback": engine.latest_feedback(&id) })).into_response()
 }
 
 /// `POST /v1/browser/focus?tab=<id>` — switch the user INTO an existing tab:
@@ -2863,6 +3802,7 @@ async fn submit_review(
     pending_feedback: tauri::State<'_, PendingFeedback>,
     expected_modes: tauri::State<'_, ExpectedModes>,
     revise_watch: tauri::State<'_, ReviseWatch>,
+    last_claude_pid: tauri::State<'_, LastClaudePid>,
     pty: tauri::State<'_, pty::PtyState>,
     session_id: String,
     terminal_id: Option<String>,
@@ -3008,6 +3948,7 @@ async fn submit_review(
         (*store).clone(),
         (*pending).clone(),
         (*revise_watch).clone(),
+        (*last_claude_pid).clone(),
         session_id.clone(),
     );
     Ok(())
@@ -3510,6 +4451,90 @@ fn fullscreen_shim_js() -> &'static str {
 })();"#
 }
 
+/// Document-start user script (all frames) that makes "open in a new tab" work
+/// for these child webviews. WebKit routes `target="_blank"`, `window.open`, and
+/// cmd/middle-clicks to the WKUIDelegate's `createWebViewWithConfiguration:` —
+/// which wry leaves unhandled here (no `new_window_req_handler`), so the request
+/// is silently dropped and nothing opens. This shim intercepts those intents,
+/// resolves them to absolute http(s) URLs, and queues them on the TOP frame's
+/// `window.__redline_newtabs`; the pane polls + drains that queue (same eval
+/// path as the fullscreen flag) and opens a real Redline tab. Plain same-tab
+/// links are left untouched — they navigate normally. Sub-frames relay their
+/// captures to the top frame via `postMessage` (the queue only lives at top,
+/// which is what the native eval reads).
+#[cfg(target_os = "macos")]
+fn newtab_shim_js() -> &'static str {
+    r#"(function(){
+  if (window.__redline_newtab_installed) return;
+  window.__redline_newtab_installed = true;
+  function isTop(){ return window===window.top; }
+  function abs(u){ try{ return new URL(u, location.href).href; }catch(e){ return ""; } }
+  function queue(u){
+    u = abs(u);
+    if (!/^https?:/i.test(u)) return;
+    if (isTop()){
+      var q = window.__redline_newtabs = window.__redline_newtabs || [];
+      q.push(u);
+      if (q.length > 20) q.splice(0, q.length - 20); // bound if the pane isn't draining
+    } else {
+      try{ window.top.postMessage({__rl_newtab:u}, '*'); }
+      catch(e){ try{ window.parent.postMessage({__rl_newtab:u}, '*'); }catch(e2){} }
+    }
+  }
+  // window.open handling splits by intent:
+  //  • WITH a features string (width/height/popup) → a real popup (OAuth/SSO):
+  //    let WebKit's native path run so our WKUIDelegate hosts it in a floating
+  //    window with a live `window.opener`. Return the real WindowProxy.
+  //  • WITHOUT features → "open in a new tab": route to a Redline tab and hand
+  //    back a harmless stub (sites that poke the return value won't throw).
+  var _open = window.open.bind(window);
+  // A real popup is signalled by SIZE/popup features (width=/height=/popup).
+  // A bare `noopener,noreferrer` (very common on plain "open in new tab" links)
+  // is NOT a popup — those must open as a Redline tab, not a floating window.
+  function isPopupFeatures(f){
+    f = f ? String(f).toLowerCase() : '';
+    return /\bwidth\s*=/.test(f) || /\bheight\s*=/.test(f) || /\bpopup\b/.test(f);
+  }
+  window.open = function(u, name, features){
+    if (isPopupFeatures(features)){
+      // Real popup (OAuth/SSO): let WebKit's native path run so our WKUIDelegate
+      // hosts it in a floating window with a live `window.opener`.
+      try{ return _open(u, name, features); }catch(e){ return null; }
+    }
+    // "Open in a new tab": route to a Redline tab, hand back a harmless stub.
+    queue(u);
+    return { closed:false, focus:function(){}, blur:function(){}, close:function(){}, postMessage:function(){} };
+  };
+  function anchorOf(node){
+    var n = node;
+    while (n && n.nodeType === 3) n = n.parentNode; // climb out of text nodes
+    return n && n.closest ? n.closest('a[href]') : null;
+  }
+  document.addEventListener('click', function(e){
+    var a = anchorOf(e.target);
+    if (!a) return;
+    // Middle-click is delivered as `auxclick` (handled below), so it's
+    // intentionally not tested here — doing both would open the tab twice.
+    var wantsNew = (a.target === '_blank') || e.metaKey || e.ctrlKey;
+    if (!wantsNew) return;
+    if (!/^https?:/i.test(a.href)) return; // let mailto:/#anchors behave normally
+    e.preventDefault(); e.stopPropagation();
+    queue(a.href);
+  }, true);
+  document.addEventListener('auxclick', function(e){
+    if (e.button !== 1) return; // middle-click = new tab
+    var a = anchorOf(e.target);
+    if (!a || !/^https?:/i.test(a.href)) return;
+    e.preventDefault(); e.stopPropagation();
+    queue(a.href);
+  }, true);
+  window.addEventListener('message', function(e){
+    var d = e && e.data;
+    if (d && typeof d.__rl_newtab === 'string') queue(d.__rl_newtab);
+  }, false);
+})();"#
+}
+
 /// Add one document-start `WKUserScript` to a content controller. SAFETY: caller
 /// is on the UI thread inside `with_webview`; `ucc` is the live
 /// `WKUserContentController`. injectionTime 0 = AtDocumentStart. The controller
@@ -3548,7 +4573,9 @@ fn install_user_scripts(wv: &tauri::Webview, css: &str) -> Result<(), String> {
     // always eval it (see below) so a reset clears the already-loaded page too.
     let view = view_inject_js(css);
     let install_view = !css.is_empty();
+    let newtab = newtab_shim_js();
     let shim_owned = shim.to_string();
+    let newtab_owned = newtab.to_string();
     let view_owned = view.clone();
     wv.with_webview(move |pw| {
         let ptr = pw.inner() as *mut objc2::runtime::AnyObject;
@@ -3565,6 +4592,9 @@ fn install_user_scripts(wv: &tauri::Webview, css: &str) -> Result<(), String> {
             let _: () = objc2::msg_send![ucc, removeAllUserScripts];
             // Shim in every frame (top page + sub-frames) for the embed handshake.
             add_user_script(ucc, &shim_owned, false);
+            // New-tab interceptor in every frame (a target=_blank link can live in
+            // a sub-frame; it relays its capture up to the top-frame queue).
+            add_user_script(ucc, &newtab_owned, false);
             // View filter only on the main frame (don't invert ad/embed iframes).
             if install_view {
                 add_user_script(ucc, &view_owned, true);
@@ -3577,6 +4607,7 @@ fn install_user_scripts(wv: &tauri::Webview, css: &str) -> Result<(), String> {
     // page's filter; skipping it left "Reset to normal" visually stuck until the
     // next navigation.
     wv.eval(shim).map_err(|e| e.to_string())?;
+    wv.eval(newtab).map_err(|e| e.to_string())?;
     wv.eval(&view).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -3609,7 +4640,10 @@ fn browser_set_view(app: AppHandle, label: String, css: String) -> Result<(), St
 /// fullscreen shim) on a freshly created tab, with no view filter. Invoked once
 /// at tab creation so video fullscreen works even before any "View" filter is
 /// applied; `browser_set_view` later re-installs the shim alongside its CSS.
-/// macOS-only; a no-op elsewhere.
+/// Also installs the new-window UI delegate here (once per webview, NOT from
+/// `install_user_scripts`, which re-runs on every view-filter swap and would
+/// otherwise churn the delegate and drop any open popups). macOS-only; a no-op
+/// elsewhere.
 #[tauri::command]
 fn browser_install_shims(app: AppHandle, label: String) -> Result<(), String> {
     let wv = app
@@ -3618,6 +4652,12 @@ fn browser_install_shims(app: AppHandle, label: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         install_user_scripts(&wv, "")?;
+        // Give this webview OAuth/SSO popup support (window.open with features →
+        // a real popup window with a live opener). Best-effort: a failure here
+        // must not block the tab from working.
+        if let Err(e) = browser_popup::install_new_window_delegate(&wv) {
+            eprintln!("browser_popup: failed to install new-window delegate: {e}");
+        }
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -3804,6 +4844,72 @@ fn show_view_menu(app: AppHandle, active: String, x: f64, y: f64) -> Result<(), 
     }
     mb = mb.separator().text("view-none", "Reset to normal");
     let menu = mb.build().map_err(|e| e.to_string())?;
+    win.popup_menu_at(&menu, tauri::LogicalPosition::new(x, y))
+        .map_err(|e| e.to_string())
+}
+
+/// Record a thumbs verdict (+1 up / -1 down) on a source the tandem agent
+/// surfaced. Upserts on `(browse_id, source_url)`; the domain is derived here so
+/// learning can aggregate by host. Called from the sources strip in BrowserChat.
+#[tauri::command]
+fn set_source_feedback(
+    settings: tauri::State<'_, Settings>,
+    browse_id: String,
+    source_url: String,
+    source_title: Option<String>,
+    verdict: i64,
+) -> Result<(), String> {
+    let now = now_millis();
+    let fb = SourceFeedback {
+        id: uuid::Uuid::new_v4().to_string(),
+        browse_id,
+        domain: crate::db::domain_of(&source_url),
+        source_url,
+        source_title,
+        verdict,
+        created_at: now,
+        updated_at: now,
+    };
+    settings
+        .db
+        .upsert_source_feedback(&fb)
+        .map_err(|e| e.to_string())
+}
+
+/// Every thumbs verdict recorded on a tab's thread, so the sources strip can
+/// restore its up/down state after a reload.
+#[tauri::command]
+fn get_source_feedback(
+    settings: tauri::State<'_, Settings>,
+    browse_id: String,
+) -> Result<Vec<SourceFeedback>, String> {
+    settings
+        .db
+        .get_source_feedback(&browse_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Pop up the native browser "Settings" menu over the embedded browser (HTML
+/// can't overlay a native webview, same as bookmarks/view). `tandem` is the
+/// current state of tandem agent mode so the item shows a check. The click
+/// returns through `on_menu_event` as `bset-tandem`, forwarded to the frontend
+/// as a `browser-settings-action` event; the pane flips the persisted flag.
+#[tauri::command]
+fn show_browser_settings_menu(app: AppHandle, tandem: bool, x: f64, y: f64) -> Result<(), String> {
+    let win = menu_anchor_window(&app).ok_or_else(|| "no main window".to_string())?;
+    let toggle = CheckMenuItem::with_id(
+        &app,
+        "bset-tandem",
+        "Tandem agent mode",
+        true,
+        tandem,
+        None::<&str>,
+    )
+    .map_err(|e| e.to_string())?;
+    let menu = MenuBuilder::new(&app)
+        .item(&toggle)
+        .build()
+        .map_err(|e| e.to_string())?;
     win.popup_menu_at(&menu, tauri::LogicalPosition::new(x, y))
         .map_err(|e| e.to_string())
 }
@@ -4011,12 +5117,16 @@ pub fn run() {
             fsbrowse::home_dir,
             highlight::open_doc,
             highlight::doc_lines,
+            highlight::highlight_diff,
             fswatch::watch_dir,
             fswatch::unwatch_dir,
             fork::fork_thread_send,
             fork::get_thread,
             fork::fork_thread_cancel,
             fork::fork_thread_discard,
+            fork::review_thread_send,
+            fork::review_question_send,
+            fork::review_thread_discard,
             fork::fork_kill_all,
             browse::browse_send,
             browse::get_browse_thread,
@@ -4036,7 +5146,52 @@ pub fn run() {
             mission::get_mission_thread,
             mission::mission_cancel,
             mission::mission_kill_all,
+            linked::linked_create,
+            linked::linked_list,
+            linked::linked_get_thread,
+            linked::linked_send,
+            linked::linked_cancel,
+            linked::linked_delete,
+            linked::linked_set_tabs,
+            linked::linked_get_tabs,
+            linked::linked_kill_all,
             mission_set_active,
+            looporch::loop_start,
+            looporch::loop_repo_status,
+            looporch::loop_list,
+            looporch::loop_get,
+            looporch::loop_subtask_attempts,
+            looporch::loop_traces,
+            looporch::loop_checkpoint_decide,
+            looporch::loop_cancel,
+            looporch::loop_delete,
+            looporch::loop_kill_all,
+            looporch::loop_tick,
+            looporch::loop_analyze,
+            review_hold_active,
+            submit_review_feedback,
+            dismiss_review,
+            review::review_open,
+            review::review_diff,
+            review::review_fingerprint,
+            review::review_commits,
+            review::review_file_contents,
+            review::review_branches,
+            review::review_annotation_clear_source,
+            review::review_question_add,
+            review::review_question_list,
+            review::review_question_delete,
+            ai_review::ai_review_start,
+            ai_review::ai_review_cancel,
+            ai_review::ai_review_active,
+            review::review_sessions_list,
+            review::review_delete,
+            review::review_annotation_add,
+            review::review_annotation_update,
+            review::review_annotation_delete,
+            review::review_annotation_list,
+            review::review_mark_viewed,
+            review::review_list_viewed,
             voice::voice_session_start,
             voice::voice_send,
             voice::voice_clean,
@@ -4052,7 +5207,12 @@ pub fn run() {
             tts::tts_kokoro_warm,
             dictation::dictation_start,
             dictation::dictation_stop,
+            dictation::dictation_cycle,
             dictation::dictation_kill_all,
+            dictation_whisper::whisper_install,
+            dictation_whisper::whisper_model_present,
+            dictation_whisper::dictation_get_engine,
+            dictation_whisper::dictation_set_engine,
             browser_navigate,
             browser_eval,
             browser_close,
@@ -4072,6 +5232,9 @@ pub fn run() {
             browser_install_shims,
             show_bookmarks_menu,
             show_view_menu,
+            show_browser_settings_menu,
+            set_source_feedback,
+            get_source_feedback,
             prompt_text,
         ])
         .setup(|app| {
@@ -4163,6 +5326,28 @@ pub fn run() {
             let mission_state = mission::MissionState::new(db.clone());
             app.manage(mission_state);
 
+            // Linked discussion (browser pane): one conversation spanning all
+            // tabs. Same lazy-`claude` reasoning; delegates heavy tabs back to
+            // their browse agents via the consult route.
+            let linked_state = linked::LinkedState::new(db.clone());
+            app.manage(linked_state);
+
+            // Loop Orchestrator: once a reviewed plan is approved, decompose it
+            // and execute each subtask in an isolated git worktree, with a
+            // separate reviewer and human checkpoints before any merge/land.
+            // Same lazy-`claude` reasoning; worktrees live under the app data dir.
+            let loop_state = looporch::LoopState::new(db.clone(), data_dir.join("loop-worktrees"));
+            loop_state.attach_app(app.handle().clone());
+            app.manage(loop_state.clone());
+            // Restart reconciler: revive interrupted runs (reset in-flight
+            // subtasks, re-adopt worktrees, re-arm pending checkpoints).
+            tauri::async_runtime::spawn(async move { loop_state.reconcile_on_start().await });
+
+            // Code Review surface: diff resolver + line-anchored annotation
+            // store. Plain DB handle — no agent process of its own.
+            app.manage(review::ReviewState::new(db.clone()));
+            app.manage(ai_review::AiReviewState::new(db.clone()));
+
             // Voice agent (spoken plan discussion). One persistent `claude`
             // session per plan; same lazy-`claude` reasoning as the fork state.
             let voice_state = voice::VoiceState::new(db.clone());
@@ -4172,6 +5357,15 @@ pub fn run() {
             // subprocess — native on-device speech-to-text, one capture at a
             // time. macOS-only under the hood; the state is cheap everywhere.
             app.manage(dictation::DictationState::new());
+
+            // Pluggable Whisper backend for dictation: model download +
+            // management and the resident whisper.cpp model. The `auto` engine
+            // prefers it over Apple once the model (~140 MB) is downloaded into
+            // the app data dir. Fully local — no audio leaves the device.
+            app.manage(dictation_whisper::WhisperState::new(
+                db.clone(),
+                data_dir.clone(),
+            ));
 
             // Voice TTS: engine choice + API key in app_settings, synth made
             // from Rust (cloud OpenAI, or the local Kokoro sidecar). The Kokoro
@@ -4198,6 +5392,9 @@ pub fn run() {
             let pending = PendingResponses::new();
             app.manage(pending.clone());
 
+            let pending_reviews = PendingReviews::new();
+            app.manage(pending_reviews.clone());
+
             let pending_feedback = PendingFeedback::new();
             app.manage(pending_feedback.clone());
 
@@ -4205,6 +5402,7 @@ pub fn run() {
             app.manage(expected_modes.clone());
 
             app.manage(ReviseWatch::new());
+            app.manage(LastClaudePid::default());
 
             let daemon_status = DaemonStatus::new();
             app.manage(daemon_status.clone());
@@ -4213,6 +5411,7 @@ pub fn run() {
                 store: store.clone(),
                 app_handle: app.handle().clone(),
                 pending,
+                pending_reviews,
                 pending_feedback,
                 expected_modes,
                 settings: settings.clone(),
@@ -4418,6 +5617,11 @@ pub fn run() {
                 id if id.starts_with("view-") => {
                     let _ = app.emit("view-menu-action", id.to_string());
                 }
+                // Browser settings menu clicks (e.g. tandem toggle) → let the
+                // browser pane flip the matching persisted flag.
+                id if id.starts_with("bset-") => {
+                    let _ = app.emit("browser-settings-action", id.to_string());
+                }
                 _ => {}
             });
 
@@ -4438,17 +5642,29 @@ pub fn run() {
                 if let Some(fork) = app_handle.try_state::<fork::ForkState>() {
                     fork.kill_all();
                 }
+                if let Some(ai) = app_handle.try_state::<ai_review::AiReviewState>() {
+                    ai.kill_all();
+                }
                 if let Some(browse) = app_handle.try_state::<browse::BrowseState>() {
                     browse.kill_all();
                 }
                 if let Some(mission) = app_handle.try_state::<mission::MissionState>() {
                     mission.kill_all();
                 }
+                if let Some(linked) = app_handle.try_state::<linked::LinkedState>() {
+                    linked.kill_all();
+                }
+                if let Some(loop_state) = app_handle.try_state::<looporch::LoopState>() {
+                    loop_state.kill_all();
+                }
                 if let Some(voice) = app_handle.try_state::<voice::VoiceState>() {
                     voice.kill_all();
                 }
                 if let Some(dictation) = app_handle.try_state::<dictation::DictationState>() {
                     dictation.kill_all();
+                }
+                if let Some(whisper) = app_handle.try_state::<dictation_whisper::WhisperState>() {
+                    whisper.kill();
                 }
                 if let Some(tts) = app_handle.try_state::<tts::TtsState>() {
                     tts.kokoro_kill();
@@ -4461,6 +5677,20 @@ pub fn run() {
 mod tests {
     use super::*;
     use crate::db::Database;
+
+    #[test]
+    fn external_source_tags_are_fenced() {
+        assert!(valid_source_tag("mylinter"));
+        assert!(valid_source_tag("clippy-2"));
+        assert!(valid_source_tag("a_b"));
+        // Reserved authors and malformed tags are refused.
+        assert!(!valid_source_tag("user"));
+        assert!(!valid_source_tag("ai"));
+        assert!(!valid_source_tag(""));
+        assert!(!valid_source_tag("Has-Caps"));
+        assert!(!valid_source_tag("space here"));
+        assert!(!valid_source_tag(&"x".repeat(33)));
+    }
     use crate::state::reparse_sections;
     use std::sync::Arc;
 
@@ -4710,6 +5940,107 @@ mod tests {
         assert_eq!(watch.current("s2"), 0);
         assert_eq!(watch.bump("s2"), 1);
         assert_eq!(watch.current("s1"), 2);
+    }
+
+    #[test]
+    fn last_claude_pid_set_get_clear() {
+        let map = LastClaudePid::default();
+        assert!(map.get("s1").is_none(), "absent session reads None");
+
+        map.set(
+            "s1",
+            ClaudeProc {
+                pid: 1234,
+                comm: "claude".into(),
+            },
+        );
+        let got = map.get("s1").expect("present after set");
+        assert_eq!(got.pid, 1234);
+        assert_eq!(got.comm, "claude");
+
+        // Overwrite replaces the prior record (refreshed on every POST).
+        map.set(
+            "s1",
+            ClaudeProc {
+                pid: 5678,
+                comm: "node".into(),
+            },
+        );
+        assert_eq!(map.get("s1").unwrap().pid, 5678);
+
+        map.clear("s1");
+        assert!(map.get("s1").is_none(), "cleared session reads None");
+    }
+
+    #[test]
+    fn claude_proc_is_alive_guards_pid_reuse() {
+        let proc = ClaudeProc {
+            pid: 4242,
+            comm: "claude".into(),
+        };
+        // Same pid, same command → alive.
+        assert!(proc.is_alive_with(|_| Some("claude".to_string())));
+        // No such process → dead.
+        assert!(!proc.is_alive_with(|_| None));
+        // Pid reused by a different command → dead (must not read as alive).
+        assert!(!proc.is_alive_with(|_| Some("zsh".to_string())));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn current_comm_reflects_process_liveness() {
+        // Our own pid is obviously alive and names a non-empty command.
+        let mine = current_comm(std::process::id());
+        assert!(mine.is_some_and(|c| !c.is_empty()), "self must be alive");
+
+        // A child we spawn and reap is dead by the time we probe its pid.
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn `true`");
+        let dead_pid = child.id();
+        child.wait().expect("reap child");
+        assert!(
+            current_comm(dead_pid).is_none(),
+            "a reaped process must read as dead"
+        );
+    }
+
+    #[test]
+    fn watchdog_step_decision_table() {
+        // Any "already settled" signal stops the watchdog regardless of liveness.
+        assert_eq!(
+            watchdog_step(true, true, true, Some(true)),
+            WatchdogStep::Stop,
+            "a fresh plan landed → stop"
+        );
+        assert_eq!(
+            watchdog_step(false, false, true, Some(true)),
+            WatchdogStep::Stop,
+            "a newer revise superseded us → stop"
+        );
+        assert_eq!(
+            watchdog_step(false, true, false, Some(true)),
+            WatchdogStep::Stop,
+            "no longer in review → stop"
+        );
+        // Still waiting + claude alive → re-arm (the false-positive we fix).
+        assert_eq!(
+            watchdog_step(false, true, true, Some(true)),
+            WatchdogStep::ReArm,
+            "alive claude (busy/blocked) → keep watching, never detach"
+        );
+        // Still waiting + claude dead → detach.
+        assert_eq!(
+            watchdog_step(false, true, true, Some(false)),
+            WatchdogStep::Detach,
+            "dead claude → feedback lost, detach"
+        );
+        // Still waiting + pid never captured → fall back to blind-timer detach.
+        assert_eq!(
+            watchdog_step(false, true, true, None),
+            WatchdogStep::Detach,
+            "no pid → preserve today's behavior, detach"
+        );
     }
 
     #[test]

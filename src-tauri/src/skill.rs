@@ -28,10 +28,20 @@ struct EmbeddedSkill {
 ///
 /// - `redline`: the plan-revision protocol contract.
 /// - `sidecar`: how to structure read-only discussion-thread replies.
+/// - `conversation`: the collaborator persona + cadence for a discussion thread
+///   the reviewer has toggled into conversation mode.
 /// - `browse`: how the embedded-browser page-discussion agent picks tools
 ///   (browser bridge vs WebSearch vs WebFetch), drives the tab, and formats.
 /// - `mission`: how the browser mission orchestrator holds a goal, gathers
 ///   across tabs + the user's pins, and synthesizes a Drafter-ready brief.
+/// - `linked`: how a linked discussion holds ONE conversation spanning all tabs
+///   (no goal), re-grounds on the current tab each turn, and checks in with a
+///   colleague (a tab's own page-discussion agent) via the consult endpoint.
+/// - `loop-orchestrator`: the three agent contracts (Planner / Executor /
+///   Reviewer) of the loop engine that turns an approved plan into parallel,
+///   individually-verified subtasks.
+/// - `redline-review`: the code-review loop — the blocking review curl, the
+///   line-anchored feedback format, and the REDLINE_REVIEW_RESOLUTIONS reply.
 const SKILLS: &[EmbeddedSkill] = &[
     EmbeddedSkill {
         name: "redline",
@@ -44,14 +54,34 @@ const SKILLS: &[EmbeddedSkill] = &[
         content: include_str!("../../skills/sidecar/SKILL.md"),
     },
     EmbeddedSkill {
+        name: "conversation",
+        version: 1,
+        content: include_str!("../../skills/conversation/SKILL.md"),
+    },
+    EmbeddedSkill {
         name: "browse",
-        version: 4,
+        version: 5,
         content: include_str!("../../skills/browse/SKILL.md"),
     },
     EmbeddedSkill {
         name: "mission",
         version: 1,
         content: include_str!("../../skills/mission/SKILL.md"),
+    },
+    EmbeddedSkill {
+        name: "linked",
+        version: 1,
+        content: include_str!("../../skills/linked/SKILL.md"),
+    },
+    EmbeddedSkill {
+        name: "loop-orchestrator",
+        version: 1,
+        content: include_str!("../../skills/loop-orchestrator/SKILL.md"),
+    },
+    EmbeddedSkill {
+        name: "redline-review",
+        version: 2,
+        content: include_str!("../../skills/redline-review/SKILL.md"),
     },
 ];
 
@@ -196,6 +226,23 @@ mod tests {
         // The sidecar skill must teach the rich formats and the read-only rule.
         assert!(sidecar.content.contains("mermaid"));
         assert!(sidecar.content.contains("ExitPlanMode"));
+    }
+
+    #[test]
+    fn conversation_skill_keeps_the_readonly_rule() {
+        let convo = SKILLS.iter().find(|s| s.name == "conversation").unwrap();
+        // Conversation mode changes voice, never permissions — the read-only
+        // guardrail must survive the persona swap.
+        assert!(convo.content.contains("ExitPlanMode"));
+        assert!(convo.content.contains("read-only"));
+    }
+
+    #[test]
+    fn linked_skill_teaches_the_consult_contract() {
+        let linked = SKILLS.iter().find(|s| s.name == "linked").unwrap();
+        // The linked skill must teach the "check in with a colleague" delegation.
+        assert!(linked.content.contains("/v1/linked/consult"));
+        assert!(linked.content.contains("digest"));
     }
 
     #[test]

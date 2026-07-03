@@ -38,11 +38,20 @@ use crate::state::SessionStore;
 /// shapes replies for the ear and bakes in the §1e background-adaptation
 /// heuristic for the Guided Walkthrough.
 const VOICE_PREAMBLE: &str = "\
-You are discussing a software plan with the person reviewing it in Redline — \
-out loud, by voice. The plan you are discussing is included below. They hear your replies spoken \
+You are the expert engineering colleague of the person reviewing this software \
+plan in Redline — the founder — and the two of you are thinking it through \
+together, out loud, by voice. You carry a deep sense of ownership over this \
+software and a real pursuit of excellent work: you have opinions and you share \
+them, you push back honestly when something is off, and you offer the sharper \
+idea instead of only agreeing. This is a free-flowing brainstorm — riff with \
+them, follow tangents, and let the conversation breathe; don't turn every reply \
+into a summary. The plan you are discussing is included below. They hear your \
+replies spoken \
 aloud by a text-to-speech engine, so write for the ear: keep replies short and \
 conversational, and avoid markdown, code blocks, bulleted lists, and URLs \
-(spell things out in prose instead). If you are walking them through the plan \
+(spell things out in prose instead). Lead with your actual take, keep each turn \
+tight so they can jump back in, and it's good to end on the open question when \
+there is one. If you are walking them through the plan \
 section by section, narrate continuously and read their reactions — silently \
 adapt as you go: simplify and slow down if they seem lost, go deeper and move \
 faster if they clearly follow; never quiz them. You may read files, search the \
@@ -361,7 +370,20 @@ pub async fn voice_session_start(
     let stderr_tail: StderrTail = Arc::new(Mutex::new(VecDeque::new()));
 
     {
-        voice.procs.lock().unwrap().insert(
+        let mut procs = voice.procs.lock().unwrap();
+        // The `contains_key` guard at the top of this fn isn't atomic across the
+        // slow async gap before here (binary resolution + spawn), so two starts
+        // for one session can race — notably React StrictMode's dev
+        // mount→cleanup→mount, which fires two `voice_session_start`s before
+        // either inserts. Re-check under the lock: if another child already owns
+        // this session we LOST the race, so drop ours now — *before* a reader is
+        // wired to it. Its `kill_on_drop` death is then silent, instead of the
+        // reader surfacing it as a spurious "the voice session ended before
+        // responding (the claude process exited)". The winner serves the session.
+        if procs.contains_key(&session_id) {
+            return Ok(());
+        }
+        procs.insert(
             session_id.clone(),
             VoiceProc {
                 child,
@@ -384,6 +406,7 @@ pub async fn voice_session_start(
         stdout,
         in_flight,
         stderr_tail,
+        prior_fork.is_some(),
     ));
     Ok(())
 }
@@ -663,12 +686,19 @@ async fn read_voice(
     stdout: ChildStdout,
     in_flight: Arc<AtomicBool>,
     stderr_tail: StderrTail,
+    // True when this child was resuming a stored fork (prior memory). If a resume
+    // never yields a real answer, the stored fork is stale (e.g. Claude pruned
+    // the session) and would wedge every future start — so we clear it on exit.
+    was_resume: bool,
 ) {
     let mut reader = BufReader::new(stdout).lines();
     let mut current_sid: Option<String> = None;
     // Whether the child ever produced a turn result. If it dies without one, the
     // session never came up healthily and we surface the stderr tail as an error.
     let mut saw_result = false;
+    // Whether a turn ever completed with a real (non-empty) answer. A resume that
+    // never reaches this produced nothing usable → its fork id is stale.
+    let mut saw_success = false;
     while let Ok(Some(line)) = reader.next_line().await {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -719,6 +749,7 @@ async fn read_voice(
                         },
                     );
                 } else {
+                    saw_success = true;
                     let _ = app.emit(
                         "voice-done",
                         VoiceDone {
@@ -747,6 +778,14 @@ async fn read_voice(
     in_flight.store(false, Ordering::SeqCst);
     {
         voice_remove(&procs, &session_id);
+    }
+    // A resume that never produced a real answer means the stored fork is stale
+    // (Claude has no such session). Drop it so the NEXT start comes up fresh
+    // instead of re-resuming the dead session forever.
+    if was_resume && !saw_success {
+        if let Err(e) = db.clear_voice_fork_session(&session_id) {
+            tracing::warn!(error = %e, "failed to clear stale voice fork id");
+        }
     }
     // If the child died before ever completing a turn, the warm session never
     // came up — surface *why* (the stderr tail) instead of a silent exit, so a
@@ -901,6 +940,16 @@ mod tests {
         assert!(VOICE_PREAMBLE.contains("explicitly asks"));
         assert!(VOICE_PREAMBLE.contains("feedback comment"));
         assert!(VOICE_PREAMBLE.contains("read the change back"));
+    }
+
+    #[test]
+    fn preamble_frames_a_collaborator_brainstorm() {
+        // The voice agent is a founder's engineering colleague, not a readout
+        // machine — opinionated, ownership, free-flowing.
+        assert!(VOICE_PREAMBLE.contains("colleague"));
+        assert!(VOICE_PREAMBLE.contains("ownership"));
+        assert!(VOICE_PREAMBLE.contains("push back"));
+        assert!(VOICE_PREAMBLE.contains("brainstorm"));
     }
 
     #[test]

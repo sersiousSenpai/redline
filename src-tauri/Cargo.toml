@@ -57,8 +57,19 @@ two-face = { version = "0.5", default-features = false, features = ["syntect-def
 # from Rust so the user's API key never enters the webview and there's no browser
 # CORS. Default TLS (Security.framework on macOS), JSON bodies.
 reqwest = { version = "0.13.4", features = ["json"] }
+# Resample the microphone's hardware-rate PCM (44.1/48 kHz) down to the 16 kHz
+# mono Whisper expects. Pure Rust (no C build); used by the batch Whisper
+# dictation backend to prepare the accumulated utterance before inference.
+rubato = "0.16"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# Local Whisper (whisper.cpp) speech-to-text as the higher-quality, pluggable
+# alternative to Apple's `SFSpeechRecognizer` (`dictation_whisper.rs`). The
+# `metal` feature GPU-accelerates inference on Apple silicon; whisper.cpp is
+# compiled from source at build time (needs `cmake` on the build machine) and
+# statically linked, so end users install nothing — the ~140 MB model is
+# downloaded lazily into the app data dir, like the Kokoro TTS model.
+whisper-rs = { version = "0.14", features = ["metal"] }
 # Enable WKWebView's back/forward swipe gestures on the embedded browser.
 # Tauri 2.11 doesn't expose `setAllowsBackForwardNavigationGestures`, so we
 # reach the WKWebView via `with_webview()` and send the selector with objc2
@@ -78,4 +89,27 @@ block2 = "0.6"
 objc2-speech = "0.3.2"     # SFSpeechRecognizer + recognition request/result/task
 objc2-avf-audio = "0.3.2"  # AVAudioEngine mic tap + PCM buffers
 objc2-foundation = "0.3.2" # NSString/NSLocale/NSError bridging
+# Typed WKWebView + AppKit classes for the embedded browser's new-window
+# (OAuth/SSO popup) support: our own `WKUIDelegate` returns a real WebKit-created
+# child webview from `createWebView…` — the only way `window.opener`,
+# `window.close()`, and `.closed` work — and hosts it in a floating `NSWindow`.
+# Feature lists mirror wry 0.55's exactly (same crate versions already resolved
+# in the tree), so Cargo feature-unification adds no extra build and every class
+# our delegate touches is guaranteed present. Without this, WebKit routes those
+# requests to wry's UI delegate, which has no new-window handler and drops them.
+objc2-web-kit = { version = "0.3.2", default-features = false, features = [
+    "std", "objc2-core-foundation", "objc2-app-kit", "block2",
+    "WKWebView", "WKWebViewConfiguration", "WKWebsiteDataStore", "WKDownload",
+    "WKDownloadDelegate", "WKNavigation", "WKNavigationDelegate",
+    "WKUserContentController", "WKURLSchemeHandler", "WKPreferences",
+    "WKURLSchemeTask", "WKScriptMessageHandler", "WKUIDelegate",
+    "WKOpenPanelParameters", "WKFrameInfo", "WKSecurityOrigin", "WKScriptMessage",
+    "WKNavigationAction", "WKWebpagePreferences", "WKNavigationResponse",
+    "WKUserScript", "WKHTTPCookieStore", "WKWindowFeatures",
+] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std", "objc2-core-foundation", "NSApplication", "NSButton", "NSControl",
+    "NSEvent", "NSWindow", "NSView", "NSPasteboard", "NSPanel", "NSResponder",
+    "NSOpenPanel", "NSSavePanel", "NSMenu", "NSGraphics", "NSScreen",
+] }
 

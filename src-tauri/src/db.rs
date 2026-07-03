@@ -7,11 +7,37 @@ use std::sync::Mutex;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::state::{
-    reparse_sections, AttachState, BrowseMessage, Comment, CommentKind, CommentScope,
-    CommentSelection, CommentStatus, EditPayload, Mission, MissionFinding, MissionMessage,
-    Resolution, ReviewSession, Revision, RoundHistoryEntry, SessionStatus, StructuralPayload,
+    reparse_sections, AttachState, BrowseMessage, CodeReviewSession, Comment, CommentKind,
+    CommentScope, CommentSelection, CommentStatus, EditPayload, LoopAttempt, LoopCheckpoint,
+    LoopRun, Linked, LinkedMessage, LoopStateEntry, LoopSubtask, LoopTrace, Mission,
+    MissionFinding, MissionMessage, Resolution, ReviewAnnotation, ReviewQuestion,
+    ReviewSession, Revision, RoundHistoryEntry, SessionStatus, SourceFeedback, StructuralPayload,
     ThreadMessage,
 };
+
+/// Reduce a URL to a bare host for feedback aggregation: strip scheme, any path/
+/// query, a leading `www.`, and lowercase it. Best-effort — a URL we can't parse
+/// falls back to the trimmed input so a row is never lost.
+pub fn domain_of(url: &str) -> String {
+    let s = url.trim();
+    let after_scheme = s.split("://").nth(1).unwrap_or(s);
+    let host = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    // Drop any userinfo@ and :port.
+    let host = host.rsplit('@').next().unwrap_or(host);
+    let host = host.split(':').next().unwrap_or(host);
+    host.trim_start_matches("www.").to_ascii_lowercase()
+}
+
+/// Decode a JSON string-array column (`deps_json`, `touched_paths_json`) into a
+/// `Vec<String>`; NULL or malformed JSON yields an empty vec (never an error —
+/// a missing edge list just means "no dependencies").
+fn json_str_array(raw: Option<String>) -> Vec<String> {
+    raw.and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or_default()
+}
 
 /// Serialize a comment's reopen-round history for the `reopen_history` column.
 /// Empty history stores NULL (keeps pre-feature and never-reopened rows clean).
@@ -179,6 +205,245 @@ impl Database {
 
             CREATE INDEX IF NOT EXISTS idx_mission_messages
                 ON mission_messages (mission_id, created_at);
+
+            -- Linked discussions: ONE continuous conversation that follows the
+            -- user across every browser tab (no goal, unlike a mission). The
+            -- resumable `claude` session id lives on the row; `linked_messages`
+            -- are the chat turns (terminal rows, mirroring mission_messages) and
+            -- carry a per-turn tab tag (which tab the user was on). Consults into
+            -- a tab's context reuse that tab's own browse thread. See linked.rs.
+            CREATE TABLE IF NOT EXISTS linked_sessions (
+                linked_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                claude_session_id TEXT,
+                tabs_json TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS linked_messages (
+                id TEXT PRIMARY KEY,
+                linked_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                body TEXT NOT NULL,
+                status TEXT NOT NULL,
+                tab_browse_id TEXT,
+                tab_n INTEGER,
+                tab_title TEXT,
+                tab_url TEXT,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_linked_messages
+                ON linked_messages (linked_id, created_at);
+
+            -- Loop Orchestrator: once a reviewed plan is approved, an engine
+            -- decomposes it into parallelizable subtasks, runs executor agents
+            -- in isolated git worktrees, has a SEPARATE reviewer grade each
+            -- against a rubric, and pauses at human checkpoints before any
+            -- merge or final land. Mirrors the missions three-table shape: a
+            -- parent run row holding the resumable planner session id, child
+            -- subtask/attempt rows, and terminal trace/checkpoint rows. The
+            -- durable truth across restarts is the `status` columns + session
+            -- ids (the live processes are disposable). See looporch.rs.
+            CREATE TABLE IF NOT EXISTS loop_runs (
+                run_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                plan_md TEXT NOT NULL,
+                repo_path TEXT NOT NULL,
+                -- The user's real branch. Written only by the final land step,
+                -- so a mid-run crash leaves it pristine.
+                base_ref TEXT NOT NULL,
+                -- `redline/loop/<run8>/integration`, forked off base_ref at run
+                -- start; every approved subtask merges here, not into base.
+                integration_branch TEXT NOT NULL,
+                -- planning | running | paused_checkpoint | review | done | failed | cancelled
+                status TEXT NOT NULL DEFAULT 'planning',
+                planner_session_id TEXT,
+                max_parallel INTEGER NOT NULL DEFAULT 3,
+                max_attempts INTEGER NOT NULL DEFAULT 3,
+                turn_budget INTEGER NOT NULL DEFAULT 40,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS loop_subtasks (
+                subtask_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                instructions TEXT NOT NULL,
+                rubric TEXT NOT NULL,
+                -- DAG edges (declared + synthetic file-overlap), JSON array of
+                -- prerequisite subtask ids.
+                deps_json TEXT,
+                -- Planner-declared file globs; drives overlap serialization +
+                -- the post-exec scope check. JSON array.
+                touched_paths_json TEXT,
+                -- pending | blocked | running | reviewing | needs_changes
+                -- | awaiting_merge | merged | stuck | failed | skipped
+                status TEXT NOT NULL DEFAULT 'pending',
+                branch TEXT,
+                worktree_path TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                executor_session_id TEXT,
+                -- planner-flagged migrations/deploys/network (checkpoint hint)
+                irreversible INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (run_id) REFERENCES loop_runs(run_id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_loop_subtasks
+                ON loop_subtasks (run_id, seq);
+
+            CREATE TABLE IF NOT EXISTS loop_attempts (
+                attempt_id TEXT PRIMARY KEY,
+                subtask_id TEXT NOT NULL,
+                attempt_no INTEGER NOT NULL,
+                -- executor | reviewer
+                role TEXT NOT NULL,
+                -- running | complete | error
+                status TEXT NOT NULL,
+                -- pass | fail (reviewer only)
+                verdict TEXT,
+                score INTEGER,
+                feedback TEXT,
+                diff_stat TEXT,
+                claude_session_id TEXT,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY (subtask_id) REFERENCES loop_subtasks(subtask_id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_loop_attempts
+                ON loop_attempts (subtask_id, created_at);
+
+            -- Durable agent scratch store — survives restarts/kills.
+            CREATE TABLE IF NOT EXISTS loop_state (
+                run_id TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (run_id, scope, key)
+            );
+
+            -- Append-only trajectory log.
+            CREATE TABLE IF NOT EXISTS loop_traces (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                subtask_id TEXT,
+                attempt_id TEXT,
+                -- planner | reviewer_verdict | merge | checkpoint
+                -- | termination | error | hill_suggestion
+                kind TEXT NOT NULL,
+                body TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_loop_traces
+                ON loop_traces (run_id, created_at);
+
+            -- Held human gates. The pending row is the durable truth; the
+            -- in-memory oneshot sender is disposable and re-armed on restart.
+            CREATE TABLE IF NOT EXISTS loop_checkpoints (
+                checkpoint_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                subtask_id TEXT,
+                -- merge | subtask_stuck | land | destructive | plan_approval
+                kind TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                -- the human's choice + optional note / edited instructions
+                decision_json TEXT,
+                -- pending | approved | denied | expired
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at INTEGER NOT NULL,
+                decided_at INTEGER,
+                FOREIGN KEY (run_id) REFERENCES loop_runs(run_id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_loop_checkpoints
+                ON loop_checkpoints (run_id, status);
+
+            -- Tandem agent mode: per-source thumbs the user gives on the sources
+            -- the browse agent surfaces. One row per (browse_id, source_url); a
+            -- re-click updates `verdict` (+1 up / -1 down) and `updated_at`.
+            -- `domain` is derived from the url so learning can aggregate by host.
+            CREATE TABLE IF NOT EXISTS source_feedback (
+                id TEXT PRIMARY KEY,
+                browse_id TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                source_title TEXT,
+                domain TEXT NOT NULL,
+                verdict INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                UNIQUE (browse_id, source_url)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_source_feedback_domain
+                ON source_feedback (domain);
+
+            -- Code Review surface: the diff-review analog of plan sessions.
+            -- Parallel tables (NOT the plan-review `comments` contract, which
+            -- is byte-frozen): honest line-anchor columns plus `quoted_text`,
+            -- the durable content anchor that re-locates across review rounds.
+            CREATE TABLE IF NOT EXISTS review_sessions (
+                review_id TEXT PRIMARY KEY,
+                repo_path TEXT NOT NULL,
+                source TEXT NOT NULL,
+                base_ref TEXT,
+                commit_sha TEXT,
+                terminal_id TEXT,
+                round INTEGER NOT NULL DEFAULT 1,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS review_annotations (
+                id TEXT NOT NULL,
+                review_id TEXT NOT NULL,
+                round INTEGER NOT NULL,
+                file_path TEXT NOT NULL,
+                side TEXT NOT NULL,
+                start_line INTEGER NOT NULL,
+                end_line INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                body TEXT NOT NULL,
+                suggestion_replacement TEXT,
+                quoted_text TEXT NOT NULL,
+                status TEXT NOT NULL,
+                resolution TEXT,
+                created_at INTEGER NOT NULL,
+                fork_session_id TEXT,
+                scope TEXT NOT NULL DEFAULT 'line',
+                label TEXT,
+                blocking TEXT,
+                source TEXT NOT NULL DEFAULT 'user',
+                PRIMARY KEY (review_id, id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_review_annotations
+                ON review_annotations (review_id, file_path, start_line);
+
+            CREATE TABLE IF NOT EXISTS review_viewed (
+                review_id TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                viewed_at INTEGER NOT NULL,
+                PRIMARY KEY (review_id, file_path)
+            );
+
+            CREATE TABLE IF NOT EXISTS review_questions (
+                id TEXT NOT NULL,
+                review_id TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                side TEXT NOT NULL,
+                start_line INTEGER NOT NULL,
+                end_line INTEGER NOT NULL,
+                quoted_text TEXT NOT NULL,
+                fork_session_id TEXT,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (review_id, id)
+            );
             "#,
         )?;
         // Best-effort additive migrations (errors on existing columns are ignored)
@@ -197,6 +462,24 @@ impl Database {
         // A mission's saved tab workspace (JSON `[{id,url,title,browseId}]`), so
         // re-entering a mission reopens its exact tabs with their discussions.
         let _ = conn.execute("ALTER TABLE missions ADD COLUMN tabs_json TEXT", []);
+        // Review-annotation discussion forks (P3.5) — for review_annotations
+        // tables created before the column landed on this branch.
+        let _ = conn.execute(
+            "ALTER TABLE review_annotations ADD COLUMN fork_session_id TEXT",
+            [],
+        );
+        // Parity sprint: annotation scope (line|file|general), conventional
+        // labels + blocking decoration, and the authoring source (user|ai|tool).
+        let _ = conn.execute(
+            "ALTER TABLE review_annotations ADD COLUMN scope TEXT NOT NULL DEFAULT 'line'",
+            [],
+        );
+        let _ = conn.execute("ALTER TABLE review_annotations ADD COLUMN label TEXT", []);
+        let _ = conn.execute("ALTER TABLE review_annotations ADD COLUMN blocking TEXT", []);
+        let _ = conn.execute(
+            "ALTER TABLE review_annotations ADD COLUMN source TEXT NOT NULL DEFAULT 'user'",
+            [],
+        );
 
         // Migration: comment ids are session-scoped (`c-001` restarts per
         // session), but legacy databases declared `id TEXT PRIMARY KEY`
@@ -868,6 +1151,21 @@ impl Database {
         Ok(())
     }
 
+    /// Forget a tab's resumable `claude` session id WITHOUT touching its message
+    /// history. Used to recover from a *poisoned* session — one whose accumulated
+    /// tool-output context (page snapshots, WebFetch, code reads, git diffs) grew
+    /// past the model's window and now throws on every `--resume`. Dropping the id
+    /// makes the next turn start a fresh session (re-embedding a snapshot) instead
+    /// of re-sending the over-limit context forever. The visible thread is kept.
+    pub fn clear_browse_session(&self, browse_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM browse_threads WHERE browse_id = ?1",
+            params![browse_id],
+        )?;
+        Ok(())
+    }
+
     // --- Missions ----------------------------------------------------------
     // The research-mission orchestrator: one shared goal across the browser
     // pane, with curated pins (`mission_findings`) and a resumable chat
@@ -1061,6 +1359,78 @@ impl Database {
         Ok(())
     }
 
+    // --- Source feedback (tandem mode thumbs) ------------------------------
+
+    /// Record (or update) a thumbs verdict for a surfaced source. Upserts on
+    /// `(browse_id, source_url)`: a second click flips `verdict` and bumps
+    /// `updated_at` while keeping the original `created_at`.
+    pub fn upsert_source_feedback(&self, f: &SourceFeedback) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO source_feedback
+                (id, browse_id, source_url, source_title, domain, verdict, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(browse_id, source_url) DO UPDATE SET
+                verdict = excluded.verdict,
+                source_title = excluded.source_title,
+                domain = excluded.domain,
+                updated_at = excluded.updated_at",
+            params![
+                f.id,
+                f.browse_id,
+                f.source_url,
+                f.source_title,
+                f.domain,
+                f.verdict,
+                f.created_at,
+                f.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// All verdicts recorded on a tab's thread, so the sources strip can restore
+    /// its up/down state after a reload.
+    pub fn get_source_feedback(&self, browse_id: &str) -> rusqlite::Result<Vec<SourceFeedback>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, browse_id, source_url, source_title, domain, verdict, created_at, updated_at
+             FROM source_feedback
+             WHERE browse_id = ?1
+             ORDER BY updated_at, id",
+        )?;
+        let rows = stmt.query_map(params![browse_id], |row| {
+            Ok(SourceFeedback {
+                id: row.get(0)?,
+                browse_id: row.get(1)?,
+                source_url: row.get(2)?,
+                source_title: row.get(3)?,
+                domain: row.get(4)?,
+                verdict: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Net thumbs score per domain across ALL tabs (sum of +1/-1), most-liked
+    /// first. Feeds the learned "preferred / avoided sources" line injected into
+    /// the tandem agent prompt.
+    pub fn domain_feedback_summary(&self) -> rusqlite::Result<Vec<(String, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT domain, SUM(verdict) AS score
+             FROM source_feedback
+             GROUP BY domain
+             ORDER BY score DESC, domain",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        rows.collect()
+    }
+
     // --- Mission chat turns ------------------------------------------------
 
     pub fn insert_mission_message(&self, msg: &MissionMessage) -> rusqlite::Result<()> {
@@ -1092,6 +1462,1115 @@ impl Database {
                 created_at: row.get(5)?,
             })
         })?;
+        rows.collect()
+    }
+
+    // --- Linked discussions ------------------------------------------------
+    // One continuous conversation spanning all browser tabs (no goal). Mirrors
+    // the mission helpers above but keyed by `linked_id`; turns carry a tab tag.
+    // See linked.rs.
+
+    pub fn insert_linked(&self, l: &Linked) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO linked_sessions
+                (linked_id, title, status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![l.linked_id, l.title, l.status, l.created_at, l.updated_at],
+        )?;
+        Ok(())
+    }
+
+    /// Linked discussions newest-first (active before archived, then recency),
+    /// for the start/switch/resume menu.
+    pub fn list_linked(&self) -> rusqlite::Result<Vec<Linked>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT linked_id, title, status, created_at, updated_at
+             FROM linked_sessions
+             ORDER BY (status = 'active') DESC, updated_at DESC, created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Linked {
+                linked_id: row.get(0)?,
+                title: row.get(1)?,
+                status: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn get_linked_session(&self, linked_id: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT claude_session_id FROM linked_sessions WHERE linked_id = ?1",
+            params![linked_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+    }
+
+    pub fn set_linked_session(
+        &self,
+        linked_id: &str,
+        claude_session_id: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE linked_sessions SET claude_session_id = ?2 WHERE linked_id = ?1",
+            params![linked_id, claude_session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Save a linked discussion's tab workspace (JSON). Like the mission helper,
+    /// this does NOT bump `updated_at` — tab churn shouldn't reorder the list.
+    pub fn set_linked_tabs(&self, linked_id: &str, tabs_json: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE linked_sessions SET tabs_json = ?2 WHERE linked_id = ?1",
+            params![linked_id, tabs_json],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_linked_tabs(&self, linked_id: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT tabs_json FROM linked_sessions WHERE linked_id = ?1",
+            params![linked_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+    }
+
+    /// Hard-delete a linked discussion and its chat. Does NOT touch any tab's
+    /// browse thread — consults live in those tabs' own discussions, which the
+    /// user may still want.
+    pub fn delete_linked(&self, linked_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM linked_messages WHERE linked_id = ?1",
+            params![linked_id],
+        )?;
+        conn.execute(
+            "DELETE FROM linked_sessions WHERE linked_id = ?1",
+            params![linked_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn insert_linked_message(&self, msg: &LinkedMessage) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO linked_messages
+                (id, linked_id, role, body, status, tab_browse_id, tab_n, tab_title, tab_url, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                msg.id,
+                msg.linked_id,
+                msg.role,
+                msg.body,
+                msg.status,
+                msg.tab_browse_id,
+                msg.tab_n,
+                msg.tab_title,
+                msg.tab_url,
+                msg.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_linked_thread(&self, linked_id: &str) -> rusqlite::Result<Vec<LinkedMessage>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, linked_id, role, body, status, tab_browse_id, tab_n, tab_title, tab_url, created_at
+             FROM linked_messages
+             WHERE linked_id = ?1
+             ORDER BY created_at, id",
+        )?;
+        let rows = stmt.query_map(params![linked_id], |row| {
+            Ok(LinkedMessage {
+                id: row.get(0)?,
+                linked_id: row.get(1)?,
+                role: row.get(2)?,
+                body: row.get(3)?,
+                status: row.get(4)?,
+                tab_browse_id: row.get(5)?,
+                tab_n: row.get(6)?,
+                tab_title: row.get(7)?,
+                tab_url: row.get(8)?,
+                created_at: row.get(9)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    // --- Loop Orchestrator: runs ------------------------------------------
+
+    pub fn insert_loop_run(&self, r: &LoopRun) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO loop_runs
+                (run_id, session_id, title, plan_md, repo_path, base_ref,
+                 integration_branch, status, planner_session_id, max_parallel,
+                 max_attempts, turn_budget, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                r.run_id,
+                r.session_id,
+                r.title,
+                r.plan_md,
+                r.repo_path,
+                r.base_ref,
+                r.integration_branch,
+                r.status,
+                r.planner_session_id,
+                r.max_parallel,
+                r.max_attempts,
+                r.turn_budget,
+                r.created_at,
+                r.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn map_loop_run(row: &rusqlite::Row) -> rusqlite::Result<LoopRun> {
+        Ok(LoopRun {
+            run_id: row.get(0)?,
+            session_id: row.get(1)?,
+            title: row.get(2)?,
+            plan_md: row.get(3)?,
+            repo_path: row.get(4)?,
+            base_ref: row.get(5)?,
+            integration_branch: row.get(6)?,
+            status: row.get(7)?,
+            planner_session_id: row.get(8)?,
+            max_parallel: row.get(9)?,
+            max_attempts: row.get(10)?,
+            turn_budget: row.get(11)?,
+            created_at: row.get(12)?,
+            updated_at: row.get(13)?,
+        })
+    }
+
+    const LOOP_RUN_COLS: &'static str =
+        "run_id, session_id, title, plan_md, repo_path, base_ref, integration_branch, \
+         status, planner_session_id, max_parallel, max_attempts, turn_budget, \
+         created_at, updated_at";
+
+    pub fn get_loop_run(&self, run_id: &str) -> rusqlite::Result<Option<LoopRun>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            &format!("SELECT {} FROM loop_runs WHERE run_id = ?1", Self::LOOP_RUN_COLS),
+            params![run_id],
+            Self::map_loop_run,
+        )
+        .optional()
+    }
+
+    /// Distinct working directories the user has worked in, most-recent first —
+    /// every `sessions.project_path` (a plan review) unioned with every
+    /// `loop_runs.repo_path` (a Loop run). This is Redline's de-facto "projects"
+    /// registry: it backs the browse agent's `/v1/code/projects` map and is the
+    /// allowlist the read-only git route validates a `repo` against. Paths are
+    /// returned verbatim (may no longer exist on disk — the caller filters).
+    pub fn list_project_paths(&self) -> rusqlite::Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT path FROM (
+                 SELECT project_path AS path, MAX(created_at) AS recent
+                     FROM sessions GROUP BY project_path
+                 UNION ALL
+                 SELECT repo_path AS path, MAX(created_at) AS recent
+                     FROM loop_runs GROUP BY repo_path
+             )
+             WHERE path IS NOT NULL AND path <> ''
+             GROUP BY path
+             ORDER BY MAX(recent) DESC",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect()
+    }
+
+    // --- code-review surface -------------------------------------------------
+
+    const REVIEW_SESSION_COLS: &'static str =
+        "review_id, repo_path, source, base_ref, commit_sha, terminal_id, round, created_at";
+
+    fn map_code_review(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodeReviewSession> {
+        Ok(CodeReviewSession {
+            review_id: row.get(0)?,
+            repo_path: row.get(1)?,
+            source: row.get(2)?,
+            base_ref: row.get(3)?,
+            commit_sha: row.get(4)?,
+            terminal_id: row.get(5)?,
+            round: row.get(6)?,
+            created_at: row.get(7)?,
+        })
+    }
+
+    pub fn upsert_code_review(&self, r: &CodeReviewSession) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO review_sessions
+                 (review_id, repo_path, source, base_ref, commit_sha, terminal_id, round, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(review_id) DO UPDATE SET
+                 repo_path = excluded.repo_path,
+                 source = excluded.source,
+                 base_ref = excluded.base_ref,
+                 commit_sha = excluded.commit_sha,
+                 terminal_id = excluded.terminal_id,
+                 round = excluded.round",
+            params![
+                r.review_id,
+                r.repo_path,
+                r.source,
+                r.base_ref,
+                r.commit_sha,
+                r.terminal_id,
+                r.round,
+                r.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_code_review(&self, review_id: &str) -> Option<CodeReviewSession> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            &format!(
+                "SELECT {} FROM review_sessions WHERE review_id = ?1",
+                Self::REVIEW_SESSION_COLS
+            ),
+            params![review_id],
+            Self::map_code_review,
+        )
+        .ok()
+    }
+
+    pub fn list_code_reviews(&self) -> rusqlite::Result<Vec<CodeReviewSession>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM review_sessions ORDER BY created_at DESC",
+            Self::REVIEW_SESSION_COLS
+        ))?;
+        let rows = stmt.query_map([], Self::map_code_review)?;
+        rows.collect()
+    }
+
+    /// The most recent review session for a repo — how a re-run of
+    /// `/redline-review` in the same repo continues the SAME review (next
+    /// round) instead of minting a parallel one.
+    pub fn latest_code_review_for_repo(&self, repo_path: &str) -> Option<CodeReviewSession> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            &format!(
+                "SELECT {} FROM review_sessions WHERE repo_path = ?1
+                 ORDER BY created_at DESC LIMIT 1",
+                Self::REVIEW_SESSION_COLS
+            ),
+            params![repo_path],
+            Self::map_code_review,
+        )
+        .ok()
+    }
+
+    pub fn delete_code_review(&self, review_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM review_annotations WHERE review_id = ?1",
+            params![review_id],
+        )?;
+        conn.execute(
+            "DELETE FROM review_viewed WHERE review_id = ?1",
+            params![review_id],
+        )?;
+        conn.execute(
+            "DELETE FROM review_sessions WHERE review_id = ?1",
+            params![review_id],
+        )?;
+        Ok(())
+    }
+
+    const REVIEW_ANNOTATION_COLS: &'static str =
+        "id, review_id, round, file_path, side, start_line, end_line, kind, body, \
+         suggestion_replacement, quoted_text, status, resolution, created_at, \
+         scope, label, blocking, source";
+
+    fn map_review_annotation(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReviewAnnotation> {
+        Ok(ReviewAnnotation {
+            id: row.get(0)?,
+            review_id: row.get(1)?,
+            round: row.get(2)?,
+            file_path: row.get(3)?,
+            side: row.get(4)?,
+            start_line: row.get(5)?,
+            end_line: row.get(6)?,
+            kind: row.get(7)?,
+            body: row.get(8)?,
+            suggestion_replacement: row.get(9)?,
+            quoted_text: row.get(10)?,
+            status: row.get(11)?,
+            resolution: row.get(12)?,
+            created_at: row.get(13)?,
+            scope: row.get(14)?,
+            label: row.get(15)?,
+            blocking: row.get(16)?,
+            source: row.get(17)?,
+        })
+    }
+
+    pub fn insert_review_annotation(&self, a: &ReviewAnnotation) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            &format!(
+                "INSERT INTO review_annotations ({})
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                         ?15, ?16, ?17, ?18)",
+                Self::REVIEW_ANNOTATION_COLS
+            ),
+            params![
+                a.id,
+                a.review_id,
+                a.round,
+                a.file_path,
+                a.side,
+                a.start_line,
+                a.end_line,
+                a.kind,
+                a.body,
+                a.suggestion_replacement,
+                a.quoted_text,
+                a.status,
+                a.resolution,
+                a.created_at,
+                a.scope,
+                a.label,
+                a.blocking,
+                a.source,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Full-row update (except identity + created_at + source). The
+    /// carry-forward pass re-homes an annotation's round/lines/status through
+    /// this same path.
+    pub fn update_review_annotation(&self, a: &ReviewAnnotation) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE review_annotations SET
+                 round = ?1, file_path = ?2, side = ?3, start_line = ?4, end_line = ?5,
+                 kind = ?6, body = ?7, suggestion_replacement = ?8, quoted_text = ?9,
+                 status = ?10, resolution = ?11, scope = ?12, label = ?13, blocking = ?14
+             WHERE review_id = ?15 AND id = ?16",
+            params![
+                a.round,
+                a.file_path,
+                a.side,
+                a.start_line,
+                a.end_line,
+                a.kind,
+                a.body,
+                a.suggestion_replacement,
+                a.quoted_text,
+                a.status,
+                a.resolution,
+                a.scope,
+                a.label,
+                a.blocking,
+                a.review_id,
+                a.id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_review_annotation(&self, review_id: &str, id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM review_annotations WHERE review_id = ?1 AND id = ?2",
+            params![review_id, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_review_annotations(
+        &self,
+        review_id: &str,
+    ) -> rusqlite::Result<Vec<ReviewAnnotation>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM review_annotations WHERE review_id = ?1
+             ORDER BY file_path, start_line, created_at",
+            Self::REVIEW_ANNOTATION_COLS
+        ))?;
+        let rows = stmt.query_map(params![review_id], Self::map_review_annotation)?;
+        rows.collect()
+    }
+
+    /// The annotation's discussion-fork claude session id (resume target).
+    /// Deliberately NOT on `ReviewAnnotation` — always read fresh from disk,
+    /// mirroring `comments.fork_session_id`.
+    pub fn get_review_annotation_fork_session(
+        &self,
+        review_id: &str,
+        id: &str,
+    ) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT fork_session_id FROM review_annotations
+             WHERE review_id = ?1 AND id = ?2",
+            params![review_id, id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+    }
+
+    pub fn set_review_annotation_fork_session(
+        &self,
+        review_id: &str,
+        id: &str,
+        fork_session_id: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE review_annotations SET fork_session_id = ?3
+             WHERE review_id = ?1 AND id = ?2",
+            params![review_id, id, fork_session_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_review_annotation_fork_session(
+        &self,
+        review_id: &str,
+        id: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE review_annotations SET fork_session_id = NULL
+             WHERE review_id = ?1 AND id = ?2",
+            params![review_id, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_review_viewed(
+        &self,
+        review_id: &str,
+        file_path: &str,
+        viewed_at: i64,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO review_viewed (review_id, file_path, viewed_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(review_id, file_path) DO UPDATE SET viewed_at = excluded.viewed_at",
+            params![review_id, file_path, viewed_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn unmark_review_viewed(&self, review_id: &str, file_path: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM review_viewed WHERE review_id = ?1 AND file_path = ?2",
+            params![review_id, file_path],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_review_viewed(&self, review_id: &str) -> rusqlite::Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT file_path FROM review_viewed WHERE review_id = ?1 ORDER BY file_path",
+        )?;
+        let rows = stmt.query_map(params![review_id], |row| row.get::<_, String>(0))?;
+        rows.collect()
+    }
+
+    /// Remove a source's DRAFT annotations only — submitted/carried history is
+    /// feedback the agent already saw and must stay auditable.
+    pub fn clear_review_annotations_by_source(
+        &self,
+        review_id: &str,
+        source: &str,
+    ) -> rusqlite::Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM review_annotations
+             WHERE review_id = ?1 AND source = ?2 AND status = 'draft'",
+            params![review_id, source],
+        )
+    }
+
+    // --- Ask-AI questions ----------------------------------------------------
+
+    const REVIEW_QUESTION_COLS: &'static str =
+        "id, review_id, file_path, side, start_line, end_line, quoted_text, created_at";
+
+    fn map_review_question(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReviewQuestion> {
+        Ok(ReviewQuestion {
+            id: row.get(0)?,
+            review_id: row.get(1)?,
+            file_path: row.get(2)?,
+            side: row.get(3)?,
+            start_line: row.get(4)?,
+            end_line: row.get(5)?,
+            quoted_text: row.get(6)?,
+            created_at: row.get(7)?,
+        })
+    }
+
+    pub fn insert_review_question(&self, q: &ReviewQuestion) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            &format!(
+                "INSERT INTO review_questions ({})
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                Self::REVIEW_QUESTION_COLS
+            ),
+            params![
+                q.id,
+                q.review_id,
+                q.file_path,
+                q.side,
+                q.start_line,
+                q.end_line,
+                q.quoted_text,
+                q.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_review_questions(&self, review_id: &str) -> rusqlite::Result<Vec<ReviewQuestion>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM review_questions WHERE review_id = ?1
+             ORDER BY file_path, start_line, created_at",
+            Self::REVIEW_QUESTION_COLS
+        ))?;
+        let rows = stmt.query_map(params![review_id], Self::map_review_question)?;
+        rows.collect()
+    }
+
+    pub fn delete_review_question(&self, review_id: &str, id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM review_questions WHERE review_id = ?1 AND id = ?2",
+            params![review_id, id],
+        )?;
+        Ok(())
+    }
+
+    /// The question's Ask-AI claude session id (resume target) — read fresh
+    /// from disk, mirroring `review_annotations.fork_session_id`.
+    pub fn get_review_question_fork_session(
+        &self,
+        review_id: &str,
+        id: &str,
+    ) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT fork_session_id FROM review_questions WHERE review_id = ?1 AND id = ?2",
+            params![review_id, id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+    }
+
+    pub fn set_review_question_fork_session(
+        &self,
+        review_id: &str,
+        id: &str,
+        session: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE review_questions SET fork_session_id = ?1 WHERE review_id = ?2 AND id = ?3",
+            params![session, review_id, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_loop_runs(&self) -> rusqlite::Result<Vec<LoopRun>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM loop_runs ORDER BY created_at DESC",
+            Self::LOOP_RUN_COLS
+        ))?;
+        let rows = stmt.query_map([], Self::map_loop_run)?;
+        rows.collect()
+    }
+
+    /// Runs in a given status — the restart reconciler asks for `running`.
+    pub fn list_loop_runs_by_status(&self, status: &str) -> rusqlite::Result<Vec<LoopRun>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM loop_runs WHERE status = ?1 ORDER BY created_at",
+            Self::LOOP_RUN_COLS
+        ))?;
+        let rows = stmt.query_map(params![status], Self::map_loop_run)?;
+        rows.collect()
+    }
+
+    pub fn update_loop_run_status(&self, run_id: &str, status: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE loop_runs SET status = ?2, updated_at = ?3 WHERE run_id = ?1",
+            params![run_id, status, crate::state::now_millis()],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_planner_session(&self, run_id: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT planner_session_id FROM loop_runs WHERE run_id = ?1",
+            params![run_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+    }
+
+    pub fn set_planner_session(&self, run_id: &str, sid: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE loop_runs SET planner_session_id = ?2 WHERE run_id = ?1",
+            params![run_id, sid],
+        )?;
+        Ok(())
+    }
+
+    /// Hard-delete a run and all its children (manual cascade — correct
+    /// regardless of the `foreign_keys` PRAGMA, like `delete_mission`).
+    pub fn delete_loop_run(&self, run_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM loop_attempts WHERE subtask_id IN
+                (SELECT subtask_id FROM loop_subtasks WHERE run_id = ?1)",
+            params![run_id],
+        )?;
+        conn.execute("DELETE FROM loop_subtasks WHERE run_id = ?1", params![run_id])?;
+        conn.execute("DELETE FROM loop_state WHERE run_id = ?1", params![run_id])?;
+        conn.execute("DELETE FROM loop_traces WHERE run_id = ?1", params![run_id])?;
+        conn.execute("DELETE FROM loop_checkpoints WHERE run_id = ?1", params![run_id])?;
+        conn.execute("DELETE FROM loop_runs WHERE run_id = ?1", params![run_id])?;
+        Ok(())
+    }
+
+    // --- Loop Orchestrator: subtasks --------------------------------------
+
+    pub fn insert_loop_subtask(&self, s: &LoopSubtask) -> rusqlite::Result<()> {
+        let deps = serde_json::to_string(&s.deps).unwrap_or_else(|_| "[]".to_string());
+        let touched =
+            serde_json::to_string(&s.touched_paths).unwrap_or_else(|_| "[]".to_string());
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO loop_subtasks
+                (subtask_id, run_id, seq, title, instructions, rubric, deps_json,
+                 touched_paths_json, status, branch, worktree_path, attempts,
+                 executor_session_id, irreversible)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                s.subtask_id,
+                s.run_id,
+                s.seq,
+                s.title,
+                s.instructions,
+                s.rubric,
+                deps,
+                touched,
+                s.status,
+                s.branch,
+                s.worktree_path,
+                s.attempts,
+                s.executor_session_id,
+                s.irreversible as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn map_loop_subtask(row: &rusqlite::Row) -> rusqlite::Result<LoopSubtask> {
+        Ok(LoopSubtask {
+            subtask_id: row.get(0)?,
+            run_id: row.get(1)?,
+            seq: row.get(2)?,
+            title: row.get(3)?,
+            instructions: row.get(4)?,
+            rubric: row.get(5)?,
+            deps: json_str_array(row.get(6)?),
+            touched_paths: json_str_array(row.get(7)?),
+            status: row.get(8)?,
+            branch: row.get(9)?,
+            worktree_path: row.get(10)?,
+            attempts: row.get(11)?,
+            executor_session_id: row.get(12)?,
+            irreversible: row.get::<_, i64>(13)? != 0,
+        })
+    }
+
+    const LOOP_SUBTASK_COLS: &'static str =
+        "subtask_id, run_id, seq, title, instructions, rubric, deps_json, \
+         touched_paths_json, status, branch, worktree_path, attempts, \
+         executor_session_id, irreversible";
+
+    pub fn get_subtask(&self, subtask_id: &str) -> rusqlite::Result<Option<LoopSubtask>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            &format!(
+                "SELECT {} FROM loop_subtasks WHERE subtask_id = ?1",
+                Self::LOOP_SUBTASK_COLS
+            ),
+            params![subtask_id],
+            Self::map_loop_subtask,
+        )
+        .optional()
+    }
+
+    pub fn list_subtasks(&self, run_id: &str) -> rusqlite::Result<Vec<LoopSubtask>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM loop_subtasks WHERE run_id = ?1 ORDER BY seq",
+            Self::LOOP_SUBTASK_COLS
+        ))?;
+        let rows = stmt.query_map(params![run_id], Self::map_loop_subtask)?;
+        rows.collect()
+    }
+
+    pub fn update_subtask_status(&self, subtask_id: &str, status: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE loop_subtasks SET status = ?2 WHERE subtask_id = ?1",
+            params![subtask_id, status],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_subtask_worktree(&self, subtask_id: &str, worktree_path: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE loop_subtasks SET worktree_path = ?2 WHERE subtask_id = ?1",
+            params![subtask_id, worktree_path],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_executor_session(&self, subtask_id: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT executor_session_id FROM loop_subtasks WHERE subtask_id = ?1",
+            params![subtask_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+    }
+
+    pub fn set_executor_session(&self, subtask_id: &str, sid: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE loop_subtasks SET executor_session_id = ?2 WHERE subtask_id = ?1",
+            params![subtask_id, sid],
+        )?;
+        Ok(())
+    }
+
+    /// Bump the attempt counter and return the new value.
+    pub fn incr_subtask_attempts(&self, subtask_id: &str) -> rusqlite::Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE loop_subtasks SET attempts = attempts + 1 WHERE subtask_id = ?1",
+            params![subtask_id],
+        )?;
+        conn.query_row(
+            "SELECT attempts FROM loop_subtasks WHERE subtask_id = ?1",
+            params![subtask_id],
+            |row| row.get(0),
+        )
+    }
+
+    /// Edit-and-retry from the stuck checkpoint: overwrite the instructions and
+    /// reset the attempt counter so the subtask re-enters scheduling fresh.
+    pub fn edit_and_reset_subtask(
+        &self,
+        subtask_id: &str,
+        instructions: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE loop_subtasks SET instructions = ?2, attempts = 0 WHERE subtask_id = ?1",
+            params![subtask_id, instructions],
+        )?;
+        Ok(())
+    }
+
+    // --- Loop Orchestrator: attempts --------------------------------------
+
+    pub fn insert_attempt(&self, a: &LoopAttempt) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO loop_attempts
+                (attempt_id, subtask_id, attempt_no, role, status, verdict, score,
+                 feedback, diff_stat, claude_session_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                a.attempt_id,
+                a.subtask_id,
+                a.attempt_no,
+                a.role,
+                a.status,
+                a.verdict,
+                a.score,
+                a.feedback,
+                a.diff_stat,
+                a.claude_session_id,
+                a.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Close out an attempt row with its terminal status + reviewer verdict.
+    #[allow(clippy::too_many_arguments)]
+    pub fn finish_attempt(
+        &self,
+        attempt_id: &str,
+        status: &str,
+        verdict: Option<&str>,
+        score: Option<i64>,
+        feedback: Option<&str>,
+        diff_stat: Option<&str>,
+        claude_session_id: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE loop_attempts
+             SET status = ?2, verdict = ?3, score = ?4, feedback = ?5,
+                 diff_stat = ?6, claude_session_id = COALESCE(?7, claude_session_id)
+             WHERE attempt_id = ?1",
+            params![attempt_id, status, verdict, score, feedback, diff_stat, claude_session_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_attempts(&self, subtask_id: &str) -> rusqlite::Result<Vec<LoopAttempt>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT attempt_id, subtask_id, attempt_no, role, status, verdict, score,
+                    feedback, diff_stat, claude_session_id, created_at
+             FROM loop_attempts WHERE subtask_id = ?1 ORDER BY created_at, attempt_no",
+        )?;
+        let rows = stmt.query_map(params![subtask_id], |row| {
+            Ok(LoopAttempt {
+                attempt_id: row.get(0)?,
+                subtask_id: row.get(1)?,
+                attempt_no: row.get(2)?,
+                role: row.get(3)?,
+                status: row.get(4)?,
+                verdict: row.get(5)?,
+                score: row.get(6)?,
+                feedback: row.get(7)?,
+                diff_stat: row.get(8)?,
+                claude_session_id: row.get(9)?,
+                created_at: row.get(10)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    // --- Loop Orchestrator: durable scratch state -------------------------
+
+    #[allow(dead_code)] // symmetric accessor; the daemon reads via loop_state_list
+    pub fn loop_state_get(&self, run_id: &str, scope: &str, key: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT value FROM loop_state WHERE run_id = ?1 AND scope = ?2 AND key = ?3",
+            params![run_id, scope, key],
+            |row| row.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+    }
+
+    pub fn loop_state_set(
+        &self,
+        run_id: &str,
+        scope: &str,
+        key: &str,
+        value: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO loop_state (run_id, scope, key, value, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(run_id, scope, key) DO UPDATE SET value = ?4, updated_at = ?5",
+            params![run_id, scope, key, value, crate::state::now_millis()],
+        )?;
+        Ok(())
+    }
+
+    pub fn loop_state_list(&self, run_id: &str, scope: &str) -> rusqlite::Result<Vec<LoopStateEntry>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT run_id, scope, key, value, updated_at
+             FROM loop_state WHERE run_id = ?1 AND scope = ?2 ORDER BY key",
+        )?;
+        let rows = stmt.query_map(params![run_id, scope], |row| {
+            Ok(LoopStateEntry {
+                run_id: row.get(0)?,
+                scope: row.get(1)?,
+                key: row.get(2)?,
+                value: row.get(3)?,
+                updated_at: row.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    // --- Loop Orchestrator: traces ----------------------------------------
+
+    pub fn insert_trace(&self, t: &LoopTrace) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO loop_traces
+                (id, run_id, subtask_id, attempt_id, kind, body, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![t.id, t.run_id, t.subtask_id, t.attempt_id, t.kind, t.body, t.created_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_traces(&self, run_id: &str) -> rusqlite::Result<Vec<LoopTrace>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, run_id, subtask_id, attempt_id, kind, body, created_at
+             FROM loop_traces WHERE run_id = ?1 ORDER BY created_at, id",
+        )?;
+        let rows = stmt.query_map(params![run_id], |row| {
+            Ok(LoopTrace {
+                id: row.get(0)?,
+                run_id: row.get(1)?,
+                subtask_id: row.get(2)?,
+                attempt_id: row.get(3)?,
+                kind: row.get(4)?,
+                body: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    // --- Loop Orchestrator: checkpoints -----------------------------------
+
+    pub fn insert_checkpoint(&self, c: &LoopCheckpoint) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO loop_checkpoints
+                (checkpoint_id, run_id, subtask_id, kind, summary, decision_json,
+                 status, created_at, decided_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                c.checkpoint_id,
+                c.run_id,
+                c.subtask_id,
+                c.kind,
+                c.summary,
+                c.decision_json,
+                c.status,
+                c.created_at,
+                c.decided_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn map_checkpoint(row: &rusqlite::Row) -> rusqlite::Result<LoopCheckpoint> {
+        Ok(LoopCheckpoint {
+            checkpoint_id: row.get(0)?,
+            run_id: row.get(1)?,
+            subtask_id: row.get(2)?,
+            kind: row.get(3)?,
+            summary: row.get(4)?,
+            decision_json: row.get(5)?,
+            status: row.get(6)?,
+            created_at: row.get(7)?,
+            decided_at: row.get(8)?,
+        })
+    }
+
+    const LOOP_CHECKPOINT_COLS: &'static str =
+        "checkpoint_id, run_id, subtask_id, kind, summary, decision_json, \
+         status, created_at, decided_at";
+
+    pub fn get_checkpoint(&self, checkpoint_id: &str) -> rusqlite::Result<Option<LoopCheckpoint>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            &format!(
+                "SELECT {} FROM loop_checkpoints WHERE checkpoint_id = ?1",
+                Self::LOOP_CHECKPOINT_COLS
+            ),
+            params![checkpoint_id],
+            Self::map_checkpoint,
+        )
+        .optional()
+    }
+
+    /// Record the human's decision on a checkpoint (status + decision payload).
+    pub fn decide_checkpoint(
+        &self,
+        checkpoint_id: &str,
+        status: &str,
+        decision_json: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE loop_checkpoints
+             SET status = ?2, decision_json = ?3, decided_at = ?4
+             WHERE checkpoint_id = ?1",
+            params![checkpoint_id, status, decision_json, crate::state::now_millis()],
+        )?;
+        Ok(())
+    }
+
+    /// Pending checkpoints for a run (the UI shows these as held gates).
+    pub fn list_pending_checkpoints(&self, run_id: &str) -> rusqlite::Result<Vec<LoopCheckpoint>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM loop_checkpoints
+             WHERE run_id = ?1 AND status = 'pending' ORDER BY created_at",
+            Self::LOOP_CHECKPOINT_COLS
+        ))?;
+        let rows = stmt.query_map(params![run_id], Self::map_checkpoint)?;
+        rows.collect()
+    }
+
+    /// Every pending checkpoint across all runs — the restart reconciler
+    /// re-arms each one's in-memory gate.
+    #[allow(dead_code)] // reconcile re-arms per-run; kept for a global sweep
+    pub fn list_all_pending_checkpoints(&self) -> rusqlite::Result<Vec<LoopCheckpoint>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM loop_checkpoints WHERE status = 'pending' ORDER BY created_at",
+            Self::LOOP_CHECKPOINT_COLS
+        ))?;
+        let rows = stmt.query_map([], Self::map_checkpoint)?;
         rows.collect()
     }
 
@@ -1319,6 +2798,99 @@ mod tests {
     fn make_store() -> SessionStore {
         let db = Arc::new(Database::open_in_memory().unwrap());
         SessionStore::new(db)
+    }
+
+    #[test]
+    fn code_review_session_and_annotations_round_trip() {
+        let db = Database::open_in_memory().unwrap();
+
+        let r = CodeReviewSession {
+            review_id: "rev-1".to_string(),
+            repo_path: "/proj".to_string(),
+            source: "uncommitted".to_string(),
+            base_ref: None,
+            commit_sha: None,
+            terminal_id: Some("term-1".to_string()),
+            round: 1,
+            created_at: 100,
+        };
+        db.upsert_code_review(&r).unwrap();
+        assert_eq!(db.get_code_review("rev-1").unwrap().repo_path, "/proj");
+        assert_eq!(db.list_code_reviews().unwrap().len(), 1);
+
+        // Re-running in the same repo finds THIS review (round continuity),
+        // and the round bump persists through the same upsert path.
+        let newer = CodeReviewSession {
+            round: 2,
+            ..r.clone()
+        };
+        db.upsert_code_review(&newer).unwrap();
+        let latest = db.latest_code_review_for_repo("/proj").unwrap();
+        assert_eq!(latest.review_id, "rev-1");
+        assert_eq!(latest.round, 2);
+        assert!(db.latest_code_review_for_repo("/other").is_none());
+
+        let a = ReviewAnnotation {
+            id: "rc-001".to_string(),
+            review_id: "rev-1".to_string(),
+            round: 1,
+            file_path: "src/main.rs".to_string(),
+            side: "new".to_string(),
+            start_line: 42,
+            end_line: 45,
+            kind: "suggestion".to_string(),
+            body: "tighten this".to_string(),
+            suggestion_replacement: Some("let x = y?;".to_string()),
+            quoted_text: "let x = y.unwrap();".to_string(),
+            status: "draft".to_string(),
+            resolution: None,
+            created_at: 100,
+            scope: "line".to_string(),
+            label: Some("nitpick".to_string()),
+            blocking: Some("non-blocking".to_string()),
+            source: "user".to_string(),
+        };
+        db.insert_review_annotation(&a).unwrap();
+        let listed = db.list_review_annotations("rev-1").unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].suggestion_replacement.as_deref(), Some("let x = y?;"));
+        assert_eq!(listed[0].quoted_text, "let x = y.unwrap();");
+
+        // The carry-forward pass re-homes round/lines/status via update.
+        let carried = ReviewAnnotation {
+            round: 2,
+            start_line: 50,
+            end_line: 53,
+            status: "carried".to_string(),
+            resolution: Some("Applied the ? operator".to_string()),
+            ..a.clone()
+        };
+        db.update_review_annotation(&carried).unwrap();
+        let after = db.list_review_annotations("rev-1").unwrap();
+        assert_eq!(after[0].round, 2);
+        assert_eq!(after[0].start_line, 50);
+        assert_eq!(after[0].status, "carried");
+        assert_eq!(after[0].resolution.as_deref(), Some("Applied the ? operator"));
+
+        // Per-file viewed tracking: mark, re-mark (upsert), unmark.
+        db.mark_review_viewed("rev-1", "src/main.rs", 100).unwrap();
+        db.mark_review_viewed("rev-1", "src/main.rs", 200).unwrap();
+        db.mark_review_viewed("rev-1", "src/lib.rs", 100).unwrap();
+        assert_eq!(
+            db.list_review_viewed("rev-1").unwrap(),
+            vec!["src/lib.rs".to_string(), "src/main.rs".to_string()]
+        );
+        db.unmark_review_viewed("rev-1", "src/lib.rs").unwrap();
+        assert_eq!(db.list_review_viewed("rev-1").unwrap().len(), 1);
+
+        // Deleting the review sweeps annotations + viewed rows with it.
+        db.delete_review_annotation("rev-1", "rc-001").unwrap();
+        assert!(db.list_review_annotations("rev-1").unwrap().is_empty());
+        db.insert_review_annotation(&a).unwrap();
+        db.delete_code_review("rev-1").unwrap();
+        assert!(db.get_code_review("rev-1").is_none());
+        assert!(db.list_review_annotations("rev-1").unwrap().is_empty());
+        assert!(db.list_review_viewed("rev-1").unwrap().is_empty());
     }
 
     #[test]

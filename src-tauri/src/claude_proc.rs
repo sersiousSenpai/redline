@@ -84,6 +84,40 @@ pub fn claude_command(claude_bin: &str) -> Command {
     cmd
 }
 
+/// The standard arg vector for a headless *browser-bridge* `claude` turn:
+/// stream-json with partial messages, the Read/Grep/Glob/WebFetch/WebSearch/Bash
+/// tool surface, and the localhost curl allow (three quoting variants — see
+/// `browse.rs` for why all three prefix rules are required), with MCP stripped.
+/// Appends `--resume <sid>` when resuming a prior session. Shared by the browse
+/// consult path and the linked-discussion agent so the tool surface can't drift
+/// between them. `browse_send`/`mission_send` keep their own inline copies.
+pub fn bridge_args(prompt: String, prior_session: Option<&str>) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "-p".to_string(),
+        prompt,
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--include-partial-messages".to_string(),
+        "--verbose".to_string(),
+        "--permission-mode".to_string(),
+        "default".to_string(),
+        "--tools".to_string(),
+        "Read,Grep,Glob,WebFetch,WebSearch,Bash".to_string(),
+        "--allowedTools".to_string(),
+        "WebSearch".to_string(),
+        "WebFetch".to_string(),
+        "Bash(curl -s http://127.0.0.1:7676/*)".to_string(),
+        "Bash(curl -s 'http://127.0.0.1:7676/*)".to_string(),
+        "Bash(curl -s \"http://127.0.0.1:7676/*)".to_string(),
+        "--strict-mcp-config".to_string(),
+    ];
+    if let Some(sid) = prior_session {
+        args.push("--resume".to_string());
+        args.push(sid.to_string());
+    }
+    args
+}
+
 /// What one `--output-format stream-json` line means to a process reader.
 /// See `docs/protocol-verification.md` Experiment (i) for the captured shapes.
 #[derive(Debug, PartialEq)]

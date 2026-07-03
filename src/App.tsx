@@ -35,6 +35,16 @@ import { BrowserPane } from "./components/BrowserPane";
 import { MenuOverlayProvider } from "./components/menuOverlay";
 import { SplitPane } from "./components/SplitPane";
 import { PromptDrafter } from "./components/PromptDrafter";
+import { LoopTrajectory } from "./components/LoopTrajectory";
+import { LoopStartDialog } from "./components/LoopStartDialog";
+import { useLoop, type LoopStartArgs } from "./hooks/useLoop";
+import ReviewPanel from "./components/ReviewPanel";
+import ReviewDiscussionPane from "./components/ReviewDiscussionPane";
+import { useReview } from "./hooks/useReview";
+import {
+  effectiveDiscussionContext,
+  type DiscussionContext,
+} from "./lib/discussionContext";
 import { VoicePanel } from "./components/VoicePanel";
 import type { ProjectOption } from "./components/ProjectPicker";
 import { useFolderWorkspaces } from "./hooks/useFolderWorkspaces";
@@ -61,6 +71,8 @@ import { FlashOverlay } from "./components/FlashOverlay";
 import { playInterceptBeep, DEFAULT_SOUND } from "./audio/beep";
 import { buildResumeCommand } from "./lib/resumeCommand";
 import { buildPlanLaunchCommand } from "./lib/planLaunchCommand";
+import { guessProjectForPlan } from "./lib/guessProject";
+import { SendToRedlineDialog } from "./components/SendToRedlineDialog";
 import type { JSONContent } from "@tiptap/react";
 import type {
   Comment,
@@ -254,6 +266,11 @@ function App() {
     "redline.commentPane.fullscreen",
     false,
   );
+  // Which artifact the Discussion sidecar pertains to (plan comments vs the
+  // code review's annotations/questions). Only consulted in a true split —
+  // see `effectiveDiscussionContext`.
+  const [discussionPinned, setDiscussionPinned] =
+    usePersistedState<DiscussionContext>("redline.discussion.context", "plan");
   // The center pane hosts two independently-toggleable views: the document
   // (editor/plan) and the embedded browser. Each has a toolbar toggle. When
   // both are on, they share the pane as a foldable split (see SplitPane);
@@ -297,6 +314,55 @@ function App() {
     "redline.drafter.project",
     null,
   );
+  // A plan sent from the browser page-discussion agent, held for a repo-confirm
+  // step (SendToRedlineDialog) before it launches into a terminal — so it never
+  // silently lands in $HOME.
+  const [sendConfirm, setSendConfirm] = useState<{
+    markdown: string;
+    initialProject: string | null;
+  } | null>(null);
+  // The Loop Orchestrator — a third secondary pane (mutually exclusive with the
+  // browser and drafter) that drives an approved plan through a DAG of subtasks.
+  // `useLoop` owns the run list, the active run's live snapshot, and the loop-*
+  // event subscription; `loopHandoff` holds the pending "run this plan" dialog.
+  const [loopOpen, setLoopOpen] = usePersistedState(
+    "redline.loop.open",
+    false,
+  );
+  const loop = useLoop();
+  // The Code Review surface — a fourth secondary pane (mutually exclusive with
+  // the browser/drafter/loop): the annotatable git diff of what the agent just
+  // wrote. `useReview` owns the repo/source choice, the parsed diff, and the
+  // line-anchored annotations.
+  const [reviewOpen, setReviewOpen] = usePersistedState(
+    "redline.review.open",
+    false,
+  );
+  const codeReview = useReview();
+  // A `/redline-review` curl is holding for feedback → surface the review
+  // pane immediately (the hook itself adopts the repo/source/round).
+  useEffect(() => {
+    let alive = true;
+    const p = listen("review-requested", () => {
+      if (!alive) return;
+      setSplitRatio(0.5);
+      setBrowserOpen(false);
+      setDrafterOpen(false);
+      setLoopOpen(false);
+      setReviewOpen(true);
+    });
+    return () => {
+      alive = false;
+      void p.then((un) => un());
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const [loopHandoff, setLoopHandoff] = useState<{
+    sessionId: string;
+    planMd: string;
+    repoPath: string | null;
+    title: string;
+  } | null>(null);
   // Document zoom (content font-scale, not webview zoom). Persisted; clamped
   // 0.8–1.6. Driven by the in-pane control and Cmd +/-/0 shortcuts.
   const [docZoom, setDocZoom] = usePersistedState("redline.docZoom", 1);
@@ -647,7 +713,7 @@ function App() {
       // If a secondary pane (browser or drafter) is filling the center pane on
       // its own, opening a document would otherwise load hidden behind it.
       // Bring up the split so both show.
-      if ((browserOpen || drafterOpen) && !docOpen) {
+      if ((browserOpen || drafterOpen || loopOpen || reviewOpen) && !docOpen) {
         setSplitRatio(0.5);
         setDocOpen(true);
       }
@@ -661,7 +727,7 @@ function App() {
         }
       }
     },
-    [setActiveFile, sidebarTab, activeTermId, browserOpen, drafterOpen, docOpen, setDocOpen, setSplitRatio],
+    [setActiveFile, sidebarTab, activeTermId, browserOpen, drafterOpen, loopOpen, reviewOpen, docOpen, setDocOpen, setSplitRatio],
   );
   const handleCloseFile = useCallback(() => {
     setActiveFile(null);
@@ -728,7 +794,7 @@ function App() {
     const ro = new ResizeObserver(recompute);
     ro.observe(container);
     return () => ro.disconnect();
-  }, [sidebarTab, activeFile, activeId, browserOpen, drafterOpen, docOpen]);
+  }, [sidebarTab, activeFile, activeId, browserOpen, drafterOpen, loopOpen, reviewOpen, docOpen]);
 
   // Track when the document column has been squeezed to a sliver so the latch
   // can replace the two colliding divider chevrons. Position is relative to the
@@ -854,6 +920,16 @@ function App() {
   // content (inner aside) stays pinned at min so it's revealed, not reflowed.
   const revealSidebarW = Math.max(sidebarWidth, 180);
   const revealPaneW = Math.max(paneWidth, 240);
+
+  // The Discussion sidecar's context. Plan comments need the doc pane on a
+  // sessions tab; the review context needs the Code Review pane open. In a
+  // true split the header toggle (discussionPinned) decides.
+  const planDiscussionAvailable = docOpen && sidebarTab.kind === "sessions";
+  const discussionContext = effectiveDiscussionContext(
+    reviewOpen,
+    planDiscussionAvailable,
+    discussionPinned,
+  );
 
   const { isDragging: termDragging, startDrag: startTermDrag } =
     useResizablePane({
@@ -1554,28 +1630,38 @@ function App() {
     setTimeout(() => setToast(null), 4000);
   };
 
-  // "Send to Redline" from a browser page-discussion reply. The browser is a
-  // native child webview that paints OVER the React DOM, so it must be closed —
-  // not just left behind — or it strands itself on top of the doc/terminal.
-  // Then bring the document pane forward and launch the plan in the terminal:
-  // Claude picks up the drafted plan, exits plan mode, and it lands in the doc
-  // pane as a review session — the normal plan-editing workflow.
+  // "Send to Claude Code" from a browser page-discussion reply. The plan was
+  // drafted while browsing, so nothing yet pins it to a repo — launching it
+  // straight into a terminal used to default the cwd to $HOME, stranding a plan
+  // about (say) `qwallah-crm` in the wrong directory. Instead, guess the target
+  // repo from the plan text and hold it for a one-tap repo-confirm step
+  // (SendToRedlineDialog) before spawning. Close the native webview first — it
+  // paints OVER the React DOM, so the dialog would be hidden behind it otherwise.
   const sendBrowserDraftToRedline = (markdown: string) => {
     if (!markdown.trim()) return;
+    const folder = sidebarTab.kind === "folder" ? sidebarTab.id : null;
+    const initialProject =
+      guessProjectForPlan(markdown, projectOptions) ?? folder ?? drafterProject;
     setBrowserOpen(false);
-    setDrafterOpen(false);
-    setDocOpen(true);
-    launchPromptDraft(
-      markdown,
-      sidebarTab.kind === "folder" ? sidebarTab.id : null,
-    );
+    setSendConfirm({ markdown, initialProject });
   };
 
-  // "Synthesize → Drafter" from a mission: the orchestrator's brief (markdown)
-  // becomes a Tiptap doc seeding the Prompt Drafter, where the user shapes the
-  // real document and then "Send to Claude Code" launches a plan session. Reuses
-  // the same markdown→doc parser that loads a plan into the editor.
-  const seedDrafterFromMission = async (markdown: string) => {
+  // Repo confirmed in SendToRedlineDialog: bring the document pane forward and
+  // launch the held plan in a terminal scoped to the chosen repo.
+  const confirmSendToRedline = (project: string | null) => {
+    const markdown = sendConfirm?.markdown;
+    setSendConfirm(null);
+    if (!markdown) return;
+    setDrafterOpen(false);
+    setDocOpen(true);
+    launchPromptDraft(markdown, project);
+  };
+
+  // Seed the Prompt Drafter with agent-authored markdown (markdown → Tiptap doc)
+  // and pre-select the repo guessed from the plan text, so the drafter's picker
+  // already shows the right project when the user ships it with "Send to Claude
+  // Code". Shared by the mission "→ Drafter" and browser "Open in Drafter" paths.
+  const openDrafterWithMarkdown = async (markdown: string) => {
     if (!markdown.trim()) return;
     try {
       const { planMarkdownToDoc } = await import("./editor/markdown/parser");
@@ -1587,10 +1673,64 @@ function App() {
         content: [{ type: "paragraph", content: [{ type: "text", text: markdown }] }],
       } as unknown as JSONContent);
     }
+    const guess = guessProjectForPlan(markdown, projectOptions);
+    if (guess !== null) setDrafterProject(guess);
     setBrowserOpen(false);
     setDrafterOpen(true);
+  };
+
+  // "Synthesize → Drafter" from a mission: the orchestrator's brief becomes a
+  // drafter doc the user shapes and then ships to Claude Code.
+  const seedDrafterFromMission = async (markdown: string) => {
+    await openDrafterWithMarkdown(markdown);
+    if (!markdown.trim()) return;
     setToast("Mission brief opened in the drafter ✍️");
     setTimeout(() => setToast(null), 4000);
+  };
+
+  // "Open in Drafter" from a browser page-discussion reply — same seeding, with
+  // the target repo pre-guessed, so the user reviews + picks the repo there.
+  const sendBrowserToDrafter = async (markdown: string) => {
+    await openDrafterWithMarkdown(markdown);
+    if (!markdown.trim()) return;
+    setToast("Reply opened in the drafter ✍️");
+    setTimeout(() => setToast(null), 4000);
+  };
+
+  // "Run with Loop Orchestrator" from the approval surface: open the loop start
+  // dialog pre-filled with the approved plan and the session's project path.
+  const openLoopHandoff = () => {
+    if (!session || !latest) return;
+    setLoopHandoff({
+      sessionId: session.sessionId,
+      planMd: latest.rawPlanMarkdown,
+      // The project this plan was reviewed in — the run's target repo.
+      repoPath: session.projectPath || null,
+      // Empty → the dialog seeds the title from the plan's own first heading
+      // (NOT the project/folder name).
+      title: "",
+    });
+  };
+
+  // Kick off the run, then bring the loop pane forward (closing the other
+  // secondary panes, which share its slot) and clear the dialog.
+  const startLoopRun = async (args: LoopStartArgs) => {
+    try {
+      const run = await loop.startLoop(args);
+      setLoopHandoff(null);
+      setSplitRatio(0.5);
+      setBrowserOpen(false);
+      setDrafterOpen(false);
+      setLoopOpen(true);
+      setToast(run ? "Loop Orchestrator running 🔁" : "Couldn't start the loop run");
+      setTimeout(() => setToast(null), 4000);
+    } catch (err) {
+      // Keep the dialog open (leave `loopHandoff` set) so the user can fix the
+      // repo/base ref and retry — and show them exactly what went wrong.
+      const msg = err instanceof Error ? err.message : String(err);
+      setToast(`Couldn't start: ${msg}`);
+      setTimeout(() => setToast(null), 9000);
+    }
   };
 
   // Fallback for a Claude running in a terminal Redline doesn't own: copy the
@@ -1931,12 +2071,16 @@ function App() {
         }}
         browserOpen={browserOpen}
         onToggleBrowser={() => {
-          // Browser and drafter share the single "secondary pane" slot, so
-          // opening one closes the other; the split resets to even so a folded
+          // Browser, drafter and loop share the single "secondary pane" slot, so
+          // opening one closes the others; the split resets to even so a folded
           // pane reappears.
           setSplitRatio(0.5);
           setBrowserOpen((v) => {
-            if (!v) setDrafterOpen(false);
+            if (!v) {
+              setDrafterOpen(false);
+              setLoopOpen(false);
+              setReviewOpen(false);
+            }
             return !v;
           });
         }}
@@ -1944,11 +2088,44 @@ function App() {
         onToggleDrafter={() => {
           setSplitRatio(0.5);
           setDrafterOpen((v) => {
-            if (!v) setBrowserOpen(false);
+            if (!v) {
+              setBrowserOpen(false);
+              setLoopOpen(false);
+              setReviewOpen(false);
+            }
             return !v;
           });
         }}
-        splitActive={docOpen && (browserOpen || drafterOpen)}
+        loopOpen={loopOpen}
+        hasLoopRuns={loop.runs.length > 0}
+        onToggleLoop={() => {
+          setSplitRatio(0.5);
+          setLoopOpen((v) => {
+            if (!v) {
+              setBrowserOpen(false);
+              setDrafterOpen(false);
+              setReviewOpen(false);
+            }
+            return !v;
+          });
+        }}
+        reviewOpen={reviewOpen}
+        onToggleReview={() => {
+          setSplitRatio(0.5);
+          setReviewOpen((v) => {
+            if (!v) {
+              setBrowserOpen(false);
+              setDrafterOpen(false);
+              setLoopOpen(false);
+            }
+            // Opening the review pulls the Discussion sidecar with it (the
+            // toggle can pin it back to the plan in a split); closing it
+            // hands the sidecar back to the plan.
+            setDiscussionPinned(v ? "plan" : "review");
+            return !v;
+          });
+        }}
+        splitActive={docOpen && (browserOpen || drafterOpen || loopOpen || reviewOpen)}
         splitVertical={splitVertical}
         onToggleSplitOrientation={() => {
           // Flipping orientation resets to 50/50 so a folded-away pane reappears.
@@ -2124,9 +2301,12 @@ function App() {
                 visible={browserVisible}
                 projectDir={sidebarTab.kind === "folder" ? sidebarTab.id : null}
                 // Drop a plan/prompt drafted while browsing into a fresh Redline
-                // plan session: close the browser overlay, show the doc pane,
-                // and launch the plan in the terminal (see handler).
+                // plan session: close the browser overlay, confirm the target
+                // repo, then launch the plan in the terminal (see handler).
                 onSendToRedline={sendBrowserDraftToRedline}
+                // Or open the reply in the Prompt Drafter (repo pre-guessed)
+                // to shape it before sending.
+                onSendToDrafter={sendBrowserToDrafter}
                 // A synthesized mission brief seeds the Prompt Drafter.
                 onSynthesizeToDrafter={seedDrafterFromMission}
                 // Re-sync the native webview whenever a surrounding pane toggles
@@ -2146,6 +2326,16 @@ function App() {
                 onLaunch={launchPromptDraft}
               />
             );
+            const loopBody = (
+              <LoopTrajectory loop={loop} onClose={() => setLoopOpen(false)} />
+            );
+            const reviewBody = (
+              <ReviewPanel
+                review={codeReview}
+                projectOptions={projectOptions}
+                onClose={() => setReviewOpen(false)}
+              />
+            );
             // The browser and drafter are mutually-exclusive "secondary" panes;
             // whichever is open splits against the document with the exact same
             // SplitPane (orientation toggle, ratio and fold-to-edge divider) the
@@ -2155,7 +2345,11 @@ function App() {
               ? browserBody
               : drafterOpen
                 ? drafterBody
-                : null;
+                : loopOpen
+                  ? loopBody
+                  : reviewOpen
+                    ? reviewBody
+                    : null;
             if (secondaryBody && docOpen)
               return (
                 <SplitPane
@@ -2179,6 +2373,8 @@ function App() {
             latest &&
             !browserOpen &&
             !drafterOpen &&
+            !loopOpen &&
+            !reviewOpen &&
             !(sidebarTab.kind === "folder" && activeFile) && (
               <>
                 {!voiceOpen && (
@@ -2220,7 +2416,7 @@ function App() {
             )}
           {/* Floating document-zoom control — pinned to the pane (doesn't scroll
               with the plan). Hidden over the folder file viewer. */}
-          {!browserOpen && !drafterOpen && !(sidebarTab.kind === "folder" && activeFile) && zoomVisible && (
+          {!browserOpen && !drafterOpen && !loopOpen && !reviewOpen && !(sidebarTab.kind === "folder" && activeFile) && zoomVisible && (
             <div
               ref={zoomCtrlRef}
               className="absolute flex items-center gap-1 rounded-full"
@@ -2345,10 +2541,11 @@ function App() {
         <aside
           ref={sidebarRef as React.RefObject<HTMLElement>}
           data-tour="discussion"
+          data-context={discussionContext}
           className={
             paneFullscreen
-              ? "absolute inset-0 z-30 overflow-y-auto"
-              : "overflow-y-auto border-l shrink-0"
+              ? "absolute inset-0 z-30 overflow-y-auto rl-discussion"
+              : "overflow-y-auto border-l shrink-0 rl-discussion"
           }
           style={
             {
@@ -2394,12 +2591,40 @@ function App() {
               background: "var(--color-paper)",
             }}
           >
-            <span>Discussion</span>
             <span className="flex items-center gap-2">
+              Discussion
+              {discussionContext === "review" && (
+                <span className="rl-review-source-chip normal-case" style={{ fontWeight: 500 }}>
+                  ⌗ code review
+                </span>
+              )}
+            </span>
+            <span className="flex items-center gap-2">
+              {/* Split-screening a plan and a review: the sidecar can point at
+                  either — this is the pin. */}
+              {reviewOpen && planDiscussionAvailable && (
+                <span className="rl-review-seg" role="group" aria-label="Discussion context">
+                  <button
+                    type="button"
+                    data-active={discussionContext === "plan" ? "" : undefined}
+                    onClick={() => setDiscussionPinned("plan")}
+                  >
+                    Plan
+                  </button>
+                  <button
+                    type="button"
+                    data-active={discussionContext === "review" ? "" : undefined}
+                    onClick={() => setDiscussionPinned("review")}
+                  >
+                    Review
+                  </button>
+                </span>
+              )}
               {/* Secondary count: keep it on one line, and drop it entirely when
                   the pane is too narrow to hold it (otherwise it wraps and looks
                   squished under "DISCUSSION"). */}
-              {sidebarTab.kind === "sessions" &&
+              {discussionContext === "plan" &&
+                sidebarTab.kind === "sessions" &&
                 paneComments.length > 0 &&
                 (paneFullscreen || paneWidth >= 340) && (
                   <span
@@ -2446,10 +2671,13 @@ function App() {
             </span>
           </div>
           <div className="p-4 flex flex-col gap-3">
-            {/* The discussion pane is scoped to the active sidebar context:
-                in a folder tab it must not leak the previously-focused
-                session's comments. */}
-            {sidebarTab.kind !== "sessions" ? (
+            {/* The sidecar pertains to what's on screen: the code review's
+                annotations/questions when the review context is active, else
+                the plan session's comments. Same pane, same fullscreen/zoom
+                machinery — different grounding. */}
+            {discussionContext === "review" ? (
+              <ReviewDiscussionPane review={codeReview} />
+            ) : sidebarTab.kind !== "sessions" ? (
               <div
                 className="italic"
                 style={{
@@ -2825,6 +3053,8 @@ function App() {
         waitingAsk={waitingAsk}
         onSubmit={submitReview}
         onApprove={approvePlan}
+        canRunLoop={sessionReady && !!latest && !detached}
+        onRunLoop={openLoopHandoff}
         termCollapsed={termCollapsed && !termFullscreen}
         termTabCount={termTabCount}
         termHasUnseen={termHasUnseen}
@@ -2835,6 +3065,27 @@ function App() {
           rect={selection.rect}
           onPick={beginCompose}
           onCrossOut={beginCrossOut}
+        />
+      )}
+      {loopHandoff && (
+        <LoopStartDialog
+          planMd={loopHandoff.planMd}
+          sessionId={loopHandoff.sessionId}
+          defaultTitle={loopHandoff.title}
+          defaultRepoPath={loopHandoff.repoPath}
+          defaultBaseRef="main"
+          projectOptions={projectOptions}
+          onStart={startLoopRun}
+          onCancel={() => setLoopHandoff(null)}
+        />
+      )}
+      {sendConfirm && (
+        <SendToRedlineDialog
+          markdown={sendConfirm.markdown}
+          options={projectOptions}
+          initialProject={sendConfirm.initialProject}
+          onConfirm={confirmSendToRedline}
+          onCancel={() => setSendConfirm(null)}
         />
       )}
       {toast && <ApproveToast message={toast} />}

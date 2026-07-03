@@ -442,6 +442,20 @@ body {
   background: color-mix(in srgb, var(--color-info) 18%, transparent);
   color: var(--color-info);
 }
+/* Hairline + small caps heading inside a ribbon dropdown (list-style menus). */
+.rl-menu-sep {
+  height: 1px;
+  background: var(--color-rule);
+  margin: 4px 2px;
+}
+.rl-menu-heading {
+  padding: 2px 9px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--color-ink-muted);
+}
 /* Delayed CSS tooltip for icon buttons — replaces bare title= so hints read
    consistently across platforms and can carry a shortcut. */
 .rl-tipwrap {
@@ -503,6 +517,65 @@ body {
 .rl-prose a {
   color: var(--color-info);
   text-decoration: underline;
+}
+
+/* Custom list-marker styles for the Prompt Drafter, referenced by the
+   `listStyle` attribute (ListStyle extension). The native families
+   (lower-roman, upper-alpha, lower-greek, decimal-leading-zero, …) need no rule
+   — these cover only the parenthetical / trailing-paren / dash variants. */
+@counter-style rl-decimal-paren {
+  system: extends decimal;
+  suffix: ") ";
+}
+@counter-style rl-lower-alpha-paren {
+  system: extends lower-alpha;
+  suffix: ") ";
+}
+@counter-style rl-lower-alpha-parenthetical {
+  system: extends lower-alpha;
+  prefix: "(";
+  suffix: ") ";
+}
+@counter-style rl-upper-alpha-paren {
+  system: extends upper-alpha;
+  suffix: ") ";
+}
+@counter-style rl-lower-roman-paren {
+  system: extends lower-roman;
+  suffix: ") ";
+}
+@counter-style rl-lower-roman-parenthetical {
+  system: extends lower-roman;
+  prefix: "(";
+  suffix: ") ";
+}
+@counter-style rl-upper-roman-paren {
+  system: extends upper-roman;
+  suffix: ") ";
+}
+@counter-style rl-dash {
+  system: cyclic;
+  symbols: "–";
+  suffix: " ";
+}
+
+/* Footnote references (Footnote extension): a superscript marker whose number
+   is drawn by a CSS counter so refs renumber automatically on any edit. */
+.rl-prose {
+  counter-reset: rl-footnote;
+}
+.rl-footnote {
+  counter-increment: rl-footnote;
+  cursor: pointer;
+  color: var(--color-info);
+  font-weight: 600;
+}
+.rl-footnote::before {
+  content: "[" counter(rl-footnote) "]";
+}
+.rl-footnote.ProseMirror-selectednode::before {
+  background: color-mix(in srgb, var(--color-info) 22%, transparent);
+  border-radius: 3px;
 }
 .rl-prose strong {
   font-weight: 600;
@@ -1744,6 +1817,56 @@ p.rl-block-modified {
   }
 }
 
+/* ── Conversation-mode pulse (PulseLogo) ─────────────────────────────────
+   The Redline strike-line blooms into a spinning fractal whose speed tracks
+   the fork's state: idle → still (just the strike), thinking/waiting → fast
+   fractal spin, streaming → a slower breathing beat. The extra blades only
+   surface while active, so an idle indicator reads as the plain logo. */
+@keyframes rl-blades-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes rl-blades-beat {
+  0%,
+  100% {
+    transform: rotate(0deg) scale(1);
+  }
+  50% {
+    transform: rotate(20deg) scale(1.06);
+  }
+}
+.rl-pulse-blades {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.rl-blade-extra {
+  transition: opacity 0.4s ease;
+}
+/* Idle: no spin, and the fractal blades fold away — just the strike-line. */
+.rl-pulse-blades[data-state="idle"] .rl-blade-extra {
+  opacity: 0 !important;
+}
+/* Listening (mic open): a slow, receptive spin, blades softly bloomed. */
+.rl-pulse-blades[data-state="listening"] {
+  animation: rl-blades-spin 2.4s linear infinite;
+}
+/* Thinking / waiting: fast fractal spin, blades fully bloomed. */
+.rl-pulse-blades[data-state="thinking"] {
+  animation: rl-blades-spin 0.7s linear infinite;
+}
+/* Streaming: a slower breathing beat while a reply flows. */
+.rl-pulse-blades[data-state="streaming"] {
+  animation: rl-blades-beat 1.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rl-pulse-blades[data-state="listening"],
+  .rl-pulse-blades[data-state="thinking"],
+  .rl-pulse-blades[data-state="streaming"] {
+    animation: none;
+  }
+}
+
 /* ── Header dropdown hover feedback ──────────────────────────────────────
    One wash for every popover off the header bar (Download, Theme, Mode,
    Alerts). Resting backgrounds live here — not inline — so :hover can layer
@@ -1819,4 +1942,795 @@ p.rl-block-modified {
   .rl-tab--mission {
     animation: none;
   }
+}
+
+/* --- Code Review surface (DiffView / ReviewPanel) --------------------------
+   Row tint reuses the tracked-changes palette (success = added, warning =
+   removed) so a diff reads like the plan redline; the word-level spans are a
+   stronger mix of the same hues, sitting inside the row wash. */
+.rl-diff-add {
+  background: color-mix(in srgb, var(--color-success) 18%, transparent);
+}
+.rl-diff-del {
+  background: color-mix(in srgb, var(--color-warning) 18%, transparent);
+}
+.rl-diff-word-add {
+  background: color-mix(in srgb, var(--color-success) 42%, transparent);
+  border-radius: 2px;
+}
+.rl-diff-word-del {
+  background: color-mix(in srgb, var(--color-warning) 42%, transparent);
+  border-radius: 2px;
+}
+/* Split view: the filler cell opposite an unpaired add/del. */
+.rl-diff-empty {
+  background: color-mix(in srgb, var(--color-rule) 22%, transparent);
+}
+/* Syntax layer in the diff — same token palette as the file viewer. */
+.rl-diff-view .hljs-comment,
+.rl-diff-view .hljs-quote {
+  color: var(--color-hl-comment);
+  font-style: italic;
+}
+.rl-diff-view .hljs-keyword,
+.rl-diff-view .hljs-selector-tag,
+.rl-diff-view .hljs-literal,
+.rl-diff-view .hljs-section,
+.rl-diff-view .hljs-link {
+  color: var(--color-hl-keyword);
+}
+.rl-diff-view .hljs-string,
+.rl-diff-view .hljs-attr,
+.rl-diff-view .hljs-regexp,
+.rl-diff-view .hljs-addition {
+  color: var(--color-hl-string);
+}
+.rl-diff-view .hljs-number,
+.rl-diff-view .hljs-built_in,
+.rl-diff-view .hljs-type,
+.rl-diff-view .hljs-symbol,
+.rl-diff-view .hljs-bullet {
+  color: var(--color-hl-number);
+}
+.rl-diff-view .hljs-title,
+.rl-diff-view .hljs-name,
+.rl-diff-view .hljs-attribute {
+  color: var(--color-hl-title);
+}
+.rl-diff-view .hljs-variable,
+.rl-diff-view .hljs-template-variable,
+.rl-diff-view .hljs-meta {
+  color: var(--color-hl-variable);
+}
+.rl-diff-view .hljs-deletion {
+  color: var(--color-hl-deletion);
+}
+/* Thin, themed scrollbars on the diff viewport. The vertical axis is hidden
+   in favour of the custom draggable indicator (.rl-diff-scrollbar); the
+   horizontal native scrollbar stays for long lines. */
+.rl-review-scroll {
+  scrollbar-width: none; /* vertical handled by the custom indicator */
+  scrollbar-color: var(--color-rule) transparent;
+}
+.rl-review-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.rl-review-scroll::-webkit-scrollbar:vertical {
+  width: 0;
+}
+.rl-review-scroll::-webkit-scrollbar-thumb {
+  background: var(--color-rule);
+  border-radius: 4px;
+}
+.rl-review-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+/* Always-grabbable vertical scroll indicator overlaid on the diff viewport.
+   Press-and-drag the thumb to scrub the whole file, or click the track to
+   jump. Sits above the code but leaves the sticky file pin (z 6) clickable. */
+.rl-diff-scrollbar {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 12px;
+  z-index: 5;
+  cursor: default;
+  touch-action: none;
+  background: transparent;
+}
+.rl-diff-scrollbar:hover,
+.rl-diff-scrollbar:active {
+  background: color-mix(in srgb, var(--color-ink) 4%, transparent);
+}
+.rl-diff-scrollbar-thumb {
+  position: absolute;
+  top: 0;
+  right: 2px;
+  width: 8px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--color-ink) 28%, transparent);
+  transition: background 120ms ease;
+  will-change: transform;
+}
+.rl-diff-scrollbar:hover .rl-diff-scrollbar-thumb,
+.rl-diff-scrollbar:active .rl-diff-scrollbar-thumb {
+  background: color-mix(in srgb, var(--color-ink) 45%, transparent);
+  width: 10px;
+  right: 1px;
+}
+/* Sticky rich file header pinned over the scroll viewport. */
+.rl-review-file-pin {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 12px;
+  font-family: var(--font-mono, ui-monospace, Menlo, monospace);
+  font-size: 12px;
+  color: var(--color-ink);
+  background: color-mix(in srgb, var(--color-paper) 82%, transparent);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border-bottom: 1px solid var(--color-rule);
+}
+.rl-review-pin-status {
+  flex-shrink: 0;
+  width: 16px;
+  text-align: center;
+  font-weight: 700;
+  font-size: 11px;
+  border-radius: 3px;
+  color: var(--color-ink-muted);
+}
+.rl-review-pin-status[data-status="added"] {
+  color: var(--color-success);
+}
+.rl-review-pin-status[data-status="deleted"] {
+  color: var(--color-warning);
+}
+.rl-review-pin-status[data-status="renamed"] {
+  color: var(--color-info);
+}
+.rl-review-pin-counts {
+  flex-shrink: 0;
+  font-size: 11px;
+}
+/* Unified|Split segmented control. */
+.rl-review-seg {
+  display: inline-flex;
+  border: 1px solid var(--color-rule);
+  border-radius: 5px;
+  overflow: hidden;
+}
+.rl-review-seg button {
+  font-size: 11.5px;
+  padding: 2px 8px;
+  border: none;
+  background: var(--color-bg-elevated);
+  color: var(--color-ink-muted);
+  cursor: pointer;
+}
+.rl-review-seg button + button {
+  border-left: 1px solid var(--color-rule);
+}
+.rl-review-seg button[data-active] {
+  background: var(--color-anchor-bg);
+  color: var(--color-anchor-text);
+  font-weight: 600;
+}
+/* Unchanged-lines expander rows. */
+.rl-diff-expand {
+  display: flex;
+  align-items: stretch;
+  background: color-mix(in srgb, var(--color-anchor-bg) 30%, transparent);
+}
+.rl-diff-expand button {
+  flex: 1;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--color-ink-muted);
+  text-align: left;
+  padding: 0 12px;
+  opacity: 0.75;
+}
+.rl-diff-expand button:hover {
+  opacity: 1;
+  background: var(--color-anchor-bg);
+  color: var(--color-anchor-text);
+}
+/* Changed-files tree badges. */
+.rl-review-tree .rl-tree-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--color-anchor-bg);
+  color: var(--color-anchor-text);
+}
+.rl-review-tree .rl-tree-badge[data-kind="search"] {
+  background: color-mix(in srgb, var(--color-info) 18%, transparent);
+  color: var(--color-info);
+}
+.rl-review-tree .rl-tree-row:hover {
+  background: var(--color-anchor-bg);
+}
+/* In-diff find strip. */
+.rl-review-search {
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--color-rule);
+}
+/* Header toggle buttons can show a pressed state. */
+.rl-review-btn[data-active] {
+  background: var(--color-anchor-bg);
+  color: var(--color-anchor-text);
+  border-color: color-mix(in srgb, var(--color-anchor-text) 40%, transparent);
+}
+/* Shortcut cheat-sheet modal. */
+.rl-shortcut-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.35);
+}
+.rl-shortcut-card {
+  min-width: 420px;
+  max-width: 560px;
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: 14px 18px;
+  border: 1px solid var(--color-rule);
+  border-radius: 10px;
+  background: var(--color-bg-elevated);
+  color: var(--color-ink);
+  box-shadow:
+    0 2px 6px rgba(0, 0, 0, 0.16),
+    0 16px 48px rgba(0, 0, 0, 0.28);
+}
+.rl-shortcut-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+.rl-shortcut-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 14px;
+}
+.rl-shortcut-group-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-ink-muted);
+  margin-bottom: 6px;
+}
+.rl-shortcut-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  padding: 2px 0;
+}
+.rl-shortcut-keys {
+  display: inline-flex;
+  gap: 3px;
+  min-width: 64px;
+}
+.rl-shortcut-keys kbd {
+  font-family: var(--font-mono, ui-monospace, Menlo, monospace);
+  font-size: 10.5px;
+  padding: 1px 5px;
+  border: 1px solid var(--color-rule);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--color-paper);
+}
+/* Discussion sidecar, code-review context: a visible accent (info-tinted top
+   edge + wash) so it can't be mistaken for the plan discussion, and lighter
+   card chrome — a column of floating shadows reads noisy in a sidebar. */
+.rl-discussion[data-context="review"] {
+  box-shadow: inset 0 2px 0 color-mix(in srgb, var(--color-info) 55%, transparent);
+}
+.rl-discussion[data-context="review"] > .rl-chrome-label {
+  background: color-mix(in srgb, var(--color-info) 5%, var(--color-paper)) !important;
+}
+.rl-review-pane-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  flex-wrap: wrap;
+}
+.rl-review-pane-section {
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-ink-muted);
+  margin-top: 4px;
+}
+.rl-review-pane-card {
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  max-height: none;
+  overflow: visible;
+}
+.rl-review-pane-card:hover {
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+/* Ask-AI ✦ marker + AI pre-review drawer. */
+.rl-diff-marker-question {
+  color: var(--color-info);
+  font-size: 12px;
+}
+.rl-review-ai {
+  border-top: 1px solid var(--color-rule);
+  background: color-mix(in srgb, var(--color-info) 6%, transparent);
+  font-size: 12px;
+}
+.rl-review-ai-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 12px;
+}
+.rl-review-ai-error {
+  color: var(--color-warning);
+}
+.rl-review-ai-log {
+  margin: 0;
+  max-height: 140px;
+  overflow-y: auto;
+  padding: 6px 12px;
+  border-top: 1px solid var(--color-rule);
+  font-family: var(--font-mono, ui-monospace, Menlo, monospace);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--color-ink-muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* Conventional-comment label chips (composer picker + card display).
+   Mono, tiny, instant-on / eased-off hover — reads as a tag, not a button. */
+.rl-review-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+.rl-review-label-chip {
+  font-family: var(--font-mono, ui-monospace, Menlo, monospace);
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  padding: 2px 6px;
+  border-radius: 8px;
+  border: 1px solid var(--color-rule);
+  background: var(--color-paper);
+  color: var(--color-ink-muted);
+  cursor: pointer;
+  transition: background-color 0.15s ease-out, border-color 0.15s ease-out;
+}
+.rl-review-label-chip:hover {
+  transition-duration: 0s;
+  border-color: var(--color-anchor-text);
+  color: var(--color-ink);
+}
+.rl-review-label-chip:active {
+  transform: scale(0.97);
+}
+.rl-review-label-chip[data-active] {
+  background: var(--color-anchor-bg);
+  border-color: color-mix(in srgb, var(--color-anchor-text) 45%, transparent);
+  color: var(--color-anchor-text);
+}
+.rl-review-label-chip[data-tone="danger"][data-active] {
+  background: color-mix(in srgb, var(--color-warning) 14%, transparent);
+  border-color: color-mix(in srgb, var(--color-warning) 50%, transparent);
+  color: var(--color-warning);
+}
+.rl-review-source-chip {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-info) 14%, transparent);
+  color: var(--color-info);
+}
+/* Review-wide (general) notes strip above the diff. */
+.rl-review-general {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--color-rule);
+  background: color-mix(in srgb, var(--color-anchor-bg) 40%, transparent);
+  font-size: 12.5px;
+}
+.rl-review-general-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.rl-review-general-tag {
+  flex-shrink: 0;
+  font-family: var(--font-mono, ui-monospace, Menlo, monospace);
+  font-size: 9.5px;
+  padding: 2px 6px;
+  border-radius: 8px;
+  background: var(--color-anchor-bg);
+  color: var(--color-anchor-text);
+}
+@media (prefers-reduced-motion: reduce) {
+  .rl-review-label-chip,
+  .rl-review-label-chip:active {
+    transition: none;
+    transform: none;
+  }
+}
+/* Card ↔ lines binding ring for the open annotation. */
+.rl-review-ring > * {
+  box-shadow:
+    0 0 0 1px var(--color-anchor-text),
+    0 1px 2px rgba(0, 0, 0, 0.12),
+    0 6px 24px rgba(0, 0, 0, 0.18) !important;
+}
+.rl-diff-ring-row {
+  box-shadow: inset 2px 0 0 var(--color-anchor-text);
+  background: color-mix(in srgb, var(--color-anchor-bg) 55%, transparent);
+}
+.rl-diff-gutter {
+  flex-shrink: 0;
+  text-align: right;
+  padding-right: 8px;
+  color: var(--color-ink-muted);
+  user-select: none;
+  font-size: 11px;
+}
+.rl-diff-status {
+  padding: 0 4px;
+  border-radius: 3px;
+  border: 1px solid var(--color-rule);
+  color: var(--color-ink-muted);
+}
+.rl-diff-status[data-status="added"] {
+  color: var(--color-success);
+  border-color: color-mix(in srgb, var(--color-success) 45%, transparent);
+}
+.rl-diff-status[data-status="deleted"] {
+  color: var(--color-warning);
+  border-color: color-mix(in srgb, var(--color-warning) 45%, transparent);
+}
+.rl-review-select {
+  font-size: 12px;
+  padding: 2px 20px 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--color-rule);
+  background: var(--color-bg-elevated);
+  color: var(--color-ink);
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5' viewBox='0 0 8 5'%3E%3Cpath d='M0 0l4 5 4-5z' fill='%23888'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+}
+.rl-review-select:hover {
+  border-color: var(--color-anchor-text);
+}
+.rl-review-btn {
+  font-size: 13px;
+  line-height: 1;
+  padding: 3px 8px;
+  min-height: 24px;
+  border-radius: 4px;
+  border: 1px solid var(--color-rule);
+  background: var(--color-bg-elevated);
+  color: var(--color-ink);
+  cursor: pointer;
+}
+.rl-review-btn:hover {
+  background: var(--color-anchor-bg);
+}
+/* Icon-only variant: fixed square hit target, monochrome glyph. */
+.rl-review-btn-iconic {
+  width: 26px;
+  min-height: 26px;
+  padding: 0;
+  font-size: 14px;
+  text-align: center;
+}
+/* Motion + focus discipline, scoped to the review surface (never global). */
+.rl-review-btn,
+.rl-review-select,
+.rl-review-seg button,
+.rl-review-card,
+.rl-review-menu {
+  transition:
+    background-color 0.15s cubic-bezier(0.4, 0, 0.2, 1),
+    border-color 0.15s cubic-bezier(0.4, 0, 0.2, 1),
+    box-shadow 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.rl-review-btn:focus-visible,
+.rl-review-select:focus-visible,
+.rl-review-seg button:focus-visible,
+.rl-diff-plus:focus-visible {
+  outline: 2px solid var(--color-anchor-text);
+  outline-offset: 1px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rl-review-btn,
+  .rl-review-select,
+  .rl-review-seg button,
+  .rl-review-card,
+  .rl-review-menu {
+    transition: none;
+  }
+}
+/* The waiting-agent cluster reads as one contained pill. */
+.rl-review-holdbar {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--color-info) 40%, transparent);
+  background: color-mix(in srgb, var(--color-info) 10%, transparent);
+}
+
+/* Review annotation layer: gutter selection, markers, floating cards. */
+.rl-diff-gutter[data-selectable] {
+  cursor: pointer;
+}
+.rl-diff-gutter[data-selectable]:hover {
+  color: var(--color-anchor-text);
+  background: var(--color-anchor-bg);
+}
+/* Hover "+": the annotate invitation. Absolutely positioned over the sign
+   column (after the two gutters) so it never disturbs the fixed row height;
+   revealed by row hover with zero re-render cost. */
+.rl-diff-plus {
+  position: absolute;
+  left: 88px; /* 2 × gutter width */
+  top: 0;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: var(--color-anchor-text);
+  color: var(--color-paper);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  cursor: pointer;
+  opacity: 0;
+  z-index: 2;
+}
+.rl-diff-row:hover .rl-diff-plus {
+  opacity: 1;
+}
+.rl-diff-plus:hover {
+  transform: scale(1.15);
+}
+@media (prefers-reduced-motion: reduce) {
+  .rl-diff-plus:hover {
+    transform: none;
+  }
+}
+.rl-review-menu-hint {
+  font-size: 11px;
+  color: var(--color-ink-muted);
+  align-self: center;
+  padding: 0 4px;
+  user-select: none;
+}
+.rl-review-readonly {
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--color-rule);
+  background: color-mix(in srgb, var(--color-info) 8%, transparent);
+  font-size: 12px;
+  color: var(--color-ink-muted);
+}
+.rl-diff-selected {
+  outline: 1px solid color-mix(in srgb, var(--color-info) 60%, transparent);
+  outline-offset: -1px;
+  background: color-mix(in srgb, var(--color-info) 10%, transparent);
+}
+.rl-diff-annotated {
+  box-shadow: inset 2px 0 0 var(--color-info);
+}
+.rl-diff-marker {
+  border: none;
+  background: none;
+  padding: 0;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+.rl-review-menu {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--color-rule);
+  border-radius: 6px;
+  background: var(--color-bg-elevated);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.1),
+    0 4px 12px rgba(0, 0, 0, 0.16);
+}
+.rl-review-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-rule);
+  border-radius: 8px;
+  background: var(--color-bg-elevated);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.12),
+    0 6px 24px rgba(0, 0, 0, 0.18);
+  font-size: 12.5px;
+  color: var(--color-ink);
+}
+.rl-review-card:hover {
+  box-shadow:
+    0 2px 4px rgba(0, 0, 0, 0.14),
+    0 10px 32px rgba(0, 0, 0, 0.24);
+}
+.rl-review-card-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--color-rule);
+}
+.rl-review-card-entry:last-of-type {
+  border-bottom: none;
+}
+.rl-review-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11.5px;
+}
+.rl-review-card-quote {
+  margin: 0;
+  padding: 4px 6px;
+  border-radius: 4px;
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 130px;
+  overflow: auto;
+}
+.rl-review-card-input {
+  width: 100%;
+  /* Auto-grows to fit its content (useAutoGrow) — no inner scroll, no manual
+     resize handle. A generous max-height keeps a huge paste from swallowing
+     the pane; only then does an inner scrollbar appear. */
+  resize: none;
+  overflow-x: hidden;
+  overflow-y: auto;
+  max-height: 40vh;
+  padding: 4px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--color-rule);
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-size: 12.5px;
+  font-family: inherit;
+}
+.rl-review-card-body {
+  white-space: pre-wrap;
+}
+.rl-review-card-resolution {
+  font-size: 12px;
+  color: var(--color-ink-muted);
+  white-space: pre-wrap;
+}
+.rl-review-card-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.rl-review-btn-primary {
+  background: var(--color-anchor-bg);
+  color: var(--color-anchor-text);
+  font-weight: 600;
+}
+.rl-review-orphans {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--color-rule);
+  background: color-mix(in srgb, var(--color-warning) 8%, transparent);
+  font-size: 12px;
+}
+.rl-review-orphans ul {
+  margin: 6px 0 0;
+  padding-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* Review annotation discussion thread (compact CommentThread sibling). */
+.rl-review-card {
+  max-height: 60vh;
+  overflow: auto;
+}
+.rl-review-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid var(--color-rule);
+  padding-top: 6px;
+}
+.rl-review-thread-msg[data-role="user"] {
+  align-self: flex-end;
+  max-width: 90%;
+}
+.rl-review-thread-user {
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: var(--color-anchor-bg);
+  color: var(--color-anchor-text);
+  white-space: pre-wrap;
+}
+.rl-review-thread-error {
+  font-size: 12px;
+  color: var(--color-warning);
+  white-space: pre-wrap;
+}
+.rl-review-thread-composer {
+  display: flex;
+  gap: 6px;
+  align-items: flex-end;
+}
+.rl-review-thread-composer textarea {
+  flex: 1;
+}
+
+/* Pulsing "agent is waiting" dot while a review curl is held. */
+.rl-review-hold-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-info);
+  animation: rl-review-hold-pulse 1.6s ease-in-out infinite;
+}
+@keyframes rl-review-hold-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rl-review-hold-dot { animation: none; }
+}
+.rl-review-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Staleness banner: the working tree changed under the displayed diff. */
+.rl-review-stale {
+  display: flex;
+  align-items: center;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--color-rule);
+  background: color-mix(in srgb, var(--color-info) 10%, transparent);
+  font-size: 12px;
 }

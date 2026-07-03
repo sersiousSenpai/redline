@@ -1,0 +1,100 @@
+The user reviewed your code changes in Redline and has requested revisions.
+
+REPO: /Users/me/proj
+REVIEW ROUND: 2
+
+GENERAL FEEDBACK (applies to the whole change):
+
+(review-wide) [comment]
+  USER COMMENT (verbatim):
+    Overall: split this change into two commits.
+  ANNOTATION_ID: rc-007
+
+ANNOTATIONS:
+
+## src/db.rs
+
+src/db.rs:new L3-6 [comment]
+  SELECTED LINES (verbatim):
+    let x = y.unwrap();
+    return Ok(x);
+  USER COMMENT (verbatim):
+    Tighten this error path.
+  ANNOTATION_ID: rc-004
+
+src/db.rs:new L60-63 [comment] {issue, blocking}
+  SELECTED LINES (verbatim):
+    let x = y.unwrap();
+    return Ok(x);
+  USER COMMENT (verbatim):
+    Tighten this error path.
+  ANNOTATION_ID: ai-001
+
+## src/main.rs
+
+src/main.rs (whole file) [comment]
+  USER COMMENT (verbatim):
+    This whole file needs a header comment.
+  ANNOTATION_ID: rc-006
+
+src/main.rs:new L7-10 [deletion]
+  The user marked these lines for deletion.
+  SELECTED LINES (verbatim):
+    let x = y.unwrap();
+    return Ok(x);
+  USER COMMENT (verbatim):
+    Tighten this error path.
+  ANNOTATION_ID: rc-003
+
+src/main.rs:new L42-45 [suggestion]
+  SELECTED LINES (verbatim):
+    let x = y.unwrap();
+    return Ok(x);
+  SUGGESTED REPLACEMENT (verbatim):
+    let x = y?;
+    return Ok(x);
+  USER COMMENT (verbatim):
+    Tighten this error path.
+  ANNOTATION_ID: rc-002
+
+src/main.rs:new L90-93 [comment] {nitpick, non-blocking}
+  SELECTED LINES (verbatim):
+    let x = y.unwrap();
+    return Ok(x);
+  USER COMMENT (verbatim):
+    Tighten this error path.
+  ANNOTATION_ID: rc-005
+
+UNMATCHED FROM EARLIER ROUNDS (the lines these referred to have since changed; address the intent if it still applies, otherwise resolve with what happened to it):
+
+src/lib.rs:new L10-13 [comment]
+  SELECTED LINES (verbatim):
+    let x = y.unwrap();
+    return Ok(x);
+  USER COMMENT (verbatim):
+    Tighten this error path.
+  YOUR PRIOR RESOLUTION (verbatim):
+    Rewrote the guard in round 1.
+  ANNOTATION_ID: rc-001
+
+REQUIRED RESPONSE FORMAT:
+
+Apply the requested changes directly to the code in this repository. [suggestion] blocks propose a concrete replacement — apply it (or the closest correct version, explaining any deviation in the resolution). [deletion] means the user wants those lines gone. [comment] is feedback to address in place. A `(whole file)` block addresses that file overall; a `(review-wide)` block addresses the whole change.
+
+LABEL SEMANTICS: a `{label}` suffix qualifies the block. praise / note / thought require no code change — acknowledge them in the resolution. nitpick / typo / polish are minor but real. issue / todo / question / suggestion / chore ask for action. A `blocking` decoration MUST be addressed before this review can be approved; `non-blocking` is at the author's judgment; `if-minor` means apply it only if the fix is small.
+
+When you finish, print a resolution block in this exact format:
+
+REDLINE_REVIEW_RESOLUTIONS
+{
+  "rc-007": "<what you did for this annotation>",
+  "rc-004": "<what you did for this annotation>",
+  "ai-001": "<what you did for this annotation>",
+  "rc-006": "<what you did for this annotation>",
+  "rc-003": "<what you did for this annotation>",
+  "rc-002": "<what you did for this annotation>",
+  "rc-005": "<what you did for this annotation>",
+  "rc-001": "<what you did for this annotation>"
+}
+
+Every ANNOTATION_ID above MUST appear as a key. Do not skip any. The user will re-run /redline-review to verify your fixes as the next review round.

@@ -17,8 +17,10 @@ import type {
 import { SplitPane } from "./SplitPane";
 import { BrowserChat } from "./BrowserChat";
 import { MissionChat } from "./MissionChat";
+import { LinkedChat } from "./LinkedChat";
 import { MissionStartDialog } from "./MissionStartDialog";
 import { useMission } from "../hooks/useMission";
+import { useLinked } from "../hooks/useLinked";
 
 // A native child webview is an OS-level layer painted on top of the React DOM —
 // it does not flow inline. So this component renders an invisible placeholder
@@ -36,10 +38,28 @@ import { useMission } from "../hooks/useMission";
 // (a query/action wakes it in the background). `liveIntentRef` tracks which tabs
 // should have a webview; `mruRef` is the recency order that picks suspend victims.
 const HOME = "https://www.google.com";
-const MAX_TABS = 10;
+// Not a UX limit — like Safari/Chrome there's no real cap on how many tabs you
+// keep, because idle tabs are SUSPENDED (only `MAX_LIVE_WEBVIEWS` are ever live
+// at once), so memory is bounded by live webviews, not by strip length. This
+// high ceiling exists ONLY as a runaway guard: the new-tab interceptor opens a
+// tab per `window.open`/`target=_blank`, so a buggy or hostile page could spam
+// them — the same thing browsers' popup blockers defend against.
+const MAX_TABS = 100;
 // Cap on simultaneously-live native webviews (active + MRU). The rest are
 // suspended to the snapshot cache. Tunable.
 const MAX_LIVE_WEBVIEWS = 3;
+// Visible band for the page-discussion split ratio (fraction given to the
+// browser slot). Kept away from 0/1 so the chat pane can never be folded to a
+// zero-width sliver — see `clampChatRatio`. Browser stays 20–80%, so the chat
+// is always at least ~20% wide.
+const CHAT_MIN_RATIO = 0.2;
+const CHAT_MAX_RATIO = 0.8;
+/** Keep the page-discussion split ratio inside its visible band so the chat pane
+ *  can never be folded to a zero-width sliver (which reads as "the discussion
+ *  won't open"). Also self-heals a NaN or an out-of-band value a prior build
+ *  let drag/persist all the way to 1 or 0. Exported for unit testing. */
+export const clampChatRatio = (r: number): number =>
+  Math.min(CHAT_MAX_RATIO, Math.max(CHAT_MIN_RATIO, Number.isFinite(r) ? r : 0.62));
 // The embedded WKWebView's default user-agent omits the "Safari" token, so
 // sites (Google included) serve a legacy/basic layout. Presenting a current
 // Safari UA makes them serve the modern experience the engine can render.
@@ -100,6 +120,12 @@ interface Tab {
 // reattaches after a reload. The native webview itself is recreated fresh at
 // the saved URL; only url/title/browseId need to survive.
 const TABS_KEY = "redline.browser.tabs";
+// The last active tab id (regular browsing). Persisted separately from the tab
+// list so a BrowserPane REMOUNT — which App triggers every time the document
+// pane toggles on/off (it re-parents this pane into/out of the SplitPane) —
+// restores the tab the user was on instead of snapping back to the first tab.
+// Missions own their own active tab, so they don't write this key.
+const ACTIVE_KEY = "redline.browser.activeId";
 const newBrowseId = (): string =>
   typeof crypto !== "undefined" && crypto.randomUUID
     ? crypto.randomUUID()
@@ -147,6 +173,29 @@ function nextSeq(tabs: Tab[]): number {
   return max + 1;
 }
 
+/** Move the tab `dragId` to sit immediately before `overId` (drag-to-reorder).
+ *  Tab NUMBERS are purely positional — the strip shows `index + 1` and the
+ *  daemon's `/v1/browser/tabs` derives `n` from list position — so reordering
+ *  the array is all that's needed for "drag tab 9 onto tab 2 → it becomes tab
+ *  2" to hold for both the user and the agent. Durable `id`/`browseId` ride
+ *  along with each tab. Returns the same array reference when nothing moves. */
+export function reorderTabs<T extends { id: string }>(
+  tabs: T[],
+  dragId: string,
+  overId: string,
+): T[] {
+  if (dragId === overId) return tabs;
+  const from = tabs.findIndex((t) => t.id === dragId);
+  const to = tabs.findIndex((t) => t.id === overId);
+  if (from < 0 || to < 0) return tabs;
+  const next = tabs.slice();
+  const [moved] = next.splice(from, 1);
+  // After removing `from`, a rightward target shifts down by one; insert the
+  // dragged tab just before the hovered one either way.
+  next.splice(from < to ? to - 1 : to, 0, moved);
+  return next;
+}
+
 interface Bookmark {
   title: string;
   url: string;
@@ -164,6 +213,9 @@ interface BrowserPaneProps {
   /** Ship a page-discussion reply into a fresh Redline plan session (terminal +
    *  `claude --permission-mode plan`). Forwarded to the chat's per-reply action. */
   onSendToRedline?: (markdown: string) => void;
+  /** Open a page-discussion reply in the Prompt Drafter (repo pre-guessed) to
+   *  shape before sending. Forwarded to the chat's per-reply action. */
+  onSendToDrafter?: (markdown: string) => void;
   /** Seed the Prompt Drafter with a synthesized mission brief (markdown → Tiptap
    *  doc), so the user shapes the real document and ships it to Claude Code. */
   onSynthesizeToDrafter?: (markdown: string) => void;
@@ -188,6 +240,7 @@ export function BrowserPane({
   visible = true,
   projectDir = null,
   onSendToRedline,
+  onSendToDrafter,
   onSynthesizeToDrafter,
   layoutKey,
 }: BrowserPaneProps) {
@@ -205,14 +258,29 @@ export function BrowserPane({
   const initialTabsRef = useRef<Tab[] | null>(null);
   if (!initialTabsRef.current) initialTabsRef.current = loadTabs();
   const seqRef = useRef(nextSeq(initialTabsRef.current));
+  // Restore the last active tab (regular browsing) once, so a remount keeps the
+  // view — and the single visible webview — on the tab the user was actually on,
+  // not tab 0. Falls back to the first tab. Missions re-seed this via swap.
+  const initialActiveRef = useRef<string | null>(null);
+  if (initialActiveRef.current === null) {
+    const restored = initialTabsRef.current;
+    let saved: string | null = null;
+    try {
+      saved = localStorage.getItem(ACTIVE_KEY);
+    } catch {
+      /* ignore — fall back to the first tab */
+    }
+    initialActiveRef.current =
+      saved && restored.some((t) => t.id === saved) ? saved : restored[0].id;
+  }
   // Which tab ids should have a live webview, and the recency order used to pick
   // suspend victims. Seeded with only the active tab — other restored tabs are
   // created lazily on first activation/wake (so reopening 8 tabs spawns 1 webview,
   // not 8). The reconcile effect only materializes tabs in `liveIntentRef`.
   const liveIntentRef = useRef<Set<string>>(
-    new Set([initialTabsRef.current[0].id]),
+    new Set([initialActiveRef.current]),
   );
-  const mruRef = useRef<string[]>([initialTabsRef.current[0].id]);
+  const mruRef = useRef<string[]>([initialActiveRef.current]);
   const rafRef = useRef(0);
   // Last bounds pushed to the active webview, so we skip redundant native
   // setPosition/setSize calls when nothing actually moved. Cleared (set null)
@@ -284,7 +352,7 @@ export function BrowserPane({
   }, []);
 
   const [tabs, setTabs] = useState<Tab[]>(initialTabsRef.current);
-  const [activeId, setActiveId] = useState(() => initialTabsRef.current![0].id);
+  const [activeId, setActiveId] = useState(() => initialActiveRef.current!);
   // Which tab's DISCUSSION thread the chat pane shows. Normally equals activeId,
   // but they diverge when the agent opens a tab on the user's behalf: the new
   // tab becomes the visible/active page (activeId), while the conversation stays
@@ -292,19 +360,26 @@ export function BrowserPane({
   // reply isn't interrupted and the one conversation keeps driving the new tab.
   // Any manual tab click re-couples them (see selectTab).
   const [discussionId, setDiscussionId] = useState(
-    () => initialTabsRef.current![0].id,
+    () => initialActiveRef.current!,
   );
-  const [addr, setAddr] = useState(() => initialTabsRef.current![0].url);
+  const [addr, setAddr] = useState(
+    () =>
+      initialTabsRef.current!.find((t) => t.id === initialActiveRef.current)
+        ?.url ?? initialTabsRef.current![0].url,
+  );
   // Page-discussion panel (browse agent). Open state is in-session; the panel
   // splits the webview slot when open. The thread itself persists in the DB.
   const [chatOpen, setChatOpen] = useState(false);
-  // Which discussion the split shows: the per-tab "page" chat or the mission
-  // "orchestrator" chat (a tier above). The 💬/🎯 toolbar buttons set this.
-  const [chatTab, setChatTab] = useState<"page" | "mission">("page");
+  // Which discussion the split shows: the per-tab "page" chat, the mission
+  // "orchestrator" chat (a tier above), or the "linked" discussion (one thread
+  // spanning all tabs). The 💬/🎯/🔗 toolbar buttons set this.
+  const [chatTab, setChatTab] = useState<"page" | "mission" | "linked">("page");
   // Research-mission state (active mission, its pins, the resumable list).
   // Mirrors itself to the backend so the daemon's /v1/mission/* routes can
   // answer the orchestrator. See useMission.
   const mission = useMission();
+  // Linked-discussion state (one continuous conversation across all tabs).
+  const linked = useLinked();
   // The "Start a mission" / "what's our goal" dialog.
   const [missionDialogOpen, setMissionDialogOpen] = useState(false);
   const [missionMenuOpen, setMissionMenuOpen] = useState(false);
@@ -330,6 +405,21 @@ export function BrowserPane({
   // While dragging the chat divider, hide the native webview so it doesn't
   // swallow the pointer (same rule App uses for its document/browser split).
   const [chatDragging, setChatDragging] = useState(false);
+  // Tab drag-to-reorder. `tabDragging` hides the native webview during a drag
+  // (so it doesn't swallow the pointer, same rule as the split divider);
+  // `dragOverId` is the tab the pointer is currently over (drop target).
+  const [tabDragging, setTabDragging] = useState(false);
+  const [dragOverId, setDragOverId] = useState<string | null>(null);
+  // Live drag bookkeeping read by the window pointer listeners without stale
+  // closures: the tab being dragged, whether the pointer has moved past the
+  // click threshold, and the current drop target.
+  const tabDragRef = useRef<{ id: string; startX: number; moved: boolean } | null>(
+    null,
+  );
+  const dragOverIdRef = useRef<string | null>(null);
+  // Set true on pointer-up of a real drag so the follow-up click doesn't also
+  // fire `selectTab` (a drag shouldn't switch tabs).
+  const suppressTabClickRef = useRef(false);
   // True while a page is "in-window fullscreen" (a video player's fullscreen
   // button, faked by the injected shim which sets window.__redline_fs). Polled
   // from the active tab; when on, the slot expands to fill the whole window.
@@ -346,6 +436,17 @@ export function BrowserPane({
   );
   const viewModeRef = useRef(viewMode);
   viewModeRef.current = viewMode;
+  // Tandem agent mode: an agent-first browsing behavior. When on, every tab
+  // lands in a 50/50 browser | page-discussion split and the browse agent is
+  // told to open the best page for definition/concept/library questions and
+  // surface rateable sources. Toggled from the ⚙️ toolbar menu; persisted.
+  const [tandem, setTandem] = usePersistedState<boolean>(
+    "redline.browser.tandem",
+    false,
+  );
+  // Read inside the native settings-menu handler without re-subscribing.
+  const tandemRef = useRef(tandem);
+  tandemRef.current = tandem;
   // Bookmarks open as a NATIVE popup menu (HTML can't overlay a native
   // webview). Item clicks arrive as a `bookmark-menu-action` event; the
   // handler reads these refs to stay current without re-subscribing.
@@ -364,7 +465,11 @@ export function BrowserPane({
   // start dialog / menu) — a native webview paints OVER React DOM, so it must
   // step aside for those, the same reason bookmarks use a native popup menu.
   const effectiveVisible =
-    visible && !chatDragging && !missionDialogOpen && !missionMenuOpen;
+    visible &&
+    !chatDragging &&
+    !tabDragging &&
+    !missionDialogOpen &&
+    !missionMenuOpen;
   const visibleRef = useRef(effectiveVisible);
   visibleRef.current = effectiveVisible;
 
@@ -417,6 +522,16 @@ export function BrowserPane({
     void invoke("browser_set_active", { label: `browser-${activeId}` }).catch(
       () => {},
     );
+    // Remember the active tab so a remount (document-pane toggle) restores it.
+    // Skip while a mission owns the workspace or a swap is mid-flight — those
+    // buckets aren't the global regular-browsing one.
+    if (!activeMissionIdRef.current && !swappingRef.current) {
+      try {
+        localStorage.setItem(ACTIVE_KEY, activeId);
+      } catch {
+        /* ignore — restore just falls back to the first tab */
+      }
+    }
   }, [activeId]);
   // Clear it when the browser pane goes away.
   useEffect(
@@ -731,10 +846,17 @@ export function BrowserPane({
     return () => window.clearInterval(interval);
   }, []);
 
-  // Poll the active tab's in-window fullscreen flag (set by the injected shim
-  // on the TOP frame for both watch-pages and the embed handshake). Reuses the
-  // proven string-returning eval path — no new native plumbing. ~250ms keeps
-  // the expand/restore responsive without churn.
+  // Poll the active tab's page signals (set by injected shims on the TOP frame):
+  //  • `__redline_fs` — the in-window fullscreen flag (watch-pages + the embed
+  //    handshake), which drives the fullscreen layout.
+  //  • `__redline_newtabs` — a queue of URLs the new-tab shim captured from
+  //    `target="_blank"` links, `window.open`, and cmd/middle-clicks. WebKit
+  //    drops those requests on the floor for these child webviews (wry's UI
+  //    delegate has no new-window handler), so the shim intercepts them and we
+  //    open a real Redline tab here instead. Draining is idempotent (the shim
+  //    hands back and clears the queue in one eval).
+  // Reuses the proven string-returning eval path — no new native plumbing.
+  // ~250ms keeps fullscreen and link-clicks responsive without churn.
   useEffect(() => {
     let cancelled = false;
     const tick = async () => {
@@ -747,12 +869,27 @@ export function BrowserPane({
       const id = activeIdRef.current;
       if (!wvMapRef.current.has(id)) return;
       try {
-        const r = await invoke<string>("browser_eval_result", {
+        const raw = await invoke<string>("browser_eval_result", {
           label: `browser-${id}`,
           script:
-            '(function(){try{return window.__redline_fs?"1":"0"}catch(e){return "0"}})()',
+            '(function(){try{var q=window.__redline_newtabs||[];window.__redline_newtabs=[];' +
+            'return JSON.stringify({fs:!!window.__redline_fs,tabs:q})}catch(e){return "{}"}})()',
         });
-        if (!cancelled) setBrowserFullscreen(r === "1");
+        if (cancelled) return;
+        let sig: { fs?: boolean; tabs?: unknown } = {};
+        try {
+          sig = JSON.parse(raw || "{}");
+        } catch {
+          /* malformed — treat as no signal */
+        }
+        setBrowserFullscreen(!!sig.fs);
+        if (Array.isArray(sig.tabs)) {
+          for (const u of sig.tabs) {
+            if (typeof u === "string" && /^https?:/i.test(u)) {
+              openTabRef.current(u);
+            }
+          }
+        }
       } catch {
         /* webview gone mid-poll — ignore */
       }
@@ -842,9 +979,19 @@ export function BrowserPane({
     void (async () => {
       const all = await Webview.getAll().catch(() => []);
       const ours = new Set(tabsRef.current.map((t) => t.label));
+      const activeLabel = `browser-${activeIdRef.current}`;
       for (const wv of all) {
-        if (wv.label.startsWith("browser-") && !ours.has(wv.label)) {
+        if (!wv.label.startsWith("browser-")) continue;
+        if (!ours.has(wv.label)) {
+          // Stray from a prior instance whose tab set differs — free it.
           closeWebview(wv.label);
+        } else if (wv.label !== activeLabel) {
+          // Ours, but not the active tab. On a remount our wvMapRef starts
+          // empty, so the previously-active webview from the old instance is
+          // untracked and would stay SHOWN at its stale (full-column) bounds,
+          // painting over the document. Only the active tab is ever shown, so
+          // hide every other live webview now; syncBounds shows the active one.
+          void wv.hide();
         }
       }
     })();
@@ -899,12 +1046,71 @@ export function BrowserPane({
   // the discussion where it is, so the conversation that opened the tab keeps
   // streaming and keeps driving it.
   const selectTab = (id: string) => {
+    // A drag just ended on this tab — that's a reorder, not a selection.
+    if (suppressTabClickRef.current) {
+      suppressTabClickRef.current = false;
+      return;
+    }
     // Selecting a suspended tab wakes it: ensure it has a live webview (recreate
     // if its prior one died or never materialized), and bump its recency.
     ensureLive(id);
     touchMru(id);
     setActiveId(id);
     setDiscussionId(id);
+  };
+
+  // Begin a potential tab drag-reorder. A small threshold distinguishes a drag
+  // from a click; only past it do we hide the webview, dim the dragged tab, and
+  // track a drop target (the tab under the pointer, found via `data-tab-id`).
+  // Reorders on release — tab numbers follow list position automatically.
+  const startTabDrag = (e: React.PointerEvent, id: string) => {
+    if (e.button !== 0) return;
+    // A press that starts on the ✕ close button is a close, not a drag.
+    if ((e.target as HTMLElement).closest("button")) return;
+    tabDragRef.current = { id, startX: e.clientX, moved: false };
+    dragOverIdRef.current = null;
+    const onMove = (ev: PointerEvent) => {
+      const st = tabDragRef.current;
+      if (!st) return;
+      if (!st.moved && Math.abs(ev.clientX - st.startX) < 5) return;
+      if (!st.moved) {
+        st.moved = true;
+        setTabDragging(true);
+        setDragOverId(st.id);
+      }
+      const el = document.elementFromPoint(ev.clientX, ev.clientY) as
+        | HTMLElement
+        | null;
+      const over = el?.closest("[data-tab-id]") as HTMLElement | null;
+      const overId = over?.getAttribute("data-tab-id") ?? null;
+      dragOverIdRef.current = overId;
+      setDragOverId(overId ?? st.id);
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      const st = tabDragRef.current;
+      tabDragRef.current = null;
+      const overId = dragOverIdRef.current;
+      dragOverIdRef.current = null;
+      setTabDragging(false);
+      setDragOverId(null);
+      if (st?.moved) {
+        // Swallow the click that follows this pointer-up so it doesn't select.
+        // A drag ending on a DIFFERENT tab may fire no click at all, which would
+        // leave the flag stuck — so also clear it on the next macrotask (the
+        // real click, if any, fires synchronously before that and consumes it).
+        suppressTabClickRef.current = true;
+        window.setTimeout(() => {
+          suppressTabClickRef.current = false;
+        }, 0);
+        if (overId && overId !== st.id) {
+          setTabs((ts) => reorderTabs(ts, st.id, overId));
+        }
+      }
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
   };
 
   const openTab = (
@@ -927,6 +1133,12 @@ export function BrowserPane({
     // Move the conversation onto the new tab unless an agent opened it on behalf
     // of the current conversation (then it stays anchored to its origin tab).
     if (!opts.anchorDiscussion) setDiscussionId(id);
+    // Tandem mode is agent-first: every new tab lands in the split so the user
+    // can ask straight away.
+    if (tandemRef.current) {
+      setChatOpen(true);
+      setChatTab("page");
+    }
   };
 
   const closeTab = (id: string) => {
@@ -1335,6 +1547,49 @@ export function BrowserPane({
     }).catch((err) => console.error("show_view_menu failed", err));
   };
 
+  // A click in the native browser Settings menu arrives here (same native-popup
+  // reason as bookmarks/view). Today the only item is the tandem-mode toggle.
+  useEffect(() => {
+    const p = listen<string>("browser-settings-action", (e) => {
+      if (e.payload === "bset-tandem") setTandem((v) => !v);
+    });
+    return () => {
+      void p.then((un) => un());
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Open the native browser Settings popup, right-aligned under the ⚙️ button
+  // (same anchoring math as the View menu).
+  const SETTINGS_MENU_WIDTH = 180;
+  const openSettingsMenu = (e: React.MouseEvent<HTMLButtonElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const margin = 8;
+    const maxX = window.innerWidth - SETTINGS_MENU_WIDTH - margin;
+    const x = Math.max(margin, Math.min(r.right - SETTINGS_MENU_WIDTH, maxX));
+    void invoke("show_browser_settings_menu", {
+      tandem: tandemRef.current,
+      x: Math.round(x),
+      y: Math.round(r.bottom + 4),
+    }).catch((err) => console.error("show_browser_settings_menu failed", err));
+  };
+
+  // Tandem agent mode drives the layout: force the page-discussion split open at
+  // a clean 50/50 the moment it turns on, so every browser/new-tab lands
+  // agent-first. The divider stays user-draggable afterward.
+  const prevTandemRef = useRef(tandem);
+  useEffect(() => {
+    if (tandem) {
+      setChatOpen(true);
+      setChatTab("page");
+      // Snap to 50/50 only on the on-transition, not on every render, so a user
+      // who later drags the divider isn't yanked back to center.
+      if (!prevTandemRef.current) setChatRatio(0.5);
+    }
+    prevTandemRef.current = tandem;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tandem]);
+
   const chromeBtn: React.CSSProperties = {
     fontSize: "13px",
     lineHeight: 1,
@@ -1363,7 +1618,9 @@ export function BrowserPane({
           return (
             <div
               key={tab.id}
+              data-tab-id={tab.id}
               onClick={() => selectTab(tab.id)}
+              onPointerDown={(e) => startTabDrag(e, tab.id)}
               title={tab.url}
               className={`flex items-center gap-1.5 rounded-t-md cursor-pointer${
                 mission.activeMission
@@ -1378,12 +1635,20 @@ export function BrowserPane({
                 padding: "5px 8px",
                 fontSize: "12px",
                 borderTop: "1px solid var(--color-rule)",
-                borderLeft: "1px solid var(--color-rule)",
+                borderLeft:
+                  tabDragging && dragOverId === tab.id && tabDragRef.current?.id !== tab.id
+                    ? "2px solid var(--color-info)"
+                    : "1px solid var(--color-rule)",
                 borderRight: "1px solid var(--color-rule)",
                 background: active
                   ? "var(--color-paper)"
                   : "var(--color-bg-elevated)",
                 color: active ? "var(--color-ink)" : "var(--color-ink-muted)",
+                // Dim the tab being dragged; a subtle cue it's in motion.
+                opacity: tabDragging && tabDragRef.current?.id === tab.id ? 0.5 : 1,
+                // While reordering, the whole strip is a drag surface.
+                cursor: tabDragging ? "grabbing" : "pointer",
+                userSelect: "none",
               }}
             >
               {/* 1-based tab number — the user's (and the agent's) handle for the
@@ -1537,6 +1802,19 @@ export function BrowserPane({
         >
           🎨
         </button>
+        <button
+          type="button"
+          style={{
+            ...chromeBtn,
+            color: tandem ? "var(--color-info)" : "var(--color-ink)",
+          }}
+          title="Browser settings (tandem agent mode)"
+          aria-label="Browser settings"
+          aria-haspopup="menu"
+          onClick={openSettingsMenu}
+        >
+          ⚙️
+        </button>
         {/* 🎯 and the missions ▾ menu read as ONE control: a single bordered
             chip with two borderless segments split by a hairline, so there's no
             gap or double-border between them. The chip tints to the accent when
@@ -1678,6 +1956,29 @@ export function BrowserPane({
         </button>
         <button
           type="button"
+          style={{
+            ...chromeBtn,
+            color: chatOpen && chatTab === "linked" ? "var(--color-info)" : "var(--color-ink)",
+          }}
+          title="Linked discussion — one conversation that follows you across tabs"
+          aria-label="Linked discussion"
+          aria-pressed={chatOpen && chatTab === "linked"}
+          onClick={() => {
+            if (chatOpen && chatTab === "linked") {
+              setChatOpen(false);
+            } else {
+              setChatOpen(true);
+              setChatTab("linked");
+              // No goal to collect — a linked discussion is just a spanning
+              // conversation, so create one lazily on first open.
+              if (!linked.activeLinked) void linked.startLinked();
+            }
+          }}
+        >
+          🔗
+        </button>
+        <button
+          type="button"
           style={chromeBtn}
           title="Close browser"
           aria-label="Close browser"
@@ -1719,6 +2020,10 @@ export function BrowserPane({
         // grounds on the visible page via `label`.
         const discussionTab =
           tabs.find((t) => t.id === discussionId) ?? activeTab;
+        // The active (visible) tab's 1-based strip ordinal — what the linked
+        // agent and the user call "tab N".
+        const activeN =
+          tabs.findIndex((t) => t.id === activeId) + 1 || null;
         const chatPanel = (
           <div className="flex flex-col h-full min-h-0">
             <DiscussionSwitcher
@@ -1728,7 +2033,28 @@ export function BrowserPane({
               pinCount={mission.findings.length}
             />
             <div className="flex-1 min-h-0">
-              {chatTab === "mission" ? (
+              {chatTab === "linked" ? (
+                linked.activeLinked ? (
+                  <LinkedChat
+                    key={linked.activeLinked.linkedId}
+                    linked={linked.activeLinked}
+                    tab={{
+                      label: `browser-${activeId}`,
+                      n: activeN,
+                      browseId: activeTab.browseId,
+                      url: activeTab.url,
+                      title: activeTab.title,
+                    }}
+                    projectDir={projectDir}
+                    onClose={() => setChatOpen(false)}
+                    onOpenLink={(url) => openTab(url)}
+                    onSendToRedline={onSendToRedline}
+                    onSendToDrafter={onSendToDrafter}
+                  />
+                ) : (
+                  <LinkedEmptyState onStart={() => void linked.startLinked()} />
+                )
+              ) : chatTab === "mission" ? (
                 mission.activeMission ? (
                   <MissionChat
                     key={mission.activeMission.missionId}
@@ -1760,12 +2086,14 @@ export function BrowserPane({
                   browseId={discussionTab.browseId}
                   label={`browser-${activeId}`}
                   projectDir={projectDir}
+                  tandem={tandem}
                   anchoredFromTitle={
                     discussionTab.id !== activeId ? discussionTab.title : undefined
                   }
                   onClose={() => setChatOpen(false)}
                   onOpenLink={(url) => openTab(url)}
                   onSendToRedline={onSendToRedline}
+                  onSendToDrafter={onSendToDrafter}
                   onAddToMission={
                     mission.activeMission
                       ? (body) =>
@@ -1785,8 +2113,8 @@ export function BrowserPane({
         return (
           <SplitPane
             vertical={false}
-            ratio={chatRatio}
-            onRatioChange={setChatRatio}
+            ratio={clampChatRatio(chatRatio)}
+            onRatioChange={(r) => setChatRatio(clampChatRatio(r))}
             onDraggingChange={setChatDragging}
             first={slot}
             second={chatPanel}
@@ -1815,8 +2143,8 @@ function DiscussionSwitcher({
   hasMission,
   pinCount,
 }: {
-  tab: "page" | "mission";
-  setTab: (t: "page" | "mission") => void;
+  tab: "page" | "mission" | "linked";
+  setTab: (t: "page" | "mission" | "linked") => void;
   hasMission: boolean;
   pinCount: number;
 }) {
@@ -1841,6 +2169,31 @@ function DiscussionSwitcher({
       </button>
       <button type="button" style={pill(tab === "mission")} onClick={() => setTab("mission")}>
         🎯 Mission{hasMission && pinCount > 0 ? ` · ${pinCount}` : ""}
+      </button>
+      <button type="button" style={pill(tab === "linked")} onClick={() => setTab("linked")}>
+        🔗 Linked
+      </button>
+    </div>
+  );
+}
+
+/** Shown in the Linked tab before a linked discussion is created. */
+function LinkedEmptyState({ onStart }: { onStart: () => void }) {
+  return (
+    <div className="flex flex-col items-center justify-center h-full gap-3 px-6 text-center">
+      <span style={{ fontSize: "28px" }}>🔗</span>
+      <p style={{ fontSize: "12px", color: "var(--color-ink-muted)", lineHeight: 1.5 }}>
+        A linked discussion is one conversation that follows you across every tab.
+        Switch tabs and keep talking — it carries the thread and checks in with a
+        tab's own discussion when it needs to go deep.
+      </p>
+      <button
+        type="button"
+        onClick={onStart}
+        className="rounded px-3 py-1.5 font-medium"
+        style={{ fontSize: "12px", background: "var(--color-info)", color: "var(--color-on-accent)" }}
+      >
+        Start a linked discussion 🔗
       </button>
     </div>
   );

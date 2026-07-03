@@ -26,7 +26,19 @@ use tokio::process::{Child, ChildStderr, ChildStdout};
 
 use crate::claude_proc::{classify_line, claude_command, resolve_claude_bin, StreamLine};
 use crate::db::Database;
-use crate::state::{now_millis, CommentKind, SessionStore, ThreadMessage};
+use crate::state::{now_millis, CommentKind, ReviewAnnotation, SessionStore, ThreadMessage};
+
+/// Where a thread's resumable fork-session id is persisted: plan comments
+/// store it on their `comments` row; review annotations on their
+/// `review_annotations` row; Ask-AI questions on their `review_questions`
+/// row. Everything else about a turn (registry, events, `thread_messages`)
+/// is shared verbatim between the thread kinds.
+#[derive(Clone, Copy)]
+enum ThreadTarget {
+    PlanComment,
+    ReviewAnnotation,
+    ReviewQuestion,
+}
 
 /// Composite registry key. Comment ids are session-scoped (`c-001` restarts
 /// per session), so a bare comment_id collides across sessions. NUL cannot
@@ -344,9 +356,372 @@ pub async fn fork_thread_send(
         key,
         session_id,
         comment_id,
+        ThreadTarget::PlanComment,
         stdout,
         stderr,
     ));
+    Ok(())
+}
+
+/// First-turn prompt for a **review annotation** discussion: grounded on the
+/// diff range + annotation instead of a plan block. Unlike plan threads there
+/// is no session to fork — the agent starts fresh in the repo and reads the
+/// code itself (the quoted lines + file:line anchor tell it exactly where).
+fn build_review_first_turn_prompt(ann: &ReviewAnnotation, opening: &str) -> String {
+    let mut p = String::from(
+        "You are discussing a CODE CHANGE with the person reviewing it in \
+         Redline's code-review pane.\n\n",
+    );
+    let what = match ann.kind.as_str() {
+        "suggestion" => "proposed a replacement for",
+        "deletion" => "marked for deletion",
+        _ => "left a comment on",
+    };
+    let lines = if ann.start_line == ann.end_line {
+        format!("line {}", ann.start_line)
+    } else {
+        format!("lines {}-{}", ann.start_line, ann.end_line)
+    };
+    p.push_str(&format!(
+        "They {what} `{}` ({} side, {lines}):\n",
+        ann.file_path, ann.side
+    ));
+    for line in ann.quoted_text.lines() {
+        p.push_str("> ");
+        p.push_str(line);
+        p.push('\n');
+    }
+    if let Some(replacement) = ann
+        .suggestion_replacement
+        .as_deref()
+        .filter(|r| !r.trim().is_empty())
+    {
+        p.push_str("\nTheir suggested replacement:\n");
+        for line in replacement.lines() {
+            p.push_str("> ");
+            p.push_str(line);
+            p.push('\n');
+        }
+    }
+    p.push_str("\nTheir message:\n");
+    for line in opening.lines() {
+        p.push_str("> ");
+        p.push_str(line);
+        p.push('\n');
+    }
+    if let Some(res) = ann.resolution.as_deref().filter(|r| !r.trim().is_empty()) {
+        p.push_str("\nThis annotation was previously resolved with:\n");
+        for line in res.lines() {
+            p.push_str("> ");
+            p.push_str(line);
+            p.push('\n');
+        }
+    }
+    p.push_str(
+        "\nStart by reading the file around those lines to ground your answer \
+         in the real code. Follow the `sidecar` skill for how to structure the \
+         reply: lead with the answer, then add a table, mermaid diagram, or \
+         callout only when it adds signal. Respond directly and concisely in \
+         markdown — no raw HTML. This is a read-only discussion thread — do \
+         not edit files, do not produce a new plan, and do not call \
+         ExitPlanMode. You may read files, search the code, and fetch web \
+         pages or search the web.",
+    );
+    p
+}
+
+/// Send a turn to a review annotation's discussion agent. Mirrors
+/// `fork_thread_send` with two differences: the thread keys on
+/// `(review_id, annotation_id)`, and the first turn starts a FRESH session in
+/// the review's repo (there is no plan session to fork) grounded on the diff
+/// range via the prompt. Follow-ups resume the annotation's own session.
+#[tauri::command]
+pub async fn review_thread_send(
+    fork: tauri::State<'_, ForkState>,
+    app: AppHandle,
+    review_id: String,
+    annotation_id: String,
+    text: String,
+) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Err("empty message".to_string());
+    }
+    let key = fork_key(&review_id, &annotation_id);
+    {
+        let guard = fork.procs.lock().unwrap();
+        if guard.contains_key(&key) {
+            return Err("a reply is still streaming for this annotation".to_string());
+        }
+    }
+
+    let session = fork
+        .db
+        .get_code_review(&review_id)
+        .ok_or_else(|| format!("no review {review_id}"))?;
+    let cwd = session.repo_path.clone();
+    let annotation = fork
+        .db
+        .list_review_annotations(&review_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|a| a.id == annotation_id)
+        .ok_or_else(|| format!("no annotation {annotation_id} in review {review_id}"))?;
+    let prior_fork = fork
+        .db
+        .get_review_annotation_fork_session(&review_id, &annotation_id);
+
+    let user_msg = ThreadMessage {
+        id: uuid::Uuid::new_v4().to_string(),
+        session_id: review_id.clone(),
+        comment_id: annotation_id.clone(),
+        role: "user".to_string(),
+        body: text.clone(),
+        status: "complete".to_string(),
+        created_at: now_millis(),
+    };
+    fork.db
+        .insert_thread_message(&user_msg)
+        .map_err(|e| format!("failed to persist message: {e}"))?;
+
+    let prompt = match &prior_fork {
+        None => build_review_first_turn_prompt(&annotation, &text),
+        Some(_) => text.clone(),
+    };
+
+    // Same read-only tool fence as plan threads (see fork_thread_send).
+    let mut args: Vec<String> = vec![
+        "-p".to_string(),
+        prompt,
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--include-partial-messages".to_string(),
+        "--verbose".to_string(),
+        "--permission-mode".to_string(),
+        "default".to_string(),
+        "--tools".to_string(),
+        "Read,Grep,Glob,WebFetch,WebSearch".to_string(),
+        "--allowedTools".to_string(),
+        "WebSearch".to_string(),
+        "WebFetch".to_string(),
+        "--strict-mcp-config".to_string(),
+    ];
+    // First turn: fresh session (no --resume). Follow-ups resume it.
+    if let Some(fork_sid) = &prior_fork {
+        args.push("--resume".to_string());
+        args.push(fork_sid.clone());
+    }
+
+    let claude_bin = fork.claude_bin().await?;
+    let mut cmd = claude_command(&claude_bin);
+    let mut child = cmd
+        .current_dir(&cwd)
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                format!(
+                    "could not find the `claude` CLI (looked for `{claude_bin}`). \
+                     Install Claude Code, or launch Redline from a terminal \
+                     so it inherits your shell's PATH."
+                )
+            } else {
+                format!("failed to spawn claude: {e}")
+            }
+        })?;
+    let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
+    let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
+
+    {
+        fork.procs
+            .lock()
+            .unwrap()
+            .insert(key.clone(), ForkProc { child });
+    }
+    tauri::async_runtime::spawn(read_fork(
+        app,
+        fork.db.clone(),
+        fork.procs.clone(),
+        key,
+        review_id,
+        annotation_id,
+        ThreadTarget::ReviewAnnotation,
+        stdout,
+        stderr,
+    ));
+    Ok(())
+}
+
+/// First-turn grounding for an Ask-AI question: the anchor + quoted lines +
+/// the reviewer's question. Read-only, answer-focused — the agent explains,
+/// it does not edit.
+fn build_question_first_turn_prompt(
+    q: &crate::state::ReviewQuestion,
+    question: &str,
+) -> String {
+    let mut p = String::new();
+    p.push_str(
+        "You are answering a reviewer's question during a code review. They \
+         selected a range in the diff and asked about it — answer the question; \
+         do NOT propose a to-do list or edit anything.\n\n",
+    );
+    p.push_str(&format!(
+        "The selection: {} ({} side), lines {}-{}.\n",
+        q.file_path, q.side, q.start_line, q.end_line
+    ));
+    if !q.quoted_text.trim().is_empty() {
+        p.push_str("The selected lines:\n\n");
+        for line in q.quoted_text.lines() {
+            p.push_str("> ");
+            p.push_str(line);
+            p.push('\n');
+        }
+        p.push('\n');
+    }
+    p.push_str(&format!("The reviewer's question (verbatim):\n\n{question}\n\n"));
+    p.push_str(
+        "Start by reading the file around those lines for context. Follow the \
+         `sidecar` skill's formatting if available. You are read-only: do not \
+         edit files, and never call ExitPlanMode.",
+    );
+    p
+}
+
+/// Ask-AI about a selection — a question thread, not an annotation. Same
+/// fresh-session + resume mechanics as `review_thread_send`; messages persist
+/// under `(review_id, ask-NNN)` and the answer NEVER enters the feedback
+/// payload.
+#[tauri::command]
+pub async fn review_question_send(
+    fork: tauri::State<'_, ForkState>,
+    app: AppHandle,
+    review_id: String,
+    question_id: String,
+    text: String,
+) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Err("empty message".to_string());
+    }
+    let key = fork_key(&review_id, &question_id);
+    {
+        let guard = fork.procs.lock().unwrap();
+        if guard.contains_key(&key) {
+            return Err("a reply is still streaming for this question".to_string());
+        }
+    }
+
+    let session = fork
+        .db
+        .get_code_review(&review_id)
+        .ok_or_else(|| format!("no review {review_id}"))?;
+    let cwd = session.repo_path.clone();
+    let question = fork
+        .db
+        .list_review_questions(&review_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|q| q.id == question_id)
+        .ok_or_else(|| format!("no question {question_id} in review {review_id}"))?;
+    let prior_fork = fork
+        .db
+        .get_review_question_fork_session(&review_id, &question_id);
+
+    let user_msg = ThreadMessage {
+        id: uuid::Uuid::new_v4().to_string(),
+        session_id: review_id.clone(),
+        comment_id: question_id.clone(),
+        role: "user".to_string(),
+        body: text.clone(),
+        status: "complete".to_string(),
+        created_at: now_millis(),
+    };
+    fork.db
+        .insert_thread_message(&user_msg)
+        .map_err(|e| format!("failed to persist message: {e}"))?;
+
+    let prompt = match &prior_fork {
+        None => build_question_first_turn_prompt(&question, &text),
+        Some(_) => text.clone(),
+    };
+
+    // Same read-only tool fence as the annotation threads.
+    let mut args: Vec<String> = vec![
+        "-p".to_string(),
+        prompt,
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--include-partial-messages".to_string(),
+        "--verbose".to_string(),
+        "--permission-mode".to_string(),
+        "default".to_string(),
+        "--tools".to_string(),
+        "Read,Grep,Glob,WebFetch,WebSearch".to_string(),
+        "--allowedTools".to_string(),
+        "WebSearch".to_string(),
+        "WebFetch".to_string(),
+        "--strict-mcp-config".to_string(),
+    ];
+    if let Some(fork_sid) = &prior_fork {
+        args.push("--resume".to_string());
+        args.push(fork_sid.clone());
+    }
+
+    let claude_bin = fork.claude_bin().await?;
+    let mut cmd = claude_command(&claude_bin);
+    let mut child = cmd
+        .current_dir(&cwd)
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("failed to spawn claude: {e}"))?;
+    let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
+    let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
+
+    {
+        fork.procs
+            .lock()
+            .unwrap()
+            .insert(key.clone(), ForkProc { child });
+    }
+    tauri::async_runtime::spawn(read_fork(
+        app,
+        fork.db.clone(),
+        fork.procs.clone(),
+        key,
+        review_id,
+        question_id,
+        ThreadTarget::ReviewQuestion,
+        stdout,
+        stderr,
+    ));
+    Ok(())
+}
+
+/// Discard a review annotation's whole thread: kill any in-flight turn,
+/// delete its messages, clear the resume session. The annotation stays.
+#[tauri::command]
+pub fn review_thread_discard(
+    fork: tauri::State<'_, ForkState>,
+    review_id: String,
+    annotation_id: String,
+) -> Result<(), String> {
+    let key = fork_key(&review_id, &annotation_id);
+    let proc = { fork.procs.lock().unwrap().remove(&key) };
+    if let Some(mut proc) = proc {
+        let _ = proc.child.start_kill();
+    }
+    fork.db
+        .delete_thread(&review_id, &annotation_id)
+        .map_err(|e| format!("failed to delete thread: {e}"))?;
+    fork.db
+        .clear_review_annotation_fork_session(&review_id, &annotation_id)
+        .map_err(|e| format!("failed to clear fork session: {e}"))?;
     Ok(())
 }
 
@@ -422,6 +797,7 @@ async fn read_fork(
     key: String,
     session_id: String,
     comment_id: String,
+    target: ThreadTarget,
     stdout: ChildStdout,
     stderr: ChildStderr,
 ) {
@@ -518,8 +894,21 @@ async fn read_fork(
             return;
         }
         // Persist the fork session id so the next turn resumes (not re-forks).
+        // For review threads, `session_id`/`comment_id` are the review /
+        // annotation ids and the resume id lives on the annotation row.
         if let Some(fork_sid) = &fork_session {
-            if let Err(e) = db.set_comment_fork_session(&session_id, &comment_id, fork_sid) {
+            let persisted = match target {
+                ThreadTarget::PlanComment => {
+                    db.set_comment_fork_session(&session_id, &comment_id, fork_sid)
+                }
+                ThreadTarget::ReviewAnnotation => {
+                    db.set_review_annotation_fork_session(&session_id, &comment_id, fork_sid)
+                }
+                ThreadTarget::ReviewQuestion => {
+                    db.set_review_question_fork_session(&session_id, &comment_id, fork_sid)
+                }
+            };
+            if let Err(e) = persisted {
                 tracing::warn!(error = %e, "failed to persist fork_session_id");
             }
         }
@@ -627,6 +1016,71 @@ mod tests {
         assert!(p.contains("§B"));
         assert!(p.contains("left a comment"));
         assert!(p.contains("Reconsider this."));
+    }
+
+    fn review_ann(kind: &str) -> ReviewAnnotation {
+        ReviewAnnotation {
+            id: "rc-001".to_string(),
+            review_id: "rev-1".to_string(),
+            round: 1,
+            file_path: "src/db.rs".to_string(),
+            side: "new".to_string(),
+            start_line: 42,
+            end_line: 45,
+            kind: kind.to_string(),
+            body: String::new(),
+            suggestion_replacement: if kind == "suggestion" {
+                Some("let x = y?;".to_string())
+            } else {
+                None
+            },
+            quoted_text: "let x = y.unwrap();".to_string(),
+            status: "draft".to_string(),
+            resolution: None,
+            created_at: 1,
+            scope: "line".to_string(),
+            label: None,
+            blocking: None,
+            source: "user".to_string(),
+        }
+    }
+
+    #[test]
+    fn review_first_turn_prompt_grounds_on_the_diff_range() {
+        let p = build_review_first_turn_prompt(&review_ann("suggestion"), "Safer this way?");
+        assert!(p.contains("src/db.rs"));
+        assert!(p.contains("lines 42-45"));
+        assert!(p.contains("new side"));
+        assert!(p.contains("> let x = y.unwrap();"));
+        assert!(p.contains("> let x = y?;"));
+        assert!(p.contains("Safer this way?"));
+        assert!(p.contains("proposed a replacement"));
+        // Read-only guardrails, same bar as plan threads.
+        assert!(p.contains("ExitPlanMode"));
+        assert!(p.contains("do not edit files"));
+        // Grounding instruction: read the real file first.
+        assert!(p.contains("reading the file"));
+    }
+
+    #[test]
+    fn review_first_turn_prompt_kind_variants() {
+        let del = build_review_first_turn_prompt(&review_ann("deletion"), "why keep this?");
+        assert!(del.contains("marked for deletion"));
+        let mut single = review_ann("comment");
+        single.end_line = 42;
+        let c = build_review_first_turn_prompt(&single, "hm");
+        assert!(c.contains("left a comment"));
+        assert!(c.contains("line 42"));
+        assert!(!c.contains("lines 42"));
+    }
+
+    #[test]
+    fn review_first_turn_prompt_carries_prior_resolution() {
+        let mut ann = review_ann("comment");
+        ann.resolution = Some("Fixed by using ?".to_string());
+        let p = build_review_first_turn_prompt(&ann, "still crashes though");
+        assert!(p.contains("previously resolved"));
+        assert!(p.contains("Fixed by using ?"));
     }
 
     #[test]

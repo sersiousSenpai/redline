@@ -23,6 +23,7 @@ import {
   flattenSections,
 } from "../lib/markdownToSpeakable";
 import { VoiceSettings, type TtsEngine } from "./VoiceSettings";
+import { PulseLogo, type PulseState } from "./PulseLogo";
 
 interface VoiceDeltaEvent {
   sessionId: string;
@@ -840,6 +841,16 @@ export function VoicePanel({
   }, [advanceWalk]);
 
   const busy = thinking;
+  // Drives the spinning-logo pulse in the header: fast fractal spin while
+  // thinking, a steady beat while speaking, a slow receptive spin while the mic
+  // is open, still otherwise.
+  const voicePulse: PulseState = thinking
+    ? "thinking"
+    : speechState === "speaking"
+      ? "streaming"
+      : listening
+        ? "listening"
+        : "idle";
   const indicator: { label: string; color: string } = listening
     ? { label: "Listening…", color: "var(--color-danger, #c0392b)" }
     : thinking
@@ -868,7 +879,7 @@ export function VoicePanel({
         style={{ borderBottom: "1px solid var(--color-rule)" }}
       >
         <div className="flex items-center gap-2">
-          <span style={{ fontSize: "15px" }}>🎙️</span>
+          <PulseLogo state={voicePulse} size={20} />
           <span style={{ fontWeight: 600, color: "var(--color-ink)" }}>
             Talk to the plan
           </span>

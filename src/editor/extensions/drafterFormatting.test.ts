@@ -143,6 +143,101 @@ describe("serializer is blind to visual formatting", () => {
   });
 });
 
+describe("ListStyle", () => {
+  function orderedMd(html: string, style: string): string {
+    const editor = makeEditor(html);
+    // Land the cursor inside the first list item (pos 3 is within its text) so
+    // the style applies to the existing list without wrapping trailing content.
+    editor.commands.setTextSelection(3);
+    editor.commands.setOrderedListStyle(style);
+    return planDocToMarkdown(editor.state.doc, { sidecars: false });
+  }
+
+  it("keeps the canonical decimal markers when no style is set", () => {
+    const editor = makeEditor(
+      "<ol><li><p>one</p></li><li><p>two</p></li></ol>",
+    );
+    const md = planDocToMarkdown(editor.state.doc, { sidecars: false });
+    expect(md).toContain("1. one");
+    expect(md).toContain("2. two");
+  });
+
+  it("serializes lower-roman markers faithfully", () => {
+    const md = orderedMd(
+      "<ol><li><p>one</p></li><li><p>two</p></li><li><p>three</p></li></ol>",
+      "lower-roman",
+    );
+    expect(md).toContain("i. one");
+    expect(md).toContain("ii. two");
+    expect(md).toContain("iii. three");
+  });
+
+  it("serializes upper-alpha with a trailing paren", () => {
+    const md = orderedMd(
+      "<ol><li><p>a</p></li><li><p>b</p></li></ol>",
+      "upper-alpha-paren",
+    );
+    expect(md).toContain("A) a");
+    expect(md).toContain("B) b");
+  });
+
+  it("serializes lower-alpha parenthetical markers", () => {
+    const md = orderedMd(
+      "<ol><li><p>x</p></li><li><p>y</p></li></ol>",
+      "lower-alpha-parenthetical",
+    );
+    expect(md).toContain("(a) x");
+    expect(md).toContain("(b) y");
+  });
+
+  it("honours the list start attribute for non-decimal styles", () => {
+    const editor = makeEditor(
+      '<ol start="3"><li><p>c</p></li><li><p>d</p></li></ol>',
+    );
+    editor.commands.setTextSelection(3);
+    editor.commands.setOrderedListStyle("upper-roman");
+    const md = planDocToMarkdown(editor.state.doc, { sidecars: false });
+    expect(md).toContain("III. c");
+    expect(md).toContain("IV. d");
+  });
+
+  it("switches a bullet list's marker without leaking CSS into markdown", () => {
+    const editor = makeEditor("<ul><li><p>one</p></li></ul>");
+    editor.commands.selectAll();
+    editor.commands.setBulletListStyle("square");
+    expect(editor.getAttributes("bulletList").listStyle).toBe("square");
+    const md = planDocToMarkdown(editor.state.doc, { sidecars: false });
+    // Bullets always serialize as a plain dash — style is display-only for them.
+    expect(md).toContain("- one");
+    expect(md).not.toMatch(/square|list-style/i);
+  });
+});
+
+describe("Footnote", () => {
+  it("emits [^n] inline and a trailing definitions block", () => {
+    const editor = makeEditor("<p>Hello</p>");
+    editor.commands.focus("end");
+    editor.commands.insertFootnote("a clarifying note");
+    const md = planDocToMarkdown(editor.state.doc, { sidecars: false });
+    expect(md).toContain("Hello[^1]");
+    expect(md).toContain("[^1]: a clarifying note");
+  });
+
+  it("numbers multiple footnotes in document order", () => {
+    const editor = makeEditor("<p>first</p><p>second</p>");
+    // Footnote after "first" (end of paragraph 1).
+    editor.commands.setTextSelection(6);
+    editor.commands.insertFootnote("note one");
+    editor.commands.focus("end");
+    editor.commands.insertFootnote("note two");
+    const md = planDocToMarkdown(editor.state.doc, { sidecars: false });
+    expect(md).toContain("first[^1]");
+    expect(md).toContain("second[^2]");
+    expect(md).toContain("[^1]: note one");
+    expect(md).toContain("[^2]: note two");
+  });
+});
+
 describe("TableAlign", () => {
   it("setTableAlign writes the align attr on the table node", () => {
     const editor = makeEditor("<p></p>");

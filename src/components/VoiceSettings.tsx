@@ -9,6 +9,10 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
  *  and `elevenlabs` are premium cloud voices (each needs the user's own key). */
 export type TtsEngine = "system" | "kokoro" | "openai" | "elevenlabs";
 
+/** Dictation (speech-to-text) backends. `auto` prefers local Whisper when its
+ *  model is installed and falls back to Apple; the other two force one. */
+export type DictationEngine = "auto" | "apple" | "whisper";
+
 interface TtsSettings {
   engine: string;
   hasOpenaiKey: boolean;
@@ -90,6 +94,15 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Dictation (microphone → text). Independent of the TTS engine above: this is
+  // which recognizer transcribes your speech. `auto` prefers local Whisper once
+  // its model is downloaded, else Apple's built-in on-device recognizer.
+  const [dictationEngine, setDictationEngine] =
+    useState<DictationEngine>("auto");
+  const [whisperPresent, setWhisperPresent] = useState(false);
+  const [whisperInstalling, setWhisperInstalling] = useState(false);
+  const [whisperProgress, setWhisperProgress] = useState<KokoroSetup | null>(null);
+
   useEffect(() => {
     let alive = true;
     void invoke<TtsSettings>("tts_get_settings")
@@ -103,6 +116,22 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
         setElevenVoice(s.elevenVoice || "21m00Tcm4TlvDq8ikWAM");
       })
       .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Load the dictation engine + Whisper model presence once.
+  useEffect(() => {
+    let alive = true;
+    void Promise.all([
+      invoke<string>("dictation_get_engine").catch(() => "auto"),
+      invoke<boolean>("whisper_model_present").catch(() => false),
+    ]).then(([eng, present]) => {
+      if (!alive) return;
+      setDictationEngine((eng as DictationEngine) || "auto");
+      setWhisperPresent(present);
+    });
     return () => {
       alive = false;
     };
@@ -137,6 +166,37 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
       un?.();
     };
   }, []);
+
+  // Live download progress for the one-time Whisper model fetch.
+  useEffect(() => {
+    let disposed = false;
+    let un: UnlistenFn | undefined;
+    void listen<KokoroSetup>("whisper-setup", (e) =>
+      setWhisperProgress(e.payload),
+    ).then((u) => {
+      if (disposed) u();
+      else un = u;
+    });
+    return () => {
+      disposed = true;
+      un?.();
+    };
+  }, []);
+
+  const installWhisper = async () => {
+    setWhisperInstalling(true);
+    setError(null);
+    setWhisperProgress(null);
+    try {
+      await invoke("whisper_install");
+      setWhisperPresent(await invoke<boolean>("whisper_model_present"));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setWhisperInstalling(false);
+      setWhisperProgress(null);
+    }
+  };
 
   const installKokoro = async () => {
     setInstalling(true);
@@ -181,6 +241,8 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
         elevenKey: elevenKeyInput.trim() ? elevenKeyInput.trim() : null,
         elevenVoice,
       });
+      // Dictation engine is a separate setting from the TTS engine above.
+      await invoke("dictation_set_engine", { engine: dictationEngine });
       onSaved(engine);
       onClose();
     } catch (e) {
@@ -418,6 +480,92 @@ export function VoiceSettings({ onClose, onSaved }: VoiceSettingsProps) {
           </div>
         </div>
       )}
+
+      <div
+        className="flex flex-col gap-2 mt-5 pt-4"
+        style={{ borderTop: "1px solid var(--color-rule)" }}
+      >
+        <span style={label}>Dictation (microphone → text)</span>
+        <span style={muted}>
+          Which recognizer transcribes your speech when you dictate. Both run
+          fully on your Mac — no audio ever leaves the device. Whisper is a
+          stronger local model; Apple's built-in recognizer needs no download.
+        </span>
+        <select
+          value={dictationEngine}
+          onChange={(e) => setDictationEngine(e.target.value as DictationEngine)}
+          style={field}
+        >
+          <option value="auto">
+            Automatic — Whisper if installed, else Apple
+          </option>
+          <option value="whisper">Whisper — stronger, local (needs model)</option>
+          <option value="apple">Apple — built-in, no download</option>
+        </select>
+
+        {(dictationEngine === "whisper" || dictationEngine === "auto") &&
+          (whisperPresent
+            ? statusRow(true, "Whisper model installed")
+            : (
+                <div className="flex flex-col gap-1.5">
+                  <button
+                    type="button"
+                    onClick={installWhisper}
+                    disabled={whisperInstalling}
+                    className="rounded-sm px-3 py-1.5"
+                    style={{
+                      fontSize: "13px",
+                      fontWeight: 600,
+                      border: "1px solid var(--color-rule)",
+                      background: "var(--color-anchor-bg)",
+                      color: "var(--color-anchor-text)",
+                      cursor: whisperInstalling ? "default" : "pointer",
+                      opacity: whisperInstalling ? 0.6 : 1,
+                      alignSelf: "flex-start",
+                    }}
+                  >
+                    {whisperInstalling
+                      ? "Downloading…"
+                      : "Download Whisper model (~140 MB)"}
+                  </button>
+                  {whisperInstalling && (
+                    <div className="flex flex-col gap-1">
+                      <div
+                        style={{
+                          height: "6px",
+                          borderRadius: "3px",
+                          background: "var(--color-rule)",
+                          overflow: "hidden",
+                        }}
+                      >
+                        <div
+                          style={{
+                            height: "100%",
+                            width:
+                              whisperProgress && whisperProgress.total
+                                ? `${Math.min(100, (whisperProgress.received / whisperProgress.total) * 100)}%`
+                                : "40%",
+                            background: "var(--color-anchor-text)",
+                            transition: "width 200ms ease",
+                          }}
+                        />
+                      </div>
+                      <span style={muted}>
+                        Downloading the Whisper model…
+                        {whisperProgress && whisperProgress.total
+                          ? ` — ${mb(whisperProgress.received)} / ${mb(whisperProgress.total)}`
+                          : ""}
+                      </span>
+                    </div>
+                  )}
+                  {dictationEngine === "auto" && !whisperInstalling && (
+                    <span style={muted}>
+                      Until the model is downloaded, dictation uses Apple.
+                    </span>
+                  )}
+                </div>
+              ))}
+      </div>
 
       {error && (
         <p style={{ color: "var(--color-danger, #c0392b)", fontSize: "12px", marginTop: "10px" }}>

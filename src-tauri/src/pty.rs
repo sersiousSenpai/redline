@@ -434,20 +434,19 @@ pub fn pty_kill(state: tauri::State<'_, PtyState>, id: String) -> Result<(), Str
     Ok(())
 }
 
-/// Which terminal tab (if any) hosts the process that opened a TCP connection
-/// to the Redline daemon from local `peer_port`. Used to pin the "plan
-/// intercepted" strip to the exact terminal whose `claude` is blocked: the
-/// hook POST carries no process identity, but its socket does — `lsof` maps
-/// the client port to the owning pid, and walking that pid's ancestry lands
-/// on one of our spawned shells (claude is a descendant of the tab's shell).
-/// `None` when the POST came from outside the dock (external terminal) or the
-/// chain can't be resolved — callers must treat that as "no terminal".
-pub fn terminal_for_client_port(state: &PtyState, peer_port: u16) -> Option<String> {
+/// `(client_pid, terminal_id)` for the process that opened the held connection
+/// from `peer_port`. `client_pid` is the long-lived `claude`/node process that
+/// made the hook POST and blocks on it — returned **even when the terminal
+/// can't be resolved** (external terminal, or the tab has no live shell), so a
+/// liveness probe still works there. `terminal_id` is `Some` only when the
+/// pid's ancestry lands on one of our spawned shells — used to pin the "plan
+/// intercepted" strip to the exact tab whose `claude` is blocked.
+pub fn client_pid_and_terminal_for_port(
+    state: &PtyState,
+    peer_port: u16,
+) -> (Option<u32>, Option<String>) {
     let shells = shell_pid_to_terminal(state);
-    if shells.is_empty() {
-        return None;
-    }
-    let output = std::process::Command::new("lsof")
+    let Ok(output) = std::process::Command::new("lsof")
         .args([
             "-nP",
             &format!("-iTCP:{peer_port}"),
@@ -455,10 +454,15 @@ pub fn terminal_for_client_port(state: &PtyState, peer_port: u16) -> Option<Stri
             "-Fpn",
         ])
         .output()
-        .ok()?;
+    else {
+        return (None, None);
+    };
     let client_pid =
-        parse_lsof_client_pid(&String::from_utf8_lossy(&output.stdout), peer_port)?;
-    walk_to_terminal(client_pid, &shells, ppid_of)
+        parse_lsof_client_pid(&String::from_utf8_lossy(&output.stdout), peer_port);
+    let terminal = client_pid
+        .filter(|_| !shells.is_empty())
+        .and_then(|p| walk_to_terminal(p, &shells, ppid_of));
+    (client_pid, terminal)
 }
 
 /// Snapshot of live shell pids → their terminal tab ids.

@@ -478,6 +478,109 @@ pub struct ThreadMessage {
     pub created_at: i64,
 }
 
+/// One **code-review** session: the diff-review analog of a plan session.
+/// Backed by the `review_sessions` table. `round` is the diff analog of a plan
+/// revision — each Submit → agent-fix → re-review cycle increments it, and
+/// annotations re-anchor across rounds by `quoted_text` (content identity;
+/// line numbers are a hint). Named to avoid colliding with `ReviewSession`,
+/// which predates this feature and means a *plan* review session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeReviewSession {
+    pub review_id: String,
+    pub repo_path: String,
+    /// DiffSource tag: "uncommitted" | "staged" | "unstagedPlusUntracked" |
+    /// "lastCommit" | "vsBase" | "commitSha".
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_sha: Option<String>,
+    /// The dock terminal whose `claude` opened this review (via the blocking
+    /// `/v1/reviews/start` route). `None` for read-only browsing sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_id: Option<String>,
+    pub round: i64,
+    pub created_at: i64,
+}
+
+/// One line-anchored annotation on a code-review diff. Backed by the
+/// `review_annotations` table — deliberately parallel to (not reusing) the
+/// plan-review `comments` table, whose ProseMirror-shaped anchors can't
+/// address git lines and whose serialized contract is byte-frozen.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewAnnotation {
+    pub id: String,
+    pub review_id: String,
+    /// Round this annotation currently anchors to (bumped when carried forward).
+    pub round: i64,
+    pub file_path: String,
+    /// "old" | "new" — which side of the diff the range addresses.
+    pub side: String,
+    pub start_line: i64,
+    pub end_line: i64,
+    /// "comment" | "deletion" | "suggestion".
+    pub kind: String,
+    pub body: String,
+    /// The replacement text, when `kind == "suggestion"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggestion_replacement: Option<String>,
+    /// Verbatim text of the selected lines — the DURABLE anchor. Re-review
+    /// rounds re-locate this text in the new diff; `start_line`/`end_line`
+    /// are only a hint into one specific round's diff.
+    pub quoted_text: String,
+    /// "draft" | "submitted" | "carried" | "orphaned".
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
+    pub created_at: i64,
+    /// "line" | "file" | "general" — what the annotation anchors to. `file`
+    /// keeps `file_path` with zeroed lines and empty `quoted_text`; `general`
+    /// additionally has an empty `file_path`. Explicit (not sentinel-derived)
+    /// so line-anchored code paths never need to guess.
+    #[serde(default = "default_annotation_scope")]
+    pub scope: String,
+    /// Optional conventional-comment label (praise, nitpick, suggestion,
+    /// issue, todo, question, thought, chore, note, typo, polish). The payload
+    /// serializer whitelists values — an unknown label is silently dropped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Label decoration: "blocking" | "non-blocking" | "if-minor".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocking: Option<String>,
+    /// Who authored it: "user" (the reviewer), "ai" (the pre-review job), or
+    /// an external tool's source tag.
+    #[serde(default = "default_annotation_source")]
+    pub source: String,
+}
+
+fn default_annotation_scope() -> String {
+    "line".to_string()
+}
+
+fn default_annotation_source() -> String {
+    "user".to_string()
+}
+
+/// An Ask-AI question about a diff selection — the reviewer's private
+/// consultation. Deliberately NOT an annotation: it never serializes into the
+/// feedback payload and is not carried across rounds. Its conversation lives
+/// in `thread_messages` keyed `(review_id, question_id)`; the `ask-` id
+/// namespace can't collide with `rc-`/`ai-` annotation ids.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewQuestion {
+    pub id: String,
+    pub review_id: String,
+    pub file_path: String,
+    pub side: String,
+    pub start_line: i64,
+    pub end_line: i64,
+    pub quoted_text: String,
+    pub created_at: i64,
+}
+
 /// One turn in a browser tab's browse-agent discussion thread. Mirrors
 /// `ThreadMessage`, but scoped to a per-tab `browse_id` (a stable UUID the
 /// frontend persists alongside its tab list) rather than a plan
@@ -534,6 +637,23 @@ pub struct MissionFinding {
     pub created_at: i64,
 }
 
+/// One **thumbs verdict** the user gave on a source the browse agent surfaced in
+/// tandem agent mode. Keyed by `(browse_id, source_url)` — re-clicking updates the
+/// same row. `verdict` is +1 (up) or -1 (down); `domain` is derived from the url
+/// so learning can aggregate preferences by host across tabs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceFeedback {
+    pub id: String,
+    pub browse_id: String,
+    pub source_url: String,
+    pub source_title: Option<String>,
+    pub domain: String,
+    pub verdict: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 /// One turn in a mission's orchestrator discussion thread. Mirrors
 /// `BrowseMessage`, scoped to a `mission_id`. Rows are terminal
 /// (`complete` | `error`); live streaming text is frontend-only state. The
@@ -549,6 +669,172 @@ pub struct MissionMessage {
     /// "complete" | "error".
     pub status: String,
     pub created_at: i64,
+}
+
+/// A **Linked discussion**: ONE continuous conversation that follows the user
+/// across every browser tab. Unlike a page discussion (one tab) or a mission
+/// (one fixed goal), it has no goal — it is a spanning conversation. Backed by
+/// the `linked_sessions` table; the agent's own resumable `claude` session id
+/// lives on the row (`claude_session_id`), so re-opening resumes it. When a
+/// tab's context gets heavy the linked agent "checks in with a colleague" — the
+/// tab's own browse (`browse_id`) discussion — via `/v1/linked/consult`. See
+/// `src-tauri/src/linked.rs`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Linked {
+    pub linked_id: String,
+    pub title: String,
+    /// "active" | "archived".
+    pub status: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// One turn in a linked discussion. Mirrors `MissionMessage`, but each turn is
+/// **tab-tagged**: the `tab_*` fields snapshot which tab the user was on when
+/// they sent (or the assistant answered) the turn, so the UI can show "on tab
+/// N — Title" per message. Rows are terminal (`complete` | `error`); live
+/// streaming text is frontend-only state. The resumable session id lives on the
+/// `linked_sessions` row, not here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkedMessage {
+    pub id: String,
+    pub linked_id: String,
+    /// "user" | "assistant".
+    pub role: String,
+    pub body: String,
+    /// "complete" | "error".
+    pub status: String,
+    /// Which tab this turn was on (nullable — the first turn may precede any tab
+    /// context). `tab_n` is the 1-based tab-strip ordinal at turn time.
+    pub tab_browse_id: Option<String>,
+    pub tab_n: Option<i64>,
+    pub tab_title: Option<String>,
+    pub tab_url: Option<String>,
+    pub created_at: i64,
+}
+
+// --- Loop Orchestrator -----------------------------------------------------
+// One engine per approved plan: decompose → execute in isolated worktrees →
+// SEPARATE reviewer grades vs rubric → human checkpoints before any merge or
+// final land. The `status` columns + session ids are the durable truth across
+// restarts; live processes are disposable. See `src-tauri/src/looporch.rs`.
+
+/// One Loop Orchestrator run, backed by the `loop_runs` row. `base_ref` is the
+/// user's real branch (written only by the final land); `integration_branch`
+/// is the disposable per-run branch every approved subtask merges into.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoopRun {
+    pub run_id: String,
+    /// Source review session this plan was approved in.
+    pub session_id: String,
+    pub title: String,
+    pub plan_md: String,
+    pub repo_path: String,
+    pub base_ref: String,
+    pub integration_branch: String,
+    /// planning | running | paused_checkpoint | review | done | failed | cancelled
+    pub status: String,
+    pub planner_session_id: Option<String>,
+    pub max_parallel: i64,
+    pub max_attempts: i64,
+    pub turn_budget: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// One decomposed, individually-verifiable subtask. `deps`/`touched_paths`
+/// round-trip the `deps_json`/`touched_paths_json` columns (like `tabs_json`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoopSubtask {
+    pub subtask_id: String,
+    pub run_id: String,
+    pub seq: i64,
+    pub title: String,
+    pub instructions: String,
+    pub rubric: String,
+    /// Prerequisite subtask ids (declared + synthetic file-overlap edges).
+    #[serde(default)]
+    pub deps: Vec<String>,
+    /// Planner-declared file globs — drives overlap serialization + scope check.
+    #[serde(default)]
+    pub touched_paths: Vec<String>,
+    /// pending | blocked | running | reviewing | needs_changes
+    /// | awaiting_merge | merged | stuck | failed | skipped
+    pub status: String,
+    pub branch: Option<String>,
+    pub worktree_path: Option<String>,
+    pub attempts: i64,
+    pub executor_session_id: Option<String>,
+    #[serde(default)]
+    pub irreversible: bool,
+}
+
+/// One maker→reviewer cycle row. A subtask has an alternating series of
+/// executor and reviewer attempts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoopAttempt {
+    pub attempt_id: String,
+    pub subtask_id: String,
+    pub attempt_no: i64,
+    /// "executor" | "reviewer".
+    pub role: String,
+    /// "running" | "complete" | "error".
+    pub status: String,
+    /// "pass" | "fail" (reviewer only).
+    pub verdict: Option<String>,
+    pub score: Option<i64>,
+    pub feedback: Option<String>,
+    pub diff_stat: Option<String>,
+    pub claude_session_id: Option<String>,
+    pub created_at: i64,
+}
+
+/// One durable agent scratch entry, keyed `(run_id, scope, key)`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoopStateEntry {
+    pub run_id: String,
+    pub scope: String,
+    pub key: String,
+    pub value: String,
+    pub updated_at: i64,
+}
+
+/// One append-only trajectory-log row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoopTrace {
+    pub id: String,
+    pub run_id: String,
+    pub subtask_id: Option<String>,
+    pub attempt_id: Option<String>,
+    /// planner | reviewer_verdict | merge | checkpoint | termination | error | hill_suggestion
+    pub kind: String,
+    pub body: String,
+    pub created_at: i64,
+}
+
+/// One held human gate. The pending row is the durable truth; the in-memory
+/// oneshot sender (`CheckpointGate`) is disposable and re-armed on restart.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoopCheckpoint {
+    pub checkpoint_id: String,
+    pub run_id: String,
+    pub subtask_id: Option<String>,
+    /// merge | subtask_stuck | land | destructive | plan_approval
+    pub kind: String,
+    pub summary: String,
+    pub decision_json: Option<String>,
+    /// pending | approved | denied | expired
+    pub status: String,
+    pub created_at: i64,
+    pub decided_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -664,10 +950,9 @@ impl SessionStore {
         self.pending_restores.lock().unwrap().remove(session_id)
     }
 
-    /// The backing database handle — test-only, for exercising fork-thread
-    /// persistence (`thread_messages`, `comments.fork_session_id`) against a
-    /// comment created the normal way through the store.
-    #[cfg(test)]
+    /// The backing database handle. Used by the `/v1/code/*` daemon routes to
+    /// enumerate the user's known projects, and (in tests) to exercise
+    /// fork-thread persistence against a comment created through the store.
     pub fn database(&self) -> Arc<Database> {
         self.db.clone()
     }

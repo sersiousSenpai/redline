@@ -24,7 +24,9 @@ use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdout};
 
-use crate::claude_proc::{classify_line, claude_command, resolve_claude_bin, StreamLine};
+use crate::claude_proc::{
+    bridge_args, classify_line, claude_command, resolve_claude_bin, StreamLine,
+};
 use crate::db::Database;
 use crate::state::{now_millis, BrowseMessage};
 
@@ -90,6 +92,191 @@ impl BrowseState {
             let _ = proc.child.start_kill();
         }
     }
+
+    /// "Check in with a colleague": run THIS tab's browse agent to completion
+    /// with a synthesis-framed question and return only its digest. Backs the
+    /// `/v1/linked/consult` route — a linked discussion delegates a heavy tab to
+    /// its own page-discussion agent (which already holds that tab's full thread)
+    /// so only the boiled-down answer, not the raw thread, enters the linked
+    /// conversation's context.
+    ///
+    /// Unlike `browse_send` (fire-and-forget, streamed via events), this awaits
+    /// the whole turn inline behind a timeout so the calling curl blocks for the
+    /// digest. It reuses the same per-`browse_id` in-flight guard, so a user's
+    /// own turn on that tab and a consult can never run at once — the second sees
+    /// a "busy" error and can retry or fall back to reading `/thread?tab=`.
+    pub async fn consult(
+        &self,
+        app: AppHandle,
+        browse_id: String,
+        question: String,
+        snapshot: Option<String>,
+    ) -> Result<String, String> {
+        if question.trim().is_empty() {
+            return Err("nothing to ask the colleague".to_string());
+        }
+
+        // Same per-tab in-flight invariant as `browse_send`.
+        {
+            let guard = self.procs.lock().unwrap();
+            if guard.contains_key(&browse_id) {
+                return Err(
+                    "that tab is busy with its own reply — try again in a moment".to_string(),
+                );
+            }
+        }
+
+        let prior_session = self.db.get_browse_session(&browse_id);
+
+        // Persist the check-in into the tab's OWN thread, framed so it reads as a
+        // colleague's visit rather than something the user typed.
+        let user_msg = BrowseMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            browse_id: browse_id.clone(),
+            role: "user".to_string(),
+            body: format!("🔗 Linked discussion checking in — {}", question.trim()),
+            status: "complete".to_string(),
+            created_at: now_millis(),
+        };
+        if let Err(e) = self.db.insert_browse_message(&user_msg) {
+            tracing::warn!(error = %e, "failed to persist consult check-in");
+        }
+
+        // Synthesis framing: a digest for a colleague, not a fresh answer to the
+        // user. First turn embeds the snapshot + tool docs (the colleague may
+        // have no prior context); a resumed colleague gets the compact ask.
+        let framed = format!(
+            "A colleague running the user's LINKED DISCUSSION — one conversation \
+             spanning several browser tabs — is checking in with you about THIS \
+             tab. Synthesize what matters here for their question as a tight \
+             DIGEST (not a transcript, and not a fresh reply to the user). Be \
+             concise. Their question:\n\n{}",
+            question.trim()
+        );
+        let prompt = match &prior_session {
+            None => build_first_turn_prompt(snapshot.as_deref(), &framed, false, None),
+            Some(_) => framed.clone(),
+        };
+
+        let args = bridge_args(prompt, prior_session.as_deref());
+        let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+
+        let claude_bin = self.claude_bin().await?;
+        let mut cmd = claude_command(&claude_bin);
+        let mut child = cmd
+            .current_dir(&cwd)
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    format!(
+                        "could not find the `claude` CLI (looked for `{claude_bin}`). \
+                         Install Claude Code, or launch Redline from a terminal \
+                         so it inherits your shell's PATH."
+                    )
+                } else {
+                    format!("failed to spawn claude: {e}")
+                }
+            })?;
+        let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
+        let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
+
+        {
+            self.procs
+                .lock()
+                .unwrap()
+                .insert(browse_id.clone(), BrowseProc { child });
+        }
+
+        // Drive inline behind a ceiling so a stuck colleague can't block the
+        // linked agent's curl forever.
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(180),
+            drive_browse_stream(&app, &browse_id, stdout, stderr),
+        )
+        .await;
+
+        let (session, final_text, errored, saw_json, stderr_text) = match outcome {
+            Ok(v) => v,
+            Err(_) => {
+                if let Some(mut p) = self.procs.lock().unwrap().remove(&browse_id) {
+                    let _ = p.child.start_kill();
+                }
+                let why = "the colleague took too long to respond".to_string();
+                finish_error(&app, &self.db, &browse_id, &why);
+                return Err(why);
+            }
+        };
+
+        let proc = { self.procs.lock().unwrap().remove(&browse_id) };
+        let cancelled = proc.is_none() && final_text.is_none();
+        let exit_ok = match proc {
+            Some(mut p) => p.child.wait().await.map(|s| s.success()).unwrap_or(false),
+            None => false,
+        };
+
+        if cancelled {
+            let _ = app.emit(
+                "browse-cancelled",
+                BrowseCancelled {
+                    browse_id: browse_id.clone(),
+                },
+            );
+            return Err("the consult was cancelled".to_string());
+        }
+        if let Some(err) = errored {
+            let why = describe_turn_error(&self.db, &browse_id, &err);
+            finish_error(&app, &self.db, &browse_id, &why);
+            return Err(why);
+        }
+        if let Some(text) = final_text {
+            if text.trim().is_empty() {
+                let why = "the colleague produced an empty reply".to_string();
+                finish_error(&app, &self.db, &browse_id, &why);
+                return Err(why);
+            }
+            if let Some(sid) = &session {
+                if let Err(e) = self.db.set_browse_session(&browse_id, sid) {
+                    tracing::warn!(error = %e, "failed to persist consult session id");
+                }
+            }
+            let msg = BrowseMessage {
+                id: uuid::Uuid::new_v4().to_string(),
+                browse_id: browse_id.clone(),
+                role: "assistant".to_string(),
+                body: text.clone(),
+                status: "complete".to_string(),
+                created_at: now_millis(),
+            };
+            if let Err(e) = self.db.insert_browse_message(&msg) {
+                tracing::warn!(error = %e, "failed to persist consult reply");
+            }
+            let _ = app.emit(
+                "browse-done",
+                BrowseDone {
+                    browse_id,
+                    message_id: msg.id,
+                    body: text.clone(),
+                },
+            );
+            return Ok(text);
+        }
+
+        let why = if !exit_ok && !stderr_text.trim().is_empty() {
+            let detail: String = stderr_text.trim().chars().take(500).collect();
+            format!("the colleague exited abnormally: {detail}")
+        } else if !saw_json {
+            "the colleague produced no parseable output".to_string()
+        } else {
+            "the colleague ended without producing a reply".to_string()
+        };
+        finish_error(&app, &self.db, &browse_id, &why);
+        Err(why)
+    }
 }
 
 // --- Event payloads --------------------------------------------------------
@@ -126,7 +313,50 @@ struct BrowseCancelled {
 /// grounding, how to drive the browser via the local curl endpoints, and the
 /// user's message. Follow-up turns send the user's text verbatim (the session
 /// already carries this context and can re-`curl /snapshot` for a fresh view).
-fn build_first_turn_prompt(snapshot: Option<&str>, user_text: &str) -> String {
+/// Turn the user's accumulated source thumbs into a one-line preference hint for
+/// the tandem agent prompt: the domains they most consistently thumbed up vs
+/// down. Returns None when there's nothing learned yet (no non-zero domains).
+fn build_pref_line(db: &Database) -> Option<String> {
+    let summary = db.domain_feedback_summary().ok()?;
+    // domain_feedback_summary is sorted score DESC; take the strongest of each.
+    let prefer: Vec<String> = summary
+        .iter()
+        .filter(|(_, score)| *score > 0)
+        .take(5)
+        .map(|(d, _)| d.clone())
+        .collect();
+    let avoid: Vec<String> = summary
+        .iter()
+        .rev()
+        .filter(|(_, score)| *score < 0)
+        .take(5)
+        .map(|(d, _)| d.clone())
+        .collect();
+    if prefer.is_empty() && avoid.is_empty() {
+        return None;
+    }
+    let mut line = String::from(
+        "Learned from the user's past thumbs on sources — weight your page choice accordingly:",
+    );
+    if !prefer.is_empty() {
+        line.push_str(" tends to PREFER ");
+        line.push_str(&prefer.join(", "));
+        line.push('.');
+    }
+    if !avoid.is_empty() {
+        line.push_str(" tends to AVOID ");
+        line.push_str(&avoid.join(", "));
+        line.push('.');
+    }
+    Some(line)
+}
+
+fn build_first_turn_prompt(
+    snapshot: Option<&str>,
+    user_text: &str,
+    tandem: bool,
+    prefs: Option<&str>,
+) -> String {
     let mut p = String::from(
         "You are helping the user with the web page open in Redline's embedded \
          browser. You can both discuss the page and drive the browser tab.\n\n",
@@ -208,11 +438,54 @@ fn build_first_turn_prompt(snapshot: Option<&str>, user_text: &str) -> String {
          WebFetch to pull a specific URL — rather than driving the user's tab to \
          a search engine. They also verify or fact-check a claim on the page \
          without navigating the tab away from what the user is viewing.\n\n\
+         You can also look at the USER'S OWN CODE while they research — so they \
+         can brainstorm development against a page. Read/Grep/Glob work across all \
+         of their projects (already permitted — no approval needed); use absolute \
+         paths. Two read-only curl routes help:\n  \
+         - List the user's projects (path, name, current git branch) — your map \
+         of where their code lives:\n    \
+         curl -s http://127.0.0.1:7676/v1/code/projects\n  \
+         - Inspect a project's git state — READ-ONLY (status/branch/log/diff/show); \
+         `repo` must be one of the projects above. Single-quote the URL to protect \
+         the shell `?`/`&`:\n    \
+         curl -s 'http://127.0.0.1:7676/v1/code/git?repo=<path>&op=log&n=20'\n    \
+         curl -s 'http://127.0.0.1:7676/v1/code/git?repo=<path>&op=diff&base=main'\n\
+         So \"review our X in <project>, check the local branch\" = list projects, \
+         Read/Grep the code, and pull branch/diff via `/v1/code/git`. You can NOT \
+         commit, edit, or run any other git — those are auto-denied.\n\n\
          Follow the `browse` skill for which tool to use for which job, how to \
          drive the tab, and how to format your reply. Respond directly and \
-         concisely in markdown; keep browser actions purposeful.\n\n\
-         The user says:\n",
+         concisely in markdown; keep browser actions purposeful.\n\n",
     );
+    if tandem {
+        p.push_str(
+            "TANDEM AGENT MODE is ON. When the user asks about a definition, \
+             concept, library, tool, API, or anything that is better understood \
+             by looking at a web page, do this:\n\
+             1. Use WebSearch to find the strongest explainer, then `/navigate` \
+             the ACTIVE tab to that single best page (use /navigate, NOT /open — \
+             the page must fill the browser half the user is looking at).\n\
+             2. Answer the question concisely in markdown.\n\
+             3. Offer ~2 ALTERNATIVE sources for the user to choose from. Do NOT \
+             auto-open the alternates — the user opens them if they want.\n\
+             4. End your reply with a machine-readable sources block listing the \
+             page you opened (primary) and the alternates, in this exact fenced \
+             form (the app parses it and hides it from view — never describe it):\n\
+             ```rl-sources\n\
+             [{\"url\":\"https://…\",\"title\":\"…\",\"primary\":true},{\"url\":\"https://…\",\"title\":\"…\"},{\"url\":\"https://…\",\"title\":\"…\"}]\n\
+             ```\n\
+             Every source you cite (primary and alternates) MUST appear in that \
+             block. If the question is conversational and no page helps, skip the \
+             navigation and omit the block.\n\n",
+        );
+        if let Some(prefs) = prefs {
+            if !prefs.trim().is_empty() {
+                p.push_str(prefs.trim());
+                p.push_str("\n\n");
+            }
+        }
+    }
+    p.push_str("The user says:\n");
     for line in user_text.lines() {
         p.push_str("> ");
         p.push_str(line);
@@ -234,6 +507,7 @@ pub async fn browse_send(
     text: String,
     snapshot: Option<String>,
     cwd: Option<String>,
+    tandem: Option<bool>,
 ) -> Result<(), String> {
     if text.trim().is_empty() {
         return Err("empty message".to_string());
@@ -264,9 +538,19 @@ pub async fn browse_send(
         .map_err(|e| format!("failed to persist message: {e}"))?;
 
     // First turn wraps the message with the snapshot + tool docs; follow-ups
-    // are verbatim (the resumed session already carries that context).
+    // are verbatim (the resumed session already carries that context). In tandem
+    // mode the first turn also carries the learned source-preference line so the
+    // agent biases its page picks toward domains the user has thumbed up.
+    let tandem = tandem.unwrap_or(false);
     let prompt = match &prior_session {
-        None => build_first_turn_prompt(snapshot.as_deref(), &text),
+        None => {
+            let prefs = if tandem {
+                build_pref_line(&browse.db)
+            } else {
+                None
+            };
+            build_first_turn_prompt(snapshot.as_deref(), &text, tandem, prefs.as_deref())
+        }
         Some(_) => text.clone(),
     };
 
@@ -306,6 +590,17 @@ pub async fn browse_send(
     if let Some(sid) = &prior_session {
         args.push("--resume".to_string());
         args.push(sid.clone());
+    }
+
+    // Widen the read boundary to span ALL the user's known projects, not just
+    // the single active-folder `cwd`. Each `--add-dir` puts a project inside the
+    // workspace so Read/Grep/Glob "just work" there — this is what lets the agent
+    // readily look at code in any project while the user researches in the
+    // browser. Re-supplied every turn (alongside `--resume`) so the set stays
+    // current. Bounded by `code::MAX_PROJECTS`.
+    for dir in crate::code::project_dirs(&browse.db) {
+        args.push("--add-dir".to_string());
+        args.push(dir);
     }
 
     // The agent's cwd scopes Read/Grep/Glob; default to $HOME when the tab has
@@ -410,17 +705,17 @@ pub fn browse_kill_all(browse: tauri::State<'_, BrowseState>) -> Result<(), Stri
 
 // --- Streaming reader ------------------------------------------------------
 
-/// Drive one browse turn: stream stdout JSONL → `browse-delta` events, then
-/// reap the child and emit a terminal `browse-done` / `browse-error` /
-/// `browse-cancelled`. Mirrors `fork::read_fork`.
-async fn read_browse(
-    app: AppHandle,
-    db: Arc<Database>,
-    procs: BrowseRegistry,
-    browse_id: String,
+/// Stream one browse child's stdout/stderr to completion, emitting
+/// `browse-delta` events as assistant text arrives. Returns
+/// `(session, final_text, errored, saw_json, stderr_text)`. Shared by
+/// `read_browse` (spawned, fire-and-forget) and `BrowseState::consult` (awaited
+/// inline so the caller gets the digest back synchronously).
+async fn drive_browse_stream(
+    app: &AppHandle,
+    browse_id: &str,
     stdout: ChildStdout,
     stderr: ChildStderr,
-) {
+) -> (Option<String>, Option<String>, Option<String>, bool, String) {
     let stdout_fut = async {
         let mut reader = BufReader::new(stdout).lines();
         let mut session: Option<String> = None;
@@ -442,7 +737,7 @@ async fn read_browse(
                     let _ = app.emit(
                         "browse-delta",
                         BrowseDelta {
-                            browse_id: browse_id.clone(),
+                            browse_id: browse_id.to_string(),
                             text,
                         },
                     );
@@ -470,6 +765,22 @@ async fn read_browse(
     };
     let ((session, final_text, errored, saw_json), stderr_text) =
         tokio::join!(stdout_fut, stderr_fut);
+    (session, final_text, errored, saw_json, stderr_text)
+}
+
+/// Drive one browse turn: stream stdout JSONL → `browse-delta` events, then
+/// reap the child and emit a terminal `browse-done` / `browse-error` /
+/// `browse-cancelled`. Mirrors `fork::read_fork`.
+async fn read_browse(
+    app: AppHandle,
+    db: Arc<Database>,
+    procs: BrowseRegistry,
+    browse_id: String,
+    stdout: ChildStdout,
+    stderr: ChildStderr,
+) {
+    let (session, final_text, errored, saw_json, stderr_text) =
+        drive_browse_stream(&app, &browse_id, stdout, stderr).await;
 
     let proc = { procs.lock().unwrap().remove(&browse_id) };
     let cancelled = proc.is_none() && final_text.is_none();
@@ -483,7 +794,10 @@ async fn read_browse(
         return;
     }
     if let Some(err) = errored {
-        finish_error(&app, &db, &browse_id, &err);
+        // Transient API errors keep the session and ask for a retry; only an
+        // explicit context overflow resets the session to start fresh.
+        let why = describe_turn_error(&db, &browse_id, &err);
+        finish_error(&app, &db, &browse_id, &why);
         return;
     }
     if let Some(text) = final_text {
@@ -530,6 +844,71 @@ async fn read_browse(
     finish_error(&app, &db, &browse_id, &why);
 }
 
+/// Whether a failed turn's error is an EXPLICIT context-length signature — the
+/// resumable session genuinely outgrew the model's window, so every `--resume`
+/// of it will keep throwing until we start fresh. This is deliberately narrow:
+/// only claude's own "prompt is too long" / context-length phrasings, NOT the
+/// generic `error_during_execution` bucket. That bucket is dominated by
+/// *transient* API errors (overload / capacity) whose session is perfectly fine
+/// on the next attempt — clearing it there would throw away a healthy
+/// conversation over a momentary blip. (Empirically: the sessions that produced
+/// `error_during_execution` here were only ~60–70K tokens and resume cleanly.)
+fn is_context_overflow(error: &str) -> bool {
+    let e = error.to_lowercase();
+    e.contains("prompt is too long")
+        || e.contains("context length")
+        || e.contains("context window")
+        || e.contains("too many tokens")
+        || e.contains("maximum context")
+}
+
+/// Whether an error looks TRANSIENT — a momentary model/API failure (the generic
+/// `error_during_execution` subtype claude emits for an empty-message errored
+/// `result`, plus overload/capacity/timeout wording). The session is healthy;
+/// retrying in a moment usually works. Account-level limits are transient-ish
+/// too (they reset), so they also land here rather than triggering a reset.
+fn is_transient(error: &str) -> bool {
+    let e = error.to_lowercase();
+    e.contains("error_during_execution")
+        || e.contains("overloaded")
+        || e.contains("capacity")
+        || e.contains("timeout")
+        || e.contains("timed out")
+        || e.contains("temporarily")
+        || e.contains("rate limit")
+        || e.contains("usage limit")
+        || e.contains("session limit")
+}
+
+/// Translate a failed turn's raw error into the message to surface, and recover
+/// the tab where that's the right move:
+///
+/// - EXPLICIT context overflow → forget the stored session id so the next turn
+///   starts fresh (re-embedding a snapshot) instead of re-`--resume`-ing an
+///   over-limit context forever, and say so.
+/// - TRANSIENT model/API error → keep the session (it's fine) and tell the user
+///   plainly to retry. This is the common "kept failing" case: a momentary API
+///   blip the user hit by retrying inside the incident window.
+/// - Anything else → surface unchanged.
+fn describe_turn_error(db: &Database, browse_id: &str, error: &str) -> String {
+    if is_context_overflow(error) {
+        if let Err(e) = db.clear_browse_session(browse_id) {
+            tracing::warn!(error = %e, "failed to clear over-limit browse session");
+        }
+        return "This discussion outgrew the model's context window, so the turn \
+                failed. I've reset its context — send your message again and I'll \
+                start fresh on this page (the replies above are kept)."
+            .to_string();
+    }
+    if is_transient(error) {
+        return "The model hit a temporary error on this turn (not something you \
+                did) — send your message again in a moment. Your conversation is \
+                intact."
+            .to_string();
+    }
+    error.to_string()
+}
+
 /// Persist a failed turn as a terminal `error` row and emit `browse-error`.
 fn finish_error(app: &AppHandle, db: &Database, browse_id: &str, error: &str) {
     let msg = BrowseMessage {
@@ -561,6 +940,8 @@ mod tests {
         let p = build_first_turn_prompt(
             Some(r#"{"url":"https://example.com","title":"Example"}"#),
             "What is this page about?",
+            false,
+            None,
         );
         assert!(p.contains("https://example.com"));
         assert!(p.contains("What is this page about?"));
@@ -579,14 +960,66 @@ mod tests {
         // Tabs are addressed (and named to the user) by their 1-based number.
         assert!(p.contains("?tab=<n>"));
         assert!(p.contains("?tab=2"));
+        // Code access: the projects map + read-only git bridge must be documented.
+        assert!(p.contains("/v1/code/projects"));
+        assert!(p.contains("/v1/code/git"));
+        // And it must be framed as read-only.
+        assert!(p.to_lowercase().contains("read-only"));
     }
 
     #[test]
     fn first_turn_prompt_without_snapshot_still_documents_tools() {
-        let p = build_first_turn_prompt(None, "open hacker news");
+        let p = build_first_turn_prompt(None, "open hacker news", false, None);
         assert!(p.contains("open hacker news"));
         assert!(p.contains("/v1/browser/navigate"));
         // No empty snapshot section header.
         assert!(!p.contains("snapshot of the page the user is currently viewing"));
+        // Non-tandem prompts carry no tandem instructions or sources contract.
+        assert!(!p.contains("TANDEM AGENT MODE"));
+        assert!(!p.contains("rl-sources"));
+    }
+
+    #[test]
+    fn only_explicit_overflow_counts_as_context_overflow() {
+        // Explicit context-length phrasings, however claude words them.
+        assert!(is_context_overflow("prompt is too long: 250000 tokens"));
+        assert!(is_context_overflow("maximum context length exceeded"));
+        assert!(is_context_overflow("input exceeds the context window"));
+        // The generic subtype is NOT overflow — it's transient (empirically the
+        // sessions that produced it were ~60–70K tokens and resume fine).
+        assert!(!is_context_overflow("error_during_execution"));
+        assert!(is_transient("error_during_execution"));
+        assert!(is_transient("model overloaded, please retry"));
+        assert!(is_transient("You've hit your session limit · resets 12:30pm"));
+    }
+
+    #[test]
+    fn transient_error_keeps_the_session_overflow_resets_it() {
+        let db = Database::open_in_memory().unwrap();
+        // Transient: session preserved, retry message.
+        db.set_browse_session("tab-1", "keep-sid").unwrap();
+        let msg = describe_turn_error(&db, "tab-1", "error_during_execution");
+        assert!(msg.to_lowercase().contains("try") || msg.to_lowercase().contains("again"));
+        assert_eq!(db.get_browse_session("tab-1").as_deref(), Some("keep-sid"));
+
+        // Explicit overflow: session forgotten so the next turn starts fresh.
+        db.set_browse_session("tab-2", "over-sid").unwrap();
+        let msg = describe_turn_error(&db, "tab-2", "prompt is too long: 1200000 tokens");
+        assert!(msg.to_lowercase().contains("reset"));
+        assert_eq!(db.get_browse_session("tab-2"), None);
+    }
+
+    #[test]
+    fn tandem_prompt_carries_sources_contract_and_prefs() {
+        let p = build_first_turn_prompt(
+            None,
+            "what is a DAG?",
+            true,
+            Some("Learned: tends to PREFER wikipedia.org."),
+        );
+        assert!(p.contains("TANDEM AGENT MODE is ON"));
+        assert!(p.contains("rl-sources"));
+        assert!(p.contains("/navigate"));
+        assert!(p.contains("wikipedia.org"));
     }
 }
