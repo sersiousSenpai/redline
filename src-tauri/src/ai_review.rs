@@ -2,7 +2,7 @@
 // Copyright 2026 Yusuf Al-Bazian
 //! AI pre-review: a read-only headless `claude` pass over the current review
 //! diff whose findings land as DRAFT annotations the reviewer curates before
-//! Submit. Process orchestration mirrors `looporch.rs` (registry, stall-kill,
+//! Submit. Process orchestration mirrors `mission.rs` (registry, stall-kill,
 //! stream-json reader via `claude_proc::classify_line`); ingestion lives in
 //! `review.rs::ingest_annotation`, which recaptures each matched finding's
 //! `quoted_text` from the diff itself — so AI findings re-anchor across
@@ -118,8 +118,8 @@ impl AiReviewState {
 }
 
 /// Headless argv: read-only tool surface (no Bash, no web, no Edit/Write) —
-/// `bypassPermissions` is safe because no write-capable tool exists (the
-/// looporch reviewer precedent, tightened further). The prompt arrives on
+/// `bypassPermissions` is safe because no write-capable tool exists. The
+/// prompt arrives on
 /// stdin (the rendered diff can exceed comfortable argv size).
 fn ai_review_args() -> Vec<String> {
     [

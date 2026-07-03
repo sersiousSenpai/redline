@@ -15,7 +15,7 @@ import type {
 
 /** Owns the Code Review surface: which repo/source is being reviewed, the
  *  parsed diff, the line-anchored annotations, and per-file viewed state.
- *  Sibling of `useLoop` for the review pane. The active review id is persisted
+ *  The active review id is persisted
  *  so the pane restores on reload; the diff itself is always re-resolved live
  *  (it's the working tree — never cache it). */
 export function useReview() {

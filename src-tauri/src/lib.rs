@@ -17,7 +17,6 @@ mod fswatch;
 mod highlight;
 mod hook;
 mod linked;
-mod looporch;
 mod mission;
 mod parser;
 #[cfg(test)]
@@ -819,7 +818,7 @@ struct ActiveMissionInfo {
 }
 
 #[derive(Clone, Default)]
-struct ActiveMission(Arc<StdMutex<Option<ActiveMissionInfo>>>);
+pub struct ActiveMission(Arc<StdMutex<Option<ActiveMissionInfo>>>);
 
 impl ActiveMission {
     fn new() -> Self {
@@ -830,6 +829,17 @@ impl ActiveMission {
     }
     fn get(&self) -> Option<ActiveMissionInfo> {
         self.0.lock().unwrap().clone()
+    }
+    /// The active mission's `(title, goal)`, for baking mission-awareness into
+    /// the browse/linked first-turn prompts (the orchestrator embeds the goal
+    /// natively). `None` when no mission is active. Managed as Tauri state, so
+    /// `browse_send`/`linked_send` can read it without a frontend round-trip.
+    pub fn active_goal(&self) -> Option<(String, String)> {
+        self.0
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|i| (i.title.clone(), i.goal.clone()))
     }
 }
 
@@ -1457,17 +1467,6 @@ async fn run_server(state: AppState) {
         // The linked agent POSTs here to run a tab's own browse agent for a
         // synthesized digest, keeping that tab's heavy thread out of its context.
         .route("/v1/linked/consult", post(handle_linked_consult))
-        // Loop Orchestrator: the executor/reviewer agents curl these from inside
-        // their worktrees. `Bash(curl -s http://127.0.0.1:7676/*)` is already
-        // hook-authorized, and the executor runs under `bypassPermissions`.
-        .route("/v1/loop/subtask", get(handle_loop_subtask))
-        .route("/v1/loop/rubric", get(handle_loop_rubric))
-        .route(
-            "/v1/loop/state",
-            get(handle_loop_state_get).post(handle_loop_state_set),
-        )
-        .route("/v1/loop/run", get(handle_loop_run))
-        .route("/v1/loop/feedback", get(handle_loop_feedback))
         // Code access (browse agent): read-only. `/projects` is the agent's map
         // of the user's known project folders; `/git` runs a whitelisted set of
         // read-only git ops (status/branch/log/diff/show) in one of them, so the
@@ -2225,13 +2224,6 @@ async fn handle_linked_consult(
     }
 }
 
-// --- Loop Orchestrator daemon routes ---------------------------------------
-
-#[derive(Deserialize)]
-struct LoopIdQ {
-    id: Option<String>,
-}
-
 /// Query for `GET /v1/code/git`. `ref` is a reserved word, so it's carried as
 /// `git_ref` with a serde rename.
 #[derive(Deserialize)]
@@ -2244,49 +2236,6 @@ struct CodeGitQ {
     base: Option<String>,
     file: Option<String>,
     stat: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct LoopStateQ {
-    run: Option<String>,
-    scope: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct LoopStateBody {
-    run: String,
-    scope: String,
-    key: String,
-    value: Value,
-}
-
-/// `GET /v1/loop/subtask?id=<subtask_id>` — the executor's contract (title,
-/// instructions, rubric, worktree, attempt, branch). The executor is told its
-/// own id in its prompt so it knows what to fetch.
-async fn handle_loop_subtask(
-    State(app_state): State<AppState>,
-    Query(q): Query<LoopIdQ>,
-) -> axum::response::Response {
-    let Some(id) = q.id.filter(|s| !s.trim().is_empty()) else {
-        return browser_error_response("missing ?id=".to_string());
-    };
-    let engine = app_state.app_handle.state::<looporch::LoopState>();
-    match engine.subtask(&id) {
-        Some(s) => Json(serde_json::json!({
-            "subtaskId": s.subtask_id,
-            "runId": s.run_id,
-            "title": s.title,
-            "instructions": s.instructions,
-            "rubric": s.rubric,
-            "touchedPaths": s.touched_paths,
-            "worktreePath": s.worktree_path,
-            "branch": s.branch,
-            "attemptNo": s.attempts,
-            "status": s.status,
-        }))
-        .into_response(),
-        None => browser_error_response(format!("no subtask `{id}`")),
-    }
 }
 
 /// `GET /v1/code/projects` — the browse agent's map of the user's known
@@ -2741,92 +2690,6 @@ async fn handle_code_git(
         Ok(output) => Json(serde_json::json!({ "ok": true, "output": output })).into_response(),
         Err(e) => browser_error_response(e),
     }
-}
-
-/// `GET /v1/loop/rubric?id=<subtask_id>` — the reviewer's rubric, on its own.
-async fn handle_loop_rubric(
-    State(app_state): State<AppState>,
-    Query(q): Query<LoopIdQ>,
-) -> axum::response::Response {
-    let Some(id) = q.id.filter(|s| !s.trim().is_empty()) else {
-        return browser_error_response("missing ?id=".to_string());
-    };
-    let engine = app_state.app_handle.state::<looporch::LoopState>();
-    match engine.subtask(&id) {
-        Some(s) => Json(serde_json::json!({ "rubric": s.rubric })).into_response(),
-        None => browser_error_response(format!("no subtask `{id}`")),
-    }
-}
-
-/// `GET /v1/loop/state?run=<run>&scope=<scope>` — the durable scratch store.
-async fn handle_loop_state_get(
-    State(app_state): State<AppState>,
-    Query(q): Query<LoopStateQ>,
-) -> axum::response::Response {
-    let (Some(run), Some(scope)) = (q.run, q.scope) else {
-        return browser_error_response("missing ?run= and ?scope=".to_string());
-    };
-    let engine = app_state.app_handle.state::<looporch::LoopState>();
-    let entries: Vec<Value> = engine
-        .db_state_list(&run, &scope)
-        .into_iter()
-        .map(|(k, v)| serde_json::json!({ "key": k, "value": v }))
-        .collect();
-    Json(serde_json::json!({ "run": run, "scope": scope, "entries": entries })).into_response()
-}
-
-/// `POST /v1/loop/state {run,scope,key,value}` — write to the scratch store.
-async fn handle_loop_state_set(
-    State(app_state): State<AppState>,
-    Json(body): Json<LoopStateBody>,
-) -> axum::response::Response {
-    let engine = app_state.app_handle.state::<looporch::LoopState>();
-    let value = match &body.value {
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
-    };
-    engine.state_set(&body.run, &body.scope, &body.key, &value);
-    Json(serde_json::json!({ "ok": true })).into_response()
-}
-
-/// `GET /v1/loop/run?id=<run_id>` — the run + its subtask statuses, so a subtask
-/// can see its siblings' progress.
-async fn handle_loop_run(
-    State(app_state): State<AppState>,
-    Query(q): Query<LoopIdQ>,
-) -> axum::response::Response {
-    let Some(id) = q.id.filter(|s| !s.trim().is_empty()) else {
-        return browser_error_response("missing ?id=".to_string());
-    };
-    let engine = app_state.app_handle.state::<looporch::LoopState>();
-    let Some(run) = engine.run(&id) else {
-        return browser_error_response(format!("no run `{id}`"));
-    };
-    let subtasks: Vec<Value> = engine
-        .run_subtasks(&id)
-        .into_iter()
-        .map(|s| serde_json::json!({ "subtaskId": s.subtask_id, "title": s.title, "status": s.status, "seq": s.seq }))
-        .collect();
-    Json(serde_json::json!({
-        "runId": run.run_id,
-        "title": run.title,
-        "status": run.status,
-        "subtasks": subtasks,
-    }))
-    .into_response()
-}
-
-/// `GET /v1/loop/feedback?id=<subtask_id>` — the latest reviewer feedback, which
-/// a resumed executor fetches out-of-band (mirrors `/v1/sessions/:id/feedback`).
-async fn handle_loop_feedback(
-    State(app_state): State<AppState>,
-    Query(q): Query<LoopIdQ>,
-) -> axum::response::Response {
-    let Some(id) = q.id.filter(|s| !s.trim().is_empty()) else {
-        return browser_error_response("missing ?id=".to_string());
-    };
-    let engine = app_state.app_handle.state::<looporch::LoopState>();
-    Json(serde_json::json!({ "feedback": engine.latest_feedback(&id) })).into_response()
 }
 
 /// `POST /v1/browser/focus?tab=<id>` — switch the user INTO an existing tab:
@@ -5273,18 +5136,6 @@ pub fn run() {
             linked::linked_get_tabs,
             linked::linked_kill_all,
             mission_set_active,
-            looporch::loop_start,
-            looporch::loop_repo_status,
-            looporch::loop_list,
-            looporch::loop_get,
-            looporch::loop_subtask_attempts,
-            looporch::loop_traces,
-            looporch::loop_checkpoint_decide,
-            looporch::loop_cancel,
-            looporch::loop_delete,
-            looporch::loop_kill_all,
-            looporch::loop_tick,
-            looporch::loop_analyze,
             review_hold_active,
             submit_review_feedback,
             dismiss_review,
@@ -5448,17 +5299,6 @@ pub fn run() {
             // their browse agents via the consult route.
             let linked_state = linked::LinkedState::new(db.clone());
             app.manage(linked_state);
-
-            // Loop Orchestrator: once a reviewed plan is approved, decompose it
-            // and execute each subtask in an isolated git worktree, with a
-            // separate reviewer and human checkpoints before any merge/land.
-            // Same lazy-`claude` reasoning; worktrees live under the app data dir.
-            let loop_state = looporch::LoopState::new(db.clone(), data_dir.join("loop-worktrees"));
-            loop_state.attach_app(app.handle().clone());
-            app.manage(loop_state.clone());
-            // Restart reconciler: revive interrupted runs (reset in-flight
-            // subtasks, re-adopt worktrees, re-arm pending checkpoints).
-            tauri::async_runtime::spawn(async move { loop_state.reconcile_on_start().await });
 
             // Code Review surface: diff resolver + line-anchored annotation
             // store. Plain DB handle — no agent process of its own.
@@ -5770,9 +5610,6 @@ pub fn run() {
                 }
                 if let Some(linked) = app_handle.try_state::<linked::LinkedState>() {
                     linked.kill_all();
-                }
-                if let Some(loop_state) = app_handle.try_state::<looporch::LoopState>() {
-                    loop_state.kill_all();
                 }
                 if let Some(voice) = app_handle.try_state::<voice::VoiceState>() {
                     voice.kill_all();

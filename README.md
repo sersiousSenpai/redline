@@ -105,7 +105,7 @@ Redline is an early release (v0.1) under active development. It currently suppor
 
 Directions we're exploring, in no particular order:
 
-- **Loop orchestrator** — turn an approved plan into parallel, individually-verified subtasks, each executed in an isolated git worktree and graded by an independent reviewer (in progress; not yet shipped).
+- **Loop orchestrator** — turn an approved plan into parallel, individually-verified subtasks, each executed in an isolated git worktree and graded by an independent reviewer (a prototype lives on the `feature/loop-orchestrator` branch; not in the product).
 - **Multiplayer** — several reviewers in one document at once, each paired with their own agent, over a CRDT (Yjs/Hocuspocus).
 - **Documents beyond Claude Code plans** — a born-in-app Word-class editor with clean `.docx` export, and eventually high-fidelity import of arbitrary `.docx` files. See [docs/document-ide-northstar.md](docs/document-ide-northstar.md).
 - Finer-grained comment anchoring (sentence- and word-level).

@@ -65,9 +65,6 @@ import { BrowserPane } from "./components/BrowserPane";
 import { MenuOverlayProvider } from "./components/menuOverlay";
 import { SplitPane } from "./components/SplitPane";
 import { PromptDrafter } from "./components/PromptDrafter";
-import { LoopTrajectory } from "./components/LoopTrajectory";
-import { LoopStartDialog } from "./components/LoopStartDialog";
-import { useLoop, type LoopStartArgs } from "./hooks/useLoop";
 import ReviewPanel from "./components/ReviewPanel";
 import ReviewDiscussionPane from "./components/ReviewDiscussionPane";
 import { useReview } from "./hooks/useReview";
@@ -351,17 +348,8 @@ function App() {
     markdown: string;
     initialProject: string | null;
   } | null>(null);
-  // The Loop Orchestrator — a third secondary pane (mutually exclusive with the
-  // browser and drafter) that drives an approved plan through a DAG of subtasks.
-  // `useLoop` owns the run list, the active run's live snapshot, and the loop-*
-  // event subscription; `loopHandoff` holds the pending "run this plan" dialog.
-  const [loopOpen, setLoopOpen] = usePersistedState(
-    "redline.loop.open",
-    false,
-  );
-  const loop = useLoop();
-  // The Code Review surface — a fourth secondary pane (mutually exclusive with
-  // the browser/drafter/loop): the annotatable git diff of what the agent just
+  // The Code Review surface — a third secondary pane (mutually exclusive with
+  // the browser/drafter): the annotatable git diff of what the agent just
   // wrote. `useReview` owns the repo/source choice, the parsed diff, and the
   // line-anchored annotations.
   const [reviewOpen, setReviewOpen] = usePersistedState(
@@ -378,7 +366,6 @@ function App() {
       setSplitRatio(0.5);
       setBrowserOpen(false);
       setDrafterOpen(false);
-      setLoopOpen(false);
       setReviewOpen(true);
     });
     return () => {
@@ -387,12 +374,6 @@ function App() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  const [loopHandoff, setLoopHandoff] = useState<{
-    sessionId: string;
-    planMd: string;
-    repoPath: string | null;
-    title: string;
-  } | null>(null);
   // Document zoom (content font-scale, not webview zoom). Persisted; clamped
   // 0.8–1.6. Driven by the in-pane control and Cmd +/-/0 shortcuts.
   const [docZoom, setDocZoom] = usePersistedState("redline.docZoom", 1);
@@ -743,7 +724,7 @@ function App() {
       // If a secondary pane (browser or drafter) is filling the center pane on
       // its own, opening a document would otherwise load hidden behind it.
       // Bring up the split so both show.
-      if ((browserOpen || drafterOpen || loopOpen || reviewOpen) && !docOpen) {
+      if ((browserOpen || drafterOpen || reviewOpen) && !docOpen) {
         setSplitRatio(0.5);
         setDocOpen(true);
       }
@@ -757,7 +738,7 @@ function App() {
         }
       }
     },
-    [setActiveFile, sidebarTab, activeTermId, browserOpen, drafterOpen, loopOpen, reviewOpen, docOpen, setDocOpen, setSplitRatio],
+    [setActiveFile, sidebarTab, activeTermId, browserOpen, drafterOpen, reviewOpen, docOpen, setDocOpen, setSplitRatio],
   );
   const handleCloseFile = useCallback(() => {
     setActiveFile(null);
@@ -824,7 +805,7 @@ function App() {
     const ro = new ResizeObserver(recompute);
     ro.observe(container);
     return () => ro.disconnect();
-  }, [sidebarTab, activeFile, activeId, browserOpen, drafterOpen, loopOpen, reviewOpen, docOpen]);
+  }, [sidebarTab, activeFile, activeId, browserOpen, drafterOpen, reviewOpen, docOpen]);
 
   // Track when the document column has been squeezed to a sliver so the latch
   // can replace the two colliding divider chevrons. Position is relative to the
@@ -2209,42 +2190,6 @@ function App() {
     setTimeout(() => setToast(null), 4000);
   };
 
-  // "Run with Loop Orchestrator" from the approval surface: open the loop start
-  // dialog pre-filled with the approved plan and the session's project path.
-  const openLoopHandoff = () => {
-    if (!session || !latest) return;
-    setLoopHandoff({
-      sessionId: session.sessionId,
-      planMd: latest.rawPlanMarkdown,
-      // The project this plan was reviewed in — the run's target repo.
-      repoPath: session.projectPath || null,
-      // Empty → the dialog seeds the title from the plan's own first heading
-      // (NOT the project/folder name).
-      title: "",
-    });
-  };
-
-  // Kick off the run, then bring the loop pane forward (closing the other
-  // secondary panes, which share its slot) and clear the dialog.
-  const startLoopRun = async (args: LoopStartArgs) => {
-    try {
-      const run = await loop.startLoop(args);
-      setLoopHandoff(null);
-      setSplitRatio(0.5);
-      setBrowserOpen(false);
-      setDrafterOpen(false);
-      setLoopOpen(true);
-      setToast(run ? "Loop Orchestrator running 🔁" : "Couldn't start the loop run");
-      setTimeout(() => setToast(null), 4000);
-    } catch (err) {
-      // Keep the dialog open (leave `loopHandoff` set) so the user can fix the
-      // repo/base ref and retry — and show them exactly what went wrong.
-      const msg = err instanceof Error ? err.message : String(err);
-      setToast(`Couldn't start: ${msg}`);
-      setTimeout(() => setToast(null), 9000);
-    }
-  };
-
   // Fallback for a Claude running in a terminal Redline doesn't own: copy the
   // resume command so the user can paste it into their own terminal.
   const copyRestoreCommand = () => {
@@ -2588,14 +2533,13 @@ function App() {
         }}
         browserOpen={browserOpen}
         onToggleBrowser={() => {
-          // Browser, drafter and loop share the single "secondary pane" slot, so
-          // opening one closes the others; the split resets to even so a folded
-          // pane reappears.
+          // Browser, drafter and review share the single "secondary pane" slot,
+          // so opening one closes the others; the split resets to even so a
+          // folded pane reappears.
           setSplitRatio(0.5);
           setBrowserOpen((v) => {
             if (!v) {
               setDrafterOpen(false);
-              setLoopOpen(false);
               setReviewOpen(false);
             }
             return !v;
@@ -2607,20 +2551,6 @@ function App() {
           setDrafterOpen((v) => {
             if (!v) {
               setBrowserOpen(false);
-              setLoopOpen(false);
-              setReviewOpen(false);
-            }
-            return !v;
-          });
-        }}
-        loopOpen={loopOpen}
-        hasLoopRuns={loop.runs.length > 0}
-        onToggleLoop={() => {
-          setSplitRatio(0.5);
-          setLoopOpen((v) => {
-            if (!v) {
-              setBrowserOpen(false);
-              setDrafterOpen(false);
               setReviewOpen(false);
             }
             return !v;
@@ -2633,7 +2563,6 @@ function App() {
             if (!v) {
               setBrowserOpen(false);
               setDrafterOpen(false);
-              setLoopOpen(false);
             }
             // Opening the review pulls the Discussion sidecar with it (the
             // toggle can pin it back to the plan in a split); closing it
@@ -2646,7 +2575,7 @@ function App() {
         canInvite={sessionReady && !!latest}
         onInvite={() => setInviteOpen(true)}
         onJoinSession={() => setJoinOpen(true)}
-        splitActive={docOpen && (browserOpen || drafterOpen || loopOpen || reviewOpen)}
+        splitActive={docOpen && (browserOpen || drafterOpen || reviewOpen)}
         splitVertical={splitVertical}
         onToggleSplitOrientation={() => {
           // Flipping orientation resets to 50/50 so a folded-away pane reappears.
@@ -2914,9 +2843,6 @@ function App() {
                 onLaunch={launchPromptDraft}
               />
             );
-            const loopBody = (
-              <LoopTrajectory loop={loop} onClose={() => setLoopOpen(false)} />
-            );
             const reviewBody = (
               <ReviewPanel
                 review={codeReview}
@@ -2933,11 +2859,9 @@ function App() {
               ? browserBody
               : drafterOpen
                 ? drafterBody
-                : loopOpen
-                  ? loopBody
-                  : reviewOpen
-                    ? reviewBody
-                    : null;
+                : reviewOpen
+                  ? reviewBody
+                  : null;
             if (secondaryBody && docOpen)
               return (
                 <SplitPane
@@ -2961,7 +2885,6 @@ function App() {
             latest &&
             !browserOpen &&
             !drafterOpen &&
-            !loopOpen &&
             !reviewOpen &&
             !(sidebarTab.kind === "folder" && activeFile) && (
               <>
@@ -3004,7 +2927,7 @@ function App() {
             )}
           {/* Floating document-zoom control — pinned to the pane (doesn't scroll
               with the plan). Hidden over the folder file viewer. */}
-          {!browserOpen && !drafterOpen && !loopOpen && !reviewOpen && !(sidebarTab.kind === "folder" && activeFile) && zoomVisible && (
+          {!browserOpen && !drafterOpen && !reviewOpen && !(sidebarTab.kind === "folder" && activeFile) && zoomVisible && (
             <div
               ref={zoomCtrlRef}
               className="absolute flex items-center gap-1 rounded-full"
@@ -3641,8 +3564,6 @@ function App() {
         waitingAsk={waitingAsk}
         onSubmit={submitReview}
         onApprove={approvePlan}
-        canRunLoop={sessionReady && !!latest && !detached}
-        onRunLoop={openLoopHandoff}
         termCollapsed={termCollapsed && !termFullscreen}
         termTabCount={termTabCount}
         termHasUnseen={termHasUnseen}
@@ -3653,18 +3574,6 @@ function App() {
           rect={selection.rect}
           onPick={beginCompose}
           onCrossOut={beginCrossOut}
-        />
-      )}
-      {loopHandoff && (
-        <LoopStartDialog
-          planMd={loopHandoff.planMd}
-          sessionId={loopHandoff.sessionId}
-          defaultTitle={loopHandoff.title}
-          defaultRepoPath={loopHandoff.repoPath}
-          defaultBaseRef="main"
-          projectOptions={projectOptions}
-          onStart={startLoopRun}
-          onCancel={() => setLoopHandoff(null)}
         />
       )}
       {sendConfirm && (

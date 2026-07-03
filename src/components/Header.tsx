@@ -78,12 +78,6 @@ interface HeaderProps {
   drafterOpen: boolean;
   /** Toggle the Prompt Drafter on/off. */
   onToggleDrafter: () => void;
-  /** Whether the Loop Orchestrator is showing in the center pane. */
-  loopOpen: boolean;
-  /** Toggle the Loop Orchestrator on/off. */
-  onToggleLoop: () => void;
-  /** At least one loop run exists — gates the header toggle's visibility. */
-  hasLoopRuns: boolean;
   /** Whether the Code Review pane is showing in the center pane. */
   reviewOpen: boolean;
   /** Toggle the Code Review pane on/off. */
@@ -127,9 +121,6 @@ export function Header({
   onToggleSplitOrientation,
   drafterOpen,
   onToggleDrafter,
-  loopOpen,
-  onToggleLoop,
-  hasLoopRuns,
   reviewOpen,
   onToggleReview,
   collabActive,
@@ -162,7 +153,7 @@ export function Header({
           {/* The document is the default view; this toggle appears while a
               secondary pane (browser or drafter) is open, to add/remove the
               document from the split. */}
-          {(browserOpen || drafterOpen || loopOpen || reviewOpen) && (
+          {(browserOpen || drafterOpen || reviewOpen) && (
             <button
               type="button"
               onClick={onToggleDoc}
@@ -232,34 +223,6 @@ export function Header({
           >
             ✍️
           </button>
-          {/* Only a way to *return* to existing runs — you start a run from the
-              "Run with Loop Orchestrator" button at the approval surface, not
-              here. Hidden entirely until a run exists (or the pane is open), so
-              it isn't a mystery icon when nothing is running. */}
-          {(loopOpen || hasLoopRuns) && (
-            <button
-              type="button"
-              onClick={onToggleLoop}
-              title={loopOpen ? "Hide Loop Orchestrator" : "Loop Orchestrator runs"}
-              aria-label={loopOpen ? "Hide Loop Orchestrator" : "Loop Orchestrator runs"}
-              aria-pressed={loopOpen}
-              className="flex items-center rounded-sm px-2 py-0.5"
-              style={{
-                fontSize: "13px",
-                lineHeight: 1,
-                border: "1px solid var(--color-rule)",
-                background: loopOpen
-                  ? "var(--color-anchor-bg)"
-                  : "var(--color-bg-elevated)",
-                color: loopOpen
-                  ? "var(--color-anchor-text)"
-                  : "var(--color-ink)",
-                cursor: "pointer",
-              }}
-            >
-              🔁
-            </button>
-          )}
           <button
             type="button"
             onClick={onToggleReview}

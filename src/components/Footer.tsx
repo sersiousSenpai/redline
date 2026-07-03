@@ -13,10 +13,6 @@ interface FooterProps {
   waitingAsk: boolean;
   onSubmit: () => void;
   onApprove: () => void;
-  /** A plan is present to hand to the Loop Orchestrator. */
-  canRunLoop?: boolean;
-  /** Open the Loop Orchestrator start dialog, pre-filled with this plan. */
-  onRunLoop?: () => void;
   /** Terminal dock collapsed (and not fullscreen) — show a peek segment. */
   termCollapsed: boolean;
   termTabCount: number;
@@ -33,8 +29,6 @@ export function Footer({
   waitingAsk,
   onSubmit,
   onApprove,
-  canRunLoop = false,
-  onRunLoop,
   termCollapsed,
   termTabCount,
   termHasUnseen,
@@ -226,23 +220,6 @@ export function Footer({
         >
           Approve plan
         </button>
-        {onRunLoop && canRunLoop && (
-          <button
-            type="button"
-            onClick={onRunLoop}
-            disabled={waiting}
-            title="Hand this plan to the Loop Orchestrator — it decomposes and drives it to a landed result"
-            className="rounded px-3 py-1 font-medium disabled:opacity-40 flex items-center gap-1"
-            style={{
-              background: "var(--color-bg-elevated)",
-              border: "1px solid var(--color-rule)",
-              color: "var(--color-ink)",
-              fontSize: "12px",
-            }}
-          >
-            🔁 Run with Loop Orch
-          </button>
-        )}
       </span>
     </footer>
   );

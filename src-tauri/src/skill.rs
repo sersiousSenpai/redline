@@ -37,9 +37,6 @@ struct EmbeddedSkill {
 /// - `linked`: how a linked discussion holds ONE conversation spanning all tabs
 ///   (no goal), re-grounds on the current tab each turn, and checks in with a
 ///   colleague (a tab's own page-discussion agent) via the consult endpoint.
-/// - `loop-orchestrator`: the three agent contracts (Planner / Executor /
-///   Reviewer) of the loop engine that turns an approved plan into parallel,
-///   individually-verified subtasks.
 /// - `redline-review`: the code-review loop — the blocking review curl, the
 ///   line-anchored feedback format, and the REDLINE_REVIEW_RESOLUTIONS reply.
 const SKILLS: &[EmbeddedSkill] = &[
@@ -72,11 +69,6 @@ const SKILLS: &[EmbeddedSkill] = &[
         name: "linked",
         version: 1,
         content: include_str!("../../skills/linked/SKILL.md"),
-    },
-    EmbeddedSkill {
-        name: "loop-orchestrator",
-        version: 1,
-        content: include_str!("../../skills/loop-orchestrator/SKILL.md"),
     },
     EmbeddedSkill {
         name: "redline-review",

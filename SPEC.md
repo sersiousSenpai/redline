@@ -482,9 +482,6 @@ a mission's tab set is serialized into `missions.tabs_json`. Plan markdown is
 stored verbatim (with sidecar IDs); section trees are reparsed on read; the live
 editor document lives in Yjs + IndexedDB, not SQLite (§8).
 
-(The database also carries `loop_*` tables for the in-progress loop orchestrator;
-that feature is not yet wired — see §21.)
-
 ### 7.3 In-memory state
 
 - `SessionStore` — sessions + revisions + comments cache backed by SQLite.
@@ -915,10 +912,9 @@ Not yet built:
 
 - **Loop orchestrator.** Turning an approved plan into parallel,
   individually-verified subtasks — each executed in an isolated git worktree and
-  graded by an independent reviewer. Design + WIP code exist in the tree
-  (`looporch.rs`, `worktree.rs`, the `loop_*` tables, the `loop-orchestrator`
-  skill) but the engine is **not wired** — no registered commands, no UI. Treat
-  as roadmap.
+  graded by an independent reviewer. A full prototype was built and then parked
+  on the `feature/loop-orchestrator` branch; it is not in the product. Treat as
+  roadmap.
 - **Multiplayer.** Several reviewers in one document at once, each with their own
   agent, over the CRDT (Yjs / Hocuspocus). See the north-star doc.
 - **Documents beyond plans.** A born-in-app Word-class editor and, later,
