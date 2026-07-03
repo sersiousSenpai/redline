@@ -25,7 +25,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdout};
 
 use crate::claude_proc::{
-    bridge_args, classify_line, claude_command, resolve_claude_bin, StreamLine,
+    bridge_args, classify_line, claude_command, mission_context_block, resolve_claude_bin,
+    StreamLine,
 };
 use crate::db::Database;
 use crate::state::{now_millis, BrowseMessage};
@@ -153,10 +154,17 @@ impl BrowseState {
              concise. Their question:\n\n{}",
             question.trim()
         );
+        // The consult already runs under the linked agent's mission-framed
+        // question, so it needs no separate mission block of its own.
         let prompt = match &prior_session {
-            None => build_first_turn_prompt(snapshot.as_deref(), &framed, false, None),
+            None => build_first_turn_prompt(snapshot.as_deref(), &framed, false, None, None),
             Some(_) => framed.clone(),
         };
+
+        // A consult is an internal map-reduce delegation, not a user prompt, so
+        // it earns no ledger event — but it still spawns an agent that would trip
+        // the global hook, so suppress that duplicate.
+        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
 
         let args = bridge_args(prompt, prior_session.as_deref());
         let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
@@ -356,11 +364,13 @@ fn build_first_turn_prompt(
     user_text: &str,
     tandem: bool,
     prefs: Option<&str>,
+    mission: Option<(&str, &str)>,
 ) -> String {
     let mut p = String::from(
         "You are helping the user with the web page open in Redline's embedded \
          browser. You can both discuss the page and drive the browser tab.\n\n",
     );
+    p.push_str(&mission_context_block(mission));
     if let Some(snap) = snapshot {
         if !snap.trim().is_empty() {
             p.push_str("Here is a snapshot of the page the user is currently viewing:\n\n");
@@ -502,6 +512,7 @@ fn build_first_turn_prompt(
 #[tauri::command]
 pub async fn browse_send(
     browse: tauri::State<'_, BrowseState>,
+    active_mission: tauri::State<'_, crate::ActiveMission>,
     app: AppHandle,
     browse_id: String,
     text: String,
@@ -542,6 +553,9 @@ pub async fn browse_send(
     // mode the first turn also carries the learned source-preference line so the
     // agent biases its page picks toward domains the user has thumbed up.
     let tandem = tandem.unwrap_or(false);
+    // When this tab lives inside an active mission, bake the goal in so the
+    // per-tab agent orients its help to what the user is researching.
+    let mission = active_mission.active_goal();
     let prompt = match &prior_session {
         None => {
             let prefs = if tandem {
@@ -549,10 +563,32 @@ pub async fn browse_send(
             } else {
                 None
             };
-            build_first_turn_prompt(snapshot.as_deref(), &text, tandem, prefs.as_deref())
+            build_first_turn_prompt(
+                snapshot.as_deref(),
+                &text,
+                tandem,
+                prefs.as_deref(),
+                mission.as_ref().map(|(t, g)| (t.as_str(), g.as_str())),
+            )
         }
         Some(_) => text.clone(),
     };
+
+    // Polis ledger: record the first-turn page-discussion prompt; keep every
+    // agent turn out of the global-hook capture stream.
+    if prior_session.is_none() {
+        crate::ledger::record_agent_prompt(
+            &browse.db,
+            crate::ledger::PromptSource::RustFirstTurn,
+            "browse",
+            &prompt,
+            cwd.clone(),
+            None,
+            None,
+        );
+    } else {
+        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+    }
 
     // The agent gets Bash so it can curl the browser endpoints. `--tools` only
     // makes a tool *available*; headless `-p` then auto-denies anything not in
@@ -942,9 +978,12 @@ mod tests {
             "What is this page about?",
             false,
             None,
+            None,
         );
         assert!(p.contains("https://example.com"));
         assert!(p.contains("What is this page about?"));
+        // With no active mission, no mission block is injected.
+        assert!(!p.contains("A research MISSION is currently active"));
         // Tool docs must always be present.
         assert!(p.contains("/v1/browser/snapshot"));
         assert!(p.contains("/v1/browser/navigate"));
@@ -969,7 +1008,7 @@ mod tests {
 
     #[test]
     fn first_turn_prompt_without_snapshot_still_documents_tools() {
-        let p = build_first_turn_prompt(None, "open hacker news", false, None);
+        let p = build_first_turn_prompt(None, "open hacker news", false, None, None);
         assert!(p.contains("open hacker news"));
         assert!(p.contains("/v1/browser/navigate"));
         // No empty snapshot section header.
@@ -977,6 +1016,24 @@ mod tests {
         // Non-tandem prompts carry no tandem instructions or sources contract.
         assert!(!p.contains("TANDEM AGENT MODE"));
         assert!(!p.contains("rl-sources"));
+    }
+
+    #[test]
+    fn first_turn_prompt_embeds_active_mission_goal() {
+        let p = build_first_turn_prompt(
+            None,
+            "How does this page help?",
+            false,
+            None,
+            Some(("Data-breach page", "Draft my firm's data-breach practice page")),
+        );
+        // The goal + mission title are baked in so the per-tab agent orients to it.
+        assert!(p.contains("A research MISSION is currently active"));
+        assert!(p.contains("Data-breach page"));
+        assert!(p.contains("Draft my firm's data-breach practice page"));
+        // And the re-read routes are documented for a mid-conversation change.
+        assert!(p.contains("/v1/mission/active"));
+        assert!(p.contains("/v1/mission/findings"));
     }
 
     #[test]
@@ -1016,6 +1073,7 @@ mod tests {
             "what is a DAG?",
             true,
             Some("Learned: tends to PREFER wikipedia.org."),
+            None,
         );
         assert!(p.contains("TANDEM AGENT MODE is ON"));
         assert!(p.contains("rl-sources"));

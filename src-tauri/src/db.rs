@@ -308,6 +308,128 @@ impl Database {
                 created_at INTEGER NOT NULL,
                 PRIMARY KEY (review_id, id)
             );
+
+            -- Polis data lake: the raw, complete prompt store. One row per
+            -- captured prompt (hook / drafter / rust-firstturn / voice). Bodies
+            -- live here (ledger-owned) so a session delete can never orphan the
+            -- hash chain. Dedup on (body_hash, claude_session_id).
+            CREATE TABLE IF NOT EXISTS prompts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                origin TEXT NOT NULL DEFAULT 'redline',
+                surface TEXT NOT NULL,
+                role TEXT,
+                session_id TEXT,
+                claude_session_id TEXT,
+                mission_id TEXT,
+                project_path TEXT,
+                body TEXT NOT NULL,
+                body_hash TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_prompts_dedup
+                ON prompts (body_hash, claude_session_id);
+
+            -- Polis ledger: append-only, hash-chained, author-attributed record
+            -- of prompts, plan revisions, decisions and curation signals.
+            -- entry_hash = sha256(prev_hash ‖ canonical-json(event)); genesis
+            -- prev = 64 zeros. Decision kinds reference an existing row by
+            -- (ref_kind, ref_id) + payload_hash rather than a deletable FK, so
+            -- deleting the referenced session can't break the chain.
+            CREATE TABLE IF NOT EXISTS ledger_events (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                author TEXT NOT NULL,
+                prompt_id INTEGER,
+                session_id TEXT,
+                version_number INTEGER,
+                ref_kind TEXT,
+                ref_id TEXT,
+                payload_hash TEXT NOT NULL,
+                prev_hash TEXT NOT NULL,
+                entry_hash TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_ledger_kind ON ledger_events (kind);
+            CREATE INDEX IF NOT EXISTS idx_ledger_ref ON ledger_events (ref_kind, ref_id);
+
+            -- Polis ClassMemory (Phase 2): an agent-classified, human-curated,
+            -- vectorless class CATALOG *over* the lake. Nodes only ever hold
+            -- POINTERS (class_links) into the ledger/prompt store — reorganizing
+            -- the tree never touches or re-copies underlying data. A class is
+            -- just a root node (parent_id NULL); depth is emergent (no level
+            -- enum). A `digest` node's `summary` is the agent-written gist of a
+            -- collapsed cold branch, with class_links back to the exact ledger
+            -- rows it cites. Every node/link carries status{proposed,accepted}:
+            -- nothing enters or moves without a user accept.
+            CREATE TABLE IF NOT EXISTS class_nodes (
+                id TEXT PRIMARY KEY,
+                parent_id TEXT,               -- NULL = a root (a class)
+                kind TEXT NOT NULL DEFAULT 'node',   -- node | digest
+                title TEXT NOT NULL,
+                summary TEXT,                 -- digest gist; NULL for plain nodes
+                project_path TEXT,            -- optional binding on any node
+                ip_name TEXT,                 -- whose plan it was (provenance)
+                status TEXT NOT NULL DEFAULT 'proposed',  -- proposed | accepted
+                pinned INTEGER NOT NULL DEFAULT 0,        -- anti-decay marker
+                curated_by TEXT,              -- 'classifier' | author on accept
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_class_nodes_parent ON class_nodes (parent_id);
+            CREATE INDEX IF NOT EXISTS idx_class_nodes_status ON class_nodes (status);
+
+            -- Pointers from a class node into the lake. target_kind is one of
+            -- prompt|session|revision|mission|decision; target_id is that row's
+            -- id (prompt id / session id / ledger seq / mission id). Reorganizing
+            -- the tree re-parents nodes; links ride along untouched.
+            CREATE TABLE IF NOT EXISTS class_links (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                node_id TEXT NOT NULL,
+                target_kind TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                note TEXT,
+                status TEXT NOT NULL DEFAULT 'proposed',  -- proposed | accepted
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_class_links_node ON class_links (node_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_class_links_dedup
+                ON class_links (node_id, target_kind, target_id);
+
+            -- Structural reorg proposals (promote/split/merge/collapse) that
+            -- can't be expressed as a single node's status. Additive proposals
+            -- (file/create) stage directly as proposed class_nodes/class_links;
+            -- these operate on EXISTING accepted nodes, so they queue here for
+            -- review. Accept applies the op to the tree + writes a taxonomy_reorg
+            -- ledger event, then drops the row; reject just drops it.
+            CREATE TABLE IF NOT EXISTS class_proposals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER,
+                op TEXT NOT NULL,             -- promote | split | merge | collapse
+                node_id TEXT,                 -- primary subject node
+                parent_id TEXT,               -- new parent (promote) / merge target parent
+                title TEXT,                   -- merge target / collapse digest title
+                summary TEXT,                 -- collapse digest gist
+                extra_json TEXT,              -- op-specific payload (split parts, merge ids, cite seqs)
+                rationale TEXT,               -- agent's stated why (size/recency/coherence)
+                status TEXT NOT NULL DEFAULT 'proposed',
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_class_proposals_status ON class_proposals (status);
+
+            -- One classifier pass over the lake delta. Bounds the seq window it
+            -- consumed so the next run is delta-based, and records the claude
+            -- session id + a short summary for the pane.
+            CREATE TABLE IF NOT EXISTS class_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at INTEGER NOT NULL,
+                finished_at INTEGER,
+                status TEXT NOT NULL,         -- running | done | error
+                seq_from INTEGER,
+                seq_to INTEGER,
+                claude_session_id TEXT,
+                summary TEXT
+            );
             "#,
         )?;
         // Best-effort additive migrations (errors on existing columns are ignored)
@@ -555,6 +677,1120 @@ impl Database {
             ],
         )?;
         Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Polis ledger (Phase 1): prompt store + hash chain
+    // ------------------------------------------------------------------
+
+    /// Insert a prompt row, deduped on (body_hash, claude_session_id). Returns
+    /// the new row id, or `None` if an identical prompt was already stored.
+    pub fn insert_prompt(&self, p: &crate::ledger::PromptRow) -> rusqlite::Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "INSERT INTO prompts
+                (ts, source, origin, surface, role, session_id, claude_session_id,
+                 mission_id, project_path, body, body_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(body_hash, claude_session_id) DO NOTHING",
+            params![
+                p.ts,
+                p.source,
+                p.origin,
+                p.surface,
+                p.role,
+                p.session_id,
+                p.claude_session_id,
+                p.mission_id,
+                p.project_path,
+                p.body,
+                p.body_hash,
+            ],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        Ok(Some(conn.last_insert_rowid()))
+    }
+
+    /// Fetch a stored prompt body by id (for the ledger pane's body viewer).
+    pub fn get_prompt_body(&self, id: i64) -> rusqlite::Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT body FROM prompts WHERE id = ?1", params![id], |r| {
+            r.get(0)
+        })
+        .optional()
+    }
+
+    /// Append an event to the hash chain. Reads the current head under the write
+    /// lock, computes `entry_hash = sha256(prev_hash ‖ canonical(event))`, and
+    /// inserts with an explicit monotonic `seq` — all atomic under the single
+    /// `Mutex<Connection>` writer, so the chain can't race.
+    pub fn append_ledger_event(
+        &self,
+        a: &crate::ledger::LedgerAppend,
+    ) -> rusqlite::Result<crate::ledger::LedgerEventRow> {
+        let conn = self.conn.lock().unwrap();
+        let head: Option<(i64, String)> = conn
+            .query_row(
+                "SELECT seq, entry_hash FROM ledger_events ORDER BY seq DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let (prev_seq, prev_hash) = head.unwrap_or((0, crate::ledger::GENESIS_PREV.to_string()));
+        let seq = prev_seq + 1;
+        let canon = crate::ledger::CanonicalEvent {
+            seq,
+            ts: a.ts,
+            kind: a.kind,
+            author: a.author,
+            prompt_id: a.prompt_id,
+            session_id: a.session_id,
+            version_number: a.version_number,
+            ref_kind: a.ref_kind,
+            ref_id: a.ref_id,
+            payload_hash: a.payload_hash,
+        };
+        let entry_hash = crate::ledger::compute_entry_hash(&prev_hash, &canon);
+        conn.execute(
+            "INSERT INTO ledger_events
+                (seq, ts, kind, author, prompt_id, session_id, version_number,
+                 ref_kind, ref_id, payload_hash, prev_hash, entry_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                seq,
+                a.ts,
+                a.kind,
+                a.author,
+                a.prompt_id,
+                a.session_id,
+                a.version_number,
+                a.ref_kind,
+                a.ref_id,
+                a.payload_hash,
+                prev_hash,
+                entry_hash,
+            ],
+        )?;
+        Ok(crate::ledger::LedgerEventRow {
+            seq,
+            ts: a.ts,
+            kind: a.kind.to_string(),
+            author: a.author.to_string(),
+            prompt_id: a.prompt_id,
+            session_id: a.session_id.map(str::to_string),
+            version_number: a.version_number,
+            ref_kind: a.ref_kind.map(str::to_string),
+            ref_id: a.ref_id.map(str::to_string),
+            payload_hash: a.payload_hash.to_string(),
+            prev_hash,
+            entry_hash,
+        })
+    }
+
+    /// Most-recent-first ledger events, capped at `limit`.
+    pub fn list_ledger_events(
+        &self,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<crate::ledger::LedgerEventRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT seq, ts, kind, author, prompt_id, session_id, version_number,
+                    ref_kind, ref_id, payload_hash, prev_hash, entry_hash
+             FROM ledger_events ORDER BY seq DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit], |r| {
+            Ok(crate::ledger::LedgerEventRow {
+                seq: r.get(0)?,
+                ts: r.get(1)?,
+                kind: r.get(2)?,
+                author: r.get(3)?,
+                prompt_id: r.get(4)?,
+                session_id: r.get(5)?,
+                version_number: r.get(6)?,
+                ref_kind: r.get(7)?,
+                ref_id: r.get(8)?,
+                payload_hash: r.get(9)?,
+                prev_hash: r.get(10)?,
+                entry_hash: r.get(11)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// True if a revision event for this (session, version) already exists with
+    /// the same payload hash — the idempotency guard for the revision path.
+    pub fn revision_event_exists(
+        &self,
+        session_id: &str,
+        version_number: i64,
+        payload_hash: &str,
+    ) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM ledger_events
+             WHERE kind = 'revision' AND session_id = ?1
+               AND version_number = ?2 AND payload_hash = ?3",
+            params![session_id, version_number, payload_hash],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// True if an identical decision event already exists — idempotency guard
+    /// for the decision path.
+    pub fn decision_event_exists(
+        &self,
+        kind: &str,
+        ref_kind: &str,
+        ref_id: &str,
+        payload_hash: &str,
+    ) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM ledger_events
+             WHERE kind = ?1 AND ref_kind = ?2 AND ref_id = ?3 AND payload_hash = ?4",
+            params![kind, ref_kind, ref_id, payload_hash],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Re-walk the whole chain, recomputing each `entry_hash` from stored fields
+    /// and checking `prev_hash` linkage. Reports the first seq that fails.
+    pub fn verify_ledger_chain(&self) -> rusqlite::Result<crate::ledger::ChainVerdict> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT seq, ts, kind, author, prompt_id, session_id, version_number,
+                    ref_kind, ref_id, payload_hash, prev_hash, entry_hash
+             FROM ledger_events ORDER BY seq ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(crate::ledger::LedgerEventRow {
+                seq: r.get(0)?,
+                ts: r.get(1)?,
+                kind: r.get(2)?,
+                author: r.get(3)?,
+                prompt_id: r.get(4)?,
+                session_id: r.get(5)?,
+                version_number: r.get(6)?,
+                ref_kind: r.get(7)?,
+                ref_id: r.get(8)?,
+                payload_hash: r.get(9)?,
+                prev_hash: r.get(10)?,
+                entry_hash: r.get(11)?,
+            })
+        })?;
+
+        let mut prev = crate::ledger::GENESIS_PREV.to_string();
+        let mut checked = 0i64;
+        let mut head = None;
+        for row in rows {
+            let e = row?;
+            // Linkage: this row must commit to its actual predecessor.
+            if e.prev_hash != prev {
+                return Ok(crate::ledger::ChainVerdict {
+                    ok: false,
+                    checked,
+                    first_bad_seq: Some(e.seq),
+                    head_hash: None,
+                });
+            }
+            let canon = crate::ledger::CanonicalEvent {
+                seq: e.seq,
+                ts: e.ts,
+                kind: &e.kind,
+                author: &e.author,
+                prompt_id: e.prompt_id,
+                session_id: e.session_id.as_deref(),
+                version_number: e.version_number,
+                ref_kind: e.ref_kind.as_deref(),
+                ref_id: e.ref_id.as_deref(),
+                payload_hash: &e.payload_hash,
+            };
+            let recomputed = crate::ledger::compute_entry_hash(&e.prev_hash, &canon);
+            if recomputed != e.entry_hash {
+                return Ok(crate::ledger::ChainVerdict {
+                    ok: false,
+                    checked,
+                    first_bad_seq: Some(e.seq),
+                    head_hash: None,
+                });
+            }
+            prev = e.entry_hash.clone();
+            head = Some(e.entry_hash);
+            checked += 1;
+        }
+        Ok(crate::ledger::ChainVerdict {
+            ok: true,
+            checked,
+            first_bad_seq: None,
+            head_hash: head,
+        })
+    }
+
+    /// Snapshot the whole database to `dest` via `VACUUM INTO` (a consistent
+    /// copy even while the app runs). The crown-jewels backup that protects the
+    /// chain itself; mirror/export are secondary content copies.
+    pub fn snapshot_to(&self, dest: &Path) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        // VACUUM INTO requires the destination not already exist.
+        let _ = std::fs::remove_file(dest);
+        conn.execute("VACUUM INTO ?1", params![dest.to_string_lossy()])?;
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Polis ClassMemory (Phase 2): the catalog over the lake
+    // ------------------------------------------------------------------
+
+    /// Seed one proposed root per (id, title, project_path), idempotent — a root
+    /// that already exists (by id) is left untouched, so re-seeding never
+    /// re-proposes an already-accepted class. Returns how many were newly seeded.
+    pub fn seed_class_roots(
+        &self,
+        rows: &[(String, String, Option<String>)],
+    ) -> rusqlite::Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let now = crate::ledger::now_millis();
+        let mut seeded = 0;
+        for (id, title, project) in rows {
+            let changed = conn.execute(
+                "INSERT INTO class_nodes
+                    (id, parent_id, kind, title, summary, project_path, ip_name,
+                     status, pinned, curated_by, created_at, updated_at)
+                 VALUES (?1, NULL, 'node', ?2, NULL, ?3, NULL, 'proposed', 0,
+                         'classifier', ?4, ?4)
+                 ON CONFLICT(id) DO NOTHING",
+                params![id, title, project, now],
+            )?;
+            seeded += changed;
+        }
+        Ok(seeded)
+    }
+
+    fn row_to_class_node(r: &rusqlite::Row) -> rusqlite::Result<crate::classmem::ClassNode> {
+        Ok(crate::classmem::ClassNode {
+            id: r.get(0)?,
+            parent_id: r.get(1)?,
+            kind: r.get(2)?,
+            title: r.get(3)?,
+            summary: r.get(4)?,
+            project_path: r.get(5)?,
+            ip_name: r.get(6)?,
+            status: r.get(7)?,
+            pinned: r.get::<_, i64>(8)? != 0,
+            curated_by: r.get(9)?,
+            created_at: r.get(10)?,
+            updated_at: r.get(11)?,
+        })
+    }
+
+    /// Every class node (proposed + accepted), for tree building in Rust.
+    pub fn list_class_nodes(&self) -> rusqlite::Result<Vec<crate::classmem::ClassNode>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, parent_id, kind, title, summary, project_path, ip_name,
+                    status, pinned, curated_by, created_at, updated_at
+             FROM class_nodes ORDER BY title ASC",
+        )?;
+        let rows = stmt.query_map([], Self::row_to_class_node)?;
+        rows.collect()
+    }
+
+    pub fn get_class_node(&self, id: &str) -> rusqlite::Result<Option<crate::classmem::ClassNode>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, parent_id, kind, title, summary, project_path, ip_name,
+                    status, pinned, curated_by, created_at, updated_at
+             FROM class_nodes WHERE id = ?1",
+            params![id],
+            Self::row_to_class_node,
+        )
+        .optional()
+    }
+
+    /// The links on one node (accepted + proposed).
+    pub fn list_class_links_for_node(
+        &self,
+        node_id: &str,
+    ) -> rusqlite::Result<Vec<crate::classmem::ClassLink>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, node_id, target_kind, target_id, note, status, created_at
+             FROM class_links WHERE node_id = ?1 ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(params![node_id], |r| {
+            Ok(crate::classmem::ClassLink {
+                id: r.get(0)?,
+                node_id: r.get(1)?,
+                target_kind: r.get(2)?,
+                target_id: r.get(3)?,
+                note: r.get(4)?,
+                status: r.get(5)?,
+                created_at: r.get(6)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Stage one parsed proposal as reviewable rows (never accepts). Additive
+    /// proposals become `proposed` nodes/links; structural ones queue in
+    /// `class_proposals`. See `classmem` for the accept path.
+    pub fn stage_proposal(
+        &self,
+        run_id: Option<i64>,
+        p: &crate::classmem::Proposal,
+    ) -> rusqlite::Result<crate::classmem::StagedOutcome> {
+        use crate::classmem::{Proposal, StagedOutcome};
+        let conn = self.conn.lock().unwrap();
+        let now = crate::ledger::now_millis();
+        let exists = |id: &str| -> rusqlite::Result<bool> {
+            let n: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM class_nodes WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )?;
+            Ok(n > 0)
+        };
+        match p {
+            Proposal::Create { parent_id, title, .. } => {
+                if !exists(parent_id)? {
+                    return Ok(StagedOutcome::Skipped);
+                }
+                // Don't re-propose an identical child.
+                let dup: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM class_nodes WHERE parent_id = ?1 AND title = ?2",
+                    params![parent_id, title],
+                    |r| r.get(0),
+                )?;
+                if dup > 0 {
+                    return Ok(StagedOutcome::Skipped);
+                }
+                let id = crate::classmem::new_node_id();
+                conn.execute(
+                    "INSERT INTO class_nodes
+                        (id, parent_id, kind, title, summary, project_path, ip_name,
+                         status, pinned, curated_by, created_at, updated_at)
+                     VALUES (?1, ?2, 'node', ?3, NULL, NULL, NULL, 'proposed', 0,
+                             'classifier', ?4, ?4)",
+                    params![id, parent_id, title, now],
+                )?;
+                Ok(StagedOutcome::Node)
+            }
+            Proposal::File {
+                parent_id,
+                sub_class,
+                target_kind,
+                target_id,
+                note,
+                ..
+            } => {
+                if !exists(parent_id)? {
+                    return Ok(StagedOutcome::Skipped);
+                }
+                let mut created_node = false;
+                // Resolve (or stage) the node the link attaches to.
+                let target_node = match sub_class {
+                    Some(sc) if !sc.trim().is_empty() => {
+                        let existing: Option<String> = conn
+                            .query_row(
+                                "SELECT id FROM class_nodes WHERE parent_id = ?1 AND title = ?2 LIMIT 1",
+                                params![parent_id, sc.trim()],
+                                |r| r.get(0),
+                            )
+                            .optional()?;
+                        match existing {
+                            Some(id) => id,
+                            None => {
+                                let id = crate::classmem::new_node_id();
+                                conn.execute(
+                                    "INSERT INTO class_nodes
+                                        (id, parent_id, kind, title, summary, project_path,
+                                         ip_name, status, pinned, curated_by, created_at, updated_at)
+                                     VALUES (?1, ?2, 'node', ?3, NULL, NULL, NULL, 'proposed', 0,
+                                             'classifier', ?4, ?4)",
+                                    params![id, parent_id, sc.trim(), now],
+                                )?;
+                                created_node = true;
+                                id
+                            }
+                        }
+                    }
+                    _ => parent_id.clone(),
+                };
+                let changed = conn.execute(
+                    "INSERT INTO class_links
+                        (node_id, target_kind, target_id, note, status, created_at)
+                     VALUES (?1, ?2, ?3, ?4, 'proposed', ?5)
+                     ON CONFLICT(node_id, target_kind, target_id) DO NOTHING",
+                    params![target_node, target_kind, target_id, note, now],
+                )?;
+                if changed == 0 && !created_node {
+                    return Ok(StagedOutcome::Skipped);
+                }
+                Ok(StagedOutcome::Link { created_node })
+            }
+            Proposal::Promote { node_id, new_parent_id, rationale } => {
+                if !exists(node_id)? {
+                    return Ok(StagedOutcome::Skipped);
+                }
+                self.insert_structural_locked(
+                    &conn, run_id, "promote", Some(node_id), new_parent_id.as_deref(),
+                    None, None, None, rationale.as_deref(), now,
+                )?;
+                Ok(StagedOutcome::Structural)
+            }
+            Proposal::Split { node_id, into, rationale } => {
+                if !exists(node_id)? {
+                    return Ok(StagedOutcome::Skipped);
+                }
+                let extra = serde_json::to_string(into).unwrap_or_else(|_| "[]".into());
+                self.insert_structural_locked(
+                    &conn, run_id, "split", Some(node_id), None, None, None,
+                    Some(&extra), rationale.as_deref(), now,
+                )?;
+                Ok(StagedOutcome::Structural)
+            }
+            Proposal::Merge { node_ids, title, parent_id, rationale } => {
+                // Every referenced node must exist.
+                for id in node_ids {
+                    if !exists(id)? {
+                        return Ok(StagedOutcome::Skipped);
+                    }
+                }
+                let extra = serde_json::to_string(node_ids).unwrap_or_else(|_| "[]".into());
+                self.insert_structural_locked(
+                    &conn, run_id, "merge", node_ids.first().map(String::as_str),
+                    parent_id.as_deref(), title.as_deref(), None,
+                    Some(&extra), rationale.as_deref(), now,
+                )?;
+                Ok(StagedOutcome::Structural)
+            }
+            Proposal::Collapse { node_id, summary, cite_seqs, rationale } => {
+                if !exists(node_id)? {
+                    return Ok(StagedOutcome::Skipped);
+                }
+                let extra = serde_json::to_string(cite_seqs).unwrap_or_else(|_| "[]".into());
+                self.insert_structural_locked(
+                    &conn, run_id, "collapse", Some(node_id), None, None,
+                    Some(summary), Some(&extra), rationale.as_deref(), now,
+                )?;
+                Ok(StagedOutcome::Structural)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_structural_locked(
+        &self,
+        conn: &rusqlite::Connection,
+        run_id: Option<i64>,
+        op: &str,
+        node_id: Option<&str>,
+        parent_id: Option<&str>,
+        title: Option<&str>,
+        summary: Option<&str>,
+        extra_json: Option<&str>,
+        rationale: Option<&str>,
+        now: i64,
+    ) -> rusqlite::Result<()> {
+        conn.execute(
+            "INSERT INTO class_proposals
+                (run_id, op, node_id, parent_id, title, summary, extra_json,
+                 rationale, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'proposed', ?9)",
+            params![run_id, op, node_id, parent_id, title, summary, extra_json, rationale, now],
+        )?;
+        Ok(())
+    }
+
+    /// Accept a proposed node and any proposed ancestors (so no accepted node is
+    /// ever orphaned under a proposed parent). Returns the ids newly flipped to
+    /// accepted (for ledger events). Idempotent on already-accepted nodes.
+    pub fn accept_class_node(&self, id: &str) -> rusqlite::Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        Self::accept_node_chain(&conn, id)
+    }
+
+    fn accept_node_chain(conn: &rusqlite::Connection, id: &str) -> rusqlite::Result<Vec<String>> {
+        let now = crate::ledger::now_millis();
+        let mut flipped = Vec::new();
+        let mut cur = Some(id.to_string());
+        let mut guard = 0;
+        while let Some(nid) = cur {
+            guard += 1;
+            if guard > 32 {
+                break;
+            }
+            let row: Option<(Option<String>, String)> = conn
+                .query_row(
+                    "SELECT parent_id, status FROM class_nodes WHERE id = ?1",
+                    params![nid],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let Some((parent, status)) = row else { break };
+            if status == "proposed" {
+                conn.execute(
+                    "UPDATE class_nodes SET status = 'accepted', curated_by = ?2, updated_at = ?3 WHERE id = ?1",
+                    params![nid, crate::ledger::local_author(), now],
+                )?;
+                flipped.push(nid.clone());
+            }
+            cur = parent;
+        }
+        Ok(flipped)
+    }
+
+    /// Accept EVERY currently-proposed node and link in one shot — the
+    /// auto-organize path (Organize applies the classifier's work directly
+    /// rather than gating it behind per-item review). Returns the node ids that
+    /// were flipped, so the caller can emit their `class_curate` ledger events.
+    /// Structural proposals are applied separately (see `apply_class_proposal`).
+    pub fn accept_all_pending(&self) -> rusqlite::Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let now = crate::ledger::now_millis();
+        let author = crate::ledger::local_author();
+        let mut stmt = conn.prepare("SELECT id FROM class_nodes WHERE status = 'proposed'")?;
+        let ids: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        drop(stmt);
+        conn.execute(
+            "UPDATE class_nodes SET status = 'accepted', curated_by = ?1, updated_at = ?2
+             WHERE status = 'proposed'",
+            params![author, now],
+        )?;
+        conn.execute(
+            "UPDATE class_links SET status = 'accepted' WHERE status = 'proposed'",
+            [],
+        )?;
+        Ok(ids)
+    }
+
+    /// Accept a proposed link, ensuring its node (and ancestors) are accepted.
+    /// Returns (node_id, newly-accepted ancestor node ids).
+    pub fn accept_class_link(&self, link_id: i64) -> rusqlite::Result<Option<(String, Vec<String>)>> {
+        let conn = self.conn.lock().unwrap();
+        let node_id: Option<String> = conn
+            .query_row(
+                "SELECT node_id FROM class_links WHERE id = ?1",
+                params![link_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(node_id) = node_id else { return Ok(None) };
+        conn.execute(
+            "UPDATE class_links SET status = 'accepted' WHERE id = ?1",
+            params![link_id],
+        )?;
+        let flipped = Self::accept_node_chain(&conn, &node_id)?;
+        Ok(Some((node_id, flipped)))
+    }
+
+    /// Reject (delete) a node and its whole proposed/accepted subtree + links.
+    /// Used to reject a proposed node; also the cleanup primitive for merges.
+    pub fn reject_class_node(&self, id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        Self::delete_node_subtree(&conn, id)
+    }
+
+    fn delete_node_subtree(conn: &rusqlite::Connection, id: &str) -> rusqlite::Result<()> {
+        // Gather the subtree (BFS) so we delete children before/with the root.
+        let mut stack = vec![id.to_string()];
+        let mut all = Vec::new();
+        let mut guard = 0;
+        while let Some(nid) = stack.pop() {
+            guard += 1;
+            if guard > 10_000 {
+                break;
+            }
+            all.push(nid.clone());
+            let mut stmt =
+                conn.prepare("SELECT id FROM class_nodes WHERE parent_id = ?1")?;
+            let kids: Vec<String> = stmt
+                .query_map(params![nid], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            stack.extend(kids);
+        }
+        for nid in &all {
+            conn.execute("DELETE FROM class_links WHERE node_id = ?1", params![nid])?;
+            conn.execute("DELETE FROM class_nodes WHERE id = ?1", params![nid])?;
+        }
+        Ok(())
+    }
+
+    pub fn reject_class_link(&self, link_id: i64) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM class_links WHERE id = ?1", params![link_id])?;
+        Ok(())
+    }
+
+    pub fn set_class_node_pinned(&self, id: &str, pinned: bool) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE class_nodes SET pinned = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, pinned as i64, crate::ledger::now_millis()],
+        )?;
+        Ok(())
+    }
+
+    pub fn rename_class_node(&self, id: &str, title: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE class_nodes SET title = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, title, crate::ledger::now_millis()],
+        )?;
+        Ok(())
+    }
+
+    fn row_to_proposal(r: &rusqlite::Row) -> rusqlite::Result<crate::classmem::ClassProposalRow> {
+        Ok(crate::classmem::ClassProposalRow {
+            id: r.get(0)?,
+            run_id: r.get(1)?,
+            op: r.get(2)?,
+            node_id: r.get(3)?,
+            parent_id: r.get(4)?,
+            title: r.get(5)?,
+            summary: r.get(6)?,
+            extra_json: r.get(7)?,
+            rationale: r.get(8)?,
+            status: r.get(9)?,
+            created_at: r.get(10)?,
+        })
+    }
+
+    /// The pending structural proposals (promote/split/merge/collapse).
+    pub fn list_class_proposals(&self) -> rusqlite::Result<Vec<crate::classmem::ClassProposalRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, run_id, op, node_id, parent_id, title, summary, extra_json,
+                    rationale, status, created_at
+             FROM class_proposals WHERE status = 'proposed' ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map([], Self::row_to_proposal)?;
+        rows.collect()
+    }
+
+    pub fn get_class_proposal(
+        &self,
+        id: i64,
+    ) -> rusqlite::Result<Option<crate::classmem::ClassProposalRow>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, run_id, op, node_id, parent_id, title, summary, extra_json,
+                    rationale, status, created_at
+             FROM class_proposals WHERE id = ?1",
+            params![id],
+            Self::row_to_proposal,
+        )
+        .optional()
+    }
+
+    pub fn reject_class_proposal(&self, id: i64) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM class_proposals WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Apply (accept) a structural proposal: mutate the accepted tree and drop
+    /// the proposal row. Returns the facts for the `taxonomy_reorg` ledger event.
+    /// Promotion re-parents preserving id/links/pins/subtree; collapse creates a
+    /// digest node citing exact ledger seqs and removes the cold subtree.
+    pub fn apply_class_proposal(
+        &self,
+        id: i64,
+    ) -> rusqlite::Result<Option<crate::classmem::AppliedReorg>> {
+        let p = match self.get_class_proposal(id)? {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let conn = self.conn.lock().unwrap();
+        let now = crate::ledger::now_millis();
+        let detail: String = match p.op.as_str() {
+            "promote" => {
+                let node = p.node_id.clone().unwrap_or_default();
+                // new_parent may be NULL → promote to a root.
+                conn.execute(
+                    "UPDATE class_nodes SET parent_id = ?2, updated_at = ?3 WHERE id = ?1",
+                    params![node, p.parent_id, now],
+                )?;
+                format!("→ parent {}", p.parent_id.as_deref().unwrap_or("(root)"))
+            }
+            "collapse" => {
+                let node = p.node_id.clone().unwrap_or_default();
+                // Hard guard (covers the manual path too): pins are an absolute
+                // anti-decay veto — never collapse a pinned branch. Drop the
+                // proposal as a no-op; unpin first to collapse.
+                if Self::subtree_pinned(&conn, &node)? {
+                    self.drop_proposal_locked(&conn, id)?;
+                    return Ok(None);
+                }
+                // Parent + title of the cold branch, for the digest placement.
+                let (parent, title): (Option<String>, String) = conn.query_row(
+                    "SELECT parent_id, title FROM class_nodes WHERE id = ?1",
+                    params![node],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                let digest_id = crate::classmem::new_node_id();
+                let digest_title = p.title.clone().unwrap_or_else(|| format!("{title} (digest)"));
+                conn.execute(
+                    "INSERT INTO class_nodes
+                        (id, parent_id, kind, title, summary, project_path, ip_name,
+                         status, pinned, curated_by, created_at, updated_at)
+                     VALUES (?1, ?2, 'digest', ?3, ?4, NULL, NULL, 'accepted', 0,
+                             ?5, ?6, ?6)",
+                    params![digest_id, parent, digest_title, p.summary, crate::ledger::local_author(), now],
+                )?;
+                // Citation links to the exact ledger seqs.
+                if let Some(extra) = &p.extra_json {
+                    if let Ok(seqs) = serde_json::from_str::<Vec<i64>>(extra) {
+                        for seq in &seqs {
+                            conn.execute(
+                                "INSERT INTO class_links
+                                    (node_id, target_kind, target_id, note, status, created_at)
+                                 VALUES (?1, 'ledger', ?2, NULL, 'accepted', ?3)
+                                 ON CONFLICT(node_id, target_kind, target_id) DO NOTHING",
+                                params![digest_id, seq.to_string(), now],
+                            )?;
+                        }
+                    }
+                }
+                // Remove the cold subtree (its sourcing now lives in the digest's
+                // citations, one hop away).
+                Self::delete_node_subtree(&conn, &node)?;
+                format!("digest {digest_id}")
+            }
+            "merge" => {
+                let ids: Vec<String> = p
+                    .extra_json
+                    .as_deref()
+                    .and_then(|e| serde_json::from_str(e).ok())
+                    .unwrap_or_default();
+                if ids.is_empty() {
+                    self.drop_proposal_locked(&conn, id)?;
+                    return Ok(None);
+                }
+                let target = ids[0].clone();
+                if let Some(t) = &p.title {
+                    conn.execute(
+                        "UPDATE class_nodes SET title = ?2, updated_at = ?3 WHERE id = ?1",
+                        params![target, t, now],
+                    )?;
+                }
+                if let Some(parent) = &p.parent_id {
+                    conn.execute(
+                        "UPDATE class_nodes SET parent_id = ?2, updated_at = ?3 WHERE id = ?1",
+                        params![target, parent, now],
+                    )?;
+                }
+                for other in ids.iter().skip(1) {
+                    // Move links and children onto the target, then delete it.
+                    conn.execute(
+                        "UPDATE OR IGNORE class_links SET node_id = ?2 WHERE node_id = ?1",
+                        params![other, target],
+                    )?;
+                    conn.execute(
+                        "DELETE FROM class_links WHERE node_id = ?1",
+                        params![other],
+                    )?;
+                    conn.execute(
+                        "UPDATE class_nodes SET parent_id = ?2, updated_at = ?3 WHERE parent_id = ?1",
+                        params![other, target, now],
+                    )?;
+                    conn.execute("DELETE FROM class_nodes WHERE id = ?1", params![other])?;
+                }
+                format!("merged {} into {target}", ids.len())
+            }
+            "split" => {
+                let node = p.node_id.clone().unwrap_or_default();
+                let parent: Option<String> = conn.query_row(
+                    "SELECT parent_id FROM class_nodes WHERE id = ?1",
+                    params![node],
+                    |r| r.get(0),
+                )?;
+                let parts: Vec<crate::classmem::SplitPart> = p
+                    .extra_json
+                    .as_deref()
+                    .and_then(|e| serde_json::from_str(e).ok())
+                    .unwrap_or_default();
+                let mut made = 0;
+                for part in &parts {
+                    let nid = crate::classmem::new_node_id();
+                    conn.execute(
+                        "INSERT INTO class_nodes
+                            (id, parent_id, kind, title, summary, project_path, ip_name,
+                             status, pinned, curated_by, created_at, updated_at)
+                         VALUES (?1, ?2, 'node', ?3, NULL, NULL, NULL, 'accepted', 0,
+                                 ?4, ?5, ?5)",
+                        params![nid, parent, part.title, crate::ledger::local_author(), now],
+                    )?;
+                    for lid in &part.link_ids {
+                        conn.execute(
+                            "UPDATE OR IGNORE class_links SET node_id = ?2 WHERE id = ?1 AND node_id = ?3",
+                            params![lid, nid, node],
+                        )?;
+                    }
+                    made += 1;
+                }
+                format!("split into {made}")
+            }
+            _ => {
+                self.drop_proposal_locked(&conn, id)?;
+                return Ok(None);
+            }
+        };
+        self.drop_proposal_locked(&conn, id)?;
+        Ok(Some(crate::classmem::AppliedReorg {
+            op: p.op,
+            node_id: p.node_id.unwrap_or_default(),
+            detail,
+        }))
+    }
+
+    fn drop_proposal_locked(&self, conn: &rusqlite::Connection, id: i64) -> rusqlite::Result<()> {
+        conn.execute("DELETE FROM class_proposals WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    // --- class runs + lake delta ---
+
+    /// The maximum ledger seq (the delta ceiling for a classifier run). 0 if the
+    /// chain is empty.
+    pub fn max_ledger_seq(&self) -> rusqlite::Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT COALESCE(MAX(seq), 0) FROM ledger_events", [], |r| r.get(0))
+    }
+
+    /// The seq the last completed classifier run consumed up to — the delta
+    /// floor for the next run. 0 when no run has completed.
+    pub fn last_run_seq_to(&self) -> rusqlite::Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COALESCE(MAX(seq_to), 0) FROM class_runs WHERE status = 'done'",
+            [],
+            |r| r.get(0),
+        )
+    }
+
+    pub fn insert_class_run(&self, seq_from: i64, seq_to: i64) -> rusqlite::Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO class_runs (started_at, status, seq_from, seq_to)
+             VALUES (?1, 'running', ?2, ?3)",
+            params![crate::ledger::now_millis(), seq_from, seq_to],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn finish_class_run(
+        &self,
+        id: i64,
+        status: &str,
+        claude_session_id: Option<&str>,
+        summary: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE class_runs SET status = ?2, finished_at = ?3, claude_session_id = ?4, summary = ?5
+             WHERE id = ?1",
+            params![id, status, crate::ledger::now_millis(), claude_session_id, summary],
+        )?;
+        Ok(())
+    }
+
+    pub fn latest_class_run(&self) -> rusqlite::Result<Option<crate::classmem::ClassRun>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, started_at, finished_at, status, seq_from, seq_to, claude_session_id, summary
+             FROM class_runs ORDER BY id DESC LIMIT 1",
+            [],
+            |r| {
+                Ok(crate::classmem::ClassRun {
+                    id: r.get(0)?,
+                    started_at: r.get(1)?,
+                    finished_at: r.get(2)?,
+                    status: r.get(3)?,
+                    seq_from: r.get(4)?,
+                    seq_to: r.get(5)?,
+                    claude_session_id: r.get(6)?,
+                    summary: r.get(7)?,
+                })
+            },
+        )
+        .optional()
+    }
+
+    /// Lake items (prompts + decision events) with `seq > since_seq`, oldest
+    /// first — the classifier's delta input and the `/v1/memory/prompts` route.
+    /// Bodies are truncated to keep the vector light.
+    pub fn list_lake_items_since(
+        &self,
+        since_seq: i64,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<crate::classmem::LakeItem>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT le.seq, le.ts, le.kind, le.ref_kind, le.ref_id, le.session_id,
+                    p.surface, p.origin, p.role, p.mission_id, p.project_path, p.body
+             FROM ledger_events le
+             LEFT JOIN prompts p ON le.prompt_id = p.id
+             WHERE le.seq > ?1
+             ORDER BY le.seq ASC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![since_seq, limit], |r| {
+            let body: Option<String> = r.get(11)?;
+            Ok(crate::classmem::LakeItem {
+                seq: r.get(0)?,
+                ts: r.get(1)?,
+                kind: r.get(2)?,
+                ref_kind: r.get(3)?,
+                ref_id: r.get(4)?,
+                session_id: r.get(5)?,
+                surface: r.get(6)?,
+                origin: r.get(7)?,
+                role: r.get(8)?,
+                mission_id: r.get(9)?,
+                project_path: r.get(10)?,
+                body: body.map(|b| {
+                    if b.chars().count() > 4000 {
+                        b.chars().take(4000).collect::<String>() + "…"
+                    } else {
+                        b
+                    }
+                }),
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Every node plus its total link count (one query, no N+1) — backs the tree
+    /// view's leaf-count badges.
+    pub fn list_class_nodes_with_counts(
+        &self,
+    ) -> rusqlite::Result<Vec<(crate::classmem::ClassNode, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT n.id, n.parent_id, n.kind, n.title, n.summary, n.project_path,
+                    n.ip_name, n.status, n.pinned, n.curated_by, n.created_at, n.updated_at,
+                    (SELECT COUNT(*) FROM class_links l WHERE l.node_id = n.id) AS link_count
+             FROM class_nodes n ORDER BY n.title ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((Self::row_to_class_node(r)?, r.get::<_, i64>(12)?))
+        })?;
+        rows.collect()
+    }
+
+    /// Per-node DIRECT link activity: `node_id → (link_count, newest_ts?)`. The
+    /// timestamp is the max `ledger_events.ts` among the node's own links that
+    /// resolve to a ledger seq (prompt/decision/ledger). Rolled up into subtree
+    /// stats by `classmem::subtree_stats` — the temporal facts that give "cold"
+    /// a scope.
+    pub fn node_direct_link_activity(
+        &self,
+    ) -> rusqlite::Result<std::collections::HashMap<String, (i64, Option<i64>)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT l.node_id, COUNT(*),
+                    MAX(CASE WHEN l.target_kind IN ('prompt','decision','ledger')
+                        THEN (SELECT le.ts FROM ledger_events le
+                              WHERE le.seq = CAST(l.target_id AS INTEGER))
+                        ELSE NULL END)
+             FROM class_links l GROUP BY l.node_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<i64>>(2)?))
+        })?;
+        let mut map = std::collections::HashMap::new();
+        for row in rows {
+            let (id, count, ts) = row?;
+            map.insert(id, (count, ts));
+        }
+        Ok(map)
+    }
+
+    /// The lake's temporal envelope (oldest/newest ledger ts) — the reference
+    /// frame coldness is measured against (never wall-clock).
+    pub fn lake_envelope(&self) -> rusqlite::Result<crate::classmem::LakeEnvelope> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COALESCE(MIN(ts), 0), COALESCE(MAX(ts), 0) FROM ledger_events",
+            [],
+            |r| {
+                Ok(crate::classmem::LakeEnvelope {
+                    oldest: r.get(0)?,
+                    newest: r.get(1)?,
+                })
+            },
+        )
+    }
+
+    fn subtree_pinned(conn: &rusqlite::Connection, id: &str) -> rusqlite::Result<bool> {
+        let mut stack = vec![id.to_string()];
+        let mut guard = 0;
+        while let Some(nid) = stack.pop() {
+            guard += 1;
+            if guard > 10_000 {
+                break;
+            }
+            let pinned: Option<i64> = conn
+                .query_row("SELECT pinned FROM class_nodes WHERE id = ?1", params![nid], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            if pinned == Some(1) {
+                return Ok(true);
+            }
+            let mut stmt = conn.prepare("SELECT id FROM class_nodes WHERE parent_id = ?1")?;
+            let kids: Vec<String> = stmt
+                .query_map(params![nid], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            stack.extend(kids);
+        }
+        Ok(false)
+    }
+
+    /// True if a node or any descendant is pinned — the anti-decay veto the
+    /// collapse guard consults.
+    pub fn subtree_has_pin(&self, id: &str) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Self::subtree_pinned(&conn, id)
+    }
+
+    /// A short human label for a link target (best-effort). Prompt/decision/
+    /// ledger targets carry a numeric ledger seq — resolve it to the prompt body
+    /// snippet or the event kind. Other kinds render from the id alone.
+    pub fn link_preview(&self, target_kind: &str, target_id: &str) -> Option<String> {
+        if !matches!(target_kind, "prompt" | "decision" | "ledger") {
+            return None;
+        }
+        let seq: i64 = target_id.trim().parse().ok()?;
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT le.kind, p.body
+             FROM ledger_events le LEFT JOIN prompts p ON le.prompt_id = p.id
+             WHERE le.seq = ?1",
+            params![seq],
+            |r| {
+                let kind: String = r.get(0)?;
+                let body: Option<String> = r.get(1)?;
+                Ok(match body {
+                    Some(b) => {
+                        let one = b.replace('\n', " ");
+                        let snip: String = one.chars().take(120).collect();
+                        snip
+                    }
+                    None => format!("[{kind} event]"),
+                })
+            },
+        )
+        .optional()
+        .ok()
+        .flatten()
     }
 
     pub fn insert_comment(
@@ -2133,6 +3369,541 @@ mod tests {
     fn make_store() -> SessionStore {
         let db = Arc::new(Database::open_in_memory().unwrap());
         SessionStore::new(db)
+    }
+
+    fn prompt_row<'a>(body: &'a str, bh: &'a str, sid: Option<&'a str>) -> crate::ledger::PromptRow<'a> {
+        crate::ledger::PromptRow {
+            ts: 1000,
+            source: "hook",
+            origin: "redline",
+            surface: "pty",
+            role: None,
+            session_id: None,
+            claude_session_id: sid,
+            mission_id: None,
+            project_path: Some("/proj"),
+            body,
+            body_hash: bh,
+        }
+    }
+
+    fn append<'a>(db: &Database, kind: &'a str, ph: &'a str) -> crate::ledger::LedgerEventRow {
+        db.append_ledger_event(&crate::ledger::LedgerAppend {
+            kind,
+            author: "tester",
+            ts: 1000,
+            prompt_id: None,
+            session_id: Some("s"),
+            version_number: None,
+            ref_kind: Some("session"),
+            ref_id: Some("s"),
+            payload_hash: ph,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn ledger_chain_builds_and_verifies() {
+        let db = Database::open_in_memory().unwrap();
+        let e1 = append(&db, "prompt", "h1");
+        let e2 = append(&db, "approval", "h2");
+        let e3 = append(&db, "revision", "h3");
+        // seq is monotonic, and each row commits to its predecessor's hash.
+        assert_eq!((e1.seq, e2.seq, e3.seq), (1, 2, 3));
+        assert_eq!(e1.prev_hash, crate::ledger::GENESIS_PREV);
+        assert_eq!(e2.prev_hash, e1.entry_hash);
+        assert_eq!(e3.prev_hash, e2.entry_hash);
+
+        let v = db.verify_ledger_chain().unwrap();
+        assert!(v.ok);
+        assert_eq!(v.checked, 3);
+        assert_eq!(v.first_bad_seq, None);
+        assert_eq!(v.head_hash.as_deref(), Some(e3.entry_hash.as_str()));
+    }
+
+    // --- ClassMemory (Phase 2) --------------------------------------------
+
+    use crate::classmem::{Proposal, SplitPart};
+
+    fn accepted_node(db: &Database, id: &str, parent: Option<&str>, title: &str) {
+        let now = crate::ledger::now_millis();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO class_nodes
+                (id, parent_id, kind, title, summary, project_path, ip_name,
+                 status, pinned, curated_by, created_at, updated_at)
+             VALUES (?1, ?2, 'node', ?3, NULL, NULL, NULL, 'accepted', 0, 'user', ?4, ?4)",
+            params![id, parent, title, now],
+        )
+        .unwrap();
+    }
+
+    fn add_link(db: &Database, node: &str, kind: &str, target: &str) -> i64 {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO class_links (node_id, target_kind, target_id, note, status, created_at)
+             VALUES (?1, ?2, ?3, NULL, 'accepted', 1000)",
+            params![node, kind, target],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn count_reorg_events(db: &Database) -> i64 {
+        let conn = db.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM ledger_events WHERE kind = 'taxonomy_reorg'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn class_tables_exist_and_seed_is_idempotent() {
+        let db = Database::open_in_memory().unwrap();
+        let rows = crate::classmem::seed_root_rows(&[
+            "/x/redline".to_string(),
+            "/x/muslimlegalconnect".to_string(),
+        ]);
+        assert_eq!(db.seed_class_roots(&rows).unwrap(), 3); // 2 repos + ~general
+        assert_eq!(db.seed_class_roots(&rows).unwrap(), 0); // idempotent
+        let nodes = db.list_class_nodes().unwrap();
+        assert_eq!(nodes.len(), 3);
+        assert!(nodes.iter().all(|n| n.status == "proposed" && n.parent_id.is_none()));
+    }
+
+    #[test]
+    fn stage_create_then_accept_writes_curate_event_and_is_idempotent() {
+        let db = Database::open_in_memory().unwrap();
+        accepted_node(&db, "root-r", None, "redline");
+        let out = db
+            .stage_proposal(
+                None,
+                &Proposal::Create {
+                    parent_id: "root-r".into(),
+                    title: "Loop Engineering".into(),
+                    rationale: None,
+                },
+            )
+            .unwrap();
+        assert!(matches!(out, crate::classmem::StagedOutcome::Node));
+        let staged = db.list_class_nodes().unwrap();
+        let node = staged.iter().find(|n| n.title == "Loop Engineering").unwrap();
+        assert_eq!(node.status, "proposed");
+
+        // Accept → accepted + exactly one class_curate ledger event.
+        let flipped = db.accept_class_node(&node.id).unwrap();
+        assert_eq!(flipped, vec![node.id.clone()]);
+        for nid in &flipped {
+            crate::classmem::record_curate(&db, nid, "accept", "");
+        }
+        assert_eq!(db.get_class_node(&node.id).unwrap().unwrap().status, "accepted");
+        // Re-accept flips nothing (idempotent — no duplicate flip).
+        assert!(db.accept_class_node(&node.id).unwrap().is_empty());
+        let n: i64 = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM ledger_events WHERE kind = 'class_curate'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn accepting_a_link_accepts_its_ancestor_chain() {
+        let db = Database::open_in_memory().unwrap();
+        accepted_node(&db, "root-r", None, "redline");
+        // file with a new sub_class → stages a proposed sub-node + a proposed link.
+        let out = db
+            .stage_proposal(
+                None,
+                &Proposal::File {
+                    parent_id: "root-r".into(),
+                    sub_class: Some("Loop Engineering".into()),
+                    target_kind: "prompt".into(),
+                    target_id: "42".into(),
+                    note: None,
+                    rationale: None,
+                },
+            )
+            .unwrap();
+        assert!(matches!(out, crate::classmem::StagedOutcome::Link { created_node: true }));
+        let sub = db
+            .list_class_nodes()
+            .unwrap()
+            .into_iter()
+            .find(|n| n.title == "Loop Engineering")
+            .unwrap();
+        assert_eq!(sub.status, "proposed");
+        let link = db.list_class_links_for_node(&sub.id).unwrap().remove(0);
+        assert_eq!(link.status, "proposed");
+
+        // Accepting the link accepts the (proposed) sub-node too.
+        let (node_id, flipped) = db.accept_class_link(link.id).unwrap().unwrap();
+        assert_eq!(node_id, sub.id);
+        assert_eq!(flipped, vec![sub.id.clone()]);
+        assert_eq!(db.get_class_node(&sub.id).unwrap().unwrap().status, "accepted");
+        assert_eq!(
+            db.list_class_links_for_node(&sub.id).unwrap()[0].status,
+            "accepted"
+        );
+    }
+
+    #[test]
+    fn reject_node_deletes_its_subtree_and_links() {
+        let db = Database::open_in_memory().unwrap();
+        accepted_node(&db, "root-r", None, "redline");
+        accepted_node(&db, "topic", Some("root-r"), "Topic");
+        accepted_node(&db, "sub", Some("topic"), "Sub");
+        add_link(&db, "sub", "prompt", "7");
+        db.reject_class_node("topic").unwrap();
+        assert!(db.get_class_node("topic").unwrap().is_none());
+        assert!(db.get_class_node("sub").unwrap().is_none());
+        assert!(db.list_class_links_for_node("sub").unwrap().is_empty());
+        assert!(db.get_class_node("root-r").unwrap().is_some()); // root untouched
+    }
+
+    #[test]
+    fn promotion_preserves_id_links_pins_and_subtree_and_writes_reorg() {
+        let db = Database::open_in_memory().unwrap();
+        accepted_node(&db, "root-a", None, "A");
+        accepted_node(&db, "root-b", None, "B");
+        accepted_node(&db, "grown", Some("root-a"), "Grown Topic");
+        accepted_node(&db, "child", Some("grown"), "Child");
+        let link_id = add_link(&db, "grown", "prompt", "99");
+        db.set_class_node_pinned("grown", true).unwrap();
+
+        // Stage + apply a promote of `grown` from root-a to root-b.
+        db.stage_proposal(
+            None,
+            &Proposal::Promote {
+                node_id: "grown".into(),
+                new_parent_id: Some("root-b".into()),
+                rationale: Some("earns its own class".into()),
+            },
+        )
+        .unwrap();
+        let prop = db.list_class_proposals().unwrap().remove(0);
+        let applied = db.apply_class_proposal(prop.id).unwrap().unwrap();
+        crate::classmem::record_reorg(&db, &applied.op, &applied.node_id, &applied.detail);
+
+        let g = db.get_class_node("grown").unwrap().unwrap();
+        assert_eq!(g.id, "grown"); // id preserved
+        assert_eq!(g.parent_id.as_deref(), Some("root-b")); // re-parented
+        assert!(g.pinned); // pin preserved
+        // links preserved (same id)
+        let links = db.list_class_links_for_node("grown").unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].id, link_id);
+        // subtree preserved
+        assert_eq!(
+            db.get_class_node("child").unwrap().unwrap().parent_id.as_deref(),
+            Some("grown")
+        );
+        // proposal consumed + a reorg ledger event written
+        assert!(db.list_class_proposals().unwrap().is_empty());
+        assert_eq!(count_reorg_events(&db), 1);
+    }
+
+    #[test]
+    fn collapse_creates_digest_with_citations_and_removes_cold_branch() {
+        let db = Database::open_in_memory().unwrap();
+        accepted_node(&db, "root-r", None, "redline");
+        accepted_node(&db, "cold", Some("root-r"), "Old Research");
+        add_link(&db, "cold", "prompt", "10");
+        // Two real ledger rows to cite (so link_preview can resolve them later).
+        append(&db, "prompt", "h10");
+        append(&db, "approval", "h11");
+
+        db.stage_proposal(
+            None,
+            &Proposal::Collapse {
+                node_id: "cold".into(),
+                summary: "Explored X; parked, no position taken.".into(),
+                cite_seqs: vec![1, 2],
+                rationale: Some("cold, unpinned".into()),
+            },
+        )
+        .unwrap();
+        let prop = db.list_class_proposals().unwrap().remove(0);
+        let applied = db.apply_class_proposal(prop.id).unwrap().unwrap();
+        crate::classmem::record_reorg(&db, &applied.op, &applied.node_id, &applied.detail);
+
+        // Original cold branch is gone.
+        assert!(db.get_class_node("cold").unwrap().is_none());
+        // A digest node exists under the root with the summary + citation links.
+        let digest = db
+            .list_class_nodes()
+            .unwrap()
+            .into_iter()
+            .find(|n| n.kind == "digest")
+            .unwrap();
+        assert_eq!(digest.parent_id.as_deref(), Some("root-r"));
+        assert_eq!(digest.summary.as_deref(), Some("Explored X; parked, no position taken."));
+        let cites = db.list_class_links_for_node(&digest.id).unwrap();
+        assert_eq!(cites.len(), 2);
+        assert!(cites.iter().all(|l| l.target_kind == "ledger"));
+        assert_eq!(count_reorg_events(&db), 1);
+    }
+
+    #[test]
+    fn collapse_refuses_a_pinned_branch() {
+        let db = Database::open_in_memory().unwrap();
+        accepted_node(&db, "root-r", None, "redline");
+        accepted_node(&db, "cold", Some("root-r"), "Pinned Topic");
+        add_link(&db, "cold", "prompt", "1");
+        db.set_class_node_pinned("cold", true).unwrap();
+        assert!(db.subtree_has_pin("cold").unwrap());
+
+        db.stage_proposal(
+            None,
+            &Proposal::Collapse {
+                node_id: "cold".into(),
+                summary: "should not happen".into(),
+                cite_seqs: vec![1],
+                rationale: None,
+            },
+        )
+        .unwrap();
+        let prop = db.list_class_proposals().unwrap().remove(0);
+        // Pins veto collapse — the op is a no-op and the branch survives intact.
+        assert!(db.apply_class_proposal(prop.id).unwrap().is_none());
+        assert!(db.get_class_node("cold").unwrap().is_some());
+        assert!(db.list_class_nodes().unwrap().iter().all(|n| n.kind != "digest"));
+    }
+
+    #[test]
+    fn activity_and_envelope_feed_coldness() {
+        let db = Database::open_in_memory().unwrap();
+        accepted_node(&db, "root-r", None, "redline");
+        // Two ledger rows at distinct ts, linked under the node.
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO ledger_events (seq, ts, kind, author, payload_hash, prev_hash, entry_hash)
+                 VALUES (1, 100, 'prompt', 't', 'p', 'x', 'y'), (2, 900, 'approval', 't', 'p2', 'y', 'z')",
+                [],
+            )
+            .unwrap();
+        }
+        add_link(&db, "root-r", "prompt", "1");
+        add_link(&db, "root-r", "decision", "2");
+        let direct = db.node_direct_link_activity().unwrap();
+        let (count, last) = direct.get("root-r").copied().unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(last, Some(900)); // newest linked ledger ts
+        let env = db.lake_envelope().unwrap();
+        assert_eq!((env.oldest, env.newest), (100, 900));
+    }
+
+    #[test]
+    fn merge_folds_links_and_children_into_the_target() {
+        let db = Database::open_in_memory().unwrap();
+        accepted_node(&db, "root-r", None, "redline");
+        accepted_node(&db, "auth1", Some("root-r"), "Auth");
+        accepted_node(&db, "auth2", Some("root-r"), "Authentication");
+        accepted_node(&db, "auth2child", Some("auth2"), "Clerk");
+        add_link(&db, "auth1", "prompt", "1");
+        add_link(&db, "auth2", "prompt", "2");
+
+        db.stage_proposal(
+            None,
+            &Proposal::Merge {
+                node_ids: vec!["auth1".into(), "auth2".into()],
+                title: Some("Auth".into()),
+                parent_id: None,
+                rationale: None,
+            },
+        )
+        .unwrap();
+        let prop = db.list_class_proposals().unwrap().remove(0);
+        db.apply_class_proposal(prop.id).unwrap().unwrap();
+
+        // auth2 is gone; its link + child moved onto auth1.
+        assert!(db.get_class_node("auth2").unwrap().is_none());
+        assert_eq!(db.list_class_links_for_node("auth1").unwrap().len(), 2);
+        assert_eq!(
+            db.get_class_node("auth2child").unwrap().unwrap().parent_id.as_deref(),
+            Some("auth1")
+        );
+    }
+
+    #[test]
+    fn split_moves_named_links_into_new_sibling_nodes() {
+        let db = Database::open_in_memory().unwrap();
+        accepted_node(&db, "root-r", None, "redline");
+        accepted_node(&db, "mixed", Some("root-r"), "Mixed");
+        let l1 = add_link(&db, "mixed", "prompt", "1");
+        let l2 = add_link(&db, "mixed", "prompt", "2");
+
+        db.stage_proposal(
+            None,
+            &Proposal::Split {
+                node_id: "mixed".into(),
+                into: vec![
+                    SplitPart { title: "Clerk".into(), link_ids: vec![l1] },
+                    SplitPart { title: "Sessions".into(), link_ids: vec![l2] },
+                ],
+                rationale: None,
+            },
+        )
+        .unwrap();
+        let prop = db.list_class_proposals().unwrap().remove(0);
+        db.apply_class_proposal(prop.id).unwrap().unwrap();
+
+        let clerk = db
+            .list_class_nodes()
+            .unwrap()
+            .into_iter()
+            .find(|n| n.title == "Clerk")
+            .unwrap();
+        assert_eq!(clerk.parent_id.as_deref(), Some("root-r")); // sibling of `mixed`
+        assert_eq!(db.list_class_links_for_node(&clerk.id).unwrap()[0].id, l1);
+    }
+
+    #[test]
+    fn accept_all_pending_applies_the_whole_staged_batch() {
+        let db = Database::open_in_memory().unwrap();
+        accepted_node(&db, "root-r", None, "redline");
+        // Stage a create + a file (proposed node + proposed link).
+        db.stage_proposal(
+            None,
+            &Proposal::Create { parent_id: "root-r".into(), title: "Loop".into(), rationale: None },
+        )
+        .unwrap();
+        db.stage_proposal(
+            None,
+            &Proposal::File {
+                parent_id: "root-r".into(),
+                sub_class: Some("Collab".into()),
+                target_kind: "prompt".into(),
+                target_id: "5".into(),
+                note: None,
+                rationale: None,
+            },
+        )
+        .unwrap();
+        // Before: two proposed nodes.
+        assert_eq!(
+            db.list_class_nodes().unwrap().iter().filter(|n| n.status == "proposed").count(),
+            2
+        );
+        // Auto-organize flips everything to accepted in one shot.
+        let flipped = db.accept_all_pending().unwrap();
+        assert_eq!(flipped.len(), 2);
+        assert!(db.list_class_nodes().unwrap().iter().all(|n| n.status == "accepted"));
+        let collab = db
+            .list_class_nodes()
+            .unwrap()
+            .into_iter()
+            .find(|n| n.title == "Collab")
+            .unwrap();
+        assert_eq!(db.list_class_links_for_node(&collab.id).unwrap()[0].status, "accepted");
+        // Idempotent: nothing left to flip.
+        assert!(db.accept_all_pending().unwrap().is_empty());
+    }
+
+    #[test]
+    fn lake_items_since_returns_delta_with_bodies() {
+        let db = Database::open_in_memory().unwrap();
+        // A prompt event (with a body) + a decision event (references a row).
+        let pid = db.insert_prompt(&prompt_row("hello world", "bh1", Some("sess"))).unwrap().unwrap();
+        db.append_ledger_event(&crate::ledger::LedgerAppend {
+            kind: "prompt",
+            author: "t",
+            ts: 1,
+            prompt_id: Some(pid),
+            session_id: None,
+            version_number: None,
+            ref_kind: None,
+            ref_id: None,
+            payload_hash: "bh1",
+        })
+        .unwrap();
+        append(&db, "approval", "ap1");
+        let items = db.list_lake_items_since(0, 10).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].body.as_deref(), Some("hello world"));
+        assert!(items[1].body.is_none()); // decision event has no stored body
+        // since_seq filters.
+        assert_eq!(db.list_lake_items_since(1, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn ledger_tamper_is_detected_at_first_bad_seq() {
+        let db = Database::open_in_memory().unwrap();
+        append(&db, "prompt", "h1");
+        append(&db, "approval", "h2");
+        append(&db, "revision", "h3");
+        // Mutate a hashed field on seq 2 directly, as a tamperer would.
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("UPDATE ledger_events SET author = 'mallory' WHERE seq = 2", [])
+                .unwrap();
+        }
+        let v = db.verify_ledger_chain().unwrap();
+        assert!(!v.ok);
+        assert_eq!(v.first_bad_seq, Some(2));
+        assert_eq!(v.checked, 1, "verification stops at the first bad seq");
+    }
+
+    #[test]
+    fn prompt_insert_dedups_on_body_and_session() {
+        let db = Database::open_in_memory().unwrap();
+        // Same body + same claude session → deduped.
+        assert!(db.insert_prompt(&prompt_row("hi", "bh1", Some("cs1"))).unwrap().is_some());
+        assert!(db.insert_prompt(&prompt_row("hi", "bh1", Some("cs1"))).unwrap().is_none());
+        // Same body, different session → distinct.
+        assert!(db.insert_prompt(&prompt_row("hi", "bh1", Some("cs2"))).unwrap().is_some());
+        // NULL sessions are treated as distinct (multiple allowed).
+        assert!(db.insert_prompt(&prompt_row("hi", "bh1", None)).unwrap().is_some());
+        assert!(db.insert_prompt(&prompt_row("hi", "bh1", None)).unwrap().is_some());
+    }
+
+    #[test]
+    fn revision_and_decision_events_are_idempotent() {
+        let db = Database::open_in_memory().unwrap();
+        assert!(crate::ledger::record_revision_event(&db, "s1", 1, "plan body").unwrap().is_some());
+        // Same (session, version, payload) → skipped.
+        assert!(crate::ledger::record_revision_event(&db, "s1", 1, "plan body").unwrap().is_none());
+        // Changed body at same version → recorded.
+        assert!(crate::ledger::record_revision_event(&db, "s1", 1, "edited").unwrap().is_some());
+
+        let dec = |ph: &str| crate::ledger::DecisionInput {
+            kind: crate::ledger::EventKind::Approval,
+            author: Some("me".to_string()),
+            session_id: Some("s1"),
+            ref_kind: "session",
+            ref_id: "s1",
+            payload_hash: ph.to_string(),
+        };
+        assert!(crate::ledger::record_decision(&db, dec("p")).unwrap().is_some());
+        assert!(crate::ledger::record_decision(&db, dec("p")).unwrap().is_none());
+        assert!(db.verify_ledger_chain().unwrap().ok);
+    }
+
+    #[test]
+    fn snapshot_round_trips_and_verifies() {
+        let dir = std::env::temp_dir().join(format!("redline-ledger-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("live.db");
+        {
+            let db = Database::open(&src).unwrap();
+            append(&db, "prompt", "h1");
+            append(&db, "approval", "h2");
+            let dest = dir.join("snap.db");
+            db.snapshot_to(&dest).unwrap();
+            // Reopen the snapshot independently → chain still verifies green.
+            let snap = Database::open(&dest).unwrap();
+            let v = snap.verify_ledger_chain().unwrap();
+            assert!(v.ok);
+            assert_eq!(v.checked, 2);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

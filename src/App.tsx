@@ -66,6 +66,8 @@ import { MenuOverlayProvider } from "./components/menuOverlay";
 import { SplitPane } from "./components/SplitPane";
 import { PromptDrafter } from "./components/PromptDrafter";
 import ReviewPanel from "./components/ReviewPanel";
+import LedgerPane from "./components/LedgerPane";
+import ClassMemoryPane from "./components/ClassMemoryPane";
 import ReviewDiscussionPane from "./components/ReviewDiscussionPane";
 import { useReview } from "./hooks/useReview";
 import {
@@ -354,6 +356,14 @@ function App() {
   // line-anchored annotations.
   const [reviewOpen, setReviewOpen] = usePersistedState(
     "redline.review.open",
+    false,
+  );
+  const [ledgerOpen, setLedgerOpen] = usePersistedState(
+    "redline.ledger.open",
+    false,
+  );
+  const [classmemOpen, setClassmemOpen] = usePersistedState(
+    "redline.classmem.open",
     false,
   );
   const codeReview = useReview();
@@ -724,7 +734,7 @@ function App() {
       // If a secondary pane (browser or drafter) is filling the center pane on
       // its own, opening a document would otherwise load hidden behind it.
       // Bring up the split so both show.
-      if ((browserOpen || drafterOpen || reviewOpen) && !docOpen) {
+      if ((browserOpen || drafterOpen || reviewOpen || ledgerOpen || classmemOpen) && !docOpen) {
         setSplitRatio(0.5);
         setDocOpen(true);
       }
@@ -738,7 +748,7 @@ function App() {
         }
       }
     },
-    [setActiveFile, sidebarTab, activeTermId, browserOpen, drafterOpen, reviewOpen, docOpen, setDocOpen, setSplitRatio],
+    [setActiveFile, sidebarTab, activeTermId, browserOpen, drafterOpen, reviewOpen, ledgerOpen, classmemOpen, docOpen, setDocOpen, setSplitRatio],
   );
   const handleCloseFile = useCallback(() => {
     setActiveFile(null);
@@ -2110,6 +2120,9 @@ function App() {
   const launchPromptDraft = (markdown: string, projectPath: string | null) => {
     const trimmed = markdown.trim();
     if (!trimmed) return;
+    // Polis ledger: record the drafted prompt at launch (the plan session
+    // doesn't exist yet, so this is the only place its body is first-class).
+    void invoke("record_drafted_prompt", { markdown: trimmed, projectPath });
     const cmd = `${buildPlanLaunchCommand(trimmed, projectPath)}\r`;
     setTermFullscreen(false);
     setTermCollapsed(false);
@@ -2541,6 +2554,8 @@ function App() {
             if (!v) {
               setDrafterOpen(false);
               setReviewOpen(false);
+              setLedgerOpen(false);
+              setClassmemOpen(false);
             }
             return !v;
           });
@@ -2552,6 +2567,8 @@ function App() {
             if (!v) {
               setBrowserOpen(false);
               setReviewOpen(false);
+              setLedgerOpen(false);
+              setClassmemOpen(false);
             }
             return !v;
           });
@@ -2563,6 +2580,7 @@ function App() {
             if (!v) {
               setBrowserOpen(false);
               setDrafterOpen(false);
+              setLedgerOpen(false);
             }
             // Opening the review pulls the Discussion sidecar with it (the
             // toggle can pin it back to the plan in a split); closing it
@@ -2571,11 +2589,37 @@ function App() {
             return !v;
           });
         }}
+        ledgerOpen={ledgerOpen}
+        onToggleLedger={() => {
+          setSplitRatio(0.5);
+          setLedgerOpen((v) => {
+            if (!v) {
+              setBrowserOpen(false);
+              setDrafterOpen(false);
+              setReviewOpen(false);
+              setClassmemOpen(false);
+            }
+            return !v;
+          });
+        }}
+        classmemOpen={classmemOpen}
+        onToggleClassmem={() => {
+          setSplitRatio(0.5);
+          setClassmemOpen((v) => {
+            if (!v) {
+              setBrowserOpen(false);
+              setDrafterOpen(false);
+              setReviewOpen(false);
+              setLedgerOpen(false);
+            }
+            return !v;
+          });
+        }}
         collabActive={!!collabShare || !!joinedRoom}
         canInvite={sessionReady && !!latest}
         onInvite={() => setInviteOpen(true)}
         onJoinSession={() => setJoinOpen(true)}
-        splitActive={docOpen && (browserOpen || drafterOpen || reviewOpen)}
+        splitActive={docOpen && (browserOpen || drafterOpen || reviewOpen || ledgerOpen || classmemOpen)}
         splitVertical={splitVertical}
         onToggleSplitOrientation={() => {
           // Flipping orientation resets to 50/50 so a folded-away pane reappears.
@@ -2850,6 +2894,8 @@ function App() {
                 onClose={() => setReviewOpen(false)}
               />
             );
+            const ledgerBody = <LedgerPane onClose={() => setLedgerOpen(false)} />;
+            const classmemBody = <ClassMemoryPane onClose={() => setClassmemOpen(false)} />;
             // The browser and drafter are mutually-exclusive "secondary" panes;
             // whichever is open splits against the document with the exact same
             // SplitPane (orientation toggle, ratio and fold-to-edge divider) the
@@ -2861,7 +2907,11 @@ function App() {
                 ? drafterBody
                 : reviewOpen
                   ? reviewBody
-                  : null;
+                  : ledgerOpen
+                    ? ledgerBody
+                    : classmemOpen
+                      ? classmemBody
+                      : null;
             if (secondaryBody && docOpen)
               return (
                 <SplitPane
@@ -2927,7 +2977,7 @@ function App() {
             )}
           {/* Floating document-zoom control — pinned to the pane (doesn't scroll
               with the plan). Hidden over the folder file viewer. */}
-          {!browserOpen && !drafterOpen && !reviewOpen && !(sidebarTab.kind === "folder" && activeFile) && zoomVisible && (
+          {!browserOpen && !drafterOpen && !reviewOpen && !ledgerOpen && !classmemOpen && !(sidebarTab.kind === "folder" && activeFile) && zoomVisible && (
             <div
               ref={zoomCtrlRef}
               className="absolute flex items-center gap-1 rounded-full"

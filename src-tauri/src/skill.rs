@@ -75,6 +75,11 @@ const SKILLS: &[EmbeddedSkill] = &[
         version: 2,
         content: include_str!("../../skills/redline-review/SKILL.md"),
     },
+    EmbeddedSkill {
+        name: "classmemory",
+        version: 1,
+        content: include_str!("../../skills/classmemory/SKILL.md"),
+    },
 ];
 
 /// The version reported in the aggregate status — the redline skill is the
@@ -235,6 +240,18 @@ mod tests {
         // The linked skill must teach the "check in with a colleague" delegation.
         assert!(linked.content.contains("/v1/linked/consult"));
         assert!(linked.content.contains("digest"));
+    }
+
+    #[test]
+    fn classmemory_skill_teaches_ops_and_retrieval() {
+        let cm = SKILLS.iter().find(|s| s.name == "classmemory").unwrap();
+        // The classifier contract: the six ops + proposals-only + provenance.
+        for needle in ["proposals", "promote", "collapse", "cite_seqs", "ground truth", "/v1/memory/tree"] {
+            assert!(
+                cm.content.contains(needle),
+                "classmemory SKILL.md is missing `{needle}`"
+            );
+        }
     }
 
     #[test]

@@ -399,12 +399,241 @@ pub fn uninstall_at(path: &std::path::Path) -> Result<HookStatus, String> {
     Ok(get_status_at(path))
 }
 
+// ===========================================================================
+// UserPromptSubmit capture hook (Polis prompt store, Phase 1)
+// ===========================================================================
+//
+// A separate, command-type hook installed beside the ExitPlanMode HTTP hook.
+// It captures every interactive prompt — PTY plan sessions AND external claude
+// sessions (the global settings.json is read by every session) — by POSTing the
+// hook's stdin payload to the daemon's ingest route. Command type (not http) is
+// deliberate: `--max-time 1` + `exit 0` guarantees prompt submission is never
+// delayed or blocked by Redline being closed or slow (fail-open).
+
+/// The daemon route the capture hook POSTs to. Also the substring by which we
+/// recognize *our* UserPromptSubmit entry when reading settings.json.
+const CAPTURE_INGEST_URL: &str = "http://127.0.0.1:7676/v1/prompts/ingest";
+
+/// The command-type hook body. Claude pipes the UserPromptSubmit JSON
+/// (`{session_id, cwd, prompt, prompt_id, …}` — verified against claude
+/// 2.1.199, see docs/protocol-verification.md) to this command's stdin;
+/// `--data-binary @-` forwards it verbatim to the ingest route. Always exits 0.
+fn capture_command() -> String {
+    format!(
+        "curl -s --max-time 1 -X POST -H 'Content-Type: application/json' \
+         --data-binary @- {CAPTURE_INGEST_URL} >/dev/null 2>&1; exit 0"
+    )
+}
+
+/// Is the entry's `hooks` array one of ours (a command hook whose command
+/// targets the ingest route)?
+fn entry_is_capture(entry: &Value) -> bool {
+    entry
+        .get("hooks")
+        .and_then(|v| v.as_array())
+        .is_some_and(|hooks| {
+            hooks.iter().any(|h| {
+                h.get("command")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|c| c.contains(CAPTURE_INGEST_URL))
+            })
+        })
+}
+
+pub fn capture_installed() -> bool {
+    capture_installed_at(&settings_path())
+}
+
+pub fn capture_installed_at(path: &std::path::Path) -> bool {
+    let Ok(content) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(json) = serde_json::from_str::<Value>(&content) else {
+        return false;
+    };
+    json.pointer("/hooks/UserPromptSubmit")
+        .and_then(|v| v.as_array())
+        .is_some_and(|entries| entries.iter().any(entry_is_capture))
+}
+
+pub fn install_capture() -> Result<bool, String> {
+    install_capture_at(&settings_path())
+}
+
+/// Install (or refresh) the UserPromptSubmit capture hook. Idempotent: if ours
+/// is already present, its command is rewritten to the current form (so a stale
+/// command from an older build self-heals); otherwise a new entry is appended.
+/// Preserves any other UserPromptSubmit hooks the user configured.
+pub fn install_capture_at(path: &std::path::Path) -> Result<bool, String> {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let mut root: Value = if path.exists() {
+        let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
+        if content.trim().is_empty() {
+            json!({})
+        } else {
+            serde_json::from_str(&content)
+                .map_err(|e| format!("existing settings.json is not valid JSON: {e}"))?
+        }
+    } else {
+        json!({})
+    };
+    if !root.is_object() {
+        return Err("settings.json root is not a JSON object".to_string());
+    }
+
+    let cmd = capture_command();
+    let obj = root.as_object_mut().expect("checked above");
+    let hooks_value = obj.entry("hooks".to_string()).or_insert_with(|| json!({}));
+    let hooks_obj = hooks_value
+        .as_object_mut()
+        .ok_or_else(|| "hooks field is not a JSON object".to_string())?;
+    let ups = hooks_obj
+        .entry("UserPromptSubmit".to_string())
+        .or_insert_with(|| json!([]));
+    let ups_arr = ups
+        .as_array_mut()
+        .ok_or_else(|| "hooks.UserPromptSubmit is not a JSON array".to_string())?;
+
+    let mut replaced = false;
+    for entry in ups_arr.iter_mut() {
+        if entry_is_capture(entry) {
+            entry["hooks"] = json!([{ "type": "command", "command": cmd, "timeout": 5 }]);
+            replaced = true;
+            break;
+        }
+    }
+    if !replaced {
+        ups_arr.push(json!({
+            "hooks": [ { "type": "command", "command": cmd, "timeout": 5 } ]
+        }));
+    }
+
+    let serialized = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    fs::write(path, format!("{}\n", serialized)).map_err(|e| e.to_string())?;
+    Ok(capture_installed_at(path))
+}
+
+pub fn uninstall_capture() -> Result<bool, String> {
+    uninstall_capture_at(&settings_path())
+}
+
+/// Remove only Redline's UserPromptSubmit capture entry, dropping empty
+/// containers so the file doesn't accumulate stubs (mirrors the ExitPlanMode
+/// uninstall cleanup). Returns whether the hook is still installed afterward.
+pub fn uninstall_capture_at(path: &std::path::Path) -> Result<bool, String> {
+    let Ok(content) = fs::read_to_string(path) else {
+        return Ok(false);
+    };
+    if content.trim().is_empty() {
+        return Ok(false);
+    }
+    let mut root: Value = serde_json::from_str(&content)
+        .map_err(|e| format!("existing settings.json is not valid JSON: {e}"))?;
+
+    if let Some(arr) = root
+        .pointer_mut("/hooks/UserPromptSubmit")
+        .and_then(|v| v.as_array_mut())
+    {
+        arr.retain(|entry| !entry_is_capture(entry));
+    }
+    if root
+        .pointer("/hooks/UserPromptSubmit")
+        .and_then(|v| v.as_array())
+        .is_some_and(|a| a.is_empty())
+    {
+        if let Some(hooks) = root.pointer_mut("/hooks").and_then(|v| v.as_object_mut()) {
+            hooks.remove("UserPromptSubmit");
+        }
+    }
+    if root
+        .pointer("/hooks")
+        .and_then(|v| v.as_object())
+        .is_some_and(|o| o.is_empty())
+    {
+        if let Some(obj) = root.as_object_mut() {
+            obj.remove("hooks");
+        }
+    }
+
+    let serialized = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    fs::write(path, format!("{}\n", serialized)).map_err(|e| e.to_string())?;
+    Ok(capture_installed_at(path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn tmppath() -> std::path::PathBuf {
         std::env::temp_dir().join(format!("redline-hook-{}.json", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn capture_install_uninstall_round_trip() {
+        let path = tmppath();
+        assert!(!capture_installed_at(&path));
+        assert!(install_capture_at(&path).unwrap());
+        assert!(capture_installed_at(&path));
+
+        // The command targets the ingest route and fails open.
+        let json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let cmd = json["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert!(cmd.contains(CAPTURE_INGEST_URL));
+        assert!(cmd.contains("--max-time 1"));
+        assert!(cmd.contains("exit 0"));
+        assert_eq!(
+            json["hooks"]["UserPromptSubmit"][0]["hooks"][0]["type"],
+            "command"
+        );
+
+        assert!(!uninstall_capture_at(&path).unwrap());
+        let json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(json.get("hooks").is_none(), "empty containers dropped");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn capture_install_is_idempotent_and_coexists_with_planmode_hook() {
+        let path = tmppath();
+        // Install the ExitPlanMode HTTP hook first, then the capture hook.
+        install_at(&path).unwrap();
+        install_capture_at(&path).unwrap();
+        install_capture_at(&path).unwrap(); // twice → no duplicate
+
+        let json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // Both hooks present and independent.
+        assert_eq!(json["hooks"]["PreToolUse"][0]["matcher"], "ExitPlanMode");
+        let ups = json["hooks"]["UserPromptSubmit"].as_array().unwrap();
+        assert_eq!(ups.len(), 1, "capture entry present exactly once");
+
+        // Uninstalling capture leaves the ExitPlanMode hook untouched.
+        uninstall_capture_at(&path).unwrap();
+        assert!(get_status_at(&path).installed);
+        assert!(!capture_installed_at(&path));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn capture_uninstall_preserves_foreign_userpromptsubmit_hook() {
+        let path = tmppath();
+        let existing = json!({
+            "hooks": { "UserPromptSubmit": [
+                { "hooks": [ { "type": "command", "command": "echo other" } ] }
+            ] }
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&existing).unwrap()).unwrap();
+        install_capture_at(&path).unwrap();
+        uninstall_capture_at(&path).unwrap();
+
+        let json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let arr = json["hooks"]["UserPromptSubmit"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["hooks"][0]["command"], "echo other");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

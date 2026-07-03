@@ -443,7 +443,8 @@ pub async fn voice_send(
     // bridge (with this plan's session_id baked into the curl templates), and —
     // for a fresh (non-resumed) session — the plan text so the agent knows what
     // it's discussing.
-    let send_text = if !primed.swap(true, Ordering::SeqCst) {
+    let is_first_turn = !primed.swap(true, Ordering::SeqCst);
+    let send_text = if is_first_turn {
         let bridge = bridge_preamble(&session_id);
         match &prime {
             Some(plan) => format!(
@@ -454,6 +455,23 @@ pub async fn voice_send(
     } else {
         text
     };
+
+    // Polis ledger: record the first-turn voice prompt (voice delivers turns over
+    // stdin, so the global hook usually won't see it — register defensively).
+    if is_first_turn {
+        crate::ledger::record_agent_prompt(
+            &voice.db,
+            crate::ledger::PromptSource::VoiceStream,
+            "voice",
+            &send_text,
+            None,
+            Some(session_id.clone()),
+            None,
+        );
+    } else {
+        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&send_text));
+    }
+
     let line = user_turn_line(&send_text);
 
     let mut w = stdin.lock().await;

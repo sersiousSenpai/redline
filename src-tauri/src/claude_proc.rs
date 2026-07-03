@@ -118,6 +118,47 @@ pub fn bridge_args(prompt: String, prior_session: Option<&str>) -> Vec<String> {
     args
 }
 
+/// A first-turn prompt fragment that makes a browse or linked agent aware of the
+/// active research **mission**, when one is running. Both the per-tab page
+/// discussion and the linked (spanning) discussion can run inside a mission
+/// workspace, but neither is told what the user is researching — so they answer
+/// blind to the goal. This bakes the goal in so they orient their help toward it.
+/// The mission orchestrator (`mission.rs`) embeds the goal natively and needs
+/// none of this. Returns an empty string when no mission is active or the goal is
+/// blank, so callers can push it unconditionally.
+pub fn mission_context_block(mission: Option<(&str, &str)>) -> String {
+    let Some((title, goal)) = mission else {
+        return String::new();
+    };
+    let goal = goal.trim();
+    if goal.is_empty() {
+        return String::new();
+    }
+    let mut p = String::from(
+        "A research MISSION is currently active — the user is working toward one \
+         goal across their browser tabs, and this discussion is part of that \
+         research. Keep your help oriented to the mission's goal.\n\n",
+    );
+    let title = title.trim();
+    if !title.is_empty() {
+        p.push_str(&format!("Mission: {title}\n"));
+    }
+    p.push_str("The mission's goal, in the user's words:\n\n");
+    for line in goal.lines() {
+        p.push_str("> ");
+        p.push_str(line);
+        p.push('\n');
+    }
+    p.push_str(
+        "\nThe user may refine the goal or pin more findings as they browse, so \
+         re-read the current mission and its pins whenever you need them (already \
+         permitted — no approval needed):\n  \
+         curl -s http://127.0.0.1:7676/v1/mission/active\n  \
+         curl -s http://127.0.0.1:7676/v1/mission/findings\n\n",
+    );
+    p
+}
+
 /// What one `--output-format stream-json` line means to a process reader.
 /// See `docs/protocol-verification.md` Experiment (i) for the captured shapes.
 #[derive(Debug, PartialEq)]
@@ -200,6 +241,24 @@ mod tests {
 
     fn parse(line: &str) -> StreamLine {
         classify_line(&serde_json::from_str::<Value>(line).unwrap())
+    }
+
+    #[test]
+    fn mission_context_block_empty_without_active_mission() {
+        assert_eq!(mission_context_block(None), "");
+        // A blank goal is treated as no mission.
+        assert_eq!(mission_context_block(Some(("Title", "   "))), "");
+    }
+
+    #[test]
+    fn mission_context_block_embeds_goal_and_reread_routes() {
+        let b = mission_context_block(Some(("Breach page", "Draft my breach page")));
+        assert!(b.contains("A research MISSION is currently active"));
+        assert!(b.contains("Mission: Breach page"));
+        assert!(b.contains("Draft my breach page"));
+        // Re-read routes so a mid-conversation goal/pin change stays reachable.
+        assert!(b.contains("/v1/mission/active"));
+        assert!(b.contains("/v1/mission/findings"));
     }
 
     #[test]

@@ -896,6 +896,15 @@ impl SessionStore {
         if let Err(e) = self.db.insert_revision(session_id, &revision) {
             tracing::error!(error = %e, "failed to persist revision");
         }
+        // Polis ledger: record the plan edit (idempotent per session/version/hash).
+        if let Err(e) = crate::ledger::record_revision_event(
+            &self.db,
+            session_id,
+            version_number as i64,
+            &revision.raw_plan_markdown,
+        ) {
+            tracing::warn!(error = %e, "failed to record revision ledger event");
+        }
         session.revisions.push(revision);
         if restored {
             self.carry_open_comments_forward(session, session_id, version_number);
@@ -1390,6 +1399,25 @@ impl SessionStore {
             if let Err(e) = self.db.upsert_session(session) {
                 tracing::error!(error = %e, "failed to persist session status");
             }
+            // Polis ledger: a plan approval is a decision worth recording.
+            if session.status == SessionStatus::Approved {
+                if let Err(e) = crate::ledger::record_decision(
+                    &self.db,
+                    crate::ledger::DecisionInput {
+                        kind: crate::ledger::EventKind::Approval,
+                        author: None,
+                        session_id: Some(session_id),
+                        ref_kind: "session",
+                        ref_id: session_id,
+                        payload_hash: crate::ledger::decision_payload_hash(&[
+                            ("status", "approved"),
+                            ("session", session_id),
+                        ]),
+                    },
+                ) {
+                    tracing::warn!(error = %e, "failed to record approval ledger event");
+                }
+            }
         }
     }
 
@@ -1408,6 +1436,32 @@ impl SessionStore {
                     comment.status = CommentStatus::Accepted;
                     if let Err(e) = self.db.update_comment(session_id, comment) {
                         tracing::error!(error = %e, "failed to persist accept");
+                    }
+                    // Polis ledger: accepting a resolution is a decision.
+                    let ph = crate::ledger::decision_payload_hash(&[
+                        ("comment", comment_id),
+                        ("accepted_at", &now.to_string()),
+                        (
+                            "body",
+                            comment
+                                .resolution
+                                .as_ref()
+                                .map(|r| r.body.as_str())
+                                .unwrap_or(""),
+                        ),
+                    ]);
+                    if let Err(e) = crate::ledger::record_decision(
+                        &self.db,
+                        crate::ledger::DecisionInput {
+                            kind: crate::ledger::EventKind::Resolution,
+                            author: None,
+                            session_id: Some(session_id),
+                            ref_kind: "comment",
+                            ref_id: comment_id,
+                            payload_hash: ph,
+                        },
+                    ) {
+                        tracing::warn!(error = %e, "failed to record resolution ledger event");
                     }
                     return true;
                 }
@@ -1478,6 +1532,26 @@ impl SessionStore {
                     }
                     if let Err(e) = self.db.update_comment(session_id, comment) {
                         tracing::error!(error = %e, "failed to persist reopen");
+                    }
+                    // Polis ledger: reopening a resolution (optionally as a
+                    // directive) is a decision, with its note in the hash.
+                    let ph = crate::ledger::decision_payload_hash(&[
+                        ("comment", comment_id),
+                        ("note", note.unwrap_or("")),
+                        ("as_change", if as_change { "1" } else { "0" }),
+                    ]);
+                    if let Err(e) = crate::ledger::record_decision(
+                        &self.db,
+                        crate::ledger::DecisionInput {
+                            kind: crate::ledger::EventKind::Reopen,
+                            author: None,
+                            session_id: Some(session_id),
+                            ref_kind: "comment",
+                            ref_id: comment_id,
+                            payload_hash: ph,
+                        },
+                    ) {
+                        tracing::warn!(error = %e, "failed to record reopen ledger event");
                     }
                     return true;
                 }

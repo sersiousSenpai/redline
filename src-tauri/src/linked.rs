@@ -29,7 +29,10 @@ use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdout};
 
-use crate::claude_proc::{bridge_args, classify_line, claude_command, resolve_claude_bin, StreamLine};
+use crate::claude_proc::{
+    bridge_args, classify_line, claude_command, mission_context_block, resolve_claude_bin,
+    StreamLine,
+};
 use crate::db::Database;
 use crate::state::{now_millis, Linked, LinkedMessage};
 
@@ -145,7 +148,12 @@ impl TabContext {
 /// live snapshot for grounding, the cross-tab read routes, the CONSULT mechanism
 /// (how to check in with a colleague), and the user's message. Follow-up turns
 /// re-ground on the current tab (`build_followup_prompt`) since it changes.
-fn build_first_turn_prompt(tab: &TabContext, snapshot: Option<&str>, user_text: &str) -> String {
+fn build_first_turn_prompt(
+    tab: &TabContext,
+    snapshot: Option<&str>,
+    user_text: &str,
+    mission: Option<(&str, &str)>,
+) -> String {
     let mut p = String::from(
         "You are ONE continuous discussion that follows the user across the tabs \
          of Redline's embedded browser. Unlike a page discussion (bound to one \
@@ -154,6 +162,9 @@ fn build_first_turn_prompt(tab: &TabContext, snapshot: Option<&str>, user_text: 
          currently on; weave the thread across tabs as they move, referring back \
          to what you saw on earlier tabs by number and title.\n\n",
     );
+    // A linked discussion has no goal of its OWN, but it can still run inside an
+    // active mission — when it does, orient the spanning conversation to that goal.
+    p.push_str(&mission_context_block(mission));
     p.push_str(&format!(
         "The user is currently on {}.\n\n",
         tab.describe()
@@ -348,6 +359,7 @@ pub fn linked_delete(
 #[tauri::command]
 pub async fn linked_send(
     linked: tauri::State<'_, LinkedState>,
+    active_mission: tauri::State<'_, crate::ActiveMission>,
     app: AppHandle,
     linked_id: String,
     text: String,
@@ -398,11 +410,34 @@ pub async fn linked_send(
         .map_err(|e| format!("failed to persist message: {e}"))?;
 
     // First turn embeds the role + snapshot + routes + consult docs; follow-ups
-    // re-ground on the current tab (which changed since the last turn).
+    // re-ground on the current tab (which changed since the last turn). When a
+    // mission is active, the first turn also bakes in its goal.
+    let mission = active_mission.active_goal();
     let prompt = match &prior_session {
-        None => build_first_turn_prompt(&tab, snapshot.as_deref(), &text),
+        None => build_first_turn_prompt(
+            &tab,
+            snapshot.as_deref(),
+            &text,
+            mission.as_ref().map(|(t, g)| (t.as_str(), g.as_str())),
+        ),
         Some(_) => build_followup_prompt(&tab, snapshot.as_deref(), &text),
     };
+
+    // Polis ledger: record the first-turn linked-discussion prompt; keep every
+    // agent turn out of the global-hook capture stream.
+    if prior_session.is_none() {
+        crate::ledger::record_agent_prompt(
+            &linked.db,
+            crate::ledger::PromptSource::RustFirstTurn,
+            "linked",
+            &prompt,
+            cwd.clone(),
+            None,
+            None,
+        );
+    } else {
+        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+    }
 
     let args = bridge_args(prompt, prior_session.as_deref());
 
@@ -672,10 +707,13 @@ mod tests {
             &tab(2, "Example", "https://example.com"),
             Some(r#"{"url":"https://example.com","title":"Example"}"#),
             "Compare this with the last tab.",
+            None,
         );
         // Current tab + user text present.
         assert!(p.contains("tab 2 — Example (https://example.com)"));
         assert!(p.contains("Compare this with the last tab."));
+        // With no active mission, no mission block is injected.
+        assert!(!p.contains("A research MISSION is currently active"));
         // Snapshot woven in.
         assert!(p.contains("\"title\":\"Example\""));
         // The consult mechanism + cross-tab read routes are documented.
@@ -705,11 +743,27 @@ mod tests {
 
     #[test]
     fn first_turn_without_snapshot_still_documents_consult() {
-        let p = build_first_turn_prompt(&tab(1, "", ""), None, "hi");
+        let p = build_first_turn_prompt(&tab(1, "", ""), None, "hi", None);
         assert!(p.contains("hi"));
         assert!(p.contains("/v1/linked/consult"));
         assert!(p.contains("The user is currently on tab 1."));
         // No empty snapshot header when there's no snapshot.
         assert!(!p.contains("snapshot of that tab right now"));
+    }
+
+    #[test]
+    fn first_turn_prompt_embeds_active_mission_goal() {
+        let p = build_first_turn_prompt(
+            &tab(1, "Example", "https://example.com"),
+            None,
+            "Find the best sources for me.",
+            Some(("Data-breach page", "Draft my firm's data-breach practice page")),
+        );
+        // The mission goal is baked into the spanning conversation.
+        assert!(p.contains("A research MISSION is currently active"));
+        assert!(p.contains("Draft my firm's data-breach practice page"));
+        assert!(p.contains("/v1/mission/active"));
+        // The spanning-conversation framing is still present.
+        assert!(p.contains("follows the user across the tabs"));
     }
 }

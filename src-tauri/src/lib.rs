@@ -5,6 +5,7 @@ mod ai_review;
 mod browse;
 #[cfg(target_os = "macos")]
 mod browser_popup;
+mod classmem;
 mod claude_proc;
 mod code;
 mod db;
@@ -16,6 +17,7 @@ mod fsbrowse;
 mod fswatch;
 mod highlight;
 mod hook;
+mod ledger;
 mod linked;
 mod mission;
 mod parser;
@@ -1414,12 +1416,174 @@ async fn handle_plan(
     Json(response)
 }
 
+/// The daemon's bind address. Loopback-only by invariant (cold-wallet posture,
+/// README.md/SPEC.md) — pinned by `daemon_binds_loopback_only`.
+const DAEMON_ADDR: &str = "127.0.0.1:7676";
+
+/// How many dated DB snapshots to retain under `backups/`.
+const LEDGER_BACKUP_KEEP: usize = 7;
+
+/// Crown-jewels backup: `VACUUM INTO` a dated snapshot of the whole DB under
+/// `<app-data>/backups/`, then prune to the newest `keep`. The ledger is
+/// append-only and hash-chained, so a corrupted `redline.db` would otherwise be
+/// unrecoverable; the mirror/export are secondary content copies, this protects
+/// the chain itself. Best-effort and self-contained — logs and returns on any
+/// error rather than propagating.
+fn snapshot_database(db: &db::Database, data_dir: &std::path::Path, keep: usize) {
+    let dir = data_dir.join("backups");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(error = %e, "could not create backups dir");
+        return;
+    }
+    // now_millis() is 13 digits until ~year 2286, so filenames sort
+    // chronologically by plain lexical order.
+    let dest = dir.join(format!("redline-{}.db", ledger::now_millis()));
+    if let Err(e) = db.snapshot_to(&dest) {
+        tracing::warn!(error = %e, "ledger DB snapshot failed");
+        return;
+    }
+    tracing::info!(path = %dest.display(), "ledger DB snapshot written");
+
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        let mut snaps: Vec<std::path::PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with("redline-") && n.ends_with(".db"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        snaps.sort();
+        if snaps.len() > keep {
+            for old in &snaps[..snaps.len() - keep] {
+                let _ = std::fs::remove_file(old);
+            }
+        }
+    }
+}
+
+/// Extract the submitted prompt text from a UserPromptSubmit payload. Empirical:
+/// claude 2.1.199 delivers it at `prompt` (verified via the hook rig; see
+/// docs/protocol-verification.md). We accept `user_input` too so a future key
+/// rename degrades gracefully rather than silently capturing empties.
+fn ingest_prompt_text(v: &serde_json::Value) -> String {
+    v.get("prompt")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| v.get("user_input").and_then(serde_json::Value::as_str))
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+/// Classify a captured prompt as belonging to a Redline-managed project or an
+/// external `claude` session. Fact-based: a session running in a directory
+/// Redline already tracks as a project is ours; anything else is external.
+fn classify_prompt_origin(db: &db::Database, cwd: Option<&str>) -> ledger::Origin {
+    if let Some(cwd) = cwd {
+        if db
+            .list_project_paths()
+            .map(|paths| paths.iter().any(|p| p == cwd))
+            .unwrap_or(false)
+        {
+            return ledger::Origin::Redline;
+        }
+    }
+    ledger::Origin::External
+}
+
+/// `POST /v1/prompts/ingest` — the UserPromptSubmit capture hook's sink. Records
+/// interactive prompts (PTY plan sessions + external sessions) into the ledger.
+/// Fail-open: any error returns 200 so the hook never blocks prompt submission.
+async fn handle_prompts_ingest(
+    State(app_state): State<AppState>,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    // 64KB cap (reject oversized payloads without parsing).
+    if body.len() > 64 * 1024 {
+        return (StatusCode::OK, Json(serde_json::json!({ "skipped": "too_large" })))
+            .into_response();
+    }
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return (StatusCode::OK, Json(serde_json::json!({ "skipped": "unparseable" })))
+            .into_response();
+    };
+    let prompt = ingest_prompt_text(&v);
+    if prompt.is_empty() {
+        return (StatusCode::OK, Json(serde_json::json!({ "skipped": "empty" }))).into_response();
+    }
+    let claude_session_id = v
+        .get("session_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let cwd = v
+        .get("cwd")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+
+    // A headless `claude -p` fires this hook too, so Redline's own spawned
+    // agents would be double-captured (Rust site + hook). The Rust site is
+    // authoritative; it registers the body before spawn, so claim-and-skip here.
+    let bh = ledger::body_hash(&prompt);
+    if ledger::claim_agent_prompt(&bh) {
+        return (StatusCode::OK, Json(serde_json::json!({ "skipped": "agent_dup" })))
+            .into_response();
+    }
+
+    let db = app_state.store.database();
+    let origin = classify_prompt_origin(&db, cwd.as_deref());
+    if origin == ledger::Origin::External {
+        // External-session capture toggle (default on).
+        let capture_external = db
+            .get_setting("redline.capture.externalSessions")
+            .map(|val| val != "false")
+            .unwrap_or(true);
+        if !capture_external {
+            return (StatusCode::OK, Json(serde_json::json!({ "skipped": "external_off" })))
+                .into_response();
+        }
+    }
+    let surface = if origin == ledger::Origin::Redline {
+        "pty"
+    } else {
+        "external"
+    };
+    let input = ledger::PromptInput {
+        source: ledger::PromptSource::Hook,
+        origin,
+        surface: surface.to_string(),
+        role: None,
+        session_id: None,
+        claude_session_id,
+        mission_id: None,
+        project_path: cwd,
+        body: prompt,
+    };
+    match ledger::record_prompt(&db, input) {
+        Ok(Some(seq)) => {
+            let _ = app_state.app_handle.emit("ledger-changed", ());
+            (StatusCode::CREATED, Json(serde_json::json!({ "seq": seq }))).into_response()
+        }
+        Ok(None) => {
+            (StatusCode::OK, Json(serde_json::json!({ "skipped": "dup" }))).into_response()
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "prompt ingest failed");
+            (StatusCode::OK, Json(serde_json::json!({ "skipped": "error" }))).into_response()
+        }
+    }
+}
+
 async fn run_server(state: AppState) {
     // Keep handles for the post-bind status update before the router consumes `state`.
     let daemon_status = state.daemon_status.clone();
     let app_handle = state.app_handle.clone();
     let app = Router::new()
         .route("/v1/plan", post(handle_plan))
+        // Polis prompt store (Phase 1): the global UserPromptSubmit capture hook
+        // POSTs its stdin payload here. Fail-open by design — never 500s the hook.
+        .route("/v1/prompts/ingest", post(handle_prompts_ingest))
         // Agent-in-doc (M4): the per-user agent's surface — read the plan's
         // block structure, post a tracked suggestion against a block id.
         .route("/v1/sessions/:session_id/plan", get(handle_get_latest_plan))
@@ -1474,6 +1638,14 @@ async fn run_server(state: AppState) {
         // Both ride the same pre-authorized `curl` allow as `/v1/browser/*`.
         .route("/v1/code/projects", get(handle_code_projects))
         .route("/v1/code/git", get(handle_code_git))
+        // ClassMemory (Phase 2): read-only catalog access for retrieval agents
+        // (the class-router walk) + a staging-only proposals sink. All ride the
+        // same pre-authorized `curl` allow. Nothing here accepts or moves a node
+        // — POST /proposals only stages reviewable rows.
+        .route("/v1/memory/tree", get(handle_memory_tree))
+        .route("/v1/memory/node/:id", get(handle_memory_node))
+        .route("/v1/memory/prompts", get(handle_memory_prompts))
+        .route("/v1/memory/proposals", post(handle_memory_proposals))
         // Code Review surface: the `/redline-review` skill's blocking curl.
         // Captures the diff, opens the review pane, and HOLDS the response
         // until the reviewer submits — the plan-review hold applied to code.
@@ -1487,7 +1659,7 @@ async fn run_server(state: AppState) {
                 .delete(handle_review_annotations_clear),
         )
         .with_state(state);
-    match tokio::net::TcpListener::bind("127.0.0.1:7676").await {
+    match tokio::net::TcpListener::bind(DAEMON_ADDR).await {
         Ok(listener) => {
             daemon_status.set_bound(true);
             tracing::info!("Redline daemon listening on http://127.0.0.1:7676");
@@ -2688,6 +2860,169 @@ async fn handle_code_git(
     };
     match code::run_git(&db, req).await {
         Ok(output) => Json(serde_json::json!({ "ok": true, "output": output })).into_response(),
+        Err(e) => browser_error_response(e),
+    }
+}
+
+// --- ClassMemory routes (Phase 2) ------------------------------------------
+
+/// A tree node as returned to a retrieval agent / the pane: the node plus its
+/// total link count (leaf-count badge).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TreeNodeView {
+    #[serde(flatten)]
+    node: crate::classmem::ClassNode,
+    link_count: i64,
+}
+
+#[derive(Deserialize)]
+struct MemoryTreeQ {
+    project: Option<String>,
+    root: Option<String>,
+}
+
+/// `GET /v1/memory/tree?project=&root=` — the accepted (and proposed) class tree,
+/// flat with link counts (the caller/FE builds the hierarchy). Scoped to a single
+/// root subtree when `root=<id>` or `project=<path>` is given. Read-only.
+async fn handle_memory_tree(
+    State(app_state): State<AppState>,
+    Query(q): Query<MemoryTreeQ>,
+) -> axum::response::Response {
+    let db = app_state.store.database();
+    let all = match db.list_class_nodes_with_counts() {
+        Ok(v) => v,
+        Err(e) => return browser_error_response(e.to_string()),
+    };
+    // Resolve an optional root filter (explicit root id, or the root bound to a
+    // project path).
+    let root_id: Option<String> = if let Some(r) = q.root.as_deref().filter(|s| !s.trim().is_empty()) {
+        Some(r.trim().to_string())
+    } else if let Some(p) = q.project.as_deref().filter(|s| !s.trim().is_empty()) {
+        all.iter()
+            .find(|(n, _)| n.parent_id.is_none() && n.project_path.as_deref() == Some(p.trim()))
+            .map(|(n, _)| n.id.clone())
+    } else {
+        None
+    };
+    let views: Vec<TreeNodeView> = match &root_id {
+        Some(rid) => {
+            // Keep the root and its descendants.
+            let keep = subtree_ids(&all, rid);
+            all.into_iter()
+                .filter(|(n, _)| keep.contains(&n.id))
+                .map(|(node, link_count)| TreeNodeView { node, link_count })
+                .collect()
+        }
+        None => all
+            .into_iter()
+            .map(|(node, link_count)| TreeNodeView { node, link_count })
+            .collect(),
+    };
+    Json(serde_json::json!({ "nodes": views })).into_response()
+}
+
+/// Ids of `root` and everything beneath it.
+fn subtree_ids(all: &[(crate::classmem::ClassNode, i64)], root: &str) -> std::collections::HashSet<String> {
+    let mut keep = std::collections::HashSet::new();
+    keep.insert(root.to_string());
+    // Iterate to a fixpoint (tree is small).
+    loop {
+        let before = keep.len();
+        for (n, _) in all {
+            if let Some(p) = &n.parent_id {
+                if keep.contains(p) {
+                    keep.insert(n.id.clone());
+                }
+            }
+        }
+        if keep.len() == before {
+            break;
+        }
+    }
+    keep
+}
+
+/// A link with a resolved display label.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LinkView {
+    #[serde(flatten)]
+    link: crate::classmem::ClassLink,
+    label: Option<String>,
+}
+
+/// `GET /v1/memory/node/:id` — one node, its children, and its links (pointers
+/// into the lake, with resolved labels). The retrieval agent's descend step.
+async fn handle_memory_node(
+    State(app_state): State<AppState>,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    let db = app_state.store.database();
+    let node = match db.get_class_node(&id) {
+        Ok(Some(n)) => n,
+        Ok(None) => return (StatusCode::NOT_FOUND, "no such class node").into_response(),
+        Err(e) => return browser_error_response(e.to_string()),
+    };
+    let all = db.list_class_nodes().unwrap_or_default();
+    let children: Vec<_> = all.into_iter().filter(|n| n.parent_id.as_deref() == Some(id.as_str())).collect();
+    let links: Vec<LinkView> = db
+        .list_class_links_for_node(&id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|link| {
+            let label = db.link_preview(&link.target_kind, &link.target_id);
+            LinkView { link, label }
+        })
+        .collect();
+    Json(serde_json::json!({ "node": node, "children": children, "links": links })).into_response()
+}
+
+#[derive(Deserialize)]
+struct MemoryPromptsQ {
+    since_seq: Option<i64>,
+    limit: Option<i64>,
+}
+
+/// `GET /v1/memory/prompts?since_seq=&limit=` — the lake delta (prompts +
+/// decision events) since a seq, oldest first. The classifier's delta input;
+/// also a general context read. Bounded.
+async fn handle_memory_prompts(
+    State(app_state): State<AppState>,
+    Query(q): Query<MemoryPromptsQ>,
+) -> axum::response::Response {
+    let db = app_state.store.database();
+    let limit = q.limit.unwrap_or(200).clamp(1, classmem::MAX_DELTA_ITEMS as i64);
+    let since = q.since_seq.unwrap_or(0).max(0);
+    match db.list_lake_items_since(since, limit) {
+        Ok(items) => Json(serde_json::json!({ "items": items })).into_response(),
+        Err(e) => browser_error_response(e.to_string()),
+    }
+}
+
+/// `POST /v1/memory/proposals` {proposals:[…]} — stage a batch of classifier
+/// proposals as reviewable rows. **Staging only** — nothing is accepted or
+/// moved. Mirrors the parse the internal Organize path uses, so an external tool
+/// (or the classifier itself) can stage over the curl bridge.
+async fn handle_memory_proposals(
+    State(app_state): State<AppState>,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    if body.len() > 256_000 {
+        return (StatusCode::PAYLOAD_TOO_LARGE, "proposals payload too large").into_response();
+    }
+    let text = String::from_utf8_lossy(&body);
+    let proposals = classmem::parse_proposals(&text);
+    if proposals.is_empty() {
+        return Json(serde_json::json!({ "ok": true, "staged": classmem::StageResult::default() }))
+            .into_response();
+    }
+    let db = app_state.store.database();
+    match classmem::stage_proposals(&db, None, &proposals) {
+        Ok(staged) => {
+            let _ = app_state.app_handle.emit("classmem-changed", ());
+            Json(serde_json::json!({ "ok": true, "staged": staged })).into_response()
+        }
         Err(e) => browser_error_response(e),
     }
 }
@@ -4847,7 +5182,28 @@ fn set_source_feedback(
     settings
         .db
         .upsert_source_feedback(&fb)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    // Polis ledger: a source-trust verdict (thumbs up/down on a source) is a
+    // curation signal.
+    let ph = ledger::decision_payload_hash(&[
+        ("source_feedback", &fb.id),
+        ("domain", &fb.domain),
+        ("verdict", &fb.verdict.to_string()),
+    ]);
+    if let Err(e) = ledger::record_decision(
+        &settings.db,
+        ledger::DecisionInput {
+            kind: ledger::EventKind::SourceTrust,
+            author: None,
+            session_id: None,
+            ref_kind: "source_feedback",
+            ref_id: &fb.id,
+            payload_hash: ph,
+        },
+    ) {
+        tracing::warn!(error = %e, "failed to record source-trust ledger event");
+    }
+    Ok(())
 }
 
 /// Every thumbs verdict recorded on a tab's thread, so the sources strip can
@@ -4861,6 +5217,465 @@ fn get_source_feedback(
         .db
         .get_source_feedback(&browse_id)
         .map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Polis ledger commands (Phase 1)
+// ---------------------------------------------------------------------------
+
+/// Most-recent-first ledger events for the Ledger pane.
+#[tauri::command]
+fn ledger_list_events(
+    store: tauri::State<'_, SessionStore>,
+    limit: Option<i64>,
+) -> Result<Vec<ledger::LedgerEventRow>, String> {
+    store
+        .database()
+        .list_ledger_events(limit.unwrap_or(1000))
+        .map_err(|e| e.to_string())
+}
+
+/// Re-walk the hash chain and report whether it verifies (and the first bad seq
+/// if not).
+#[tauri::command]
+fn ledger_verify(store: tauri::State<'_, SessionStore>) -> Result<ledger::ChainVerdict, String> {
+    store
+        .database()
+        .verify_ledger_chain()
+        .map_err(|e| e.to_string())
+}
+
+/// Fetch a stored prompt body by id (the Ledger pane's body viewer).
+#[tauri::command]
+fn ledger_prompt_body(
+    store: tauri::State<'_, SessionStore>,
+    id: i64,
+) -> Result<Option<String>, String> {
+    store.database().get_prompt_body(id).map_err(|e| e.to_string())
+}
+
+/// Read/write the "capture external claude sessions" toggle (default on).
+#[tauri::command]
+fn ledger_get_capture_external(store: tauri::State<'_, SessionStore>) -> bool {
+    store
+        .database()
+        .get_setting("redline.capture.externalSessions")
+        .map(|v| v != "false")
+        .unwrap_or(true)
+}
+
+#[tauri::command]
+fn ledger_set_capture_external(
+    store: tauri::State<'_, SessionStore>,
+    enabled: bool,
+) -> Result<(), String> {
+    store
+        .database()
+        .set_setting(
+            "redline.capture.externalSessions",
+            if enabled { "true" } else { "false" },
+        )
+        .map_err(|e| e.to_string())
+}
+
+/// Record a drafted prompt at Prompt Drafter launch. The plan session doesn't
+/// exist yet (claude hasn't spawned), so there's no claude session id here; the
+/// drafted body is registered against the agent guard so the eventual hook fire
+/// for the spawned session doesn't double-record it.
+#[tauri::command]
+fn record_drafted_prompt(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    markdown: String,
+    project_path: Option<String>,
+) -> Result<(), String> {
+    let body = markdown.trim().to_string();
+    if body.is_empty() {
+        return Ok(());
+    }
+    ledger::register_agent_prompt(&ledger::body_hash(&body));
+    let input = ledger::PromptInput {
+        source: ledger::PromptSource::DrafterLaunch,
+        origin: ledger::Origin::Redline,
+        surface: "drafter".to_string(),
+        role: None,
+        session_id: None,
+        claude_session_id: None,
+        mission_id: None,
+        project_path,
+        body,
+    };
+    ledger::record_prompt(&store.database(), input)?;
+    let _ = app.emit("ledger-changed", ());
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Polis ClassMemory commands (Phase 2)
+// ---------------------------------------------------------------------------
+
+/// Run one classifier pass: seed roots (idempotent), compute the lake delta
+/// since the last completed run, spawn the read-only classifier, parse its
+/// structured-JSON proposals, and STAGE them (nothing is accepted). Returns the
+/// per-op counts + a summary for the pane.
+#[tauri::command(async)]
+async fn classmem_organize(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+) -> Result<serde_json::Value, String> {
+    let db = store.database();
+    let roots = classmem::seed_root_rows(&db.list_project_paths().map_err(|e| e.to_string())?);
+    db.seed_class_roots(&roots).map_err(|e| e.to_string())?;
+
+    let seq_from = db.last_run_seq_to().map_err(|e| e.to_string())?;
+    let seq_to = db.max_ledger_seq().map_err(|e| e.to_string())?;
+    let delta = db
+        .list_lake_items_since(seq_from, classmem::MAX_DELTA_ITEMS as i64)
+        .map_err(|e| e.to_string())?;
+    let tree = db.list_class_nodes().map_err(|e| e.to_string())?;
+    let run_id = db.insert_class_run(seq_from, seq_to).map_err(|e| e.to_string())?;
+    let _ = app.emit("classmem-changed", ());
+
+    if delta.is_empty() {
+        db.finish_class_run(run_id, "done", None, "no new lake items to classify")
+            .map_err(|e| e.to_string())?;
+        let _ = app.emit("classmem-changed", ());
+        return Ok(serde_json::json!({
+            "staged": classmem::StageResult::default(),
+            "summary": "Nothing new to classify yet — capture some prompts first.",
+            "seqFrom": seq_from, "seqTo": seq_to,
+        }));
+    }
+
+    // Temporal + storage facts so the orchestrator can judge coldness against
+    // the lake's own activity (fed as ground truth, never inferred).
+    let direct = db.node_direct_link_activity().map_err(|e| e.to_string())?;
+    let envelope = db.lake_envelope().map_err(|e| e.to_string())?;
+    let stats = classmem::subtree_stats(&tree, &direct);
+    let prompt = classmem::build_classifier_prompt(&tree, &delta, &stats, envelope);
+    let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+    // Default: the orchestrator organizes directly (no required human approval);
+    // the ledger's taxonomy-reorg time-travel is the safety net, and the human
+    // curates after if they want. A reviewer who prefers the gate turns this off.
+    let auto_apply = db
+        .get_setting("redline.classmem.autoApply")
+        .map(|v| v != "false")
+        .unwrap_or(true);
+    match classmem::run_classifier(&cwd, prompt).await {
+        Ok((text, session)) => {
+            let proposals = classmem::parse_proposals(&text);
+            let staged = classmem::stage_proposals(&db, Some(run_id), &proposals)
+                .map_err(|e| e.to_string())?;
+            let mut applied_reorgs = 0usize;
+            let mut held_collapses = 0usize;
+            if auto_apply {
+                // Flip every freshly-staged node/link to accepted…
+                let accepted = db.accept_all_pending().map_err(|e| e.to_string())?;
+                for nid in &accepted {
+                    classmem::record_curate(&db, nid, "organize", "");
+                }
+                // Recompute activity AFTER staging for the collapse interlock.
+                let direct2 = db.node_direct_link_activity().map_err(|e| e.to_string())?;
+                let nodes_now = db.list_class_nodes().map_err(|e| e.to_string())?;
+                let stats2 = classmem::subtree_stats(&nodes_now, &direct2);
+                let env2 = db.lake_envelope().map_err(|e| e.to_string())?;
+                // …and apply every pending structural op — EXCEPT a `collapse`
+                // that isn't clearly cold, which is held as a pending proposal
+                // for manual review rather than silently destroying the subtree.
+                for prop in db.list_class_proposals().map_err(|e| e.to_string())? {
+                    if prop.op == "collapse" {
+                        let safe = prop
+                            .node_id
+                            .as_deref()
+                            .and_then(|nid| stats2.get(nid))
+                            .map(|s| classmem::auto_collapse_safe(s, env2))
+                            .unwrap_or(false);
+                        if !safe {
+                            held_collapses += 1;
+                            continue; // leave pending → shows in the review strip
+                        }
+                    }
+                    if let Some(a) = db.apply_class_proposal(prop.id).map_err(|e| e.to_string())? {
+                        classmem::record_reorg(&db, &a.op, &a.node_id, &a.detail);
+                        applied_reorgs += 1;
+                    }
+                }
+                let _ = app.emit("ledger-changed", ());
+            }
+            let summary = if auto_apply {
+                format!(
+                    "Organized: {} class(es), {} link(s), {} reorg(s){}{}",
+                    staged.created_nodes,
+                    staged.staged_links,
+                    applied_reorgs,
+                    if held_collapses > 0 {
+                        format!(", {held_collapses} collapse(s) held for review")
+                    } else {
+                        String::new()
+                    },
+                    if staged.skipped > 0 { format!(", {} skipped", staged.skipped) } else { String::new() }
+                )
+            } else {
+                format!(
+                    "{} class(es), {} link(s), {} structural, {} skipped — review to apply",
+                    staged.created_nodes, staged.staged_links, staged.structural, staged.skipped
+                )
+            };
+            db.finish_class_run(run_id, "done", session.as_deref(), &summary)
+                .map_err(|e| e.to_string())?;
+            let _ = app.emit("classmem-changed", ());
+            Ok(serde_json::json!({
+                "staged": staged, "summary": summary, "autoApplied": auto_apply,
+                "seqFrom": seq_from, "seqTo": seq_to,
+            }))
+        }
+        Err(e) => {
+            let _ = db.finish_class_run(run_id, "error", None, &e);
+            let _ = app.emit("classmem-changed", ());
+            Err(e)
+        }
+    }
+}
+
+/// The class tree (flat + link counts); the FE builds the hierarchy.
+#[tauri::command]
+fn classmem_tree(store: tauri::State<'_, SessionStore>) -> Result<Vec<TreeNodeView>, String> {
+    let db = store.database();
+    let rows = db.list_class_nodes_with_counts().map_err(|e| e.to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(|(node, link_count)| TreeNodeView { node, link_count })
+        .collect())
+}
+
+/// One node with its children and its (label-resolved) links.
+#[tauri::command]
+fn classmem_node(
+    store: tauri::State<'_, SessionStore>,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    let db = store.database();
+    let node = db
+        .get_class_node(&id)
+        .map_err(|e| e.to_string())?
+        .ok_or("no such class node")?;
+    let children: Vec<_> = db
+        .list_class_nodes()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|n| n.parent_id.as_deref() == Some(id.as_str()))
+        .collect();
+    let links: Vec<LinkView> = db
+        .list_class_links_for_node(&id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|link| {
+            let label = db.link_preview(&link.target_kind, &link.target_id);
+            LinkView { link, label }
+        })
+        .collect();
+    Ok(serde_json::json!({ "node": node, "children": children, "links": links }))
+}
+
+/// A citation on a collapse proposal: an exact ledger seq + a resolved snippet.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CitationView {
+    seq: i64,
+    label: Option<String>,
+}
+
+/// A structural proposal enriched for review: the subject node's title + (for a
+/// collapse) the digest's cited ledger rows.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProposalView {
+    #[serde(flatten)]
+    row: crate::classmem::ClassProposalRow,
+    node_title: Option<String>,
+    citations: Vec<CitationView>,
+}
+
+/// The pending structural proposals (promote/split/merge/collapse), enriched
+/// with the digest preview + citations the pane shows for review.
+#[tauri::command]
+fn classmem_proposals(store: tauri::State<'_, SessionStore>) -> Result<Vec<ProposalView>, String> {
+    let db = store.database();
+    let rows = db.list_class_proposals().map_err(|e| e.to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let node_title = row
+                .node_id
+                .as_deref()
+                .and_then(|id| db.get_class_node(id).ok().flatten())
+                .map(|n| n.title);
+            let citations = if row.op == "collapse" {
+                row.extra_json
+                    .as_deref()
+                    .and_then(|e| serde_json::from_str::<Vec<i64>>(e).ok())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|seq| CitationView {
+                        seq,
+                        label: db.link_preview("ledger", &seq.to_string()),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            ProposalView { row, node_title, citations }
+        })
+        .collect())
+}
+
+/// The latest classifier run (status/summary/session) for the pane header.
+#[tauri::command]
+fn classmem_latest_run(
+    store: tauri::State<'_, SessionStore>,
+) -> Result<Option<classmem::ClassRun>, String> {
+    store.database().latest_class_run().map_err(|e| e.to_string())
+}
+
+/// Whether Organize applies the classifier's work directly (default) or stages
+/// it for per-item review. Default on: no required human decision-making.
+#[tauri::command]
+fn classmem_get_auto_apply(store: tauri::State<'_, SessionStore>) -> bool {
+    store
+        .database()
+        .get_setting("redline.classmem.autoApply")
+        .map(|v| v != "false")
+        .unwrap_or(true)
+}
+
+#[tauri::command]
+fn classmem_set_auto_apply(
+    store: tauri::State<'_, SessionStore>,
+    enabled: bool,
+) -> Result<(), String> {
+    store
+        .database()
+        .set_setting(
+            "redline.classmem.autoApply",
+            if enabled { "true" } else { "false" },
+        )
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn classmem_accept_node(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    id: String,
+) -> Result<(), String> {
+    let db = store.database();
+    let flipped = db.accept_class_node(&id).map_err(|e| e.to_string())?;
+    for nid in &flipped {
+        classmem::record_curate(&db, nid, "accept", "");
+    }
+    let _ = app.emit("classmem-changed", ());
+    let _ = app.emit("ledger-changed", ());
+    Ok(())
+}
+
+#[tauri::command]
+fn classmem_reject_node(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    id: String,
+) -> Result<(), String> {
+    store.database().reject_class_node(&id).map_err(|e| e.to_string())?;
+    let _ = app.emit("classmem-changed", ());
+    Ok(())
+}
+
+#[tauri::command]
+fn classmem_accept_link(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    link_id: i64,
+) -> Result<(), String> {
+    let db = store.database();
+    if let Some((node_id, flipped)) = db.accept_class_link(link_id).map_err(|e| e.to_string())? {
+        for nid in &flipped {
+            classmem::record_curate(&db, nid, "accept", "");
+        }
+        classmem::record_curate(&db, &node_id, "accept_link", &link_id.to_string());
+        let _ = app.emit("ledger-changed", ());
+    }
+    let _ = app.emit("classmem-changed", ());
+    Ok(())
+}
+
+#[tauri::command]
+fn classmem_reject_link(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    link_id: i64,
+) -> Result<(), String> {
+    store.database().reject_class_link(link_id).map_err(|e| e.to_string())?;
+    let _ = app.emit("classmem-changed", ());
+    Ok(())
+}
+
+#[tauri::command]
+fn classmem_accept_proposal(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    id: i64,
+) -> Result<(), String> {
+    let db = store.database();
+    if let Some(applied) = db.apply_class_proposal(id).map_err(|e| e.to_string())? {
+        classmem::record_reorg(&db, &applied.op, &applied.node_id, &applied.detail);
+        let _ = app.emit("ledger-changed", ());
+    }
+    let _ = app.emit("classmem-changed", ());
+    Ok(())
+}
+
+#[tauri::command]
+fn classmem_reject_proposal(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    id: i64,
+) -> Result<(), String> {
+    store.database().reject_class_proposal(id).map_err(|e| e.to_string())?;
+    let _ = app.emit("classmem-changed", ());
+    Ok(())
+}
+
+#[tauri::command]
+fn classmem_pin_node(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    id: String,
+    pinned: bool,
+) -> Result<(), String> {
+    let db = store.database();
+    db.set_class_node_pinned(&id, pinned).map_err(|e| e.to_string())?;
+    classmem::record_curate(&db, &id, "pin", if pinned { "1" } else { "0" });
+    let _ = app.emit("classmem-changed", ());
+    let _ = app.emit("ledger-changed", ());
+    Ok(())
+}
+
+#[tauri::command]
+fn classmem_rename_node(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    id: String,
+    title: String,
+) -> Result<(), String> {
+    let title = title.trim().to_string();
+    if title.is_empty() {
+        return Err("title cannot be empty".into());
+    }
+    let db = store.database();
+    db.rename_class_node(&id, &title).map_err(|e| e.to_string())?;
+    classmem::record_curate(&db, &id, "rename", &title);
+    let _ = app.emit("classmem-changed", ());
+    let _ = app.emit("ledger-changed", ());
+    Ok(())
 }
 
 /// Pop up the native browser "Settings" menu over the embedded browser (HTML
@@ -4946,6 +5761,10 @@ fn install_hook() -> Result<HookStatus, String> {
     let result = hook::install();
     if let Ok(status) = &result {
         tracing::info!(path = %status.settings_path, "installed redline hook");
+        // Install the Polis prompt-capture hook alongside the plan hook.
+        if let Err(e) = hook::install_capture() {
+            tracing::warn!(error = %e, "failed to install prompt-capture hook");
+        }
     }
     result
 }
@@ -4983,6 +5802,7 @@ fn remove_hook_via_menu(app: &AppHandle) {
                 return;
             }
             let app = app_for_confirm;
+            let _ = hook::uninstall_capture();
             match hook::uninstall() {
                 Ok(status) => {
                     tracing::info!(path = %status.settings_path, "removed redline hook");
@@ -5203,6 +6023,27 @@ pub fn run() {
             show_browser_settings_menu,
             set_source_feedback,
             get_source_feedback,
+            ledger_list_events,
+            ledger_verify,
+            ledger_prompt_body,
+            ledger_get_capture_external,
+            ledger_set_capture_external,
+            record_drafted_prompt,
+            classmem_organize,
+            classmem_tree,
+            classmem_node,
+            classmem_proposals,
+            classmem_latest_run,
+            classmem_get_auto_apply,
+            classmem_set_auto_apply,
+            classmem_accept_node,
+            classmem_reject_node,
+            classmem_accept_link,
+            classmem_reject_link,
+            classmem_accept_proposal,
+            classmem_reject_proposal,
+            classmem_pin_node,
+            classmem_rename_node,
             prompt_text,
         ])
         .setup(|app| {
@@ -5215,6 +6056,18 @@ pub fn run() {
             // so "Restore plan session" runs its daemon fetch hands-free instead
             // of stalling on an approval prompt. No-op if not installed / present.
             hook::ensure_restore_permission();
+
+            // Install the Polis prompt-capture hook beside the ExitPlanMode hook
+            // for anyone who has already set Redline up. It travels with the main
+            // hook: capturing your prompts is core to the ledger. External-session
+            // storage is separately gated by `redline.capture.externalSessions`.
+            if hook::get_status().installed && !hook::capture_installed() {
+                if let Err(e) = hook::install_capture() {
+                    tracing::warn!(error = %e, "failed to install prompt-capture hook");
+                } else {
+                    tracing::info!("installed Polis prompt-capture hook");
+                }
+            }
 
             // Open at a generous, Safari-style fraction of whatever display the
             // window lands on, centered — a fixed pixel size feels small on a
@@ -5254,6 +6107,18 @@ pub fn run() {
             let db = Arc::new(
                 Database::open(&db_path).expect("failed to open sqlite database"),
             );
+
+            // Polis backup: one snapshot now (so a backup always exists), then
+            // every 6h on a background thread. Also snapshots on quit.
+            {
+                let db_bak = db.clone();
+                let dir_bak = data_dir.clone();
+                snapshot_database(&db_bak, &dir_bak, LEDGER_BACKUP_KEEP);
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_secs(6 * 3600));
+                    snapshot_database(&db_bak, &dir_bak, LEDGER_BACKUP_KEEP);
+                });
+            }
 
             let settings = Settings::load(db.clone());
             app.manage(settings.clone());
@@ -5596,6 +6461,12 @@ pub fn run() {
             // Kill any headless `claude` discussion forks on teardown so no
             // child is orphaned (PTYs SIGHUP-clean when their master closes).
             if let tauri::RunEvent::Exit = event {
+                // Polis: a final crown-jewels snapshot of the ledger DB on quit.
+                if let Some(store) = app_handle.try_state::<SessionStore>() {
+                    if let Ok(dir) = app_handle.path().app_data_dir() {
+                        snapshot_database(&store.database(), &dir, LEDGER_BACKUP_KEEP);
+                    }
+                }
                 if let Some(fork) = app_handle.try_state::<fork::ForkState>() {
                     fork.kill_all();
                 }
@@ -5631,6 +6502,41 @@ pub fn run() {
 mod tests {
     use super::*;
     use crate::db::Database;
+
+    /// Golden: the exact UserPromptSubmit payload captured from claude 2.1.199
+    /// (docs/protocol-verification.md). The submitted text is at `prompt` — NOT
+    /// `user_input` as the public docs claim. Building against `user_input`
+    /// alone would capture empties; this pins the empirical reality.
+    #[test]
+    fn ingest_reads_prompt_field_from_real_payload() {
+        let golden = serde_json::json!({
+            "session_id": "fbf661e8-3152-4f0d-bc43-e1bc07008f5a",
+            "transcript_path": "/Users/x/.claude/projects/p/s.jsonl",
+            "cwd": "/Users/x/proj",
+            "prompt_id": "37137840-65f2-43a0-b280-7a3b7ad1564f",
+            "permission_mode": "default",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "say hi in one word"
+        });
+        assert_eq!(ingest_prompt_text(&golden), "say hi in one word");
+        // Forward-compat: a hypothetical `user_input`-only payload still works.
+        let alt = serde_json::json!({ "user_input": "  spaced  " });
+        assert_eq!(ingest_prompt_text(&alt), "spaced");
+        // No text → empty (the handler skips empties).
+        assert_eq!(ingest_prompt_text(&serde_json::json!({ "prompt": "   " })), "");
+        assert_eq!(ingest_prompt_text(&serde_json::json!({})), "");
+    }
+
+    /// Cold-wallet posture pin: the daemon must bind loopback only, never a
+    /// routable interface. If someone changes this, they change the invariant.
+    #[test]
+    fn daemon_binds_loopback_only() {
+        assert_eq!(DAEMON_ADDR, "127.0.0.1:7676");
+        assert!(
+            DAEMON_ADDR.starts_with("127.0.0.1:"),
+            "the daemon must bind loopback only (cold-wallet posture)"
+        );
+    }
 
     #[test]
     fn external_source_tags_are_fenced() {

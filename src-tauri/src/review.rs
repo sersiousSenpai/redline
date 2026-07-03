@@ -1088,6 +1088,32 @@ pub fn review_annotation_update(
         .db
         .update_review_annotation(&annotation)
         .map_err(|e| e.to_string())?;
+    // Polis ledger: a reviewer verdict (an annotation carrying a resolution) is
+    // a decision worth recording.
+    if let Some(res) = annotation
+        .resolution
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        let ph = crate::ledger::decision_payload_hash(&[
+            ("annotation", &annotation.id),
+            ("status", &annotation.status),
+            ("resolution", res),
+        ]);
+        if let Err(e) = crate::ledger::record_decision(
+            &state.db,
+            crate::ledger::DecisionInput {
+                kind: crate::ledger::EventKind::ReviewVerdict,
+                author: None,
+                session_id: Some(&annotation.review_id),
+                ref_kind: "review_annotation",
+                ref_id: &annotation.id,
+                payload_hash: ph,
+            },
+        ) {
+            tracing::warn!(error = %e, "failed to record review verdict ledger event");
+        }
+    }
     emit_changed(&app, &annotation.review_id);
     Ok(())
 }

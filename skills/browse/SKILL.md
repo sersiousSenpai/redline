@@ -97,6 +97,17 @@ google.com", not "t10"). Numbers are positional and shift as tabs open or close,
 so re-read `/tabs` for the current mapping each task rather than trusting a
 number you saw earlier in the conversation.
 
+## When a mission is active
+
+Your tab can be part of a **research mission** — the user working toward one goal
+across all their tabs. When it is, your first turn carries the mission's goal;
+keep your help oriented to it (e.g. weigh what's on this page against what the
+mission is trying to achieve). If you need the goal again, or a mission may have
+started after you did, read it with `curl -s
+http://127.0.0.1:7676/v1/mission/active` (pins: `/v1/mission/findings`);
+`{"active":false}` just means no mission is running, so carry on as a normal page
+discussion.
+
 ## Looking at the user's code
 
 The user researches and brainstorms development *as they browse* — so they'll

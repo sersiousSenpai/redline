@@ -387,6 +387,25 @@ pub fn mission_add_finding(
         .db
         .insert_finding(&f)
         .map_err(|e| format!("failed to pin finding: {e}"))?;
+    // Polis ledger: a pinned finding is a curation signal (what you valued).
+    let ph = crate::ledger::decision_payload_hash(&[
+        ("finding", &f.id),
+        ("url", f.source_url.as_deref().unwrap_or("")),
+        ("body", &f.body),
+    ]);
+    if let Err(e) = crate::ledger::record_decision(
+        &mission.db,
+        crate::ledger::DecisionInput {
+            kind: crate::ledger::EventKind::Pin,
+            author: None,
+            session_id: Some(&f.mission_id),
+            ref_kind: "mission_finding",
+            ref_id: &f.id,
+            payload_hash: ph,
+        },
+    ) {
+        tracing::warn!(error = %e, "failed to record pin ledger event");
+    }
     Ok(f)
 }
 
@@ -468,6 +487,22 @@ pub async fn mission_send(
         }
         Some(_) => text.clone(),
     };
+
+    // Polis ledger: record the first-turn mission prompt; keep every agent turn
+    // out of the global-hook capture stream.
+    if prior_session.is_none() {
+        crate::ledger::record_agent_prompt(
+            &mission.db,
+            crate::ledger::PromptSource::RustFirstTurn,
+            "mission",
+            &prompt,
+            cwd.clone(),
+            None,
+            Some(mission_id.clone()),
+        );
+    } else {
+        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+    }
 
     // Same tool surface as the browse agent: Bash scoped to the localhost
     // bridge (three quoting variants), plus WebSearch/WebFetch. See browse.rs

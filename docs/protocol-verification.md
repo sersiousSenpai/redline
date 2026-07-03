@@ -450,3 +450,46 @@ After running all experiments, the answers determine:
 ## Accumulated findings
 
 (Write a short prose summary here once you've completed the experiments. This is what gets folded back into SPEC.md.)
+
+---
+
+## Experiment (UserPromptSubmit) — prompt-capture hook contract (2026-07-03, claude 2.1.199)
+
+**Goal:** confirm the event name + payload shape the Polis prompt store (Phase 1)
+captures, before building the ingest pipeline on it.
+
+**Method:** installed a command-type `UserPromptSubmit` hook in an isolated
+project (`--settings` file, real `~/.claude` untouched) that dumps its stdin,
+then ran `claude -p "say hi in one word"` from that directory.
+
+**Captured payload (verbatim):**
+
+```json
+{"session_id":"fbf661e8-3152-4f0d-bc43-e1bc07008f5a",
+ "transcript_path":"/…/<session>.jsonl",
+ "cwd":"/…/hooktest",
+ "prompt_id":"37137840-65f2-43a0-b280-7a3b7ad1564f",
+ "permission_mode":"default",
+ "hook_event_name":"UserPromptSubmit",
+ "prompt":"say hi in one word"}
+```
+
+**Findings:**
+
+- [x] **The submitted text is at top-level `prompt`.** The public docs
+  (code.claude.com/docs/en/hooks) say `user_input`; the installed binary
+  disagrees. **Empirical wins** — building against `user_input` alone would have
+  silently captured empty prompts. `handle_prompts_ingest` reads `prompt` and
+  falls back to `user_input` for forward-compat. Pinned by the golden test
+  `ingest_reads_prompt_field_from_real_payload`.
+- [x] **Fires in headless `-p`, not just interactive.** Consequence: Redline's
+  own spawned agents (fork/browse/mission/linked, all headless `-p`) trip this
+  global hook too. The Rust construction sites are authoritative (they know the
+  surface/mission as fact); each registers the exact prompt body with a
+  process-global guard *before* spawn, and the ingest handler claims-and-skips
+  that body — race-free because registration precedes the spawn.
+- [x] `session_id` is the claude session id; `cwd` gives the project (used to
+  classify `origin=redline` vs `external`); `prompt_id` is a per-turn UUID.
+- [x] Command-type hook, stdin JSON, `exit 0` passes through unchanged. Redline
+  installs it as a `curl … --max-time 1 … ; exit 0` one-liner (fail-open: a
+  closed/slow daemon never delays or blocks prompt submission).

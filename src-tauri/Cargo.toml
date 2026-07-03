@@ -34,6 +34,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 pulldown-cmark = "0.10"
 rusqlite = { version = "0.31", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
+# SHA-256 for the append-only prompt/decision ledger's hash chain
+# (entry_hash = sha256(prev_hash ‖ canonical-json(event))). Not previously a dep.
+sha2 = "0.10"
 similar = "2"
 portable-pty = "0.8"
 base64 = "0.22"

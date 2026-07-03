@@ -279,6 +279,22 @@ pub async fn fork_thread_send(
         Some(_) => text.clone(),
     };
 
+    // Polis ledger: record the first-turn discussion prompt with its true
+    // surface; keep every agent turn out of the global-hook capture stream.
+    if prior_fork.is_none() {
+        crate::ledger::record_agent_prompt(
+            &fork.db,
+            crate::ledger::PromptSource::RustFirstTurn,
+            "fork",
+            &prompt,
+            Some(cwd.clone()),
+            Some(session_id.clone()),
+            None,
+        );
+    } else {
+        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+    }
+
     // Read-only fork: built-in tools limited to Read/Grep/Glob plus the web
     // tools (WebFetch/WebSearch) so the discussion can ground answers in external
     // docs. `--allowedTools` is required for the web tools to actually run:
@@ -488,6 +504,20 @@ pub async fn review_thread_send(
         Some(_) => text.clone(),
     };
 
+    if prior_fork.is_none() {
+        crate::ledger::record_agent_prompt(
+            &fork.db,
+            crate::ledger::PromptSource::RustFirstTurn,
+            "review_fork",
+            &prompt,
+            Some(cwd.clone()),
+            Some(review_id.clone()),
+            None,
+        );
+    } else {
+        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+    }
+
     // Same read-only tool fence as plan threads (see fork_thread_send).
     let mut args: Vec<String> = vec![
         "-p".to_string(),
@@ -646,6 +676,20 @@ pub async fn review_question_send(
         None => build_question_first_turn_prompt(&question, &text),
         Some(_) => text.clone(),
     };
+
+    if prior_fork.is_none() {
+        crate::ledger::record_agent_prompt(
+            &fork.db,
+            crate::ledger::PromptSource::RustFirstTurn,
+            "review_question",
+            &prompt,
+            Some(cwd.clone()),
+            Some(review_id.clone()),
+            None,
+        );
+    } else {
+        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+    }
 
     // Same read-only tool fence as the annotation threads.
     let mut args: Vec<String> = vec![
