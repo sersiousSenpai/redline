@@ -1,0 +1,405 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Standalone styling for the Review Request browser viewer. Deliberately
+   dependency-free (no Tailwind): a small palette that follows the OS theme,
+   plus just enough `.rl-prose` typography for the shared TipTap schema. */
+
+:root {
+  --v-bg: #faf8f4;
+  --v-paper: #ffffff;
+  --v-ink: #1f1d1a;
+  --v-muted: #6f6a61;
+  --v-rule: #e3ded4;
+  --v-accent: #b4472e;
+  --v-on-accent: #ffffff;
+  --v-warn: #b45309;
+  --v-highlight: rgba(233, 178, 45, 0.28);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --v-bg: #191817;
+    --v-paper: #211f1e;
+    --v-ink: #e8e4dd;
+    --v-muted: #9b958a;
+    --v-rule: #3a3733;
+    --v-accent: #e06a4c;
+    --v-on-accent: #1b1a19;
+    --v-highlight: rgba(233, 178, 45, 0.22);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+}
+body {
+  background: var(--v-bg);
+  color: var(--v-ink);
+  font:
+    14px/1.6 -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+}
+
+.rlv-shell {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.rlv-center {
+  align-items: center;
+  justify-content: center;
+}
+
+.rlv-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 22px;
+  border-bottom: 1px solid var(--v-rule);
+  background: var(--v-paper);
+}
+.rlv-title {
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 19px;
+  font-weight: 600;
+}
+.rlv-sub {
+  font-size: 12px;
+  color: var(--v-muted);
+  margin-top: 2px;
+}
+.rlv-note {
+  font-size: 12px;
+  color: var(--v-muted);
+  font-style: italic;
+  margin-top: 4px;
+}
+.rlv-banner {
+  padding: 8px 22px;
+  font-size: 12.5px;
+  color: var(--v-warn);
+  border-bottom: 1px solid var(--v-rule);
+  background: var(--v-paper);
+}
+
+.rlv-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+.rlv-doc-pane {
+  flex: 1;
+  overflow-y: auto;
+  padding: 36px 40px 80px;
+}
+.rlv-doc {
+  max-width: 760px;
+  margin: 0 auto;
+  outline: none;
+}
+
+.rlv-rail {
+  width: 300px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--v-rule);
+  background: var(--v-paper);
+  overflow-y: auto;
+  padding: 16px;
+}
+.rlv-rail-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 10px;
+}
+.rlv-hint {
+  font-size: 11.5px;
+  color: var(--v-muted);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.rlv-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.rlv-item {
+  border: 1px solid var(--v-rule);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: var(--v-bg);
+}
+.rlv-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+.rlv-chip {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  border-radius: 999px;
+  padding: 1px 7px;
+  border: 1px solid var(--v-muted);
+  color: var(--v-muted);
+}
+.rlv-chip-edit {
+  border-color: var(--v-accent);
+  color: var(--v-accent);
+}
+.rlv-quote {
+  font-size: 11.5px;
+  color: var(--v-muted);
+  border-left: 2px solid var(--v-rule);
+  padding-left: 7px;
+  margin: 4px 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.rlv-item-body {
+  font-size: 12.5px;
+  white-space: pre-wrap;
+}
+.rlv-strike {
+  text-decoration: line-through;
+  color: var(--v-muted);
+}
+.rlv-x {
+  border: none;
+  background: none;
+  color: var(--v-muted);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.rlv-menu {
+  position: fixed;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 1px;
+  border: 1px solid var(--v-rule);
+  border-radius: 6px;
+  overflow: hidden;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  z-index: 40;
+}
+.rlv-menu button {
+  border: none;
+  background: var(--v-paper);
+  color: var(--v-ink);
+  font-size: 12px;
+  padding: 7px 12px;
+  cursor: pointer;
+}
+.rlv-menu button:hover {
+  background: var(--v-bg);
+}
+
+.rlv-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+.rlv-card {
+  width: 480px;
+  max-width: 92vw;
+  max-height: 86vh;
+  overflow-y: auto;
+  background: var(--v-paper);
+  border: 1px solid var(--v-rule);
+  border-radius: 8px;
+  padding: 22px;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.25);
+}
+.rlv-card h1 {
+  font-family: Georgia, serif;
+  font-size: 20px;
+  margin: 0 0 8px;
+}
+.rlv-card h2 {
+  font-family: Georgia, serif;
+  font-size: 17px;
+  margin: 0 0 8px;
+}
+.rlv-card p {
+  font-size: 13px;
+  color: var(--v-muted);
+  margin: 0 0 12px;
+}
+.rlv-card label {
+  display: block;
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+.rlv-card textarea {
+  width: 100%;
+  margin-top: 4px;
+  border: 1px solid var(--v-rule);
+  border-radius: 5px;
+  background: var(--v-bg);
+  color: var(--v-ink);
+  font: inherit;
+  font-size: 13px;
+  padding: 7px 9px;
+  resize: vertical;
+}
+.rlv-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace !important;
+  font-size: 11px !important;
+  word-break: break-all;
+}
+.rlv-error {
+  color: var(--v-warn) !important;
+  font-size: 12px !important;
+}
+
+.rlv-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.rlv-end {
+  justify-content: flex-end;
+}
+.rlv-btn {
+  border: 1px solid var(--v-rule);
+  border-radius: 5px;
+  background: var(--v-paper);
+  color: var(--v-ink);
+  font-size: 12.5px;
+  padding: 7px 14px;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-block;
+}
+.rlv-btn[disabled] {
+  opacity: 0.5;
+  cursor: default;
+}
+.rlv-primary {
+  background: var(--v-accent);
+  border-color: var(--v-accent);
+  color: var(--v-on-accent);
+  font-weight: 500;
+}
+
+/* ── minimal .rl-prose typography for the shared schema ── */
+.rl-prose {
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 15.5px;
+  line-height: 1.65;
+}
+.rl-prose h1 {
+  font-size: 26px;
+  line-height: 1.25;
+  margin: 0 0 14px;
+}
+.rl-prose h2 {
+  font-size: 21px;
+  margin: 26px 0 10px;
+}
+.rl-prose h3 {
+  font-size: 17px;
+  margin: 20px 0 8px;
+}
+.rl-prose p {
+  margin: 0 0 12px;
+}
+.rl-prose ul,
+.rl-prose ol {
+  padding-left: 26px;
+  margin: 0 0 12px;
+}
+.rl-prose li > p {
+  margin-bottom: 4px;
+}
+.rl-prose blockquote {
+  border-left: 3px solid var(--v-rule);
+  margin: 0 0 12px;
+  padding-left: 14px;
+  color: var(--v-muted);
+}
+.rl-prose code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.86em;
+  background: color-mix(in srgb, var(--v-rule) 45%, transparent);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+.rl-prose pre {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  background: color-mix(in srgb, var(--v-rule) 30%, transparent);
+  border: 1px solid var(--v-rule);
+  border-radius: 6px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  margin: 0 0 14px;
+}
+.rl-prose pre code {
+  background: none;
+  padding: 0;
+}
+.rl-prose table {
+  border-collapse: collapse;
+  margin: 0 0 14px;
+  font-size: 13.5px;
+}
+.rl-prose th,
+.rl-prose td {
+  border: 1px solid var(--v-rule);
+  padding: 5px 10px;
+  text-align: left;
+}
+.rl-prose hr {
+  border: none;
+  border-top: 1px solid var(--v-rule);
+  margin: 20px 0;
+}
+.rl-prose a {
+  color: var(--v-accent);
+}
+
+/* Annotation highlights painted by the CommentHighlights extension. */
+.rl-comment-highlight {
+  background: var(--v-highlight);
+  border-bottom: 1.5px solid color-mix(in srgb, var(--v-warn) 55%, transparent);
+  cursor: pointer;
+}
+.rl-comment-highlight--focused {
+  background: color-mix(in srgb, var(--v-highlight) 140%, transparent);
+}
+
+/* Track-change marks that may ride in the shared fragment (rendered
+   read-only here). */
+.rl-prose ins,
+.rl-prose [data-rl-ins] {
+  background: rgba(47, 158, 68, 0.15);
+  text-decoration: none;
+}
+.rl-prose del,
+.rl-prose [data-rl-del] {
+  color: var(--v-muted);
+  text-decoration: line-through;
+}
