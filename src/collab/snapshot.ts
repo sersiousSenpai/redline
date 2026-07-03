@@ -11,7 +11,10 @@
  * in the fragment); for pure-fragment delivery it costs nothing.
  *
  * Token format: `RLS1.<flag>.<key>.<data>`
- *   flag  "z" = payload deflate-raw compressed before encryption, "n" = not
+ *   flag  "d" = payload deflate (zlib) compressed before encryption,
+ *         "z" = deflate-raw (legacy tokens — decode-only; encoding moved to
+ *         "d" because deflate-raw is the least-supported format across
+ *         browser DecompressionStream implementations), "n" = uncompressed
  *   key   base64url raw 32-byte AES-GCM key
  *   data  base64url (12-byte IV || ciphertext)
  *
@@ -60,25 +63,34 @@ function fromBase64Url(s: string): Uint8Array {
 }
 
 /** Plans are markdown — deflate typically cuts the token to a third. Falls
- *  back to uncompressed where CompressionStream is unavailable. */
+ *  back to uncompressed where CompressionStream is unavailable. Uses the
+ *  zlib "deflate" format: the viewer decodes in arbitrary browsers, and
+ *  "deflate" has been in every (De)CompressionStream implementation since
+ *  their first release, unlike "deflate-raw". */
 async function deflate(bytes: Uint8Array): Promise<Uint8Array | null> {
   if (typeof CompressionStream === "undefined") return null;
   try {
-    const stream = new Blob([bytes as BlobPart])
-      .stream()
-      .pipeThrough(new CompressionStream("deflate-raw"));
+    // Response(bytes).body instead of Blob.stream(): identical in browsers,
+    // and it also works under Node/jsdom (whose Blob lacks .stream()), so
+    // the compression path is actually exercised by the test suite.
+    const source = new Response(bytes as BodyInit).body;
+    if (!source) return null;
+    const stream = source.pipeThrough(new CompressionStream("deflate"));
     return new Uint8Array(await new Response(stream).arrayBuffer());
   } catch {
     return null;
   }
 }
 
-async function inflate(bytes: Uint8Array): Promise<Uint8Array | null> {
+async function inflate(
+  bytes: Uint8Array,
+  format: "deflate" | "deflate-raw",
+): Promise<Uint8Array | null> {
   if (typeof DecompressionStream === "undefined") return null;
   try {
-    const stream = new Blob([bytes as BlobPart])
-      .stream()
-      .pipeThrough(new DecompressionStream("deflate-raw"));
+    const source = new Response(bytes as BodyInit).body;
+    if (!source) return null;
+    const stream = source.pipeThrough(new DecompressionStream(format));
     return new Uint8Array(await new Response(stream).arrayBuffer());
   } catch {
     return null;
@@ -105,7 +117,7 @@ export async function encodeSnapshot(payload: SnapshotPayload): Promise<string> 
   data.set(ct, iv.length);
   return [
     PREFIX,
-    useCompressed ? "z" : "n",
+    useCompressed ? "d" : "n",
     toBase64Url(rawKey),
     toBase64Url(data),
   ].join(".");
@@ -116,10 +128,12 @@ export async function encodeSnapshot(payload: SnapshotPayload): Promise<string> 
 export async function decodeSnapshot(
   token: string,
 ): Promise<SnapshotPayload | null> {
-  const parts = token.trim().split(".");
+  // Tolerate whitespace/newlines picked up in transit (hard-wrapped emails,
+  // chat clients) — the alphabet has none, so stripping is always safe.
+  const parts = token.replace(/\s+/g, "").split(".");
   if (parts.length !== 4 || parts[0] !== PREFIX) return null;
   const [, flag, keyPart, dataPart] = parts;
-  if (flag !== "z" && flag !== "n") return null;
+  if (flag !== "d" && flag !== "z" && flag !== "n") return null;
   try {
     const data = fromBase64Url(dataPart);
     if (data.length < 13) return null;
@@ -137,8 +151,11 @@ export async function decodeSnapshot(
         data.slice(12),
       ),
     );
-    if (flag === "z") {
-      const inflated = await inflate(body);
+    if (flag === "d" || flag === "z") {
+      const inflated = await inflate(
+        body,
+        flag === "d" ? "deflate" : "deflate-raw",
+      );
       if (!inflated) return null;
       body = inflated;
     }

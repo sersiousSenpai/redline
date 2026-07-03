@@ -63,8 +63,50 @@ describe("snapshot", () => {
   it("encrypt → decrypt round-trips the full payload", async () => {
     const token = await encodeSnapshot(snapshot());
     expect(token.startsWith("RLS1.")).toBe(true);
+    // Compression must be zlib-deflate ("d") — deflate-raw ("z") is the
+    // least-supported DecompressionStream format across browsers and is
+    // decode-only legacy now.
+    expect(token.split(".")[1]).toBe("d");
     const decoded = await decodeSnapshot(token);
     expect(decoded).toEqual(snapshot());
+  });
+
+  it("tolerates whitespace picked up in transit", async () => {
+    const token = await encodeSnapshot(snapshot());
+    const wrapped = token.replace(/(.{60})/g, "$1\n");
+    expect(await decodeSnapshot(wrapped)).toEqual(snapshot());
+  });
+
+  it("still decodes legacy deflate-raw ('z') tokens", async () => {
+    // Hand-build a token exactly as the pre-'d' encoder did.
+    const plain = new TextEncoder().encode(JSON.stringify(snapshot()));
+    const compressed = new Uint8Array(
+      await new Response(
+        new Response(plain).body!.pipeThrough(
+          new CompressionStream("deflate-raw"),
+        ),
+      ).arrayBuffer(),
+    );
+    const key = await crypto.subtle.generateKey(
+      { name: "AES-GCM", length: 256 },
+      true,
+      ["encrypt"],
+    );
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = new Uint8Array(
+      await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, compressed),
+    );
+    const rawKey = new Uint8Array(await crypto.subtle.exportKey("raw", key));
+    const data = new Uint8Array(iv.length + ct.length);
+    data.set(iv, 0);
+    data.set(ct, iv.length);
+    const b64 = (bytes: Uint8Array) =>
+      btoa(String.fromCharCode(...bytes))
+        .replace(/\+/g, "-")
+        .replace(/\//g, "_")
+        .replace(/=+$/, "");
+    const legacy = ["RLS1", "z", b64(rawKey), b64(data)].join(".");
+    expect(await decodeSnapshot(legacy)).toEqual(snapshot());
   });
 
   it("rejects a tampered token", async () => {

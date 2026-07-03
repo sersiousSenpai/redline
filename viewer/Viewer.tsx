@@ -32,8 +32,46 @@ import type { CommentSelection } from "../src/types";
 
 type ViewerPhase =
   | { kind: "paste"; error?: string }
-  | { kind: "invalid" }
+  | { kind: "invalid"; message: string }
   | { kind: "ready"; payload: SnapshotPayload; expired: boolean };
+
+/** Decode failures are almost never "bad token" — they're the browser
+ *  environment. Name the actual blocker so the reviewer can act on it. */
+function explainDecodeFailure(raw: string): string {
+  const token = raw.replace(/\s+/g, "").replace(/^.*#/, "");
+  if (!token.startsWith("RLS1.")) {
+    return "That doesn’t look like a Redline snapshot code — it should start with RLS1.";
+  }
+  if (!globalThis.crypto?.subtle) {
+    return (
+      "This page isn’t running in a secure context, so the browser disables " +
+      "the crypto needed to decrypt the snapshot. Open the viewer via " +
+      "http://localhost or an https:// address — a plain http:// IP or " +
+      "hostname won’t work."
+    );
+  }
+  if (typeof DecompressionStream === "undefined") {
+    return (
+      "This browser is missing DecompressionStream, which the snapshot " +
+      "needs — use a current Chrome, Edge, Firefox, or Safari."
+    );
+  }
+  if (token.split(".")[1] === "z") {
+    try {
+      new DecompressionStream("deflate-raw");
+    } catch {
+      return (
+        "This browser can’t read this link’s compression format — ask the " +
+        "sender to regenerate the link (their updated Redline mints a " +
+        "compatible one)."
+      );
+    }
+  }
+  return (
+    "That code didn’t decode — it may be incomplete (make sure the whole " +
+    "thing was copied) or corrupted in transit."
+  );
+}
 
 interface Annotation {
   id: string;
@@ -122,7 +160,10 @@ export function Viewer() {
       }
       const payload = await decodeSnapshot(decodeURIComponent(token));
       if (!payload) {
-        setPhase({ kind: "invalid" });
+        setPhase({
+          kind: "invalid",
+          message: explainDecodeFailure(decodeURIComponent(token)),
+        });
         return;
       }
       setPhase({
@@ -136,10 +177,10 @@ export function Viewer() {
   }, []);
 
   const pasteToken = async (raw: string) => {
-    const token = raw.trim().replace(/^.*#/, "");
+    const token = raw.replace(/\s+/g, "").replace(/^.*#/, "");
     const payload = await decodeSnapshot(token);
     if (!payload) {
-      setPhase({ kind: "paste", error: "That code didn’t decode — check the paste and try again." });
+      setPhase({ kind: "paste", error: explainDecodeFailure(raw) });
       return;
     }
     setPhase({
@@ -156,11 +197,8 @@ export function Viewer() {
     return (
       <div className="rlv-shell rlv-center">
         <div className="rlv-card">
-          <h1>Invalid or corrupted link</h1>
-          <p>
-            This review link couldn’t be decrypted. Ask the sender for a fresh
-            one — links are single-purpose and may have been regenerated.
-          </p>
+          <h1>Couldn’t open this review</h1>
+          <p>{phase.message}</p>
         </div>
       </div>
     );
