@@ -33,6 +33,7 @@ import {
 import type { CollabProviderHandle } from "./collab/provider";
 import { useCommentMirror } from "./collab/useCommentMirror";
 import { createYjsCommentBackend } from "./collab/yjsCommentBackend";
+import { observeMeta, publishMeta, readMeta } from "./collab/meta";
 import { HookSetupModal } from "./components/HookSetupModal";
 import { ReadmeModal } from "./components/ReadmeModal";
 import { FeedbackModal } from "./components/FeedbackModal";
@@ -927,6 +928,18 @@ function App() {
     }
     try {
       const full = await invoke<ReviewSession | null>("get_session", { id });
+      // Revision-rollover handoff (live collab): if this session is being
+      // shared and the fetched state moved to a NEW latest revision, bump
+      // `meta.currentVersion` into the room we're STILL attached to before
+      // setSession re-keys the editor — after the re-key the old room's
+      // provider is gone and collaborators would never learn where we went.
+      const share = collabShareRef.current;
+      const handle = collabPresenceRef.current;
+      if (share && handle && full && full.sessionId === share.sessionId) {
+        const v =
+          full.revisions[full.revisions.length - 1]?.versionNumber ?? 0;
+        publishMeta(handle.ydoc, { currentVersion: v });
+      }
       setSession(full);
     } catch (err) {
       console.error("get_session failed", err);
@@ -1232,6 +1245,12 @@ function App() {
   const [collabPresence, setCollabPresence] =
     useState<CollabProviderHandle | null>(null);
   const [collabPeers, setCollabPeers] = useState(0);
+  // Read inside loadSession (defined earlier, runs later) so the rollover
+  // bump can reach the still-attached room without re-binding listeners.
+  const collabShareRef = useRef<CollabConfig | null>(null);
+  collabShareRef.current = collabShare;
+  const collabPresenceRef = useRef<CollabProviderHandle | null>(null);
+  collabPresenceRef.current = collabPresence;
   const [relayDefaults, setRelayDefaults] = useState<{
     displayName: string;
     signaling: string[];
@@ -1329,6 +1348,39 @@ function App() {
     setCollabComments(yjsBackend.list());
     return yjsBackend.observe(() => setCollabComments(yjsBackend.list()));
   }, [yjsBackend]);
+
+  // Owner: publish session meta into the current room (idempotent per key).
+  // Rollover bumps happen separately in loadSession — they must reach the
+  // OLD room before the editor re-keys; this effect covers steady state.
+  useEffect(() => {
+    if (!ownerCollab || !collabPresence || !session || !latest) return;
+    publishMeta(collabPresence.ydoc, {
+      currentVersion: latest.versionNumber,
+      threadStart: threadRevisions[0]?.versionNumber ?? 0,
+      ownerName: ownerCollab.user.name,
+      projectName: session.projectName,
+      status: session.status,
+    });
+  }, [ownerCollab, collabPresence, session, latest, threadRevisions]);
+
+  // Collaborator: follow the rollover forwarding address. When the room's
+  // meta says the plan moved to a newer revision, re-point the joined config
+  // — the revisionKey changes, PlanEditor re-keys onto a fresh Y.Doc, and
+  // the provider reattaches to the new room and hydrates from the mesh.
+  useEffect(() => {
+    if (!joinedRoom || !collabPresence) return;
+    const ydoc = collabPresence.ydoc;
+    const check = () => {
+      const v = readMeta(ydoc).currentVersion;
+      if (typeof v === "number" && v > joinedRoom.config.version) {
+        setJoinedRoom((r) =>
+          r ? { ...r, config: { ...r.config, version: v } } : r,
+        );
+      }
+    };
+    check();
+    return observeMeta(ydoc, check);
+  }, [joinedRoom, collabPresence]);
   // When a voice-authored comment newly appears on the displayed revision (the
   // agent captured a spoken change over the curl bridge, so we never saw the
   // returned Comment), focus it and auto-open its discussion sidecar.
