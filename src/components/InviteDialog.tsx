@@ -21,6 +21,8 @@ interface InviteDialogProps {
   onCreateInvite: (reviewerName: string) => Promise<string | null>;
   /** Revoke an invite — transport-side eviction + room key rotation. */
   onRevoke: (requestId: string) => void;
+  /** Drop a revoked invite from the list entirely. */
+  onRemove: (requestId: string) => void;
   /** Re-encode the join code for an existing invite (current room state). */
   mintCode: (invite: string) => string | null;
   /** Mint the room and start sharing (also persists the settings). */
@@ -45,6 +47,7 @@ export function InviteDialog({
   connectedHashes,
   onCreateInvite,
   onRevoke,
+  onRemove,
   mintCode,
   onStart,
   onStop,
@@ -112,7 +115,7 @@ export function InviteDialog({
   };
 
   const visibleRequests = liveRequests.filter((r) => r.status !== "revoked");
-  const revokedCount = liveRequests.length - visibleRequests.length;
+  const revokedRequests = liveRequests.filter((r) => r.status === "revoked");
 
   return (
     <div
@@ -334,18 +337,52 @@ export function InviteDialog({
                 })}
               </ul>
             )}
-            {revokedCount > 0 && (
-              <p
-                style={{
-                  fontSize: "11px",
-                  color: "var(--color-ink-muted)",
-                  marginBottom: 10,
-                }}
-              >
-                {revokedCount} revoked{" "}
-                {revokedCount === 1 ? "invite" : "invites"} (see the
-                Collaboration Center).
-              </p>
+            {revokedRequests.length > 0 && (
+              <ul className="mb-3">
+                {revokedRequests.map((r) => (
+                  <li
+                    key={r.id}
+                    className="flex items-center gap-2 py-1 border-b"
+                    style={{
+                      borderColor: "var(--color-rule)",
+                      fontSize: "12px",
+                      color: "var(--color-ink-muted)",
+                    }}
+                  >
+                    <span
+                      className="flex-1 truncate"
+                      style={{ textDecoration: "line-through" }}
+                    >
+                      {r.reviewerName}
+                    </span>
+                    <span
+                      style={{
+                        fontSize: "10px",
+                        textTransform: "uppercase",
+                        letterSpacing: "0.05em",
+                        color: "var(--color-warning)",
+                      }}
+                    >
+                      revoked
+                    </span>
+                    <button
+                      type="button"
+                      title="Remove this revoked invite from the list"
+                      onClick={() => onRemove(r.id)}
+                      className="rounded px-2 py-0.5"
+                      style={{
+                        border: "1px solid var(--color-rule)",
+                        background: "var(--color-bg-elevated)",
+                        color: "var(--color-ink-muted)",
+                        fontSize: "11px",
+                        cursor: "pointer",
+                      }}
+                    >
+                      Remove
+                    </button>
+                  </li>
+                ))}
+              </ul>
             )}
             {shownCode && (
               <>

@@ -43,25 +43,13 @@ import {
   sealEnvelope,
   type RoomAccess,
 } from "./collab/access";
-import {
-  activeLiveRequests,
-  isExpired,
-  type ImportSummary,
-} from "./collab/reviewRequest";
+import { activeLiveRequests } from "./collab/reviewRequest";
 import { useReviewRequests } from "./collab/useReviewRequests";
 import {
   isJoinedSessionId,
   joinedSessionKey,
   useJoinedSession,
 } from "./collab/useJoinedSession";
-import { encodeSnapshot, type SnapshotPayload } from "./collab/snapshot";
-import {
-  deriveSigningKey,
-  peekReturn,
-  reanchorReturn,
-  verifyReturn,
-} from "./collab/returnBlob";
-import { CollaborationCenter } from "./components/CollaborationCenter";
 import { HookSetupModal } from "./components/HookSetupModal";
 import { ReadmeModal } from "./components/ReadmeModal";
 import { FeedbackModal } from "./components/FeedbackModal";
@@ -81,7 +69,7 @@ import { VoicePanel } from "./components/VoicePanel";
 import type { ProjectOption } from "./components/ProjectPicker";
 import { useFolderWorkspaces } from "./hooks/useFolderWorkspaces";
 import { computeParagraphDiff, type ParagraphDiff } from "./diff";
-import { anchorByBlockId, blockIdByAnchorId } from "./editor/docModel";
+import { blockIdByAnchorId } from "./editor/docModel";
 import { useTextSelection } from "./hooks/useTextSelection";
 import {
   applyFont,
@@ -1269,7 +1257,6 @@ function App() {
   // handles surface back here for presence UI, mirrors, and access control.
   const [inviteOpen, setInviteOpen] = useState(false);
   const [joinOpen, setJoinOpen] = useState(false);
-  const [collabCenterOpen, setCollabCenterOpen] = useState(false);
   const [collabShare, setCollabShare] = useState<CollabConfig | null>(null);
   // The room's admin token — the credential the signaling server ties
   // manage (allowlist/revoke) rights to. Never leaves this machine.
@@ -1513,7 +1500,7 @@ function App() {
       if (!req) return;
       reviewRequests.update(requestId, { status: "revoked" });
       const share = collabShare;
-      if (share && req.mode === "live") {
+      if (share) {
         const epoch = (share.epoch ?? 0) + 1;
         const secret = randomToken();
         setCollabShare({ ...share, secret, epoch });
@@ -1534,172 +1521,6 @@ function App() {
       if (req) revokeRequest(req.id);
     },
     [reviewRequests, revokeRequest],
-  );
-
-  // Async Review Request (1d): encrypt the CURRENT revision into a snapshot
-  // token for the browser viewer. The per-request signing key (derived from
-  // the owner secret) rides inside so the viewer can sign its return.
-  const buildSnapshotToken = useCallback(
-    async (req: {
-      id: string;
-      reviewerName: string;
-      expiresAt?: number;
-      note?: string;
-    }): Promise<string | null> => {
-      if (!session || !latest) return null;
-      const ownerSecret = await invoke<string>("get_owner_secret");
-      const signingKey = await deriveSigningKey(ownerSecret, req.id);
-      const payload: SnapshotPayload = {
-        v: 1,
-        requestId: req.id,
-        baseVersion: latest.versionNumber,
-        reviewerName: req.reviewerName,
-        ...(relayDefaults.displayName
-          ? { ownerName: relayDefaults.displayName }
-          : {}),
-        projectName: session.projectName,
-        ...(activePlanTitle ? { planTitle: activePlanTitle } : {}),
-        markdown: latest.rawPlanMarkdown,
-        signingKey,
-        ...(req.expiresAt ? { expiresAt: req.expiresAt } : {}),
-        ...(req.note ? { note: req.note } : {}),
-        createdAt: Date.now(),
-      };
-      return encodeSnapshot(payload);
-    },
-    [session, latest, relayDefaults, activePlanTitle],
-  );
-
-  const createAsyncRequest = useCallback(
-    async (
-      reviewerName: string,
-      expiresDays: number | null,
-      note: string,
-    ): Promise<string | null> => {
-      if (!session || !latest || !reviewRequests.ready) return null;
-      // The registry is bound to the shared session while sharing — refuse
-      // creating requests for a different session under that key.
-      if (collabShare && collabShare.sessionId !== session.sessionId) {
-        return null;
-      }
-      const id = `rr-${randomToken(8)}`;
-      const expiresAt = expiresDays
-        ? Date.now() + expiresDays * 86_400_000
-        : undefined;
-      const trimmedNote = note.trim() || undefined;
-      const token = await buildSnapshotToken({
-        id,
-        reviewerName,
-        ...(expiresAt ? { expiresAt } : {}),
-        ...(trimmedNote ? { note: trimmedNote } : {}),
-      });
-      if (!token) return null;
-      reviewRequests.add({
-        id,
-        reviewerName,
-        mode: "async",
-        status: "pending",
-        createdAt: Date.now(),
-        baseVersion: latest.versionNumber,
-        ...(expiresAt ? { expiresAt } : {}),
-        ...(trimmedNote ? { note: trimmedNote } : {}),
-      });
-      return token;
-    },
-    [session, latest, reviewRequests, collabShare, buildSnapshotToken],
-  );
-
-  // Regenerate an async request's link against the CURRENT revision (the
-  // token is never stored — it embeds the whole encrypted plan). Same
-  // request id ⇒ same derived signing key ⇒ old and new links both verify.
-  const remintAsyncRequest = useCallback(
-    async (requestId: string): Promise<string | null> => {
-      const req = reviewRequests.requests.find((r) => r.id === requestId);
-      if (!req || req.mode !== "async" || !latest) return null;
-      const token = await buildSnapshotToken({
-        id: req.id,
-        reviewerName: req.reviewerName,
-        ...(req.expiresAt ? { expiresAt: req.expiresAt } : {}),
-        ...(req.note ? { note: req.note } : {}),
-      });
-      if (token) {
-        reviewRequests.update(requestId, {
-          baseVersion: latest.versionNumber,
-        });
-      }
-      return token;
-    },
-    [reviewRequests, latest, buildSnapshotToken],
-  );
-
-  // Import a signed return (1d): verify against the derived key, re-anchor
-  // by blockId onto the CURRENT revision, attribute to the reviewer, and
-  // surface anything that no longer anchors instead of dropping it.
-  const importReturn = useCallback(
-    async (
-      blob: string,
-    ): Promise<{ summary?: ImportSummary; error?: string }> => {
-      if (!session || !latest) return { error: "Open the plan session first." };
-      const peeked = peekReturn(blob);
-      if (!peeked) {
-        return { error: "That doesn’t look like a Redline return blob." };
-      }
-      const req = reviewRequests.requests.find(
-        (r) => r.id === peeked.requestId,
-      );
-      if (!req) {
-        return { error: "No matching review request in this session." };
-      }
-      if (req.status === "revoked") {
-        return {
-          error: "That request was cancelled — its returns are no longer accepted.",
-        };
-      }
-      if (isExpired(req, Date.now())) {
-        return { error: "That request expired." };
-      }
-      const ownerSecret = await invoke<string>("get_owner_secret");
-      const key = await deriveSigningKey(ownerSecret, req.id);
-      const verified = await verifyReturn(blob, key);
-      if (!verified) {
-        return {
-          error:
-            "Signature check failed — the blob was tampered with or belongs to a different request.",
-        };
-      }
-      const anchors = anchorByBlockId(latest.sections);
-      const { placed, orphans } = reanchorReturn(verified, anchors);
-      const imported: Comment[] = [];
-      for (const request of placed) {
-        try {
-          imported.push(
-            await invoke<Comment>("add_comment", {
-              sessionId: session.sessionId,
-              request,
-            }),
-          );
-        } catch (err) {
-          console.error("failed to import returned comment", err);
-        }
-      }
-      reviewRequests.update(req.id, {
-        status: "returned",
-        returnedAt: Date.now(),
-        importedCommentIds: imported.map((c) => c.id),
-        orphans,
-        importedIntoVersion: latest.versionNumber,
-      });
-      await loadSession(session.sessionId);
-      return {
-        summary: {
-          imported,
-          orphans,
-          baseVersion: verified.baseVersion,
-          currentVersion: latest.versionNumber,
-        },
-      };
-    },
-    [session, latest, reviewRequests],
   );
 
   // The room follows the CURRENT revision (a revise round rolls the room);
@@ -2562,8 +2383,7 @@ function App() {
     setupModalActive ||
     tourActive ||
     inviteOpen ||
-    joinOpen ||
-    collabCenterOpen;
+    joinOpen;
   // The native webview must be hidden whenever a pane divider is mid-drag —
   // otherwise it swallows the pointer and the resize freezes. This makes the
   // sidebar, comment pane, terminal, and the document/browser split all
@@ -2647,9 +2467,7 @@ function App() {
         }}
         collabActive={!!collabShare || !!joinedRoom}
         canInvite={sessionReady && !!latest}
-        // 👥 opens the Collaboration Center — the request list; live
-        // sharing (the invite dialog) is one step inside it.
-        onInvite={() => setCollabCenterOpen(true)}
+        onInvite={() => setInviteOpen(true)}
         onJoinSession={() => setJoinOpen(true)}
         splitActive={docOpen && (browserOpen || drafterOpen)}
         splitVertical={splitVertical}
@@ -3614,12 +3432,11 @@ function App() {
           peerCount={collabPeers}
           defaultDisplayName={relayDefaults.displayName}
           defaultSignaling={relayDefaults.signaling}
-          liveRequests={reviewRequests.requests.filter(
-            (r) => r.mode === "live",
-          )}
+          liveRequests={reviewRequests.requests}
           connectedHashes={presentHashes}
           onCreateInvite={createLiveInvite}
           onRevoke={revokeRequest}
+          onRemove={(id) => reviewRequests.remove(id)}
           mintCode={mintJoinCode}
           onStart={startShare}
           onStop={stopShare}
@@ -3631,34 +3448,6 @@ function App() {
           defaultDisplayName={relayDefaults.displayName}
           onJoin={joinRoom}
           onClose={() => setJoinOpen(false)}
-        />
-      )}
-      {collabCenterOpen && (
-        <CollaborationCenter
-          sessionLabel={
-            activePlanTitle ??
-            session?.projectName ??
-            (collabShare ? "shared session" : "this session")
-          }
-          scopedElsewhere={
-            !!collabShare && !!activeId && collabShare.sessionId !== activeId
-          }
-          requests={reviewRequests.requests}
-          ready={reviewRequests.ready}
-          connectedHashes={presentHashes}
-          sharing={!!collabShare}
-          currentVersion={latest?.versionNumber ?? 0}
-          onOpenInvite={() => setInviteOpen(true)}
-          onCreateAsync={createAsyncRequest}
-          onRemintAsync={remintAsyncRequest}
-          onImportReturn={importReturn}
-          onRevoke={revokeRequest}
-          onResolve={(id) =>
-            reviewRequests.update(id, { status: "resolved" })
-          }
-          onRemove={(id) => reviewRequests.remove(id)}
-          mintCode={mintJoinCode}
-          onClose={() => setCollabCenterOpen(false)}
         />
       )}
       {showReadme && <ReadmeModal onClose={() => setShowReadme(false)} />}

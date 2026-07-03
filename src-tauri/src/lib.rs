@@ -62,7 +62,6 @@ const SETTING_MODE: &str = "interception_mode";
 // URLs baked into invite codes, and the owner's display name for presence.
 const SETTING_COLLAB_SIGNALING: &str = "collab_signaling";
 const SETTING_COLLAB_DISPLAY_NAME: &str = "collab_display_name";
-const SETTING_COLLAB_OWNER_SECRET: &str = "collab_owner_secret";
 const DEFAULT_COLLAB_SIGNALING: &str = "ws://127.0.0.1:4444";
 /// Seconds the Ambient decision window stays open before auto-approving.
 const AMBIENT_WINDOW_SECS: u64 = 20;
@@ -3211,47 +3210,6 @@ fn set_relay_config(
     Ok(())
 }
 
-/// The owner's long-lived collaboration signing secret. Per-review-request
-/// HMAC keys derive from it (`HMAC(secret, request id)`), so verifying a
-/// signed async return never requires storing per-request keys. Generated
-/// lazily on first read — 32 random bytes hex-encoded — and stable after
-/// that so returns minted against old requests keep verifying.
-#[tauri::command]
-fn get_owner_secret(settings: tauri::State<'_, Settings>) -> Result<String, String> {
-    if let Some(existing) = settings.db.get_setting(SETTING_COLLAB_OWNER_SECRET) {
-        if !existing.is_empty() {
-            return Ok(existing);
-        }
-    }
-    // Two v4 UUIDs = 32 bytes of OS randomness — no extra dependency.
-    let mut bytes = Vec::with_capacity(32);
-    bytes.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
-    bytes.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
-    let secret: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    settings
-        .db
-        .set_setting(SETTING_COLLAB_OWNER_SECRET, &secret)
-        .map_err(|e| e.to_string())?;
-    Ok(secret)
-}
-
-/// Replace the owner secret (e.g. key rotation after a suspected leak).
-/// Outstanding async Review Requests stop verifying — the Collaboration
-/// Center is expected to warn before offering this.
-#[tauri::command]
-fn set_owner_secret(
-    settings: tauri::State<'_, Settings>,
-    secret: String,
-) -> Result<(), String> {
-    if secret.trim().is_empty() {
-        return Err("owner secret cannot be empty".into());
-    }
-    settings
-        .db
-        .set_setting(SETTING_COLLAB_OWNER_SECRET, secret.trim())
-        .map_err(|e| e.to_string())
-}
-
 /// Per-session Review Request registry, stored as an opaque JSON blob the
 /// frontend owns (`src/collab/reviewRequest.ts` defines the shape). Keyed
 /// per session so requests survive restarts and background sessions.
@@ -4143,8 +4101,6 @@ pub fn run() {
             set_interception_mode,
             get_relay_config,
             set_relay_config,
-            get_owner_secret,
-            set_owner_secret,
             get_collab_requests,
             set_collab_requests,
             get_collab_share,
