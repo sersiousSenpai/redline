@@ -50,6 +50,40 @@ import {
   persistPlanYDoc,
   seedPlanYDocIfEmpty,
 } from "../editor/yjs/planYDoc";
+import {
+  collabRoomName,
+  type CollabConfig,
+  type CollabRoomId,
+  type CollabRole,
+  type CollabUser,
+} from "../collab/collabConfig";
+import {
+  createCollabProvider,
+  type CollabProviderHandle,
+} from "../collab/provider";
+
+/** Attach this editor's Y.Doc to a live collaboration room.
+ *
+ * Seeding policy rides the role (load-bearing — seeding is non-deterministic
+ * across Yjs client ids, so two seeders would duplicate the document):
+ *  - `owner`: hydrate exactly as solo (IndexedDB restore, else markdown
+ *    seed) — the owner is the single authoritative seed origin.
+ *  - `collaborator`: NEVER seed and skip IndexedDB; the body arrives over
+ *    the mesh, and hydration gates on the provider's first peer sync.
+ */
+export interface PlanEditorCollab {
+  config: CollabConfig;
+  role: CollabRole;
+  user: CollabUser;
+  /** Current room override — join codes carry the minted revision, but the
+   *  live room follows the CURRENT revision (rollover re-points this). */
+  room?: CollabRoomId;
+  /** Extra ICE servers (self-hosted TURN) from the relay settings. */
+  iceServers?: RTCIceServer[];
+  /** Surfaces the live provider so the parent can render presence UI.
+   *  Called with null when the provider tears down. */
+  onProvider?: (handle: CollabProviderHandle | null) => void;
+}
 
 interface PlanEditorProps {
   /** Sidecar-augmented markdown from the latest revision. */
@@ -77,6 +111,8 @@ interface PlanEditorProps {
   /** M4: a user edit was blocked because its block carries a pending agent
    *  suggestion — surface "resolve the suggestion first" UI. */
   onLockedEdit?: (blockId: string) => void;
+  /** Live collaboration room to attach this revision's Y.Doc to. */
+  collab?: PlanEditorCollab;
 }
 
 /** Editor actions the App can invoke imperatively (it renders the
@@ -109,9 +145,15 @@ export function PlanEditor({
   focusedCommentId,
   actionsRef,
   onLockedEdit,
+  collab,
 }: PlanEditorProps) {
+  const isCollaborator = collab?.role === "collaborator";
+  // A collaborator has no Tauri comment backend (Phase 1b adds a Yjs-backed
+  // one) but co-edits the body directly — their marks ride the fragment and
+  // the owner's projection derives the cards.
   const editable =
-    !!onAddComment && !!onUpdateComment && !!onDeleteComment;
+    isCollaborator ||
+    (!!onAddComment && !!onUpdateComment && !!onDeleteComment);
 
   const anchors = useMemo(() => anchorByBlockId(sections), [sections]);
 
@@ -144,7 +186,46 @@ export function PlanEditor({
     [seedBlocks],
   );
 
+  // Live-room provider. Keyed by room + secret so a revision rollover (new
+  // room) or a fresh invite (new secret) tears down and reattaches, while
+  // parent re-renders that merely rebuild the `collab` object don't churn
+  // websocket/peer connections. The handle lives in state because the cursor
+  // extension and collaborator hydration both depend on it existing.
+  const collabRef = useRef(collab);
+  collabRef.current = collab;
+  const [collabHandle, setCollabHandle] =
+    useState<CollabProviderHandle | null>(null);
+  const collabKey = collab
+    ? `${collabRoomName(collab.room ?? collab.config)}#${collab.config.secret}`
+    : null;
   useEffect(() => {
+    if (!collabKey) return;
+    const c = collabRef.current!;
+    const handle = createCollabProvider(ydoc, c.config, {
+      ...(c.room ? { room: c.room } : {}),
+      ...(c.iceServers ? { iceServers: c.iceServers } : {}),
+    });
+    // CollaborationCursor also writes `user`; setting it here too means the
+    // roster is correct even before the editor instance exists. `role` lets
+    // presence UI badge the owner.
+    handle.awareness.setLocalStateField("user", {
+      name: c.user.name,
+      color: c.user.color,
+      role: c.role,
+    });
+    setCollabHandle(handle);
+    c.onProvider?.(handle);
+    return () => {
+      setCollabHandle(null);
+      collabRef.current?.onProvider?.(null);
+      handle.destroy();
+    };
+  }, [ydoc, collabKey]);
+
+  useEffect(() => {
+    // Collaborator seeding policy: never seed, never persist — the network
+    // hydration effect below owns readiness for this role.
+    if (isCollaborator) return;
     let cancelled = false;
     const persistence = sessionId ? persistPlanYDoc(revisionKey, ydoc) : null;
     const ready = persistence?.whenSynced ?? Promise.resolve();
@@ -172,7 +253,22 @@ export function PlanEditor({
     // `markdown`/`anchors` deliberately omitted: content reloads only on
     // revisionKey change — the same contract the old initialDoc memo had.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [revisionKey, ydoc, sessionId]);
+  }, [revisionKey, ydoc, sessionId, isCollaborator]);
+
+  // Collaborator hydration: the body arrives over the mesh. Gating on the
+  // provider's first peer sync keeps the same invariant the seed path has —
+  // the editor can't come up editable over an empty doc (a pre-sync
+  // keystroke would merge as a spurious leading edit once content lands).
+  useEffect(() => {
+    if (!isCollaborator || !collabHandle) return;
+    let cancelled = false;
+    void collabHandle.whenSynced.then(() => {
+      if (!cancelled) setHydratedKey(revisionKey);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isCollaborator, collabHandle, revisionKey]);
 
   // Stable identity for the lock callback so the extensions memo (and the
   // editor instance) never recreates when the parent re-renders.
@@ -184,13 +280,24 @@ export function PlanEditor({
       ...planExtensions({
         document: ydoc,
         onLockedEdit: (blockId) => onLockedEditRef.current?.(blockId),
+        // Remote carets only when a live provider is attached. `user` is
+        // read once at extension creation — identity churn on the parent's
+        // collab object doesn't matter here.
+        ...(collabHandle && collabRef.current
+          ? {
+              cursor: {
+                awareness: collabHandle.awareness,
+                user: collabRef.current.user,
+              },
+            }
+          : {}),
       }),
       RedlineDecorations,
       CommentHighlights,
       CommentMarkers,
       SearchHighlight,
     ],
-    [ydoc],
+    [ydoc, collabHandle],
   );
   const scheduleRef = useRef<(() => void) | null>(null);
 
@@ -224,7 +331,9 @@ export function PlanEditor({
     // instance (ydoc → fresh PM state) replays restored content; if it
     // contains uncommitted pre-crash edits, the scheduled flush re-derives
     // their comments against the clean base — that IS the crash recovery.
-    [revisionKey, hydrated],
+    // Also recreated when a live provider attaches/detaches so the
+    // CollaborationCursor extension (dis)appears with it.
+    [revisionKey, hydrated, collabHandle],
   );
 
   const readCurrent = useCallback(
@@ -251,7 +360,11 @@ export function PlanEditor({
     comments: comments ?? [],
     backend,
     readCurrent,
-    enabled: editable && hydrated && seedBlocks.length > 0,
+    // Projection ownership: doc→card projection runs on the OWNER only — the
+    // collaborator has no seed baseline (empty markdown) and no SQLite; the
+    // owner derives cards from the shared fragment for everyone.
+    enabled:
+      editable && hydrated && seedBlocks.length > 0 && !isCollaborator,
   });
   scheduleRef.current = schedule;
 

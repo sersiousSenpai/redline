@@ -1820,3 +1820,47 @@ p.rl-block-modified {
     animation: none;
   }
 }
+
+/* ── Live collaboration (Phase 1a) ─────────────────────────────────── */
+/* Remote carets + selections from @tiptap/extension-collaboration-cursor.
+   The extension inlines each user's color; these rules supply the shape. */
+.collaboration-cursor__caret {
+  border-left: 1px solid;
+  border-right: 1px solid;
+  margin-left: -1px;
+  margin-right: -1px;
+  pointer-events: none;
+  position: relative;
+  word-break: normal;
+}
+.collaboration-cursor__label {
+  border-radius: 3px 3px 3px 0;
+  color: #fff;
+  font-family: var(--font-sans);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 600;
+  left: -1px;
+  line-height: normal;
+  padding: 0.1rem 0.3rem;
+  position: absolute;
+  top: -1.4em;
+  user-select: none;
+  white-space: nowrap;
+}
+/* Presence strip's "Live" indicator. */
+.rl-live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  background: var(--color-success, #2f9e44);
+  animation: rl-live-pulse 2s ease-in-out infinite;
+}
+@keyframes rl-live-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-success, #2f9e44) 45%, transparent); }
+  50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-success, #2f9e44) 18%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rl-live-dot { animation: none; }
+}

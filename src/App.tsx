@@ -18,8 +18,19 @@ const PlanEditor = lazy(() =>
   import("./components/PlanEditor").then((m) => ({ default: m.PlanEditor })),
 );
 import type { PlanEditorActions } from "./components/PlanEditor";
+import type { PlanEditorCollab } from "./components/PlanEditor";
 import { Footer } from "./components/Footer";
 import { Header } from "./components/Header";
+import { InviteDialog } from "./components/InviteDialog";
+import { JoinDialog } from "./components/JoinDialog";
+import { PresenceBar } from "./components/PresenceBar";
+import {
+  collabRevisionKey,
+  presenceColor,
+  randomToken,
+  type CollabConfig,
+} from "./collab/collabConfig";
+import type { CollabProviderHandle } from "./collab/provider";
 import { HookSetupModal } from "./components/HookSetupModal";
 import { ReadmeModal } from "./components/ReadmeModal";
 import { FeedbackModal } from "./components/FeedbackModal";
@@ -1204,6 +1215,95 @@ function App() {
     isViewingHistorical && viewedRevision
       ? viewedRevision.comments
       : latestComments;
+
+  // ── Live collaboration (Phase 1a) ────────────────────────────────────
+  // Owner side: one active share, scoped to the session it was minted for.
+  // Collaborator side: one joined room. Both attach through PlanEditor's
+  // `collab` prop; the provider handle surfaces back here for presence UI.
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [joinOpen, setJoinOpen] = useState(false);
+  const [collabShare, setCollabShare] = useState<CollabConfig | null>(null);
+  const [joinedRoom, setJoinedRoom] = useState<{
+    config: CollabConfig;
+    name: string;
+  } | null>(null);
+  const [collabPresence, setCollabPresence] =
+    useState<CollabProviderHandle | null>(null);
+  const [collabPeers, setCollabPeers] = useState(0);
+  const [relayDefaults, setRelayDefaults] = useState<{
+    displayName: string;
+    signaling: string[];
+  }>({ displayName: "", signaling: ["ws://127.0.0.1:4444"] });
+
+  useEffect(() => {
+    void invoke<{ displayName: string; signaling: string[] }>(
+      "get_relay_config",
+    )
+      .then(setRelayDefaults)
+      .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    if (!collabPresence) {
+      setCollabPeers(0);
+      return;
+    }
+    setCollabPeers(collabPresence.peerCount);
+    return collabPresence.onPeersChanged(setCollabPeers);
+  }, [collabPresence]);
+
+  const startShare = useCallback(
+    (displayName: string, signaling: string[]) => {
+      if (!activeId || !latest) return;
+      // Persist the relay settings so the next invite is prefilled.
+      void invoke("set_relay_config", { displayName, signaling }).catch(
+        () => undefined,
+      );
+      setRelayDefaults({ displayName, signaling });
+      setCollabShare({
+        sessionId: activeId,
+        threadStart: threadRevisions[0]?.versionNumber ?? 0,
+        version: latest.versionNumber,
+        signaling,
+        secret: randomToken(),
+        invite: randomToken(8),
+        ownerName: displayName,
+      });
+    },
+    [activeId, latest, threadRevisions],
+  );
+
+  // The room follows the CURRENT revision (a revise round rolls the room);
+  // the join code's minted version is only where a joiner starts.
+  const ownerCollab = useMemo<PlanEditorCollab | undefined>(() => {
+    if (!collabShare || !activeId || collabShare.sessionId !== activeId) {
+      return undefined;
+    }
+    if (!latest) return undefined;
+    const name = collabShare.ownerName || "Owner";
+    return {
+      config: collabShare,
+      role: "owner",
+      user: { name, color: presenceColor(name) },
+      room: {
+        sessionId: activeId,
+        threadStart: threadRevisions[0]?.versionNumber ?? 0,
+        version: latest.versionNumber,
+      },
+      onProvider: setCollabPresence,
+    };
+  }, [collabShare, activeId, latest, threadRevisions]);
+
+  const collaboratorCollab = useMemo<PlanEditorCollab | undefined>(() => {
+    if (!joinedRoom) return undefined;
+    const name = joinedRoom.name || "Guest";
+    return {
+      config: joinedRoom.config,
+      role: "collaborator",
+      user: { name, color: presenceColor(name) },
+      onProvider: setCollabPresence,
+    };
+  }, [joinedRoom]);
   // When a voice-authored comment newly appears on the displayed revision (the
   // agent captured a spoken change over the curl bridge, so we never saw the
   // returned Comment), focus it and auto-open its discussion sidecar.
@@ -1866,7 +1966,12 @@ function App() {
       setupPhase === "done");
   const tourActive = tourOpen || (!onboardingDone && !setupModalActive);
   const browserOverlayActive =
-    showReadme || showFeedback || setupModalActive || tourActive;
+    showReadme ||
+    showFeedback ||
+    setupModalActive ||
+    tourActive ||
+    inviteOpen ||
+    joinOpen;
   // The native webview must be hidden whenever a pane divider is mid-drag —
   // otherwise it swallows the pointer and the resize freezes. This makes the
   // sidebar, comment pane, terminal, and the document/browser split all
@@ -1948,6 +2053,10 @@ function App() {
             return !v;
           });
         }}
+        collabActive={!!collabShare || !!joinedRoom}
+        canInvite={sessionReady && !!latest}
+        onInvite={() => setInviteOpen(true)}
+        onJoinSession={() => setJoinOpen(true)}
         splitActive={docOpen && (browserOpen || drafterOpen)}
         splitVertical={splitVertical}
         onToggleSplitOrientation={() => {
@@ -1962,6 +2071,20 @@ function App() {
           onOpen={openDecisionForReview}
           onApprove={approveFromDecision}
           onExpire={dismissDecisionWindow}
+        />
+      )}
+      {collabPresence && (collabShare || joinedRoom) && (
+        <PresenceBar
+          handle={collabPresence}
+          role={joinedRoom ? "collaborator" : "owner"}
+          onInvite={joinedRoom ? undefined : () => setInviteOpen(true)}
+          onEnd={() => {
+            if (joinedRoom) setJoinedRoom(null);
+            else {
+              setCollabShare(null);
+              setInviteOpen(false);
+            }
+          }}
         />
       )}
       <main className="relative flex-1 overflow-hidden flex flex-col">
@@ -2057,7 +2180,23 @@ function App() {
               } as React.CSSProperties
             }
           >
-            {sidebarTab.kind === "folder" ? (
+            {joinedRoom && collaboratorCollab ? (
+              // Joined (collaborator) view: no local session, no markdown —
+              // the body hydrates from the mesh and the editor renders it
+              // with full track-changes co-editing. Phase 1c adds the
+              // synthesized sidebar session; for now the room takes over
+              // the document pane while joined.
+              <Suspense fallback={null}>
+                <PlanEditor
+                  key={`joined:${collabRevisionKey(joinedRoom.config)}`}
+                  markdown=""
+                  sections={[]}
+                  comments={[]}
+                  revisionKey={collabRevisionKey(joinedRoom.config)}
+                  collab={collaboratorCollab}
+                />
+              </Suspense>
+            ) : sidebarTab.kind === "folder" ? (
               <EmptyState
                 title="Browsing files"
                 body="Select a file from the tree to view it here."
@@ -2098,6 +2237,7 @@ function App() {
                     onHighlightClick={handleHighlightClick}
                     actionsRef={planActionsRef}
                     onLockedEdit={lockedEditToast}
+                    collab={ownerCollab}
                   />
                 </Suspense>
               )
@@ -2838,6 +2978,27 @@ function App() {
         />
       )}
       {toast && <ApproveToast message={toast} />}
+      {inviteOpen && (
+        <InviteDialog
+          sharing={collabShare}
+          peerCount={collabPeers}
+          defaultDisplayName={relayDefaults.displayName}
+          defaultSignaling={relayDefaults.signaling}
+          onStart={startShare}
+          onStop={() => setCollabShare(null)}
+          onClose={() => setInviteOpen(false)}
+        />
+      )}
+      {joinOpen && (
+        <JoinDialog
+          defaultDisplayName={relayDefaults.displayName}
+          onJoin={(config, name) => {
+            setJoinedRoom({ config, name });
+            setJoinOpen(false);
+          }}
+          onClose={() => setJoinOpen(false)}
+        />
+      )}
       {showReadme && <ReadmeModal onClose={() => setShowReadme(false)} />}
       {showFeedback && (
         <FeedbackModal onClose={() => setShowFeedback(false)} />

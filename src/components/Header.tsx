@@ -78,6 +78,12 @@ interface HeaderProps {
   drafterOpen: boolean;
   /** Toggle the Prompt Drafter on/off. */
   onToggleDrafter: () => void;
+  /** A live collaboration room is active (sharing or joined). */
+  collabActive: boolean;
+  /** Invite needs an active plan session to share. */
+  canInvite: boolean;
+  onInvite: () => void;
+  onJoinSession: () => void;
 }
 
 export function Header({
@@ -111,6 +117,10 @@ export function Header({
   onToggleSplitOrientation,
   drafterOpen,
   onToggleDrafter,
+  collabActive,
+  canInvite,
+  onInvite,
+  onJoinSession,
 }: HeaderProps) {
   const latest = session?.revisions[session.revisions.length - 1];
   const downloadVersion = viewedVersionNumber ?? latest?.versionNumber;
@@ -206,6 +216,53 @@ export function Header({
             }}
           >
             ✍️
+          </button>
+          <button
+            type="button"
+            onClick={onInvite}
+            disabled={!canInvite && !collabActive}
+            title={
+              collabActive
+                ? "Live session — manage sharing"
+                : canInvite
+                  ? "Invite to a live session"
+                  : "Open a plan session to invite collaborators"
+            }
+            aria-label="Invite to live session"
+            aria-pressed={collabActive}
+            className="flex items-center rounded-sm px-2 py-0.5"
+            style={{
+              fontSize: "13px",
+              lineHeight: 1,
+              border: "1px solid var(--color-rule)",
+              background: collabActive
+                ? "var(--color-anchor-bg)"
+                : "var(--color-bg-elevated)",
+              color: collabActive
+                ? "var(--color-anchor-text)"
+                : "var(--color-ink)",
+              cursor: canInvite || collabActive ? "pointer" : "default",
+              opacity: canInvite || collabActive ? 1 : 0.45,
+            }}
+          >
+            👥
+          </button>
+          <button
+            type="button"
+            onClick={onJoinSession}
+            title="Join a live session with an invite code"
+            aria-label="Join a live session"
+            className="flex items-center rounded-sm px-2 py-0.5"
+            style={{
+              fontSize: "11px",
+              lineHeight: "13px",
+              border: "1px solid var(--color-rule)",
+              background: "var(--color-bg-elevated)",
+              color: "var(--color-ink)",
+              cursor: "pointer",
+            }}
+          >
+            Join
           </button>
           {splitActive && (
             <button
