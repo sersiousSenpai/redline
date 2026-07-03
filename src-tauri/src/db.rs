@@ -611,6 +611,10 @@ impl Database {
         // same reasoning as `fork_session_id` above.
         let _ = conn.execute("ALTER TABLE comments ADD COLUMN author TEXT", []);
         let _ = conn.execute("ALTER TABLE comments ADD COLUMN agent_state TEXT", []);
+        // Live-collab / Review Request attribution: the human reviewer a
+        // comment came from ("John Doe"). NULL for every owner-originated
+        // comment and every pre-collab row. Distinct from `author` (agent id).
+        let _ = conn.execute("ALTER TABLE comments ADD COLUMN reviewer TEXT", []);
         // Persisted attach state: lets detachment survive app restarts and be
         // visible for background sessions (the live `held` flag is recomputed
         // from in-memory senders and tells nothing after a crash).
@@ -727,8 +731,8 @@ impl Database {
                 block_id, structural_json,
                 sel_char_start, sel_char_end, sel_quoted_text,
                 sel_sub_block_id, reopen_note, reopen_history, actionable,
-                author, agent_state
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+                author, agent_state, reviewer
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
             params![
                 comment.id,
                 session_id,
@@ -755,6 +759,7 @@ impl Database {
                 comment.actionable as i64,
                 comment.author,
                 comment.agent_state,
+                comment.reviewer,
             ],
         )?;
         Ok(())
@@ -805,8 +810,9 @@ impl Database {
                 reopen_history = ?16,
                 actionable = ?17,
                 author = ?18,
-                agent_state = ?19
-             WHERE session_id = ?20 AND id = ?21",
+                agent_state = ?19,
+                reviewer = ?20
+             WHERE session_id = ?21 AND id = ?22",
             params![
                 comment.scope.map(|s| s.as_str()),
                 comment.body,
@@ -827,6 +833,7 @@ impl Database {
                 comment.actionable as i64,
                 comment.author,
                 comment.agent_state,
+                comment.reviewer,
                 session_id,
                 comment.id,
             ],
@@ -2677,7 +2684,7 @@ impl Database {
                     block_id, structural_json,
                     sel_char_start, sel_char_end, sel_quoted_text,
                     sel_sub_block_id, reopen_note, reopen_history, actionable,
-                    author, agent_state
+                    author, agent_state, reviewer
              FROM comments
              ORDER BY session_id, version_number, created_at",
         )?;
@@ -2732,6 +2739,7 @@ impl Database {
             let actionable: bool = row.get::<_, i64>(22)? != 0;
             let author: Option<String> = row.get(23)?;
             let agent_state: Option<String> = row.get(24)?;
+            let reviewer: Option<String> = row.get(25)?;
             Ok((
                 row.get::<_, String>(1)?, // session_id
                 row.get::<_, u32>(2)?,    // version_number
@@ -2753,6 +2761,7 @@ impl Database {
                     actionable,
                     author,
                     agent_state,
+                    reviewer,
                 },
             ))
         })?;
@@ -3054,6 +3063,47 @@ mod tests {
     }
 
     #[test]
+    fn add_comment_honors_explicit_id_without_perturbing_sequence() {
+        use crate::state::CommentKind;
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let store = SessionStore::new(db);
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("s", "/tmp/s", md.to_string(), reparse_sections(md), true, false);
+        let req = |id: Option<&str>| NewCommentRequest {
+            id: id.map(|s| s.to_string()),
+            kind: CommentKind::Feedback,
+            scope: None,
+            anchor_id: "A".to_string(),
+            block_id: None,
+            structural: None,
+            body: "b".to_string(),
+            edit: None,
+            selection: None,
+            author: None,
+            reviewer: None,
+        };
+        // Normal mint starts the c-NNN sequence.
+        let a = store.add_comment("s", req(None)).unwrap();
+        assert_eq!(a.id, "c-001");
+        // A collaborator-minted id (never plain c-NNN) is honored verbatim…
+        let b = store.add_comment("s", req(Some("c-1187249-42"))).unwrap();
+        assert_eq!(b.id, "c-1187249-42");
+        // …and does not perturb the owner's sequence.
+        let c = store.add_comment("s", req(None)).unwrap();
+        assert_eq!(c.id, "c-002");
+        // Re-delivering an existing id is idempotent: the existing comment
+        // comes back untouched, nothing new is minted.
+        let d = store.add_comment("s", req(Some("c-001"))).unwrap();
+        assert_eq!(d.id, "c-001");
+        assert_eq!(d.created_at, a.created_at);
+        let all = store.get("s").unwrap().revisions.last().unwrap().comments.len();
+        assert_eq!(all, 3);
+        // Empty string is treated as absent.
+        let e = store.add_comment("s", req(Some(""))).unwrap();
+        assert_eq!(e.id, "c-003");
+    }
+
+    #[test]
     fn restored_revision_carries_open_comments_forward() {
         use crate::state::{CommentKind, CommentStatus};
         let db = Arc::new(Database::open_in_memory().unwrap());
@@ -3061,6 +3111,7 @@ mod tests {
         let md = "# Plan\n\nBody.\n";
         store.upsert_plan("s", "/tmp/s", md.to_string(), reparse_sections(md), true, false);
         let comment = |body: &str| NewCommentRequest {
+                id: None,
             kind: CommentKind::Feedback,
             scope: None,
             anchor_id: "A".to_string(),
@@ -3070,6 +3121,7 @@ mod tests {
             edit: None,
             selection: None,
             author: None,
+            reviewer: None,
         };
         // A submitted comment (stays on v1), a reopened one and a draft (carried).
         let settled = store.add_comment("s", comment("settled")).unwrap();
@@ -3122,6 +3174,7 @@ mod tests {
             .add_comment(
                 "doomed",
                 NewCommentRequest {
+                id: None,
                     kind: CommentKind::Question,
                     scope: None,
                     anchor_id: "A".to_string(),
@@ -3131,6 +3184,7 @@ mod tests {
                     edit: None,
                     selection: None,
                     author: None,
+                    reviewer: None,
                 },
             )
             .expect("add comment");
@@ -3160,6 +3214,7 @@ mod tests {
             .add_comment(
                 "old",
                 NewCommentRequest {
+                id: None,
                     kind: CommentKind::Feedback,
                     scope: None,
                     anchor_id: "A".to_string(),
@@ -3169,6 +3224,7 @@ mod tests {
                     edit: None,
                     selection: None,
                     author: None,
+                    reviewer: None,
                 },
             )
             .expect("add comment");
@@ -3227,6 +3283,7 @@ mod tests {
             .add_comment(
                 "sess-c",
                 NewCommentRequest {
+                id: None,
                     kind: CommentKind::Question,
                     scope: None,
                     anchor_id: "A".to_string(),
@@ -3236,6 +3293,7 @@ mod tests {
                     edit: None,
                     selection: None,
                     author: None,
+                    reviewer: None,
                 },
             )
             .expect("add comment");
@@ -3258,6 +3316,7 @@ mod tests {
         store.upsert_plan("sess-1", "/tmp/proj", "# A\n\nIntro paragraph.\n".to_string(), sections, true, false);
 
         let req = NewCommentRequest {
+                id: None,
             kind: CommentKind::Feedback,
             scope: Some(CommentScope::Structural),
             anchor_id: "A".to_string(),
@@ -3267,6 +3326,7 @@ mod tests {
             edit: None,
             selection: None,
             author: None,
+            reviewer: None,
         };
         let c1 = store.add_comment("sess-1", req).expect("add");
         assert_eq!(c1.id, "c-001");
@@ -3274,6 +3334,7 @@ mod tests {
         assert!(matches!(c1.scope, Some(CommentScope::Structural)));
 
         let req2 = NewCommentRequest {
+                id: None,
             kind: CommentKind::Question,
             scope: None,
             anchor_id: "A".to_string(),
@@ -3283,6 +3344,7 @@ mod tests {
             edit: None,
             selection: None,
             author: None,
+            reviewer: None,
         };
         let c2 = store.add_comment("sess-1", req2).expect("add 2");
         assert_eq!(c2.id, "c-002");
@@ -3306,6 +3368,7 @@ mod tests {
             .add_comment(
                 "sess-a",
                 NewCommentRequest {
+                id: None,
                     kind: CommentKind::Edit,
                     scope: None,
                     anchor_id: "A.p1".to_string(),
@@ -3318,6 +3381,7 @@ mod tests {
                     }),
                     selection: None,
                     author: Some("claude-code".to_string()),
+                    reviewer: None,
                 },
             )
             .expect("add agent comment");
@@ -3328,6 +3392,7 @@ mod tests {
             .add_comment(
                 "sess-a",
                 NewCommentRequest {
+                id: None,
                     kind: CommentKind::Question,
                     scope: None,
                     anchor_id: "A".to_string(),
@@ -3337,6 +3402,7 @@ mod tests {
                     edit: None,
                     selection: None,
                     author: None,
+                    reviewer: None,
                 },
             )
             .expect("add user comment");
@@ -3355,6 +3421,44 @@ mod tests {
         let ru = &s.revisions[0].comments[1];
         assert!(ru.author.is_none());
         assert!(ru.agent_state.is_none());
+    }
+
+    // Review Request / live-collab attribution: `reviewer` survives insert →
+    // reload and stays None for owner-originated comments.
+    #[test]
+    fn reviewer_attribution_round_trips() {
+        use crate::state::CommentKind;
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let store = SessionStore::new(db.clone());
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("sess-r", "/tmp/r", md.to_string(), reparse_sections(md), true, false);
+        let mk = |reviewer: Option<&str>| NewCommentRequest {
+            id: None,
+            kind: CommentKind::Feedback,
+            scope: None,
+            anchor_id: "A".to_string(),
+            block_id: Some("blk-1".to_string()),
+            structural: None,
+            body: "from a return".to_string(),
+            edit: None,
+            selection: None,
+            author: None,
+            reviewer: reviewer.map(|s| s.to_string()),
+        };
+        let imported = store
+            .add_comment("sess-r", mk(Some("John Doe")))
+            .expect("add imported comment");
+        assert_eq!(imported.reviewer.as_deref(), Some("John Doe"));
+        let own = store.add_comment("sess-r", mk(None)).expect("add own comment");
+        assert!(own.reviewer.is_none());
+
+        let reloaded = SessionStore::new(db);
+        let s = reloaded.get("sess-r").expect("session");
+        assert_eq!(
+            s.revisions[0].comments[0].reviewer.as_deref(),
+            Some("John Doe")
+        );
+        assert!(s.revisions[0].comments[1].reviewer.is_none());
     }
 
     #[test]
@@ -3429,6 +3533,7 @@ mod tests {
         let md = "# Plan\n\nBody.\n";
         store.upsert_plan("s1", "/tmp/x", md.to_string(), reparse_sections(md), true, false);
         let mk_q = || NewCommentRequest {
+                id: None,
             kind: CommentKind::Question,
             scope: None,
             anchor_id: "A".to_string(),
@@ -3438,6 +3543,7 @@ mod tests {
             edit: None,
             selection: None,
             author: None,
+            reviewer: None,
         };
         store.add_comment("s1", mk_q()).expect("add comment");
         let db = store.database();
@@ -3471,6 +3577,7 @@ mod tests {
             .add_comment(
                 "s-fork",
                 NewCommentRequest {
+                id: None,
                     kind: CommentKind::Question,
                     scope: None,
                     anchor_id: "A".to_string(),
@@ -3480,6 +3587,7 @@ mod tests {
                     edit: None,
                     selection: None,
                     author: None,
+                    reviewer: None,
                 },
             )
             .expect("add comment");
@@ -3517,6 +3625,7 @@ mod tests {
                 .add_comment(
                     "s-disc",
                     NewCommentRequest {
+                id: None,
                         kind,
                         scope: None,
                         anchor_id: "A".to_string(),
@@ -3526,6 +3635,7 @@ mod tests {
                         edit: None,
                         selection: None,
                         author: None,
+                        reviewer: None,
                     },
                 )
                 .expect("add comment");
@@ -3605,6 +3715,7 @@ mod tests {
             .add_comment(
                 "s-arch",
                 NewCommentRequest {
+                id: None,
                     kind: CommentKind::Feedback,
                     scope: None,
                     anchor_id: "A".to_string(),
@@ -3614,6 +3725,7 @@ mod tests {
                     edit: None,
                     selection: None,
                     author: None,
+                    reviewer: None,
                 },
             )
             .expect("add comment");
@@ -3667,6 +3779,7 @@ mod tests {
         store.add_comment(
             "sess-rt",
             NewCommentRequest {
+                id: None,
                 kind: CommentKind::Feedback,
                 scope: Some(CommentScope::Structural),
                 anchor_id: "A.1".to_string(),
@@ -3676,12 +3789,14 @@ mod tests {
                 edit: None,
                 selection: None,
                 author: None,
+                reviewer: None,
             },
         )
         .expect("add comment");
         store.add_comment(
             "sess-rt",
             NewCommentRequest {
+                id: None,
                 kind: CommentKind::Question,
                 scope: None,
                 anchor_id: "A".to_string(),
@@ -3691,6 +3806,7 @@ mod tests {
                 edit: None,
                 selection: None,
                 author: None,
+                reviewer: None,
             },
         )
         .expect("add comment");
@@ -3834,6 +3950,7 @@ Restructured detail body.
             .add_comment(
                 "sess-ask",
                 NewCommentRequest {
+                id: None,
                     kind: CommentKind::Question,
                     scope: None,
                     anchor_id: "A".to_string(),
@@ -3843,6 +3960,7 @@ Restructured detail body.
                     edit: None,
                     selection: None,
                     author: None,
+                    reviewer: None,
                 },
             )
             .expect("add q1");
@@ -3850,6 +3968,7 @@ Restructured detail body.
             .add_comment(
                 "sess-ask",
                 NewCommentRequest {
+                id: None,
                     kind: CommentKind::Question,
                     scope: None,
                     anchor_id: "B".to_string(),
@@ -3859,6 +3978,7 @@ Restructured detail body.
                     edit: None,
                     selection: None,
                     author: None,
+                    reviewer: None,
                 },
             )
             .expect("add q2");
@@ -3960,6 +4080,7 @@ body.
             store.add_comment(
                 "sess-x",
                 NewCommentRequest {
+                id: None,
                     kind: CommentKind::Edit,
                     scope: None,
                     anchor_id: "A.p1".to_string(),
@@ -3972,6 +4093,7 @@ body.
                     }),
                     selection: None,
                     author: None,
+                    reviewer: None,
                 },
             )
             .expect("add comment");
@@ -4001,6 +4123,7 @@ body.
             .add_comment(
                 "s",
                 NewCommentRequest {
+                id: None,
                     kind: CommentKind::Edit,
                     scope: None,
                     anchor_id: "A.p1".to_string(),
@@ -4013,6 +4136,7 @@ body.
                     }),
                     selection: None,
                     author: None,
+                    reviewer: None,
                 },
             )
             .expect("add");
@@ -4064,6 +4188,7 @@ body.
             .add_comment(
                 "s",
                 NewCommentRequest {
+                id: None,
                     kind: CommentKind::BlockMove,
                     scope: None,
                     anchor_id: "A.p1".to_string(),
@@ -4079,6 +4204,7 @@ body.
                     edit: None,
                     selection: None,
                     author: None,
+                    reviewer: None,
                 },
             )
             .expect("add structural");
@@ -4116,6 +4242,7 @@ body.
         store.upsert_plan("sess-b", "/tmp/b", md.to_string(), reparse_sections(md), true, false);
 
         let mk = |body: &str| NewCommentRequest {
+                id: None,
             kind: CommentKind::Question,
             scope: None,
             anchor_id: "A".to_string(),
@@ -4125,6 +4252,7 @@ body.
             edit: None,
             selection: None,
             author: None,
+            reviewer: None,
         };
 
         let a = store
@@ -4259,6 +4387,7 @@ body.
             .add_comment(
                 "fresh",
                 NewCommentRequest {
+                id: None,
                     kind: CommentKind::Question,
                     scope: None,
                     anchor_id: "T".to_string(),
@@ -4268,6 +4397,7 @@ body.
                     edit: None,
                     selection: None,
                     author: None,
+                    reviewer: None,
                 },
             )
             .expect("fresh session c-001 persists");

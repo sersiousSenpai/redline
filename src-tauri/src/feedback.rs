@@ -456,6 +456,7 @@ mod tests {
             actionable: false,
             author: None,
             agent_state: None,
+            reviewer: None,
         }
     }
 
@@ -587,6 +588,7 @@ mod tests {
             actionable: false,
             author: None,
             agent_state: None,
+            reviewer: None,
         };
         let prose = mk_comment(
             "c-001",

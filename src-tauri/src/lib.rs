@@ -69,6 +69,11 @@ use crate::state::{
 };
 
 const SETTING_MODE: &str = "interception_mode";
+// Live-collaboration relay settings (Phase 1a): the self-hosted signaling
+// URLs baked into invite codes, and the owner's display name for presence.
+const SETTING_COLLAB_SIGNALING: &str = "collab_signaling";
+const SETTING_COLLAB_DISPLAY_NAME: &str = "collab_display_name";
+const DEFAULT_COLLAB_SIGNALING: &str = "ws://127.0.0.1:4444";
 /// Seconds the Ambient decision window stays open before auto-approving.
 const AMBIENT_WINDOW_SECS: u64 = 20;
 
@@ -4096,6 +4101,112 @@ fn set_interception_mode(app: AppHandle, mode: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Relay settings for live collaboration: the signaling server URLs minted
+/// into invite codes and the owner's presence display name. Stored in
+/// `app_settings` (signaling as a JSON array) so invites are prefilled.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RelayConfig {
+    signaling: Vec<String>,
+    display_name: String,
+}
+
+#[tauri::command]
+fn get_relay_config(settings: tauri::State<'_, Settings>) -> RelayConfig {
+    let signaling = settings
+        .db
+        .get_setting(SETTING_COLLAB_SIGNALING)
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| vec![DEFAULT_COLLAB_SIGNALING.to_string()]);
+    let display_name = settings
+        .db
+        .get_setting(SETTING_COLLAB_DISPLAY_NAME)
+        .unwrap_or_default();
+    RelayConfig {
+        signaling,
+        display_name,
+    }
+}
+
+#[tauri::command]
+fn set_relay_config(
+    settings: tauri::State<'_, Settings>,
+    signaling: Option<Vec<String>>,
+    display_name: Option<String>,
+) -> Result<(), String> {
+    if let Some(urls) = signaling {
+        let json = serde_json::to_string(&urls).map_err(|e| e.to_string())?;
+        settings
+            .db
+            .set_setting(SETTING_COLLAB_SIGNALING, &json)
+            .map_err(|e| e.to_string())?;
+    }
+    if let Some(name) = display_name {
+        settings
+            .db
+            .set_setting(SETTING_COLLAB_DISPLAY_NAME, name.trim())
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Per-session Review Request registry, stored as an opaque JSON blob the
+/// frontend owns (`src/collab/reviewRequest.ts` defines the shape). Keyed
+/// per session so requests survive restarts and background sessions.
+#[tauri::command]
+fn get_collab_requests(
+    settings: tauri::State<'_, Settings>,
+    session_id: String,
+) -> String {
+    settings
+        .db
+        .get_setting(&format!("collab_requests.{session_id}"))
+        .unwrap_or_else(|| "[]".to_string())
+}
+
+#[tauri::command]
+fn set_collab_requests(
+    settings: tauri::State<'_, Settings>,
+    session_id: String,
+    json: String,
+) -> Result<(), String> {
+    settings
+        .db
+        .set_setting(&format!("collab_requests.{session_id}"), &json)
+        .map_err(|e| e.to_string())
+}
+
+/// Per-session live-share state (room secret, epoch, admin token, signaling)
+/// so a restart doesn't strand outstanding join codes: re-sharing the same
+/// session reuses the persisted room instead of minting a new secret. An
+/// empty/absent value means "never shared" — `None` clears it.
+#[tauri::command]
+fn get_collab_share(
+    settings: tauri::State<'_, Settings>,
+    session_id: String,
+) -> Option<String> {
+    settings
+        .db
+        .get_setting(&format!("collab_share.{session_id}"))
+        .filter(|s| !s.is_empty())
+}
+
+#[tauri::command]
+fn set_collab_share(
+    settings: tauri::State<'_, Settings>,
+    session_id: String,
+    json: Option<String>,
+) -> Result<(), String> {
+    settings
+        .db
+        .set_setting(
+            &format!("collab_share.{session_id}"),
+            json.as_deref().unwrap_or(""),
+        )
+        .map_err(|e| e.to_string())
+}
+
 /// Reviewer explicitly opened an Ambient-mode plan for full review — cancels the
 /// auto-approve and keeps the held POST waiting for an explicit decision.
 #[tauri::command]
@@ -5094,6 +5205,12 @@ pub fn run() {
             attach_discussion,
             get_interception_mode,
             set_interception_mode,
+            get_relay_config,
+            set_relay_config,
+            get_collab_requests,
+            set_collab_requests,
+            get_collab_share,
+            set_collab_share,
             get_daemon_status,
             claim_review,
             arm_restore,
@@ -6145,6 +6262,7 @@ mod tests {
             .add_comment(
                 "s1",
                 NewCommentRequest {
+                id: None,
                     kind: CommentKind::Feedback,
                     scope: None,
                     anchor_id: "A".to_string(),
@@ -6154,6 +6272,7 @@ mod tests {
                     edit: None,
                     selection: None,
                     author: None,
+                    reviewer: None,
                 },
             )
             .unwrap();

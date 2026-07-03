@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 
 import type { RevisionSummary, SessionSummary } from "../types";
+import type { JoinedSessionInfo } from "../collab/useJoinedSession";
 import {
   computeRevisionDisplay,
   latestDisplayVersion,
@@ -12,6 +13,12 @@ interface SessionSidebarProps {
   sessions: SessionSummary[];
   activeId: string | null;
   pendingCounts: Record<string, number>;
+  /** Live room this instance is currently a guest in — the joined-session
+   *  shadow (Phase 1c). Synthesized from Yjs, not from the backend; rendered
+   *  pinned above local sessions with a "joined" badge. */
+  joined?: JoinedSessionInfo | null;
+  onSelectJoined?: () => void;
+  onLeaveJoined?: () => void;
   onSelect: (id: string) => void;
   /** Delete a session. Held sessions are deleted with force=true, which
    *  drains the orphaned hook response so Claude Code's terminal unblocks
@@ -52,6 +59,9 @@ export function SessionSidebar({
   sessions,
   activeId,
   pendingCounts,
+  joined,
+  onSelectJoined,
+  onLeaveJoined,
   onSelect,
   onDelete,
   onExport,
@@ -86,6 +96,22 @@ export function SessionSidebar({
       className="flex-1 overflow-y-auto rl-thin-scroll-y"
       style={{ background: "var(--color-paper)" }}
     >
+      {joined && (
+        <>
+          <div
+            className="rl-chrome-label px-3 py-2 border-b"
+            style={{ borderColor: "var(--color-rule)" }}
+          >
+            Joined session
+          </div>
+          <JoinedRow
+            joined={joined}
+            active={activeId === joined.key}
+            onClick={() => onSelectJoined?.()}
+            onLeave={() => onLeaveJoined?.()}
+          />
+        </>
+      )}
       <div
         className="rl-chrome-label px-3 py-2 border-b"
         style={{ borderColor: "var(--color-rule)" }}
@@ -120,6 +146,109 @@ export function SessionSidebar({
           ))}
         </ul>
       )}
+    </div>
+  );
+}
+
+/** The joined-session shadow row: no revisions tree, no delete — the plan
+ *  lives on the owner's machine; this instance is a guest. The live dot +
+ *  "joined" badge tell it apart from local sessions at a glance. */
+function JoinedRow({
+  joined,
+  active,
+  onClick,
+  onLeave,
+}: {
+  joined: JoinedSessionInfo;
+  active: boolean;
+  onClick: () => void;
+  onLeave: () => void;
+}) {
+  return (
+    <div className="relative group">
+      <button
+        type="button"
+        aria-label="Leave joined session"
+        title="Leave this live session"
+        onClick={(e) => {
+          e.stopPropagation();
+          onLeave();
+        }}
+        className="absolute right-3 top-2 z-10 rounded px-1.5 opacity-0 group-hover:opacity-100 transition-opacity"
+        style={{
+          color: "var(--color-ink-muted)",
+          background: "var(--color-bg-elevated)",
+          border: "1px solid var(--color-rule)",
+          fontSize: "12px",
+          lineHeight: 1.4,
+        }}
+      >
+        ✕
+      </button>
+      <button
+        type="button"
+        onClick={onClick}
+        className="hover-elevated w-full text-left pl-3 pr-3 py-2 border-b"
+        style={{
+          borderColor: "var(--color-rule)",
+          background: active ? "var(--color-bg-elevated)" : "transparent",
+        }}
+      >
+        <div className="flex items-center justify-between gap-2 mb-1">
+          <span
+            className="truncate flex items-center gap-1.5"
+            style={{
+              fontSize: "13px",
+              fontWeight: active ? 600 : 500,
+              color: "var(--color-ink)",
+            }}
+            title={
+              joined.ownerName
+                ? `Live session shared by ${joined.ownerName}`
+                : "Live session"
+            }
+          >
+            <span className="rl-live-dot" aria-hidden />
+            {joined.title}
+          </span>
+          <span
+            className="font-mono shrink-0 rounded-sm px-1.5 py-0.5 transition-opacity group-hover:opacity-0"
+            style={{
+              background: "var(--color-anchor-bg)",
+              color: "var(--color-anchor-text)",
+              fontSize: "10px",
+            }}
+          >
+            v{joined.version}
+          </span>
+        </div>
+        <div
+          className="flex items-center gap-2"
+          style={{ fontSize: "10px", color: "var(--color-ink-muted)" }}
+        >
+          <span
+            title="You're a guest in this session — the owner controls approval and access."
+            style={{
+              color: "var(--color-accent)",
+              border: "1px solid var(--color-accent)",
+              borderRadius: "9999px",
+              padding: "0 6px",
+              fontSize: "9px",
+              fontWeight: 600,
+              textTransform: "uppercase",
+              letterSpacing: "0.06em",
+            }}
+          >
+            joined
+          </span>
+          {joined.ownerName && <span>{joined.ownerName}</span>}
+          {joined.status && (
+            <span style={{ textTransform: "uppercase", letterSpacing: "0.06em" }}>
+              {joined.status.replace(/_/g, " ")}
+            </span>
+          )}
+        </div>
+      </button>
     </div>
   );
 }

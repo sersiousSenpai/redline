@@ -457,6 +457,14 @@ pub struct Comment {
     /// chip. `None` for user comments and undecided agent suggestions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_state: Option<String>,
+    /// Human attribution for comments that arrived from another person — a
+    /// collaborator in a live room or an async Review Request return ("John
+    /// Doe"). Distinct from `author`, which is an AGENT id and drives the M4
+    /// block-lock; this field is display/attribution only. `None` for every
+    /// comment the session owner wrote themselves, which keeps the serialized
+    /// shape byte-identical to the pre-collab contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewer: Option<String>,
 }
 
 /// One turn in a comment's fork-agent discussion thread (Phase 2). Rows are
@@ -840,6 +848,13 @@ pub struct LoopCheckpoint {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewCommentRequest {
+    /// Optional caller-minted id (live collab: a collaborator mints
+    /// `c-{client}-{ts}` so one comment has one identity on both sides).
+    /// Honored only when unique in the session; foreign-format ids parse as
+    /// `None` in `parse_comment_id`, so the owner's `c-NNN` sequence is
+    /// unperturbed.
+    #[serde(default)]
+    pub id: Option<String>,
     #[serde(rename = "type")]
     pub kind: CommentKind,
     pub scope: Option<CommentScope>,
@@ -855,6 +870,11 @@ pub struct NewCommentRequest {
     /// Set only by the agent endpoints; the frontend never sends it.
     #[serde(default)]
     pub author: Option<String>,
+    /// Human attribution for imported/collaborator comments (see
+    /// `Comment::reviewer`). Sent by the Review Request import path and the
+    /// live-collab mirror; absent on every owner-originated comment.
+    #[serde(default)]
+    pub reviewer: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1145,15 +1165,35 @@ impl SessionStore {
             return Err(format!("session {session_id} has no revisions yet"));
         }
 
-        let next_n = session
-            .revisions
-            .iter()
-            .flat_map(|r| r.comments.iter())
-            .filter_map(|c| parse_comment_id(&c.id))
-            .max()
-            .unwrap_or(0)
-            + 1;
-        let id = format!("c-{:03}", next_n);
+        // Explicit ids make delivery idempotent: re-adding an id the session
+        // already has returns the existing comment unchanged instead of
+        // minting a duplicate (the live-collab mirror can replay an add —
+        // e.g. an IndexedDB-restored map entry — and must converge, not
+        // multiply). Absent an explicit id, mint the next c-NNN.
+        if let Some(id) = request.id.as_deref().filter(|id| !id.is_empty()) {
+            if let Some(existing) = session
+                .revisions
+                .iter()
+                .flat_map(|r| r.comments.iter())
+                .find(|c| c.id == id)
+            {
+                return Ok(existing.clone());
+            }
+        }
+        let id = match request.id.as_deref().filter(|id| !id.is_empty()) {
+            Some(id) => id.to_string(),
+            None => {
+                let next_n = session
+                    .revisions
+                    .iter()
+                    .flat_map(|r| r.comments.iter())
+                    .filter_map(|c| parse_comment_id(&c.id))
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+                format!("c-{:03}", next_n)
+            }
+        };
 
         let scope = match request.kind {
             CommentKind::Feedback => Some(request.scope.unwrap_or(CommentScope::Local)),
@@ -1186,6 +1226,7 @@ impl SessionStore {
             actionable: false,
             author: request.author,
             agent_state: None,
+            reviewer: request.reviewer,
         };
 
         let latest = session.revisions.last_mut().expect("non-empty checked above");
@@ -1706,6 +1747,7 @@ mod tests {
             actionable: false,
             author: None,
             agent_state: None,
+            reviewer: None,
         }
     }
 

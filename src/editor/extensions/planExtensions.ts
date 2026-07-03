@@ -4,6 +4,7 @@ import type { Extensions } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
 import { Code } from "@tiptap/extension-code";
 import Collaboration from "@tiptap/extension-collaboration";
+import CollaborationCursor from "@tiptap/extension-collaboration-cursor";
 import Link from "@tiptap/extension-link";
 import Table from "@tiptap/extension-table";
 import TableRow from "@tiptap/extension-table-row";
@@ -17,6 +18,14 @@ import { richCodeBlock } from "./CodeBlockView";
 import { DeletionMark, InsertionMark } from "./TrackChanges";
 import { TrackChangesInput } from "./TrackChangesInput";
 
+/** Remote-cursor wiring for a live collaboration session. `awareness` is the
+ *  network provider's y-protocols Awareness instance (typed loosely so this
+ *  schema module never imports the transport). Requires `document`. */
+export interface PlanCursorOptions {
+  awareness: unknown;
+  user: { name: string; color: string };
+}
+
 export interface PlanExtensionOptions {
   /** Bind the editor to this Y.Doc via the Collaboration extension. When set,
    *  StarterKit history is turned OFF (Collaboration ships the Yjs
@@ -24,6 +33,10 @@ export interface PlanExtensionOptions {
    *  the headless schema (`getSchema` ignores plugins, so the node/mark model
    *  is identical either way) and for plain non-CRDT editors in tests. */
   document?: Y.Doc;
+  /** Live-session remote carets/selections (CollaborationCursor). Cursor
+   *  state rides awareness, not the doc — the schema is unchanged, so the
+   *  markdown round-trip and `getSchema` are unaffected. */
+  cursor?: PlanCursorOptions;
   /** M4: a user edit was blocked because its block carries a pending agent
    *  suggestion ("resolve it first" UI). */
   onLockedEdit?: (blockId: string) => void;
@@ -45,7 +58,7 @@ export interface PlanExtensionOptions {
 export function planExtensions(
   options: PlanExtensionOptions = {},
 ): Extensions {
-  const { document, onLockedEdit } = options;
+  const { document, cursor, onLockedEdit } = options;
   return [
     // StarterKit's bundled code block is swapped for `richCodeBlock()` —
     // CodeBlockLowlight + a NodeView for syntax highlighting and mermaid
@@ -66,6 +79,17 @@ export function planExtensions(
       ...(document ? { history: false } : {}),
     }),
     ...(document ? [Collaboration.configure({ document })] : []),
+    // CollaborationCursor expects `{ provider: { awareness } }`; it stores
+    // the local user in awareness and decorates remote selections. Attached
+    // only when a live provider exists, so solo editing pays nothing.
+    ...(document && cursor
+      ? [
+          CollaborationCursor.configure({
+            provider: { awareness: cursor.awareness },
+            user: cursor.user,
+          }),
+        ]
+      : []),
     Code.extend({ excludes: "bold italic strike link" }),
     richCodeBlock(),
     Link.configure({
