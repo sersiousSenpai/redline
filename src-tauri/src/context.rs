@@ -744,6 +744,7 @@ mod tests {
             revisions: Vec::new(),
             status,
             attach_state: AttachState::Idle,
+            updated_at: 1_000,
         };
         db.upsert_session(&mk("approved-unexported", SessionStatus::Approved)).unwrap();
         db.upsert_session(&mk("approved-exported", SessionStatus::Approved)).unwrap();
@@ -772,6 +773,7 @@ mod tests {
             revisions: Vec::new(),
             status: SessionStatus::InReview,
             attach_state: AttachState::Idle,
+            updated_at: 500,
         })
         .unwrap();
         // A revision row (what `load_all` reads) + its ledger event.

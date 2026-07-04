@@ -91,6 +91,7 @@ import type { ThemeName } from "./theme/themes";
 import type { FontName } from "./theme/fonts";
 import { usePersistedState } from "./theme/usePersistedState";
 import { useResizablePane } from "./hooks/useResizablePane";
+import { useAutoExitFullscreen } from "./hooks/useAutoExitFullscreen";
 import { PaneDivider } from "./components/PaneDivider";
 import { TerminalTabs } from "./components/TerminalTabs";
 import type { TerminalTabsHandle } from "./components/TerminalTabs";
@@ -98,6 +99,7 @@ import { DecisionWindowBanner } from "./components/DecisionWindowBanner";
 import { FlashOverlay } from "./components/FlashOverlay";
 import { playInterceptBeep, DEFAULT_SOUND } from "./audio/beep";
 import { buildResumeCommand } from "./lib/resumeCommand";
+import { computePaneLayout } from "./lib/paneLayout";
 import { buildPlanLaunchCommand } from "./lib/planLaunchCommand";
 import { guessProjectForPlan } from "./lib/guessProject";
 import { SendToRedlineDialog } from "./components/SendToRedlineDialog";
@@ -776,8 +778,48 @@ function App() {
   // with a single vertical "latch" (‹ above, › below) centered over the
   // vanished document; clicking either arrow snaps it back open.
   const docColumnRef = useRef<HTMLDivElement | null>(null);
-  const [docObscured, setDocObscured] = useState(false);
   const [latchPos, setLatchPos] = useState({ left: 0, top: 0 });
+
+  // Track the viewport width so each side pane's max can be "up to the other
+  // pane" — letting EITHER pane be dragged until the document clamps fully
+  // shut, symmetrically. (A fixed 320px reserve made this lopsided: one pane
+  // could clamp the doc shut and the other couldn't.)
+  const [winWidth, setWinWidth] = useState(() =>
+    typeof window !== "undefined" ? window.innerWidth : 1440,
+  );
+  useEffect(() => {
+    const onResize = () => setWinWidth(window.innerWidth);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  // The row's space model: the doc column floors at DOC_MIN and any pane
+  // width past that becomes curtain overlay instead of flow. Stateless — it
+  // appears and retracts continuously as widths / window / collapse change.
+  const layout = computePaneLayout({
+    winWidth,
+    sidebarWidth,
+    sidebarCollapsed,
+    paneWidth,
+    paneCollapsed,
+    paneFullscreen,
+  });
+
+  // When collapsing the sidebar (or growing the window) frees enough room
+  // for the fullscreen discussion to fit beside a full-width doc, drop it
+  // back to side-by-side so the doc reflows into the freed space.
+  useAutoExitFullscreen({
+    paneFullscreen,
+    setPaneFullscreen,
+    layoutInput: {
+      winWidth,
+      sidebarWidth,
+      sidebarCollapsed,
+      paneWidth,
+      paneCollapsed,
+      paneFullscreen,
+    },
+  });
 
   // Hide the floating zoom pill the moment the document text would reach it.
   // The article is centered with a max width, so on a wide pane there's an empty
@@ -811,20 +853,21 @@ function App() {
     return () => ro.disconnect();
   }, [sidebarTab, activeFile, activeId, browserOpen, drafterOpen, reviewOpen, docOpen]);
 
-  // Track when the document column has been squeezed to a sliver so the latch
-  // can replace the two colliding divider chevrons. Position is relative to the
-  // positioned <main> ancestor (the document column's offsetParent).
+  // Position the latch over the visible remnant of the document. The doc
+  // column's flow box floors at DOC_MIN now, so "squeezed shut" means the
+  // curtains cover it — center the latch on the strip they leave uncovered.
+  // Position is relative to the positioned <main> ancestor (the document
+  // column's offsetParent).
+  const { sidebarOverlayPx, paneOverlayPx, docVisibleW } = layout;
   useEffect(() => {
     const el = docColumnRef.current;
     if (!el) return;
     const recompute = () => {
-      const w = el.offsetWidth;
-      setDocObscured(w < 56);
-      // Center the latch over the vanished document, but keep it on-screen when
-      // the document clamps against a window edge (one pane collapsed).
+      // Keep the latch on-screen when the visible strip clamps against a
+      // window edge (one pane collapsed).
       const parent = el.offsetParent as HTMLElement | null;
       const maxLeft = (parent?.clientWidth ?? window.innerWidth) - 12;
-      const rawLeft = el.offsetLeft + w / 2;
+      const rawLeft = el.offsetLeft + sidebarOverlayPx + docVisibleW / 2;
       setLatchPos({
         left: Math.min(maxLeft, Math.max(12, rawLeft)),
         top: el.offsetTop + el.offsetHeight / 2,
@@ -834,12 +877,22 @@ function App() {
     const ro = new ResizeObserver(recompute);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [sidebarWidth, paneWidth, sidebarCollapsed, paneCollapsed, paneFullscreen]);
+  }, [
+    sidebarWidth,
+    paneWidth,
+    sidebarCollapsed,
+    paneCollapsed,
+    paneFullscreen,
+    sidebarOverlayPx,
+    paneOverlayPx,
+    docVisibleW,
+  ]);
 
-  // The latch appears whenever the document has been clamped to a sliver —
-  // whether between two open panes or against a collapsed pane's edge. Each
+  // The latch appears whenever the document's uncovered strip has shrunk to a
+  // sliver — the curtains (or a collapsed pane's edge) have swallowed it. Each
   // arrow reopens the document by shrinking whichever pane is actually open on
   // that side (falling back to the other side when one pane is collapsed).
+  const docObscured = docVisibleW < 56;
   const latchActive = docObscured && !paneFullscreen;
   const reopenDocFromLeft = () => {
     if (!sidebarCollapsed) setSidebarWidth(180);
@@ -878,20 +931,9 @@ function App() {
     storeFont(name);
   };
 
-  // Track the viewport width so each side pane's max can be "up to the other
-  // pane" — letting EITHER pane be dragged until the document clamps fully shut,
-  // symmetrically. (A fixed 320px reserve made this lopsided: one pane could
-  // clamp the doc shut and the other couldn't.)
-  const [winWidth, setWinWidth] = useState(() =>
-    typeof window !== "undefined" ? window.innerWidth : 1440,
-  );
-  useEffect(() => {
-    const onResize = () => setWinWidth(window.innerWidth);
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, []);
   // Max width = whatever leaves the document at 0 against the *other* pane
-  // (minus the two 6px dividers). Collapsed panes contribute 0.
+  // (minus the two 6px dividers). Collapsed panes contribute 0. Widths past
+  // the doc's DOC_MIN floor render as curtain overlay (see `layout` above).
   const sidebarMaxW = Math.max(
     180,
     winWidth - (paneCollapsed ? 0 : paneWidth) - 12,
@@ -2480,12 +2522,16 @@ function App() {
   // otherwise it swallows the pointer and the resize freezes. This makes the
   // sidebar, comment pane, terminal, and the document/browser split all
   // draggable over the browser, exactly as they are over the document.
+  // A curtained side pane paints over the doc column in React DOM — which the
+  // native webview would ignore (it always paints above). Hide the browser
+  // while any curtain is up, exactly like under modals and drags.
   const browserVisible =
     !browserOverlayActive &&
     !sidebarDragging &&
     !isDragging &&
     !termDragging &&
     !splitDragging &&
+    !layout.curtainActive &&
     openMenuCount === 0;
 
   return (
@@ -2620,11 +2666,16 @@ function App() {
       <main className="relative flex-1 overflow-hidden flex flex-col">
         <div className="flex-1 overflow-hidden flex">
         {!sidebarCollapsed && (
+        // Clip wrapper for the drawer reveal. In curtain state (the doc is at
+        // its floor) it reserves only the flow width and lets the full-width
+        // aside spill right OVER the doc, painted above it.
         <div
           className="shrink-0"
           style={{
-            width: `${sidebarWidth}px`,
-            overflow: "hidden",
+            width: `${layout.sidebarFlowW}px`,
+            overflow: layout.sidebarOverlayPx > 0 ? "visible" : "hidden",
+            position: layout.sidebarOverlayPx > 0 ? "relative" : undefined,
+            zIndex: layout.sidebarOverlayPx > 0 ? 25 : undefined,
             display: "flex",
             justifyContent: "flex-start",
             transition: sidebarSettling ? "width 160ms ease" : undefined,
@@ -2633,7 +2684,15 @@ function App() {
         <aside
           data-tour="sessions"
           className="flex flex-col shrink-0"
-          style={{ width: `${revealSidebarW}px` }}
+          style={{
+            width: `${revealSidebarW}px`,
+            ...(layout.sidebarOverlayPx > 0
+              ? {
+                  background: "var(--color-paper)",
+                  boxShadow: "8px 0 24px rgba(0,0,0,0.18)",
+                }
+              : null),
+          }}
         >
           <SidebarTabStrip
             openFolders={openFolders}
@@ -2677,8 +2736,36 @@ function App() {
             </div>
           )}
         </aside>
+        {/* In curtain state the flow boundary sits under the spilled aside, so
+            the divider rides the curtain's visible right edge instead. */}
+        {layout.sidebarOverlayPx > 0 && (
+          <div
+            style={{
+              position: "absolute",
+              top: 0,
+              bottom: 0,
+              right: `${-(layout.sidebarOverlayPx + 6)}px`,
+              zIndex: 26,
+              display: "flex",
+            }}
+          >
+            <PaneDivider
+              orientation="vertical"
+              side="leading"
+              label="sidebar"
+              collapsed={sidebarCollapsed}
+              dragging={sidebarDragging}
+              onToggle={() => setSidebarCollapsed((c) => !c)}
+              onPointerDown={startSidebarDrag}
+              hideChevron={latchActive}
+            />
+          </div>
+        )}
         </div>
         )}
+        {/* Always in flow (its 6px is part of the space model); when the
+            sidebar curtains it is painted over, and the absolute copy above
+            carries the affordance at the curtain's visible edge. */}
         <PaneDivider
           orientation="vertical"
           side="leading"
@@ -2687,7 +2774,7 @@ function App() {
           dragging={sidebarDragging}
           onToggle={() => setSidebarCollapsed((c) => !c)}
           onPointerDown={startSidebarDrag}
-          hideChevron={latchActive}
+          hideChevron={latchActive || layout.sidebarOverlayPx > 0}
         />
         <div
           ref={docColumnRef}
@@ -2838,7 +2925,7 @@ function App() {
                 // and reflows the slot without a drag (e.g. closing the comment
                 // pane, which otherwise leaves the webview stranded at its old
                 // size with a gap of blank space).
-                layoutKey={`${paneCollapsed}|${sidebarCollapsed}|${docOpen}|${splitVertical}`}
+                layoutKey={`${paneCollapsed}|${sidebarCollapsed}|${docOpen}|${splitVertical}|${layout.curtainActive}`}
               />
             );
             const drafterBody = (
@@ -2972,12 +3059,16 @@ function App() {
         </div>
 
         {!paneFullscreen && (
+          // Always in flow (its 6px is part of the space model); when the
+          // discussion pane curtains it is painted over, and the absolute
+          // copy inside the pane wrapper carries the affordance at the
+          // curtain's visible edge.
           <PaneDivider
             collapsed={paneCollapsed}
             dragging={isDragging}
             onToggle={() => setPaneCollapsed((c) => !c)}
             onPointerDown={startDrag}
-            hideChevron={latchActive}
+            hideChevron={latchActive || layout.paneOverlayPx > 0}
           />
         )}
 
@@ -3048,8 +3139,11 @@ function App() {
             paneFullscreen
               ? { display: "contents" }
               : {
-                  width: `${paneWidth}px`,
-                  overflow: "hidden",
+                  width: `${layout.paneFlowW}px`,
+                  overflow: layout.paneOverlayPx > 0 ? "visible" : "hidden",
+                  position:
+                    layout.paneOverlayPx > 0 ? "relative" : undefined,
+                  zIndex: layout.paneOverlayPx > 0 ? 25 : undefined,
                   display: "flex",
                   justifyContent: "flex-end",
                   flexShrink: 0,
@@ -3057,6 +3151,28 @@ function App() {
                 }
           }
         >
+        {/* Curtain state: the divider copy rides the curtain's visible left
+            edge (the in-flow divider is painted over). */}
+        {!paneFullscreen && layout.paneOverlayPx > 0 && (
+          <div
+            style={{
+              position: "absolute",
+              top: 0,
+              bottom: 0,
+              left: `${-(layout.paneOverlayPx + 6)}px`,
+              zIndex: 26,
+              display: "flex",
+            }}
+          >
+            <PaneDivider
+              collapsed={paneCollapsed}
+              dragging={isDragging}
+              onToggle={() => setPaneCollapsed((c) => !c)}
+              onPointerDown={startDrag}
+              hideChevron={latchActive}
+            />
+          </div>
+        )}
         <aside
           ref={sidebarRef as React.RefObject<HTMLElement>}
           data-tour="discussion"
@@ -3070,6 +3186,11 @@ function App() {
             {
               background: "var(--color-paper)",
               borderColor: "var(--color-rule)",
+              // Curtain state: read as painted above the doc.
+              boxShadow:
+                !paneFullscreen && layout.paneOverlayPx > 0
+                  ? "-8px 0 24px rgba(0,0,0,0.18)"
+                  : undefined,
               // Fullscreen lets the aside fill its absolute box (no fixed width).
               width: paneFullscreen ? undefined : `${revealPaneW}px`,
               // One place to drive every discussion's text size — descendants

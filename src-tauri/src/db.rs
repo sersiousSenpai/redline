@@ -635,7 +635,45 @@ impl Database {
             "ALTER TABLE sessions ADD COLUMN attach_state TEXT NOT NULL DEFAULT 'idle'",
             [],
         );
+        // Last-activity timestamp: the sidebar orders sessions by it. Bumped
+        // on every revision/comment/thread message/status change. Legacy rows
+        // (updated_at = 0) are backfilled from their latest revision — the
+        // best recency proxy already on disk. Both statements are idempotent.
+        let _ = conn.execute(
+            "ALTER TABLE sessions ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute(
+            "UPDATE sessions SET updated_at = MAX(
+                created_at,
+                COALESCE((SELECT MAX(received_at) FROM revisions r
+                          WHERE r.session_id = sessions.session_id), created_at)
+             ) WHERE updated_at = 0",
+            [],
+        );
         Ok(())
+    }
+
+    /// Bump a session's last-activity timestamp. Takes the already-locked
+    /// connection (the `Mutex` is not reentrant — never call `self.conn.lock()`
+    /// here). `MAX` keeps the value monotonic under out-of-order events.
+    fn touch_session(conn: &Connection, session_id: &str, at: i64) {
+        let _ = conn.execute(
+            "UPDATE sessions SET updated_at = MAX(updated_at, ?1) WHERE session_id = ?2",
+            params![at, session_id],
+        );
+    }
+
+    /// Test-only: force a session's `updated_at` back to 0 to simulate a row
+    /// written by a pre-`updated_at` build (the migration backfill's target).
+    #[cfg(test)]
+    pub(crate) fn zero_updated_at(&self, session_id: &str) {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET updated_at = 0 WHERE session_id = ?1",
+            params![session_id],
+        )
+        .unwrap();
     }
 
     pub fn get_setting(&self, key: &str) -> Option<String> {
@@ -661,13 +699,14 @@ impl Database {
     pub fn upsert_session(&self, session: &ReviewSession) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO sessions (session_id, project_path, project_name, created_at, status, attach_state)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO sessions (session_id, project_path, project_name, created_at, status, attach_state, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(session_id) DO UPDATE SET
                 project_path = excluded.project_path,
                 project_name = excluded.project_name,
                 status = excluded.status,
-                attach_state = excluded.attach_state",
+                attach_state = excluded.attach_state,
+                updated_at = MAX(sessions.updated_at, excluded.updated_at)",
             params![
                 session.session_id,
                 session.project_path,
@@ -675,6 +714,7 @@ impl Database {
                 session.created_at,
                 session_status_str(session.status),
                 session.attach_state.as_str(),
+                session.updated_at,
             ],
         )?;
         Ok(())
@@ -703,6 +743,7 @@ impl Database {
                 revision.restored as i64,
             ],
         )?;
+        Self::touch_session(&conn, session_id, revision.received_at);
         Ok(())
     }
 
@@ -2380,6 +2421,7 @@ impl Database {
                 comment.reviewer,
             ],
         )?;
+        Self::touch_session(&conn, session_id, comment.created_at);
         Ok(())
     }
 
@@ -2471,6 +2513,7 @@ impl Database {
             "UPDATE sessions SET attach_state = ?1 WHERE session_id = ?2",
             params![state, session_id],
         )?;
+        Self::touch_session(&conn, session_id, crate::state::now_millis());
         Ok(())
     }
 
@@ -2596,6 +2639,7 @@ impl Database {
                 msg.created_at,
             ],
         )?;
+        Self::touch_session(&conn, &msg.session_id, msg.created_at);
         Ok(())
     }
 
@@ -3705,7 +3749,7 @@ impl Database {
         let mut sessions: HashMap<String, ReviewSession> = HashMap::new();
 
         let mut stmt = conn.prepare(
-            "SELECT session_id, project_path, project_name, created_at, status, attach_state FROM sessions",
+            "SELECT session_id, project_path, project_name, created_at, status, attach_state, updated_at FROM sessions",
         )?;
         let rows = stmt.query_map([], |row| {
             let status_str: String = row.get(4)?;
@@ -3718,6 +3762,7 @@ impl Database {
                 revisions: Vec::new(),
                 status: session_status_from(&status_str),
                 attach_state: AttachState::from_str(&attach_str).unwrap_or(AttachState::Idle),
+                updated_at: row.get(6)?,
             })
         })?;
         for row in rows {
@@ -6095,5 +6140,104 @@ body.
         );
 
         let _ = std::fs::remove_file(&tmpfile);
+    }
+
+    // --- Session recency (updated_at) ----------------------------------
+
+    #[test]
+    fn migration_backfills_legacy_updated_at() {
+        use crate::state::{AttachState, ReviewSession, SessionStatus};
+        let db = Database::open_in_memory().unwrap();
+        let mk = |id: &str, created: i64| ReviewSession {
+            session_id: id.to_string(),
+            project_path: "/repo".to_string(),
+            project_name: "repo".to_string(),
+            created_at: created,
+            revisions: Vec::new(),
+            status: SessionStatus::InReview,
+            attach_state: AttachState::Idle,
+            updated_at: 0,
+        };
+        db.upsert_session(&mk("with-rev", 500)).unwrap();
+        db.insert_revision(
+            "with-rev",
+            &crate::state::Revision {
+                version_number: 1,
+                received_at: 700,
+                raw_plan_markdown: "# P".to_string(),
+                sections: Vec::new(),
+                comments: Vec::new(),
+                thread_start: true,
+                restored: false,
+            },
+        )
+        .unwrap();
+        db.upsert_session(&mk("bare", 300)).unwrap();
+        // Simulate rows written by a pre-updated_at build…
+        db.zero_updated_at("with-rev");
+        db.zero_updated_at("bare");
+        // …and re-run the idempotent migration: only 0-rows are backfilled.
+        db.migrate().unwrap();
+        let all = db.load_all().unwrap();
+        assert_eq!(all["with-rev"].updated_at, 700); // latest revision time
+        assert_eq!(all["bare"].updated_at, 300); // falls back to created_at
+    }
+
+    #[test]
+    fn thread_message_bumps_session_recency_ordering() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let store = SessionStore::new(db.clone());
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("a", "/tmp/a", md.to_string(), reparse_sections(md), true, false);
+        store.upsert_plan("b", "/tmp/b", md.to_string(), reparse_sections(md), true, false);
+        // Discussion activity lands on the DB directly (fork threads write
+        // through Database, not the store); a strictly later stamp must float
+        // "a" above "b" after a restart-shaped reload.
+        let later = crate::state::now_millis() + 10_000;
+        db.insert_thread_message(&ThreadMessage {
+            id: "m1".to_string(),
+            session_id: "a".to_string(),
+            comment_id: "c-001".to_string(),
+            role: "user".to_string(),
+            body: "hi".to_string(),
+            status: "complete".to_string(),
+            created_at: later,
+        })
+        .unwrap();
+        let reloaded = SessionStore::new(db.clone());
+        let list = reloaded.list();
+        assert_eq!(list[0].session_id, "a");
+        assert_eq!(list[0].updated_at, later);
+    }
+
+    #[test]
+    fn comment_bumps_in_memory_updated_at() {
+        use crate::state::CommentKind;
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let store = SessionStore::new(db);
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("s", "/tmp/s", md.to_string(), reparse_sections(md), true, false);
+        let before = store.get("s").unwrap().updated_at;
+        let c = store
+            .add_comment(
+                "s",
+                NewCommentRequest {
+                    id: None,
+                    kind: CommentKind::Feedback,
+                    scope: None,
+                    anchor_id: "A".to_string(),
+                    block_id: None,
+                    structural: None,
+                    body: "b".to_string(),
+                    edit: None,
+                    selection: None,
+                    author: None,
+                    reviewer: None,
+                },
+            )
+            .unwrap();
+        let after = store.get("s").unwrap().updated_at;
+        assert!(after >= before);
+        assert!(after >= c.created_at);
     }
 }

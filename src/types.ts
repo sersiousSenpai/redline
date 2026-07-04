@@ -213,6 +213,8 @@ export interface SessionSummary {
   /** Every revision of this session, oldest-first — drives the sidebar tree. */
   revisions: RevisionSummary[];
   createdAt: number;
+  /** Last activity (revision/comment/discussion/status) — sidebar sort key. */
+  updatedAt: number;
   status: SessionStatus;
   pendingCount: number;
   awaitingReview: boolean;

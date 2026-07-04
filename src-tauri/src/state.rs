@@ -151,6 +151,9 @@ pub struct ReviewSession {
     pub revisions: Vec<Revision>,
     pub status: SessionStatus,
     pub attach_state: AttachState,
+    /// Last-activity timestamp (revision/comment/thread message/status
+    /// change) — the sidebar orders sessions by it, newest first.
+    pub updated_at: i64,
 }
 
 /// A lightweight per-revision projection for the sidebar's revisions tree —
@@ -193,6 +196,8 @@ pub struct SessionSummary {
     /// Persisted attach state — `Detached` means the held POST died before a
     /// decision and the session needs a restore before submit/approve work.
     pub attach_state: AttachState,
+    /// Last-activity timestamp — `list()` sorts by it, newest first.
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -826,8 +831,19 @@ impl SessionStore {
             return;
         }
         session.attach_state = state;
+        session.updated_at = now_millis();
         if let Err(e) = self.db.set_session_attach_state(session_id, state.as_str()) {
             tracing::error!(error = %e, "failed to persist attach state");
+        }
+    }
+
+    /// Bump a session's in-memory last-activity timestamp. Used by callers
+    /// that persist activity through the `Database` directly (fork threads),
+    /// where the DB row is already touched but the store copy would go stale.
+    pub fn touch(&self, session_id: &str) {
+        let mut map = self.inner.lock().unwrap();
+        if let Some(session) = map.get_mut(session_id) {
+            session.updated_at = now_millis();
         }
     }
 
@@ -876,6 +892,7 @@ impl SessionStore {
                 revisions: Vec::new(),
                 status: SessionStatus::InReview,
                 attach_state: AttachState::Idle,
+                updated_at: now,
             };
             if let Err(e) = self.db.upsert_session(&s) {
                 tracing::error!(error = %e, "failed to persist session");
@@ -906,6 +923,7 @@ impl SessionStore {
             tracing::warn!(error = %e, "failed to record revision ledger event");
         }
         session.revisions.push(revision);
+        session.updated_at = session.updated_at.max(now);
         if restored {
             self.carry_open_comments_forward(session, session_id, version_number);
         }
@@ -940,6 +958,7 @@ impl SessionStore {
         if let Err(e) = self.db.insert_revision(session_id, &revision) {
             tracing::error!(error = %e, "failed to persist restored revision");
         }
+        session.updated_at = session.updated_at.max(revision.received_at);
         session.revisions.push(revision);
         self.carry_open_comments_forward(session, session_id, version_number);
         Some(UpsertResult {
@@ -1026,10 +1045,16 @@ impl SessionStore {
                     held: false,
                     held_terminal_id: None,
                     attach_state: s.attach_state,
+                    updated_at: s.updated_at,
                 }
             })
             .collect();
-        sessions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        // Most recent activity first; creation time tiebreaks equal stamps.
+        sessions.sort_by(|a, b| {
+            b.updated_at
+                .cmp(&a.updated_at)
+                .then(b.created_at.cmp(&a.created_at))
+        });
         sessions
     }
 
@@ -1125,6 +1150,7 @@ impl SessionStore {
             return Err(format!("failed to persist comment: {e}"));
         }
         latest.comments.push(comment.clone());
+        session.updated_at = session.updated_at.max(comment.created_at);
         Ok(comment)
     }
 
@@ -1396,6 +1422,7 @@ impl SessionStore {
                 return;
             }
             session.status = status;
+            session.updated_at = now_millis();
             if let Err(e) = self.db.upsert_session(session) {
                 tracing::error!(error = %e, "failed to persist session status");
             }

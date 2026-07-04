@@ -403,6 +403,7 @@ mod tests {
             revisions: vec![],
             status: crate::state::SessionStatus::InReview,
             attach_state: crate::state::AttachState::Idle,
+            updated_at: 1,
         })
         .unwrap();
         crate::ledger::record_prompt(

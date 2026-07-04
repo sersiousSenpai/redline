@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::Serialize;
 use serde_json::Value;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdout};
 
@@ -310,6 +310,9 @@ pub async fn fork_thread_send(
     fork.db
         .insert_thread_message(&user_msg)
         .map_err(|e| format!("failed to persist message: {e}"))?;
+    // The DB row is already touched by insert_thread_message; keep the
+    // in-memory store's activity stamp in step so the sidebar reorders.
+    store.touch(&session_id);
 
     // Build the turn prompt — wrapped on the first turn, verbatim after. The
     // first turn uses `text` (the frontend's seed) so the persisted user row
@@ -967,6 +970,8 @@ async fn read_fork(
         if let Err(e) = db.insert_thread_message(&msg) {
             tracing::warn!(error = %e, "failed to persist assistant message");
         }
+        // No-op for review/question threads, whose ids aren't plan sessions.
+        app.state::<SessionStore>().touch(&session_id);
         let _ = app.emit(
             "fork-done",
             ForkDone {

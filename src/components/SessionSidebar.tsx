@@ -284,28 +284,33 @@ function SessionRow({
     session.revisions,
     session.latestVersion,
   );
+  // Only multi-revision sessions get a disclosure affordance — a single
+  // revision has no tree to reveal, so the row stays flat.
+  const expandable = session.revisions.length > 1;
 
   return (
     <li className="relative group">
       {/* Disclosure chevron — toggles the revision tree without selecting. */}
-      <button
-        type="button"
-        aria-label={expanded ? "Collapse revisions" : "Expand revisions"}
-        title={expanded ? "Hide revisions" : "Show revisions"}
-        onClick={(e) => {
-          e.stopPropagation();
-          onToggleExpand();
-        }}
-        className="absolute left-1 top-2 z-10 px-1"
-        style={{
-          color: "var(--color-ink-muted)",
-          fontSize: "10px",
-          lineHeight: 1.6,
-          cursor: "pointer",
-        }}
-      >
-        {expanded ? "▾" : "▸"}
-      </button>
+      {expandable && (
+        <button
+          type="button"
+          aria-label={expanded ? "Collapse revisions" : "Expand revisions"}
+          title={expanded ? "Hide revisions" : "Show revisions"}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleExpand();
+          }}
+          className="absolute left-1 top-2 z-10 px-1"
+          style={{
+            color: "var(--color-ink-muted)",
+            fontSize: "10px",
+            lineHeight: 1.6,
+            cursor: "pointer",
+          }}
+        >
+          {expanded ? "▾" : "▸"}
+        </button>
+      )}
       {confirming ? (
         <div
           className="absolute right-3 top-2 z-10 flex items-center gap-1"
@@ -478,7 +483,7 @@ function SessionRow({
           )}
         </div>
       </button>
-      {expanded && (
+      {expandable && expanded && (
         <ul className="border-b" style={{ borderColor: "var(--color-rule)" }}>
           {session.revisions.map((r, idx) => {
             const info = display.get(r.versionNumber);
