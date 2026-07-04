@@ -207,6 +207,52 @@ fn build_first_turn_prompt(
     p
 }
 
+// --- Spawn args -------------------------------------------------------------
+
+/// Base spawn args for a read-only **discussion fork** (the sidecar / code-review
+/// discussion modality). The tool surface is the read-only
+/// `Read,Grep,Glob,WebFetch,WebSearch` set PLUS `Bash` scoped — via
+/// `--allowedTools` — to the localhost daemon's `curl` bridge, in the same three
+/// quoting variants `claude_proc::bridge_args` uses. That scoped `curl` allow is
+/// the discussion fork's **ClassMemory retrieval surface**: the class-router in
+/// the `sidecar` / `conversation` skills walks `/v1/memory/*` to answer
+/// "what did I decide / research about X" against the user's own catalog.
+///
+/// This is a **conscious loosening** of the former read-only-no-`Bash` fork
+/// invariant (Phase 3 of the Polis program). The allow is a literal prefix
+/// confined to `http://127.0.0.1:7676/` — headless `-p` auto-denies any `Bash`
+/// invocation that doesn't match it — so a fork still cannot write files, run
+/// arbitrary commands, or reach any host but the local daemon. `Edit`/`Write`/
+/// `ExitPlanMode` stay out of `--tools`, and `--strict-mcp-config` still strips
+/// MCP. See `docs/protocol-verification.md` Experiment (i).
+///
+/// All three fork spawn sites share this one builder so the tool surface can't
+/// drift between them; each caller appends its own `--resume [--fork-session]`
+/// tail. `prompt` is moved into the returned vector (arg position after `-p`).
+fn discussion_fork_args(prompt: String) -> Vec<String> {
+    vec![
+        "-p".to_string(),
+        prompt,
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--include-partial-messages".to_string(),
+        "--verbose".to_string(),
+        "--permission-mode".to_string(),
+        "default".to_string(),
+        "--tools".to_string(),
+        "Read,Grep,Glob,WebFetch,WebSearch,Bash".to_string(),
+        "--allowedTools".to_string(),
+        "WebSearch".to_string(),
+        "WebFetch".to_string(),
+        // The ONLY Bash allow: the localhost daemon curl bridge, three quotings
+        // (plain / single- / double-quoted URL) — identical to `bridge_args`.
+        "Bash(curl -s http://127.0.0.1:7676/*)".to_string(),
+        "Bash(curl -s 'http://127.0.0.1:7676/*)".to_string(),
+        "Bash(curl -s \"http://127.0.0.1:7676/*)".to_string(),
+        "--strict-mcp-config".to_string(),
+    ]
+}
+
 // --- Commands --------------------------------------------------------------
 
 /// Send a turn to a comment's fork agent. The first turn forks the main
@@ -295,30 +341,11 @@ pub async fn fork_thread_send(
         crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
     }
 
-    // Read-only fork: built-in tools limited to Read/Grep/Glob plus the web
-    // tools (WebFetch/WebSearch) so the discussion can ground answers in external
-    // docs. `--allowedTools` is required for the web tools to actually run:
-    // headless `-p` auto-denies anything not allow-listed (Read/Grep/Glob are
-    // auto-approved). The web tools have no repo or plan side effects, so the
-    // read-only guarantee holds: Edit/Write/Bash/ExitPlanMode stay excluded and
-    // MCP is stripped. Never plan mode. See docs/protocol-verification.md
-    // Experiment (i).
-    let mut args: Vec<String> = vec![
-        "-p".to_string(),
-        prompt,
-        "--output-format".to_string(),
-        "stream-json".to_string(),
-        "--include-partial-messages".to_string(),
-        "--verbose".to_string(),
-        "--permission-mode".to_string(),
-        "default".to_string(),
-        "--tools".to_string(),
-        "Read,Grep,Glob,WebFetch,WebSearch".to_string(),
-        "--allowedTools".to_string(),
-        "WebSearch".to_string(),
-        "WebFetch".to_string(),
-        "--strict-mcp-config".to_string(),
-    ];
+    // Read-only discussion fork: the Read/Grep/Glob + web tool surface plus the
+    // scoped localhost-daemon `curl` allow (the ClassMemory retrieval surface).
+    // Edit/Write/ExitPlanMode stay excluded and MCP is stripped; never plan mode.
+    // See `discussion_fork_args` and docs/protocol-verification.md Experiment (i).
+    let mut args: Vec<String> = discussion_fork_args(prompt);
     match &prior_fork {
         None => {
             args.push("--resume".to_string());
@@ -518,23 +545,9 @@ pub async fn review_thread_send(
         crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
     }
 
-    // Same read-only tool fence as plan threads (see fork_thread_send).
-    let mut args: Vec<String> = vec![
-        "-p".to_string(),
-        prompt,
-        "--output-format".to_string(),
-        "stream-json".to_string(),
-        "--include-partial-messages".to_string(),
-        "--verbose".to_string(),
-        "--permission-mode".to_string(),
-        "default".to_string(),
-        "--tools".to_string(),
-        "Read,Grep,Glob,WebFetch,WebSearch".to_string(),
-        "--allowedTools".to_string(),
-        "WebSearch".to_string(),
-        "WebFetch".to_string(),
-        "--strict-mcp-config".to_string(),
-    ];
+    // Same read-only discussion-fork tool surface as plan threads (scoped curl
+    // allow included — see `discussion_fork_args`).
+    let mut args: Vec<String> = discussion_fork_args(prompt);
     // First turn: fresh session (no --resume). Follow-ups resume it.
     if let Some(fork_sid) = &prior_fork {
         args.push("--resume".to_string());
@@ -691,23 +704,9 @@ pub async fn review_question_send(
         crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
     }
 
-    // Same read-only tool fence as the annotation threads.
-    let mut args: Vec<String> = vec![
-        "-p".to_string(),
-        prompt,
-        "--output-format".to_string(),
-        "stream-json".to_string(),
-        "--include-partial-messages".to_string(),
-        "--verbose".to_string(),
-        "--permission-mode".to_string(),
-        "default".to_string(),
-        "--tools".to_string(),
-        "Read,Grep,Glob,WebFetch,WebSearch".to_string(),
-        "--allowedTools".to_string(),
-        "WebSearch".to_string(),
-        "WebFetch".to_string(),
-        "--strict-mcp-config".to_string(),
-    ];
+    // Same read-only discussion-fork tool surface as the annotation threads
+    // (scoped curl allow included — see `discussion_fork_args`).
+    let mut args: Vec<String> = discussion_fork_args(prompt);
     if let Some(fork_sid) = &prior_fork {
         args.push("--resume".to_string());
         args.push(fork_sid.clone());
@@ -1028,6 +1027,70 @@ mod tests {
     use super::*;
 
     // stream-json line classification is covered by `claude_proc`'s own tests.
+
+    /// The Phase-3 fork loosening must grant EXACTLY the scoped localhost-daemon
+    /// curl allow and nothing broader: no bare `Bash` allow, no other curl host,
+    /// and no write/plan tools in the tool set. This is the guard on the
+    /// consciously-widened read-only fork invariant.
+    #[test]
+    fn discussion_fork_args_grant_only_the_scoped_localhost_curl_allow() {
+        let args = discussion_fork_args("the prompt".to_string());
+
+        // `-p <prompt>` leads; MCP is stripped; never plan mode.
+        assert_eq!(args[0], "-p");
+        assert_eq!(args[1], "the prompt");
+        assert!(args.iter().any(|a| a == "--strict-mcp-config"));
+        assert!(!args.iter().any(|a| a == "plan"), "must never be plan mode");
+
+        // The `--tools` set: Bash is present (for curl) but no write/plan tools.
+        let tools_idx = args.iter().position(|a| a == "--tools").unwrap();
+        let tools = &args[tools_idx + 1];
+        assert_eq!(tools, "Read,Grep,Glob,WebFetch,WebSearch,Bash");
+        for forbidden in ["Edit", "Write", "ExitPlanMode", "NotebookEdit", "Task"] {
+            assert!(
+                !tools.split(',').any(|t| t == forbidden),
+                "`{forbidden}` must not be in the discussion-fork tool set"
+            );
+        }
+
+        // The `--allowedTools` values run from just after the flag to the next
+        // flag (`--strict-mcp-config`). It must be EXACTLY the two web tools plus
+        // the three scoped-curl quoting variants — nothing else.
+        let allow_idx = args.iter().position(|a| a == "--allowedTools").unwrap();
+        let allow: Vec<&str> = args[allow_idx + 1..]
+            .iter()
+            .take_while(|a| !a.starts_with("--"))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            allow,
+            vec![
+                "WebSearch",
+                "WebFetch",
+                "Bash(curl -s http://127.0.0.1:7676/*)",
+                "Bash(curl -s 'http://127.0.0.1:7676/*)",
+                "Bash(curl -s \"http://127.0.0.1:7676/*)",
+            ],
+            "the allow-list must be exactly the web tools + the three scoped curl variants"
+        );
+
+        // No bare `Bash` allow (that would permit arbitrary commands), and every
+        // Bash allow targets ONLY the localhost daemon.
+        for a in &allow {
+            if a.starts_with("Bash(") {
+                assert!(
+                    a.contains("curl -s http://127.0.0.1:7676/")
+                        || a.contains("curl -s 'http://127.0.0.1:7676/")
+                        || a.contains("curl -s \"http://127.0.0.1:7676/"),
+                    "Bash allow `{a}` must be scoped to the localhost daemon"
+                );
+            }
+        }
+        assert!(
+            !allow.iter().any(|a| *a == "Bash"),
+            "a bare `Bash` allow would defeat the scoping — it must never appear"
+        );
+    }
 
     #[test]
     fn fork_key_is_session_scoped() {

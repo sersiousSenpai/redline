@@ -52,7 +52,7 @@ const MAX_CORPUS_BYTES: usize = 60_000;
 /// A class node. A *class* is just a root (`parent_id == None`); depth is
 /// emergent (no level enum). A `digest` node's `summary` is the agent-written
 /// gist of a collapsed cold branch.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClassNode {
     pub id: String,
@@ -70,7 +70,7 @@ pub struct ClassNode {
 }
 
 /// A pointer from a class node into the lake.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClassLink {
     pub id: i64,
@@ -763,6 +763,147 @@ pub async fn run_classifier(cwd: &str, prompt: String) -> Result<(String, Option
         } else {
             format!("classifier failed: {}", errbuf.trim())
         }),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// One organize pass (shared by the command + the background keeper)
+// ---------------------------------------------------------------------------
+
+/// The result of one `organize_once` pass — enough for the command to build its
+/// pane JSON and for the keeper to log/skip.
+#[derive(Debug, Clone, Default)]
+pub struct OrganizeOutcome {
+    pub staged: StageResult,
+    pub summary: String,
+    pub auto_applied: bool,
+    pub seq_from: i64,
+    pub seq_to: i64,
+    /// False when the lake delta was empty and the classifier never ran.
+    pub ran: bool,
+}
+
+/// Run one classifier pass end-to-end against the current lake delta: seed roots,
+/// compute the delta since the last completed run, spawn the read-only
+/// classifier, stage its structured-JSON proposals, and — when auto-apply is on
+/// (the default) — accept the additive batch and apply every structural op
+/// except a not-clearly-cold `collapse` (held for review by the
+/// `auto_collapse_safe` interlock). Pure of any UI: callers emit their own
+/// change events. This is the brain the background keeper drives autonomously
+/// and the `classmem_organize` command wraps.
+pub async fn organize_once(db: &Database) -> Result<OrganizeOutcome, String> {
+    let roots = seed_root_rows(&db.list_project_paths().map_err(|e| e.to_string())?);
+    db.seed_class_roots(&roots).map_err(|e| e.to_string())?;
+
+    let seq_from = db.last_run_seq_to().map_err(|e| e.to_string())?;
+    let seq_to = db.max_ledger_seq().map_err(|e| e.to_string())?;
+    let delta = db
+        .list_lake_items_since(seq_from, MAX_DELTA_ITEMS as i64)
+        .map_err(|e| e.to_string())?;
+    let tree = db.list_class_nodes().map_err(|e| e.to_string())?;
+    let run_id = db.insert_class_run(seq_from, seq_to).map_err(|e| e.to_string())?;
+
+    if delta.is_empty() {
+        db.finish_class_run(run_id, "done", None, "no new lake items to classify")
+            .map_err(|e| e.to_string())?;
+        return Ok(OrganizeOutcome {
+            summary: "Nothing new to classify yet — capture some prompts first.".to_string(),
+            seq_from,
+            seq_to,
+            ran: false,
+            ..Default::default()
+        });
+    }
+
+    // Temporal + storage facts so the orchestrator judges coldness against the
+    // lake's own activity (fed as ground truth, never inferred).
+    let direct = db.node_direct_link_activity().map_err(|e| e.to_string())?;
+    let envelope = db.lake_envelope().map_err(|e| e.to_string())?;
+    let stats = subtree_stats(&tree, &direct);
+    let prompt = build_classifier_prompt(&tree, &delta, &stats, envelope);
+    let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+    // Default: the orchestrator organizes directly (no required human approval);
+    // the ledger's taxonomy-reorg time-travel is the safety net. A reviewer who
+    // prefers the gate turns this off.
+    let auto_apply = db
+        .get_setting("redline.classmem.autoApply")
+        .map(|v| v != "false")
+        .unwrap_or(true);
+
+    match run_classifier(&cwd, prompt).await {
+        Ok((text, session)) => {
+            let proposals = parse_proposals(&text);
+            let staged =
+                stage_proposals(db, Some(run_id), &proposals).map_err(|e| e.to_string())?;
+            let mut applied_reorgs = 0usize;
+            let mut held_collapses = 0usize;
+            if auto_apply {
+                let accepted = db.accept_all_pending().map_err(|e| e.to_string())?;
+                for nid in &accepted {
+                    record_curate(db, nid, "organize", "");
+                }
+                // Recompute activity AFTER staging for the collapse interlock.
+                let direct2 = db.node_direct_link_activity().map_err(|e| e.to_string())?;
+                let nodes_now = db.list_class_nodes().map_err(|e| e.to_string())?;
+                let stats2 = subtree_stats(&nodes_now, &direct2);
+                let env2 = db.lake_envelope().map_err(|e| e.to_string())?;
+                for prop in db.list_class_proposals().map_err(|e| e.to_string())? {
+                    if prop.op == "collapse" {
+                        let safe = prop
+                            .node_id
+                            .as_deref()
+                            .and_then(|nid| stats2.get(nid))
+                            .map(|s| auto_collapse_safe(s, env2))
+                            .unwrap_or(false);
+                        if !safe {
+                            held_collapses += 1;
+                            continue; // leave pending → shows in the review strip
+                        }
+                    }
+                    if let Some(a) = db.apply_class_proposal(prop.id).map_err(|e| e.to_string())? {
+                        record_reorg(db, &a.op, &a.node_id, &a.detail);
+                        applied_reorgs += 1;
+                    }
+                }
+            }
+            let summary = if auto_apply {
+                format!(
+                    "Organized: {} class(es), {} link(s), {} reorg(s){}{}",
+                    staged.created_nodes,
+                    staged.staged_links,
+                    applied_reorgs,
+                    if held_collapses > 0 {
+                        format!(", {held_collapses} collapse(s) held for review")
+                    } else {
+                        String::new()
+                    },
+                    if staged.skipped > 0 {
+                        format!(", {} skipped", staged.skipped)
+                    } else {
+                        String::new()
+                    }
+                )
+            } else {
+                format!(
+                    "{} class(es), {} link(s), {} structural, {} skipped — review to apply",
+                    staged.created_nodes, staged.staged_links, staged.structural, staged.skipped
+                )
+            };
+            db.finish_class_run(run_id, "done", session.as_deref(), &summary)
+                .map_err(|e| e.to_string())?;
+            Ok(OrganizeOutcome {
+                staged,
+                summary,
+                auto_applied: auto_apply,
+                seq_from,
+                seq_to,
+                ran: true,
+            })
+        }
+        Err(e) => {
+            let _ = db.finish_class_run(run_id, "error", None, &e);
+            Err(e)
+        }
     }
 }
 

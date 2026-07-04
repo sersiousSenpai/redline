@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::db::Database;
@@ -99,6 +99,12 @@ pub enum EventKind {
     /// (an additive `file`/`create` proposal), or pinned/renamed — a curation
     /// signal (what you valued / how you organized). References the node.
     ClassCurate,
+    /// Memory-as-plumbing: a cold prompt body was compacted to a gist (or
+    /// forgotten). The act of forgetting is itself part of the record — the
+    /// event retains the ORIGINAL `body_hash` as tamper-evident proof of what
+    /// was there, so the chain and every bundle stay verifiable even though the
+    /// stored body is gone. References the prompt by `(ref_kind="prompt", ref_id)`.
+    Compaction,
 }
 
 impl EventKind {
@@ -114,6 +120,7 @@ impl EventKind {
             EventKind::SourceTrust => "source_trust",
             EventKind::TaxonomyReorg => "taxonomy_reorg",
             EventKind::ClassCurate => "class_curate",
+            EventKind::Compaction => "compaction",
         }
     }
 }
@@ -198,8 +205,9 @@ pub struct LedgerAppend<'a> {
     pub payload_hash: &'a str,
 }
 
-/// A materialized ledger row, returned by append and list.
-#[derive(Debug, Clone, Serialize)]
+/// A materialized ledger row, returned by append and list. `Deserialize` so an
+/// exported context bundle can be re-loaded and re-verified in-process.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LedgerEventRow {
     pub seq: i64,

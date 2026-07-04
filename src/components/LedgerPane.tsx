@@ -33,7 +33,7 @@ interface LedgerPaneProps {
   onClose: () => void;
 }
 
-const KIND_LABEL: Record<string, string> = {
+export const KIND_LABEL: Record<string, string> = {
   prompt: "Prompt",
   revision: "Revision",
   resolution: "Resolution",
@@ -44,9 +44,10 @@ const KIND_LABEL: Record<string, string> = {
   source_trust: "Source trust",
   taxonomy_reorg: "Taxonomy reorg",
   class_curate: "Class curate",
+  compaction: "Compaction",
 };
 
-const KIND_COLOR: Record<string, string> = {
+export const KIND_COLOR: Record<string, string> = {
   prompt: "#4f8cff",
   revision: "#7c5cff",
   resolution: "#2fae66",
@@ -57,6 +58,7 @@ const KIND_COLOR: Record<string, string> = {
   source_trust: "#d0a52f",
   taxonomy_reorg: "#7c5cff",
   class_curate: "#2f9ea5",
+  compaction: "#8a8f98",
 };
 
 export function kindLabel(kind: string): string {

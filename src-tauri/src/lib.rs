@@ -5,9 +5,11 @@ mod ai_review;
 mod browse;
 #[cfg(target_os = "macos")]
 mod browser_popup;
+mod bundle;
 mod classmem;
 mod claude_proc;
 mod code;
+mod context;
 mod db;
 mod dictation;
 mod dictation_whisper;
@@ -17,8 +19,14 @@ mod fsbrowse;
 mod fswatch;
 mod highlight;
 mod hook;
+mod keeper;
 mod ledger;
 mod linked;
+mod librarian;
+/// The MCP stdio proxy's request→route→response core. `pub` so the
+/// `redline-mcp` binary (`src/bin/`) can share the exact, unit-tested logic.
+pub mod mcp;
+mod mirror;
 mod mission;
 mod parser;
 #[cfg(test)]
@@ -1646,6 +1654,20 @@ async fn run_server(state: AppState) {
         .route("/v1/memory/node/:id", get(handle_memory_node))
         .route("/v1/memory/prompts", get(handle_memory_prompts))
         .route("/v1/memory/proposals", post(handle_memory_proposals))
+        // Context access (Phase 3): the Librarian agent's friction digest —
+        // ground-truth counts/staleness (backlog, held proposals, stalled
+        // reviews, bulging branches). Read-only; rides the same `curl` allow.
+        .route("/v1/context/overview", get(handle_context_overview))
+        // Context access (Phase 4): read-only query surface over the lake for
+        // agents (internal via curl, external via the MCP proxy). Filtered
+        // prompts, one session's full history, and aggregate stats. All bounded,
+        // injection-safe (`q` is a bound LIKE), and ride the same `curl` allow.
+        .route("/v1/context/prompts", get(handle_context_prompts))
+        .route(
+            "/v1/context/sessions/:id/history",
+            get(handle_context_session_history),
+        )
+        .route("/v1/context/stats", get(handle_context_stats))
         // Code Review surface: the `/redline-review` skill's blocking curl.
         // Captures the diff, opens the review pane, and HOLDS the response
         // until the reviewer submits — the plan-review hold applied to code.
@@ -3025,6 +3047,82 @@ async fn handle_memory_proposals(
         }
         Err(e) => browser_error_response(e),
     }
+}
+
+#[derive(Deserialize)]
+struct ContextOverviewQ {
+    /// Optional cap on the ranked lists (in-review, bulging). Clamped 1..=50.
+    limit: Option<i64>,
+}
+
+/// `GET /v1/context/overview?limit=` — the Librarian's friction digest as JSON:
+/// lake backlog, held structural proposals, stalled in-review sessions, bulging
+/// branches, missions, source-trust coverage. Ground truth (never inferred),
+/// internally bounded. Consumed by the Librarian (baked into its prompt via
+/// `librarian.rs`, re-readable here) and the Phase-4 external MCP surface.
+async fn handle_context_overview(
+    State(app_state): State<AppState>,
+    Query(q): Query<ContextOverviewQ>,
+) -> axum::response::Response {
+    let db = app_state.store.database();
+    let limit = context::clamp_limit(q.limit);
+    let digest = context::build_digest(&db, limit);
+    Json(digest).into_response()
+}
+
+#[derive(Deserialize)]
+struct ContextPromptsQ {
+    session: Option<String>,
+    mission: Option<String>,
+    surface: Option<String>,
+    project: Option<String>,
+    since_seq: Option<i64>,
+    /// Free-text substring — bound as a LIKE parameter in the DB layer.
+    q: Option<String>,
+    limit: Option<i64>,
+}
+
+/// `GET /v1/context/prompts?session=&mission=&surface=&project=&since_seq=&q=&limit=`
+/// — filtered read of the captured-prompt lake. Every filter is ANDed; `q` is a
+/// bound substring (injection-safe). Oldest-first, byte-bounded. Read-only.
+async fn handle_context_prompts(
+    State(app_state): State<AppState>,
+    Query(q): Query<ContextPromptsQ>,
+) -> axum::response::Response {
+    let db = app_state.store.database();
+    let filters = context::PromptFilters {
+        session_id: q.session,
+        mission_id: q.mission,
+        surface: q.surface,
+        project: q.project,
+        since_seq: q.since_seq,
+        substring: q.q,
+        limit: context::clamp_prompt_limit(q.limit),
+    };
+    match context::list_prompts(&db, &filters) {
+        Ok(items) => Json(serde_json::json!({ "items": items })).into_response(),
+        Err(e) => browser_error_response(e),
+    }
+}
+
+/// `GET /v1/context/sessions/:id/history` — one plan session's revision digests,
+/// comment threads, and decision/curation ledger events. Read-only.
+async fn handle_context_session_history(
+    State(app_state): State<AppState>,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    let db = app_state.store.database();
+    match context::build_session_history(&db, &id) {
+        Some(h) => Json(h).into_response(),
+        None => (StatusCode::NOT_FOUND, "no such session").into_response(),
+    }
+}
+
+/// `GET /v1/context/stats` — aggregate counts (per day / surface / kind / class).
+/// Agent/MCP-facing only; there is deliberately no dashboard UI. Read-only.
+async fn handle_context_stats(State(app_state): State<AppState>) -> axum::response::Response {
+    let db = app_state.store.database();
+    Json(context::build_stats(&db)).into_response()
 }
 
 /// `POST /v1/browser/focus?tab=<id>` — switch the user INTO an existing tab:
@@ -5311,6 +5409,175 @@ fn record_drafted_prompt(
 }
 
 // ---------------------------------------------------------------------------
+// Polis Librarian command (Phase 3)
+// ---------------------------------------------------------------------------
+
+/// Run the on-demand Librarian agent once: build the ground-truth friction digest
+/// from the DB, bake it into the spawn prompt, run the read-only agent headless
+/// (MCP stripped, curl bridge), and parse its prioritized checklist back.
+/// Read-only — nothing is mutated, so no change events are emitted; the checklist
+/// is returned straight to the caller for rendering. Mirrors `classmem_organize`'s
+/// spawn/parse shape (cwd = HOME, like the classifier).
+#[tauri::command(async)]
+async fn librarian_agent(
+    store: tauri::State<'_, SessionStore>,
+) -> Result<librarian::LibrarianResult, String> {
+    let db = store.database();
+    let digest = context::build_digest(&db, context::LIMIT_MAX as usize);
+    let prompt = librarian::build_librarian_prompt_from_digest(&digest);
+    let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+    let (text, _session) = librarian::run_librarian(&cwd, prompt).await?;
+    Ok(librarian::parse_checklist(&text))
+}
+
+// ---------------------------------------------------------------------------
+// Polis context access + portability commands (Phase 4)
+// ---------------------------------------------------------------------------
+
+/// Resolve the absolute path to the co-shipped `redline-mcp` binary — it sits
+/// next to the main executable (dev: `target/<profile>/redline-mcp`; bundled:
+/// alongside the app binary). Falls back to the bare name (PATH lookup).
+fn resolve_mcp_bin() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("redline-mcp")))
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "redline-mcp".to_string())
+}
+
+/// The copyable `~/.claude.json` MCP snippet + the resolved binary path, for the
+/// settings surface. External `claude` sessions install this to query Redline's
+/// memory; internal agents never use MCP (they keep `--strict-mcp-config`).
+#[tauri::command]
+fn mcp_config_snippet() -> Result<serde_json::Value, String> {
+    let bin = resolve_mcp_bin();
+    Ok(serde_json::json!({
+        "binPath": bin,
+        "snippet": mcp::claude_config_snippet(&bin),
+    }))
+}
+
+/// Export a verifiable context bundle to a file the user picks. `scope` is one
+/// of `session|mission|class|full`; `id` is required for the first three. The
+/// bundle re-verifies from the file alone (each event self-certifies via its
+/// `entry_hash`). A session-scoped export records F6 state so the Librarian can
+/// stop flagging that plan as un-exported. Returns the saved path, or `None` if
+/// the save dialog was cancelled.
+#[tauri::command]
+async fn export_context_bundle(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    scope: String,
+    id: Option<String>,
+) -> Result<Option<String>, String> {
+    let need_id = |id: Option<String>| id.filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| format!("the `{scope}` scope needs an id"));
+    let bundle_scope = match scope.as_str() {
+        "session" => bundle::BundleScope::Session(need_id(id.clone())?),
+        "mission" => bundle::BundleScope::Mission(need_id(id.clone())?),
+        "class" => bundle::BundleScope::Class(need_id(id.clone())?),
+        "full" => bundle::BundleScope::Full,
+        other => return Err(format!("unknown bundle scope `{other}`")),
+    };
+
+    // Build the bundle in a scoped block so no DB access is held across the
+    // (blocking) save dialog.
+    let (json_bytes, file_name, head_hash) = {
+        let db = store.database();
+        let b = bundle::build_bundle(&db, &bundle_scope)?;
+        // Never ship a bundle that doesn't re-verify from itself — the whole
+        // point is a portable, independently-checkable artifact.
+        let verdict = bundle::verify_bundle(&b);
+        if !verdict.ok {
+            return Err(format!(
+                "refusing to export: the bundle failed self-verification (first bad seq {:?})",
+                verdict.first_bad_seq
+            ));
+        }
+        let head = b.head_hash.clone();
+        let name = format!("redline-context-{}.json", bundle_scope.kind());
+        let js = serde_json::to_string_pretty(&b).map_err(|e| e.to_string())?;
+        (js, name, head)
+    };
+
+    let picked = app
+        .dialog()
+        .file()
+        .add_filter("JSON bundle", &["json"])
+        .set_file_name(&file_name)
+        .blocking_save_file();
+    let Some(fp) = picked else {
+        return Ok(None); // user cancelled
+    };
+    let path = fp.into_path().map_err(|e| format!("invalid save path: {e}"))?;
+    std::fs::write(&path, json_bytes).map_err(|e| e.to_string())?;
+
+    // F6: mark a session-scoped export so the Librarian's un-exported signal
+    // clears for that plan. (Mission/class/full aren't per-plan; not recorded.)
+    if let Some(sid) = bundle_scope.session_id() {
+        let db = store.database();
+        let _ = db.record_plan_export(sid, "session", Some(&head_hash));
+        let _ = app.emit("ledger-changed", ());
+    }
+    tracing::info!(path = %path.display(), scope = %scope, "exported context bundle");
+    Ok(Some(path.to_string_lossy().to_string()))
+}
+
+/// Current mirror status for the settings surface.
+#[tauri::command]
+fn mirror_status(store: tauri::State<'_, SessionStore>) -> Result<mirror::MirrorStatus, String> {
+    Ok(mirror::status(&store.database()))
+}
+
+/// Point the mirror at a directory chosen via a native folder picker (empty ⇒
+/// off). Does a full sync so the directory immediately reflects the ledger.
+#[tauri::command]
+async fn pick_mirror_dir(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+) -> Result<Option<mirror::MirrorStatus>, String> {
+    let picked = app.dialog().file().blocking_pick_folder();
+    let Some(dir) = picked else {
+        return Ok(None); // cancelled
+    };
+    let path = dir.into_path().map_err(|e| format!("invalid folder: {e}"))?;
+    let st = mirror::set_dir(&store.database(), &path.to_string_lossy())?;
+    let _ = app.emit("mirror-changed", ());
+    Ok(Some(st))
+}
+
+/// Set (or clear, when empty) the mirror directory by path.
+#[tauri::command]
+async fn set_mirror_dir(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    dir: String,
+) -> Result<mirror::MirrorStatus, String> {
+    let st = mirror::set_dir(&store.database(), &dir)?;
+    let _ = app.emit("mirror-changed", ());
+    Ok(st)
+}
+
+/// Rebuild the configured mirror from scratch (the recovery path if it drifts).
+#[tauri::command]
+async fn mirror_rebuild(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+) -> Result<mirror::MirrorStatus, String> {
+    let st = mirror::rebuild_configured(&store.database())?;
+    let _ = app.emit("mirror-changed", ());
+    Ok(st)
+}
+
+/// Sync any new ledger events into the mirror now (also runs on a timer).
+#[tauri::command]
+async fn mirror_sync(store: tauri::State<'_, SessionStore>) -> Result<mirror::MirrorStatus, String> {
+    let db = store.database();
+    mirror::sync_if_enabled(&db);
+    Ok(mirror::status(&db))
+}
+
+// ---------------------------------------------------------------------------
 // Polis ClassMemory commands (Phase 2)
 // ---------------------------------------------------------------------------
 
@@ -5324,117 +5591,66 @@ async fn classmem_organize(
     store: tauri::State<'_, SessionStore>,
 ) -> Result<serde_json::Value, String> {
     let db = store.database();
-    let roots = classmem::seed_root_rows(&db.list_project_paths().map_err(|e| e.to_string())?);
-    db.seed_class_roots(&roots).map_err(|e| e.to_string())?;
-
-    let seq_from = db.last_run_seq_to().map_err(|e| e.to_string())?;
-    let seq_to = db.max_ledger_seq().map_err(|e| e.to_string())?;
-    let delta = db
-        .list_lake_items_since(seq_from, classmem::MAX_DELTA_ITEMS as i64)
-        .map_err(|e| e.to_string())?;
-    let tree = db.list_class_nodes().map_err(|e| e.to_string())?;
-    let run_id = db.insert_class_run(seq_from, seq_to).map_err(|e| e.to_string())?;
+    let _ = app.emit("classmem-changed", ()); // "running" pulse
+    let outcome = classmem::organize_once(&db).await;
     let _ = app.emit("classmem-changed", ());
+    let _ = app.emit("ledger-changed", ());
+    let _ = app.emit("memory-changed", ());
+    let o = outcome?;
+    Ok(serde_json::json!({
+        "staged": o.staged,
+        "summary": o.summary,
+        "autoApplied": o.auto_applied,
+        "seqFrom": o.seq_from,
+        "seqTo": o.seq_to,
+    }))
+}
 
-    if delta.is_empty() {
-        db.finish_class_run(run_id, "done", None, "no new lake items to classify")
-            .map_err(|e| e.to_string())?;
-        let _ = app.emit("classmem-changed", ());
-        return Ok(serde_json::json!({
-            "staged": classmem::StageResult::default(),
-            "summary": "Nothing new to classify yet — capture some prompts first.",
-            "seqFrom": seq_from, "seqTo": seq_to,
-        }));
-    }
+/// The one quiet surface's data source: everything the memory pill + inspector
+/// need in a single read. `live` is always true (the keeper is always running);
+/// `backlog` is un-organized ledger growth; `chainOk` is a live re-verify.
+#[tauri::command]
+fn memory_status(store: tauri::State<'_, SessionStore>) -> Result<serde_json::Value, String> {
+    let db = store.database();
+    let max_seq = db.max_ledger_seq().map_err(|e| e.to_string())?;
+    let last_to = db.last_run_seq_to().map_err(|e| e.to_string())?;
+    let run = db.latest_class_run().map_err(|e| e.to_string())?;
+    let (last_organized_ts, last_summary) = match run {
+        Some(r) if r.status == "done" => (r.finished_at, r.summary),
+        _ => (None, None),
+    };
+    let chain = db.verify_ledger_chain().map_err(|e| e.to_string())?;
+    let (compacted, reclaimed, last_compaction_ts) =
+        db.compaction_stats().map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "live": true,
+        "itemCount": max_seq,
+        "backlog": (max_seq - last_to).max(0),
+        "lastOrganizedTs": last_organized_ts,
+        "lastOrganizedSummary": last_summary,
+        "chainOk": chain.ok,
+        "compactedCount": compacted,
+        "reclaimedBytes": reclaimed,
+        "lastCompactionTs": last_compaction_ts,
+    }))
+}
 
-    // Temporal + storage facts so the orchestrator can judge coldness against
-    // the lake's own activity (fed as ground truth, never inferred).
-    let direct = db.node_direct_link_activity().map_err(|e| e.to_string())?;
-    let envelope = db.lake_envelope().map_err(|e| e.to_string())?;
-    let stats = classmem::subtree_stats(&tree, &direct);
-    let prompt = classmem::build_classifier_prompt(&tree, &delta, &stats, envelope);
-    let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-    // Default: the orchestrator organizes directly (no required human approval);
-    // the ledger's taxonomy-reorg time-travel is the safety net, and the human
-    // curates after if they want. A reviewer who prefers the gate turns this off.
-    let auto_apply = db
-        .get_setting("redline.classmem.autoApply")
-        .map(|v| v != "false")
-        .unwrap_or(true);
-    match classmem::run_classifier(&cwd, prompt).await {
-        Ok((text, session)) => {
-            let proposals = classmem::parse_proposals(&text);
-            let staged = classmem::stage_proposals(&db, Some(run_id), &proposals)
-                .map_err(|e| e.to_string())?;
-            let mut applied_reorgs = 0usize;
-            let mut held_collapses = 0usize;
-            if auto_apply {
-                // Flip every freshly-staged node/link to accepted…
-                let accepted = db.accept_all_pending().map_err(|e| e.to_string())?;
-                for nid in &accepted {
-                    classmem::record_curate(&db, nid, "organize", "");
-                }
-                // Recompute activity AFTER staging for the collapse interlock.
-                let direct2 = db.node_direct_link_activity().map_err(|e| e.to_string())?;
-                let nodes_now = db.list_class_nodes().map_err(|e| e.to_string())?;
-                let stats2 = classmem::subtree_stats(&nodes_now, &direct2);
-                let env2 = db.lake_envelope().map_err(|e| e.to_string())?;
-                // …and apply every pending structural op — EXCEPT a `collapse`
-                // that isn't clearly cold, which is held as a pending proposal
-                // for manual review rather than silently destroying the subtree.
-                for prop in db.list_class_proposals().map_err(|e| e.to_string())? {
-                    if prop.op == "collapse" {
-                        let safe = prop
-                            .node_id
-                            .as_deref()
-                            .and_then(|nid| stats2.get(nid))
-                            .map(|s| classmem::auto_collapse_safe(s, env2))
-                            .unwrap_or(false);
-                        if !safe {
-                            held_collapses += 1;
-                            continue; // leave pending → shows in the review strip
-                        }
-                    }
-                    if let Some(a) = db.apply_class_proposal(prop.id).map_err(|e| e.to_string())? {
-                        classmem::record_reorg(&db, &a.op, &a.node_id, &a.detail);
-                        applied_reorgs += 1;
-                    }
-                }
-                let _ = app.emit("ledger-changed", ());
-            }
-            let summary = if auto_apply {
-                format!(
-                    "Organized: {} class(es), {} link(s), {} reorg(s){}{}",
-                    staged.created_nodes,
-                    staged.staged_links,
-                    applied_reorgs,
-                    if held_collapses > 0 {
-                        format!(", {held_collapses} collapse(s) held for review")
-                    } else {
-                        String::new()
-                    },
-                    if staged.skipped > 0 { format!(", {} skipped", staged.skipped) } else { String::new() }
-                )
-            } else {
-                format!(
-                    "{} class(es), {} link(s), {} structural, {} skipped — review to apply",
-                    staged.created_nodes, staged.staged_links, staged.structural, staged.skipped
-                )
-            };
-            db.finish_class_run(run_id, "done", session.as_deref(), &summary)
-                .map_err(|e| e.to_string())?;
-            let _ = app.emit("classmem-changed", ());
-            Ok(serde_json::json!({
-                "staged": staged, "summary": summary, "autoApplied": auto_apply,
-                "seqFrom": seq_from, "seqTo": seq_to,
-            }))
-        }
-        Err(e) => {
-            let _ = db.finish_class_run(run_id, "error", None, &e);
-            let _ = app.emit("classmem-changed", ());
-            Err(e)
-        }
-    }
+/// Explicit forget: release a prompt's words now (a manual compaction). The
+/// ledger keeps the fact that it happened + the original body hash. Returns the
+/// new ledger seq, or `null` if the prompt was already compacted/absent.
+#[tauri::command]
+fn memory_forget(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    prompt_id: i64,
+) -> Result<Option<i64>, String> {
+    let db = store.database();
+    let seq = db
+        .compact_prompt_body(prompt_id, "[forgotten]", "forget")
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit("memory-changed", ());
+    let _ = app.emit("ledger-changed", ());
+    Ok(seq)
 }
 
 /// The class tree (flat + link counts); the FE builds the hierarchy.
@@ -6044,7 +6260,17 @@ pub fn run() {
             classmem_reject_proposal,
             classmem_pin_node,
             classmem_rename_node,
+            memory_status,
+            memory_forget,
             prompt_text,
+            librarian_agent,
+            export_context_bundle,
+            mirror_status,
+            pick_mirror_dir,
+            set_mirror_dir,
+            mirror_rebuild,
+            mirror_sync,
+            mcp_config_snippet,
         ])
         .setup(|app| {
             // Silently bring an existing install's hook timeout up to date, so a
@@ -6119,6 +6345,27 @@ pub fn run() {
                     snapshot_database(&db_bak, &dir_bak, LEDGER_BACKUP_KEEP);
                 });
             }
+
+            // Polis portable mirror (Phase 4): a continuous, one-way markdown
+            // mirror of the ledger into the user-chosen directory. Off until a
+            // dir is set (`redline.mirrorDir`); syncs on startup, then every 2
+            // minutes. Best-effort and non-blocking — a mirror hiccup never
+            // touches the app or the chain (the ledger stays source of truth).
+            {
+                let db_mir = db.clone();
+                std::thread::spawn(move || loop {
+                    mirror::sync_if_enabled(&db_mir);
+                    std::thread::sleep(std::time::Duration::from_secs(120));
+                });
+            }
+
+            // Memory as plumbing: the background keeper. It waits for the app to
+            // go idle, then autonomously organizes the lake into the ClassMemory
+            // catalog and compacts cold prompt bodies to gists — no buttons, no
+            // configs, one quiet pill. Async (the classifier/summarizer are), so
+            // it rides the Tauri runtime, not a std thread. Best-effort: every
+            // step logs on error and never brings the loop down.
+            keeper::spawn(app.handle().clone(), db.clone());
 
             let settings = Settings::load(db.clone());
             app.manage(settings.clone());

@@ -377,6 +377,27 @@ claude -p "<prompt>" --resume <fork_session_id> \
 > below record the original 2026-05-21 verification with the `Read,Grep,Glob`
 > set; only the web tools were added since.
 
+> **Update 2026-07-03 (Polis Phase 3 — conscious fork-invariant loosening):**
+> the discussion forks now also carry `Bash`, scoped by `--allowedTools` to the
+> localhost daemon `curl` bridge in the same three quoting variants
+> `claude_proc::bridge_args` uses:
+> `Bash(curl -s http://127.0.0.1:7676/*)` (plain / single-quoted / double-quoted
+> URL). This is the forks' **ClassMemory retrieval surface** — the class-router
+> in the `sidecar` / `conversation` skills walks `/v1/memory/*` to ground a reply
+> in the user's own captured decisions/research. It is a deliberate widening of
+> the read-only-no-`Bash` guarantee above, and it is **narrow**: the allow is a
+> literal prefix confined to `http://127.0.0.1:7676/`, so headless `-p`
+> auto-denies any other `Bash` invocation (no file writes, no arbitrary commands,
+> no other host). `Edit`/`Write`/`ExitPlanMode` stay excluded from `--tools`, and
+> `--strict-mcp-config` still strips MCP. All three fork spawn sites
+> (`fork_thread_send`, `review_thread_send`, `review_question_send`) share one
+> builder — `fork::discussion_fork_args` — so the surface can't drift, and the
+> unit test `discussion_fork_args_grant_only_the_scoped_localhost_curl_allow`
+> asserts the allow-list is *exactly* the two web tools + the three scoped curl
+> variants and nothing broader (no bare `Bash`, no other curl host). The
+> `--tools` built-in bullet below reads `Read,Grep,Glob` from the original run;
+> `Bash` (curl-scoped) and the web tools have been added since.
+
 - [x] **`--fork-session` mints a new session id.** The first turn resumed `d8111931-…`; the `system/init` event reported a *different* `session_id` (`5cd5f058-…`). `result.session_id` matched `init`.
 - [x] **The resumed transcript is untouched.** The main session's `.jsonl` was byte- and mtime-identical before and after the fork.
 - [x] **Follow-up `--resume <fork_id>` (no `--fork-session`) keeps the same id** and carries prior-turn context (the follow-up correctly recalled what the first turn discussed). First turn forks; follow-ups plain-resume.

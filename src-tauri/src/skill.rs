@@ -39,6 +39,10 @@ struct EmbeddedSkill {
 ///   colleague (a tab's own page-discussion agent) via the consult endpoint.
 /// - `redline-review`: the code-review loop — the blocking review curl, the
 ///   line-anchored feedback format, and the REDLINE_REVIEW_RESOLUTIONS reply.
+/// - `classmemory`: the ClassMemory classifier + retrieval contract (the lake's
+///   catalog).
+/// - `librarian`: the on-demand friction-reduction agent that stewards the
+///   prompt/context library and emits a prioritized next-actions checklist.
 const SKILLS: &[EmbeddedSkill] = &[
     EmbeddedSkill {
         name: "redline",
@@ -47,12 +51,12 @@ const SKILLS: &[EmbeddedSkill] = &[
     },
     EmbeddedSkill {
         name: "sidecar",
-        version: 1,
+        version: 2,
         content: include_str!("../../skills/sidecar/SKILL.md"),
     },
     EmbeddedSkill {
         name: "conversation",
-        version: 1,
+        version: 2,
         content: include_str!("../../skills/conversation/SKILL.md"),
     },
     EmbeddedSkill {
@@ -62,7 +66,7 @@ const SKILLS: &[EmbeddedSkill] = &[
     },
     EmbeddedSkill {
         name: "mission",
-        version: 1,
+        version: 2,
         content: include_str!("../../skills/mission/SKILL.md"),
     },
     EmbeddedSkill {
@@ -79,6 +83,16 @@ const SKILLS: &[EmbeddedSkill] = &[
         name: "classmemory",
         version: 1,
         content: include_str!("../../skills/classmemory/SKILL.md"),
+    },
+    EmbeddedSkill {
+        name: "librarian",
+        version: 2,
+        content: include_str!("../../skills/librarian/SKILL.md"),
+    },
+    EmbeddedSkill {
+        name: "context-analysis",
+        version: 1,
+        content: include_str!("../../skills/context-analysis/SKILL.md"),
     },
 ];
 
@@ -252,6 +266,76 @@ mod tests {
                 "classmemory SKILL.md is missing `{needle}`"
             );
         }
+    }
+
+    #[test]
+    fn librarian_skill_teaches_checklist_and_priority() {
+        let lib = SKILLS.iter().find(|s| s.name == "librarian").unwrap();
+        // The friction agent's contract: the checklist output, the priority
+        // categories, on-demand-only, and the do-not-fabricate rule.
+        for needle in [
+            "checklist",
+            "held_proposal",
+            "stalled_review",
+            "unstructured_backlog",
+            "on-demand",
+            "un_exported", // F6: real Phase-4 signal, now surfaced (was deferred)
+        ] {
+            assert!(
+                lib.content.contains(needle),
+                "librarian SKILL.md is missing `{needle}`"
+            );
+        }
+    }
+
+    #[test]
+    fn context_analysis_skill_teaches_the_mcp_tools() {
+        let ca = SKILLS.iter().find(|s| s.name == "context-analysis").unwrap();
+        // The external-session MCP contract: the four tools + read-only + the
+        // localhost boundary.
+        for needle in [
+            "query_prompts",
+            "session_history",
+            "memory_tree",
+            "stats",
+            "read-only",
+            "127.0.0.1",
+        ] {
+            assert!(
+                ca.content.contains(needle),
+                "context-analysis SKILL.md is missing `{needle}`"
+            );
+        }
+    }
+
+    /// Extract the `<!-- CLASS-ROUTER:BEGIN -->…<!-- CLASS-ROUTER:END -->` block
+    /// from a skill body. Returns `None` if either sentinel is missing.
+    fn class_router_block(content: &str) -> Option<&str> {
+        let begin = content.find("<!-- CLASS-ROUTER:BEGIN")?;
+        let end = content.find("<!-- CLASS-ROUTER:END")?;
+        content.get(begin..end)
+    }
+
+    #[test]
+    fn sidecar_and_conversation_share_a_byte_identical_class_router() {
+        // The class-router + ClassMemory-retrieval guidance is authored ONCE and
+        // pasted into both discussion skills; this guard fails the build if they
+        // drift, so a fix to one can never silently miss the other.
+        let sidecar = SKILLS.iter().find(|s| s.name == "sidecar").unwrap();
+        let convo = SKILLS.iter().find(|s| s.name == "conversation").unwrap();
+        let a = class_router_block(sidecar.content)
+            .expect("sidecar SKILL.md is missing the CLASS-ROUTER sentinels");
+        let b = class_router_block(convo.content)
+            .expect("conversation SKILL.md is missing the CLASS-ROUTER sentinels");
+        assert!(a.len() > 500, "the shared block should be substantial");
+        assert_eq!(
+            a, b,
+            "the sidecar and conversation class-router blocks must be byte-identical"
+        );
+        // And it must actually carry the router + retrieval contract.
+        assert!(a.contains("resolve the likely class"));
+        assert!(a.contains("/v1/memory/tree"));
+        assert!(a.contains("what did I *decide*"));
     }
 
     #[test]

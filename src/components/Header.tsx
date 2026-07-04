@@ -9,6 +9,7 @@ import { FontPicker } from "./FontPicker";
 import { DownloadMenu } from "./DownloadMenu";
 import { ModeToggle } from "./ModeToggle";
 import { AlertSettings } from "./AlertSettings";
+import { MemoryStatusPill } from "./MemoryStatusPill";
 import type { SoundConfig } from "../audio/beep";
 import { latestDisplayVersion } from "../lib/revisionVersions";
 
@@ -82,12 +83,8 @@ interface HeaderProps {
   reviewOpen: boolean;
   /** Toggle the Code Review pane on/off. */
   onToggleReview: () => void;
-  ledgerOpen: boolean;
-  /** Toggle the Polis Ledger pane on/off. */
-  onToggleLedger: () => void;
-  classmemOpen: boolean;
-  /** Toggle the Polis ClassMemory pane on/off. */
-  onToggleClassmem: () => void;
+  /** Open the one quiet memory surface (the read-mostly inspector). */
+  onOpenMemory: () => void;
   /** A live collaboration room is active (sharing or joined). */
   collabActive: boolean;
   /** Invite needs an active plan session to share. */
@@ -129,10 +126,7 @@ export function Header({
   onToggleDrafter,
   reviewOpen,
   onToggleReview,
-  ledgerOpen,
-  onToggleLedger,
-  classmemOpen,
-  onToggleClassmem,
+  onOpenMemory,
   collabActive,
   canInvite,
   onInvite,
@@ -163,7 +157,7 @@ export function Header({
           {/* The document is the default view; this toggle appears while a
               secondary pane (browser or drafter) is open, to add/remove the
               document from the split. */}
-          {(browserOpen || drafterOpen || reviewOpen || ledgerOpen || classmemOpen) && (
+          {(browserOpen || drafterOpen || reviewOpen) && (
             <button
               type="button"
               onClick={onToggleDoc}
@@ -257,50 +251,7 @@ export function Header({
           >
             ±
           </button>
-          <button
-            type="button"
-            onClick={onToggleLedger}
-            title={ledgerOpen ? "Hide ledger" : "Open the prompt & decision ledger"}
-            aria-label={ledgerOpen ? "Hide ledger" : "Open the prompt & decision ledger"}
-            aria-pressed={ledgerOpen}
-            className="flex items-center rounded-sm px-2 py-0.5"
-            style={{
-              fontSize: "13px",
-              lineHeight: 1,
-              border: "1px solid var(--color-rule)",
-              background: ledgerOpen
-                ? "var(--color-anchor-bg)"
-                : "var(--color-bg-elevated)",
-              color: ledgerOpen
-                ? "var(--color-anchor-text)"
-                : "var(--color-ink)",
-              cursor: "pointer",
-            }}
-          >
-            📒
-          </button>
-          <button
-            type="button"
-            onClick={onToggleClassmem}
-            title={classmemOpen ? "Hide ClassMemory" : "Open the ClassMemory catalog"}
-            aria-label={classmemOpen ? "Hide ClassMemory" : "Open the ClassMemory catalog"}
-            aria-pressed={classmemOpen}
-            className="flex items-center rounded-sm px-2 py-0.5"
-            style={{
-              fontSize: "13px",
-              lineHeight: 1,
-              border: "1px solid var(--color-rule)",
-              background: classmemOpen
-                ? "var(--color-anchor-bg)"
-                : "var(--color-bg-elevated)",
-              color: classmemOpen
-                ? "var(--color-anchor-text)"
-                : "var(--color-ink)",
-              cursor: "pointer",
-            }}
-          >
-            🧠
-          </button>
+          <MemoryStatusPill onOpen={onOpenMemory} />
           <button
             type="button"
             onClick={onInvite}

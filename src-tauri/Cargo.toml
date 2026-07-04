@@ -6,6 +6,10 @@ authors = ["Yusuf Al-Bazian"]
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/sersiousSenpai/redline"
+# Two binaries now ship: the Tauri app (`redline`, from src/main.rs) and the
+# `redline-mcp` stdio proxy (src/bin/). `cargo run` / `tauri dev` invoke cargo
+# without `--bin`, so name the app as the default to keep them unambiguous.
+default-run = "redline"
 
 [lib]
 name = "redline_lib"
@@ -59,7 +63,10 @@ two-face = { version = "0.5", default-features = false, features = ["syntect-def
 # HTTP client for the voice agent's premium (cloud) TTS — the synth call is made
 # from Rust so the user's API key never enters the webview and there's no browser
 # CORS. Default TLS (Security.framework on macOS), JSON bodies.
-reqwest = { version = "0.13.4", features = ["json"] }
+# `blocking` is used by the `redline-mcp` stdio proxy binary (src/bin/), which
+# forwards MCP tool calls to the localhost daemon over synchronous GETs — a
+# simple stdin→HTTP→stdout loop needs no async runtime.
+reqwest = { version = "0.13.4", features = ["json", "blocking"] }
 # Resample the microphone's hardware-rate PCM (44.1/48 kHz) down to the 16 kHz
 # mono Whisper expects. Pure Rust (no C build); used by the batch Whisper
 # dictation backend to prepare the accumulated utterance before inference.

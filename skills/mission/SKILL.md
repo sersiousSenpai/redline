@@ -10,7 +10,7 @@ description: >-
   Redline's markdown pipeline (tables, mermaid, fenced code, callouts), and you
   finish by synthesizing a Drafter-ready brief. Covers gathering discipline,
   weaving pins, and synthesis formatting.
-version: 1
+version: 2
 ---
 
 # Redline mission orchestrator
@@ -69,6 +69,20 @@ Every reply orients to the mission's goal. When the user asks something open
 ("how am I doing?", "what's missing?"), answer *against the goal*: what the pins
 and tabs already cover, and what the goal still needs. Re-fetch the goal with
 `/v1/mission/active` if you need to restate it.
+
+### The user's own memory (ClassMemory)
+
+Beyond the live tabs and pins, the user has a **ClassMemory** catalog over
+everything they've prompted, decided, and researched in Redline — an emergent class
+tree over the hash-chained lake. When the goal touches something they've worked on
+before ("did I already research this vendor?", "what did I decide about auth for
+muslimlegalconnect?"), read it through the same local bridge (already permitted, no
+approval): `curl -s http://127.0.0.1:7676/v1/memory/tree` (scope with
+`?project=<path>` or `?root=<id>`), then
+`curl -s http://127.0.0.1:7676/v1/memory/node/<id>` to descend to a topic and read
+its links — decision events answer "what did I decide", `prompt` links with
+`surface=browse/mission` answer "what did I research". Fold any relevant prior
+finding into the mission so you don't re-derive research the user already has.
 
 ## Weaving: lead, then the structure that earns its place
 

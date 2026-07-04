@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -173,6 +173,17 @@ struct PtySession {
 /// Monotonic spawn-generation counter (see `PtySession::generation`).
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
+/// Unix-ms of the most recent output from ANY live terminal — the "is a shell
+/// actively producing output" signal the background memory keeper consults to
+/// stay off the user's hot path. Bumped on every PTY read; 0 = no output yet.
+static LAST_PTY_OUTPUT_MS: AtomicI64 = AtomicI64::new(0);
+
+/// The most recent PTY-output timestamp (unix ms), or 0 if a terminal has never
+/// produced output this run. Read by `keeper::is_idle`.
+pub fn last_pty_output_ms() -> i64 {
+    LAST_PTY_OUTPUT_MS.load(Ordering::Relaxed)
+}
+
 /// Registry of live PTYs keyed by the frontend-assigned terminal id. The outer
 /// mutex guards only the map structure (insert/remove/lookup, microsecond
 /// criticals). Each session has its own inner mutex for write/resize I/O — so
@@ -279,7 +290,12 @@ pub fn pty_spawn(
             flow_for_reader.wait_until_drained();
             match reader.read(&mut buf) {
                 Ok(0) => break,
-                Ok(n) => pump_for_reader.push(&buf[..n]),
+                Ok(n) => {
+                    // Mark live-terminal activity so the memory keeper defers
+                    // while a shell is actively producing output.
+                    LAST_PTY_OUTPUT_MS.store(crate::ledger::now_millis(), Ordering::Relaxed);
+                    pump_for_reader.push(&buf[..n]);
+                }
                 Err(_) => break,
             }
         }
