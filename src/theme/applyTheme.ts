@@ -5,6 +5,8 @@ import { DEFAULT_THEME, getTheme, isThemeName } from "./themes";
 import type { ThemeName } from "./themes";
 import { DEFAULT_FONT, getFont, isFontName } from "./fonts";
 import type { FontName } from "./fonts";
+import { DEFAULT_LINT, isLintName } from "./lint";
+import type { LintName } from "./lint";
 
 const STORAGE_KEY = "redline.theme";
 // Resolved CSS variables, cached so the inline bootstrap in index.html can
@@ -19,6 +21,11 @@ const VARS_KEY = "redline.themeVars";
 // with index.html.
 const FONT_KEY = "redline.font";
 const FONT_STACK_KEY = "redline.fontStack";
+
+// Plaintext-linting preference — independent of both color theme and font.
+// LINT_KEY stores the chosen lint *name*; the value is replayed pre-paint in
+// index.html purely as the `data-lint` attribute (cheap, no vars to cache).
+const LINT_KEY = "redline.lint";
 
 // Imperative token application: set each derived CSS custom property as an
 // inline style on <html>. Inline styles on the root element beat any Tailwind
@@ -79,6 +86,17 @@ export function applyFont(name: FontName): void {
   }
 }
 
+// Whether the user has ever explicitly chosen a font. Used to gate a theme's
+// suggested-companion font so it only applies to an untouched default, never
+// overriding a real pick.
+export function hasStoredFont(): boolean {
+  try {
+    return isFontName(localStorage.getItem(FONT_KEY));
+  } catch {
+    return false;
+  }
+}
+
 // Read the persisted font synchronously (used pre-paint in main.tsx).
 export function readStoredFont(): FontName {
   try {
@@ -95,5 +113,48 @@ export function storeFont(name: FontName): void {
     localStorage.setItem(FONT_KEY, name);
   } catch {
     /* ignore — font still applies for this session */
+  }
+}
+
+// Apply the chosen plaintext-lint theme by stamping `data-lint` on <html>;
+// styles.css colors the `rl-lint--*` token spans off that attribute. Also fire
+// the lint-change event so every mounted editor's LintDecorations plugin
+// recomputes (turning coloring off vs on changes what it emits). The event name
+// is inlined to avoid importing the editor bundle into the theme/bootstrap layer.
+export function applyLint(name: LintName): void {
+  document.documentElement.dataset.lint = name;
+  try {
+    window.dispatchEvent(new Event("redline:lintchange"));
+  } catch {
+    /* non-browser (test) environment — decorations refresh on next edit */
+  }
+}
+
+// Whether the user has ever explicitly chosen a lint theme. Gates a color
+// theme's suggested-companion lint so it only lands on an untouched default.
+export function hasStoredLint(): boolean {
+  try {
+    return isLintName(localStorage.getItem(LINT_KEY));
+  } catch {
+    return false;
+  }
+}
+
+// Read the persisted lint theme synchronously (used pre-paint in main.tsx).
+export function readStoredLint(): LintName {
+  try {
+    const raw = localStorage.getItem(LINT_KEY);
+    if (isLintName(raw)) return raw;
+  } catch {
+    /* localStorage unavailable (private mode / quota) — fall through */
+  }
+  return DEFAULT_LINT;
+}
+
+export function storeLint(name: LintName): void {
+  try {
+    localStorage.setItem(LINT_KEY, name);
+  } catch {
+    /* ignore — lint still applies for this session */
   }
 }

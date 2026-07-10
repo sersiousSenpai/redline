@@ -1,12 +1,12 @@
 ---
-name: redline
+name: redline-plan-review
 description: >-
   Plan-revision contract for plans reviewed in Redline. Use when the context
   contains a Redline review payload — comment feedback tagged [edit],
   [feedback], or [question], rl:blk- block-identity sidecars, or a
   REDLINE_RESOLUTIONS block. Covers presentation-aware plan markdown,
   preserving sidecars, and emitting resolutions.
-version: 8
+version: 9
 ---
 
 # Redline review protocol

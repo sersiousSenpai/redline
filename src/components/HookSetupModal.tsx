@@ -2,6 +2,7 @@
 // Copyright 2026 Yusuf Al-Bazian
 import type { ReactNode } from "react";
 import type { HookStatus, SkillStatus } from "../types";
+import { CopyChip } from "./CopyChip";
 
 interface HookSetupModalProps {
   /** "setup" = the mandatory install screen; "done" = the post-install
@@ -13,6 +14,8 @@ interface HookSetupModalProps {
   onInstall: () => void;
   /** Dismisses the post-install explainer. */
   onDismiss: () => void;
+  /** Opens the "How Redline works" explainer (shown on the done screen). */
+  onShowHowItWorks?: () => void;
   /** Install failure detail, rendered inline above the button. */
   error?: string | null;
 }
@@ -111,6 +114,7 @@ export function HookSetupModal({
   skillStatus,
   onInstall,
   onDismiss,
+  onShowHowItWorks,
   error,
 }: HookSetupModalProps) {
   const hookNote =
@@ -188,10 +192,7 @@ export function HookSetupModal({
                 marginBottom: 18,
               }}
             >
-              After install, run{" "}
-              <code className="font-mono" style={codeChip}>
-                /hooks
-              </code>{" "}
+              After install, run <CopyChip text="/hooks" title="Copy /hooks" />{" "}
               inside Claude Code once to approve the hook (a one-time security
               check).
             </p>
@@ -262,14 +263,30 @@ export function HookSetupModal({
                 marginBottom: 18,
               }}
             >
-              One more thing: run{" "}
-              <code className="font-mono" style={codeChip}>
-                /hooks
-              </code>{" "}
+              One more thing: run <CopyChip text="/hooks" title="Copy /hooks" />{" "}
               inside Claude Code once to approve the hook (a one-time security
               check).
             </p>
-            <div className="flex items-center justify-end">
+            <div className="flex items-center justify-between">
+              {onShowHowItWorks ? (
+                <button
+                  type="button"
+                  onClick={onShowHowItWorks}
+                  style={{
+                    fontSize: "12px",
+                    color: "var(--color-info)",
+                    background: "transparent",
+                    border: "none",
+                    padding: 0,
+                    cursor: "pointer",
+                    textDecoration: "underline",
+                  }}
+                >
+                  How does this work?
+                </button>
+              ) : (
+                <span />
+              )}
               <button
                 type="button"
                 onClick={onDismiss}

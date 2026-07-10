@@ -39,6 +39,20 @@ interface LinkView {
   status: string;
   createdAt: number;
   label: string | null;
+  /** The decision seq that superseded this link's target (null = current). */
+  supersededBy: number | null;
+}
+
+/** An agent-derived pattern note on a node — never ground truth. */
+export interface Observation {
+  id: number;
+  nodeId: string;
+  summary: string;
+  citeSeqs: number[];
+  createdSeq: number | null;
+  pinned: boolean;
+  dismissed: boolean;
+  createdAt: number;
 }
 
 interface Citation {
@@ -98,7 +112,35 @@ const OP_LABEL: Record<string, string> = {
   split: "Split",
   merge: "Merge",
   collapse: "Collapse",
+  supersede: "Supersede",
 };
+
+/**
+ * "#5 → #12" for a supersede proposal's extraJson ({"old_seq":5,"new_seq":12}).
+ * Null on missing/malformed payloads. Pure, so it's unit-tested.
+ */
+export function supersedeLabel(extraJson: string | null): string | null {
+  if (!extraJson) return null;
+  try {
+    const v = JSON.parse(extraJson) as { old_seq?: unknown; new_seq?: unknown };
+    if (typeof v.old_seq !== "number" || typeof v.new_seq !== "number") return null;
+    return `#${v.old_seq} → #${v.new_seq}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Display order for a node's observations: pinned first (promoted into the
+ * node's permanent context), then newest first; dismissed filtered defensively
+ * (the API already excludes them). Pure, so it's unit-tested.
+ */
+export function sortObservations(obs: Observation[]): Observation[] {
+  return obs
+    .filter((o) => !o.dismissed)
+    .slice()
+    .sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.createdAt - a.createdAt || b.id - a.id);
+}
 
 interface ClassMemoryPaneProps {
   onClose: () => void;
@@ -109,7 +151,11 @@ export default function ClassMemoryPane({ onClose }: ClassMemoryPaneProps) {
   const [proposals, setProposals] = useState<ProposalView[]>([]);
   const [run, setRun] = useState<ClassRun | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
-  const [detail, setDetail] = useState<{ links: LinkView[]; children: ClassNode[] } | null>(null);
+  const [detail, setDetail] = useState<{
+    links: LinkView[];
+    children: ClassNode[];
+    observations: Observation[];
+  } | null>(null);
   const [organizing, setOrganizing] = useState(false);
   const [autoApply, setAutoApply] = useState(true);
   const [notice, setNotice] = useState<string | null>(null);
@@ -154,8 +200,12 @@ export default function ClassMemoryPane({ onClose }: ClassMemoryPaneProps) {
     setSelected(id);
     setDetail(null);
     try {
-      const d = await invoke<{ links: LinkView[]; children: ClassNode[] }>("classmem_node", { id });
-      setDetail({ links: d.links, children: d.children });
+      const d = await invoke<{
+        links: LinkView[];
+        children: ClassNode[];
+        observations: Observation[];
+      }>("classmem_node", { id });
+      setDetail({ links: d.links, children: d.children, observations: d.observations ?? [] });
     } catch (e) {
       setError(String(e));
     }
@@ -187,6 +237,7 @@ export default function ClassMemoryPane({ onClose }: ClassMemoryPaneProps) {
   );
 
   const tree = buildTree(nodes);
+  const selectedNode = selected ? nodes.find((n) => n.id === selected) : undefined;
 
   return (
     <div
@@ -312,7 +363,9 @@ export default function ClassMemoryPane({ onClose }: ClassMemoryPaneProps) {
             </div>
           ) : detail == null ? (
             <div style={{ color: "var(--color-ink-muted)" }}>Loading…</div>
-          ) : detail.links.length === 0 && detail.children.length === 0 ? (
+          ) : detail.links.length === 0 &&
+            detail.children.length === 0 &&
+            detail.observations.length === 0 ? (
             <div style={{ color: "var(--color-ink-muted)" }}>
               No links yet — a container class.
             </div>
@@ -347,9 +400,49 @@ export default function ClassMemoryPane({ onClose }: ClassMemoryPaneProps) {
                   >
                     {l.targetKind}
                   </span>
-                  <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  <span
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      // Superseded decisions are history, not the answer — mute them.
+                      color: l.supersededBy != null ? "var(--color-ink-muted)" : undefined,
+                    }}
+                  >
                     {l.label ?? `#${l.targetId}`}
                   </span>
+                  {l.supersededBy != null && (
+                    <span
+                      title={`This decision was superseded by ledger event #${l.supersededBy}. It stays in the lake as history.`}
+                      style={{
+                        flex: "0 0 auto",
+                        fontSize: 10,
+                        padding: "0 6px",
+                        borderRadius: 999,
+                        color: "#fff",
+                        background: "#8a8f98",
+                      }}
+                    >
+                      superseded → #{l.supersededBy}
+                    </span>
+                  )}
+                  {l.supersededBy != null && selectedNode?.pinned && (
+                    <span
+                      title="You pinned this class, and one of its decisions is now marked superseded — worth a look."
+                      style={{
+                        flex: "0 0 auto",
+                        fontSize: 10,
+                        padding: "0 6px",
+                        borderRadius: 999,
+                        color: "#fff",
+                        background: "#e0913a",
+                      }}
+                    >
+                      pinned · superseded
+                    </span>
+                  )}
                   {l.status === "proposed" && (
                     <>
                       <MiniBtn label="✓" title="Accept link" onClick={() => act("classmem_accept_link", { linkId: l.id })} />
@@ -358,6 +451,46 @@ export default function ClassMemoryPane({ onClose }: ClassMemoryPaneProps) {
                   )}
                 </div>
               ))}
+              {detail.observations.length > 0 && (
+                <>
+                  <div style={{ color: "var(--color-ink-muted)", marginTop: 8, marginBottom: 2 }}>
+                    Patterns (agent-derived — hypotheses, not facts)
+                  </div>
+                  {sortObservations(detail.observations).map((o) => (
+                    <div
+                      key={o.id}
+                      style={{
+                        display: "flex",
+                        alignItems: "flex-start",
+                        gap: 8,
+                        padding: "6px 8px",
+                        border: "1px dashed var(--color-rule)",
+                        borderRadius: 4,
+                      }}
+                    >
+                      <span style={{ flex: "0 0 auto" }} title="Agent-derived pattern">
+                        {o.pinned ? "📌" : "🔎"}
+                      </span>
+                      <span style={{ flex: 1, minWidth: 0 }}>
+                        {o.summary}
+                        <span style={{ display: "block", fontSize: 11, color: "var(--color-ink-muted)" }}>
+                          cites {o.citeSeqs.map((s) => `#${s}`).join(", ")}
+                        </span>
+                      </span>
+                      <MiniBtn
+                        label={o.pinned ? "📌" : "📍"}
+                        title={o.pinned ? "Unpin pattern" : "Pin pattern (promote into this class's permanent context)"}
+                        onClick={() => act("classmem_pin_observation", { id: o.id, pinned: !o.pinned })}
+                      />
+                      <MiniBtn
+                        label="✕"
+                        title="Dismiss pattern (never resurfaces)"
+                        onClick={() => act("classmem_dismiss_observation", { id: o.id })}
+                      />
+                    </div>
+                  ))}
+                </>
+              )}
             </div>
           )}
         </div>
@@ -489,6 +622,11 @@ function ProposalCard({ p, onAct }: { p: ProposalView; onAct: ActFn }) {
         <MiniBtn label="✓" title="Accept" onClick={() => onAct("classmem_accept_proposal", { id: p.id })} />
         <MiniBtn label="✕" title="Reject" onClick={() => onAct("classmem_reject_proposal", { id: p.id })} />
       </div>
+      {p.op === "supersede" && supersedeLabel(p.extraJson) && (
+        <div style={{ fontSize: 12, marginTop: 4 }}>
+          {supersedeLabel(p.extraJson)} — the newer decision replaces the older (never erased)
+        </div>
+      )}
       {p.rationale && (
         <div style={{ color: "var(--color-ink-muted)", fontSize: 12, marginTop: 4 }}>{p.rationale}</div>
       )}

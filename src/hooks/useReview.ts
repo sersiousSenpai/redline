@@ -42,7 +42,7 @@ export function useReview() {
   const [viewed, setViewed] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // A `/redline-review` curl is held open on this review — Submit/Approve/
+  // A `/redline-code-review` curl is held open on this review — Submit/Approve/
   // Dismiss will answer the agent directly.
   const [holdActive, setHoldActive] = useState(false);
   // Bumped by review-requested so the diff re-resolves even when repo+source
@@ -196,7 +196,7 @@ export function useReview() {
     };
   }, [refreshAnnotations]);
 
-  // A held `/redline-review` curl requested this review: adopt its repo/
+  // A held `/redline-code-review` curl requested this review: adopt its repo/
   // source/round and enter hold mode. `review-released` ends the hold
   // (answered, dismissed, capped, or the curl died).
   useEffect(() => {

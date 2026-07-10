@@ -26,6 +26,7 @@ import {
   type CommentHighlightRange,
 } from "../editor/extensions/CommentHighlights";
 import { SearchHighlight } from "../editor/extensions/SearchHighlight";
+import { LintDecorations } from "../editor/extensions/LintDecorations";
 import { PlanSearchBox } from "./PlanSearchBox";
 import {
   anchorByBlockId,
@@ -306,6 +307,9 @@ export function PlanEditor({
       CommentHighlights,
       CommentMarkers,
       SearchHighlight,
+      // IDE-style token coloring; a no-op (empty decorations) unless the user
+      // has picked a lint theme. Reads <html data-lint> directly, so no prop.
+      LintDecorations,
     ],
     [ydoc, collabHandle],
   );

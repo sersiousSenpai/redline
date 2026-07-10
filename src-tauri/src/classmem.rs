@@ -75,14 +75,48 @@ pub struct ClassNode {
 pub struct ClassLink {
     pub id: i64,
     pub node_id: String,
-    pub target_kind: String, // prompt|session|revision|mission|decision
+    pub target_kind: String, // prompt|session|revision|mission|decision|browse_event
     pub target_id: String,
     pub note: Option<String>,
     pub status: String,
     pub created_at: i64,
 }
 
-/// A queued structural reorg proposal (promote/split/merge/collapse).
+/// The ledger event kinds that are claims (decisions) — the only kinds a
+/// supersession may connect. Prompts/revisions are history, never superseded.
+pub const DECISION_KINDS: [&str; 3] = ["resolution", "approval", "review_verdict"];
+
+/// Outcome of validating + recording one supersession. `Rejected` is a
+/// guardrail verdict (logged, proposal dropped), never a DB error.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SupersessionOutcome {
+    Applied {
+        /// The seq actually superseded — may differ from the proposed old_seq
+        /// when the op was redirected to the current head of its chain.
+        effective_old: i64,
+        new_seq: i64,
+        event_seq: i64,
+    },
+    Rejected(String),
+}
+
+/// An agent-written pattern statement over a node's lake items. Derived,
+/// never ground truth — retrieval surfaces these after facts/decisions,
+/// labeled as patterns. `cite_seqs` is always non-empty (uncited = rejected).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClassObservation {
+    pub id: i64,
+    pub node_id: String,
+    pub summary: String,
+    pub cite_seqs: Vec<i64>,
+    pub created_seq: Option<i64>,
+    pub pinned: bool,
+    pub dismissed: bool,
+    pub created_at: i64,
+}
+
+/// A queued structural reorg proposal (promote/split/merge/collapse/supersede).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClassProposalRow {
@@ -134,6 +168,11 @@ pub struct LakeItem {
     /// The prompt body (truncated) for prompt items; `None` for decision events
     /// (they reference a row, not a stored body).
     pub body: Option<String>,
+    /// Memory-by-session provenance (non-hashed `prompts` columns): the thread
+    /// this prompt belongs to and the parent session it hangs under.
+    pub thread_kind: Option<String>,
+    pub thread_id: Option<String>,
+    pub parent_session_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -212,6 +251,14 @@ pub enum Proposal {
         node_id: String,
         summary: String,
         cite_seqs: Vec<i64>,
+        rationale: Option<String>,
+    },
+    /// A newer decision replaces an older one on the same subject. Staged for
+    /// the verifier agent (never blind-applied); apply-time guardrails live in
+    /// `Database::apply_supersession_locked`.
+    Supersede {
+        old_seq: i64,
+        new_seq: i64,
         rationale: Option<String>,
     },
 }
@@ -354,6 +401,21 @@ fn parse_one(v: &Value) -> Option<Proposal> {
                 rationale,
             })
         }
+        "supersede" => {
+            let old_seq = value_as_i64(v.get("old_seq"))?;
+            let new_seq = value_as_i64(v.get("new_seq"))?;
+            // Cheap screen only — old must precede new (which also makes
+            // cycles impossible); the full guardrails (decision-kind check,
+            // head-of-chain redirect) run at apply time.
+            if old_seq <= 0 || new_seq <= 0 || old_seq >= new_seq {
+                return None;
+            }
+            Some(Proposal::Supersede {
+                old_seq,
+                new_seq,
+                rationale,
+            })
+        }
         _ => None, // unknown op — skipped (logged by the caller if it wants)
     }
 }
@@ -363,6 +425,15 @@ fn value_as_id(v: Option<&Value>) -> Option<String> {
     match v {
         Some(Value::String(s)) if !s.trim().is_empty() => Some(s.trim().to_string()),
         Some(Value::Number(n)) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+/// A ledger seq may arrive as a JSON number or numeric string.
+fn value_as_i64(v: Option<&Value>) -> Option<i64> {
+    match v {
+        Some(Value::Number(n)) => n.as_i64(),
+        Some(Value::String(s)) => s.trim().parse().ok(),
         _ => None,
     }
 }
@@ -622,8 +693,20 @@ pub fn build_classifier_prompt(
     );
     let mut used = p.len();
     for it in delta {
+        // Memory-by-session lineage — printed as ground truth so the
+        // classifier can file by session/thread ancestry, not just by project.
+        let mut lineage = String::new();
+        if let Some(s) = it.session_id.as_deref().filter(|s| !s.is_empty()) {
+            lineage.push_str(&format!(" | session={s}"));
+        }
+        if let (Some(tk), Some(tid)) = (it.thread_kind.as_deref(), it.thread_id.as_deref()) {
+            lineage.push_str(&format!(" | thread={tk}:{tid}"));
+        }
+        if let Some(par) = it.parent_session_id.as_deref().filter(|s| !s.is_empty()) {
+            lineage.push_str(&format!(" | parent=session:{par}"));
+        }
         let line = format!(
-            "- seq {} | {} | project={} | surface={} | {}\n",
+            "- seq {} | {} | project={} | surface={}{lineage} | {}\n",
             it.seq,
             it.kind,
             it.project_path.as_deref().unwrap_or("~none"),
@@ -648,16 +731,22 @@ pub fn build_classifier_prompt(
         "\n## Output\n\nReturn ONLY a JSON object (optionally in a ```json fence) \
          of the form:\n\n\
          {\"proposals\": [\n  \
-         {\"op\":\"file\",\"parent_id\":\"<root/node id>\",\"sub_class\":\"<optional new sub-class title>\",\"target_kind\":\"prompt|session|revision|mission|decision\",\"target_id\":\"<lake seq/id>\",\"note\":\"<short>\",\"rationale\":\"<why>\"},\n  \
+         {\"op\":\"file\",\"parent_id\":\"<root/node id>\",\"sub_class\":\"<optional new sub-class title>\",\"target_kind\":\"prompt|session|revision|mission|decision|browse_event\",\"target_id\":\"<lake seq/id>\",\"note\":\"<short>\",\"rationale\":\"<why>\"},\n  \
          {\"op\":\"create\",\"parent_id\":\"<id>\",\"title\":\"<class>\",\"rationale\":\"<why: size×coherence×recency>\"},\n  \
          {\"op\":\"promote\",\"node_id\":\"<id>\",\"new_parent_id\":\"<id>\",\"rationale\":\"<grew, earns its own class>\"},\n  \
          {\"op\":\"split\",\"node_id\":\"<id>\",\"into\":[{\"title\":\"<a>\",\"link_ids\":[]},{\"title\":\"<b>\",\"link_ids\":[]}],\"rationale\":\"<why>\"},\n  \
          {\"op\":\"merge\",\"node_ids\":[\"<id>\",\"<id>\"],\"title\":\"<merged>\",\"rationale\":\"<why>\"},\n  \
-         {\"op\":\"collapse\",\"node_id\":\"<id>\",\"summary\":\"<agent-written gist>\",\"cite_seqs\":[<exact ledger seqs>],\"rationale\":\"<cold, unpinned>\"}\n]}\n\n\
+         {\"op\":\"collapse\",\"node_id\":\"<id>\",\"summary\":\"<agent-written gist>\",\"cite_seqs\":[<exact ledger seqs>],\"rationale\":\"<cold, unpinned>\"},\n  \
+         {\"op\":\"supersede\",\"old_seq\":<decision seq>,\"new_seq\":<decision seq>,\"rationale\":\"<why the newer decision replaces the older>\"}\n]}\n\n\
          Every proposal needs a rationale. Promotion is size × coherence × \
          recency — never a fixed count. Do not split a coherent subject on its \
          verbs. Collapse only cold, unpinned branches, and cite the exact ledger \
-         seqs the digest summarizes.\n",
+         seqs the digest summarizes. Emit `supersede` only when a NEWER decision \
+         event (resolution/approval/review_verdict) genuinely reverses or \
+         replaces an OLDER one on the same subject — never for prompts or \
+         discussion, and never based on an observation (observations are \
+         derived, not ground truth). Supersession marks the old decision as \
+         replaced; it never erases it.\n",
     );
     p
 }
@@ -836,7 +925,7 @@ pub async fn organize_once(db: &Database) -> Result<OrganizeOutcome, String> {
             let staged =
                 stage_proposals(db, Some(run_id), &proposals).map_err(|e| e.to_string())?;
             let mut applied_reorgs = 0usize;
-            let mut held_collapses = 0usize;
+            let mut held = 0usize;
             if auto_apply {
                 let accepted = db.accept_all_pending().map_err(|e| e.to_string())?;
                 for nid in &accepted {
@@ -848,6 +937,22 @@ pub async fn organize_once(db: &Database) -> Result<OrganizeOutcome, String> {
                 let stats2 = subtree_stats(&nodes_now, &direct2);
                 let env2 = db.lake_envelope().map_err(|e| e.to_string())?;
                 for prop in db.list_class_proposals().map_err(|e| e.to_string())? {
+                    // Gardener gate (confidence × reversibility): the always-on
+                    // gardener acts alone only on cheap, REVERSIBLE ops
+                    // (file/create/promote/split). Destructive or ambiguous ops
+                    // are held in the review strip for the human — a `merge`
+                    // fuses distinct nodes into one, and a not-clearly-cold
+                    // `collapse` destroys a branch into a digest.
+                    if prop.op == "merge" {
+                        held += 1;
+                        continue;
+                    }
+                    if prop.op == "supersede" {
+                        // Never blind-applied — adjudicated by the verifier
+                        // agent after this loop (additive in storage, but it
+                        // changes what "what did I decide" answers).
+                        continue;
+                    }
                     if prop.op == "collapse" {
                         let safe = prop
                             .node_id
@@ -856,7 +961,7 @@ pub async fn organize_once(db: &Database) -> Result<OrganizeOutcome, String> {
                             .map(|s| auto_collapse_safe(s, env2))
                             .unwrap_or(false);
                         if !safe {
-                            held_collapses += 1;
+                            held += 1;
                             continue; // leave pending → shows in the review strip
                         }
                     }
@@ -866,14 +971,29 @@ pub async fn organize_once(db: &Database) -> Result<OrganizeOutcome, String> {
                     }
                 }
             }
+            // Supersede recommendations get a machine confidence gate: an
+            // independent adversarial agent adjudicates each one. Applied
+            // supersessions record their own `supersede` ledger event inside
+            // the apply; refuted ones are dropped; if the verifier can't run,
+            // the rows stay staged in the review strip as the fallback.
+            let mut superseded = 0usize;
+            if auto_apply {
+                let (sup_applied, _sup_dropped) = verify_supersede_proposals(db, &cwd).await;
+                superseded = sup_applied;
+            }
             let summary = if auto_apply {
                 format!(
-                    "Organized: {} class(es), {} link(s), {} reorg(s){}{}",
+                    "Organized: {} class(es), {} link(s), {} reorg(s){}{}{}",
                     staged.created_nodes,
                     staged.staged_links,
                     applied_reorgs,
-                    if held_collapses > 0 {
-                        format!(", {held_collapses} collapse(s) held for review")
+                    if superseded > 0 {
+                        format!(", {superseded} supersession(s)")
+                    } else {
+                        String::new()
+                    },
+                    if held > 0 {
+                        format!(", {held} destructive op(s) held for review")
                     } else {
                         String::new()
                     },
@@ -908,6 +1028,154 @@ pub async fn organize_once(db: &Database) -> Result<OrganizeOutcome, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Supersede verifier (the machine confidence gate)
+// ---------------------------------------------------------------------------
+
+/// A supersession only applies when the verifier affirms it at or above this
+/// confidence. Below it (or on an explicit refutation) the proposal is
+/// dropped; with no verdict at all it stays staged for the review strip.
+pub const SUPERSEDE_CONFIDENCE_MIN: f64 = 0.8;
+
+/// One adjudication from the verifier agent.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SupersedeVerdict {
+    pub proposal_id: i64,
+    pub apply: bool,
+    pub confidence: f64,
+    pub reason: String,
+}
+
+/// Parse the verifier's reply. Tolerant of prose/fences like the other agent
+/// parsers; entries with no usable proposalId are dropped, missing fields
+/// default to the safe side (apply=false, confidence=0).
+pub fn parse_supersede_verdicts(text: &str) -> Vec<SupersedeVerdict> {
+    let Some(obj) = crate::keeper::extract_object_with_key(text, "verdicts") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if let Some(arr) = obj.get("verdicts").and_then(Value::as_array) {
+        for v in arr {
+            let Some(proposal_id) = value_as_i64(v.get("proposalId")) else {
+                continue;
+            };
+            let apply = v.get("apply").and_then(Value::as_bool).unwrap_or(false);
+            let confidence = v.get("confidence").and_then(Value::as_f64).unwrap_or(0.0);
+            let reason = str_field(v, "reason").unwrap_or("").to_string();
+            out.push(SupersedeVerdict {
+                proposal_id,
+                apply,
+                confidence,
+                reason,
+            });
+        }
+    }
+    out
+}
+
+/// The adversarial adjudication prompt: evidence for both decisions per
+/// proposal, and an instruction to REFUTE unless the replacement is clear.
+fn build_supersede_verifier_prompt(db: &Database, pending: &[ClassProposalRow]) -> String {
+    let mut p = String::from(
+        "You are Redline's supersession verifier. The memory classifier proposed \
+         that a newer decision REPLACES an older one (\"supersession\"). Applying \
+         one permanently changes how \"what did I decide\" is answered, so your \
+         job is adversarial: try to REFUTE each proposal. Affirm only when the \
+         two decisions are genuinely about the SAME subject and the newer one \
+         clearly reverses or replaces the older one. Different subjects, mere \
+         follow-ups, refinements that keep the old decision standing, or thin \
+         evidence → refute. If uncertain, refute.\n\n## Proposals\n\n",
+    );
+    for prop in pending {
+        let pair = prop
+            .extra_json
+            .as_deref()
+            .and_then(|e| serde_json::from_str::<Value>(e).ok())
+            .and_then(|v| Some((v.get("old_seq")?.as_i64()?, v.get("new_seq")?.as_i64()?)));
+        let Some((old_seq, new_seq)) = pair else {
+            continue;
+        };
+        let ctx = |seq: i64| {
+            db.decision_event_context(seq)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| format!("event #{seq} (unresolvable)"))
+        };
+        p.push_str(&format!(
+            "### proposal {}\n- OLD (to be superseded): {}\n- NEW (the replacement): {}\n- classifier's rationale: {}\n\n",
+            prop.id,
+            ctx(old_seq),
+            ctx(new_seq),
+            prop.rationale.as_deref().unwrap_or("(none)"),
+        ));
+    }
+    p.push_str(
+        "## Output\n\nReturn ONLY a JSON object (optionally in a ```json fence) \
+         of the form:\n\n{\"verdicts\": [\n  \
+         {\"proposalId\": <id>, \"apply\": true|false, \"confidence\": 0.0-1.0, \"reason\": \"<one sentence>\"}\n]}\n\n\
+         One verdict per proposal. `apply: true` means you could NOT refute it \
+         and the supersession should be recorded.\n",
+    );
+    p
+}
+
+/// Adjudicate every pending `supersede` proposal with one verifier spawn.
+/// Applied ops append their `supersede` ledger event inside
+/// `apply_supersession_locked` — no `taxonomy_reorg` is recorded for them.
+/// Returns `(applied, dropped)`. Best-effort: on spawn/parse failure the
+/// proposals stay staged (the review strip is the graceful fallback).
+pub async fn verify_supersede_proposals(db: &Database, cwd: &str) -> (usize, usize) {
+    let pending: Vec<ClassProposalRow> = match db.list_class_proposals() {
+        Ok(rows) => rows.into_iter().filter(|p| p.op == "supersede").collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not list supersede proposals");
+            return (0, 0);
+        }
+    };
+    if pending.is_empty() {
+        return (0, 0);
+    }
+    let prompt = build_supersede_verifier_prompt(db, &pending);
+    let text = match run_classifier(cwd, prompt).await {
+        Ok((text, _session)) => text,
+        Err(e) => {
+            tracing::info!(error = %e,
+                "supersede verifier unavailable — proposals stay staged for review");
+            return (0, 0);
+        }
+    };
+    let verdicts = parse_supersede_verdicts(&text);
+    let mut applied = 0usize;
+    let mut dropped = 0usize;
+    for prop in &pending {
+        let Some(v) = verdicts.iter().find(|v| v.proposal_id == prop.id) else {
+            continue; // no verdict → stays staged
+        };
+        if v.apply && v.confidence >= SUPERSEDE_CONFIDENCE_MIN {
+            match db.apply_class_proposal(prop.id) {
+                Ok(Some(a)) => {
+                    tracing::info!(target: "redline::classmem", detail = %a.detail,
+                        confidence = v.confidence, "supersession applied");
+                    applied += 1;
+                }
+                // Guardrail-rejected at apply (row already dropped inside).
+                Ok(None) => dropped += 1,
+                Err(e) => {
+                    tracing::warn!(error = %e, proposal = prop.id, "supersession apply failed");
+                }
+            }
+        } else {
+            // Refuted / low confidence: drop, same semantics as a human
+            // reject (which records no ledger event either).
+            tracing::info!(target: "redline::classmem", proposal = prop.id,
+                confidence = v.confidence, reason = %v.reason, "supersession refuted");
+            let _ = db.reject_class_proposal(prop.id);
+            dropped += 1;
+        }
+    }
+    (applied, dropped)
+}
+
+// ---------------------------------------------------------------------------
 // Accept helpers (decision/reorg ledger events)
 // ---------------------------------------------------------------------------
 
@@ -926,6 +1194,24 @@ pub fn record_curate(db: &Database, node_id: &str, action: &str, detail: &str) {
         },
     ) {
         tracing::warn!(error = %e, node_id, action, "failed to record class-curate ledger event");
+    }
+}
+
+/// Revert an accepted `file` (the gardener's — or a user's — most common
+/// action): remove the class link and append a **compensating** `class_curate`
+/// event (`action="revert"`). This is the rollback primitive that lets the
+/// Librarian act by default while the human stays supervisor: a bad auto-file is
+/// undone without ever deleting a ledger event, so `verify_ledger_chain` /
+/// `verify_bundle` stay green — the reversal is *recorded*, not erased. Returns
+/// `true` if a link was removed, `false` if the link id didn't exist.
+pub fn revert_link(db: &Database, link_id: i64) -> Result<bool, String> {
+    match db.delete_class_link(link_id).map_err(|e| e.to_string())? {
+        Some((node_id, target_kind, target_id)) => {
+            let detail = format!("{target_kind}:{target_id}");
+            record_curate(db, &node_id, "revert", &detail);
+            Ok(true)
+        }
+        None => Ok(false),
     }
 }
 
@@ -976,12 +1262,13 @@ mod tests {
   {"op":"promote","node_id":"cn-1","new_parent_id":"root-redline","rationale":"grew"},
   {"op":"split","node_id":"cn-2","into":[{"title":"Clerk","link_ids":[1,2]},{"title":"Sessions","link_ids":[3]}],"rationale":"two subjects"},
   {"op":"merge","node_ids":["cn-3","cn-4"],"title":"Auth","rationale":"dupes"},
-  {"op":"collapse","node_id":"cn-5","summary":"old investing research","cite_seqs":[10,11,12],"rationale":"cold"}
+  {"op":"collapse","node_id":"cn-5","summary":"old investing research","cite_seqs":[10,11,12],"rationale":"cold"},
+  {"op":"supersede","old_seq":"318","new_seq":402,"rationale":"the beta approval reversed the earlier resolution"}
 ]}
 ```
 That's it."#;
         let props = parse_proposals(text);
-        assert_eq!(props.len(), 6);
+        assert_eq!(props.len(), 7);
         assert!(matches!(props[0], Proposal::Create { .. }));
         match &props[1] {
             Proposal::File { target_id, sub_class, .. } => {
@@ -998,6 +1285,13 @@ That's it."#;
             Proposal::Collapse { cite_seqs, .. } => assert_eq!(cite_seqs, &vec![10, 11, 12]),
             _ => panic!("expected collapse"),
         }
+        match &props[6] {
+            Proposal::Supersede { old_seq, new_seq, .. } => {
+                // string-coerced old_seq + numeric new_seq both parse
+                assert_eq!((*old_seq, *new_seq), (318, 402));
+            }
+            _ => panic!("expected supersede"),
+        }
     }
 
     #[test]
@@ -1008,11 +1302,36 @@ That's it."#;
           {"op":"frobnicate","node_id":"x"},
           {"op":"merge","node_ids":["only-one"]},
           {"op":"split","node_id":"y","into":[]},
+          {"op":"supersede","old_seq":9},
+          {"op":"supersede","old_seq":9,"new_seq":9},
+          {"op":"supersede","old_seq":12,"new_seq":9},
           {"op":"create","parent_id":"root","title":"Keep","rationale":"ok"}
         ]}"#;
         let props = parse_proposals(text);
         assert_eq!(props.len(), 1);
         assert!(matches!(props[0], Proposal::Create { .. }));
+    }
+
+    #[test]
+    fn parse_supersede_verdicts_gates_on_shape() {
+        let text = r#"Adjudicated.
+```json
+{"verdicts":[
+  {"proposalId":7,"apply":true,"confidence":0.95,"reason":"clear reversal"},
+  {"proposalId":"8","apply":false,"confidence":0.4,"reason":"different subjects"},
+  {"apply":true,"confidence":1.0,"reason":"no id — dropped"},
+  {"proposalId":9}
+]}
+```"#;
+        let v = parse_supersede_verdicts(text);
+        assert_eq!(v.len(), 3);
+        assert_eq!(v[0], SupersedeVerdict { proposal_id: 7, apply: true, confidence: 0.95, reason: "clear reversal".into() });
+        // numeric-string id coerces; refutation carries through
+        assert_eq!(v[1].proposal_id, 8);
+        assert!(!v[1].apply);
+        // missing fields default to the safe side
+        assert_eq!(v[2], SupersedeVerdict { proposal_id: 9, apply: false, confidence: 0.0, reason: String::new() });
+        assert!(parse_supersede_verdicts("prose only").is_empty());
     }
 
     #[test]
@@ -1044,6 +1363,9 @@ That's it."#;
             ref_kind: None,
             ref_id: None,
             body: Some("wire the loop executor".into()),
+            thread_kind: Some("browse".into()),
+            thread_id: Some("tab-7".into()),
+            parent_session_id: Some("sess-42".into()),
         }];
         let mut stats = HashMap::new();
         stats.insert(
@@ -1059,6 +1381,9 @@ That's it."#;
         // Temporal + storage facts + the envelope are fed as ground truth.
         assert!(p.contains("items=3"));
         assert!(p.contains("envelope"));
+        // Memory-by-session lineage rides the delta line as ground truth too.
+        assert!(p.contains("thread=browse:tab-7"));
+        assert!(p.contains("parent=session:sess-42"));
     }
 
     #[test]

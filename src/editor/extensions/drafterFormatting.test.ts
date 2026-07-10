@@ -71,7 +71,16 @@ describe("Indent", () => {
     const count = (e: Editor) =>
       JSON.stringify(e.getJSON()).split('"bulletList"').length - 1;
     expect(count(editor)).toBe(1);
-    editor.commands.focus("end"); // cursor lands in the second item
+    // Place the caret INSIDE the second item. (`focus("end")` would land in
+    // TrailingNode's trailing paragraph: DraftBlockIds' mount stamp counts as
+    // a doc change, so the trailing node exists from the start now — as it
+    // always did after the first keystroke in a real session.)
+    let inTwo = 0;
+    editor.state.doc.descendants((n, pos) => {
+      if (n.isText && n.text === "two") inTwo = pos + 1;
+      return true;
+    });
+    editor.commands.focus(inTwo);
     editor.commands.indent();
     // Sinking the second item creates a nested bullet list under the first.
     expect(count(editor)).toBe(2);

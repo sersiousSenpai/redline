@@ -159,6 +159,63 @@ pub fn mission_context_block(mission: Option<(&str, &str)>) -> String {
     p
 }
 
+/// The terminal outcome of one headless turn, collected silently (no UI
+/// events) — the consult path's stream driver. Used by the Companion's
+/// `/v1/global/consult` fan-out, where the digest is returned inline to a
+/// blocking curl rather than streamed to a pane.
+pub struct TurnOutcome {
+    pub session: Option<String>,
+    pub final_text: Option<String>,
+    pub errored: Option<String>,
+    pub saw_json: bool,
+    pub stderr_text: String,
+}
+
+/// Drain a spawned `claude`'s stdout/stderr to completion and classify the
+/// result. stderr is drained concurrently so a full pipe can't block the child.
+pub async fn collect_turn(
+    stdout: tokio::process::ChildStdout,
+    stderr: tokio::process::ChildStderr,
+) -> TurnOutcome {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let stderr_task = tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        let mut text = String::new();
+        while let Ok(Some(line)) = lines.next_line().await {
+            text.push_str(&line);
+            text.push('\n');
+        }
+        text
+    });
+    let mut lines = BufReader::new(stdout).lines();
+    let mut out = TurnOutcome {
+        session: None,
+        final_text: None,
+        errored: None,
+        saw_json: false,
+        stderr_text: String::new(),
+    };
+    while let Ok(Some(line)) = lines.next_line().await {
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        out.saw_json = true;
+        match classify_line(&v) {
+            StreamLine::Init(sid) => out.session = Some(sid),
+            StreamLine::Final { text, session_id } => {
+                if session_id.is_some() {
+                    out.session = session_id;
+                }
+                out.final_text = Some(text);
+            }
+            StreamLine::Failed(msg) => out.errored = Some(msg),
+            StreamLine::Delta(_) | StreamLine::Ignore => {}
+        }
+    }
+    out.stderr_text = stderr_task.await.unwrap_or_default();
+    out
+}
+
 /// What one `--output-format stream-json` line means to a process reader.
 /// See `docs/protocol-verification.md` Experiment (i) for the captured shapes.
 #[derive(Debug, PartialEq)]

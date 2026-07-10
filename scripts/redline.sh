@@ -44,6 +44,40 @@ if ! command -v cargo >/dev/null 2>&1; then
   fi
 fi
 
+# whisper.cpp (bundled speech-to-text) is compiled from source by the whisper-rs
+# build script, which shells out to `cmake`. cmake is NOT part of the Xcode
+# Command Line Tools, so a fresh Mac won't have it — without this check the build
+# dies deep inside cargo with a cryptic "is `cmake` not installed?" panic.
+if ! command -v cmake >/dev/null 2>&1; then
+  echo "✗ cmake isn't installed (needed to compile the bundled speech-to-text engine)."
+  if command -v brew >/dev/null 2>&1; then
+    if [ -t 0 ]; then
+      printf "  Install it now with Homebrew (brew install cmake)? [Y/n] "
+      read -r ans
+      case "${ans:-Y}" in
+        [Yy]*|"") brew install cmake ;;
+        *)
+          echo "  Install it yourself with 'brew install cmake', then re-run 'npm run redline'."
+          exit 1
+          ;;
+      esac
+    else
+      brew install cmake
+    fi
+  else
+    echo "  Homebrew wasn't found, so we can't install it automatically." >&2
+    echo "  Install Homebrew from https://brew.sh, then run:" >&2
+    echo "    brew install cmake" >&2
+    echo "  (or download cmake from https://cmake.org/download/), then re-run 'npm run redline'." >&2
+    exit 1
+  fi
+fi
+if ! command -v cmake >/dev/null 2>&1; then
+  echo "✗ cmake still isn't on PATH after the install attempt." >&2
+  echo "  Open a new terminal (or run 'brew install cmake' manually), then re-run 'npm run redline'." >&2
+  exit 1
+fi
+
 NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
 if [ "$NODE_MAJOR" -lt 20 ]; then
   echo "✗ Node.js $NODE_MAJOR is too old — Redline needs Node 20 or newer." >&2

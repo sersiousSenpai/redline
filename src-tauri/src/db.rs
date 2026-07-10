@@ -39,6 +39,62 @@ fn reopen_history_to_json(history: &[RoundHistoryEntry]) -> Option<String> {
     serde_json::to_string(history).ok()
 }
 
+/// One lexical hit from the browse-events FTS index (Dojo P3). `score` is the
+/// BM25 relevance (SQLite returns it negative-lower-is-better; we sort ascending
+/// and pass it through). `snippet` shows the matched span with `[...]` markers.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowseHit {
+    pub id: i64,
+    pub ts: i64,
+    pub url: String,
+    pub title: Option<String>,
+    pub snippet: String,
+    pub score: f64,
+}
+
+/// Turn a raw user query into a safe FTS5 MATCH string: split on whitespace,
+/// keep tokens with at least one alphanumeric, escape embedded quotes, wrap each
+/// as a quoted phrase, and OR them for keyword recall. Quoting neutralizes FTS5
+/// operators (`*`, `-`, `:`, `NEAR`, parens), so an injection-shaped query can
+/// only ever match literally. Returns `None` when nothing searchable survives,
+/// so the caller returns no hits instead of a syntax error.
+fn sanitize_fts_query(q: &str) -> Option<String> {
+    let terms: Vec<String> = q
+        .split_whitespace()
+        .filter(|t| t.chars().any(char::is_alphanumeric))
+        .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+        .collect();
+    if terms.is_empty() {
+        None
+    } else {
+        Some(terms.join(" OR "))
+    }
+}
+
+/// One context-journal row — a meaningful app activity the Companion folds into
+/// its "while you were away" delta (surface switch, revision, nav, pin, …).
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JournalRow {
+    pub id: i64,
+    pub ts: i64,
+    pub kind: String,
+    pub surface_kind: Option<String>,
+    pub surface_id: Option<String>,
+    pub label: Option<String>,
+    pub detail: Option<String>,
+}
+
+/// One turn from a generic thread read (`/v1/context/threads/:kind/:id`).
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenericThreadMsg {
+    pub role: String,
+    pub body: String,
+    pub created_at: i64,
+}
+
 pub struct Database {
     conn: Mutex<Connection>,
 }
@@ -380,9 +436,10 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_class_nodes_status ON class_nodes (status);
 
             -- Pointers from a class node into the lake. target_kind is one of
-            -- prompt|session|revision|mission|decision; target_id is that row's
-            -- id (prompt id / session id / ledger seq / mission id). Reorganizing
-            -- the tree re-parents nodes; links ride along untouched.
+            -- prompt|session|revision|mission|decision|browse_event; target_id is
+            -- that row's id (prompt id / session id / ledger seq / mission id /
+            -- browse_events id). Reorganizing the tree re-parents nodes; links
+            -- ride along untouched.
             CREATE TABLE IF NOT EXISTS class_links (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 node_id TEXT NOT NULL,
@@ -431,6 +488,41 @@ impl Database {
                 summary TEXT
             );
 
+            -- Supersession index: decision old_seq was replaced by new_seq.
+            -- Plain and NEVER hashed — the tamper-evident fact is the
+            -- `supersede` ledger event (event_seq); this table is only the fast
+            -- "is seq X superseded?" lookup so retrieval never re-parses
+            -- payloads. PRIMARY KEY(old_seq) enforces "superseded at most
+            -- once" — a later supersession targets the current chain head.
+            CREATE TABLE IF NOT EXISTS supersessions (
+                old_seq INTEGER PRIMARY KEY,  -- the superseded decision event
+                new_seq INTEGER NOT NULL,     -- the superseding decision event
+                event_seq INTEGER NOT NULL,   -- the supersede ledger event
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_supersessions_new
+                ON supersessions (new_seq);
+
+            -- Agent-written pattern observations over a node's lake items
+            -- (recurrence / trend / co-occurrence). Derived, never ground
+            -- truth: the classifier must never file by one. cite_seqs is a
+            -- non-empty JSON array of the exact ledger seqs the pattern was
+            -- derived from — an uncited observation is rejected upstream.
+            -- Rows retire when their node's subtree collapses/merges away;
+            -- the `observation` ledger events remain as history.
+            CREATE TABLE IF NOT EXISTS class_observations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                node_id TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                cite_seqs TEXT NOT NULL,      -- JSON array of ledger seqs
+                created_seq INTEGER,          -- the observation ledger event seq
+                pinned INTEGER NOT NULL DEFAULT 0,
+                dismissed INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_class_observations_node
+                ON class_observations (node_id, dismissed);
+
             -- Polis Phase 4: which sessions have been exported as a portable
             -- context bundle. This is the state that finally backs the
             -- Librarian's deferred F6 "un-exported approved plan" friction signal
@@ -447,6 +539,172 @@ impl Database {
             );
             CREATE UNIQUE INDEX IF NOT EXISTS idx_plan_exports_session
                 ON plan_exports (session_id, scope);
+
+            -- Polis P2 (Dojo "Browsing Behavior"): the pages the user landed on,
+            -- with the normalized on-screen content that was there + a content
+            -- context-hash. Ledger-owned body store: a `browse_event` ledger row
+            -- references a row here by (ref_kind='browse_event', ref_id=id) +
+            -- payload_hash = context_hash, exactly like a decision event, so a
+            -- session delete can never orphan the chain. `text` (title + url +
+            -- headings + body) is retained so later lexical retrieval (P3 FTS5)
+            -- has something to index; `context_hash` groups every event that
+            -- touched the same content across sessions/tabs.
+            CREATE TABLE IF NOT EXISTS browse_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts INTEGER NOT NULL,
+                action TEXT NOT NULL,          -- 'navigate' (a page the user landed on)
+                browse_id TEXT,               -- the tab's discussion-thread key
+                url TEXT NOT NULL,
+                title TEXT,
+                text TEXT NOT NULL,           -- normalized page content (for P3 FTS)
+                context_hash TEXT NOT NULL    -- body_hash over `text`
+            );
+            CREATE INDEX IF NOT EXISTS idx_browse_events_hash ON browse_events (context_hash);
+            CREATE INDEX IF NOT EXISTS idx_browse_events_tab ON browse_events (browse_id);
+
+            -- Dojo P3: a lexical (BM25) full-text index over browse events only.
+            -- Browsing is high-volume and keyword-heavy, so lexical recall beats
+            -- dense vectors as the first cut — and FTS5 ships with SQLite, so
+            -- there is no new dependency, no embedding model, and retrieval stays
+            -- auditable (you can see which terms matched). Plans/prompts keep the
+            -- vectorless ClassMemory walk; only this noisy stream gets fuzzy
+            -- lexical search. External-content table over `browse_events`, kept in
+            -- sync by an AFTER INSERT trigger (browse_events is insert-only).
+            CREATE VIRTUAL TABLE IF NOT EXISTS browse_events_fts USING fts5(
+                title, url, text,
+                content='browse_events',
+                content_rowid='id'
+            );
+            CREATE TRIGGER IF NOT EXISTS browse_events_ai AFTER INSERT ON browse_events BEGIN
+                INSERT INTO browse_events_fts (rowid, title, url, text)
+                VALUES (new.id, new.title, new.url, new.text);
+            END;
+
+            -- Memory-by-session: the readable parent/child relation across the
+            -- app's disjoint thread id-spaces. A child (browse tab thread,
+            -- linked discussion, mission, voice session, draft, review, …)
+            -- hangs under a parent session or mission. Referenced by id, never
+            -- FK-cascaded, so deletes can't orphan the ledger; each accepted
+            -- row is committed to the chain by a `session_link` ledger event.
+            CREATE TABLE IF NOT EXISTS session_tree (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                child_kind TEXT NOT NULL,
+                child_id TEXT NOT NULL,
+                parent_kind TEXT NOT NULL,
+                parent_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_session_tree_child
+                ON session_tree (child_kind, child_id);
+            CREATE INDEX IF NOT EXISTS idx_session_tree_parent
+                ON session_tree (parent_kind, parent_id);
+
+            -- Companion passive awareness: an append-only journal of meaningful
+            -- app activity (surface switches, revisions, verdicts, navs, pins,
+            -- launches, agent turns). NOT part of the tamper-evident record —
+            -- a bounded working set (pruned on insert) the Companion reads as
+            -- its "while you were away" delta.
+            CREATE TABLE IF NOT EXISTS context_journal (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                surface_kind TEXT,
+                surface_id TEXT,
+                label TEXT,
+                detail TEXT
+            );
+
+            -- Companion (global cross-surface discussion agent): the spanning
+            -- conversation's resumable claude session id + per-turn surface
+            -- tags, mirroring linked_sessions/linked_messages. last_journal_seq
+            -- is the high-water mark of journal rows already folded into the
+            -- conversation.
+            CREATE TABLE IF NOT EXISTS companion_sessions (
+                companion_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                claude_session_id TEXT,
+                last_journal_seq INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS companion_messages (
+                id TEXT PRIMARY KEY,
+                companion_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                body TEXT NOT NULL,
+                status TEXT NOT NULL,
+                surface_kind TEXT,
+                surface_id TEXT,
+                surface_label TEXT,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_companion_messages
+                ON companion_messages (companion_id, created_at);
+
+            -- Prompt Drafter durable identity: the doc's markdown mirror (what
+            -- agents read via /v1/drafter/:id/doc — TipTap JSON stays in
+            -- localStorage as the fidelity source), plus the draft's discussion
+            -- thread, comment sidecar, and queued agent suggestions.
+            CREATE TABLE IF NOT EXISTS drafts (
+                draft_id TEXT PRIMARY KEY,
+                title TEXT,
+                project_path TEXT,
+                doc_markdown TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS draft_chat_threads (
+                draft_id TEXT PRIMARY KEY,
+                claude_session_id TEXT,
+                last_doc_hash TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS draft_chat_messages (
+                id TEXT PRIMARY KEY,
+                draft_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                body TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_draft_chat_messages
+                ON draft_chat_messages (draft_id, created_at);
+
+            CREATE TABLE IF NOT EXISTS draft_comments (
+                id TEXT PRIMARY KEY,
+                draft_id TEXT NOT NULL,
+                block_id TEXT,
+                sel_char_start INTEGER,
+                sel_char_end INTEGER,
+                sel_quoted_text TEXT,
+                body TEXT NOT NULL,
+                author TEXT,
+                created_at INTEGER NOT NULL,
+                fork_session_id TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_draft_comments
+                ON draft_comments (draft_id, created_at);
+
+            -- Agent write-suggestions against a draft, queued so a proposal
+            -- made while the drafter pane is closed is drained on mount rather
+            -- than dropped. status: pending | applied | rejected.
+            CREATE TABLE IF NOT EXISTS draft_suggestions (
+                id TEXT PRIMARY KEY,
+                draft_id TEXT NOT NULL,
+                op TEXT NOT NULL,
+                block_id TEXT,
+                original TEXT,
+                markdown TEXT NOT NULL,
+                agent_id TEXT,
+                body TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_draft_suggestions
+                ON draft_suggestions (draft_id, status, created_at);
             "#,
         )?;
         // Best-effort additive migrations (errors on existing columns are ignored)
@@ -493,6 +751,34 @@ impl Database {
         let _ = conn.execute("ALTER TABLE prompts ADD COLUMN gist TEXT", []);
         let _ = conn.execute("ALTER TABLE prompts ADD COLUMN compacted_at INTEGER", []);
         let _ = conn.execute("ALTER TABLE prompts ADD COLUMN original_bytes INTEGER", []);
+
+        // Memory-by-session provenance: which interaction thread a prompt
+        // belongs to (browse_id / linked_id / draft_id / …) and the parent plan
+        // session that thread hangs under. Non-hashed (only prompt_id +
+        // body_hash enter the chained event), so purely additive and
+        // chain-safe — the gist/compacted_at precedent.
+        let _ = conn.execute("ALTER TABLE prompts ADD COLUMN thread_kind TEXT", []);
+        let _ = conn.execute("ALTER TABLE prompts ADD COLUMN thread_id TEXT", []);
+        let _ = conn.execute("ALTER TABLE prompts ADD COLUMN parent_session_id TEXT", []);
+
+        // Dojo P3: backfill the browse-events FTS index for the upgrade path where
+        // `browse_events` already had rows (a P2-only build) before the FTS table
+        // + trigger existed — the trigger only fires on new inserts. Guarded so
+        // the common case (empty or already-indexed) is a cheap no-op.
+        {
+            let ev_ct: i64 = conn
+                .query_row("SELECT COUNT(*) FROM browse_events", [], |r| r.get(0))
+                .unwrap_or(0);
+            let fts_ct: i64 = conn
+                .query_row("SELECT COUNT(*) FROM browse_events_fts", [], |r| r.get(0))
+                .unwrap_or(0);
+            if ev_ct > 0 && fts_ct == 0 {
+                let _ = conn.execute(
+                    "INSERT INTO browse_events_fts(browse_events_fts) VALUES('rebuild')",
+                    [],
+                );
+            }
+        }
 
         // Migration: comment ids are session-scoped (`c-001` restarts per
         // session), but legacy databases declared `id TEXT PRIMARY KEY`
@@ -758,8 +1044,9 @@ impl Database {
         let changed = conn.execute(
             "INSERT INTO prompts
                 (ts, source, origin, surface, role, session_id, claude_session_id,
-                 mission_id, project_path, body, body_hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 mission_id, project_path, body, body_hash,
+                 thread_kind, thread_id, parent_session_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(body_hash, claude_session_id) DO NOTHING",
             params![
                 p.ts,
@@ -773,12 +1060,95 @@ impl Database {
                 p.project_path,
                 p.body,
                 p.body_hash,
+                p.thread_kind,
+                p.thread_id,
+                p.parent_session_id,
             ],
         )?;
         if changed == 0 {
             return Ok(None);
         }
         Ok(Some(conn.last_insert_rowid()))
+    }
+
+    /// Insert a browsing event into the ledger-owned `browse_events` store.
+    /// Dedups a *consecutive* re-capture of the same content in the same tab (the
+    /// snapshot fires on navigation AND just before a tab is backgrounded, so one
+    /// page can be captured twice) — returns `None` then. The same `context_hash`
+    /// recurring later (after visiting other pages, or in another tab) is kept, so
+    /// content-identity grouping across the corpus stays intact. Returns the new
+    /// row id on insert.
+    pub fn insert_browse_event(
+        &self,
+        r: &crate::ledger::BrowseEventRow,
+    ) -> rusqlite::Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        let last: Option<String> = conn
+            .query_row(
+                "SELECT context_hash FROM browse_events
+                 WHERE browse_id IS ?1 ORDER BY id DESC LIMIT 1",
+                params![r.browse_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if last.as_deref() == Some(r.context_hash) {
+            return Ok(None);
+        }
+        conn.execute(
+            "INSERT INTO browse_events (ts, action, browse_id, url, title, text, context_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![r.ts, r.action, r.browse_id, r.url, r.title, r.text, r.context_hash],
+        )?;
+        Ok(Some(conn.last_insert_rowid()))
+    }
+
+    /// Lexical (BM25) search over browse-event content — the Dojo P3 retrieval
+    /// path for the noisy, keyword-heavy browsing stream (plans/prompts keep the
+    /// vectorless walk). Ranks by FTS5 `bm25`, best first, and returns a matched
+    /// snippet per hit. A query that sanitizes to nothing yields no hits.
+    pub fn search_browse_events(&self, query: &str, limit: i64) -> rusqlite::Result<Vec<BrowseHit>> {
+        let Some(match_q) = sanitize_fts_query(query) else {
+            return Ok(Vec::new());
+        };
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT be.id, be.ts, be.url, be.title,
+                    snippet(browse_events_fts, 2, '[', ']', '…', 12),
+                    bm25(browse_events_fts)
+             FROM browse_events_fts
+             JOIN browse_events be ON be.id = browse_events_fts.rowid
+             WHERE browse_events_fts MATCH ?1
+             ORDER BY bm25(browse_events_fts)
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![match_q, limit.max(1)], |r| {
+            Ok(BrowseHit {
+                id: r.get(0)?,
+                ts: r.get(1)?,
+                url: r.get(2)?,
+                title: r.get(3)?,
+                snippet: r.get(4)?,
+                score: r.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Fetch a browse event's `(url, title, text, context_hash)` by id — the read
+    /// side of the `browse_events` store, for the bundle/mirror joins that will
+    /// carry browse-event bodies (exercised by tests today).
+    #[allow(dead_code)]
+    pub fn get_browse_event(
+        &self,
+        id: i64,
+    ) -> rusqlite::Result<Option<(String, Option<String>, String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT url, title, text, context_hash FROM browse_events WHERE id = ?1",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()
     }
 
     /// Fetch a stored prompt body by id. When the row has been compacted, the
@@ -922,6 +1292,729 @@ impl Database {
     }
 
     // -----------------------------------------------------------------------
+    // Memory-by-session: session tree + context journal
+    // -----------------------------------------------------------------------
+
+    /// Insert a session-tree relation. A child has at most one parent (UNIQUE
+    /// on `(child_kind, child_id)` — first write wins); returns the new row id,
+    /// or `None` when the child is already linked.
+    pub fn insert_session_link(
+        &self,
+        child_kind: &str,
+        child_id: &str,
+        parent_kind: &str,
+        parent_id: &str,
+        created_at: i64,
+    ) -> rusqlite::Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "INSERT INTO session_tree (child_kind, child_id, parent_kind, parent_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(child_kind, child_id) DO NOTHING",
+            params![child_kind, child_id, parent_kind, parent_id, created_at],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        Ok(Some(conn.last_insert_rowid()))
+    }
+
+    /// A child's parent, if linked: `(parent_kind, parent_id)`.
+    pub fn session_tree_parent(
+        &self,
+        child_kind: &str,
+        child_id: &str,
+    ) -> rusqlite::Result<Option<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT parent_kind, parent_id FROM session_tree
+             WHERE child_kind = ?1 AND child_id = ?2",
+            params![child_kind, child_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+    }
+
+    /// A parent's children, oldest-first: `(child_kind, child_id, created_at)`.
+    pub fn session_tree_children(
+        &self,
+        parent_kind: &str,
+        parent_id: &str,
+    ) -> rusqlite::Result<Vec<(String, String, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT child_kind, child_id, created_at FROM session_tree
+             WHERE parent_kind = ?1 AND parent_id = ?2 ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![parent_kind, parent_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        rows.collect()
+    }
+
+    /// Append a context-journal row (the Companion's passive-awareness feed),
+    /// pruning the working set on insert: keep the newest `JOURNAL_KEEP_ROWS`
+    /// and nothing older than `JOURNAL_KEEP_MS`. Best-effort at call sites.
+    pub fn append_journal(
+        &self,
+        kind: &str,
+        surface_kind: Option<&str>,
+        surface_id: Option<&str>,
+        label: Option<&str>,
+        detail: Option<&str>,
+    ) -> rusqlite::Result<i64> {
+        const JOURNAL_KEEP_ROWS: i64 = 2000;
+        const JOURNAL_KEEP_MS: i64 = 14 * 24 * 60 * 60 * 1000;
+        let now = crate::ledger::now_millis();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO context_journal (ts, kind, surface_kind, surface_id, label, detail)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![now, kind, surface_kind, surface_id, label, detail],
+        )?;
+        let id = conn.last_insert_rowid();
+        let _ = conn.execute(
+            "DELETE FROM context_journal
+             WHERE id <= ?1 - ?2 OR ts < ?3 - ?4",
+            params![id, JOURNAL_KEEP_ROWS, now, JOURNAL_KEEP_MS],
+        );
+        Ok(id)
+    }
+
+    /// Journal rows strictly after `since_id`, oldest-first, capped at `limit` —
+    /// the Companion's "while you were away" delta.
+    pub fn list_journal_since(
+        &self,
+        since_id: i64,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<JournalRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, ts, kind, surface_kind, surface_id, label, detail
+             FROM context_journal WHERE id > ?1 ORDER BY id ASC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![since_id.max(0), limit.max(1)], |r| {
+            Ok(JournalRow {
+                id: r.get(0)?,
+                ts: r.get(1)?,
+                kind: r.get(2)?,
+                surface_kind: r.get(3)?,
+                surface_id: r.get(4)?,
+                label: r.get(5)?,
+                detail: r.get(6)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// The newest journal row id (0 when empty) — the seq a reader can resume
+    /// its delta from.
+    pub fn journal_head(&self) -> rusqlite::Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM context_journal",
+            [],
+            |r| r.get(0),
+        )
+    }
+
+    // -----------------------------------------------------------------------
+    // Companion: the global cross-surface discussion
+    // -----------------------------------------------------------------------
+
+    pub fn insert_companion(&self, c: &crate::state::Companion) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO companion_sessions
+                (companion_id, title, status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![c.companion_id, c.title, c.status, c.created_at, c.updated_at],
+        )?;
+        Ok(())
+    }
+
+    /// All companion sessions, most recently active first.
+    pub fn list_companions(&self) -> rusqlite::Result<Vec<crate::state::Companion>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT companion_id, title, status, created_at, updated_at
+             FROM companion_sessions ORDER BY updated_at DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(crate::state::Companion {
+                companion_id: r.get(0)?,
+                title: r.get(1)?,
+                status: r.get(2)?,
+                created_at: r.get(3)?,
+                updated_at: r.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn delete_companion(&self, companion_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM companion_messages WHERE companion_id = ?1",
+            params![companion_id],
+        )?;
+        conn.execute(
+            "DELETE FROM companion_sessions WHERE companion_id = ?1",
+            params![companion_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_companion_session(&self, companion_id: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT claude_session_id FROM companion_sessions WHERE companion_id = ?1",
+            params![companion_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+    }
+
+    pub fn set_companion_session(
+        &self,
+        companion_id: &str,
+        claude_session_id: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE companion_sessions SET claude_session_id = ?2 WHERE companion_id = ?1",
+            params![companion_id, claude_session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Forget an over-limit companion session so the next turn starts fresh.
+    pub fn clear_companion_session(&self, companion_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE companion_sessions SET claude_session_id = NULL WHERE companion_id = ?1",
+            params![companion_id],
+        )?;
+        Ok(())
+    }
+
+    /// The journal high-water mark this companion has already absorbed.
+    pub fn get_companion_journal_seq(&self, companion_id: &str) -> i64 {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT last_journal_seq FROM companion_sessions WHERE companion_id = ?1",
+            params![companion_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0)
+    }
+
+    pub fn set_companion_journal_seq(
+        &self,
+        companion_id: &str,
+        seq: i64,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE companion_sessions SET last_journal_seq = MAX(last_journal_seq, ?2)
+             WHERE companion_id = ?1",
+            params![companion_id, seq],
+        )?;
+        Ok(())
+    }
+
+    pub fn insert_companion_message(
+        &self,
+        msg: &crate::state::CompanionMessage,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO companion_messages
+                (id, companion_id, role, body, status, surface_kind, surface_id,
+                 surface_label, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                msg.id,
+                msg.companion_id,
+                msg.role,
+                msg.body,
+                msg.status,
+                msg.surface_kind,
+                msg.surface_id,
+                msg.surface_label,
+                msg.created_at
+            ],
+        )?;
+        Self::touch_companion_locked(&conn, &msg.companion_id, msg.created_at);
+        Ok(())
+    }
+
+    fn touch_companion_locked(conn: &Connection, companion_id: &str, at: i64) {
+        let _ = conn.execute(
+            "UPDATE companion_sessions SET updated_at = MAX(updated_at, ?2)
+             WHERE companion_id = ?1",
+            params![companion_id, at],
+        );
+    }
+
+    pub fn load_companion_thread(
+        &self,
+        companion_id: &str,
+    ) -> rusqlite::Result<Vec<crate::state::CompanionMessage>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, companion_id, role, body, status, surface_kind, surface_id,
+                    surface_label, created_at
+             FROM companion_messages WHERE companion_id = ?1
+             ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![companion_id], |r| {
+            Ok(crate::state::CompanionMessage {
+                id: r.get(0)?,
+                companion_id: r.get(1)?,
+                role: r.get(2)?,
+                body: r.get(3)?,
+                status: r.get(4)?,
+                surface_kind: r.get(5)?,
+                surface_id: r.get(6)?,
+                surface_label: r.get(7)?,
+                created_at: r.get(8)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // Prompt Drafter: durable draft identity + markdown mirror
+    // -----------------------------------------------------------------------
+
+    /// Upsert a draft's markdown mirror (what agents read via
+    /// `/v1/drafter/:id/doc`). The TipTap JSON stays in localStorage as the
+    /// fidelity source; this row is the agent-readable projection.
+    pub fn upsert_draft(
+        &self,
+        draft_id: &str,
+        title: Option<&str>,
+        project_path: Option<&str>,
+        doc_markdown: &str,
+    ) -> rusqlite::Result<()> {
+        let now = crate::ledger::now_millis();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO drafts (draft_id, title, project_path, doc_markdown, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+             ON CONFLICT(draft_id) DO UPDATE SET
+                title = excluded.title,
+                project_path = excluded.project_path,
+                doc_markdown = excluded.doc_markdown,
+                updated_at = excluded.updated_at",
+            params![draft_id, title, project_path, doc_markdown, now],
+        )?;
+        Ok(())
+    }
+
+    /// A draft's `(title, project_path, doc_markdown, updated_at)`.
+    pub fn get_draft(
+        &self,
+        draft_id: &str,
+    ) -> rusqlite::Result<Option<(Option<String>, Option<String>, String, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT title, project_path, doc_markdown, updated_at
+             FROM drafts WHERE draft_id = ?1",
+            params![draft_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()
+    }
+
+    /// Persist a draft-chat turn (terminal row; streaming is frontend-only).
+    pub fn insert_draft_chat_message(
+        &self,
+        msg: &crate::state::DraftChatMessage,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO draft_chat_messages (id, draft_id, role, body, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                msg.id,
+                msg.draft_id,
+                msg.role,
+                msg.body,
+                msg.status,
+                msg.created_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// A draft's discussion history, oldest-first.
+    pub fn load_draft_chat_thread(
+        &self,
+        draft_id: &str,
+    ) -> rusqlite::Result<Vec<crate::state::DraftChatMessage>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, draft_id, role, body, status, created_at
+             FROM draft_chat_messages WHERE draft_id = ?1 ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![draft_id], |r| {
+            Ok(crate::state::DraftChatMessage {
+                id: r.get(0)?,
+                draft_id: r.get(1)?,
+                role: r.get(2)?,
+                body: r.get(3)?,
+                status: r.get(4)?,
+                created_at: r.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// The draft chat's resumable claude session id, if any.
+    pub fn get_draft_chat_session(&self, draft_id: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT claude_session_id FROM draft_chat_threads WHERE draft_id = ?1",
+            params![draft_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+    }
+
+    pub fn set_draft_chat_session(
+        &self,
+        draft_id: &str,
+        claude_session_id: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO draft_chat_threads (draft_id, claude_session_id)
+             VALUES (?1, ?2)
+             ON CONFLICT(draft_id) DO UPDATE SET claude_session_id = excluded.claude_session_id",
+            params![draft_id, claude_session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Forget an over-limit draft-chat session so the next turn starts fresh.
+    pub fn clear_draft_chat_session(&self, draft_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE draft_chat_threads SET claude_session_id = NULL WHERE draft_id = ?1",
+            params![draft_id],
+        )?;
+        Ok(())
+    }
+
+    /// The doc hash the draft's agent last saw (drives the "the draft has
+    /// changed — re-read it" follow-up header).
+    pub fn get_draft_chat_doc_hash(&self, draft_id: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT last_doc_hash FROM draft_chat_threads WHERE draft_id = ?1",
+            params![draft_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+    }
+
+    pub fn set_draft_chat_doc_hash(&self, draft_id: &str, hash: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO draft_chat_threads (draft_id, last_doc_hash)
+             VALUES (?1, ?2)
+             ON CONFLICT(draft_id) DO UPDATE SET last_doc_hash = excluded.last_doc_hash",
+            params![draft_id, hash],
+        )?;
+        Ok(())
+    }
+
+    /// Drop a draft's discussion thread + resumable session (explicit draft
+    /// delete only — "New draft" keeps history).
+    pub fn delete_draft_chat(&self, draft_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM draft_chat_messages WHERE draft_id = ?1",
+            params![draft_id],
+        )?;
+        conn.execute(
+            "DELETE FROM draft_chat_threads WHERE draft_id = ?1",
+            params![draft_id],
+        )?;
+        Ok(())
+    }
+
+    /// Insert a draft comment (the drafter sidecar).
+    pub fn insert_draft_comment(&self, c: &crate::state::DraftComment) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO draft_comments
+                (id, draft_id, block_id, sel_char_start, sel_char_end, sel_quoted_text,
+                 body, author, created_at, fork_session_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                c.id,
+                c.draft_id,
+                c.block_id,
+                c.sel_char_start,
+                c.sel_char_end,
+                c.sel_quoted_text,
+                c.body,
+                c.author,
+                c.created_at,
+                c.fork_session_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// A draft's comments, oldest-first.
+    pub fn list_draft_comments(
+        &self,
+        draft_id: &str,
+    ) -> rusqlite::Result<Vec<crate::state::DraftComment>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, draft_id, block_id, sel_char_start, sel_char_end, sel_quoted_text,
+                    body, author, created_at, fork_session_id
+             FROM draft_comments WHERE draft_id = ?1 ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![draft_id], |r| {
+            Ok(crate::state::DraftComment {
+                id: r.get(0)?,
+                draft_id: r.get(1)?,
+                block_id: r.get(2)?,
+                sel_char_start: r.get(3)?,
+                sel_char_end: r.get(4)?,
+                sel_quoted_text: r.get(5)?,
+                body: r.get(6)?,
+                author: r.get(7)?,
+                created_at: r.get(8)?,
+                fork_session_id: r.get(9)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// One draft comment by id (scope checks + fork grounding).
+    pub fn get_draft_comment(
+        &self,
+        id: &str,
+    ) -> rusqlite::Result<Option<crate::state::DraftComment>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, draft_id, block_id, sel_char_start, sel_char_end, sel_quoted_text,
+                    body, author, created_at, fork_session_id
+             FROM draft_comments WHERE id = ?1",
+            params![id],
+            |r| {
+                Ok(crate::state::DraftComment {
+                    id: r.get(0)?,
+                    draft_id: r.get(1)?,
+                    block_id: r.get(2)?,
+                    sel_char_start: r.get(3)?,
+                    sel_char_end: r.get(4)?,
+                    sel_quoted_text: r.get(5)?,
+                    body: r.get(6)?,
+                    author: r.get(7)?,
+                    created_at: r.get(8)?,
+                    fork_session_id: r.get(9)?,
+                })
+            },
+        )
+        .optional()
+    }
+
+    /// Delete a draft comment + its discussion thread rows.
+    pub fn delete_draft_comment(&self, draft_id: &str, id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM draft_comments WHERE id = ?1", params![id])?;
+        conn.execute(
+            "DELETE FROM thread_messages WHERE session_id = ?1 AND comment_id = ?2",
+            params![draft_id, id],
+        )?;
+        Ok(())
+    }
+
+    /// The draft comment's resumable discussion-fork session id.
+    pub fn get_draft_comment_fork_session(&self, id: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT fork_session_id FROM draft_comments WHERE id = ?1",
+            params![id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+    }
+
+    pub fn set_draft_comment_fork_session(
+        &self,
+        id: &str,
+        fork_session_id: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE draft_comments SET fork_session_id = ?2 WHERE id = ?1",
+            params![id, fork_session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Queue an agent write-suggestion (status `pending`).
+    pub fn insert_draft_suggestion(
+        &self,
+        s: &crate::state::DraftSuggestion,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO draft_suggestions
+                (id, draft_id, op, block_id, original, markdown, agent_id, body, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                s.id,
+                s.draft_id,
+                s.op,
+                s.block_id,
+                s.original,
+                s.markdown,
+                s.agent_id,
+                s.body,
+                s.status,
+                s.created_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// A draft's pending suggestions, oldest-first — drained by the drafter on
+    /// mount so proposals made while the pane was closed aren't lost.
+    pub fn list_pending_draft_suggestions(
+        &self,
+        draft_id: &str,
+    ) -> rusqlite::Result<Vec<crate::state::DraftSuggestion>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, draft_id, op, block_id, original, markdown, agent_id, body, status, created_at
+             FROM draft_suggestions
+             WHERE draft_id = ?1 AND status = 'pending'
+             ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![draft_id], |r| {
+            Ok(crate::state::DraftSuggestion {
+                id: r.get(0)?,
+                draft_id: r.get(1)?,
+                op: r.get(2)?,
+                block_id: r.get(3)?,
+                original: r.get(4)?,
+                markdown: r.get(5)?,
+                agent_id: r.get(6)?,
+                body: r.get(7)?,
+                status: r.get(8)?,
+                created_at: r.get(9)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Resolve a suggestion: `applied` or `rejected`. Returns whether a pending
+    /// row was actually transitioned.
+    pub fn resolve_draft_suggestion(&self, id: &str, status: &str) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE draft_suggestions SET status = ?2
+             WHERE id = ?1 AND status = 'pending'",
+            params![id, status],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Resolve a thread kind to its `(table, key column)`. The one place the
+    /// generic thread routes map the app's disjoint id-spaces; `session`/`fork`
+    /// reads a plan session's comment threads.
+    fn thread_table(kind: &str) -> Option<(&'static str, &'static str)> {
+        match kind {
+            "browse" => Some(("browse_messages", "browse_id")),
+            "linked" => Some(("linked_messages", "linked_id")),
+            "mission" => Some(("mission_messages", "mission_id")),
+            "companion" => Some(("companion_messages", "companion_id")),
+            "drafter" | "drafter_chat" => Some(("draft_chat_messages", "draft_id")),
+            "session" | "fork" => Some(("thread_messages", "session_id")),
+            _ => None,
+        }
+    }
+
+    /// Generic read-only thread fetch across the per-surface `*_messages`
+    /// tables — the tail `limit` turns, oldest-first. `None` for an unknown
+    /// kind (the route 404s). Table/column names come from the fixed
+    /// `thread_table` map, never from the caller.
+    pub fn load_thread_generic(
+        &self,
+        kind: &str,
+        id: &str,
+        limit: i64,
+    ) -> rusqlite::Result<Option<Vec<GenericThreadMsg>>> {
+        let Some((table, key)) = Self::thread_table(kind) else {
+            return Ok(None);
+        };
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT role, body, created_at FROM {table}
+             WHERE {key} = ?1 ORDER BY created_at DESC, id DESC LIMIT ?2"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![id, limit.max(1)], |r| {
+            Ok(GenericThreadMsg {
+                role: r.get(0)?,
+                body: r.get(1)?,
+                created_at: r.get(2)?,
+            })
+        })?;
+        let mut msgs: Vec<GenericThreadMsg> = rows.collect::<Result<_, _>>()?;
+        msgs.reverse(); // oldest-first
+        Ok(Some(msgs))
+    }
+
+    /// Message count + newest timestamp for a thread, for the tree route's
+    /// child digests. `(0, None)` for an unknown kind or empty thread.
+    pub fn thread_stats(&self, kind: &str, id: &str) -> rusqlite::Result<(i64, Option<i64>)> {
+        let Some((table, key)) = Self::thread_table(kind) else {
+            return Ok((0, None));
+        };
+        let conn = self.conn.lock().unwrap();
+        let sql = format!("SELECT COUNT(*), MAX(created_at) FROM {table} WHERE {key} = ?1");
+        conn.query_row(&sql, params![id], |r| Ok((r.get(0)?, r.get(1)?)))
+    }
+
+    /// Best-effort human label for a thread id (a linked/mission/companion/draft
+    /// title; plan sessions resolve through `sessions.project_name`).
+    pub fn thread_label(&self, kind: &str, id: &str) -> Option<String> {
+        let (sql, key) = match kind {
+            "linked" => ("SELECT title FROM linked_sessions WHERE linked_id = ?1", id),
+            "mission" => ("SELECT title FROM missions WHERE mission_id = ?1", id),
+            "companion" => (
+                "SELECT title FROM companion_sessions WHERE companion_id = ?1",
+                id,
+            ),
+            "drafter" | "drafter_chat" => ("SELECT title FROM drafts WHERE draft_id = ?1", id),
+            "session" => (
+                "SELECT project_name FROM sessions WHERE session_id = ?1",
+                id,
+            ),
+            _ => return None,
+        };
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(sql, params![key], |r| r.get::<_, Option<String>>(0))
+            .ok()
+            .flatten()
+    }
+
+    // -----------------------------------------------------------------------
     // Phase 4 — context access + portability (routes / export / mirror)
     // -----------------------------------------------------------------------
 
@@ -938,7 +2031,8 @@ impl Database {
         // caller string ever reaches the SQL text.
         let mut sql = String::from(
             "SELECT le.seq, le.ts, le.kind, le.ref_kind, le.ref_id, le.session_id,
-                    p.surface, p.origin, p.role, p.mission_id, p.project_path, p.body
+                    p.surface, p.origin, p.role, p.mission_id, p.project_path, p.body,
+                    p.thread_kind, p.thread_id, p.parent_session_id
              FROM prompts p
              JOIN ledger_events le ON le.prompt_id = p.id
              WHERE 1 = 1",
@@ -955,6 +2049,18 @@ impl Database {
         if let Some(s) = f.surface.as_deref().filter(|s| !s.is_empty()) {
             sql.push_str(" AND p.surface = ?");
             binds.push(Box::new(s.to_string()));
+        }
+        if let Some(t) = f.thread_kind.as_deref().filter(|s| !s.is_empty()) {
+            sql.push_str(" AND p.thread_kind = ?");
+            binds.push(Box::new(t.to_string()));
+        }
+        if let Some(t) = f.thread_id.as_deref().filter(|s| !s.is_empty()) {
+            sql.push_str(" AND p.thread_id = ?");
+            binds.push(Box::new(t.to_string()));
+        }
+        if let Some(p) = f.parent_session_id.as_deref().filter(|s| !s.is_empty()) {
+            sql.push_str(" AND p.parent_session_id = ?");
+            binds.push(Box::new(p.to_string()));
         }
         if let Some(p) = f.project.as_deref().filter(|s| !s.is_empty()) {
             sql.push_str(" AND p.project_path = ?");
@@ -996,6 +2102,9 @@ impl Database {
                         b
                     }
                 }),
+                thread_kind: r.get(12)?,
+                thread_id: r.get(13)?,
+                parent_session_id: r.get(14)?,
             })
         })?;
         rows.collect()
@@ -1096,7 +2205,8 @@ impl Database {
             "SELECT le.seq, le.ts, le.kind, le.author, le.prompt_id, le.session_id,
                     le.version_number, le.ref_kind, le.ref_id, le.payload_hash,
                     le.prev_hash, le.entry_hash,
-                    p.surface, p.origin, p.role, p.mission_id, p.project_path, p.body
+                    p.surface, p.origin, p.role, p.mission_id, p.project_path, p.body,
+                    p.thread_kind, p.thread_id, p.parent_session_id
              FROM ledger_events le
              LEFT JOIN prompts p ON le.prompt_id = p.id
              WHERE le.seq > ?1 ORDER BY le.seq ASC LIMIT ?2",
@@ -1123,6 +2233,9 @@ impl Database {
                 mission_id: r.get(15)?,
                 project_path: r.get(16)?,
                 body: r.get(17)?,
+                thread_kind: r.get(18)?,
+                thread_id: r.get(19)?,
+                parent_session_id: r.get(20)?,
             })
         })?;
         rows.collect()
@@ -1708,6 +2821,45 @@ impl Database {
                 )?;
                 Ok(StagedOutcome::Structural)
             }
+            Proposal::Supersede { old_seq, new_seq, rationale } => {
+                // Light stage-time screen so garbage never reaches the review
+                // strip: both seqs must exist and be decision events, old
+                // before new. The full guardrails (head-of-chain redirect,
+                // at-most-once) run at apply.
+                if old_seq >= new_seq {
+                    return Ok(StagedOutcome::Skipped);
+                }
+                for seq in [old_seq, new_seq] {
+                    let kind: Option<String> = conn
+                        .query_row(
+                            "SELECT kind FROM ledger_events WHERE seq = ?1",
+                            params![seq],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    match kind {
+                        Some(k) if crate::classmem::DECISION_KINDS.contains(&k.as_str()) => {}
+                        _ => return Ok(StagedOutcome::Skipped),
+                    }
+                }
+                // Don't re-stage an identical pending supersession.
+                let extra = serde_json::json!({ "old_seq": old_seq, "new_seq": new_seq })
+                    .to_string();
+                let dup: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM class_proposals
+                     WHERE op = 'supersede' AND status = 'proposed' AND extra_json = ?1",
+                    params![extra],
+                    |r| r.get(0),
+                )?;
+                if dup > 0 {
+                    return Ok(StagedOutcome::Skipped);
+                }
+                self.insert_structural_locked(
+                    &conn, run_id, "supersede", None, None, None, None,
+                    Some(&extra), rationale.as_deref(), now,
+                )?;
+                Ok(StagedOutcome::Structural)
+            }
         }
     }
 
@@ -1819,6 +2971,30 @@ impl Database {
         Ok(Some((node_id, flipped)))
     }
 
+    /// Delete a single class link (a pointer into the lake) by id, returning its
+    /// `(node_id, target_kind, target_id)` so the caller can record a compensating
+    /// ledger event. Removing a pointer never touches lake data or the ledger, so
+    /// this is the safe inverse of an accepted `file`: the append-only chain stays
+    /// intact and the reversal is recorded as a new `class_curate` event rather
+    /// than by rewriting history. `None` if no such link.
+    pub fn delete_class_link(
+        &self,
+        link_id: i64,
+    ) -> rusqlite::Result<Option<(String, String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let row: Option<(String, String, String)> = conn
+            .query_row(
+                "SELECT node_id, target_kind, target_id FROM class_links WHERE id = ?1",
+                params![link_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        if row.is_some() {
+            conn.execute("DELETE FROM class_links WHERE id = ?1", params![link_id])?;
+        }
+        Ok(row)
+    }
+
     /// Reject (delete) a node and its whole proposed/accepted subtree + links.
     /// Used to reject a proposed node; also the cleanup primitive for merges.
     pub fn reject_class_node(&self, id: &str) -> rusqlite::Result<()> {
@@ -1846,6 +3022,13 @@ impl Database {
         }
         for nid in &all {
             conn.execute("DELETE FROM class_links WHERE node_id = ?1", params![nid])?;
+            // Observations retire with their node (collapse/merge/reject) —
+            // they are re-derived, and their `observation` ledger events
+            // remain as the tamper-evident history.
+            conn.execute(
+                "DELETE FROM class_observations WHERE node_id = ?1",
+                params![nid],
+            )?;
             conn.execute("DELETE FROM class_nodes WHERE id = ?1", params![nid])?;
         }
         Ok(())
@@ -2025,6 +3208,12 @@ impl Database {
                         "DELETE FROM class_links WHERE node_id = ?1",
                         params![other],
                     )?;
+                    // Merged-away nodes retire their observations (re-derived;
+                    // ledger `observation` events remain as history).
+                    conn.execute(
+                        "DELETE FROM class_observations WHERE node_id = ?1",
+                        params![other],
+                    )?;
                     conn.execute(
                         "UPDATE class_nodes SET parent_id = ?2, updated_at = ?3 WHERE parent_id = ?1",
                         params![other, target, now],
@@ -2066,6 +3255,41 @@ impl Database {
                 }
                 format!("split into {made}")
             }
+            "supersede" => {
+                let (old_seq, new_seq) = match p
+                    .extra_json
+                    .as_deref()
+                    .and_then(|e| serde_json::from_str::<serde_json::Value>(e).ok())
+                    .and_then(|v| {
+                        Some((v.get("old_seq")?.as_i64()?, v.get("new_seq")?.as_i64()?))
+                    }) {
+                    Some(pair) => pair,
+                    None => {
+                        // Malformed payload — drop, never retry forever.
+                        self.drop_proposal_locked(&conn, id)?;
+                        return Ok(None);
+                    }
+                };
+                let rationale = p.rationale.clone().unwrap_or_default();
+                match Self::apply_supersession_locked(&conn, old_seq, new_seq, &rationale)? {
+                    crate::classmem::SupersessionOutcome::Applied {
+                        effective_old,
+                        new_seq,
+                        ..
+                    } => {
+                        // The supersede ledger event was appended inside
+                        // apply_supersession_locked — callers must NOT also
+                        // record a taxonomy_reorg for this op.
+                        format!("#{effective_old} → #{new_seq}")
+                    }
+                    crate::classmem::SupersessionOutcome::Rejected(msg) => {
+                        tracing::info!(target: "redline::classmem", old_seq, new_seq, %msg,
+                            "supersede proposal rejected at apply");
+                        self.drop_proposal_locked(&conn, id)?;
+                        return Ok(None);
+                    }
+                }
+            }
             _ => {
                 self.drop_proposal_locked(&conn, id)?;
                 return Ok(None);
@@ -2082,6 +3306,334 @@ impl Database {
     fn drop_proposal_locked(&self, conn: &rusqlite::Connection, id: i64) -> rusqlite::Result<()> {
         conn.execute("DELETE FROM class_proposals WHERE id = ?1", params![id])?;
         Ok(())
+    }
+
+    // --- supersession (temporal validity over decisions) ---
+
+    /// Validate + record "decision new_seq supersedes decision old_seq":
+    /// append the `supersede` ledger event and insert the queryable
+    /// `supersessions` index row, atomically under one lock. Never deletes —
+    /// the old decision stays in the lake with a status, and a pin on it does
+    /// NOT veto (nothing is destroyed; the UI surfaces it instead).
+    /// Production goes through `apply_class_proposal` (which calls the locked
+    /// core under its own lock); this locking wrapper exists for tests.
+    #[cfg(test)]
+    pub fn apply_supersession(
+        &self,
+        old_seq: i64,
+        new_seq: i64,
+        rationale: &str,
+    ) -> rusqlite::Result<crate::classmem::SupersessionOutcome> {
+        let conn = self.conn.lock().unwrap();
+        Self::apply_supersession_locked(&conn, old_seq, new_seq, rationale)
+    }
+
+    /// The core, callable with an already-held lock (`apply_class_proposal`
+    /// holds it across the op match).
+    fn apply_supersession_locked(
+        conn: &rusqlite::Connection,
+        old_seq: i64,
+        new_seq: i64,
+        rationale: &str,
+    ) -> rusqlite::Result<crate::classmem::SupersessionOutcome> {
+        use crate::classmem::SupersessionOutcome as Out;
+        let kind_of = |seq: i64| -> rusqlite::Result<Option<String>> {
+            conn.query_row(
+                "SELECT kind FROM ledger_events WHERE seq = ?1",
+                params![seq],
+                |r| r.get(0),
+            )
+            .optional()
+        };
+        // Only decisions are claims that can be replaced; prompts/revisions
+        // are history and are never superseded.
+        for seq in [old_seq, new_seq] {
+            match kind_of(seq)? {
+                None => return Ok(Out::Rejected(format!("no ledger event #{seq}"))),
+                Some(k) if !crate::classmem::DECISION_KINDS.contains(&k.as_str()) => {
+                    return Ok(Out::Rejected(format!(
+                        "#{seq} is a {k} event, not a decision"
+                    )));
+                }
+                Some(_) => {}
+            }
+        }
+        // "Superseded at most once": if old_seq was already superseded, this
+        // op redirects to the current head of its chain.
+        let mut effective_old = old_seq;
+        let mut hops = 0;
+        while let Some(next) = conn
+            .query_row(
+                "SELECT new_seq FROM supersessions WHERE old_seq = ?1",
+                params![effective_old],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+        {
+            effective_old = next;
+            hops += 1;
+            if hops > 64 {
+                return Ok(Out::Rejected("supersession chain too deep".into()));
+            }
+        }
+        if effective_old == new_seq {
+            // Covers the idempotent duplicate: A→B proposed again lands here.
+            return Ok(Out::Rejected(format!("#{new_seq} is already the chain head")));
+        }
+        // Every stored edge strictly increases seq, so requiring old < new
+        // makes cycles structurally impossible — this check IS the cycle
+        // rejection (the hop guard above is defense in depth).
+        if effective_old >= new_seq {
+            return Ok(Out::Rejected(format!(
+                "superseding decision #{new_seq} must come after #{effective_old}"
+            )));
+        }
+        // Field order is frozen — it is the payload-hash identity.
+        let new_str = new_seq.to_string();
+        let ph = crate::ledger::decision_payload_hash(&[
+            ("superseded_by", &new_str),
+            ("rationale", rationale),
+        ]);
+        let author = crate::ledger::local_author();
+        let old_str = effective_old.to_string();
+        let ev = Self::append_ledger_event_locked(
+            conn,
+            &crate::ledger::LedgerAppend {
+                kind: crate::ledger::EventKind::Supersede.as_str(),
+                author: &author,
+                ts: crate::ledger::now_millis(),
+                prompt_id: None,
+                session_id: None,
+                version_number: None,
+                ref_kind: Some("ledger_event"),
+                ref_id: Some(old_str.as_str()),
+                payload_hash: &ph,
+            },
+        )?;
+        conn.execute(
+            "INSERT INTO supersessions (old_seq, new_seq, event_seq, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![effective_old, new_seq, ev.seq, ev.ts],
+        )?;
+        Ok(Out::Applied {
+            effective_old,
+            new_seq,
+            event_seq: ev.seq,
+        })
+    }
+
+    /// old_seq → new_seq for the given seqs — backs the per-link
+    /// `supersededBy` annotation in the node view. (As-of queries later fall
+    /// out of the same table by filtering `event_seq <= asof`.)
+    pub fn supersessions_for_seqs(
+        &self,
+        seqs: &[i64],
+    ) -> rusqlite::Result<std::collections::HashMap<i64, i64>> {
+        let conn = self.conn.lock().unwrap();
+        let mut out = std::collections::HashMap::new();
+        let mut stmt =
+            conn.prepare("SELECT new_seq FROM supersessions WHERE old_seq = ?1")?;
+        for &seq in seqs {
+            if let Some(new_seq) = stmt
+                .query_row(params![seq], |r| r.get::<_, i64>(0))
+                .optional()?
+            {
+                out.insert(seq, new_seq);
+            }
+        }
+        Ok(out)
+    }
+
+    // --- class observations (agent-derived patterns) ---
+
+    /// Insert an observation + append its `observation` ledger event,
+    /// atomically. Dedup on (node_id, summary) regardless of `dismissed` —
+    /// a dismissed pattern never resurfaces under the same wording. Returns
+    /// the new row id, `None` when skipped. Empty cite_seqs is rejected here
+    /// too (defense in depth behind the strict parser).
+    pub fn insert_class_observation(
+        &self,
+        node_id: &str,
+        summary: &str,
+        cite_seqs: &[i64],
+    ) -> rusqlite::Result<Option<i64>> {
+        if cite_seqs.is_empty() || summary.trim().is_empty() {
+            return Ok(None);
+        }
+        let conn = self.conn.lock().unwrap();
+        let node_exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM class_nodes WHERE id = ?1",
+            params![node_id],
+            |r| r.get(0),
+        )?;
+        if node_exists == 0 {
+            return Ok(None);
+        }
+        let dup: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM class_observations WHERE node_id = ?1 AND summary = ?2",
+            params![node_id, summary],
+            |r| r.get(0),
+        )?;
+        if dup > 0 {
+            return Ok(None);
+        }
+        let cites = serde_json::to_string(cite_seqs).unwrap_or_else(|_| "[]".into());
+        let now = crate::ledger::now_millis();
+        conn.execute(
+            "INSERT INTO class_observations
+                (node_id, summary, cite_seqs, created_seq, pinned, dismissed, created_at)
+             VALUES (?1, ?2, ?3, NULL, 0, 0, ?4)",
+            params![node_id, summary, cites, now],
+        )?;
+        let row_id = conn.last_insert_rowid();
+        // Field order is frozen — it is the payload-hash identity.
+        let ph = crate::ledger::decision_payload_hash(&[
+            ("node", node_id),
+            ("summary", summary),
+            ("cites", &cites),
+        ]);
+        let author = crate::ledger::local_author();
+        let ev = Self::append_ledger_event_locked(
+            &conn,
+            &crate::ledger::LedgerAppend {
+                kind: crate::ledger::EventKind::Observation.as_str(),
+                author: &author,
+                ts: now,
+                prompt_id: None,
+                session_id: None,
+                version_number: None,
+                ref_kind: Some("class_node"),
+                ref_id: Some(node_id),
+                payload_hash: &ph,
+            },
+        )?;
+        conn.execute(
+            "UPDATE class_observations SET created_seq = ?2 WHERE id = ?1",
+            params![row_id, ev.seq],
+        )?;
+        Ok(Some(row_id))
+    }
+
+    pub fn list_class_observations(
+        &self,
+        node_id: &str,
+        include_dismissed: bool,
+    ) -> rusqlite::Result<Vec<crate::classmem::ClassObservation>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, node_id, summary, cite_seqs, created_seq, pinned, dismissed, created_at
+             FROM class_observations
+             WHERE node_id = ?1 AND (?2 OR dismissed = 0)
+             ORDER BY pinned DESC, created_at DESC, id DESC",
+        )?;
+        let rows = stmt.query_map(params![node_id, include_dismissed], |r| {
+            Ok(crate::classmem::ClassObservation {
+                id: r.get(0)?,
+                node_id: r.get(1)?,
+                summary: r.get(2)?,
+                cite_seqs: serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or_default(),
+                created_seq: r.get(4)?,
+                pinned: r.get::<_, i64>(5)? != 0,
+                dismissed: r.get::<_, i64>(6)? != 0,
+                created_at: r.get(7)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Newest (non-dismissed) observation timestamp per node — the keeper's
+    /// freshness gate: a node whose newest observation postdates its last
+    /// activity has nothing new to mine.
+    pub fn newest_observation_per_node(
+        &self,
+    ) -> rusqlite::Result<std::collections::HashMap<String, i64>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT node_id, MAX(created_at) FROM class_observations
+             WHERE dismissed = 0 GROUP BY node_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        rows.collect()
+    }
+
+    /// Dismiss = "never resurface this pattern". Returns the node id so the
+    /// caller can record the `class_curate` event. The row is kept (not
+    /// deleted) so the dedup guard keeps holding.
+    pub fn set_observation_dismissed(&self, id: i64) -> rusqlite::Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let node: Option<String> = conn
+            .query_row(
+                "SELECT node_id FROM class_observations WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if node.is_some() {
+            conn.execute(
+                "UPDATE class_observations SET dismissed = 1, pinned = 0 WHERE id = ?1",
+                params![id],
+            )?;
+        }
+        Ok(node)
+    }
+
+    /// Pin = promote into the node's permanent context (floats first in the
+    /// pane and in retrieval). Returns the node id for the curate event.
+    pub fn set_observation_pinned(
+        &self,
+        id: i64,
+        pinned: bool,
+    ) -> rusqlite::Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let node: Option<String> = conn
+            .query_row(
+                "SELECT node_id FROM class_observations WHERE id = ?1 AND dismissed = 0",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if node.is_some() {
+            conn.execute(
+                "UPDATE class_observations SET pinned = ?2 WHERE id = ?1",
+                params![id, pinned as i64],
+            )?;
+        }
+        Ok(node)
+    }
+
+    /// The corpus for the keeper's observation pass: a node's ledger-resolvable
+    /// links as `(seq, kind, ts, snippet)`, newest first. Snippet is the prompt
+    /// body head (or its gist once compacted); bodyless decision events yield
+    /// `None` and are rendered by kind alone.
+    pub fn node_link_items(
+        &self,
+        node_id: &str,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<(i64, String, i64, Option<String>)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT le.seq, le.kind, le.ts,
+                    COALESCE(NULLIF(substr(p.body, 1, 240), ''), p.gist)
+             FROM class_links l
+             JOIN ledger_events le ON CAST(l.target_id AS INTEGER) = le.seq
+             LEFT JOIN prompts p ON p.id = le.prompt_id
+             WHERE l.node_id = ?1
+               AND l.target_kind IN ('prompt', 'decision', 'ledger')
+               AND l.status = 'accepted'
+             ORDER BY le.ts DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![node_id, limit], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, Option<String>>(3)?,
+            ))
+        })?;
+        rows.collect()
     }
 
     // --- class runs + lake delta ---
@@ -2189,11 +3741,21 @@ impl Database {
         limit: i64,
     ) -> rusqlite::Result<Vec<crate::classmem::LakeItem>> {
         let conn = self.conn.lock().unwrap();
+        // Surface browse-event content too (they carry no prompt row): a
+        // `browse_event` ledger row joins `browse_events` by ref_id, so the
+        // classifier sees the page text (as `body`) under a synthetic
+        // `browse_event` surface and can file it under a class like any prompt.
         let mut stmt = conn.prepare(
             "SELECT le.seq, le.ts, le.kind, le.ref_kind, le.ref_id, le.session_id,
-                    p.surface, p.origin, p.role, p.mission_id, p.project_path, p.body
+                    COALESCE(p.surface, CASE WHEN le.ref_kind = 'browse_event'
+                                             THEN 'browse_event' END),
+                    p.origin, p.role, p.mission_id, p.project_path,
+                    COALESCE(p.body, be.text),
+                    p.thread_kind, p.thread_id, p.parent_session_id
              FROM ledger_events le
              LEFT JOIN prompts p ON le.prompt_id = p.id
+             LEFT JOIN browse_events be
+                    ON le.ref_kind = 'browse_event' AND le.ref_id = CAST(be.id AS TEXT)
              WHERE le.seq > ?1
              ORDER BY le.seq ASC
              LIMIT ?2",
@@ -2219,6 +3781,9 @@ impl Database {
                         b
                     }
                 }),
+                thread_kind: r.get(12)?,
+                thread_id: r.get(13)?,
+                parent_session_id: r.get(14)?,
             })
         })?;
         rows.collect()
@@ -2350,6 +3915,84 @@ impl Database {
         .optional()
         .ok()
         .flatten()
+    }
+
+    /// Best-effort evidence bundle for one decision event — what the supersede
+    /// verifier agent reads to adjudicate "does the newer decision genuinely
+    /// replace the older one?". Resolves the referenced comment body, review
+    /// annotation, and/or the session's plan heading when available; a decision
+    /// whose referents were deleted still yields its ledger facts.
+    pub fn decision_event_context(&self, seq: i64) -> rusqlite::Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let row: Option<(String, i64, Option<String>, Option<String>, Option<String>)> = conn
+            .query_row(
+                "SELECT kind, ts, session_id, ref_kind, ref_id
+                 FROM ledger_events WHERE seq = ?1",
+                params![seq],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()?;
+        let Some((kind, ts, session_id, ref_kind, ref_id)) = row else {
+            return Ok(None);
+        };
+        let snip = |s: &str| -> String {
+            let one = s.replace('\n', " ");
+            let cut: String = one.chars().take(200).collect();
+            if one.chars().count() > 200 { format!("{cut}…") } else { cut }
+        };
+        let mut out = format!("event #{seq} kind={kind} ts={ts}");
+        match (ref_kind.as_deref(), ref_id.as_deref()) {
+            (Some("comment"), Some(cid)) => {
+                let c: Option<(String, String)> = conn
+                    .query_row(
+                        "SELECT body, status FROM comments WHERE id = ?1 LIMIT 1",
+                        params![cid],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?;
+                if let Some((body, status)) = c {
+                    out.push_str(&format!(" | comment[{status}]: {}", snip(&body)));
+                }
+            }
+            (Some("review_annotation"), Some(aid)) => {
+                let a: Option<(String, String, Option<String>)> = conn
+                    .query_row(
+                        "SELECT body, status, resolution
+                         FROM review_annotations WHERE id = ?1 LIMIT 1",
+                        params![aid],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )
+                    .optional()?;
+                if let Some((body, status, resolution)) = a {
+                    out.push_str(&format!(" | annotation[{status}]: {}", snip(&body)));
+                    if let Some(res) = resolution.as_deref().filter(|s| !s.is_empty()) {
+                        out.push_str(&format!(" | resolution: {}", snip(res)));
+                    }
+                }
+            }
+            _ => {}
+        }
+        if let Some(sid) = session_id.as_deref().filter(|s| !s.is_empty()) {
+            let plan: Option<String> = conn
+                .query_row(
+                    "SELECT raw_plan_markdown FROM revisions
+                     WHERE session_id = ?1 ORDER BY version_number DESC LIMIT 1",
+                    params![sid],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(md) = plan {
+                let heading = md
+                    .lines()
+                    .find(|l| l.trim_start().starts_with('#'))
+                    .unwrap_or_default()
+                    .trim();
+                if !heading.is_empty() {
+                    out.push_str(&format!(" | plan: {}", snip(heading)));
+                }
+            }
+        }
+        Ok(Some(out))
     }
 
     pub fn insert_comment(
@@ -3367,7 +5010,7 @@ impl Database {
     }
 
     /// The most recent review session for a repo — how a re-run of
-    /// `/redline-review` in the same repo continues the SAME review (next
+    /// `/redline-code-review` in the same repo continues the SAME review (next
     /// round) instead of minting a parallel one.
     pub fn latest_code_review_for_repo(&self, repo_path: &str) -> Option<CodeReviewSession> {
         let conn = self.conn.lock().unwrap();
@@ -3947,6 +5590,9 @@ mod tests {
             project_path: Some("/proj"),
             body,
             body_hash: bh,
+            thread_kind: None,
+            thread_id: None,
+            parent_session_id: None,
         }
     }
 
@@ -4012,6 +5658,216 @@ mod tests {
         conn.last_insert_rowid()
     }
 
+    // --- Supersession + observations (temporal validity / patterns) --------
+
+    use crate::classmem::SupersessionOutcome;
+
+    fn assert_rejected(out: SupersessionOutcome) -> String {
+        match out {
+            SupersessionOutcome::Rejected(msg) => msg,
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn supersession_guardrails() {
+        let db = Database::open_in_memory().unwrap();
+        let _p = append(&db, "prompt", "h1"); // seq 1 — not a decision
+        let r1 = append(&db, "resolution", "h2"); // seq 2
+        let a1 = append(&db, "approval", "h3"); // seq 3
+        let r2 = append(&db, "review_verdict", "h4"); // seq 4
+
+        // Non-decision kinds are never superseded (either side).
+        assert_rejected(db.apply_supersession(1, r1.seq, "").unwrap());
+        assert_rejected(db.apply_supersession(r1.seq, 1, "").unwrap());
+        // Unknown seqs reject.
+        assert_rejected(db.apply_supersession(r1.seq, 999, "").unwrap());
+        // Old must precede new.
+        assert_rejected(db.apply_supersession(a1.seq, r1.seq, "").unwrap());
+
+        // Happy path: r1 → a1.
+        match db.apply_supersession(r1.seq, a1.seq, "reversed").unwrap() {
+            SupersessionOutcome::Applied { effective_old, new_seq, event_seq } => {
+                assert_eq!((effective_old, new_seq), (r1.seq, a1.seq));
+                // The supersede event landed on the chain, referencing old.
+                let ev = db
+                    .list_ledger_events(1)
+                    .unwrap()
+                    .into_iter()
+                    .next()
+                    .unwrap();
+                assert_eq!(ev.seq, event_seq);
+                assert_eq!(ev.kind, "supersede");
+                assert_eq!(ev.ref_kind.as_deref(), Some("ledger_event"));
+                assert_eq!(ev.ref_id.as_deref(), Some(r1.seq.to_string().as_str()));
+            }
+            other => panic!("expected Applied, got {other:?}"),
+        }
+
+        // "At most once": superseding r1 again redirects to the chain head
+        // (a1), so r1 → r2 records a1 → r2, not a second edge from r1.
+        match db.apply_supersession(r1.seq, r2.seq, "newer again").unwrap() {
+            SupersessionOutcome::Applied { effective_old, new_seq, .. } => {
+                assert_eq!((effective_old, new_seq), (a1.seq, r2.seq));
+            }
+            other => panic!("expected Applied, got {other:?}"),
+        }
+        // The idempotent duplicate lands on "already the head" and rejects.
+        assert_rejected(db.apply_supersession(r1.seq, r2.seq, "").unwrap());
+
+        // The index answers both hops.
+        let map = db.supersessions_for_seqs(&[r1.seq, a1.seq, r2.seq]).unwrap();
+        assert_eq!(map.get(&r1.seq), Some(&a1.seq));
+        assert_eq!(map.get(&a1.seq), Some(&r2.seq));
+        assert_eq!(map.get(&r2.seq), None);
+    }
+
+    #[test]
+    fn supersede_and_observation_keep_chain_green() {
+        // The hash-invariant tripwire: the two new event kinds coexist with
+        // the old ones on one chain, and verification stays green — proof
+        // that CanonicalEvent was untouched.
+        let db = Database::open_in_memory().unwrap();
+        append(&db, "prompt", "h1");
+        let r = append(&db, "resolution", "h2");
+        let a = append(&db, "approval", "h3");
+        match db.apply_supersession(r.seq, a.seq, "why").unwrap() {
+            SupersessionOutcome::Applied { .. } => {}
+            other => panic!("expected Applied, got {other:?}"),
+        }
+        accepted_node(&db, "cn-x", None, "X");
+        assert!(db
+            .insert_class_observation("cn-x", "a pattern", &[1, 2])
+            .unwrap()
+            .is_some());
+        let v = db.verify_ledger_chain().unwrap();
+        assert!(v.ok, "chain must stay green: {v:?}");
+        assert_eq!(v.checked, 5); // 3 seeds + supersede + observation
+    }
+
+    #[test]
+    fn insert_class_observation_sets_created_seq_and_dedups() {
+        let db = Database::open_in_memory().unwrap();
+        accepted_node(&db, "cn-x", None, "X");
+
+        // Uncited / empty-summary / unknown-node inserts are rejected.
+        assert!(db.insert_class_observation("cn-x", "s", &[]).unwrap().is_none());
+        assert!(db.insert_class_observation("cn-x", "  ", &[1]).unwrap().is_none());
+        assert!(db.insert_class_observation("ghost", "s", &[1]).unwrap().is_none());
+
+        let id = db
+            .insert_class_observation("cn-x", "deploys follow auth changes", &[4, 9])
+            .unwrap()
+            .expect("first insert lands");
+        let obs = db.list_class_observations("cn-x", false).unwrap();
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].id, id);
+        assert_eq!(obs[0].cite_seqs, vec![4, 9]);
+        // The row points at its own `observation` ledger event.
+        let seq = obs[0].created_seq.expect("created_seq backfilled");
+        let ev = db.list_ledger_events(10).unwrap();
+        let ev = ev.iter().find(|e| e.seq == seq).unwrap();
+        assert_eq!(ev.kind, "observation");
+        assert_eq!(ev.ref_id.as_deref(), Some("cn-x"));
+
+        // Identical summary dedups — including after a dismiss, so a
+        // dismissed pattern never resurfaces under the same wording.
+        assert!(db
+            .insert_class_observation("cn-x", "deploys follow auth changes", &[4])
+            .unwrap()
+            .is_none());
+        let node = db.set_observation_dismissed(id).unwrap();
+        assert_eq!(node.as_deref(), Some("cn-x"));
+        assert!(db.list_class_observations("cn-x", false).unwrap().is_empty());
+        assert_eq!(db.list_class_observations("cn-x", true).unwrap().len(), 1);
+        assert!(db
+            .insert_class_observation("cn-x", "deploys follow auth changes", &[4, 9])
+            .unwrap()
+            .is_none());
+        // A dismissed observation can't be pinned.
+        assert!(db.set_observation_pinned(id, true).unwrap().is_none());
+    }
+
+    #[test]
+    fn collapse_retires_subtree_observations_but_keeps_their_events() {
+        let db = Database::open_in_memory().unwrap();
+        accepted_node(&db, "cn-root", None, "root");
+        accepted_node(&db, "cn-cold", Some("cn-root"), "cold branch");
+        append(&db, "prompt", "h1");
+        db.insert_class_observation("cn-cold", "some pattern", &[1])
+            .unwrap()
+            .expect("observation lands");
+
+        // Stage + apply a collapse of the branch.
+        let staged = db
+            .stage_proposal(
+                None,
+                &Proposal::Collapse {
+                    node_id: "cn-cold".into(),
+                    summary: "digest".into(),
+                    cite_seqs: vec![1],
+                    rationale: None,
+                },
+            )
+            .unwrap();
+        assert!(matches!(staged, crate::classmem::StagedOutcome::Structural));
+        let pid = db.list_class_proposals().unwrap()[0].id;
+        assert!(db.apply_class_proposal(pid).unwrap().is_some());
+
+        // The rows retired with the branch…
+        assert!(db.list_class_observations("cn-cold", true).unwrap().is_empty());
+        // …but the tamper-evident history remains and the chain stays green.
+        assert!(db
+            .list_ledger_events(10)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "observation"));
+        assert!(db.verify_ledger_chain().unwrap().ok);
+    }
+
+    #[test]
+    fn supersede_proposal_stages_and_applies_through_the_review_machinery() {
+        let db = Database::open_in_memory().unwrap();
+        append(&db, "prompt", "h1");
+        let r = append(&db, "resolution", "h2");
+        let a = append(&db, "approval", "h3");
+
+        // Stage-time screen: non-decision or unknown seqs are skipped.
+        let skipped = db
+            .stage_proposal(None, &Proposal::Supersede { old_seq: 1, new_seq: a.seq, rationale: None })
+            .unwrap();
+        assert!(matches!(skipped, crate::classmem::StagedOutcome::Skipped));
+
+        let staged = db
+            .stage_proposal(
+                None,
+                &Proposal::Supersede { old_seq: r.seq, new_seq: a.seq, rationale: Some("why".into()) },
+            )
+            .unwrap();
+        assert!(matches!(staged, crate::classmem::StagedOutcome::Structural));
+        // Identical pending proposal doesn't re-stage.
+        let dup = db
+            .stage_proposal(
+                None,
+                &Proposal::Supersede { old_seq: r.seq, new_seq: a.seq, rationale: Some("again".into()) },
+            )
+            .unwrap();
+        assert!(matches!(dup, crate::classmem::StagedOutcome::Skipped));
+
+        let props = db.list_class_proposals().unwrap();
+        assert_eq!(props.len(), 1);
+        assert_eq!(props[0].op, "supersede");
+        let applied = db.apply_class_proposal(props[0].id).unwrap().expect("applies");
+        assert_eq!(applied.op, "supersede");
+        assert_eq!(applied.detail, format!("#{} → #{}", r.seq, a.seq));
+        assert!(db.list_class_proposals().unwrap().is_empty());
+        assert_eq!(
+            db.supersessions_for_seqs(&[r.seq]).unwrap().get(&r.seq),
+            Some(&a.seq)
+        );
+        assert!(db.verify_ledger_chain().unwrap().ok);
+    }
+
     fn count_reorg_events(db: &Database) -> i64 {
         let conn = db.conn.lock().unwrap();
         conn.query_row(
@@ -4074,6 +5930,252 @@ mod tests {
             .unwrap()
         };
         assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn browse_event_records_dedups_and_keeps_chain_green() {
+        let db = Database::open_in_memory().unwrap();
+        let ev = |browse_id: &str, text: &str| crate::ledger::BrowseEventInput {
+            action: "navigate".into(),
+            browse_id: Some(browse_id.into()),
+            url: "https://example.com".into(),
+            title: Some("Example".into()),
+            text: text.into(),
+        };
+        // First page records → a browse_event ledger row + a browse_events row.
+        assert!(crate::ledger::record_browse_event(&db, ev("t1", "page one")).unwrap().is_some());
+        // Same content back-to-back in the same tab is deduped (nothing written).
+        assert!(crate::ledger::record_browse_event(&db, ev("t1", "page one")).unwrap().is_none());
+        // A different page in the same tab records.
+        assert!(crate::ledger::record_browse_event(&db, ev("t1", "page two")).unwrap().is_some());
+        // The SAME content in a DIFFERENT tab records (content-identity grouping,
+        // not global dedup).
+        assert!(crate::ledger::record_browse_event(&db, ev("t2", "page one")).unwrap().is_some());
+
+        // The event references its browse_events row; text + hash round-trip.
+        let (url, title, text, chash) = db.get_browse_event(1).unwrap().unwrap();
+        assert_eq!(url, "https://example.com");
+        assert_eq!(title.as_deref(), Some("Example"));
+        assert_eq!(text, "page one");
+        assert_eq!(chash, crate::ledger::body_hash("page one"));
+
+        // Two distinct pages under 't1' + one under 't2' == 3 stored events.
+        let n: i64 = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row("SELECT COUNT(*) FROM browse_events", [], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(n, 3);
+
+        // The hash chain still verifies with browse_event rows in it.
+        assert!(db.verify_ledger_chain().unwrap().ok);
+
+        // The classifier delta surfaces the page text as `body` under a synthetic
+        // `browse_event` surface, so the classifier can file it under a class.
+        let items = db.list_lake_items_since(0, 100).unwrap();
+        let be = items.iter().find(|i| i.kind == "browse_event").unwrap();
+        assert_eq!(be.surface.as_deref(), Some("browse_event"));
+        assert_eq!(be.body.as_deref(), Some("page one"));
+        assert_eq!(be.ref_kind.as_deref(), Some("browse_event"));
+    }
+
+    #[test]
+    fn revert_link_removes_pointer_appends_compensating_event_and_keeps_chain_green() {
+        let db = Database::open_in_memory().unwrap();
+        // An accepted class with an accepted link — the gardener's "file" outcome.
+        accepted_node(&db, "root-r", None, "redline");
+        let link_id = add_link(&db, "root-r", "prompt", "42");
+        // Record the accept as a curate event, like the gardener does.
+        crate::classmem::record_curate(&db, "root-r", "organize", "");
+        assert!(db.verify_ledger_chain().unwrap().ok);
+
+        // Revert → the pointer is gone, but the ledger only GREW (a compensating
+        // 'revert' class_curate event), so the chain still verifies.
+        assert!(crate::classmem::revert_link(&db, link_id).unwrap());
+        assert!(db.list_class_links_for_node("root-r").unwrap().is_empty());
+        assert!(db.verify_ledger_chain().unwrap().ok);
+
+        // Two class_curate events exist: the original accept + the revert.
+        let n: i64 = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM ledger_events WHERE kind = 'class_curate'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(n, 2);
+
+        // Reverting a link that no longer exists is a no-op (false), no new event.
+        assert!(!crate::classmem::revert_link(&db, link_id).unwrap());
+    }
+
+    #[test]
+    fn session_link_records_tree_row_and_event_and_keeps_chain_green() {
+        let db = Database::open_in_memory().unwrap();
+        append(&db, "prompt", "h1"); // pre-existing history
+
+        // First link: tree row + a session_link ledger event, chain stays green.
+        let seq = crate::ledger::record_session_link(&db, "browse", "tab-1", "session", "s9")
+            .unwrap();
+        assert!(seq.is_some());
+        assert_eq!(
+            db.session_tree_parent("browse", "tab-1").unwrap(),
+            Some(("session".to_string(), "s9".to_string()))
+        );
+        let verdict = db.verify_ledger_chain().unwrap();
+        assert!(verdict.ok, "chain must verify with a session_link event in it");
+
+        // Idempotent: a child has one parent; re-linking is a no-op (no event).
+        let again =
+            crate::ledger::record_session_link(&db, "browse", "tab-1", "mission", "m1").unwrap();
+        assert!(again.is_none());
+        assert_eq!(
+            db.session_tree_parent("browse", "tab-1").unwrap(),
+            Some(("session".to_string(), "s9".to_string())),
+            "first write wins"
+        );
+
+        // Children walk from the parent side.
+        crate::ledger::record_session_link(&db, "voice", "s9", "session", "s9").unwrap();
+        let kids = db.session_tree_children("session", "s9").unwrap();
+        assert_eq!(kids.len(), 2);
+        assert!(db.verify_ledger_chain().unwrap().ok);
+
+        // Blank ids record nothing.
+        assert!(crate::ledger::record_session_link(&db, "browse", " ", "session", "s9")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn journal_appends_lists_and_prunes() {
+        let db = Database::open_in_memory().unwrap();
+        let first = db
+            .append_journal("surface_switch", Some("plan"), Some("s1"), Some("My plan"), None)
+            .unwrap();
+        db.append_journal("nav", Some("browser"), None, Some("Example"), Some("https://x"))
+            .unwrap();
+        let head = db.journal_head().unwrap();
+        assert!(head > first);
+
+        // Delta read: strictly after `since`, oldest-first.
+        let delta = db.list_journal_since(first, 100).unwrap();
+        assert_eq!(delta.len(), 1);
+        assert_eq!(delta[0].kind, "nav");
+        assert_eq!(delta[0].detail.as_deref(), Some("https://x"));
+
+        // Prune: rows older than the 2000-row window are dropped on insert.
+        for i in 0..2005 {
+            db.append_journal("agent_turn", Some("browse"), Some(&format!("t{i}")), None, None)
+                .unwrap();
+        }
+        let n: i64 = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row("SELECT COUNT(*) FROM context_journal", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert!(n <= 2000, "journal working set stays bounded, got {n}");
+    }
+
+    #[test]
+    fn prompt_thread_provenance_round_trips_into_lake_items() {
+        let db = Database::open_in_memory().unwrap();
+        crate::ledger::record_prompt(
+            &db,
+            crate::ledger::PromptInput {
+                source: crate::ledger::PromptSource::RustFirstTurn,
+                origin: crate::ledger::Origin::Redline,
+                surface: "browse".to_string(),
+                role: None,
+                session_id: None,
+                claude_session_id: None,
+                mission_id: None,
+                project_path: None,
+                body: "discuss this page".to_string(),
+                thread: Some(crate::ledger::ThreadRef {
+                    thread_kind: "browse",
+                    thread_id: "tab-1".to_string(),
+                    parent_session_id: Some("s9".to_string()),
+                }),
+            },
+        )
+        .unwrap();
+        let items = db.list_lake_items_since(0, 10).unwrap();
+        let it = items.iter().find(|i| i.kind == "prompt").unwrap();
+        assert_eq!(it.thread_kind.as_deref(), Some("browse"));
+        assert_eq!(it.thread_id.as_deref(), Some("tab-1"));
+        assert_eq!(it.parent_session_id.as_deref(), Some("s9"));
+        // The chain is body-blind to the new columns: still green.
+        assert!(db.verify_ledger_chain().unwrap().ok);
+    }
+
+    #[test]
+    fn generic_thread_reader_maps_kinds_and_rejects_unknown() {
+        let db = Database::open_in_memory().unwrap();
+        db.insert_browse_message(&BrowseMessage {
+            id: "b1".into(),
+            browse_id: "tab-1".into(),
+            role: "user".into(),
+            body: "hello".into(),
+            status: "complete".into(),
+            created_at: 10,
+        })
+        .unwrap();
+        db.insert_browse_message(&BrowseMessage {
+            id: "b2".into(),
+            browse_id: "tab-1".into(),
+            role: "assistant".into(),
+            body: "hi".into(),
+            status: "complete".into(),
+            created_at: 20,
+        })
+        .unwrap();
+        let msgs = db.load_thread_generic("browse", "tab-1", 50).unwrap().unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, "user", "oldest-first");
+        let (count, last) = db.thread_stats("browse", "tab-1").unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(last, Some(20));
+        assert!(db.load_thread_generic("nope", "x", 10).unwrap().is_none());
+    }
+
+    #[test]
+    fn browse_events_fts_ranks_keyword_hits_and_is_injection_safe() {
+        let db = Database::open_in_memory().unwrap();
+        let page = |url: &str, title: &str, text: &str| crate::ledger::BrowseEventInput {
+            action: "navigate".into(),
+            browse_id: Some("t1".into()),
+            url: url.into(),
+            title: Some(title.into()),
+            text: text.into(),
+        };
+        crate::ledger::record_browse_event(
+            &db,
+            page("https://a.example", "Clerk auth", "Clerk provides authentication for Next.js apps"),
+        )
+        .unwrap();
+        crate::ledger::record_browse_event(
+            &db,
+            page("https://b.example", "Postgres tuning", "vacuum and autovacuum settings for large tables"),
+        )
+        .unwrap();
+
+        // A keyword search returns the matching page, not the other.
+        let hits = db.search_browse_events("authentication", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].url, "https://a.example");
+        assert!(hits[0].snippet.contains('[') && hits[0].snippet.contains(']'));
+
+        // Multi-term OR recall: matches either page, ranked.
+        let hits = db.search_browse_events("vacuum authentication", 10).unwrap();
+        assert_eq!(hits.len(), 2);
+
+        // An FTS-operator-shaped query can't error out — it matches literally
+        // (no such literal here) and simply returns nothing.
+        assert!(db.search_browse_events("\"unterminated OR (", 10).unwrap().is_empty());
+        // A query with no searchable tokens yields no hits (not an error).
+        assert!(db.search_browse_events("   *  ", 10).unwrap().is_empty());
     }
 
     #[test]
@@ -4278,6 +6380,7 @@ mod tests {
                 mission_id: None,
                 project_path: None,
                 body: "a long cold prompt body destined to be compacted to a gist".into(),
+                thread: None,
             },
         )
         .unwrap()

@@ -1,8 +1,8 @@
 ---
-name: redline-review
+name: redline-code-review
 description: >-
   Getting the code you just wrote reviewed line-by-line in Redline. Use when
-  the user asks for a code review, says "/redline-review", or when you want
+  the user asks for a code review, says "/redline-code-review", or when you want
   their sign-off on a batch of edits before moving on. Runs a blocking curl to
   the local Redline daemon: the diff of your changes opens in Redline's review
   pane, the user annotates it (comments, deletions, code suggestions), and the
@@ -10,7 +10,7 @@ description: >-
   session to address. Covers the command, the feedback format (line, whole-file
   and review-wide blocks, labels), review rounds, and the
   REDLINE_REVIEW_RESOLUTIONS reply contract.
-version: 2
+version: 3
 ---
 
 # Redline code review

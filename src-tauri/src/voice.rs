@@ -63,6 +63,55 @@ single feedback comment on the plan through the local bridge described below. \
 Before posting, read the change back to them in one short spoken sentence to \
 confirm; never post a change they did not explicitly ask you to capture.";
 
+/// The drafter variant of [`VOICE_PREAMBLE`]: same ear-shaped, opinionated
+/// collaborator, but the document under discussion is a PROMPT the user is
+/// drafting (to launch a fresh Claude Code plan session), not a finished plan.
+/// Voice stays read-only over the doc — spoken edits are a later pass with an
+/// explicit confirm step; hands-free mutation is too easy to trigger.
+const DRAFTER_VOICE_PREAMBLE: &str = "\
+You are the expert engineering colleague of the person writing this document — \
+a PROMPT they are drafting in Redline to launch a fresh Claude Code planning \
+session — and the two of you are thinking it through together, out loud, by \
+voice. Your job is to make the prompt land: pull the goal into focus, hunt the \
+missing constraints and context, and suggest sharper structure. You have \
+opinions and you share them; push back honestly when something is off. The \
+draft is included below, and the user keeps editing it while you talk — re-read \
+it through the bridge described below whenever you need current text. They hear \
+your replies spoken aloud by a text-to-speech engine, so write for the ear: \
+short, conversational, no markdown, no code blocks, no lists, no URLs. Lead \
+with your actual take, keep each turn tight so they can jump back in, and end \
+on the open question when there is one. If you are walking them through the \
+draft section by section, narrate continuously and silently adapt to their \
+reactions; never quiz them. You may read files, search the code, and fetch web \
+pages to ground your answers, but you must not edit files or the document, \
+produce a plan, or call ExitPlanMode.";
+
+/// The drafter voice agent's read bridge: how to re-read the live draft. No
+/// write surface — voice on a draft is read-only (see DRAFTER_VOICE_PREAMBLE).
+fn drafter_bridge_preamble(draft_id: &str) -> String {
+    format!(
+        "The draft lives at the local bridge (already permitted; no approval \
+needed — put the URL immediately after `-s`):\n\
+  curl -s http://127.0.0.1:7676/v1/drafter/{draft_id}/doc\n\
+It returns the live markdown (ignore any `<!-- rl:blk-… -->` markers when \
+reading aloud). The user edits continuously while you talk, so re-read before \
+answering about specific wording. This bridge is read-only: you must not \
+attempt any other call, edit files, or produce a plan."
+    )
+}
+
+/// The prefix that marks a voice key as a Prompt Drafter session
+/// (`drafter:<draft_id>`) rather than a plan session id. The key shape is the
+/// kind — no extra state needed anywhere in the registry.
+const DRAFTER_KEY_PREFIX: &str = "drafter:";
+
+/// The draft id inside a `drafter:<id>` voice key, or `None` for plan keys.
+fn drafter_key_id(session_id: &str) -> Option<&str> {
+    session_id
+        .strip_prefix(DRAFTER_KEY_PREFIX)
+        .filter(|s| !s.is_empty())
+}
+
 /// The capture-feedback bridge, appended to a fresh fork's first turn with the
 /// plan's own `session_id` baked into the curl templates. Teaches the agent to
 /// (1) read the plan's blocks to anchor against, then (2) POST a `[feedback]`
@@ -270,6 +319,7 @@ pub async fn voice_session_start(
     app: AppHandle,
     session_id: String,
     plan_markdown: String,
+    cwd: Option<String>,
 ) -> Result<(), String> {
     {
         let guard = voice.procs.lock().unwrap();
@@ -278,10 +328,22 @@ pub async fn voice_session_start(
         }
     }
 
-    let session = store
-        .get(&session_id)
-        .ok_or_else(|| format!("no session {session_id}"))?;
-    let cwd = session.project_path.clone();
+    // A `drafter:<draft_id>` key is a Prompt Drafter voice session: there is no
+    // plan session to look up — the caller passes the cwd (the launch project)
+    // and `plan_markdown` carries the draft. Plan keys keep the SessionStore
+    // lookup as the cwd source of truth.
+    let cwd = match drafter_key_id(&session_id) {
+        Some(_) => cwd
+            .filter(|c| !c.trim().is_empty())
+            .or_else(|| std::env::var("HOME").ok())
+            .unwrap_or_else(|| "/".to_string()),
+        None => {
+            let session = store
+                .get(&session_id)
+                .ok_or_else(|| format!("no session {session_id}"))?;
+            session.project_path.clone()
+        }
+    };
     let prior_fork = voice.db.get_voice_fork_session(&session_id);
 
     // Persistent stream-json session. Read-only tools, MCP stripped, never plan
@@ -439,18 +501,25 @@ pub async fn voice_send(
         return Err("a reply is still streaming".to_string());
     }
 
-    // The first turn of a fresh session carries the preamble, the capture-feedback
-    // bridge (with this plan's session_id baked into the curl templates), and —
-    // for a fresh (non-resumed) session — the plan text so the agent knows what
-    // it's discussing.
+    // The first turn of a fresh session carries the preamble, the bridge (plan:
+    // capture-feedback with the session id baked in; drafter: the read-only doc
+    // route), and — for a fresh (non-resumed) session — the document text so
+    // the agent knows what it's discussing.
     let is_first_turn = !primed.swap(true, Ordering::SeqCst);
     let send_text = if is_first_turn {
-        let bridge = bridge_preamble(&session_id);
-        match &prime {
-            Some(plan) => format!(
-                "{VOICE_PREAMBLE}\n\n{bridge}\n\n--- PLAN ---\n{plan}\n--- END PLAN ---\n\n{text}"
+        let (preamble, bridge, doc_tag) = match drafter_key_id(&session_id) {
+            Some(draft_id) => (
+                DRAFTER_VOICE_PREAMBLE,
+                drafter_bridge_preamble(draft_id),
+                "DRAFT",
             ),
-            None => format!("{VOICE_PREAMBLE}\n\n{bridge}\n\n{text}"),
+            None => (VOICE_PREAMBLE, bridge_preamble(&session_id), "PLAN"),
+        };
+        match &prime {
+            Some(doc) => format!(
+                "{preamble}\n\n{bridge}\n\n--- {doc_tag} ---\n{doc}\n--- END {doc_tag} ---\n\n{text}"
+            ),
+            None => format!("{preamble}\n\n{bridge}\n\n{text}"),
         }
     } else {
         text
@@ -458,16 +527,57 @@ pub async fn voice_send(
 
     // Polis ledger: record the first-turn voice prompt (voice delivers turns over
     // stdin, so the global hook usually won't see it — register defensively).
+    // The voice thread's parent is explicit, never inferred: its plan session,
+    // or — for a `drafter:` key — its draft.
     if is_first_turn {
-        crate::ledger::record_agent_prompt(
-            &voice.db,
-            crate::ledger::PromptSource::VoiceStream,
-            "voice",
-            &send_text,
-            None,
-            Some(session_id.clone()),
-            None,
-        );
+        match drafter_key_id(&session_id) {
+            Some(draft_id) => {
+                let _ = crate::ledger::record_session_link(
+                    &voice.db,
+                    "voice",
+                    &session_id,
+                    "drafter",
+                    draft_id,
+                );
+                crate::ledger::record_agent_prompt(
+                    &voice.db,
+                    crate::ledger::PromptSource::VoiceStream,
+                    "drafter_voice",
+                    &send_text,
+                    None,
+                    None,
+                    None,
+                    Some(crate::ledger::ThreadRef {
+                        thread_kind: "voice",
+                        thread_id: session_id.clone(),
+                        parent_session_id: None,
+                    }),
+                );
+            }
+            None => {
+                let _ = crate::ledger::record_session_link(
+                    &voice.db,
+                    "voice",
+                    &session_id,
+                    "session",
+                    &session_id,
+                );
+                crate::ledger::record_agent_prompt(
+                    &voice.db,
+                    crate::ledger::PromptSource::VoiceStream,
+                    "voice",
+                    &send_text,
+                    None,
+                    Some(session_id.clone()),
+                    None,
+                    Some(crate::ledger::ThreadRef {
+                        thread_kind: "voice",
+                        thread_id: session_id.clone(),
+                        parent_session_id: Some(session_id.clone()),
+                    }),
+                );
+            }
+        }
     } else {
         crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&send_text));
     }
@@ -768,6 +878,14 @@ async fn read_voice(
                     );
                 } else {
                     saw_success = true;
+                    // Companion journal: the voice agent completed a turn.
+                    let _ = db.append_journal(
+                        "agent_turn",
+                        Some("voice"),
+                        Some(&session_id),
+                        None,
+                        None,
+                    );
                     let _ = app.emit(
                         "voice-done",
                         VoiceDone {
@@ -984,5 +1102,33 @@ mod tests {
         // Anchoring + confirm-before-post guidance is taught.
         assert!(b.contains("heading"));
         assert!(b.contains("read the change back"));
+    }
+
+    #[test]
+    fn drafter_key_shape_is_the_kind() {
+        assert_eq!(drafter_key_id("drafter:abc-123"), Some("abc-123"));
+        assert_eq!(drafter_key_id("sess-XYZ"), None);
+        assert_eq!(drafter_key_id("drafter:"), None, "empty id is not a draft");
+    }
+
+    #[test]
+    fn drafter_bridge_preamble_is_read_only_and_embeds_doc_route() {
+        let b = drafter_bridge_preamble("d-42");
+        // The doc route with the draft id baked in, immediately after `-s`.
+        assert!(b.contains("curl -s http://127.0.0.1:7676/v1/drafter/d-42/doc"));
+        // Read-only: no comments/suggestions write surface for voice.
+        assert!(!b.contains("/comments"));
+        assert!(!b.contains("/suggestions"));
+        assert!(b.contains("read-only"));
+        // Re-read discipline (the user edits while talking).
+        assert!(b.contains("re-read"));
+    }
+
+    #[test]
+    fn drafter_voice_preamble_is_ear_shaped_and_no_mutation() {
+        assert!(DRAFTER_VOICE_PREAMBLE.contains("spoken aloud"));
+        assert!(DRAFTER_VOICE_PREAMBLE.contains("PROMPT"));
+        assert!(DRAFTER_VOICE_PREAMBLE.contains("must not edit files or the document"));
+        assert!(DRAFTER_VOICE_PREAMBLE.contains("never quiz them"));
     }
 }

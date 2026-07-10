@@ -8,7 +8,7 @@ description: >-
   decided, and organized — their captured prompts (the lake), a plan session's
   full history, their ClassMemory catalog, and aggregate stats. All tools are
   read-only and reach a locally running Redline over 127.0.0.1.
-version: 1
+version: 2
 ---
 
 # Analyzing Redline memory over MCP
@@ -45,6 +45,12 @@ you just reach it through MCP instead. The user's memory has two layers:
   before you go spelunking in raw prompts.
 - **`stats`** — aggregate counts: prompts per day, per surface, ledger events per
   kind, linked items per class. Use for a fast shape-of-the-corpus read.
+- **`search_browsing`** — lexical (BM25) full-text search over the user's browsing
+  behavior (the pages they landed on), with a matched snippet per hit, best-first.
+  Args: `q` (keywords), `limit` (1–200, default 20). Use for "what pages has the
+  user seen about X" — the browsing stream is keyword-heavy, so it's searched
+  lexically, distinct from `query_prompts` (their prompts) and `memory_tree`
+  (their curated classes).
 
 ## How to work
 

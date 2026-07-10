@@ -71,6 +71,7 @@ reqwest = { version = "0.13.4", features = ["json", "blocking"] }
 # mono Whisper expects. Pure Rust (no C build); used by the batch Whisper
 # dictation backend to prepare the accumulated utterance before inference.
 rubato = "0.16"
+tauri-plugin-deep-link = "2.4.9"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Local Whisper (whisper.cpp) speech-to-text as the higher-quality, pluggable

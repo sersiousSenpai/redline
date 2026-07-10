@@ -549,6 +549,70 @@ export interface Linked {
   updatedAt: number;
 }
 
+/** A Companion session — ONE global discussion that follows the user across
+ *  every surface of the app. Mirrors the Rust `Companion`. */
+export interface Companion {
+  companionId: string;
+  title: string;
+  /** "active" | "archived". */
+  status: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** One persisted Companion turn, surface-tagged with where the user was. */
+export interface CompanionMessage {
+  id: string;
+  companionId: string;
+  /** "user" | "assistant". */
+  role: string;
+  body: string;
+  /** "complete" | "error". */
+  status: string;
+  surfaceKind: string | null;
+  surfaceId: string | null;
+  surfaceLabel: string | null;
+  createdAt: number;
+}
+
+/** A chunk of streaming Companion text. */
+export interface CompanionDeltaEvent {
+  companionId: string;
+  text: string;
+}
+
+/** A Companion turn finished — `body` is the authoritative full reply. */
+export interface CompanionDoneEvent {
+  companionId: string;
+  messageId: string;
+  body: string;
+}
+
+export interface CompanionErrorEvent {
+  companionId: string;
+  error: string;
+}
+
+export interface CompanionCancelledEvent {
+  companionId: string;
+}
+
+/** A comment anchored to a Prompt Drafter block — the drafter sidecar.
+ *  Mirrors the Rust `DraftComment`; its discussion thread rides the shared
+ *  `thread_messages` store keyed `(draftId, comment.id)` on `fork-*` events. */
+export interface DraftComment {
+  id: string;
+  draftId: string;
+  blockId: string | null;
+  selCharStart: number | null;
+  selCharEnd: number | null;
+  selQuotedText: string | null;
+  body: string;
+  author: string | null;
+  createdAt: number;
+  forkSessionId: string | null;
+}
+
 /** One persisted turn in a linked discussion. Mirrors the Rust `LinkedMessage`.
  *  Each turn is tab-tagged (`tab*`) with the tab the user was on at the time, so
  *  the UI can show "on tab N — Title" per message. */

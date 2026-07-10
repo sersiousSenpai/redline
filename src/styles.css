@@ -1201,6 +1201,43 @@ p.rl-block-modified {
   box-shadow: inset 0 0 0 1px var(--color-warning);
 }
 
+/* ── Plaintext "linting" — IDE-style token coloring ───────────────────────
+   The LintDecorations ProseMirror plugin tags tokens in the plan document with
+   `rl-lint rl-lint--<kind>` spans; these rules color them per the active lint
+   theme, keyed on <html data-lint>. Scoped to `.rl-prose` so only the document
+   text is affected, never the app chrome. When linting is off the plugin emits
+   no spans at all, so there's no "off" rule to write. Adding a new lint theme =
+   add a `:root[data-lint="<name>"]` block here + an entry in theme/lint.ts. */
+
+/* Cyberpunk — a neon duotone syntax glow (cyan / magenta / amber / mint) with a
+   faint bloom, echoing the "Synthwave / Cyberpunk" editor themes. Tuned for the
+   dark page the Terminal color theme provides, but harmless on any background. */
+:root[data-lint="cyberpunk"] .rl-prose .rl-lint {
+  /* A hair of extra weight makes tokens read as "code" against prose. */
+  font-weight: 500;
+}
+:root[data-lint="cyberpunk"] .rl-prose .rl-lint--num {
+  color: #ffd23f;
+  text-shadow: 0 0 6px color-mix(in srgb, #ffd23f 55%, transparent);
+}
+:root[data-lint="cyberpunk"] .rl-prose .rl-lint--str {
+  color: #5de6a8;
+  text-shadow: 0 0 6px color-mix(in srgb, #5de6a8 50%, transparent);
+}
+:root[data-lint="cyberpunk"] .rl-prose .rl-lint--kw {
+  color: #ff2e97;
+  font-weight: 700;
+  text-shadow: 0 0 8px color-mix(in srgb, #ff2e97 55%, transparent);
+}
+:root[data-lint="cyberpunk"] .rl-prose .rl-lint--url {
+  color: #00e5ff;
+  text-shadow: 0 0 7px color-mix(in srgb, #00e5ff 55%, transparent);
+}
+:root[data-lint="cyberpunk"] .rl-prose .rl-lint--punct {
+  color: #7fdcff;
+  text-shadow: 0 0 5px color-mix(in srgb, #7fdcff 45%, transparent);
+}
+
 /* ── Phase 1: rich code-block & mermaid presentation ──────────────────────
    Rendered by the CodeBlockView React NodeView. The `codeBlock` ProseMirror
    node is unchanged — this is presentation only. */
@@ -2777,4 +2814,58 @@ p.rl-block-modified {
 }
 @media (prefers-reduced-motion: reduce) {
   .rl-live-dot { animation: none; }
+}
+
+/* Table-of-contents rail: a quiet hover so entries feel clickable without
+   competing with the active-heading accent bar. */
+.rl-toc-item:hover {
+  background: color-mix(in srgb, var(--color-ink) 8%, transparent);
+}
+
+/* ── Terminal theme FX ──────────────────────────────────────────────────────
+   A whisper-quiet "cyberdeck" texture, active only under the Terminal theme.
+   Pure CSS (static gradients, no canvas / rAF): a faint blueprint grid, a
+   subtle horizontal scanline, and a cyan glow bleeding down from the top. Kept
+   at very low opacity so it reads as surface texture, never as a veil over the
+   document — the overlay is pointer-events:none and sits behind interactive
+   chrome via a fixed full-viewport layer at the back of the stacking context. */
+:root[data-theme="terminal"] body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image:
+    /* cyan glow from the top edge */
+    radial-gradient(
+      120% 60% at 50% -10%,
+      color-mix(in srgb, var(--color-info) 10%, transparent),
+      transparent 60%
+    ),
+    /* horizontal scanlines */
+    repeating-linear-gradient(
+      to bottom,
+      rgba(255, 255, 255, 0.018) 0px,
+      rgba(255, 255, 255, 0.018) 1px,
+      transparent 1px,
+      transparent 3px
+    ),
+    /* blueprint grid */
+    linear-gradient(
+      to right,
+      color-mix(in srgb, var(--color-info) 6%, transparent) 1px,
+      transparent 1px
+    ),
+    linear-gradient(
+      to bottom,
+      color-mix(in srgb, var(--color-info) 6%, transparent) 1px,
+      transparent 1px
+    );
+  background-size: 100% 100%, 100% 3px, 44px 44px, 44px 44px;
+}
+/* Keep the app's own layers above the texture. #root establishes a stacking
+   context so all real UI paints over the fixed ::before layer. */
+:root[data-theme="terminal"] #root {
+  position: relative;
+  z-index: 1;
 }

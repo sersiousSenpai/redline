@@ -3,18 +3,36 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { EditorContent, useEditor } from "@tiptap/react";
 import type { JSONContent } from "@tiptap/react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 import { drafterExtensions } from "../editor/extensions/drafterExtensions";
 import { planDocToMarkdown } from "../editor/markdown/serializer";
+import {
+  acceptDraftSuggestion,
+  applyDraftSuggestion,
+  rejectDraftSuggestion,
+  type DraftSuggestionRow,
+} from "../editor/drafterSuggestions";
 import { DrafterToolbar } from "./DrafterToolbar";
 import { DrafterFindBar } from "./DrafterFindBar";
+import { DrafterChat } from "./DrafterChat";
+import { DrafterSidecar } from "./DrafterSidecar";
 import { ProjectPicker, type ProjectOption } from "./ProjectPicker";
+import { useTextSelection } from "../hooks/useTextSelection";
+import type { CommentHighlightRange } from "../editor/extensions/CommentHighlights";
+import type { DraftComment } from "../types";
 
 interface PromptDrafterProps {
+  /** The draft's durable identity — keys its agents, comments, and memory. */
+  draftId: string;
   /** Persisted draft (Tiptap JSON), or null for a blank document. */
   doc: JSONContent | null;
   /** Called (debounced) with the latest Tiptap JSON so the host can persist it. */
   onDocChange: (json: JSONContent) => void;
+  /** Called on the same debounce with the markdown mirror (sidecars on) so the
+   *  host can flush it to the backend `drafts` table for the agents to read. */
+  onMarkdownChange?: (markdown: string) => void;
   /** Candidate project directories for the launch picker. */
   projectOptions: ProjectOption[];
   /** Selected project dir, or null for $HOME. */
@@ -22,20 +40,30 @@ interface PromptDrafterProps {
   onSelectedProjectChange: (path: string | null) => void;
   /** Launch a fresh Claude plan session with this prompt (markdown) + cwd. */
   onLaunch: (markdown: string, projectPath: string | null) => void;
+  /** The 💬 discussion pane (internal split). */
+  chatOpen: boolean;
+  onChatOpenChange: (open: boolean) => void;
 }
 
 // The Prompt Drafter: a Word-style document editor for authoring a prompt and
 // launching it into a new Claude Code plan session. JSON is the in-editor source
 // of truth (full fidelity, persisted); markdown is generated only at send time.
 export function PromptDrafter({
+  draftId,
   doc,
   onDocChange,
+  onMarkdownChange,
   projectOptions,
   selectedProject,
   onSelectedProjectChange,
   onLaunch,
+  chatOpen,
+  onChatOpenChange,
 }: PromptDrafterProps) {
   const persistTimer = useRef<number | null>(null);
+  // Latest onMarkdownChange without re-creating the editor on identity churn.
+  const onMarkdownChangeRef = useRef(onMarkdownChange);
+  onMarkdownChangeRef.current = onMarkdownChange;
 
   const editor = useEditor({
     extensions: drafterExtensions(),
@@ -52,6 +80,11 @@ export function PromptDrafter({
         window.clearTimeout(persistTimer.current);
       persistTimer.current = window.setTimeout(() => {
         onDocChange(editor.getJSON());
+        // Mirror the markdown (sidecars ON so block ids survive for the
+        // agents' block-addressed suggestions) on the same debounce.
+        onMarkdownChangeRef.current?.(
+          planDocToMarkdown(editor.state.doc, { sidecars: true }),
+        );
       }, 400);
     },
   });
@@ -78,6 +111,186 @@ export function PromptDrafter({
       }
     };
   }, [editor, onDocChange]);
+
+  // Agent write-suggestions: drain the pending queue on mount (proposals made
+  // while the pane was closed), then apply live `drafter-suggestion` events.
+  // Each lands as tracked changes (or applies directly into an empty doc) and
+  // gets a card with Accept/Reject; the verdict is persisted so the agent's
+  // next doc read reflects it.
+  const [suggestions, setSuggestions] = useState<DraftSuggestionRow[]>([]);
+  const seenSuggestions = useRef<Set<string>>(new Set());
+
+  const landSuggestion = useCallback(
+    (s: DraftSuggestionRow) => {
+      if (!editor || editor.isDestroyed) return;
+      if (seenSuggestions.current.has(s.id)) return;
+      seenSuggestions.current.add(s.id);
+      const outcome = applyDraftSuggestion(editor, s);
+      if (outcome === "applied") {
+        void invoke("draft_suggestion_resolve", {
+          id: s.id,
+          status: "applied",
+        }).catch(() => {});
+        // Persist the applied content promptly (skip the debounce race on an
+        // immediate launch after a whole-cloth draft).
+        onDocChange(editor.getJSON());
+        onMarkdownChangeRef.current?.(
+          planDocToMarkdown(editor.state.doc, { sidecars: true }),
+        );
+        return;
+      }
+      if (outcome === "stale") {
+        void invoke("draft_suggestion_resolve", {
+          id: s.id,
+          status: "rejected",
+        }).catch(() => {});
+        return;
+      }
+      setSuggestions((list) =>
+        list.some((x) => x.id === s.id) ? list : [...list, s],
+      );
+    },
+    [editor, onDocChange],
+  );
+
+  useEffect(() => {
+    if (!editor) return;
+    let alive = true;
+    void invoke<DraftSuggestionRow[]>("draft_suggestions_pending", {
+      draftId,
+    })
+      .then((rows) => {
+        if (!alive) return;
+        for (const s of rows) landSuggestion(s);
+      })
+      .catch(() => {});
+    const p = listen<DraftSuggestionRow>("drafter-suggestion", (e) => {
+      if (!alive || e.payload.draftId !== draftId) return;
+      landSuggestion(e.payload);
+    });
+    return () => {
+      alive = false;
+      void p.then((un) => un());
+    };
+  }, [editor, draftId, landSuggestion]);
+
+  const resolveSuggestion = useCallback(
+    (s: DraftSuggestionRow, verdict: "applied" | "rejected") => {
+      if (editor && !editor.isDestroyed) {
+        if (verdict === "applied") acceptDraftSuggestion(editor, s);
+        else rejectDraftSuggestion(editor, s);
+      }
+      setSuggestions((list) => list.filter((x) => x.id !== s.id));
+      void invoke("draft_suggestion_resolve", {
+        id: s.id,
+        status: verdict,
+      }).catch(() => {});
+    },
+    [editor],
+  );
+
+  // --- The comment sidecar (selection-anchored draft comments) -------------
+  const [comments, setComments] = useState<DraftComment[]>([]);
+  const [sidecarOpen, setSidecarOpen] = useState(false);
+  const [focusedCommentId, setFocusedCommentId] = useState<string | null>(null);
+  const workspaceRef = useRef<HTMLDivElement>(null);
+  const [selection, clearSelection] = useTextSelection(workspaceRef, true);
+  const [commentDraft, setCommentDraft] = useState<string | null>(null);
+  // The selection SNAPSHOT the composer works from. The live `selection`
+  // collapses the instant focus moves (clicking the button, the textarea's
+  // autofocus — each fires `selectionchange`), which unmounted the popover a
+  // frame after it appeared. Snapshot on click; the popover renders from the
+  // snapshot and survives losing the live selection.
+  const [pendingSel, setPendingSel] = useState<{
+    blockId: string | null;
+    charStart: number;
+    charEnd: number;
+    quotedText: string;
+    rect: { left: number; top: number };
+  } | null>(null);
+
+  const openCommentComposer = useCallback(() => {
+    if (!selection) return;
+    setPendingSel({
+      blockId: selection.anchorId || null,
+      charStart: selection.charStart,
+      charEnd: selection.charEnd,
+      quotedText: selection.text,
+      rect: { left: selection.rect.left, top: selection.rect.top },
+    });
+    setCommentDraft("");
+    clearSelection();
+  }, [selection, clearSelection]);
+
+  useEffect(() => {
+    let alive = true;
+    void invoke<DraftComment[]>("draft_comment_list", { draftId })
+      .then((rows) => {
+        if (!alive) return;
+        setComments(rows);
+        if (rows.length > 0) setSidecarOpen(true);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [draftId]);
+
+  // Project the comments to inline highlights (CommentHighlights keys on the
+  // same blockId/charStart/charEnd anchors the plan editor uses).
+  useEffect(() => {
+    if (!editor || editor.isDestroyed) return;
+    const ranges: CommentHighlightRange[] = comments.flatMap((c) =>
+      c.blockId && c.selCharStart != null && c.selCharEnd != null
+        ? [
+            {
+              commentId: c.id,
+              blockId: c.blockId,
+              charStart: c.selCharStart,
+              charEnd: c.selCharEnd,
+              quotedText: c.selQuotedText ?? "",
+              muted: false,
+            },
+          ]
+        : [],
+    );
+    editor.commands.setCommentHighlights(ranges);
+    editor.commands.focusCommentHighlight(focusedCommentId);
+  }, [editor, comments, focusedCommentId]);
+
+  const addComment = useCallback(
+    (body: string) => {
+      if (!pendingSel || !body.trim()) return;
+      void invoke<DraftComment>("draft_comment_add", {
+        draftId,
+        body,
+        blockId: pendingSel.blockId,
+        selCharStart: pendingSel.charStart,
+        selCharEnd: pendingSel.charEnd,
+        selQuotedText: pendingSel.quotedText,
+      })
+        .then((c) => {
+          setComments((list) => [...list, c]);
+          setSidecarOpen(true);
+          setFocusedCommentId(c.id);
+        })
+        .catch(() => {});
+      setCommentDraft(null);
+      setPendingSel(null);
+    },
+    [pendingSel, draftId],
+  );
+
+  const deleteComment = useCallback(
+    (id: string) => {
+      void invoke("draft_comment_delete", { draftId, commentId: id }).catch(
+        () => {},
+      );
+      setComments((list) => list.filter((c) => c.id !== id));
+      if (focusedCommentId === id) setFocusedCommentId(null);
+    },
+    [draftId, focusedCommentId],
+  );
 
   const launch = useCallback(() => {
     if (!editor || editor.isEmpty) return;
@@ -213,28 +426,224 @@ export function PromptDrafter({
     >
       <DrafterToolbar editor={editor} />
 
-      <div className="rl-thin-scroll-y rl-page-workspace min-h-0 flex-1 overflow-y-auto">
-        {searchOpen && (
-          <DrafterFindBar
-            query={searchQuery}
-            onQueryChange={runSearch}
-            replacement={replacement}
-            onReplacementChange={setReplacement}
-            matchCount={searchCount}
-            activeIndex={searchActive}
-            onNext={() => stepSearch("next")}
-            onPrev={() => stepSearch("prev")}
-            onReplaceOne={replaceActive}
-            onReplaceAll={replaceAll}
-            onClose={closeSearch}
+      {suggestions.length > 0 && (
+        <div
+          data-no-drag="true"
+          className="flex flex-col gap-1 px-4 py-1.5"
+          style={{
+            borderBottom: "1px solid var(--color-rule)",
+            background: "var(--color-bg-elevated)",
+          }}
+        >
+          {suggestions.map((s) => (
+            <div key={s.id} className="flex items-center gap-2">
+              <span style={{ fontSize: "12px" }}>✍️</span>
+              <span
+                className="min-w-0 flex-1 truncate"
+                style={{ fontSize: "11.5px", color: "var(--color-ink)" }}
+                title={s.body ?? undefined}
+              >
+                {s.body?.trim() ||
+                  {
+                    append: "Proposed new content",
+                    replace_block: "Proposed a rewrite of a block",
+                    insert_after: "Proposed an insertion",
+                    delete_block: "Proposed removing a block",
+                  }[s.op] ||
+                  "Agent suggestion"}
+                <span
+                  style={{
+                    color: "var(--color-ink-muted)",
+                    marginLeft: "6px",
+                    fontSize: "10px",
+                  }}
+                >
+                  — tracked in the document
+                </span>
+              </span>
+              <button
+                type="button"
+                onClick={() => resolveSuggestion(s, "applied")}
+                className="rounded-sm px-2 py-0.5"
+                style={{
+                  fontSize: "11px",
+                  border: "1px solid var(--color-rule)",
+                  background: "var(--color-anchor-bg)",
+                  color: "var(--color-anchor-text)",
+                  cursor: "pointer",
+                }}
+              >
+                Accept
+              </button>
+              <button
+                type="button"
+                onClick={() => resolveSuggestion(s, "rejected")}
+                className="rounded-sm px-2 py-0.5"
+                style={{
+                  fontSize: "11px",
+                  border: "1px solid var(--color-rule)",
+                  background: "var(--color-paper)",
+                  color: "var(--color-ink-muted)",
+                  cursor: "pointer",
+                }}
+              >
+                Reject
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="flex min-h-0 flex-1">
+        <div
+          ref={workspaceRef}
+          className="rl-thin-scroll-y rl-page-workspace relative min-h-0 flex-1 overflow-y-auto"
+        >
+          {selection && pendingSel === null && (
+            <button
+              type="button"
+              // preventDefault on mousedown so clicking the button never
+              // collapses the selection it exists to act on (the plan
+              // editor's SelectionMenu does the same).
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={openCommentComposer}
+              className="fixed z-30 rounded-full px-2.5 py-1"
+              style={{
+                left: `${Math.max(8, selection.rect.left)}px`,
+                top: `${Math.max(8, selection.rect.top - 34)}px`,
+                fontSize: "11.5px",
+                background: "var(--color-bg-elevated)",
+                border: "1px solid var(--color-rule)",
+                color: "var(--color-ink)",
+                boxShadow: "0 4px 14px rgba(0,0,0,0.18)",
+                cursor: "pointer",
+              }}
+            >
+              🗨️ Comment
+            </button>
+          )}
+          {pendingSel && commentDraft !== null && (
+            <div
+              className="fixed z-30 flex flex-col gap-1 rounded p-2"
+              style={{
+                left: `${Math.max(8, pendingSel.rect.left)}px`,
+                top: `${Math.max(8, pendingSel.rect.top - 96)}px`,
+                width: "260px",
+                background: "var(--color-bg-elevated)",
+                border: "1px solid var(--color-rule)",
+                boxShadow: "0 4px 14px rgba(0,0,0,0.18)",
+              }}
+            >
+              <div
+                className="truncate"
+                style={{
+                  fontSize: "10.5px",
+                  color: "var(--color-ink-muted)",
+                  borderLeft: "2px solid var(--color-rule)",
+                  paddingLeft: "6px",
+                }}
+                title={pendingSel.quotedText}
+              >
+                {pendingSel.quotedText}
+              </div>
+              <textarea
+                autoFocus
+                value={commentDraft}
+                onChange={(e) => setCommentDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    addComment(commentDraft);
+                  }
+                  if (e.key === "Escape") {
+                    setCommentDraft(null);
+                    setPendingSel(null);
+                  }
+                }}
+                placeholder="Comment on this selection…"
+                rows={2}
+                className="rounded px-1.5 py-1"
+                style={{
+                  fontSize: "12px",
+                  border: "1px solid var(--color-rule)",
+                  background: "var(--color-paper)",
+                  color: "var(--color-ink)",
+                  fontFamily: "inherit",
+                  resize: "none",
+                }}
+              />
+              <div className="flex justify-end gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCommentDraft(null);
+                    setPendingSel(null);
+                  }}
+                  style={{ fontSize: "11px", color: "var(--color-ink-muted)" }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => addComment(commentDraft)}
+                  disabled={!commentDraft.trim()}
+                  className="rounded px-2 py-0.5"
+                  style={{
+                    fontSize: "11px",
+                    background: "var(--color-info)",
+                    color: "var(--color-on-accent)",
+                    opacity: commentDraft.trim() ? 1 : 0.5,
+                  }}
+                >
+                  Add
+                </button>
+              </div>
+            </div>
+          )}
+          {searchOpen && (
+            <DrafterFindBar
+              query={searchQuery}
+              onQueryChange={runSearch}
+              replacement={replacement}
+              onReplacementChange={setReplacement}
+              matchCount={searchCount}
+              activeIndex={searchActive}
+              onNext={() => stepSearch("next")}
+              onPrev={() => stepSearch("prev")}
+              onReplaceOne={replaceActive}
+              onReplaceAll={replaceAll}
+              onClose={closeSearch}
+            />
+          )}
+          <div
+            className="rl-page"
+            onClick={() => editor?.chain().focus().run()}
+          >
+            <EditorContent editor={editor} />
+          </div>
+        </div>
+        {sidecarOpen && (
+          <DrafterSidecar
+            draftId={draftId}
+            comments={comments}
+            focusedId={focusedCommentId}
+            onSelect={setFocusedCommentId}
+            onDelete={deleteComment}
+            onClose={() => setSidecarOpen(false)}
           />
         )}
-        <div
-          className="rl-page"
-          onClick={() => editor?.chain().focus().run()}
-        >
-          <EditorContent editor={editor} />
-        </div>
+        {chatOpen && (
+          <DrafterChat
+            draftId={draftId}
+            projectPath={selectedProject}
+            getMarkdown={() =>
+              editor
+                ? planDocToMarkdown(editor.state.doc, { sidecars: true })
+                : ""
+            }
+            onClose={() => onChatOpenChange(false)}
+          />
+        )}
       </div>
 
       <div
@@ -252,6 +661,48 @@ export function PromptDrafter({
           {words} {words === 1 ? "word" : "words"} · {chars}{" "}
           {chars === 1 ? "character" : "characters"}
         </span>
+        <button
+          type="button"
+          onClick={() => setSidecarOpen((v) => !v)}
+          title={
+            sidecarOpen
+              ? "Close the comment sidecar"
+              : "Comments anchored to this draft"
+          }
+          className="rounded-sm px-2 py-0.5"
+          style={{
+            fontSize: "11px",
+            border: "1px solid var(--color-rule)",
+            background: sidecarOpen
+              ? "var(--color-bg-elevated)"
+              : "var(--color-paper)",
+            color: sidecarOpen ? "var(--color-info)" : "var(--color-ink-muted)",
+            cursor: "pointer",
+          }}
+        >
+          🗨️ Comments{comments.length > 0 ? ` (${comments.length})` : ""}
+        </button>
+        <button
+          type="button"
+          onClick={() => onChatOpenChange(!chatOpen)}
+          title={
+            chatOpen
+              ? "Close the draft discussion"
+              : "Discuss this draft with an agent that can write into it"
+          }
+          className="rounded-sm px-2 py-0.5"
+          style={{
+            fontSize: "11px",
+            border: "1px solid var(--color-rule)",
+            background: chatOpen
+              ? "var(--color-bg-elevated)"
+              : "var(--color-paper)",
+            color: chatOpen ? "var(--color-info)" : "var(--color-ink-muted)",
+            cursor: "pointer",
+          }}
+        >
+          💬 Discuss
+        </button>
         <span style={{ opacity: 0.7 }}>⌘F to find &amp; replace</span>
       </div>
 

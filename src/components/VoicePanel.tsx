@@ -58,11 +58,16 @@ interface TranscriptLine {
 }
 
 interface VoicePanelProps {
+  /** The voice key: a plan session id, or `drafter:<draft_id>` for a Prompt
+   *  Drafter session (the backend derives the kind from the key shape). */
   sessionId: string;
-  /** Latest revision's raw plan markdown (sidecars included). */
+  /** The document under discussion (plan revision or draft), sidecars included. */
   markdown: string;
   /** Section tree — drives the structure-aware read and the walkthrough. */
   sections: Section[];
+  /** Working dir for a drafter session (plan sessions resolve their own from
+   *  the SessionStore). */
+  cwd?: string | null;
   onClose: () => void;
 }
 
@@ -81,6 +86,7 @@ export function VoicePanel({
   sessionId,
   markdown,
   sections,
+  cwd,
   onClose,
 }: VoicePanelProps) {
   const [speechState, setSpeechState] = useState<SpeechState>("idle");
@@ -283,6 +289,7 @@ export function VoicePanel({
     void invoke("voice_session_start", {
       sessionId,
       planMarkdown: markdownRef.current,
+      cwd: cwd ?? null,
     })
       .then(() => alive && setSessionUp(true))
       .catch((e) => alive && setError(String(e)));
@@ -358,6 +365,7 @@ export function VoicePanel({
         await invoke("voice_session_start", {
           sessionId,
           planMarkdown: markdownRef.current,
+          cwd: cwd ?? null,
         });
         await invoke("voice_send", { sessionId, text });
       }
@@ -518,6 +526,7 @@ export function VoicePanel({
         void invoke("voice_session_start", {
           sessionId,
           planMarkdown: markdownRef.current,
+          cwd: cwd ?? null,
         }).catch(() => {});
       });
     // Keep swallowing the killed child's exit/error past its stdout EOF, then

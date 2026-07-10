@@ -614,6 +614,100 @@ pub struct BrowseMessage {
     pub created_at: i64,
 }
 
+/// One turn in a draft's discussion thread (the Prompt Drafter's 💬 agent).
+/// Mirrors `BrowseMessage`, scoped to a `draft_id`. The agent's resumable
+/// session id + the last doc hash it saw live in `draft_chat_threads`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftChatMessage {
+    pub id: String,
+    pub draft_id: String,
+    /// "user" | "assistant".
+    pub role: String,
+    pub body: String,
+    /// "complete" | "error".
+    pub status: String,
+    pub created_at: i64,
+}
+
+/// A Companion session: ONE global discussion that follows the user across
+/// every surface of the app (plan reviews, Prompt Drafter, browser, missions,
+/// code review). Backed by `companion_sessions`; the resumable claude session
+/// id lives on the row, and `last_journal_seq` is the high-water mark of
+/// context-journal rows already folded into the conversation ("while you were
+/// away"). See companion.rs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Companion {
+    pub companion_id: String,
+    pub title: String,
+    /// "active" | "archived".
+    pub status: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// One persisted turn in a Companion discussion. Each turn is surface-tagged
+/// with where the user was when it was sent, so the UI can show "on the plan —
+/// My plan" per message (the Companion's analog of linked's tab tags).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompanionMessage {
+    pub id: String,
+    pub companion_id: String,
+    /// "user" | "assistant".
+    pub role: String,
+    pub body: String,
+    /// "complete" | "error".
+    pub status: String,
+    pub surface_kind: Option<String>,
+    pub surface_id: Option<String>,
+    pub surface_label: Option<String>,
+    pub created_at: i64,
+}
+
+/// A comment anchored to a draft block — the Prompt Drafter's sidecar
+/// (selection-anchored discussion threads, like plan comments but leaner:
+/// no kinds/resolutions/structural payloads). The thread itself lives in
+/// `thread_messages` keyed `(draft_id, comment_id)` (the review-thread
+/// precedent); the fork's resumable session id lives here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftComment {
+    pub id: String,
+    pub draft_id: String,
+    pub block_id: Option<String>,
+    pub sel_char_start: Option<i64>,
+    pub sel_char_end: Option<i64>,
+    pub sel_quoted_text: Option<String>,
+    pub body: String,
+    pub author: Option<String>,
+    pub created_at: i64,
+    pub fork_session_id: Option<String>,
+}
+
+/// An agent write-suggestion against a draft — a tracked change the drafter
+/// renders with accept/reject. Queued in `draft_suggestions` (status `pending`)
+/// so a proposal made while the pane is closed is drained on mount.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftSuggestion {
+    pub id: String,
+    pub draft_id: String,
+    /// `append | replace_block | insert_after | delete_block`.
+    pub op: String,
+    pub block_id: Option<String>,
+    /// The block markdown the agent read (staleness guard).
+    pub original: Option<String>,
+    pub markdown: String,
+    pub agent_id: Option<String>,
+    /// Optional one-line rationale shown on the card.
+    pub body: Option<String>,
+    /// `pending | applied | rejected`.
+    pub status: String,
+    pub created_at: i64,
+}
+
 /// A research **Mission**: an orchestrator that sits a tier above the per-tab
 /// browse agents, holding a shared goal across the whole browser pane. Backed by
 /// the `missions` table; the orchestrator's own resumable `claude` session id
@@ -922,6 +1016,14 @@ impl SessionStore {
         ) {
             tracing::warn!(error = %e, "failed to record revision ledger event");
         }
+        // Companion journal: a plan revision arrived (v{n}).
+        let _ = self.db.append_journal(
+            "revision",
+            Some("plan"),
+            Some(session_id),
+            None,
+            Some(&format!("v{version_number}")),
+        );
         session.revisions.push(revision);
         session.updated_at = session.updated_at.max(now);
         if restored {
@@ -1444,6 +1546,10 @@ impl SessionStore {
                 ) {
                     tracing::warn!(error = %e, "failed to record approval ledger event");
                 }
+                // Companion journal: the plan was approved.
+                let _ = self
+                    .db
+                    .append_journal("approval", Some("plan"), Some(session_id), None, None);
             }
         }
     }

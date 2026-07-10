@@ -38,6 +38,9 @@ enum ThreadTarget {
     PlanComment,
     ReviewAnnotation,
     ReviewQuestion,
+    /// A Prompt Drafter sidecar thread — keys on `(draft_id, comment_id)`,
+    /// fork session persisted on the `draft_comments` row.
+    DraftComment,
 }
 
 /// Composite registry key. Comment ids are session-scoped (`c-001` restarts
@@ -78,6 +81,95 @@ impl ForkState {
             db,
             claude_bin: Arc::new(OnceLock::new()),
         }
+    }
+
+    /// "Check in with a colleague" targeting a PLAN SESSION, for the
+    /// Companion's `/v1/global/consult`. Plan sessions are external terminal
+    /// claudes Redline must never disturb — so each consult runs an EPHEMERAL
+    /// read-only fork (`--resume <session_id> --fork-session`, the same trick
+    /// discussion threads use), returns the digest, and persists nothing: the
+    /// fork session id is thrown away, and there is no natural thread to write
+    /// check-in rows into (the exchange lives in the Companion's own thread).
+    pub async fn consult_plan(
+        &self,
+        session_id: String,
+        cwd: String,
+        question: String,
+    ) -> Result<String, String> {
+        if question.trim().is_empty() {
+            return Err("nothing to ask the colleague".to_string());
+        }
+        let key = format!("consult\u{0}{session_id}");
+        {
+            let guard = self.procs.lock().unwrap();
+            if guard.contains_key(&key) {
+                return Err(
+                    "that plan session is already being consulted — try again in a moment"
+                        .to_string(),
+                );
+            }
+        }
+        let framed = format!(
+            "You are an ephemeral read-only fork of this planning session. The \
+             user's COMPANION — their global cross-surface discussion — is \
+             checking in about THIS plan and its conversation so far. Synthesize \
+             what matters for their question as a tight DIGEST (not a transcript, \
+             not a new plan; never call ExitPlanMode). Be concise. Their \
+             question:\n\n{}",
+            question.trim()
+        );
+        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&framed));
+
+        let mut args: Vec<String> = discussion_fork_args(framed);
+        args.push("--resume".to_string());
+        args.push(session_id.clone());
+        args.push("--fork-session".to_string());
+
+        let claude_bin = self.claude_bin().await?;
+        let mut cmd = claude_command(&claude_bin);
+        let mut child = cmd
+            .current_dir(&cwd)
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| format!("failed to spawn claude: {e}"))?;
+        let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
+        let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
+        {
+            self.procs
+                .lock()
+                .unwrap()
+                .insert(key.clone(), ForkProc { child });
+        }
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(180),
+            crate::claude_proc::collect_turn(stdout, stderr),
+        )
+        .await;
+        let proc = { self.procs.lock().unwrap().remove(&key) };
+        let outcome = match outcome {
+            Ok(o) => o,
+            Err(_) => {
+                if let Some(mut p) = proc {
+                    let _ = p.child.start_kill();
+                }
+                return Err("the colleague took too long to respond".to_string());
+            }
+        };
+        if let Some(mut p) = proc {
+            let _ = p.child.wait().await;
+        }
+        if let Some(err) = outcome.errored {
+            return Err(err);
+        }
+        outcome
+            .final_text
+            .filter(|t| !t.trim().is_empty())
+            .ok_or_else(|| "the colleague produced no reply".to_string())
     }
 
     /// The resolved `claude` path, computing it on first call. Runs on the
@@ -329,8 +421,17 @@ pub async fn fork_thread_send(
     };
 
     // Polis ledger: record the first-turn discussion prompt with its true
-    // surface; keep every agent turn out of the global-hook capture stream.
+    // surface + thread provenance (the parent is this comment's plan session —
+    // explicit, never inferred); keep every agent turn out of the global-hook
+    // capture stream.
     if prior_fork.is_none() {
+        let _ = crate::ledger::record_session_link(
+            &fork.db,
+            "fork",
+            &comment_id,
+            "session",
+            &session_id,
+        );
         crate::ledger::record_agent_prompt(
             &fork.db,
             crate::ledger::PromptSource::RustFirstTurn,
@@ -339,6 +440,11 @@ pub async fn fork_thread_send(
             Some(cwd.clone()),
             Some(session_id.clone()),
             None,
+            Some(crate::ledger::ThreadRef {
+                thread_kind: "fork",
+                thread_id: comment_id.clone(),
+                parent_session_id: Some(session_id.clone()),
+            }),
         );
     } else {
         crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
@@ -535,6 +641,13 @@ pub async fn review_thread_send(
     };
 
     if prior_fork.is_none() {
+        let _ = crate::ledger::record_session_link(
+            &fork.db,
+            "review_thread",
+            &annotation_id,
+            "review",
+            &review_id,
+        );
         crate::ledger::record_agent_prompt(
             &fork.db,
             crate::ledger::PromptSource::RustFirstTurn,
@@ -543,6 +656,11 @@ pub async fn review_thread_send(
             Some(cwd.clone()),
             Some(review_id.clone()),
             None,
+            Some(crate::ledger::ThreadRef {
+                thread_kind: "review_thread",
+                thread_id: annotation_id.clone(),
+                parent_session_id: Some(review_id.clone()),
+            }),
         );
     } else {
         crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
@@ -694,6 +812,13 @@ pub async fn review_question_send(
     };
 
     if prior_fork.is_none() {
+        let _ = crate::ledger::record_session_link(
+            &fork.db,
+            "review_question",
+            &question_id,
+            "review",
+            &review_id,
+        );
         crate::ledger::record_agent_prompt(
             &fork.db,
             crate::ledger::PromptSource::RustFirstTurn,
@@ -702,6 +827,11 @@ pub async fn review_question_send(
             Some(cwd.clone()),
             Some(review_id.clone()),
             None,
+            Some(crate::ledger::ThreadRef {
+                thread_kind: "review_question",
+                thread_id: question_id.clone(),
+                parent_session_id: Some(review_id.clone()),
+            }),
         );
     } else {
         crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
@@ -768,6 +898,222 @@ pub fn review_thread_discard(
     fork.db
         .clear_review_annotation_fork_session(&review_id, &annotation_id)
         .map_err(|e| format!("failed to clear fork session: {e}"))?;
+    Ok(())
+}
+
+/// First-turn grounding for a Prompt Drafter sidecar thread: the anchored
+/// block + quoted selection + the live-doc route + the block-SCOPED write
+/// contract (this thread may only propose edits to its own block).
+fn build_draft_first_turn_prompt(
+    draft_id: &str,
+    comment: &crate::state::DraftComment,
+    opening: &str,
+) -> String {
+    let mut p = String::from(
+        "You are discussing one part of a document in Redline's Prompt Drafter — \
+         a PROMPT the user is authoring to launch a fresh Claude Code planning \
+         session. They anchored a comment to a block of the draft and opened \
+         this thread about it.\n\n",
+    );
+    if let Some(bid) = comment.block_id.as_deref().filter(|s| !s.is_empty()) {
+        p.push_str(&format!("The anchored block id: `{bid}`\n"));
+    }
+    if let Some(q) = comment
+        .sel_quoted_text
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        p.push_str("The text they selected:\n");
+        for line in q.lines() {
+            p.push_str("> ");
+            p.push_str(line);
+            p.push('\n');
+        }
+    }
+    p.push_str(&format!(
+        "\nThe live draft (the user edits it continuously — re-read before \
+         answering about wording; already permitted, no approval needed):\n  \
+         curl -s http://127.0.0.1:7676/v1/drafter/{draft_id}/doc\n\n\
+         You may propose an edit to YOUR anchored block only — post a tracked \
+         suggestion (rendered with accept/reject) with `commentId` set so the \
+         daemon can scope-check it:\n  \
+         curl -s -X POST http://127.0.0.1:7676/v1/drafter/{draft_id}/suggestions \
+         -H 'Content-Type: application/json' -d '{{\"op\":\"replace_block\",\
+\"blockId\":\"<your block>\",\"original\":\"<its markdown as you read it>\",\
+\"markdown\":\"<your rewrite>\",\"commentId\":\"{comment_id}\",\
+\"agentId\":\"draft-thread\"}}'\n\
+         Ops allowed for you: `replace_block`, `insert_after`, `delete_block` — \
+         all against your anchored block. A 409 means the block changed or \
+         already carries an open suggestion: re-read the doc and retry. \
+         \"Discuss this paragraph\" must never rewrite the whole prompt.\n\n",
+        comment_id = comment.id,
+    ));
+    p.push_str("Their message:\n");
+    for line in opening.lines() {
+        p.push_str("> ");
+        p.push_str(line);
+        p.push('\n');
+    }
+    p.push_str(
+        "\nFollow the `sidecar` skill for how to structure the reply: lead with \
+         the answer, then add a table, mermaid diagram, or callout only when it \
+         adds signal. Respond in markdown — no raw HTML. Outside the scoped \
+         suggestion endpoint above you are read-only: do not edit files, do not \
+         produce a plan, and never call ExitPlanMode.",
+    );
+    p
+}
+
+/// Send a turn to a draft comment's discussion agent. Mirrors
+/// `review_thread_send` (fresh session on the first turn — a draft has no plan
+/// session to fork — resumed thereafter); messages persist in `thread_messages`
+/// keyed `(draft_id, comment_id)`.
+#[tauri::command]
+pub async fn draft_thread_send(
+    fork: tauri::State<'_, ForkState>,
+    app: AppHandle,
+    draft_id: String,
+    comment_id: String,
+    text: String,
+) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Err("empty message".to_string());
+    }
+    let key = fork_key(&draft_id, &comment_id);
+    {
+        let guard = fork.procs.lock().unwrap();
+        if guard.contains_key(&key) {
+            return Err("a reply is still streaming for this comment".to_string());
+        }
+    }
+
+    let comment = fork
+        .db
+        .get_draft_comment(&comment_id)
+        .map_err(|e| e.to_string())?
+        .filter(|c| c.draft_id == draft_id)
+        .ok_or_else(|| format!("no comment {comment_id} on draft {draft_id}"))?;
+    let cwd = fork
+        .db
+        .get_draft(&draft_id)
+        .ok()
+        .flatten()
+        .and_then(|(_, project, _, _)| project)
+        .filter(|p| !p.trim().is_empty())
+        .or_else(|| std::env::var("HOME").ok())
+        .unwrap_or_else(|| "/".to_string());
+    let prior_fork = fork.db.get_draft_comment_fork_session(&comment_id);
+
+    let user_msg = ThreadMessage {
+        id: uuid::Uuid::new_v4().to_string(),
+        session_id: draft_id.clone(),
+        comment_id: comment_id.clone(),
+        role: "user".to_string(),
+        body: text.clone(),
+        status: "complete".to_string(),
+        created_at: now_millis(),
+    };
+    fork.db
+        .insert_thread_message(&user_msg)
+        .map_err(|e| format!("failed to persist message: {e}"))?;
+
+    let prompt = match &prior_fork {
+        None => build_draft_first_turn_prompt(&draft_id, &comment, &text),
+        Some(_) => text.clone(),
+    };
+
+    if prior_fork.is_none() {
+        let _ = crate::ledger::record_session_link(
+            &fork.db,
+            "drafter_fork",
+            &comment_id,
+            "drafter",
+            &draft_id,
+        );
+        crate::ledger::record_agent_prompt(
+            &fork.db,
+            crate::ledger::PromptSource::RustFirstTurn,
+            "drafter_fork",
+            &prompt,
+            Some(cwd.clone()),
+            None,
+            None,
+            Some(crate::ledger::ThreadRef {
+                thread_kind: "drafter_fork",
+                thread_id: comment_id.clone(),
+                parent_session_id: None,
+            }),
+        );
+    } else {
+        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+    }
+
+    let mut args: Vec<String> = discussion_fork_args(prompt);
+    if let Some(fork_sid) = &prior_fork {
+        args.push("--resume".to_string());
+        args.push(fork_sid.clone());
+    }
+
+    let claude_bin = fork.claude_bin().await?;
+    let mut cmd = claude_command(&claude_bin);
+    let mut child = cmd
+        .current_dir(&cwd)
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                format!(
+                    "could not find the `claude` CLI (looked for `{claude_bin}`). \
+                     Install Claude Code, or launch Redline from a terminal \
+                     so it inherits your shell's PATH."
+                )
+            } else {
+                format!("failed to spawn claude: {e}")
+            }
+        })?;
+    let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
+    let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
+
+    {
+        fork.procs
+            .lock()
+            .unwrap()
+            .insert(key.clone(), ForkProc { child });
+    }
+    tauri::async_runtime::spawn(read_fork(
+        app,
+        fork.db.clone(),
+        fork.procs.clone(),
+        key,
+        draft_id,
+        comment_id,
+        ThreadTarget::DraftComment,
+        stdout,
+        stderr,
+    ));
+    Ok(())
+}
+
+/// Discard a draft comment's whole thread: kill any in-flight turn, delete its
+/// messages, clear the resume session. The comment stays.
+#[tauri::command]
+pub fn draft_thread_discard(
+    fork: tauri::State<'_, ForkState>,
+    draft_id: String,
+    comment_id: String,
+) -> Result<(), String> {
+    let key = fork_key(&draft_id, &comment_id);
+    let proc = { fork.procs.lock().unwrap().remove(&key) };
+    if let Some(mut proc) = proc {
+        let _ = proc.child.start_kill();
+    }
+    fork.db
+        .delete_thread(&draft_id, &comment_id)
+        .map_err(|e| format!("failed to delete thread: {e}"))?;
     Ok(())
 }
 
@@ -953,6 +1299,9 @@ async fn read_fork(
                 ThreadTarget::ReviewQuestion => {
                     db.set_review_question_fork_session(&session_id, &comment_id, fork_sid)
                 }
+                ThreadTarget::DraftComment => {
+                    db.set_draft_comment_fork_session(&comment_id, fork_sid)
+                }
             };
             if let Err(e) = persisted {
                 tracing::warn!(error = %e, "failed to persist fork_session_id");
@@ -970,6 +1319,8 @@ async fn read_fork(
         if let Err(e) = db.insert_thread_message(&msg) {
             tracing::warn!(error = %e, "failed to persist assistant message");
         }
+        // Companion journal: a discussion-thread fork completed a turn.
+        let _ = db.append_journal("agent_turn", Some("fork"), Some(&comment_id), None, None);
         // No-op for review/question threads, whose ids aren't plan sessions.
         app.state::<SessionStore>().touch(&session_id);
         let _ = app.emit(

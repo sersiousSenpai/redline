@@ -72,6 +72,18 @@ pub fn tool_definitions() -> Value {
             "name": "stats",
             "description": "Aggregate counts over the lake: prompts per day, per surface, ledger events per kind, and linked items per class. Agent-facing insight, no UI.",
             "inputSchema": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "search_browsing",
+            "description": "Lexical (BM25) full-text search over the user's browsing behavior — the pages they landed on, with a matched snippet per hit, best-first. Keyword-heavy and fuzzy; use for 'what pages has the user seen about X'. Distinct from query_prompts (their prompts) and memory_tree (their curated classes).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "q": {"type": "string", "description": "Free-text keywords to match against page content."},
+                    "limit": {"type": "integer", "description": "Max hits (1..100, default 20)."}
+                },
+                "required": ["q"]
+            }
         }
     ])
 }
@@ -119,6 +131,13 @@ pub fn route_for_tool(name: &str, args: &Value) -> Result<(String, Vec<(String, 
             Ok(("/v1/memory/tree".to_string(), params))
         }
         "stats" => Ok(("/v1/context/stats".to_string(), params)),
+        "search_browsing" => {
+            push(&mut params, "q", s("q"));
+            if let Some(lim) = i("limit") {
+                params.push(("limit".into(), lim.to_string()));
+            }
+            Ok(("/v1/context/browse/search".to_string(), params))
+        }
         other => Err(format!("unknown tool `{other}`")),
     }
 }
@@ -218,12 +237,24 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_returns_the_four_tools() {
+    fn tools_list_returns_the_expected_tools() {
         let msg = json!({"jsonrpc":"2.0","id":1,"method":"tools/list"});
         let resp = handle_message(&msg, &stub()).unwrap();
         let tools = resp["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, ["query_prompts", "session_history", "memory_tree", "stats"]);
+        assert_eq!(
+            names,
+            ["query_prompts", "session_history", "memory_tree", "stats", "search_browsing"]
+        );
+    }
+
+    #[test]
+    fn search_browsing_routes_to_the_browse_search_endpoint() {
+        let (path, params) =
+            route_for_tool("search_browsing", &json!({"q": "clerk auth", "limit": 5})).unwrap();
+        assert_eq!(path, "/v1/context/browse/search");
+        assert!(params.contains(&("q".to_string(), "clerk auth".to_string())));
+        assert!(params.contains(&("limit".to_string(), "5".to_string())));
     }
 
     #[test]

@@ -418,6 +418,7 @@ mod tests {
                 mission_id: None,
                 project_path: Some("/repo".into()),
                 body: "first prompt".into(),
+                thread: None,
             },
         )
         .unwrap();
@@ -433,6 +434,7 @@ mod tests {
                 mission_id: None,
                 project_path: None,
                 body: "second prompt".into(),
+                thread: None,
             },
         )
         .unwrap();

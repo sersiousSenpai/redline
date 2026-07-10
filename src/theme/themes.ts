@@ -15,6 +15,7 @@ export type ThemeName =
   | "silveraerogel"
   | "solidcolors"
   | "grass"
+  | "terminal"
   | "redline";
 
 /** The 16 ANSI palette slots xterm accepts as theme overrides. */
@@ -163,6 +164,32 @@ export const THEMES: ThemeEntry[] = [
     name: "blossom",
     label: "Blossom",
     base: { bg: "#ecdcdd", fg: "#381b2b", blue: "#897ad9", yellow: "#d99a2c", green: "#4f9e57", selection: "#ff4f97" },
+  },
+  {
+    // Terminal — a cool "cyberdeck" mood: a deep blue-black page, an electric
+    // cyan body ink, and a neon-magenta selection so commented spans and
+    // v-badges glow. Distinct from Homebrew (warm neon green on pure black) and
+    // Pro (flat white on black) — this one leans duotone cyan/magenta, the
+    // classic futuristic-terminal palette. Pairs with a monospace face
+    // (see fonts.ts / DEFAULT_FONT_FOR_THEME) for the full "techie" read.
+    name: "terminal",
+    label: "Terminal",
+    base: {
+      bg: "#0a0e16",        // deep blue-black page
+      fg: "#d6e1ef",        // cool near-white ink
+      blue: "#35c8f0",      // electric cyan — info / edit
+      yellow: "#e6c84f",    // amber — warning / feedback
+      green: "#5de6a8",     // mint — success / question
+      selection: "#ff2e97", // neon magenta — commented spans & v-badges
+    },
+    // The stock dim grey vanishes on the blue-black page; lift the dim slots to
+    // a cool slate and pin `black` to a deeper ink so background fills stay back.
+    ansi: {
+      black: "#050810",
+      brightBlack: "#3b4a63",
+      blue: "#35c8f0",
+      brightBlue: "#7fdcff",
+    },
   },
   {
     // Redline — the brand theme: redline.dev's red on a warm near-black. The

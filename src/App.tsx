@@ -23,6 +23,11 @@ import { Footer } from "./components/Footer";
 import { Header } from "./components/Header";
 import { InviteDialog } from "./components/InviteDialog";
 import { JoinDialog } from "./components/JoinDialog";
+import { ShareSnapshotDialog } from "./components/ShareSnapshotDialog";
+import { importSharedPlanFromUrl } from "./collab/importSharedLink";
+import { deriveActiveSurface } from "./lib/activeSurface";
+import { CompanionDrawer } from "./components/CompanionDrawer";
+import { useCompanion } from "./hooks/useCompanion";
 import { PresenceBar } from "./components/PresenceBar";
 import {
   collabRevisionKey,
@@ -51,6 +56,7 @@ import {
   useJoinedSession,
 } from "./collab/useJoinedSession";
 import { HookSetupModal } from "./components/HookSetupModal";
+import { HowItWorksCard } from "./components/HowItWorksCard";
 import { ReadmeModal } from "./components/ReadmeModal";
 import { FeedbackModal } from "./components/FeedbackModal";
 import { OnboardingTour } from "./components/OnboardingTour";
@@ -59,6 +65,7 @@ import { ResolutionWarningBanner } from "./components/ResolutionWarningBanner";
 import { SelectionMenu } from "./components/SelectionMenu";
 import { SessionSidebar } from "./components/SessionSidebar";
 import { SidebarTabStrip } from "./components/SidebarTabStrip";
+import { PlanToc } from "./components/PlanToc";
 import { FileTree } from "./components/FileTree";
 import { FileViewer } from "./components/FileViewer";
 import { BrowserPane } from "./components/BrowserPane";
@@ -81,13 +88,21 @@ import { blockIdByAnchorId } from "./editor/docModel";
 import { useTextSelection } from "./hooks/useTextSelection";
 import {
   applyFont,
+  applyLint,
   applyTheme,
+  hasStoredFont,
+  hasStoredLint,
   readStoredFont,
+  readStoredLint,
   readStoredTheme,
   storeFont,
+  storeLint,
   storeTheme,
 } from "./theme/applyTheme";
 import type { ThemeName } from "./theme/themes";
+import { SUGGESTED_FONT_FOR_THEME } from "./theme/fonts";
+import type { LintName } from "./theme/lint";
+import { SUGGESTED_LINT_FOR_THEME } from "./theme/lint";
 import type { FontName } from "./theme/fonts";
 import { usePersistedState } from "./theme/usePersistedState";
 import { useResizablePane } from "./hooks/useResizablePane";
@@ -115,6 +130,7 @@ import type {
   PlanReceivedEvent,
   Revision,
   ReviewSession,
+  Section,
   SessionSummary,
   SkillStatus,
 } from "./types";
@@ -248,9 +264,17 @@ function App() {
     useState<PlanDecisionWindowEvent | null>(null);
   const [theme, setTheme] = useState<ThemeName>(() => readStoredTheme());
   const [font, setFont] = useState<FontName>(() => readStoredFont());
+  const [lint, setLint] = useState<LintName>(() => readStoredLint());
   // Flash-on-intercept alert: an opt-in full-window pulse (+ optional beep)
   // fired whenever a plan is intercepted. `flashSeq` bumps to (re)trigger the
   // overlay; the three prefs persist via localStorage.
+  // Table-of-contents rail (Phase 2): a collapsible outline of the current
+  // plan's headings, docked to the left of the document column. Persisted so a
+  // reader's preference sticks across sessions.
+  const [tocOpen, setTocOpen] = usePersistedState("redline.tocOpen", true);
+  // The "How Redline works" explainer (Phase 3) — opened from the empty state
+  // and the post-install screen; purely informational.
+  const [howItWorksOpen, setHowItWorksOpen] = useState(false);
   const [flashEnabled, setFlashEnabled] = usePersistedState(
     "redline.flashOnIntercept.enabled",
     false,
@@ -344,6 +368,55 @@ function App() {
     "redline.drafter.project",
     null,
   );
+  // The draft's durable identity — keys its discussion agent, comments, voice
+  // memory, and its lineage in the memory lake. "New draft" mints a fresh id;
+  // old rows stay queryable as history.
+  const [drafterDraftId, setDrafterDraftId] = usePersistedState<string | null>(
+    "redline.drafter.draftId",
+    null,
+  );
+  useEffect(() => {
+    if (!drafterDraftId) setDrafterDraftId(crypto.randomUUID());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drafterDraftId]);
+  // The drafter's 💬 discussion pane (internal split inside the drafter).
+  const [drafterChatOpen, setDrafterChatOpen] = usePersistedState(
+    "redline.drafter.chatOpen",
+    false,
+  );
+  // The drafter's 🎙️ voice drawer + what it's primed with: the latest mirrored
+  // markdown and its parsed Section tree (for the Guided Walkthrough).
+  const [drafterVoiceOpen, setDrafterVoiceOpen] = useState(false);
+  const [drafterMarkdown, setDrafterMarkdown] = useState("");
+  const [drafterSections, setDrafterSections] = useState<Section[]>([]);
+  // Flush the draft's markdown mirror (sidecars on) to the backend `drafts`
+  // table so the agents' /v1/drafter/:id/doc reads are never stale.
+  const drafterMarkdownChange = useCallback(
+    (markdown: string) => {
+      setDrafterMarkdown(markdown);
+      if (!drafterDraftId) return;
+      void invoke("drafter_set_doc", {
+        draftId: drafterDraftId,
+        markdown,
+        projectPath: drafterProject,
+      }).catch(() => {});
+    },
+    [drafterDraftId, drafterProject],
+  );
+  // Sections for the drafter voice walkthrough — parsed backend-side from the
+  // mirrored markdown, only while the voice drawer is open.
+  useEffect(() => {
+    if (!drafterVoiceOpen) return;
+    let alive = true;
+    void invoke<Section[]>("parse_markdown_sections", {
+      markdown: drafterMarkdown,
+    })
+      .then((s) => alive && setDrafterSections(s))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [drafterVoiceOpen, drafterMarkdown]);
   // A plan sent from the browser page-discussion agent, held for a repo-confirm
   // step (SendToRedlineDialog) before it launches into a terminal — so it never
   // silently lands in $HOME.
@@ -362,8 +435,23 @@ function App() {
   // Memory is plumbing: no per-surface toolbar panes anymore. One ephemeral,
   // read-mostly inspector (Lake / Catalog / Settings) behind the quiet pill.
   const [memoryInspectorOpen, setMemoryInspectorOpen] = useState(false);
+  // The Companion — the global cross-surface discussion. A right-docked
+  // overlay drawer OUTSIDE the secondary-pane exclusivity (it must coexist
+  // with browser/drafter/review). ⌘J toggles it from anywhere.
+  const [companionOpen, setCompanionOpen] = useState(false);
+  const companionCtl = useCompanion(companionOpen);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === "j" || e.key === "J")) {
+        e.preventDefault();
+        setCompanionOpen((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
   const codeReview = useReview();
-  // A `/redline-review` curl is holding for feedback → surface the review
+  // A `/redline-code-review` curl is holding for feedback → surface the review
   // pane immediately (the hook itself adopts the repo/source/round).
   useEffect(() => {
     let alive = true;
@@ -923,12 +1011,35 @@ function App() {
     setTheme(name);
     applyTheme(name);
     storeTheme(name);
+    // Recommend (never force) the theme's companion font: apply it only if the
+    // user is still on the untouched default, so a real font pick is preserved.
+    const suggested = SUGGESTED_FONT_FOR_THEME[name];
+    if (suggested && suggested !== font && !hasStoredFont()) {
+      setFont(suggested);
+      applyFont(suggested);
+      // Not stored — leaves the pick "untouched" so switching away restores the
+      // default face, and an explicit FontPicker choice still takes over.
+    }
+    // Same recommend-never-force rule for the theme's companion lint: apply it
+    // only while the user is still on the untouched default (Off), so a real
+    // lint pick is preserved and switching away restores plain prose.
+    const suggestedLint = SUGGESTED_LINT_FOR_THEME[name];
+    if (suggestedLint && suggestedLint !== lint && !hasStoredLint()) {
+      setLint(suggestedLint);
+      applyLint(suggestedLint);
+    }
   };
 
   const onFontChange = (name: FontName) => {
     setFont(name);
     applyFont(name);
     storeFont(name);
+  };
+
+  const onLintChange = (name: LintName) => {
+    setLint(name);
+    applyLint(name);
+    storeLint(name);
   };
 
   // Max width = whatever leaves the document at 0 against the *other* pane
@@ -1264,6 +1375,50 @@ function App() {
     };
   }, [activeId, selectSessions]);
 
+  // `redline://…#RLS1…` deep links — the browser viewer's "Open in Redline"
+  // link lands a shared plan here as a full native review. The handler ref is
+  // refreshed each render so the mount-once listener always sees the latest
+  // selection closures without re-subscribing onOpenUrl.
+  const openSharedRef = useRef<(urls: string[]) => void>(() => {});
+  openSharedRef.current = (urls: string[]) => {
+    void (async () => {
+      for (const url of urls) {
+        try {
+          const id = await importSharedPlanFromUrl(url);
+          if (!id) continue;
+          await refreshSummaries();
+          selectSessions();
+          setActiveId(id);
+          setViewedVersionNumber(null);
+          void loadSession(id);
+        } catch (err) {
+          console.error("failed to import shared plan", err);
+        }
+      }
+    })();
+  };
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const dl = await import("@tauri-apps/plugin-deep-link");
+        unlisten = await dl.onOpenUrl((urls) => openSharedRef.current(urls));
+        // Cold start: the URL that launched the app, if any.
+        const current = await dl.getCurrent().catch(() => null);
+        if (!cancelled && current && current.length) {
+          openSharedRef.current(current);
+        }
+      } catch {
+        // deep-link plugin unavailable (e.g. under test) — no-op.
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
   // When user clicks a session in the sidebar, reload it. Clear any stale
   // session object up front so the next paint doesn't flash the previous
   // session's plan/comments while get_session is in flight — otherwise the
@@ -1325,6 +1480,10 @@ function App() {
     return revs.slice(start);
   }, [session]);
   const sections = latest?.sections ?? [];
+  // Headings shown in the doc pane right now — the historical revision when
+  // one is being viewed, otherwise the latest. Drives the TOC rail.
+  const displaySections =
+    isViewingHistorical && viewedRevision ? viewedRevision.sections : sections;
   // anchorId → stable blockId for the current revision. Selection-originated
   // comments only capture a positional anchorId; the in-doc highlight
   // decoration is keyed by blockId, so resolve it at submit time.
@@ -1360,6 +1519,7 @@ function App() {
   // handles surface back here for presence UI, mirrors, and access control.
   const [inviteOpen, setInviteOpen] = useState(false);
   const [joinOpen, setJoinOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
   const [collabShare, setCollabShare] = useState<CollabConfig | null>(null);
   // The room's admin token — the credential the signaling server ties
   // manage (allowlist/revoke) rights to. Never leaves this machine.
@@ -1440,6 +1600,41 @@ function App() {
   const activePlanTitle =
     summaries.find((s) => s.sessionId === (session?.sessionId ?? ""))
       ?.planTitle ?? null;
+
+  // Memory-by-session (spine): mirror "where is the user" into the backend
+  // ActiveSurface cell. Debounced so pane flips during a drag/animation
+  // collapse to one write; the backend journals only identity changes. The
+  // browser tab's own detail is mirrored separately by BrowserPane
+  // (`browser_set_active`/`browser_set_tabs`) — the backend enriches from
+  // those cells when the surface is `browser`.
+  const activeSummary = summaries.find((s) => s.sessionId === activeId);
+  const activeSurface = deriveActiveSurface({
+    browserOpen,
+    drafterOpen,
+    reviewOpen,
+    activeId,
+    planTitle: activeSummary?.planTitle ?? null,
+    planProject: activeSummary?.projectPath ?? null,
+    activeTab: null,
+    reviewId: codeReview.activeReviewId,
+    reviewRepo: codeReview.repo,
+    drafterDraftId,
+    drafterProject,
+    activeFile,
+    hasTerminal: termTabCount > 0,
+  });
+  const activeSurfaceKey = `${activeSurface.kind} ${activeSurface.id ?? ""} ${
+    activeSurface.label ?? ""
+  } ${activeSurface.detail ?? ""}`;
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      void invoke("surface_set_active", { info: activeSurface }).catch(
+        () => {},
+      );
+    }, 150);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSurfaceKey]);
 
   const startShare = useCallback(
     (displayName: string, signaling: string[]) => {
@@ -1665,6 +1860,25 @@ function App() {
   // synthesized entirely from the room's Yjs state — no backend session.
   const joinedInfo = useJoinedSession(joinedRoom, joinedPresence);
   const joinedActive = !!joinedInfo && activeId === joinedInfo.key;
+
+  // Width of the table-of-contents rail. Kept in one place so the rail and the
+  // left space it reserves in the document scroller stay in lockstep.
+  const TOC_RAIL_W = 230;
+  // The TOC rail applies only over a plainly-displayed plan document (a real
+  // session, latest or historical, with headings) — never the folder viewer, a
+  // joined shadow session, or while a secondary pane (browser/drafter/review)
+  // shares the column. When eligible + open it becomes an in-flow panel: the
+  // document scroller reserves `TOC_RAIL_W` on its left so the rail docks
+  // beside the plan instead of floating over it.
+  const tocEligible =
+    sidebarTab.kind === "sessions" &&
+    !joinedActive &&
+    sessionReady &&
+    !browserOpen &&
+    !drafterOpen &&
+    !reviewOpen &&
+    displaySections.length > 0;
+  const tocDocked = tocEligible && tocOpen;
 
   const joinRoom = useCallback((config: CollabConfig, name: string) => {
     setJoinedRoom({ config, name });
@@ -2158,7 +2372,13 @@ function App() {
     if (!trimmed) return;
     // Polis ledger: record the drafted prompt at launch (the plan session
     // doesn't exist yet, so this is the only place its body is first-class).
-    void invoke("record_drafted_prompt", { markdown: trimmed, projectPath });
+    // The draft_id makes the eventual plan session a CHILD of this draft —
+    // the ingest hook links them when the spawned session first fires.
+    void invoke("record_drafted_prompt", {
+      markdown: trimmed,
+      projectPath,
+      draftId: drafterDraftId,
+    });
     const cmd = `${buildPlanLaunchCommand(trimmed, projectPath)}\r`;
     setTermFullscreen(false);
     setTermCollapsed(false);
@@ -2321,6 +2541,24 @@ function App() {
     } catch (err) {
       console.error("export_revision_docx failed", err);
       alert(`Export failed: ${err}`);
+    }
+  };
+
+  // Save one plan revision as a note in the user's Obsidian vault. The vault
+  // folder is asked for once (native picker) and remembered by the backend.
+  const saveRevisionToObsidian = async (
+    sessionId: string,
+    versionNumber: number,
+  ) => {
+    try {
+      const saved = await invoke<string | null>("save_revision_to_obsidian", {
+        sessionId,
+        versionNumber,
+      });
+      toastSaved(saved);
+    } catch (err) {
+      console.error("save_revision_to_obsidian failed", err);
+      alert(`Save to Obsidian failed: ${err}`);
     }
   };
 
@@ -2517,7 +2755,8 @@ function App() {
     setupModalActive ||
     tourActive ||
     inviteOpen ||
-    joinOpen;
+    joinOpen ||
+    shareOpen;
   // The native webview must be hidden whenever a pane divider is mid-drag —
   // otherwise it swallows the pointer and the resize freezes. This makes the
   // sidebar, comment pane, terminal, and the document/browser split all
@@ -2559,10 +2798,13 @@ function App() {
         onThemeChange={onThemeChange}
         font={font}
         onFontChange={onFontChange}
+        lint={lint}
+        onLintChange={onLintChange}
         mode={mode}
         onModeChange={changeMode}
         onExport={exportRevision}
         onExportDocx={exportRevisionDocx}
+        onSaveObsidian={saveRevisionToObsidian}
         viewedVersionNumber={viewedVersionNumber}
         downloadDisabled={sidebarTab.kind === "folder"}
         flashEnabled={flashEnabled}
@@ -2624,11 +2866,15 @@ function App() {
             return !v;
           });
         }}
+        companionOpen={companionOpen}
+        onToggleCompanion={() => setCompanionOpen((v) => !v)}
         onOpenMemory={() => setMemoryInspectorOpen(true)}
         collabActive={!!collabShare || !!joinedRoom}
         canInvite={sessionReady && !!latest}
         onInvite={() => setInviteOpen(true)}
         onJoinSession={() => setJoinOpen(true)}
+        canShare={sessionReady && !!latest}
+        onShareSnapshot={() => setShareOpen(true)}
         splitActive={docOpen && (browserOpen || drafterOpen || reviewOpen)}
         splitVertical={splitVertical}
         onToggleSplitOrientation={() => {
@@ -2781,6 +3027,104 @@ function App() {
           className="flex-1 overflow-hidden flex flex-col relative"
           style={{ background: "var(--color-paper)" }}
         >
+          {/* Table-of-contents rail (Phase 2). Docked to the left of the
+              document column: the scroller below reserves `TOC_RAIL_W` of left
+              padding while this is open (see `tocDocked`), so the rail sits
+              BESIDE the plan rather than floating over it — responsive when the
+              sidebar narrows the column. Gated by `tocEligible`. */}
+          {(() => {
+            if (!tocEligible) return null;
+            return tocOpen ? (
+              <div
+                className="rl-toc-rail"
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  bottom: 0,
+                  width: `${TOC_RAIL_W}px`,
+                  zIndex: 20,
+                  display: "flex",
+                  flexDirection: "column",
+                  background: "var(--color-bg-elevated)",
+                  borderRight: "1px solid var(--color-rule)",
+                  boxShadow: "4px 0 16px rgba(0,0,0,0.12)",
+                }}
+              >
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    padding: "8px 10px",
+                    borderBottom: "1px solid var(--color-rule)",
+                  }}
+                >
+                  <span
+                    className="font-sans"
+                    style={{
+                      fontSize: "10px",
+                      fontWeight: 700,
+                      letterSpacing: "0.06em",
+                      textTransform: "uppercase",
+                      color: "var(--color-ink-muted)",
+                    }}
+                  >
+                    Contents
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setTocOpen(false)}
+                    title="Hide contents"
+                    aria-label="Hide contents"
+                    style={{
+                      border: "none",
+                      background: "transparent",
+                      color: "var(--color-ink-muted)",
+                      cursor: "pointer",
+                      fontSize: "14px",
+                      lineHeight: 1,
+                    }}
+                  >
+                    ‹
+                  </button>
+                </div>
+                <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+                  <PlanToc
+                    sections={displaySections}
+                    scopeSelector=".doc-article"
+                  />
+                </div>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setTocOpen(true)}
+                title="Show contents"
+                aria-label="Show table of contents"
+                className="font-sans"
+                style={{
+                  position: "absolute",
+                  top: "10px",
+                  left: "10px",
+                  zIndex: 20,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "6px",
+                  padding: "4px 8px",
+                  fontSize: "11px",
+                  fontWeight: 600,
+                  border: "1px solid var(--color-rule)",
+                  borderRadius: "4px",
+                  background: "var(--color-bg-elevated)",
+                  color: "var(--color-ink)",
+                  cursor: "pointer",
+                }}
+              >
+                <span aria-hidden>☰</span> Contents
+              </button>
+            );
+          })()}
           {(() => {
             const documentBody =
               sidebarTab.kind === "folder" && activeFile ? (
@@ -2790,7 +3134,13 @@ function App() {
               onSaved={toastSaved}
             />
           ) : (
-          <div className="rl-thin-scroll-y flex-1 overflow-y-auto">
+          <div
+            className="rl-thin-scroll-y flex-1 overflow-y-auto"
+            style={{
+              paddingLeft: tocDocked ? `${TOC_RAIL_W}px` : undefined,
+              transition: "padding-left 160ms cubic-bezier(0.4,0,0.2,1)",
+            }}
+          >
           <article
             ref={documentRef}
             data-tour="editor"
@@ -2900,6 +3250,23 @@ function App() {
                     <code className="font-mono">shift+tab</code> to switch into
                     plan mode. When Claude finishes planning, the plan opens
                     here for review.
+                    <br />
+                    <button
+                      type="button"
+                      onClick={() => setHowItWorksOpen(true)}
+                      style={{
+                        marginTop: "12px",
+                        fontSize: "13px",
+                        color: "var(--color-info)",
+                        background: "transparent",
+                        border: "none",
+                        padding: 0,
+                        cursor: "pointer",
+                        textDecoration: "underline",
+                      }}
+                    >
+                      New here? See how Redline works →
+                    </button>
                   </>
                 }
               />
@@ -2930,12 +3297,16 @@ function App() {
             );
             const drafterBody = (
               <PromptDrafter
+                draftId={drafterDraftId ?? ""}
                 doc={drafterDoc}
                 onDocChange={setDrafterDoc}
+                onMarkdownChange={drafterMarkdownChange}
                 projectOptions={projectOptions}
                 selectedProject={drafterProject}
                 onSelectedProjectChange={setDrafterProject}
                 onLaunch={launchPromptDraft}
+                chatOpen={drafterChatOpen}
+                onChatOpenChange={setDrafterChatOpen}
               />
             );
             const reviewBody = (
@@ -3020,6 +3391,46 @@ function App() {
                 )}
               </>
             )}
+          {/* Drafter voice — the same 🎙️ drawer over the Prompt Drafter, keyed
+              `drafter:<draft_id>` (the backend derives the kind from the key
+              shape) and primed with the draft's markdown mirror. */}
+          {drafterOpen && drafterDraftId && !reviewOpen && (
+            <>
+              {!drafterVoiceOpen && (
+                <button
+                  type="button"
+                  onClick={() => setDrafterVoiceOpen(true)}
+                  title="Discuss this draft by voice"
+                  aria-label="Discuss this draft by voice"
+                  className="absolute flex items-center gap-1.5 rounded-full"
+                  style={{
+                    left: "16px",
+                    bottom: "60px",
+                    padding: "6px 12px",
+                    fontSize: "13px",
+                    background: "var(--color-bg-elevated)",
+                    border: "1px solid var(--color-rule)",
+                    color: "var(--color-ink)",
+                    boxShadow: "0 4px 14px rgba(0,0,0,0.18)",
+                    cursor: "pointer",
+                    zIndex: 20,
+                  }}
+                >
+                  🎙️ Discuss
+                </button>
+              )}
+              {drafterVoiceOpen && (
+                <VoicePanel
+                  key={drafterDraftId}
+                  sessionId={`drafter:${drafterDraftId}`}
+                  markdown={drafterMarkdown}
+                  sections={drafterSections}
+                  cwd={drafterProject}
+                  onClose={() => setDrafterVoiceOpen(false)}
+                />
+              )}
+            </>
+          )}
           {/* Floating document-zoom control — pinned to the pane (doesn't scroll
               with the plan). Hidden over the folder file viewer. */}
           {!browserOpen && !drafterOpen && !reviewOpen && !(sidebarTab.kind === "folder" && activeFile) && zoomVisible && (
@@ -3739,6 +4150,16 @@ function App() {
           onClose={() => setJoinOpen(false)}
         />
       )}
+      {shareOpen && session && latest && (
+        <ShareSnapshotDialog
+          sessionId={session.sessionId}
+          version={latest.versionNumber}
+          ownerName={relayDefaults.displayName}
+          currentSections={latest.sections}
+          addComment={addEditorComment}
+          onClose={() => setShareOpen(false)}
+        />
+      )}
       {memoryInspectorOpen && (
         <MemoryInspector
           onClose={() => setMemoryInspectorOpen(false)}
@@ -3765,9 +4186,13 @@ function App() {
             skillStatus={skillStatus}
             onInstall={installIntegration}
             onDismiss={() => setSetupPhase("setup")}
+            onShowHowItWorks={() => setHowItWorksOpen(true)}
             error={installError}
           />
         )}
+      {howItWorksOpen && (
+        <HowItWorksCard onClose={() => setHowItWorksOpen(false)} />
+      )}
       {/* Onboarding tour: replay from the menu always, or auto-run once on first
           launch — but only after the hook/skill setup modal is out of the way,
           so the two never overlap. */}
@@ -3790,6 +4215,18 @@ function App() {
           />
         );
       })()}
+      {/* The Companion — a root-level overlay drawer (sibling of the memory
+          inspector), never part of the center-pane exclusivity dance. */}
+      {companionOpen && companionCtl.active && (
+        <CompanionDrawer
+          companion={companionCtl.active}
+          companions={companionCtl.companions}
+          onSwitch={companionCtl.setActiveId}
+          onNew={() => void companionCtl.create()}
+          onDelete={(id) => void companionCtl.remove(id)}
+          onClose={() => setCompanionOpen(false)}
+        />
+      )}
     </div>
     </MenuOverlayProvider>
   );

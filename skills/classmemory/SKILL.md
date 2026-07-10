@@ -7,10 +7,12 @@ description: >-
   reviewable class tree by emitting structured-JSON proposals) OR when an agent
   needs to RETRIEVE from ClassMemory to answer "what did I decide / research
   about X". Covers the emergent-taxonomy rules (repos seed roots; topics earn
-  promotion by size × coherence × recency), the six proposal ops (file / create
-  / promote / split / merge / collapse), the proposals-only + provenance-as-
-  ground-truth discipline, and the vectorless tree-walk retrieval contract.
-version: 1
+  promotion by size × coherence × recency), the seven proposal ops (file /
+  create / promote / split / merge / collapse / supersede), the proposals-only +
+  provenance-as-ground-truth discipline, and the vectorless tree-walk retrieval
+  contract (current decisions first, superseded as history, observations as
+  labeled patterns).
+version: 2
 ---
 
 # Redline ClassMemory
@@ -56,6 +58,10 @@ you always just emit the best organization; write it as if it will be applied.)
    subtree; its sourcing survives only via the digest's `cite_seqs`).
 3. **Rationale on every op.** State the *why* — it becomes the ledger record of
    the reorganization.
+4. **Observations are derived, never ground truth.** Pattern notes shown on
+   nodes came from an agent pass over the lake — never `file`, `supersede`, or
+   reorganize based on one. Provenance (`project_path`, `surface`) remains the
+   only filing authority.
 
 ### The shape: emergent, 2–3 deep
 
@@ -115,7 +121,7 @@ subtree**: a class is cold only if *everything under it* went quiet, measured
 against the whole lake's recency (so a dormant *project* doesn't self-collapse —
 its branches are judged against your overall activity, not just each other).
 
-### The six ops
+### The seven ops
 
 Return `{"proposals": [ … ]}` — a JSON object, optionally in a ```json fence.
 Each op:
@@ -128,15 +134,33 @@ Each op:
 | `split` | one node holds two distinct subjects | `node_id`, `into:[{title,link_ids}]` |
 | `merge` | duplicate/overlapping nodes are one subject | `node_ids:[…]`, `title?` |
 | `collapse` | a cold, unpinned branch decays to a digest | `node_id`, `summary`, `cite_seqs:[…]` |
+| `supersede` | a newer decision replaces an older one on the same subject | `old_seq`, `new_seq` |
 
-- `target_kind` ∈ `prompt | session | revision | mission | decision`;
-  `target_id` is the lake id (prompt seq, session id, ledger seq, mission id).
+- `target_kind` ∈ `prompt | session | revision | mission | decision |
+  browse_event | linked | companion | browse_thread`;
+  `target_id` is the lake id (prompt seq, session id, ledger seq, mission id,
+  thread id).
+- **Lineage is provenance too.** Delta lines may carry `session=`, `thread=`
+  (`kind:id` — the browse tab / linked discussion / draft / voice thread the
+  prompt belongs to), and `parent=session:<id>` (the plan session that thread
+  hangs under). Use it: prompts sharing a parent session usually belong with
+  that session's subject, and a `file` against the `session` target keeps the
+  whole lineage retrievable in one hop. Never infer lineage that isn't given.
 - **`collapse` must cite exact ledger seqs.** The digest's `summary` is your
   agent-written gist; its `cite_seqs` are the exact ledger rows it summarizes.
   Blurriness lives at the summary level — sourcing stays perfect one hop away.
   Only collapse **cold, unpinned** branches (pins are anti-decay markers).
 - **`promote` preserves everything** — id, links, pins, and the whole subtree
   ride along. That is why growing a topic and re-rooting it loses nothing.
+- **`supersede` marks a decision as replaced, never erased.** Both seqs must be
+  decision events (`resolution` / `approval` / `review_verdict`) and `old_seq`
+  must precede `new_seq`. A decision is superseded at most once — if the older
+  one was already superseded, Redline redirects your op to the current head of
+  its chain. Never supersede prompts or discussion (they are history, not
+  claims), and never emit one based on an observation. Your supersede is a
+  *recommendation*: an independent verifier agent adjudicates it with a
+  confidence gate before it applies, so emit it whenever the reversal is real
+  and state the evidence in the rationale.
 
 Example:
 
@@ -144,7 +168,8 @@ Example:
 {"proposals":[
   {"op":"create","parent_id":"root-redline","title":"Loop Engineering","rationale":"6 loop-executor prompts + 2 decisions cohere and were active this week"},
   {"op":"file","parent_id":"root-redline","sub_class":"Loop Engineering","target_kind":"decision","target_id":"318","note":"approved: remove from product","rationale":"the beta decision, not just discussion"},
-  {"op":"collapse","node_id":"cn-oldinvest","summary":"Explored quantum-computing stocks; parked, no position taken.","cite_seqs":[71,74,80],"rationale":"cold 5 weeks, unpinned, never queried"}
+  {"op":"collapse","node_id":"cn-oldinvest","summary":"Explored quantum-computing stocks; parked, no position taken.","cite_seqs":[71,74,80],"rationale":"cold 5 weeks, unpinned, never queried"},
+  {"op":"supersede","old_seq":318,"new_seq":402,"rationale":"the beta approval (402) reversed the earlier keep-it resolution (318) on the same feature"}
 ]}
 ```
 
@@ -168,18 +193,29 @@ catalog — it is a **vectorless tree-walk**, not a similarity search:
      `?project=<path>` or `?root=<id>` to scope).
 2. **Descend to the topic node**, then read its links:
    - `curl -s http://127.0.0.1:7676/v1/memory/node/<id>` — the node, its
-     children, and its links (pointers into the lake).
+     children, its links (pointers into the lake), and its `observations`.
 3. **Route by the question's verb** (this is where predicate structure earns its
    keep — at query time, not stored):
    - **"what did I *decide*"** → weight **decision events first**
      (`approval` / `resolution` / `review_verdict` links), *not* the discussion
-     prose that merely debated it.
+     prose that merely debated it — **and answer with *current* decisions**: a
+     link carrying `supersededBy` is history, not the answer. Follow the chain
+     to its head, report that as the decision, and mention the superseded one
+     only as background ("previously X, superseded by Y"). For as-of questions
+     ("what was true in March") walk the supersession chain backwards by event
+     time — nothing was destroyed.
    - **"what was I *researching*"** → weight `prompt` links with
      `surface = browse/mission` and `source_trust`.
    - **"how did I *build/wire*"** → weight `prompt` (plan/rust) + `revision`.
 4. **Expand a `digest` node only when detail is needed** — its `summary` answers
    most questions; when you need specifics, follow its `cite_seqs` links to the
    exact ledger rows.
+5. **Observations come last, labeled as patterns.** A node's `observations` are
+   agent-derived pattern notes (each citing the seqs it derives from). Surface
+   them *after* facts and decisions, phrased as a hypothesis ("a pattern in
+   your history suggests…"), never asserted as a fact or a decision. A `pinned`
+   observation is one the user promoted — include it; skip `dismissed` ones
+   entirely (the API already filters them).
 
 Worked examples (both must resolve *through the accepted tree*):
 

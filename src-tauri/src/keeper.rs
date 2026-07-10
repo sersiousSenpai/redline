@@ -53,6 +53,17 @@ const MAX_BATCH: usize = 40;
 const MAX_CORPUS_BYTES: usize = 60_000;
 /// Deterministic-fallback gist keeps this many leading characters.
 const GIST_HEAD_CHARS: usize = 240;
+/// Run one observation pass per this many completed organize passes (the
+/// counter persists in settings so cadence survives restarts).
+const OBSERVE_EVERY_N_ORGANIZES: i64 = 5;
+/// A node needs at least this many ledger-resolvable links to be mined.
+const OBSERVE_MIN_ITEMS: i64 = 5;
+/// Nodes mined per pass (bounds the baked corpus + spawn cost).
+const OBSERVE_MAX_NODES: usize = 3;
+/// Per-node cap on corpus items fed to the observation prompt.
+const OBSERVE_MAX_ITEMS_PER_NODE: i64 = 40;
+/// Settings key for the organize-pass counter behind the observation cadence.
+const OBSERVE_COUNTER_KEY: &str = "redline.keeper.observeCounter";
 
 // ---------------------------------------------------------------------------
 // Idle gate (pure)
@@ -252,7 +263,8 @@ pub fn parse_compaction_actions(text: &str) -> Vec<CompactionAction> {
 }
 
 /// First top-level `{…}` substring that parses as JSON and carries `key`.
-fn extract_object_with_key(text: &str, key: &str) -> Option<Value> {
+/// Shared with classmem's supersede-verifier parser.
+pub(crate) fn extract_object_with_key(text: &str, key: &str) -> Option<Value> {
     let bytes = text.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -412,6 +424,215 @@ pub async fn compaction_pass(db: &Database) -> Result<usize, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Observation pass (agent-derived patterns over a node's items)
+// ---------------------------------------------------------------------------
+
+/// One observation the pass will write.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObservationAction {
+    pub node_id: String,
+    pub summary: String,
+    pub cite_seqs: Vec<i64>,
+}
+
+/// Pick the nodes worth mining this pass: accepted, not a digest, holding at
+/// least `min_items` ledger-resolvable items, and with something NEW since
+/// their newest observation (freshness — never re-mine a quiet node). Ranked
+/// by last activity (recently active nodes have live patterns), truncated to
+/// `max`. Pure and deterministic.
+pub fn select_observation_nodes(
+    nodes: &[ClassNode],
+    stats: &HashMap<String, classmem::BranchStat>,
+    newest_obs: &HashMap<String, i64>,
+    min_items: i64,
+    max: usize,
+) -> Vec<String> {
+    let mut cands: Vec<(&str, i64)> = nodes
+        .iter()
+        .filter(|n| n.status == "accepted" && n.kind != "digest")
+        .filter_map(|n| {
+            let s = stats.get(&n.id)?;
+            if s.item_count < min_items {
+                return None;
+            }
+            let last = s.last_ts?;
+            if newest_obs.get(&n.id).is_some_and(|&obs| obs >= last) {
+                return None; // nothing new since the last observation
+            }
+            Some((n.id.as_str(), last))
+        })
+        .collect();
+    cands.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    cands.truncate(max);
+    cands.into_iter().map(|(id, _)| id.to_string()).collect()
+}
+
+/// Build the observation prompt. Self-contained like `build_keeper_prompt` —
+/// the corpus is baked in, no skill load, no curling. Every observation must
+/// cite the exact seqs it derives from; uncited output is rejected.
+pub fn build_observations_prompt(
+    corpus: &[(String, String, Vec<(i64, String, i64, Option<String>)>)],
+) -> String {
+    let mut p = String::from(
+        "You are Redline's memory keeper, observation pass. For each class of \
+         the user's history below, look ACROSS its items for a PATTERN — a \
+         recurrence, a trend over time, or a co-occurrence (e.g. \"every deploy \
+         prompt lands within a day of an auth change\"). An observation is a \
+         DERIVED note, never ground truth — phrase it as a pattern, not a fact \
+         or decision. Every observation MUST cite the exact seqs it derives \
+         from — uncited observations are rejected. If a class shows no genuine \
+         pattern, emit nothing for it. At most one observation per class.\n\n",
+    );
+    let mut used = p.len();
+    for (node_id, title, items) in corpus {
+        let mut block = format!("### node {node_id} — {title}\n");
+        for (seq, kind, ts, snippet) in items {
+            block.push_str(&format!(
+                "- seq {seq} | {kind} | ts={ts} | {}\n",
+                snippet.as_deref().map(|s| {
+                    let one = s.replace('\n', " ");
+                    one.chars().take(200).collect::<String>()
+                })
+                .unwrap_or_else(|| format!("[{kind} event]")),
+            ));
+        }
+        block.push('\n');
+        if used + block.len() > MAX_CORPUS_BYTES {
+            break;
+        }
+        used += block.len();
+        p.push_str(&block);
+    }
+    p.push_str(
+        "## Output\n\nReturn ONLY a JSON object (optionally in a ```json fence):\n\n\
+         {\"observations\":[{\"nodeId\":\"<node id>\",\"summary\":\"<1–2 sentence pattern>\",\"citeSeqs\":[<seqs from that node's items>]}]}\n",
+    );
+    p
+}
+
+/// Parse the observation reply — deliberately STRICTER than the compaction
+/// parser: entries with an empty summary, empty `citeSeqs`, an unknown
+/// `nodeId`, or any cited seq that was not actually shown to the agent for
+/// that node (fabricated citation) are dropped. Numeric strings coerce. Pure.
+pub fn parse_observations(
+    text: &str,
+    allowed: &HashMap<String, HashSet<i64>>,
+) -> Vec<ObservationAction> {
+    let Some(obj) = extract_object_with_key(text, "observations") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if let Some(arr) = obj.get("observations").and_then(Value::as_array) {
+        for v in arr {
+            let Some(node_id) = v
+                .get("nodeId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            else {
+                continue;
+            };
+            let Some(shown) = allowed.get(node_id) else {
+                continue; // unknown node — fabricated or stale
+            };
+            let Some(summary) = v
+                .get("summary")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            else {
+                continue;
+            };
+            let cite_seqs: Vec<i64> = v
+                .get("citeSeqs")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| match x {
+                            Value::Number(n) => n.as_i64(),
+                            Value::String(s) => s.trim().parse().ok(),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            // An uncited pattern is fabrication; a citation outside what the
+            // agent was shown is fabrication too.
+            if cite_seqs.is_empty() || cite_seqs.iter().any(|s| !shown.contains(s)) {
+                continue;
+            }
+            out.push(ObservationAction {
+                node_id: node_id.to_string(),
+                summary: summary.to_string(),
+                cite_seqs,
+            });
+        }
+    }
+    out
+}
+
+/// The keeper's third idle-tick pass: mine a few active, item-rich nodes for
+/// patterns and write them as `class_observations` rows (each appending its
+/// `observation` ledger event). No deterministic fallback — an observation is
+/// pure judgment, so if the agent is unavailable the pass just skips.
+pub async fn observations_pass(db: &Database) -> Result<usize, String> {
+    let nodes = db.list_class_nodes().map_err(|e| e.to_string())?;
+    let direct = db.node_direct_link_activity().map_err(|e| e.to_string())?;
+    let stats = subtree_stats(&nodes, &direct);
+    let newest_obs = db.newest_observation_per_node().map_err(|e| e.to_string())?;
+    let selected = select_observation_nodes(
+        &nodes,
+        &stats,
+        &newest_obs,
+        OBSERVE_MIN_ITEMS,
+        OBSERVE_MAX_NODES,
+    );
+    if selected.is_empty() {
+        return Ok(0);
+    }
+    let title_of: HashMap<&str, &str> = nodes
+        .iter()
+        .map(|n| (n.id.as_str(), n.title.as_str()))
+        .collect();
+    let mut corpus = Vec::new();
+    let mut allowed: HashMap<String, HashSet<i64>> = HashMap::new();
+    for node_id in &selected {
+        let items = db
+            .node_link_items(node_id, OBSERVE_MAX_ITEMS_PER_NODE)
+            .map_err(|e| e.to_string())?;
+        if (items.len() as i64) < OBSERVE_MIN_ITEMS {
+            continue; // links resolved to fewer ledger rows than the gate
+        }
+        allowed.insert(node_id.clone(), items.iter().map(|(seq, ..)| *seq).collect());
+        corpus.push((
+            node_id.clone(),
+            title_of.get(node_id.as_str()).copied().unwrap_or("").to_string(),
+            items,
+        ));
+    }
+    if corpus.is_empty() {
+        return Ok(0);
+    }
+    let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+    let text = match run_keeper_summarizer(&cwd, build_observations_prompt(&corpus)).await {
+        Ok(text) => text,
+        Err(e) => {
+            tracing::info!(error = %e, "observation agent unavailable — skipping the pass");
+            return Ok(0);
+        }
+    };
+    let mut written = 0usize;
+    for a in parse_observations(&text, &allowed) {
+        match db.insert_class_observation(&a.node_id, &a.summary, &a.cite_seqs) {
+            Ok(Some(_)) => written += 1,
+            Ok(None) => {} // dedup (incl. previously dismissed) or node gone
+            Err(e) => tracing::warn!(error = %e, node = %a.node_id, "insert observation failed"),
+        }
+    }
+    Ok(written)
+}
+
+// ---------------------------------------------------------------------------
 // The scheduler loop
 // ---------------------------------------------------------------------------
 
@@ -447,9 +668,14 @@ pub fn spawn(app: AppHandle, db: Arc<Database>) {
                 continue; // not enough new material yet
             }
 
-            // --- run: organize, then compact. Both best-effort. ---
+            // --- run: organize, then compact, then (occasionally) observe.
+            // All best-effort. ---
+            let mut organized = false;
             match classmem::organize_once(&db).await {
-                Ok(o) if o.ran => tracing::info!(summary = %o.summary, "keeper organized"),
+                Ok(o) if o.ran => {
+                    organized = true;
+                    tracing::info!(summary = %o.summary, "keeper organized");
+                }
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error = %e, "keeper organize pass failed"),
             }
@@ -457,6 +683,25 @@ pub fn spawn(app: AppHandle, db: Arc<Database>) {
                 Ok(n) if n > 0 => tracing::info!(compacted = n, "keeper compacted cold prompts"),
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error = %e, "keeper compaction pass failed"),
+            }
+            // Observation cadence: one pass per OBSERVE_EVERY_N_ORGANIZES
+            // organizes that actually ran (counter persists across restarts).
+            if organized {
+                let n = db
+                    .get_setting(OBSERVE_COUNTER_KEY)
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .unwrap_or(0)
+                    + 1;
+                if n >= OBSERVE_EVERY_N_ORGANIZES {
+                    match observations_pass(&db).await {
+                        Ok(k) if k > 0 => tracing::info!(observations = k, "keeper observed patterns"),
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!(error = %e, "keeper observation pass failed"),
+                    }
+                    let _ = db.set_setting(OBSERVE_COUNTER_KEY, "0");
+                } else {
+                    let _ = db.set_setting(OBSERVE_COUNTER_KEY, &n.to_string());
+                }
             }
 
             last_run_ms = Some(now_millis());
@@ -567,6 +812,79 @@ mod tests {
         assert_eq!(a[1].gist, "Auth spike notes"); // trimmed
         assert_eq!(a[1].reason, "cold"); // defaulted
         assert!(parse_compaction_actions("no json").is_empty());
+    }
+
+    #[test]
+    fn parse_observations_rejects_uncited_and_foreign_seqs() {
+        let mut allowed: HashMap<String, HashSet<i64>> = HashMap::new();
+        allowed.insert("cn-a".into(), [10, 11, 12].into_iter().collect());
+        let text = r#"Patterns found:
+```json
+{"observations":[
+  {"nodeId":"cn-a","summary":"deploys follow auth changes","citeSeqs":[10,"11"]},
+  {"nodeId":"cn-a","summary":"uncited pattern","citeSeqs":[]},
+  {"nodeId":"cn-a","summary":"fabricated citation","citeSeqs":[10,99]},
+  {"nodeId":"cn-ghost","summary":"unknown node","citeSeqs":[10]},
+  {"nodeId":"cn-a","summary":"   ","citeSeqs":[10]}
+]}
+```"#;
+        let obs = parse_observations(text, &allowed);
+        assert_eq!(obs.len(), 1, "uncited / foreign-seq / unknown-node / blank all dropped");
+        assert_eq!(obs[0].node_id, "cn-a");
+        assert_eq!(obs[0].cite_seqs, vec![10, 11]); // numeric-string coerced
+        assert!(parse_observations("prose", &allowed).is_empty());
+    }
+
+    #[test]
+    fn select_observation_nodes_gates_on_size_freshness_and_kind() {
+        let mut digest = node("digest", None, false);
+        digest.kind = "digest".into();
+        let mut proposed = node("proposed", None, false);
+        proposed.status = "proposed".into();
+        let nodes = vec![
+            node("busy", None, false),     // active + big → picked first
+            node("older", None, false),    // active + big, older → picked second
+            node("tiny", None, false),     // too few items
+            node("stale", None, false),    // observation newer than last activity
+            digest,                        // digests are never mined
+            proposed,                      // unaccepted nodes are never mined
+        ];
+        let stat = |count: i64, ts: i64| classmem::BranchStat {
+            last_ts: Some(ts),
+            item_count: count,
+            pinned: false,
+        };
+        let stats: HashMap<String, classmem::BranchStat> = [
+            ("busy".to_string(), stat(10, 900)),
+            ("older".to_string(), stat(8, 500)),
+            ("tiny".to_string(), stat(2, 950)),
+            ("stale".to_string(), stat(9, 400)),
+            ("digest".to_string(), stat(9, 990)),
+            ("proposed".to_string(), stat(9, 990)),
+        ]
+        .into_iter()
+        .collect();
+        let newest_obs: HashMap<String, i64> = [("stale".to_string(), 450)].into_iter().collect();
+        let picked = select_observation_nodes(&nodes, &stats, &newest_obs, OBSERVE_MIN_ITEMS, 2);
+        assert_eq!(picked, vec!["busy".to_string(), "older".to_string()]);
+        // With room for more, the gated nodes still never appear.
+        let all = select_observation_nodes(&nodes, &stats, &newest_obs, OBSERVE_MIN_ITEMS, 10);
+        assert_eq!(all, vec!["busy".to_string(), "older".to_string()]);
+    }
+
+    #[test]
+    fn observations_prompt_carries_the_citation_contract() {
+        let corpus = vec![(
+            "cn-a".to_string(),
+            "Auth".to_string(),
+            vec![(10, "prompt".to_string(), 900, Some("clerk webhook".to_string()))],
+        )];
+        let p = build_observations_prompt(&corpus);
+        assert!(p.contains("observations"));
+        assert!(p.contains("citeSeqs"));
+        assert!(p.contains("uncited observations are rejected"));
+        assert!(p.contains("### node cn-a — Auth"));
+        assert!(p.contains("seq 10"));
     }
 
     #[test]

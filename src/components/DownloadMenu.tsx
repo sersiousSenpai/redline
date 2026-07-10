@@ -12,21 +12,24 @@ interface DownloadMenuProps {
   onExportMarkdown: () => void;
   /** Save the revision as a Word .docx file. */
   onExportDocx: () => void;
+  /** Save the revision as a note in the user's Obsidian vault. */
+  onSaveObsidian: () => void;
 }
 
-const FORMATS = [
-  { key: "md", label: "Markdown (.md)" },
-  { key: "docx", label: "Word (.docx)" },
+const ACTIONS = [
+  { key: "md", label: "Download markdown (.md)" },
+  { key: "obsidian", label: "Save to Obsidian" },
+  { key: "docx", label: "Export Word (.docx)" },
 ] as const;
 
-// Compact caret dropdown matching ThemePicker: one Download trigger, a popover
-// listing the export formats. Formats come from the adapter registry's two
-// shipped adapters; extend FORMATS when a new adapter lands.
+// Compact caret dropdown matching ThemePicker: one "Options" trigger, a popover
+// listing the export/save actions for the displayed revision.
 export function DownloadMenu({
   version,
   disabled = false,
   onExportMarkdown,
   onExportDocx,
+  onSaveObsidian,
 }: DownloadMenuProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -53,9 +56,10 @@ export function DownloadMenu({
     };
   }, [open]);
 
-  const pick = (key: (typeof FORMATS)[number]["key"]) => {
+  const pick = (key: (typeof ACTIONS)[number]["key"]) => {
     setOpen(false);
     if (key === "md") onExportMarkdown();
+    else if (key === "obsidian") onSaveObsidian();
     else onExportDocx();
   };
 
@@ -67,8 +71,8 @@ export function DownloadMenu({
         disabled={disabled}
         title={
           disabled
-            ? "Switch to a plan session to download"
-            : `Download v${version}`
+            ? "Switch to a plan session for options"
+            : `Options for v${version}`
         }
         aria-haspopup="menu"
         aria-expanded={open}
@@ -82,7 +86,7 @@ export function DownloadMenu({
           opacity: disabled ? 0.4 : 1,
         }}
       >
-        Download
+        Options
         <span style={{ color: "var(--color-ink-muted)", fontSize: "9px" }}>
           ▾
         </span>
@@ -91,23 +95,23 @@ export function DownloadMenu({
       {open && (
         <div
           role="menu"
-          aria-label="Download format"
+          aria-label="Options"
           className="absolute right-0 z-50 rounded-md overflow-hidden"
           style={{
             top: "calc(100% + 6px)",
-            width: "170px",
+            width: "210px",
             border: "1px solid var(--color-rule)",
             background: "var(--color-bg-elevated)",
             boxShadow: "0 8px 24px rgba(0,0,0,0.28)",
           }}
         >
-          {FORMATS.map((f, idx) => (
+          {ACTIONS.map((a, idx) => (
             <button
-              key={f.key}
+              key={a.key}
               type="button"
               role="menuitem"
-              onClick={() => pick(f.key)}
-              title={`Download v${version} as ${f.label}`}
+              onClick={() => pick(a.key)}
+              title={`${a.label} — v${version}`}
               className="rl-menu-item w-full text-left px-3 py-2 font-sans"
               style={{
                 fontSize: "12px",
@@ -115,12 +119,12 @@ export function DownloadMenu({
                 color: "var(--color-ink)",
                 cursor: "pointer",
                 borderBottom:
-                  idx < FORMATS.length - 1
+                  idx < ACTIONS.length - 1
                     ? "1px solid var(--color-rule)"
                     : "none",
               }}
             >
-              {f.label}
+              {a.label}
             </button>
           ))}
         </div>

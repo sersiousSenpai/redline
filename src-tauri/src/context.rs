@@ -268,6 +268,10 @@ pub struct PromptFilters {
     pub since_seq: Option<i64>,
     pub substring: Option<String>,
     pub limit: i64,
+    /// Memory-by-session filters over the non-hashed provenance columns.
+    pub thread_kind: Option<String>,
+    pub thread_id: Option<String>,
+    pub parent_session_id: Option<String>,
 }
 
 /// Clamp + default `GET /v1/context/prompts`'s `?limit=`.
@@ -601,6 +605,7 @@ mod tests {
                 mission_id: None,
                 project_path: project.map(str::to_string),
                 body: body.to_string(),
+                thread: None,
             },
         )
         .unwrap();
@@ -635,6 +640,69 @@ mod tests {
         .unwrap();
         assert_eq!(by_project.len(), 1);
         assert_eq!(by_project[0].surface.as_deref(), Some("browse"));
+    }
+
+    #[test]
+    fn context_prompts_filter_by_thread_and_parent_session() {
+        let db = Database::open_in_memory().unwrap();
+        seed_prompt(&db, "pty_plan", Some("/repo/a"), "plain plan prompt");
+        crate::ledger::record_prompt(
+            &db,
+            crate::ledger::PromptInput {
+                source: crate::ledger::PromptSource::RustFirstTurn,
+                origin: crate::ledger::Origin::Redline,
+                surface: "browse".to_string(),
+                role: None,
+                session_id: None,
+                claude_session_id: None,
+                mission_id: None,
+                project_path: None,
+                body: "tab-scoped question".to_string(),
+                thread: Some(crate::ledger::ThreadRef {
+                    thread_kind: "browse",
+                    thread_id: "tab-42".to_string(),
+                    parent_session_id: Some("sess-parent".to_string()),
+                }),
+            },
+        )
+        .unwrap();
+
+        let by_thread = list_prompts(
+            &db,
+            &PromptFilters {
+                thread_kind: Some("browse".into()),
+                thread_id: Some("tab-42".into()),
+                limit: clamp_prompt_limit(None),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(by_thread.len(), 1);
+        assert_eq!(by_thread[0].body.as_deref(), Some("tab-scoped question"));
+
+        let by_parent = list_prompts(
+            &db,
+            &PromptFilters {
+                parent_session_id: Some("sess-parent".into()),
+                limit: clamp_prompt_limit(None),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(by_parent.len(), 1);
+        assert_eq!(by_parent[0].thread_id.as_deref(), Some("tab-42"));
+
+        // A thread filter that matches nothing returns nothing (not everything).
+        let none = list_prompts(
+            &db,
+            &PromptFilters {
+                thread_kind: Some("linked".into()),
+                limit: clamp_prompt_limit(None),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(none.is_empty());
     }
 
     #[test]

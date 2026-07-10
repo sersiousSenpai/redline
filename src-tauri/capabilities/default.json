@@ -22,6 +22,7 @@
     "core:webview:allow-set-webview-focus",
     "dialog:allow-message",
     "dialog:allow-open",
-    "opener:default"
+    "opener:default",
+    "deep-link:default"
   ]
 }

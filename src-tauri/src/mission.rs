@@ -81,6 +81,123 @@ impl MissionState {
             let _ = proc.child.start_kill();
         }
     }
+
+    /// "Check in with a colleague" for the Companion's `/v1/global/consult`:
+    /// run THIS mission's orchestrator to completion with a synthesis-framed
+    /// question and return only its digest. Mirrors `BrowseState::consult`
+    /// (in-flight guard, check-in rows persisted in the mission's own thread,
+    /// inline drive behind a 180s ceiling). Whether a turn is running is
+    /// checked with the same guard `mission_send` uses, so a user turn and a
+    /// consult can never collide.
+    pub async fn consult(&self, mission_id: String, question: String) -> Result<String, String> {
+        if question.trim().is_empty() {
+            return Err("nothing to ask the colleague".to_string());
+        }
+        {
+            let guard = self.procs.lock().unwrap();
+            if guard.contains_key(&mission_id) {
+                return Err(
+                    "the mission orchestrator is busy — try again in a moment".to_string(),
+                );
+            }
+        }
+        let prior_session = self.db.get_mission_session(&mission_id);
+
+        let check_in = MissionMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            mission_id: mission_id.clone(),
+            role: "user".to_string(),
+            body: format!("🧭 Companion checking in — {}", question.trim()),
+            status: "complete".to_string(),
+            created_at: now_millis(),
+        };
+        if let Err(e) = self.db.insert_mission_message(&check_in) {
+            tracing::warn!(error = %e, "failed to persist consult check-in");
+        }
+
+        let framed = format!(
+            "The user's COMPANION — their global cross-surface discussion — is \
+             checking in with you about THIS mission. Synthesize what matters \
+             here for their question as a tight DIGEST (not a transcript, not a \
+             fresh reply to the user). Be concise. Their question:\n\n{}",
+            question.trim()
+        );
+        let prompt = match &prior_session {
+            None => {
+                let m = self
+                    .db
+                    .get_mission(&mission_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "mission not found".to_string())?;
+                let findings = self.db.list_findings(&mission_id).unwrap_or_default();
+                build_first_turn_prompt(&m.title, &m.goal, &findings, &framed)
+            }
+            Some(_) => framed.clone(),
+        };
+        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+
+        let args = crate::claude_proc::bridge_args(prompt, prior_session.as_deref());
+        let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+        let claude_bin = self.claude_bin().await?;
+        let mut cmd = claude_command(&claude_bin);
+        let mut child = cmd
+            .current_dir(&cwd)
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| format!("failed to spawn claude: {e}"))?;
+        let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
+        let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
+        {
+            self.procs
+                .lock()
+                .unwrap()
+                .insert(mission_id.clone(), MissionProc { child });
+        }
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(180),
+            crate::claude_proc::collect_turn(stdout, stderr),
+        )
+        .await;
+        let proc = { self.procs.lock().unwrap().remove(&mission_id) };
+        let outcome = match outcome {
+            Ok(o) => o,
+            Err(_) => {
+                if let Some(mut p) = proc {
+                    let _ = p.child.start_kill();
+                }
+                return Err("the colleague took too long to respond".to_string());
+            }
+        };
+        if let Some(mut p) = proc {
+            let _ = p.child.wait().await;
+        }
+        if let Some(err) = outcome.errored {
+            return Err(err);
+        }
+        let Some(text) = outcome.final_text.filter(|t| !t.trim().is_empty()) else {
+            return Err("the colleague produced no reply".to_string());
+        };
+        if let Some(sid) = &outcome.session {
+            let _ = self.db.set_mission_session(&mission_id, sid);
+        }
+        let reply = MissionMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            mission_id: mission_id.clone(),
+            role: "assistant".to_string(),
+            body: text.clone(),
+            status: "complete".to_string(),
+            created_at: now_millis(),
+        };
+        if let Err(e) = self.db.insert_mission_message(&reply) {
+            tracing::warn!(error = %e, "failed to persist consult reply");
+        }
+        Ok(text)
+    }
 }
 
 // --- Event payloads --------------------------------------------------------
@@ -406,6 +523,14 @@ pub fn mission_add_finding(
     ) {
         tracing::warn!(error = %e, "failed to record pin ledger event");
     }
+    // Companion journal: the user pinned a finding.
+    let _ = mission.db.append_journal(
+        "mission_pin",
+        Some("browser"),
+        Some(&f.mission_id),
+        f.source_title.as_deref(),
+        f.source_url.as_deref(),
+    );
     Ok(f)
 }
 
@@ -488,8 +613,10 @@ pub async fn mission_send(
         Some(_) => text.clone(),
     };
 
-    // Polis ledger: record the first-turn mission prompt; keep every agent turn
-    // out of the global-hook capture stream.
+    // Polis ledger: record the first-turn mission prompt with its thread
+    // provenance (missions are usually roots — the browser pane is the active
+    // surface at creation, so `resolve_parent` naturally yields none); keep
+    // every agent turn out of the global-hook capture stream.
     if prior_session.is_none() {
         crate::ledger::record_agent_prompt(
             &mission.db,
@@ -499,6 +626,11 @@ pub async fn mission_send(
             cwd.clone(),
             None,
             Some(mission_id.clone()),
+            Some(crate::ledger::ThreadRef {
+                thread_kind: "mission",
+                thread_id: mission_id.clone(),
+                parent_session_id: None,
+            }),
         );
     } else {
         crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
@@ -709,6 +841,8 @@ async fn read_mission(
         if let Err(e) = db.insert_mission_message(&msg) {
             tracing::warn!(error = %e, "failed to persist assistant message");
         }
+        // Companion journal: the mission orchestrator completed a turn.
+        let _ = db.append_journal("agent_turn", Some("mission"), Some(&mission_id), None, None);
         let _ = app.emit(
             "mission-done",
             MissionDone {

@@ -105,6 +105,32 @@ pub enum EventKind {
     /// was there, so the chain and every bundle stay verifiable even though the
     /// stored body is gone. References the prompt by `(ref_kind="prompt", ref_id)`.
     Compaction,
+    /// Dojo P2 ("Browsing Behavior"): a page the user landed on. The normalized
+    /// on-screen content lives in the ledger-owned `browse_events` table; this
+    /// event references it by `(ref_kind="browse_event", ref_id)` and carries the
+    /// page content-hash as `payload_hash`.
+    BrowseEvent,
+    /// Memory-by-session: a child interaction thread (browse / linked / mission /
+    /// voice / drafter / fork / companion) was attached to a parent session or
+    /// mission. The readable relation lives in the `session_tree` table; this
+    /// event references that row by `(ref_kind="session_link", ref_id)` and
+    /// commits to its `(child, parent)` identity via `payload_hash`, making the
+    /// hierarchy tamper-evident without touching `CanonicalEvent`.
+    SessionLink,
+    /// Supersession: a newer decision replaces an older one on the same subject.
+    /// References the SUPERSEDED event by `(ref_kind="ledger_event",
+    /// ref_id=old_seq)` — the first event-to-event reference — and commits to
+    /// `(superseded_by, rationale)` via `payload_hash`. Never an edit: the old
+    /// decision stays in the lake; the queryable "is seq X superseded?" index
+    /// lives in the plain `supersessions` side table, never the hashed event.
+    Supersede,
+    /// An agent-written pattern statement (recurrence / trend / co-occurrence)
+    /// over a class node's lake items. Derived, never ground truth. The readable
+    /// row lives in `class_observations`; this event references the node by
+    /// `(ref_kind="class_node", ref_id)` and commits to `(node, summary, cites)`
+    /// via `payload_hash`, so observation history is tamper-evident even after
+    /// the row is retired.
+    Observation,
 }
 
 impl EventKind {
@@ -121,6 +147,10 @@ impl EventKind {
             EventKind::TaxonomyReorg => "taxonomy_reorg",
             EventKind::ClassCurate => "class_curate",
             EventKind::Compaction => "compaction",
+            EventKind::BrowseEvent => "browse_event",
+            EventKind::SessionLink => "session_link",
+            EventKind::Supersede => "supersede",
+            EventKind::Observation => "observation",
         }
     }
 }
@@ -237,6 +267,22 @@ pub struct PromptRow<'a> {
     pub project_path: Option<&'a str>,
     pub body: &'a str,
     pub body_hash: &'a str,
+    /// Memory-by-session provenance (non-hashed — only `prompt_id` + `body_hash`
+    /// enter the chained event, so these columns are free to add/populate).
+    pub thread_kind: Option<&'a str>,
+    pub thread_id: Option<&'a str>,
+    pub parent_session_id: Option<&'a str>,
+}
+
+/// A row to insert into the ledger-owned `browse_events` table (Dojo P2).
+pub struct BrowseEventRow<'a> {
+    pub ts: i64,
+    pub action: &'a str,
+    pub browse_id: Option<&'a str>,
+    pub url: &'a str,
+    pub title: Option<&'a str>,
+    pub text: &'a str,
+    pub context_hash: &'a str,
 }
 
 /// The result of verifying the whole chain.
@@ -299,8 +345,57 @@ pub fn claim_agent_prompt(body_hash: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Drafted-prompt handoff guard
+// ---------------------------------------------------------------------------
+//
+// The draft→launched-session lineage: `record_drafted_prompt` registers the
+// launched body's hash here WITH its draft id; when the spawned session's first
+// `UserPromptSubmit` hook fire arrives at the ingest handler (and is
+// claim-skipped by the agent guard above), the handler claims this map too —
+// at that exact moment the claude session id is known, so the ingest can record
+// `session_link(session → drafter draft)`. Same TTL/consume-once semantics as
+// the agent guard.
+
+fn drafted_guard() -> &'static Mutex<HashMap<String, (String, Instant)>> {
+    static G: OnceLock<Mutex<HashMap<String, (String, Instant)>>> = OnceLock::new();
+    G.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Register a drafted prompt body about to be launched into a new plan session,
+/// carrying the draft id the eventual session should be linked under.
+pub fn register_drafted_prompt(body_hash: &str, draft_id: &str) {
+    let mut g = drafted_guard().lock().unwrap();
+    let now = Instant::now();
+    g.retain(|_, (_, t)| now.duration_since(*t) < GUARD_TTL);
+    g.insert(body_hash.to_string(), (draft_id.to_string(), now));
+}
+
+/// Consume a drafted-prompt registration: the draft id this body was launched
+/// from, or `None` if the body wasn't a drafter launch.
+pub fn claim_drafted_prompt(body_hash: &str) -> Option<String> {
+    let mut g = drafted_guard().lock().unwrap();
+    let now = Instant::now();
+    g.retain(|_, (_, t)| now.duration_since(*t) < GUARD_TTL);
+    g.remove(body_hash).map(|(draft_id, _)| draft_id)
+}
+
+// ---------------------------------------------------------------------------
 // Public record entry points
 // ---------------------------------------------------------------------------
+
+/// Memory-by-session provenance for a captured prompt: which interaction
+/// thread it belongs to and (when resolvable) the parent session that thread
+/// hangs under. Stored in non-hashed `prompts` columns — never in the chain.
+#[derive(Debug, Clone)]
+pub struct ThreadRef {
+    /// `browse | linked | mission | voice | drafter | drafter_chat | fork |
+    /// review_thread | review_question | companion` — the thread's kind.
+    pub thread_kind: &'static str,
+    /// The thread's own id in its id-space (browse_id, linked_id, …).
+    pub thread_id: String,
+    /// The parent plan session, when one is resolvable at capture time.
+    pub parent_session_id: Option<String>,
+}
 
 /// The full set of fields needed to record a prompt.
 pub struct PromptInput {
@@ -313,6 +408,7 @@ pub struct PromptInput {
     pub mission_id: Option<String>,
     pub project_path: Option<String>,
     pub body: String,
+    pub thread: Option<ThreadRef>,
 }
 
 /// Record a prompt into the lake + emit its ledger event. Returns the new
@@ -334,6 +430,12 @@ pub fn record_prompt(db: &Database, input: PromptInput) -> Result<Option<i64>, S
         project_path: input.project_path.as_deref(),
         body: &input.body,
         body_hash: &bh,
+        thread_kind: input.thread.as_ref().map(|t| t.thread_kind),
+        thread_id: input.thread.as_ref().map(|t| t.thread_id.as_str()),
+        parent_session_id: input
+            .thread
+            .as_ref()
+            .and_then(|t| t.parent_session_id.as_deref()),
     };
     let prompt_id = match db.insert_prompt(&row).map_err(|e| e.to_string())? {
         Some(id) => id,
@@ -369,6 +471,7 @@ pub fn record_agent_prompt(
     project_path: Option<String>,
     session_id: Option<String>,
     mission_id: Option<String>,
+    thread: Option<ThreadRef>,
 ) {
     register_agent_prompt(&body_hash(body));
     let input = PromptInput {
@@ -381,10 +484,64 @@ pub fn record_agent_prompt(
         mission_id,
         project_path,
         body: body.to_string(),
+        thread,
     };
     if let Err(e) = record_prompt(db, input) {
         tracing::warn!(error = %e, surface, "failed to record agent prompt to ledger");
     }
+}
+
+/// Fields for recording a browsing event — a page the user landed on (Dojo P2).
+pub struct BrowseEventInput {
+    /// What happened. Today always `"navigate"` (a page that came on screen);
+    /// left open for finer-grained interactions later.
+    pub action: String,
+    /// The tab's discussion-thread key, so events can be grouped per tab.
+    pub browse_id: Option<String>,
+    pub url: String,
+    pub title: Option<String>,
+    /// Normalized on-screen content (title + url + headings + body). Hashed to
+    /// the context hash and retained for later lexical retrieval (P3 FTS5).
+    pub text: String,
+}
+
+/// Record a browsing event into the lake: store the normalized page content in
+/// the ledger-owned `browse_events` table and emit a `browse_event` ledger event
+/// referencing it by `(ref_kind="browse_event", ref_id=id)` with the content hash
+/// as `payload_hash`. Returns the new seq, or `None` if the content was a
+/// consecutive duplicate for the tab (nothing written). Best-effort — surfaces DB
+/// errors as `Err` for logging; never blocks the browser.
+pub fn record_browse_event(db: &Database, input: BrowseEventInput) -> Result<Option<i64>, String> {
+    let ch = body_hash(&input.text);
+    let ts = now_millis();
+    let row = BrowseEventRow {
+        ts,
+        action: &input.action,
+        browse_id: input.browse_id.as_deref(),
+        url: &input.url,
+        title: input.title.as_deref(),
+        text: &input.text,
+        context_hash: &ch,
+    };
+    let id = match db.insert_browse_event(&row).map_err(|e| e.to_string())? {
+        Some(id) => id,
+        None => return Ok(None), // consecutive duplicate for this tab
+    };
+    let author = local_author();
+    let ref_id = id.to_string();
+    let append = LedgerAppend {
+        kind: EventKind::BrowseEvent.as_str(),
+        author: &author,
+        ts,
+        prompt_id: None,
+        session_id: None,
+        version_number: None,
+        ref_kind: Some("browse_event"),
+        ref_id: Some(&ref_id),
+        payload_hash: &ch,
+    };
+    let ev = db.append_ledger_event(&append).map_err(|e| e.to_string())?;
+    Ok(Some(ev.seq))
 }
 
 /// Emit a ledger event for a plan revision. Idempotent per
@@ -460,6 +617,81 @@ pub fn record_decision(db: &Database, input: DecisionInput) -> Result<Option<i64
     };
     let ev = db.append_ledger_event(&append).map_err(|e| e.to_string())?;
     Ok(Some(ev.seq))
+}
+
+/// Record a parent/child session-tree relation: insert the readable
+/// `session_tree` row (idempotent — a child has at most one parent, first write
+/// wins) and, when a row was actually inserted, emit a `session_link` ledger
+/// event referencing it, committing to the `(child, parent)` identity via
+/// `payload_hash`. Returns the new ledger seq, `None` when the relation already
+/// existed. Best-effort at call sites — never block a spawn on it.
+pub fn record_session_link(
+    db: &Database,
+    child_kind: &str,
+    child_id: &str,
+    parent_kind: &str,
+    parent_id: &str,
+) -> Result<Option<i64>, String> {
+    if child_id.trim().is_empty() || parent_id.trim().is_empty() {
+        return Ok(None);
+    }
+    let row_id = match db
+        .insert_session_link(child_kind, child_id, parent_kind, parent_id, now_millis())
+        .map_err(|e| e.to_string())?
+    {
+        Some(id) => id,
+        None => return Ok(None), // this child is already linked
+    };
+    let ph = decision_payload_hash(&[
+        ("child_kind", child_kind),
+        ("child_id", child_id),
+        ("parent_kind", parent_kind),
+        ("parent_id", parent_id),
+    ]);
+    record_decision(
+        db,
+        DecisionInput {
+            kind: EventKind::SessionLink,
+            author: None,
+            session_id: (parent_kind == "session").then_some(parent_id),
+            ref_kind: "session_link",
+            ref_id: &row_id.to_string(),
+            payload_hash: ph,
+        },
+    )
+}
+
+/// Resolve the parent for a NEW interaction thread — called ONCE at thread
+/// creation; the relation is then recorded via `record_session_link` and never
+/// re-derived. Precedence:
+///   explicit seed (voice→plan, drafter-from-mission→mission, fork→its session)
+///   > the active mission, for browser-family surfaces (browse, linked)
+///   > the active surface's plan session (the user was looking at plan X)
+///   > none (a root thread).
+/// The companion is always a root: it spans surfaces by design.
+pub fn resolve_parent(
+    explicit: Option<(&str, &str)>,
+    active_mission_id: Option<&str>,
+    active_surface: Option<(&str, &str)>, // (kind, id) when the surface carries an id
+    child_kind: &str,
+) -> Option<(String, String)> {
+    if child_kind == "companion" {
+        return None;
+    }
+    if let Some((kind, id)) = explicit {
+        return Some((kind.to_string(), id.to_string()));
+    }
+    if matches!(child_kind, "browse" | "linked") {
+        if let Some(m) = active_mission_id.filter(|m| !m.trim().is_empty()) {
+            return Some(("mission".to_string(), m.to_string()));
+        }
+    }
+    if let Some(("plan", id)) = active_surface {
+        if !id.trim().is_empty() {
+            return Some(("session".to_string(), id.to_string()));
+        }
+    }
+    None
 }
 
 /// Convenience: hash a small canonical decision descriptor (a set of key=value
@@ -540,6 +772,52 @@ mod tests {
         register_agent_prompt(&bh);
         assert!(claim_agent_prompt(&bh), "registered → claimed");
         assert!(!claim_agent_prompt(&bh), "consume-once → second claim fails");
+    }
+
+    #[test]
+    fn resolve_parent_precedence_table() {
+        // explicit seed always wins
+        assert_eq!(
+            resolve_parent(Some(("session", "s1")), Some("m1"), Some(("plan", "s2")), "voice"),
+            Some(("session".into(), "s1".into()))
+        );
+        // browser-family surfaces prefer the active mission
+        assert_eq!(
+            resolve_parent(None, Some("m1"), Some(("plan", "s2")), "browse"),
+            Some(("mission".into(), "m1".into()))
+        );
+        assert_eq!(
+            resolve_parent(None, Some("m1"), None, "linked"),
+            Some(("mission".into(), "m1".into()))
+        );
+        // non-browser kinds ignore the mission and fall to the focused plan
+        assert_eq!(
+            resolve_parent(None, Some("m1"), Some(("plan", "s2")), "drafter"),
+            Some(("session".into(), "s2".into()))
+        );
+        // browse with no mission falls to the focused plan too
+        assert_eq!(
+            resolve_parent(None, None, Some(("plan", "s2")), "browse"),
+            Some(("session".into(), "s2".into()))
+        );
+        // a non-plan surface is not a parent
+        assert_eq!(resolve_parent(None, None, Some(("browser", "t1")), "browse"), None);
+        // the companion is always a root
+        assert_eq!(
+            resolve_parent(Some(("session", "s1")), Some("m1"), Some(("plan", "s2")), "companion"),
+            None
+        );
+        // blank ids never produce a parent
+        assert_eq!(resolve_parent(None, Some("  "), Some(("plan", " ")), "browse"), None);
+    }
+
+    #[test]
+    fn drafted_guard_claims_once_with_draft_id() {
+        let bh = format!("draftguard-{}", now_millis());
+        assert_eq!(claim_drafted_prompt(&bh), None);
+        register_drafted_prompt(&bh, "draft-7");
+        assert_eq!(claim_drafted_prompt(&bh), Some("draft-7".to_string()));
+        assert_eq!(claim_drafted_prompt(&bh), None, "consume-once");
     }
 
     #[test]

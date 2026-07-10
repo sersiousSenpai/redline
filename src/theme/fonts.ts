@@ -138,6 +138,14 @@ export const FONTS: FontEntry[] = [
 // when the user has no saved choice yet, so existing installs keep their pick.
 export const DEFAULT_FONT: FontName = "san-francisco";
 
+// A theme's "natural companion" face. Picking such a theme *recommends* this
+// font — but only when the user hasn't chosen their own yet (see App's
+// onThemeChange). It never overrides an explicit font pick, so the font stays
+// fully independent of the color theme. Terminal reads best in monospace.
+export const SUGGESTED_FONT_FOR_THEME: Partial<Record<string, FontName>> = {
+  terminal: "sf-mono",
+};
+
 const BY_NAME = new Map(FONTS.map((f) => [f.name, f]));
 
 export function getFont(name: string): FontEntry {

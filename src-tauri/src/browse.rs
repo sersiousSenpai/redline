@@ -513,6 +513,7 @@ fn build_first_turn_prompt(
 pub async fn browse_send(
     browse: tauri::State<'_, BrowseState>,
     active_mission: tauri::State<'_, crate::ActiveMission>,
+    active_surface: tauri::State<'_, crate::ActiveSurface>,
     app: AppHandle,
     browse_id: String,
     text: String,
@@ -574,9 +575,21 @@ pub async fn browse_send(
         Some(_) => text.clone(),
     };
 
-    // Polis ledger: record the first-turn page-discussion prompt; keep every
-    // agent turn out of the global-hook capture stream.
+    // Polis ledger: record the first-turn page-discussion prompt WITH its
+    // thread provenance (this tab's browse_id + resolved parent), and link the
+    // new thread into the session tree; keep every agent turn out of the
+    // global-hook capture stream.
     if prior_session.is_none() {
+        let surface = active_surface.kind_and_id();
+        let parent = crate::ledger::resolve_parent(
+            None,
+            active_mission.active_id().as_deref(),
+            surface.as_ref().map(|(k, i)| (k.as_str(), i.as_str())),
+            "browse",
+        );
+        if let Some((pk, pid)) = &parent {
+            let _ = crate::ledger::record_session_link(&browse.db, "browse", &browse_id, pk, pid);
+        }
         crate::ledger::record_agent_prompt(
             &browse.db,
             crate::ledger::PromptSource::RustFirstTurn,
@@ -585,6 +598,13 @@ pub async fn browse_send(
             cwd.clone(),
             None,
             None,
+            Some(crate::ledger::ThreadRef {
+                thread_kind: "browse",
+                thread_id: browse_id.clone(),
+                parent_session_id: parent
+                    .filter(|(pk, _)| pk == "session")
+                    .map(|(_, pid)| pid),
+            }),
         );
     } else {
         crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
@@ -858,6 +878,8 @@ async fn read_browse(
         if let Err(e) = db.insert_browse_message(&msg) {
             tracing::warn!(error = %e, "failed to persist assistant message");
         }
+        // Companion journal: this tab's agent completed a turn.
+        let _ = db.append_journal("agent_turn", Some("browse"), Some(&browse_id), None, None);
         let _ = app.emit(
             "browse-done",
             BrowseDone {
@@ -889,7 +911,7 @@ async fn read_browse(
 /// on the next attempt — clearing it there would throw away a healthy
 /// conversation over a momentary blip. (Empirically: the sessions that produced
 /// `error_during_execution` here were only ~60–70K tokens and resume cleanly.)
-fn is_context_overflow(error: &str) -> bool {
+pub(crate) fn is_context_overflow(error: &str) -> bool {
     let e = error.to_lowercase();
     e.contains("prompt is too long")
         || e.contains("context length")
@@ -903,7 +925,7 @@ fn is_context_overflow(error: &str) -> bool {
 /// `result`, plus overload/capacity/timeout wording). The session is healthy;
 /// retrying in a moment usually works. Account-level limits are transient-ish
 /// too (they reset), so they also land here rather than triggering a reset.
-fn is_transient(error: &str) -> bool {
+pub(crate) fn is_transient(error: &str) -> bool {
     let e = error.to_lowercase();
     e.contains("error_during_execution")
         || e.contains("overloaded")

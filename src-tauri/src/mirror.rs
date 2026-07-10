@@ -53,6 +53,12 @@ pub struct MirrorRow {
     pub mission_id: Option<String>,
     pub project_path: Option<String>,
     pub body: Option<String>,
+    /// Memory-by-session lineage (non-hashed `prompts` columns): the thread
+    /// this prompt belongs to and the parent session it hangs under. Drives
+    /// the `sessions/<parent>/` filing step + `parent:`/`thread:` frontmatter.
+    pub thread_kind: Option<String>,
+    pub thread_id: Option<String>,
+    pub parent_session_id: Option<String>,
 }
 
 /// A single mirror note: a relative path under the mirror root + its full
@@ -106,9 +112,13 @@ fn opt(s: &Option<String>) -> &str {
 /// (prompt text or revision markdown) already snapshotted by the caller.
 pub fn note_for(row: &MirrorRow, body: Option<&str>) -> MirrorNote {
     let e = &row.event;
-    // File under sessions/<id>, else missions/<id>, else unfiled/.
+    // File under sessions/<id>, else — memory-by-session — under the PARENT
+    // session a session-less thread hangs beneath, else missions/<id>, else
+    // unfiled/. Deterministic from the row alone, so rebuilds stay stable.
     let rel_path = if let Some(sid) = e.session_id.as_deref().filter(|s| !s.is_empty()) {
         format!("sessions/{}/{:06}-{}.md", safe_segment(sid), e.seq, e.kind)
+    } else if let Some(par) = row.parent_session_id.as_deref().filter(|s| !s.is_empty()) {
+        format!("sessions/{}/{:06}-{}.md", safe_segment(par), e.seq, e.kind)
     } else if let Some(mid) = row.mission_id.as_deref().filter(|s| !s.is_empty()) {
         format!("missions/{}/{:06}-{}.md", safe_segment(mid), e.seq, e.kind)
     } else {
@@ -126,6 +136,15 @@ pub fn note_for(row: &MirrorRow, body: Option<&str>) -> MirrorNote {
     c.push_str(&format!("role: {}\n", opt(&row.role)));
     c.push_str(&format!("session: {}\n", e.session_id.as_deref().unwrap_or("-")));
     c.push_str(&format!("mission: {}\n", opt(&row.mission_id)));
+    // Memory-by-session lineage — derived (never hashed), safe to extend.
+    c.push_str(&format!(
+        "thread: {}\n",
+        match (row.thread_kind.as_deref(), row.thread_id.as_deref()) {
+            (Some(k), Some(id)) if !k.is_empty() && !id.is_empty() => format!("{k}:{id}"),
+            _ => "-".to_string(),
+        }
+    ));
+    c.push_str(&format!("parent: {}\n", opt(&row.parent_session_id)));
     c.push_str(&format!("project: {}\n", opt(&row.project_path)));
     c.push_str(&format!("ts: {}\n", e.ts));
     c.push_str("---\n\n");
@@ -377,6 +396,7 @@ mod tests {
                     mission_id: None,
                     project_path: Some("/repo".into()),
                     body: format!("prompt body {i}"),
+                    thread: None,
                 },
             )
             .unwrap();
@@ -453,6 +473,7 @@ mod tests {
                 mission_id: Some("m1".into()),
                 project_path: None,
                 body: "a mission prompt".into(),
+                thread: None,
             },
         )
         .unwrap();
@@ -516,6 +537,7 @@ mod tests {
                 mission_id: None,
                 project_path: Some("/repo".into()),
                 body: "a later prompt".into(),
+                thread: None,
             },
         )
         .unwrap();

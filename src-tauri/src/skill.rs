@@ -37,17 +37,25 @@ struct EmbeddedSkill {
 /// - `linked`: how a linked discussion holds ONE conversation spanning all tabs
 ///   (no goal), re-grounds on the current tab each turn, and checks in with a
 ///   colleague (a tab's own page-discussion agent) via the consult endpoint.
-/// - `redline-review`: the code-review loop — the blocking review curl, the
+/// - `drafter`: the Prompt Drafter discussion agent — prompt-crafting
+///   collaborator persona, the live-doc re-read discipline, and the tracked
+///   write-suggestions contract (append/replace/insert/delete by block id).
+/// - `companion`: the global cross-surface Companion — the spanning-app
+///   discipline, the while-you-were-away journal feed, the global consult
+///   contract, and memory/lineage retrieval.
+/// - `redline-code-review`: the code-review loop — the blocking review curl, the
 ///   line-anchored feedback format, and the REDLINE_REVIEW_RESOLUTIONS reply.
 /// - `classmemory`: the ClassMemory classifier + retrieval contract (the lake's
 ///   catalog).
 /// - `librarian`: the on-demand friction-reduction agent that stewards the
 ///   prompt/context library and emits a prioritized next-actions checklist.
+/// - `sensei`: the Dojo recruit contract — how an external model grounds
+///   classes-first on the user's lake + ClassMemory (over MCP) to work like them.
 const SKILLS: &[EmbeddedSkill] = &[
     EmbeddedSkill {
-        name: "redline",
-        version: 8,
-        content: include_str!("../../skills/redline/SKILL.md"),
+        name: "redline-plan-review",
+        version: 9,
+        content: include_str!("../../skills/redline-plan-review/SKILL.md"),
     },
     EmbeddedSkill {
         name: "sidecar",
@@ -75,13 +83,23 @@ const SKILLS: &[EmbeddedSkill] = &[
         content: include_str!("../../skills/linked/SKILL.md"),
     },
     EmbeddedSkill {
-        name: "redline-review",
-        version: 2,
-        content: include_str!("../../skills/redline-review/SKILL.md"),
+        name: "drafter",
+        version: 1,
+        content: include_str!("../../skills/drafter/SKILL.md"),
+    },
+    EmbeddedSkill {
+        name: "companion",
+        version: 1,
+        content: include_str!("../../skills/companion/SKILL.md"),
+    },
+    EmbeddedSkill {
+        name: "redline-code-review",
+        version: 3,
+        content: include_str!("../../skills/redline-code-review/SKILL.md"),
     },
     EmbeddedSkill {
         name: "classmemory",
-        version: 1,
+        version: 2,
         content: include_str!("../../skills/classmemory/SKILL.md"),
     },
     EmbeddedSkill {
@@ -91,8 +109,13 @@ const SKILLS: &[EmbeddedSkill] = &[
     },
     EmbeddedSkill {
         name: "context-analysis",
-        version: 1,
+        version: 2,
         content: include_str!("../../skills/context-analysis/SKILL.md"),
+    },
+    EmbeddedSkill {
+        name: "sensei",
+        version: 1,
+        content: include_str!("../../skills/sensei/SKILL.md"),
     },
 ];
 
@@ -106,8 +129,8 @@ pub struct SkillStatus {
     /// Every shipped skill exists AND its content matches the version Redline
     /// ships. The setup modal advances only when this is true.
     pub installed: bool,
-    /// Absolute path to `~/.claude/skills/redline/SKILL.md` (always reported).
-    /// The modal shows one path; redline is the anchor users recognize.
+    /// Absolute path to `~/.claude/skills/redline-plan-review/SKILL.md` (always
+    /// reported). The modal shows one path; the plan-review skill is the anchor.
     pub skill_path: String,
     /// At least one shipped `SKILL.md` is present but its content differs from
     /// the shipped version — installing will overwrite it. The skill analogue of
@@ -224,7 +247,10 @@ mod tests {
 
     #[test]
     fn redline_skill_carries_the_resolution_contract() {
-        let redline = SKILLS.iter().find(|s| s.name == "redline").unwrap();
+        let redline = SKILLS
+            .iter()
+            .find(|s| s.name == "redline-plan-review")
+            .unwrap();
         assert!(
             redline.content.contains("REDLINE_RESOLUTIONS"),
             "redline SKILL.md is missing the resolution-block contract"
@@ -259,8 +285,23 @@ mod tests {
     #[test]
     fn classmemory_skill_teaches_ops_and_retrieval() {
         let cm = SKILLS.iter().find(|s| s.name == "classmemory").unwrap();
-        // The classifier contract: the six ops + proposals-only + provenance.
-        for needle in ["proposals", "promote", "collapse", "cite_seqs", "ground truth", "/v1/memory/tree"] {
+        // The classifier contract: the seven ops + proposals-only + provenance,
+        // plus the retrieval rules for supersession and observations. "seven
+        // ops" keeps the skill and the parser in lockstep — adding an op must
+        // touch both, and a revert to "six" trips this.
+        for needle in [
+            "proposals",
+            "promote",
+            "collapse",
+            "cite_seqs",
+            "ground truth",
+            "/v1/memory/tree",
+            "seven ops",
+            "supersede",
+            "old_seq",
+            "supersededBy",
+            "observations",
+        ] {
             assert!(
                 cm.content.contains(needle),
                 "classmemory SKILL.md is missing `{needle}`"
@@ -336,6 +377,26 @@ mod tests {
         assert!(a.contains("resolve the likely class"));
         assert!(a.contains("/v1/memory/tree"));
         assert!(a.contains("what did I *decide*"));
+    }
+
+    #[test]
+    fn sensei_skill_teaches_the_recruit_contract() {
+        let sensei = SKILLS.iter().find(|s| s.name == "sensei").unwrap();
+        // The Dojo recruit contract: the box fields, classes-first grounding over
+        // the ClassMemory catalog, the MCP boundary, and the read-only rule.
+        for needle in [
+            "Recruit Reason",
+            "Recruit Function",
+            "classes-first",
+            "memory_tree",
+            "127.0.0.1",
+            "read-only",
+        ] {
+            assert!(
+                sensei.content.contains(needle),
+                "sensei SKILL.md is missing `{needle}`"
+            );
+        }
     }
 
     #[test]

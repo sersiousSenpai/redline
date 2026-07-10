@@ -45,6 +45,7 @@ export const KIND_LABEL: Record<string, string> = {
   taxonomy_reorg: "Taxonomy reorg",
   class_curate: "Class curate",
   compaction: "Compaction",
+  browse_event: "Browse event",
 };
 
 export const KIND_COLOR: Record<string, string> = {
@@ -59,6 +60,7 @@ export const KIND_COLOR: Record<string, string> = {
   taxonomy_reorg: "#7c5cff",
   class_curate: "#2f9ea5",
   compaction: "#8a8f98",
+  browse_event: "#3aa0c0",
 };
 
 export function kindLabel(kind: string): string {

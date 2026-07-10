@@ -82,6 +82,122 @@ impl LinkedState {
             let _ = proc.child.start_kill();
         }
     }
+
+    /// "Check in with a colleague" for the Companion's `/v1/global/consult`:
+    /// run THIS linked discussion to completion with a synthesis-framed
+    /// question and return only its digest. Mirrors `BrowseState::consult`;
+    /// check-in + digest rows land in the linked thread (untabbed — the
+    /// visit isn't tied to any browser tab).
+    pub async fn consult(&self, linked_id: String, question: String) -> Result<String, String> {
+        if question.trim().is_empty() {
+            return Err("nothing to ask the colleague".to_string());
+        }
+        {
+            let guard = self.procs.lock().unwrap();
+            if guard.contains_key(&linked_id) {
+                return Err(
+                    "the linked discussion is busy — try again in a moment".to_string(),
+                );
+            }
+        }
+        let prior_session = self.db.get_linked_session(&linked_id);
+
+        let check_in = LinkedMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            linked_id: linked_id.clone(),
+            role: "user".to_string(),
+            body: format!("🧭 Companion checking in — {}", question.trim()),
+            status: "complete".to_string(),
+            tab_browse_id: None,
+            tab_n: None,
+            tab_title: None,
+            tab_url: None,
+            created_at: now_millis(),
+        };
+        if let Err(e) = self.db.insert_linked_message(&check_in) {
+            tracing::warn!(error = %e, "failed to persist consult check-in");
+        }
+
+        let framed = format!(
+            "The user's COMPANION — their global cross-surface discussion — is \
+             checking in with you about THIS linked discussion. Synthesize what \
+             matters here for their question as a tight DIGEST (not a \
+             transcript, not a fresh reply to the user). Be concise. Their \
+             question:\n\n{}",
+            question.trim()
+        );
+        let prompt = match &prior_session {
+            None => build_first_turn_prompt(&TabContext::default(), None, &framed, None),
+            Some(_) => framed.clone(),
+        };
+        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+
+        let args = bridge_args(prompt, prior_session.as_deref());
+        let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+        let claude_bin = self.claude_bin().await?;
+        let mut cmd = claude_command(&claude_bin);
+        let mut child = cmd
+            .current_dir(&cwd)
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| format!("failed to spawn claude: {e}"))?;
+        let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
+        let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
+        {
+            self.procs
+                .lock()
+                .unwrap()
+                .insert(linked_id.clone(), LinkedProc { child });
+        }
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(180),
+            crate::claude_proc::collect_turn(stdout, stderr),
+        )
+        .await;
+        let proc = { self.procs.lock().unwrap().remove(&linked_id) };
+        let outcome = match outcome {
+            Ok(o) => o,
+            Err(_) => {
+                if let Some(mut p) = proc {
+                    let _ = p.child.start_kill();
+                }
+                return Err("the colleague took too long to respond".to_string());
+            }
+        };
+        if let Some(mut p) = proc {
+            let _ = p.child.wait().await;
+        }
+        if let Some(err) = outcome.errored {
+            return Err(err);
+        }
+        let Some(text) = outcome.final_text.filter(|t| !t.trim().is_empty()) else {
+            return Err("the colleague produced no reply".to_string());
+        };
+        if let Some(sid) = &outcome.session {
+            let _ = self.db.set_linked_session(&linked_id, sid);
+        }
+        let reply = LinkedMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            linked_id: linked_id.clone(),
+            role: "assistant".to_string(),
+            body: text.clone(),
+            status: "complete".to_string(),
+            tab_browse_id: None,
+            tab_n: None,
+            tab_title: None,
+            tab_url: None,
+            created_at: now_millis(),
+        };
+        if let Err(e) = self.db.insert_linked_message(&reply) {
+            tracing::warn!(error = %e, "failed to persist consult reply");
+        }
+        Ok(text)
+    }
 }
 
 // --- Event payloads --------------------------------------------------------
@@ -360,6 +476,7 @@ pub fn linked_delete(
 pub async fn linked_send(
     linked: tauri::State<'_, LinkedState>,
     active_mission: tauri::State<'_, crate::ActiveMission>,
+    active_surface: tauri::State<'_, crate::ActiveSurface>,
     app: AppHandle,
     linked_id: String,
     text: String,
@@ -423,9 +540,22 @@ pub async fn linked_send(
         Some(_) => build_followup_prompt(&tab, snapshot.as_deref(), &text),
     };
 
-    // Polis ledger: record the first-turn linked-discussion prompt; keep every
-    // agent turn out of the global-hook capture stream.
+    // Polis ledger: record the first-turn linked-discussion prompt WITH its
+    // thread provenance + session-tree link (a linked discussion created while
+    // a mission is active hangs under that mission; else root — tab-level
+    // parents would be wrong for a spanning thread); keep every agent turn out
+    // of the global-hook capture stream.
     if prior_session.is_none() {
+        let surface = active_surface.kind_and_id();
+        let parent = crate::ledger::resolve_parent(
+            None,
+            active_mission.active_id().as_deref(),
+            surface.as_ref().map(|(k, i)| (k.as_str(), i.as_str())),
+            "linked",
+        );
+        if let Some((pk, pid)) = &parent {
+            let _ = crate::ledger::record_session_link(&linked.db, "linked", &linked_id, pk, pid);
+        }
         crate::ledger::record_agent_prompt(
             &linked.db,
             crate::ledger::PromptSource::RustFirstTurn,
@@ -434,6 +564,13 @@ pub async fn linked_send(
             cwd.clone(),
             None,
             None,
+            Some(crate::ledger::ThreadRef {
+                thread_kind: "linked",
+                thread_id: linked_id.clone(),
+                parent_session_id: parent
+                    .filter(|(pk, _)| pk == "session")
+                    .map(|(_, pid)| pid),
+            }),
         );
     } else {
         crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
@@ -624,6 +761,8 @@ async fn read_linked(
         if let Err(e) = db.insert_linked_message(&msg) {
             tracing::warn!(error = %e, "failed to persist assistant message");
         }
+        // Companion journal: the linked discussion completed a turn.
+        let _ = db.append_journal("agent_turn", Some("linked"), Some(&linked_id), None, None);
         let _ = app.emit(
             "linked-done",
             LinkedDone {

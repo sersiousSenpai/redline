@@ -5,13 +5,20 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 import { describeVerdict, kindLabel, KIND_COLOR } from "./LedgerPane";
-import { buildTree, type ClassNode, type TreeNode } from "./ClassMemoryPane";
+import {
+  buildTree,
+  sortObservations,
+  type ClassNode,
+  type Observation,
+  type TreeNode,
+} from "./ClassMemoryPane";
 import {
   mirrorIsBehind,
   mirrorSummary,
   type McpConfig,
   type MirrorStatus,
 } from "../lib/portability";
+import type { SkillStatus } from "../types";
 
 // The one slim, read-mostly memory surface — replacing the four Polis toolbar
 // panes (ledger / ClassMemory / Librarian / portability). Memory organizes and
@@ -47,6 +54,8 @@ interface LinkView {
   targetKind: string;
   targetId: string;
   label: string | null;
+  /** The decision seq that superseded this link's target (null = current). */
+  supersededBy: number | null;
 }
 
 interface MemoryInspectorProps {
@@ -445,6 +454,7 @@ function CatalogTab() {
   const [nodes, setNodes] = useState<ClassNode[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [links, setLinks] = useState<LinkView[] | null>(null);
+  const [observations, setObservations] = useState<Observation[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -465,13 +475,36 @@ function CatalogTab() {
   const openNode = useCallback(async (id: string) => {
     setSelected(id);
     setLinks(null);
+    setObservations([]);
     try {
-      const d = await invoke<{ links: LinkView[] }>("classmem_node", { id });
+      const d = await invoke<{ links: LinkView[]; observations: Observation[] }>(
+        "classmem_node",
+        { id },
+      );
       setLinks(d.links);
+      setObservations(d.observations ?? []);
     } catch (e) {
       setError(String(e));
     }
   }, []);
+
+  // Supervisor override on the always-on gardener: unfile a link it auto-added.
+  // The rollback appends a compensating ledger event (never deletes one), so the
+  // hash chain stays intact.
+  const revertLink = useCallback(
+    async (linkId: number) => {
+      try {
+        await invoke<boolean>("memory_revert_link", { linkId });
+        if (selected) {
+          const d = await invoke<{ links: LinkView[] }>("classmem_node", { id: selected });
+          setLinks(d.links);
+        }
+      } catch (e) {
+        setError(String(e));
+      }
+    },
+    [selected],
+  );
 
   const tree = buildTree(nodes);
 
@@ -502,7 +535,7 @@ function CatalogTab() {
           </div>
         ) : links == null ? (
           <div style={{ color: "var(--color-ink-muted)" }}>Loading…</div>
-        ) : links.length === 0 ? (
+        ) : links.length === 0 && observations.length === 0 ? (
           <div style={{ color: "var(--color-ink-muted)" }}>No links yet — a container class.</div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -528,11 +561,82 @@ function CatalogTab() {
                 >
                   {l.targetKind}
                 </span>
-                <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                <span
+                  style={{
+                    flex: 1,
+                    minWidth: 0,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    color: l.supersededBy != null ? "var(--color-ink-muted)" : undefined,
+                  }}
+                >
                   {l.label ?? `#${l.targetId}`}
                 </span>
+                {l.supersededBy != null && (
+                  <span
+                    title={`Superseded by ledger event #${l.supersededBy} (kept as history)`}
+                    style={{
+                      flex: "0 0 auto",
+                      fontSize: 10,
+                      padding: "0 6px",
+                      borderRadius: 999,
+                      color: "#fff",
+                      background: "#8a8f98",
+                    }}
+                  >
+                    superseded → #{l.supersededBy}
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => void revertLink(l.id)}
+                  title="Unfile this link (rolls back the gardener; keeps the ledger intact)"
+                  style={{
+                    flex: "0 0 auto",
+                    fontSize: 11,
+                    border: "1px solid var(--color-rule)",
+                    background: "var(--color-bg-elevated)",
+                    color: "var(--color-ink-muted)",
+                    borderRadius: 3,
+                    padding: "1px 6px",
+                    cursor: "pointer",
+                  }}
+                >
+                  Unfile
+                </button>
               </div>
             ))}
+            {observations.length > 0 && (
+              <>
+                <div style={{ color: "var(--color-ink-muted)", marginTop: 8, marginBottom: 2 }}>
+                  Patterns (agent-derived)
+                </div>
+                {sortObservations(observations).map((o) => (
+                  <div
+                    key={o.id}
+                    style={{
+                      display: "flex",
+                      alignItems: "flex-start",
+                      gap: 8,
+                      padding: "6px 8px",
+                      border: "1px dashed var(--color-rule)",
+                      borderRadius: 4,
+                    }}
+                  >
+                    <span style={{ flex: "0 0 auto" }} title="Agent-derived pattern">
+                      {o.pinned ? "📌" : "🔎"}
+                    </span>
+                    <span style={{ flex: 1, minWidth: 0 }}>
+                      {o.summary}
+                      <span style={{ display: "block", fontSize: 11, color: "var(--color-ink-muted)" }}>
+                        cites {o.citeSeqs.map((s) => `#${s}`).join(", ")}
+                      </span>
+                    </span>
+                  </div>
+                ))}
+              </>
+            )}
           </div>
         )}
       </div>
@@ -593,18 +697,21 @@ function SettingsTab({
 }) {
   const [mirror, setMirror] = useState<MirrorStatus | null>(null);
   const [mcp, setMcp] = useState<McpConfig | null>(null);
+  const [skill, setSkill] = useState<SkillStatus | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
-      const [m, c] = await Promise.all([
+      const [m, c, s] = await Promise.all([
         invoke<MirrorStatus>("mirror_status"),
         invoke<McpConfig>("mcp_config_snippet"),
+        invoke<SkillStatus>("get_skill_status"),
       ]);
       setMirror(m);
       setMcp(c);
+      setSkill(s);
     } catch (e) {
       setMsg(String(e));
     }
@@ -640,6 +747,21 @@ function SettingsTab({
     });
   const syncNow = () =>
     run("sync", async () => setMirror(await invoke<MirrorStatus>("mirror_sync")));
+  const createVault = () =>
+    run("vault", async () => {
+      const st = await invoke<MirrorStatus | null>("create_memory_vault");
+      if (st) {
+        setMirror(st);
+        setMsg(`Created a dedicated Redline Memory vault at ${st.dir}.`);
+      } else {
+        setMsg("Vault creation cancelled.");
+      }
+    });
+  const installSkills = () =>
+    run("skills", async () => {
+      setSkill(await invoke<SkillStatus>("install_skill"));
+      setMsg("Recruit skills installed to ~/.claude/skills.");
+    });
   const exportBundle = (scope: string, id?: string | null) =>
     run(`export:${scope}`, async () => {
       const path = await invoke<string | null>("export_context_bundle", { scope, id: id ?? null });
@@ -683,6 +805,50 @@ function SettingsTab({
           {msg}
         </div>
       )}
+
+      {/* Dojo — the recruit-onboarding flow, tying skills + MCP + warm start together */}
+      <section className="mb-5">
+        <div style={sectionTitle}>🥋 Dojo — train a recruit</div>
+        <p style={{ ...note, marginBottom: 8 }}>
+          Point an outside model — any <code>claude</code> or local LLM — at your
+          memory so it works <em>like you</em>. The recruit grounds{" "}
+          <em>classes-first</em> on your lake and its ClassMemory catalog over MCP,
+          then fetches what it needs. Three steps:
+        </p>
+        <ol style={{ ...note, marginBottom: 10, paddingLeft: 18, listStyle: "decimal" }}>
+          <li style={{ marginBottom: 4 }}>
+            <strong>Install the recruit skills</strong> (the <code>sensei</code>{" "}
+            training contract + <code>context-analysis</code> tools).
+          </li>
+          <li style={{ marginBottom: 4 }}>
+            <strong>Wire the MCP snippet</strong> below into the recruit's{" "}
+            <code>~/.claude.json</code>.
+          </li>
+          <li>
+            <strong>Hand it a warm start</strong> — <em>Export everything</em>{" "}
+            below, or open the dedicated vault as its reference.
+          </li>
+        </ol>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={installSkills}
+            disabled={!!busy || skill?.installed === true}
+            style={btn}
+          >
+            {busy === "skills"
+              ? "Installing…"
+              : skill?.installed
+                ? "Recruit skills installed ✓"
+                : skill?.outdated
+                  ? "Update recruit skills"
+                  : "Install recruit skills"}
+          </button>
+          <button type="button" onClick={createVault} disabled={!!busy} style={btn}>
+            {busy === "vault" ? "Creating…" : "Create Redline Memory vault"}
+          </button>
+        </div>
+      </section>
 
       <section className="mb-5">
         <div style={sectionTitle}>Portable memory mirror</div>
