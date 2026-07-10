@@ -6,6 +6,13 @@ import { CellSelection } from "@tiptap/pm/tables";
 
 import { drafterExtensions } from "./drafterExtensions";
 import { planDocToMarkdown } from "../markdown/serializer";
+import {
+  classifyOrderedToken,
+  fromAlpha,
+  fromRoman,
+  NEXT_BULLET,
+  NEXT_ORDERED,
+} from "../listMarkers";
 
 // Exercise the Word-style formatting commands the ribbon drives (font size,
 // line height, indent/outdent, color, font family) against a real headless
@@ -190,6 +197,15 @@ describe("ListStyle", () => {
     expect(md).toContain("B) b");
   });
 
+  it("serializes decimal parenthetical markers", () => {
+    const md = orderedMd(
+      "<ol><li><p>x</p></li><li><p>y</p></li></ol>",
+      "decimal-parenthetical",
+    );
+    expect(md).toContain("(1) x");
+    expect(md).toContain("(2) y");
+  });
+
   it("serializes lower-alpha parenthetical markers", () => {
     const md = orderedMd(
       "<ol><li><p>x</p></li><li><p>y</p></li></ol>",
@@ -219,6 +235,280 @@ describe("ListStyle", () => {
     // Bullets always serialize as a plain dash — style is display-only for them.
     expect(md).toContain("- one");
     expect(md).not.toMatch(/square|list-style/i);
+  });
+});
+
+// Route text through the input-rules pipeline the way real typing does:
+// handleTextInput is the prop the inputRules plugin hooks.
+function typeText(editor: Editor, text: string) {
+  for (const char of text) {
+    const { view } = editor;
+    const { from, to } = view.state.selection;
+    const handled = view.someProp("handleTextInput", (f) =>
+      f(view, from, to, char, () => view.state.tr.insertText(char, from, to)),
+    );
+    if (!handled) view.dispatch(view.state.tr.insertText(char, from, to));
+  }
+}
+
+// Place the caret inside the text leaf whose content is `text`.
+function focusText(editor: Editor, text: string) {
+  let pos = 0;
+  editor.state.doc.descendants((n, p) => {
+    if (n.isText && n.text === text) pos = p + 1;
+    return !pos;
+  });
+  editor.commands.focus(pos);
+}
+
+// Every list in the doc, outermost first, as (type, listStyle, start).
+function lists(editor: Editor): { type: string; style: string | null; start: number }[] {
+  const out: { type: string; style: string | null; start: number }[] = [];
+  editor.state.doc.descendants((n) => {
+    if (n.type.name === "orderedList" || n.type.name === "bulletList") {
+      out.push({
+        type: n.type.name,
+        style: (n.attrs.listStyle as string | null) ?? null,
+        start: (n.attrs.start as number) ?? 1,
+      });
+    }
+    return true;
+  });
+  return out;
+}
+
+describe("listMarkers inverses", () => {
+  it("fromAlpha inverts bijective base-26 and rejects non-lowercase", () => {
+    expect(fromAlpha("a")).toBe(1);
+    expect(fromAlpha("c")).toBe(3);
+    expect(fromAlpha("z")).toBe(26);
+    expect(fromAlpha("aa")).toBe(27);
+    expect(fromAlpha("A")).toBeNull();
+    expect(fromAlpha("")).toBeNull();
+  });
+
+  it("fromRoman accepts only canonical lowercase numerals", () => {
+    expect(fromRoman("i")).toBe(1);
+    expect(fromRoman("iv")).toBe(4);
+    expect(fromRoman("xxxviii")).toBe(38);
+    expect(fromRoman("mcmxciv")).toBe(1994);
+    expect(fromRoman("vv")).toBeNull();
+    expect(fromRoman("iiii")).toBeNull();
+    expect(fromRoman("IV")).toBeNull();
+    expect(fromRoman("")).toBeNull();
+  });
+
+  it("classifies tokens with Word's ambiguity policy", () => {
+    expect(classifyOrderedToken("3")).toEqual({ family: "decimal", start: 3 });
+    expect(classifyOrderedToken("0")).toBeNull();
+    // Bare i/I is Roman; every other single letter — v and x included — is alpha.
+    expect(classifyOrderedToken("i")).toEqual({ family: "lower-roman", start: 1 });
+    expect(classifyOrderedToken("I")).toEqual({ family: "upper-roman", start: 1 });
+    expect(classifyOrderedToken("a")).toEqual({ family: "lower-alpha", start: 1 });
+    expect(classifyOrderedToken("C")).toEqual({ family: "upper-alpha", start: 3 });
+    expect(classifyOrderedToken("v")).toEqual({ family: "lower-alpha", start: 22 });
+    expect(classifyOrderedToken("x")).toEqual({ family: "lower-alpha", start: 24 });
+    // Multi-letter only as canonical roman over {i,v,x}.
+    expect(classifyOrderedToken("iv")).toEqual({ family: "lower-roman", start: 4 });
+    expect(classifyOrderedToken("XI")).toEqual({ family: "upper-roman", start: 11 });
+    expect(classifyOrderedToken("Iv")).toBeNull();
+    expect(classifyOrderedToken("vv")).toBeNull();
+    expect(classifyOrderedToken("aa")).toBeNull();
+    expect(classifyOrderedToken("cm")).toBeNull();
+    expect(classifyOrderedToken("abcdefg")).toBeNull();
+  });
+
+  it("cascade maps ring correctly in every family", () => {
+    // Word's dot ring, entered from the outline styles.
+    expect(NEXT_ORDERED["upper-roman"]).toBe("upper-alpha");
+    expect(NEXT_ORDERED["upper-alpha"]).toBe("decimal");
+    expect(NEXT_ORDERED["decimal"]).toBe("lower-alpha");
+    expect(NEXT_ORDERED["lower-alpha"]).toBe("lower-roman");
+    expect(NEXT_ORDERED["lower-roman"]).toBe("decimal");
+    // Decimal variants join the ring where decimal does.
+    expect(NEXT_ORDERED["decimal-leading-zero"]).toBe("lower-alpha");
+    expect(NEXT_ORDERED["lower-greek"]).toBe("lower-alpha");
+    // Paren and parenthetical families cascade within themselves.
+    expect(NEXT_ORDERED["decimal-paren"]).toBe("lower-alpha-paren");
+    expect(NEXT_ORDERED["lower-roman-paren"]).toBe("decimal-paren");
+    expect(NEXT_ORDERED["decimal-parenthetical"]).toBe("lower-alpha-parenthetical");
+    expect(NEXT_ORDERED["lower-roman-parenthetical"]).toBe("decimal-parenthetical");
+    expect(NEXT_BULLET["disc"]).toBe("circle");
+    expect(NEXT_BULLET["dash"]).toBe("disc");
+  });
+});
+
+describe("ListStyle cascade on nesting", () => {
+  it("walks Word's outline I. → A. → 1. via indent()", () => {
+    const editor = makeEditor(
+      '<ol data-list-style="upper-roman"><li><p>one</p></li><li><p>two</p></li><li><p>three</p></li></ol>',
+    );
+    focusText(editor, "two");
+    editor.commands.indent();
+    expect(lists(editor).map((l) => l.style)).toEqual([
+      "upper-roman",
+      "upper-alpha",
+    ]);
+    // "three" first joins the stamped sublist, then sinks one deeper.
+    focusText(editor, "three");
+    editor.commands.indent();
+    editor.commands.indent();
+    expect(lists(editor).map((l) => l.style)).toEqual([
+      "upper-roman",
+      "upper-alpha",
+      "decimal",
+    ]);
+    const md = planDocToMarkdown(editor.state.doc, { sidecars: false });
+    expect(md).toContain("I. one");
+    expect(md).toContain("A. two");
+    expect(md).toContain("1. three");
+  });
+
+  it("starts the dot ring from an unstyled list and wraps it after roman", () => {
+    const plain = makeEditor(
+      "<ol><li><p>one</p></li><li><p>two</p></li></ol>",
+    );
+    focusText(plain, "two");
+    plain.commands.indent();
+    expect(lists(plain).map((l) => l.style)).toEqual([null, "lower-alpha"]);
+
+    const roman = makeEditor(
+      '<ol data-list-style="lower-roman"><li><p>one</p></li><li><p>two</p></li></ol>',
+    );
+    focusText(roman, "two");
+    roman.commands.indent();
+    expect(lists(roman).map((l) => l.style)).toEqual([
+      "lower-roman",
+      "decimal",
+    ]);
+  });
+
+  it("cascades bullets ● → ○ and keeps markdown dashes", () => {
+    const editor = makeEditor(
+      "<ul><li><p>one</p></li><li><p>two</p></li></ul>",
+    );
+    focusText(editor, "two");
+    editor.commands.indent();
+    expect(lists(editor).map((l) => l.style)).toEqual([null, "circle"]);
+    const md = planDocToMarkdown(editor.state.doc, { sidecars: false });
+    expect(md).toContain("- one");
+    expect(md).toContain("- two");
+  });
+
+  it("never restamps a sublist the user styled from the picker", () => {
+    const editor = makeEditor(
+      "<ol><li><p>one</p></li><li><p>two</p></li><li><p>three</p></li></ol>",
+    );
+    focusText(editor, "two");
+    editor.commands.indent();
+    // The user overrides the stamped lower-alpha with greek…
+    editor.commands.setOrderedListStyle("lower-greek");
+    expect(lists(editor).map((l) => l.style)).toEqual([null, "lower-greek"]);
+    // …and a later sink that merges into that sublist leaves it alone.
+    focusText(editor, "three");
+    editor.commands.indent();
+    expect(lists(editor).map((l) => l.style)).toEqual([null, "lower-greek"]);
+  });
+
+  it("Tab in a list nests and stamps like the toolbar indent", () => {
+    const editor = makeEditor(
+      "<ol><li><p>one</p></li><li><p>two</p></li></ol>",
+    );
+    focusText(editor, "two");
+    const event = new KeyboardEvent("keydown", { key: "Tab" });
+    editor.view.someProp("handleKeyDown", (f) => f(editor.view, event));
+    expect(lists(editor).map((l) => l.style)).toEqual([null, "lower-alpha"]);
+  });
+
+  it("Tab in a table still goes to the next cell, not into list handling", () => {
+    const editor = makeEditor("<p></p>");
+    editor.commands.focus("end");
+    editor.commands.insertTable({ rows: 2, cols: 2, withHeaderRow: true });
+    const before = editor.state.selection.from;
+    const event = new KeyboardEvent("keydown", { key: "Tab" });
+    editor.view.someProp("handleKeyDown", (f) => f(editor.view, event));
+    expect(editor.state.selection.from).not.toBe(before);
+    expect(lists(editor)).toEqual([]);
+  });
+});
+
+describe("ListStyle Word AutoFormat input rules", () => {
+  function typed(text: string): Editor {
+    const editor = makeEditor("<p></p>");
+    editor.commands.focus("start");
+    typeText(editor, text);
+    return editor;
+  }
+
+  it("`a. ` opens a lower-alpha list at start 1", () => {
+    expect(lists(typed("a. "))).toEqual([
+      { type: "orderedList", style: "lower-alpha", start: 1 },
+    ]);
+  });
+
+  it("`iv. ` opens a lower-roman list at start 4", () => {
+    expect(lists(typed("iv. "))).toEqual([
+      { type: "orderedList", style: "lower-roman", start: 4 },
+    ]);
+  });
+
+  it("`C. ` opens an upper-alpha list at start 3", () => {
+    expect(lists(typed("C. "))).toEqual([
+      { type: "orderedList", style: "upper-alpha", start: 3 },
+    ]);
+  });
+
+  it("`I. ` reads as Roman, not alpha", () => {
+    expect(lists(typed("I. "))).toEqual([
+      { type: "orderedList", style: "upper-roman", start: 1 },
+    ]);
+  });
+
+  it("`v. ` reads as alpha item 22 (Word's policy), not Roman 5", () => {
+    expect(lists(typed("v. "))).toEqual([
+      { type: "orderedList", style: "lower-alpha", start: 22 },
+    ]);
+  });
+
+  it("`3. ` falls through to StarterKit: null style, native start", () => {
+    expect(lists(typed("3. "))).toEqual([
+      { type: "orderedList", style: null, start: 3 },
+    ]);
+  });
+
+  it("`1) ` opens a decimal-paren list", () => {
+    expect(lists(typed("1) "))).toEqual([
+      { type: "orderedList", style: "decimal-paren", start: 1 },
+    ]);
+  });
+
+  it("`(b) ` opens a lower-alpha-parenthetical list at start 2", () => {
+    expect(lists(typed("(b) "))).toEqual([
+      { type: "orderedList", style: "lower-alpha-parenthetical", start: 2 },
+    ]);
+  });
+
+  it("non-markers like `vv. ` stay plain text", () => {
+    const editor = typed("vv. ");
+    expect(lists(editor)).toEqual([]);
+    expect(editor.getText()).toContain("vv.");
+  });
+
+  it("consecutive same-style markers join into one list", () => {
+    const editor = makeEditor("<p></p>");
+    editor.commands.focus("start");
+    typeText(editor, "a. first");
+    editor.commands.enter();
+    // Leaving the list via a fresh paragraph, then typing the successor marker
+    // should re-join the styled list above.
+    editor.commands.liftListItem("listItem");
+    typeText(editor, "b. second");
+    expect(lists(editor)).toEqual([
+      { type: "orderedList", style: "lower-alpha", start: 1 },
+    ]);
+    const md = planDocToMarkdown(editor.state.doc, { sidecars: false });
+    expect(md).toContain("a. first");
+    expect(md).toContain("b. second");
   });
 });
 

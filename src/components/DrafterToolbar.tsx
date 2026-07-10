@@ -362,6 +362,7 @@ const ORDERED_STYLE_GROUPS: {
     styles: [
       { key: "decimal", preview: "1. 2. 3." },
       { key: "decimal-paren", preview: "1) 2) 3)" },
+      { key: "decimal-parenthetical", preview: "(1) (2) (3)" },
       { key: "decimal-leading-zero", preview: "01. 02. 03." },
     ],
   },

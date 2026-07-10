@@ -527,6 +527,11 @@ body {
   system: extends decimal;
   suffix: ") ";
 }
+@counter-style rl-decimal-parenthetical {
+  system: extends decimal;
+  prefix: "(";
+  suffix: ") ";
+}
 @counter-style rl-lower-alpha-paren {
   system: extends lower-alpha;
   suffix: ") ";

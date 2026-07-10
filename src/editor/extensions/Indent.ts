@@ -79,10 +79,12 @@ export const Indent = Extension.create<IndentOptions>({
     const shift =
       (delta: number) =>
       ({ editor, chain }: { editor: import("@tiptap/core").Editor; chain: () => import("@tiptap/core").ChainedCommands }) => {
-        // Real list nesting takes priority over margin indentation.
+        // Real list nesting takes priority over margin indentation. Sinking
+        // stamps the new sublist with ListStyle's Word numbering cascade, so
+        // the toolbar indent and Tab behave identically.
         if (editor.isActive("listItem")) {
           return delta > 0
-            ? chain().sinkListItem("listItem").run()
+            ? chain().sinkListItem("listItem").stampListCascade().run()
             : chain().liftListItem("listItem").run();
         }
         let c = chain();
