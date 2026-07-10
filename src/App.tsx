@@ -99,10 +99,17 @@ import {
   storeLint,
   storeTheme,
 } from "./theme/applyTheme";
-import type { ThemeName } from "./theme/themes";
-import { SUGGESTED_FONT_FOR_THEME } from "./theme/fonts";
+import type { ThemeEntry, ThemeName } from "./theme/themes";
+import {
+  DEFAULT_THEME,
+  THEMES,
+  isThemeName,
+  registerUserThemes,
+} from "./theme/themes";
+import { SUGGESTED_FONT_FOR_THEME, isFontName } from "./theme/fonts";
+import { reconcilePick, reconcileTheme } from "./theme/prefsSync";
 import type { LintName } from "./theme/lint";
-import { SUGGESTED_LINT_FOR_THEME } from "./theme/lint";
+import { SUGGESTED_LINT_FOR_THEME, isLintName } from "./theme/lint";
 import type { FontName } from "./theme/fonts";
 import { usePersistedState } from "./theme/usePersistedState";
 import { useResizablePane } from "./hooks/useResizablePane";
@@ -279,6 +286,9 @@ function App() {
   const [theme, setTheme] = useState<ThemeName>(() => readStoredTheme());
   const [font, setFont] = useState<FontName>(() => readStoredFont());
   const [lint, setLint] = useState<LintName>(() => readStoredLint());
+  // User themes from ~/.redline/themes/*.json, registered on mount. Held in
+  // state (not just the module registry) so the picker re-renders once loaded.
+  const [userThemes, setUserThemes] = useState<ThemeEntry[]>([]);
   // Flash-on-intercept alert: an opt-in full-window pulse (+ optional beep)
   // fired whenever a plan is intercepted. `flashSeq` bumps to (re)trigger the
   // overlay; the three prefs persist via localStorage.
@@ -1024,6 +1034,14 @@ function App() {
   // source of truth: card click sets it; highlight click sets it; effects
   // mirror the change in each direction.
   const [focusedCommentId, setFocusedCommentId] = useState<string | null>(null);
+  // Bumped on every deliberate "take me to this comment" gesture so the
+  // editor's focus effect re-fires even when the id is unchanged (re-click,
+  // already-centered target) — the flash is the visible acknowledgement.
+  const [focusNonce, setFocusNonce] = useState(0);
+  const focusComment = useCallback((id: string) => {
+    setFocusedCommentId(id);
+    setFocusNonce((n) => n + 1);
+  }, []);
   // A comment the agent just created by voice — auto-expand its discussion
   // sidecar once (then cleared, so a later manual collapse isn't fought).
   const [autoOpenCommentId, setAutoOpenCommentId] = useState<string | null>(null);
@@ -1036,10 +1054,94 @@ function App() {
   // Stable so it doesn't defeat the memo on CommentCard / CommentThread.
   const clearAutoOpen = useCallback(() => setAutoOpenCommentId(null), []);
 
+  // Appearance prefs live in the DB (`app_settings`) so a fork or second
+  // machine carries them; localStorage is only the pre-paint cache. This mount
+  // effect (1) registers ~/.redline/themes/*.json user themes so their names
+  // resolve, then (2) reconciles DB vs local: a valid DB value wins (and marks
+  // the pick explicit), otherwise a real local pick migrates into the DB. The
+  // one-time migration is idempotent — once the DB row exists it simply wins.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const files =
+          await invoke<{ name: string; json: string }[]>("list_user_themes");
+        if (cancelled) return;
+        setUserThemes(registerUserThemes(files));
+      } catch {
+        /* command unavailable (tests / web) — built-ins only */
+      }
+      let prefs: {
+        theme?: string | null;
+        font?: string | null;
+        lint?: string | null;
+      };
+      try {
+        prefs = await invoke("get_ui_prefs");
+      } catch {
+        return;
+      }
+      if (cancelled) return;
+      const setPref = (key: string, value: string) => {
+        void invoke("set_ui_pref", { key, value }).catch(() => {});
+      };
+      // THEME — the DB name wins when it resolves; otherwise the local pick
+      // migrates into the DB (rules in prefsSync.ts). `appliedAtBoot` is false
+      // for user themes: the pre-paint bootstrap skipped them.
+      const localTheme = readStoredTheme();
+      const themeDecision = reconcileTheme({
+        db: prefs.theme,
+        local: localTheme,
+        resolves: isThemeName,
+        appliedAtBoot: THEMES.some((t) => t.name === localTheme),
+        fallback: DEFAULT_THEME,
+      });
+      if (themeDecision.apply) {
+        setTheme(themeDecision.apply);
+        applyTheme(themeDecision.apply);
+        storeTheme(themeDecision.apply);
+      }
+      if (themeDecision.writeDb) setPref("theme", themeDecision.writeDb);
+      // FONT — gated on hasStoredFont(): only an explicit pick migrates, so
+      // the suggested-companion-font rule keeps meaning "untouched".
+      const fontDecision = reconcilePick({
+        db: prefs.font,
+        local: readStoredFont(),
+        hasExplicitLocal: hasStoredFont(),
+        isValid: isFontName,
+      });
+      if (fontDecision.apply) {
+        setFont(fontDecision.apply);
+        applyFont(fontDecision.apply);
+        storeFont(fontDecision.apply);
+      }
+      if (fontDecision.writeDb) setPref("font", fontDecision.writeDb);
+      // LINT — identical rule to font.
+      const lintDecision = reconcilePick({
+        db: prefs.lint,
+        local: readStoredLint(),
+        hasExplicitLocal: hasStoredLint(),
+        isValid: isLintName,
+      });
+      if (lintDecision.apply) {
+        const next = lintDecision.apply as LintName;
+        setLint(next);
+        applyLint(next);
+        storeLint(next);
+      }
+      if (lintDecision.writeDb) setPref("lint", lintDecision.writeDb);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const onThemeChange = (name: ThemeName) => {
     setTheme(name);
     applyTheme(name);
     storeTheme(name);
+    void invoke("set_ui_pref", { key: "theme", value: name }).catch(() => {});
     // Recommend (never force) the theme's companion font: apply it only if the
     // user is still on the untouched default, so a real font pick is preserved.
     const suggested = SUGGESTED_FONT_FOR_THEME[name];
@@ -1063,12 +1165,14 @@ function App() {
     setFont(name);
     applyFont(name);
     storeFont(name);
+    void invoke("set_ui_pref", { key: "font", value: name }).catch(() => {});
   };
 
   const onLintChange = (name: LintName) => {
     setLint(name);
     applyLint(name);
     storeLint(name);
+    void invoke("set_ui_pref", { key: "lint", value: name }).catch(() => {});
   };
 
   // Max width = whatever leaves the document at 0 against the *other* pane
@@ -2169,7 +2273,7 @@ function App() {
     if (card instanceof HTMLElement) {
       card.scrollIntoView({ block: "center", behavior: "smooth" });
     }
-  }, [focusedCommentId]);
+  }, [focusedCommentId, focusNonce]);
 
   // Clear focus when the user clicks the document chrome outside any
   // highlight or card (Word's behaviour). Anchored to the main panel so
@@ -2698,8 +2802,9 @@ function App() {
   // through a ref that always holds the latest handlers, so the wrappers stay
   // identity-stable for the component's lifetime with no stale-closure risk.
   const commentHandlersRef = useRef({
-    select: (id: string) =>
-      setFocusedCommentId((prev) => (prev === id ? null : id)),
+    // Always-set (never toggle-to-null): re-clicking a card re-centers and
+    // re-flashes its highlight instead of silently clearing the focus.
+    select: focusComment,
     remove: deleteComment,
     accept: acceptResolution,
     acceptSuggestion: acceptAgentSuggestion,
@@ -2707,8 +2812,7 @@ function App() {
     promote: promoteToChange,
   });
   commentHandlersRef.current = {
-    select: (id: string) =>
-      setFocusedCommentId((prev) => (prev === id ? null : id)),
+    select: focusComment,
     remove: deleteComment,
     accept: acceptResolution,
     acceptSuggestion: acceptAgentSuggestion,
@@ -2717,10 +2821,7 @@ function App() {
   };
   // Stable so PlanEditor / HistoricalRevisionView don't re-bind their highlight
   // click handler on every App render (notably ~60×/s during a divider drag).
-  const handleHighlightClick = useCallback(
-    (id: string) => setFocusedCommentId(id),
-    [],
-  );
+  const handleHighlightClick = focusComment;
   const commentCallbacks = useMemo(
     () => ({
       onSelect: (id: string) => commentHandlersRef.current.select(id),
@@ -2823,6 +2924,7 @@ function App() {
         session={session}
         theme={theme}
         onThemeChange={onThemeChange}
+        userThemes={userThemes}
         font={font}
         onFontChange={onFontChange}
         lint={lint}
@@ -3274,6 +3376,7 @@ function App() {
                   diff={historicalDiff}
                   latestVersionNumber={latest?.versionNumber ?? 0}
                   focusedCommentId={focusedCommentId}
+                  focusNonce={focusNonce}
                   onHighlightClick={handleHighlightClick}
                   onBackToLatest={() => setViewedVersionNumber(null)}
                 />
@@ -3294,6 +3397,7 @@ function App() {
                     onUpdateComment={updateComment}
                     onDeleteComment={deleteComment}
                     focusedCommentId={focusedCommentId}
+                    focusNonce={focusNonce}
                     onHighlightClick={handleHighlightClick}
                     actionsRef={planActionsRef}
                     onLockedEdit={lockedEditToast}
@@ -3492,7 +3596,7 @@ function App() {
           )}
           {/* Floating document-zoom control — pinned to the pane (doesn't scroll
               with the plan). Hidden over the folder file viewer. */}
-          {!browserOpen && !drafterOpen && !reviewOpen && !(sidebarTab.kind === "folder" && activeFile) && zoomVisible && (
+          {mainSurface === "document" && !(sidebarTab.kind === "folder" && activeFile) && zoomVisible && (
             <div
               ref={zoomCtrlRef}
               className="absolute flex items-center gap-1 rounded-full"
@@ -4022,7 +4126,7 @@ function App() {
                               v === latest?.versionNumber ? null : v,
                             );
                           }
-                          setFocusedCommentId(c.id);
+                          focusComment(c.id);
                         }}
                         title={`Jump to ${c.id} — Accept or Reopen the resolution`}
                         className="font-mono rounded px-1.5 py-0.5"
@@ -4315,6 +4419,7 @@ function HistoricalRevisionView({
   diff,
   latestVersionNumber,
   focusedCommentId,
+  focusNonce,
   onHighlightClick,
   onBackToLatest,
 }: {
@@ -4323,6 +4428,7 @@ function HistoricalRevisionView({
   diff?: ParagraphDiff;
   latestVersionNumber: number;
   focusedCommentId: string | null;
+  focusNonce?: number;
   onHighlightClick: (commentId: string) => void;
   onBackToLatest: () => void;
 }) {
@@ -4374,6 +4480,7 @@ function HistoricalRevisionView({
           comments={revision.comments}
           revisionKey={`${sessionId}:hist:${revision.versionNumber}`}
           focusedCommentId={focusedCommentId}
+          focusNonce={focusNonce}
           onHighlightClick={onHighlightClick}
         />
       </Suspense>

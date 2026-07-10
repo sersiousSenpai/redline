@@ -25,7 +25,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdout};
 
 use crate::claude_proc::{
-    bridge_args, classify_line, claude_command, mission_context_block, resolve_claude_bin,
+    bridge_args, classify_line, mission_context_block, resolve_claude_bin,
     StreamLine,
 };
 use crate::db::Database;
@@ -166,11 +166,11 @@ impl BrowseState {
         // the global hook, so suppress that duplicate.
         crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
 
-        let args = bridge_args(prompt, prior_session.as_deref());
+        let args = bridge_args("browse", prompt, prior_session.as_deref());
         let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
 
         let claude_bin = self.claude_bin().await?;
-        let mut cmd = claude_command(&claude_bin);
+        let mut cmd = crate::claude_proc::claude_command_for_seat("browse", &claude_bin);
         let mut child = cmd
             .current_dir(&cwd)
             .args(&args)
@@ -643,6 +643,7 @@ pub async fn browse_send(
         "Bash(curl -s \"http://127.0.0.1:7676/*)".to_string(),
         "--strict-mcp-config".to_string(),
     ];
+    args.extend(crate::seat::flag_args("browse"));
     if let Some(sid) = &prior_session {
         args.push("--resume".to_string());
         args.push(sid.clone());
@@ -667,7 +668,7 @@ pub async fn browse_send(
         .unwrap_or_else(|| "/".to_string());
 
     let claude_bin = browse.claude_bin().await?;
-    let mut cmd = claude_command(&claude_bin);
+    let mut cmd = crate::claude_proc::claude_command_for_seat("browse", &claude_bin);
     let mut child = cmd
         .current_dir(&cwd)
         .args(&args)

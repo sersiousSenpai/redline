@@ -3,11 +3,13 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { CSSProperties, ReactNode } from "react";
 import type { InterceptionMode, ReviewSession } from "../types";
-import type { ThemeName } from "../theme/themes";
+import type { MainSurface } from "../lib/mainSurface";
+import type { ThemeEntry, ThemeName } from "../theme/themes";
 import type { FontName } from "../theme/fonts";
 import type { LintName } from "../theme/lint";
 import { ThemePicker } from "./ThemePicker";
 import { FontPicker } from "./FontPicker";
+import { AgentSeats } from "./AgentSeats";
 import { LintPicker } from "./LintPicker";
 import { DownloadMenu } from "./DownloadMenu";
 import { ModeToggle } from "./ModeToggle";
@@ -112,6 +114,8 @@ interface HeaderProps {
   session: ReviewSession | null;
   theme: ThemeName;
   onThemeChange: (name: ThemeName) => void;
+  /** User themes loaded from ~/.redline/themes — the picker's "user" section. */
+  userThemes: ThemeEntry[];
   font: FontName;
   onFontChange: (name: FontName) => void;
   lint: LintName;
@@ -141,28 +145,20 @@ interface HeaderProps {
   onFlashSoundConfigChange: (next: SoundConfig) => void;
   onFlashSoundPreview: (config: SoundConfig) => void;
   onFlashTest: () => void;
-  /** Whether the document view is showing in the center pane. */
-  docOpen: boolean;
-  /** Toggle the document view on/off. */
-  onToggleDoc: () => void;
-  /** Whether the embedded browser is currently showing in the center pane. */
-  browserOpen: boolean;
-  /** Toggle the embedded browser on/off. */
-  onToggleBrowser: () => void;
-  /** Both document and browser are on, so the split orientation control shows. */
+  /** Which single surface owns the center pane. The four surface buttons are
+   *  a radio group: clicking always full-switches, never tiles. */
+  surface: MainSurface;
+  onSelectSurface: (next: MainSurface) => void;
+  /** Explicit tiling: keep the document alongside a non-document surface. */
+  docPinned: boolean;
+  onToggleDocPin: () => void;
+  /** The doc pin is on over a non-document surface, so the split orientation
+   *  control shows. */
   splitActive: boolean;
   /** true = stacked (column), false = side-by-side (row). */
   splitVertical: boolean;
   /** Flip the split between side-by-side and stacked. */
   onToggleSplitOrientation: () => void;
-  /** Whether the Prompt Drafter is showing in the center pane. */
-  drafterOpen: boolean;
-  /** Toggle the Prompt Drafter on/off. */
-  onToggleDrafter: () => void;
-  /** Whether the Code Review pane is showing in the center pane. */
-  reviewOpen: boolean;
-  /** Toggle the Code Review pane on/off. */
-  onToggleReview: () => void;
   /** The Companion drawer — the global cross-surface discussion (⌘J). */
   companionOpen: boolean;
   onToggleCompanion: () => void;
@@ -183,6 +179,7 @@ export function Header({
   session,
   theme,
   onThemeChange,
+  userThemes,
   font,
   onFontChange,
   lint,
@@ -204,19 +201,15 @@ export function Header({
   onFlashSoundConfigChange,
   onFlashSoundPreview,
   onFlashTest,
-  docOpen,
-  onToggleDoc,
-  browserOpen,
-  onToggleBrowser,
+  surface,
+  onSelectSurface,
+  docPinned,
+  onToggleDocPin,
   splitActive,
   splitVertical,
   onToggleSplitOrientation,
-  drafterOpen,
-  onToggleDrafter,
   companionOpen,
   onToggleCompanion,
-  reviewOpen,
-  onToggleReview,
   onOpenMemory,
   collabActive,
   canInvite,
@@ -246,45 +239,50 @@ export function Header({
       }}
     >
       <div className="flex items-center gap-3">
-        <div className="flex items-center gap-1.5">
-          {/* The document is the default view; this glyph-only toggle appears
-              while a secondary pane (browser/drafter/review) is open, to
-              add/remove the document from the split. Low-traffic → no label. */}
-          {(browserOpen || drafterOpen || reviewOpen) && (
+        <div className="flex items-center gap-1.5" role="radiogroup" aria-label="Main pane surface">
+          {/* Surface radio group — always visible, clicking full-switches the
+              center pane (clicking the active surface is a no-op). Text-only
+              labels (no glyphs; the emoji read as toy-like and one filled its
+              button). The tooltip carries the longer description. */}
+          {(
+            [
+              ["document", "Document", "Show the document"],
+              ["browser", "Browser", "Switch to the browser"],
+              ["drafter", "Prompt Drafter", "Draft a new prompt"],
+              ["review", "Code Review", "Review code changes"],
+            ] as const
+          ).map(([key, label, title]) => (
             <HeaderButton
-              onClick={onToggleDoc}
-              active={docOpen}
-              title={docOpen ? "Hide document" : "Show document"}
-              ariaLabel={docOpen ? "Hide document" : "Show document"}
-              label="Document"
+              key={key}
+              onClick={() => {
+                if (surface !== key) onSelectSurface(key);
+              }}
+              active={surface === key}
+              title={surface === key ? `${label} is showing` : title}
+              ariaLabel={title}
+              label={label}
+            />
+          ))}
+          {/* Explicit tiling: while a non-document surface is up, pin the
+              document alongside it. Sticky — switching surfaces then swaps
+              only the non-document tile. */}
+          {surface !== "document" && (
+            <HeaderButton
+              onClick={onToggleDocPin}
+              active={docPinned}
+              title={
+                docPinned
+                  ? "Untile the document"
+                  : "Tile the document alongside"
+              }
+              ariaLabel={
+                docPinned
+                  ? "Untile the document"
+                  : "Tile the document alongside"
+              }
+              icon="◫"
             />
           )}
-          {/* Primary pane verbs — text-only labels (no glyphs; the emoji read
-              as toy-like and one filled its button). The tooltip carries the
-              longer description. */}
-          <HeaderButton
-            onClick={onToggleBrowser}
-            active={browserOpen}
-            title={browserOpen ? "Hide browser" : "Show browser"}
-            ariaLabel={browserOpen ? "Hide browser" : "Show browser"}
-            label="Browser"
-          />
-          <HeaderButton
-            onClick={onToggleDrafter}
-            active={drafterOpen}
-            title={drafterOpen ? "Close prompt drafter" : "Draft a new prompt"}
-            ariaLabel={
-              drafterOpen ? "Close prompt drafter" : "Draft a new prompt"
-            }
-            label="Prompt Drafter"
-          />
-          <HeaderButton
-            onClick={onToggleReview}
-            active={reviewOpen}
-            title={reviewOpen ? "Hide code review" : "Review code changes"}
-            ariaLabel={reviewOpen ? "Hide code review" : "Review code changes"}
-            label="Code Review"
-          />
           <HeaderButton
             onClick={onToggleCompanion}
             active={companionOpen}
@@ -318,9 +316,16 @@ export function Header({
         </div>
         <SettingsMenu
           mode={<ModeToggle mode={mode} onChange={onModeChange} />}
-          theme={<ThemePicker theme={theme} onThemeChange={onThemeChange} />}
+          theme={
+            <ThemePicker
+              theme={theme}
+              onThemeChange={onThemeChange}
+              userThemes={userThemes}
+            />
+          }
           font={<FontPicker font={font} onFontChange={onFontChange} />}
           lint={<LintPicker lint={lint} onLintChange={onLintChange} />}
+          agents={<AgentSeats />}
           notifications={
             <AlertSettings
               enabled={flashEnabled}

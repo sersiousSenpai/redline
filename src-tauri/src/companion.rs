@@ -31,7 +31,7 @@ use tokio::process::{Child, ChildStderr, ChildStdout};
 
 use crate::browse::{is_context_overflow, is_transient};
 use crate::claude_proc::{
-    bridge_args, classify_line, claude_command, mission_context_block, resolve_claude_bin,
+    bridge_args, classify_line, mission_context_block, resolve_claude_bin,
     StreamLine,
 };
 use crate::db::{Database, JournalRow};
@@ -493,14 +493,14 @@ pub async fn companion_send(
         let _ = companion.db.set_companion_journal_seq(&companion_id, h);
     }
 
-    let args = bridge_args(prompt, prior_session.as_deref());
+    let args = bridge_args("companion", prompt, prior_session.as_deref());
     let cwd = cwd
         .filter(|c| !c.trim().is_empty())
         .or_else(|| std::env::var("HOME").ok())
         .unwrap_or_else(|| "/".to_string());
 
     let claude_bin = companion.claude_bin().await?;
-    let mut cmd = claude_command(&claude_bin);
+    let mut cmd = crate::claude_proc::claude_command_for_seat("companion", &claude_bin);
     let mut child = cmd
         .current_dir(&cwd)
         .args(&args)

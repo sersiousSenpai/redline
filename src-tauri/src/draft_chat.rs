@@ -25,7 +25,7 @@ use tokio::process::{Child, ChildStderr, ChildStdout};
 
 use crate::browse::{is_context_overflow, is_transient};
 use crate::claude_proc::{
-    bridge_args, classify_line, claude_command, mission_context_block, resolve_claude_bin,
+    bridge_args, classify_line, mission_context_block, resolve_claude_bin,
     StreamLine,
 };
 use crate::db::Database;
@@ -134,13 +134,13 @@ impl DraftChatState {
         };
         crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
 
-        let args = bridge_args(prompt, prior_session.as_deref());
+        let args = bridge_args("drafter", prompt, prior_session.as_deref());
         let cwd = project_path
             .filter(|p| !p.trim().is_empty())
             .or_else(|| std::env::var("HOME").ok())
             .unwrap_or_else(|| "/".to_string());
         let claude_bin = self.claude_bin().await?;
-        let mut cmd = claude_command(&claude_bin);
+        let mut cmd = crate::claude_proc::claude_command_for_seat("drafter", &claude_bin);
         let mut child = cmd
             .current_dir(&cwd)
             .args(&args)
@@ -488,7 +488,7 @@ pub async fn draft_chat_send(
     // re-read); record the hash it will see.
     let _ = chat.db.set_draft_chat_doc_hash(&draft_id, &doc_hash);
 
-    let args = bridge_args(prompt, prior_session.as_deref());
+    let args = bridge_args("drafter", prompt, prior_session.as_deref());
     let cwd = cwd
         .or(project_path)
         .filter(|c| !c.trim().is_empty())
@@ -496,7 +496,7 @@ pub async fn draft_chat_send(
         .unwrap_or_else(|| "/".to_string());
 
     let claude_bin = chat.claude_bin().await?;
-    let mut cmd = claude_command(&claude_bin);
+    let mut cmd = crate::claude_proc::claude_command_for_seat("drafter", &claude_bin);
     let mut child = cmd
         .current_dir(&cwd)
         .args(&args)

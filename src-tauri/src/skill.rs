@@ -149,6 +149,57 @@ fn skills_root() -> PathBuf {
     home.join(".claude").join("skills")
 }
 
+/// A user-authored skill discovered at runtime from `~/.redline/skills/`.
+/// Installed to `~/.claude/skills/<name>/SKILL.md` exactly like the built-ins,
+/// but exempt from the byte-equality version lock: presence at the destination
+/// counts as installed, and a diverged copy never flags the bundle `outdated`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UserSkill {
+    pub name: String,
+    pub content: String,
+}
+
+/// HOME-env resolution for `~/.redline/skills` — the user-skills source dir.
+fn user_skills_root() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    home.join(".redline").join("skills")
+}
+
+/// Discover user skills under `dir` (`<dir>/<name>/SKILL.md`). A name that
+/// collides with a shipped skill is skipped — built-ins always win, so a user
+/// file can never shadow the plan-review contract. Empty files are ignored.
+/// A missing directory is simply "no user skills", never an error.
+pub fn discover_user_skills_under(dir: &std::path::Path) -> Vec<UserSkill> {
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if SKILLS.iter().any(|s| s.name == name) {
+            continue;
+        }
+        if let Ok(content) = fs::read_to_string(path.join("SKILL.md")) {
+            if !content.trim().is_empty() {
+                out.push(UserSkill { name, content });
+            }
+        }
+    }
+    // read_dir order is filesystem-dependent; sort for a stable install order.
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+pub fn discover_user_skills() -> Vec<UserSkill> {
+    discover_user_skills_under(&user_skills_root())
+}
+
 /// Per-skill install state at a path: `Ok(true)` installed-and-current,
 /// `Ok(false)` present-but-stale, `Err` absent. Byte-equality, not existence —
 /// an existence-only check would report a stale file as installed after a
@@ -162,13 +213,16 @@ fn is_current(skill: &EmbeddedSkill, path: &std::path::Path) -> Result<bool, ()>
 }
 
 pub fn get_status() -> SkillStatus {
-    get_status_under(&skills_root())
+    get_status_under(&skills_root(), &discover_user_skills())
 }
 
-/// Aggregate status across every shipped skill, resolving each under `root`
-/// (`<root>/<name>/SKILL.md`). `installed` requires all current; `outdated` is
-/// set if any present file is stale.
-pub fn get_status_under(root: &std::path::Path) -> SkillStatus {
+/// Aggregate status across every shipped skill plus discovered user skills,
+/// resolving each under `root` (`<root>/<name>/SKILL.md`). `installed` requires
+/// all built-ins current AND all user skills present; `outdated` is set if any
+/// present built-in file is stale. User skills are exempt from the byte-equality
+/// lock: existence at the destination is enough, and a diverged destination copy
+/// never sets `outdated` (the user may be iterating on it in place).
+pub fn get_status_under(root: &std::path::Path, user: &[UserSkill]) -> SkillStatus {
     let mut all_current = true;
     let mut any_outdated = false;
     for skill in SKILLS {
@@ -179,6 +233,11 @@ pub fn get_status_under(root: &std::path::Path) -> SkillStatus {
                 any_outdated = true;
             }
             Err(()) => all_current = false,
+        }
+    }
+    for skill in user {
+        if !root.join(&skill.name).join("SKILL.md").is_file() {
+            all_current = false;
         }
     }
     SkillStatus {
@@ -194,15 +253,17 @@ pub fn get_status_under(root: &std::path::Path) -> SkillStatus {
 }
 
 pub fn install() -> Result<SkillStatus, String> {
-    install_under(&skills_root())
+    install_under(&skills_root(), &discover_user_skills())
 }
 
-/// Write every embedded skill under `root` (`<root>/<name>/SKILL.md`), creating
-/// directories as needed. Idempotent by overwrite — a skill is a whole-file
-/// artifact Redline owns, so (unlike the hook's JSON merge into a user-owned
-/// `settings.json`) there is nothing to preserve; re-running writes identical
-/// bytes.
-pub fn install_under(root: &std::path::Path) -> Result<SkillStatus, String> {
+/// Write every embedded skill plus the given user skills under `root`
+/// (`<root>/<name>/SKILL.md`), creating directories as needed. Idempotent by
+/// overwrite — a skill is a whole-file artifact Redline owns, so (unlike the
+/// hook's JSON merge into a user-owned `settings.json`) there is nothing to
+/// preserve; re-running writes identical bytes. A user skill whose destination
+/// already exists is left alone (the source under `~/.redline/skills` may be
+/// older than in-place edits at the destination — never clobber those).
+pub fn install_under(root: &std::path::Path, user: &[UserSkill]) -> Result<SkillStatus, String> {
     for skill in SKILLS {
         let path = root.join(skill.name).join("SKILL.md");
         if let Some(parent) = path.parent() {
@@ -212,7 +273,17 @@ pub fn install_under(root: &std::path::Path) -> Result<SkillStatus, String> {
         }
         fs::write(&path, skill.content).map_err(|e| e.to_string())?;
     }
-    Ok(get_status_under(root))
+    for skill in user {
+        let path = root.join(&skill.name).join("SKILL.md");
+        if path.is_file() {
+            continue;
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        fs::write(&path, &skill.content).map_err(|e| e.to_string())?;
+    }
+    Ok(get_status_under(root, user))
 }
 
 #[cfg(test)]
@@ -418,7 +489,7 @@ mod tests {
     #[test]
     fn install_creates_files_and_parent_dirs_for_all_skills() {
         let root = tmpdir();
-        let status = install_under(&root).unwrap();
+        let status = install_under(&root, &[]).unwrap();
         assert!(status.installed);
         assert!(!status.outdated);
         assert_eq!(status.version, SKILL_VERSION);
@@ -433,8 +504,8 @@ mod tests {
     #[test]
     fn install_is_idempotent() {
         let root = tmpdir();
-        install_under(&root).unwrap();
-        let status = install_under(&root).unwrap();
+        install_under(&root, &[]).unwrap();
+        let status = install_under(&root, &[]).unwrap();
         assert!(status.installed);
         assert!(!status.outdated);
         for skill in SKILLS {
@@ -452,10 +523,10 @@ mod tests {
         // but no/stale sidecar → the bundle reads as not-installed + outdated,
         // which re-shows the setup modal.
         let root = tmpdir();
-        install_under(&root).unwrap();
+        install_under(&root, &[]).unwrap();
         fs::write(skill_md(&root, "sidecar"), "stale skill content").unwrap();
 
-        let status = get_status_under(&root);
+        let status = get_status_under(&root, &[]);
         assert!(!status.installed, "a stale sidecar must break `installed`");
         assert!(status.outdated, "a stale sidecar must set `outdated`");
         let _ = fs::remove_dir_all(&root);
@@ -464,10 +535,10 @@ mod tests {
     #[test]
     fn aggregate_not_installed_when_a_skill_is_missing() {
         let root = tmpdir();
-        install_under(&root).unwrap();
+        install_under(&root, &[]).unwrap();
         fs::remove_dir_all(root.join("sidecar")).unwrap();
 
-        let status = get_status_under(&root);
+        let status = get_status_under(&root, &[]);
         assert!(!status.installed);
         // Missing (not present-but-stale) does not set `outdated`.
         assert!(!status.outdated);
@@ -477,7 +548,7 @@ mod tests {
     #[test]
     fn status_reports_missing_when_absent() {
         let root = tmpdir();
-        let status = get_status_under(&root);
+        let status = get_status_under(&root, &[]);
         assert!(!status.installed);
         assert!(!status.outdated);
         // Nothing was created — no cleanup needed.
@@ -491,9 +562,9 @@ mod tests {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(&path, "stale skill content").unwrap();
         }
-        assert!(get_status_under(&root).outdated);
+        assert!(get_status_under(&root, &[]).outdated);
 
-        let status = install_under(&root).unwrap();
+        let status = install_under(&root, &[]).unwrap();
         assert!(status.installed);
         assert!(!status.outdated);
         for skill in SKILLS {
@@ -502,6 +573,83 @@ mod tests {
                 skill.content
             );
         }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // ---- User skills (~/.redline/skills) ------------------------------------
+
+    fn user_skill(name: &str) -> UserSkill {
+        UserSkill {
+            name: name.to_string(),
+            content: format!("---\nname: {name}\n---\n\nMy custom skill.\n"),
+        }
+    }
+
+    #[test]
+    fn discover_skips_builtin_collisions_empty_files_and_missing_dir() {
+        let src = tmpdir();
+        // Missing directory → no user skills, no error.
+        assert!(discover_user_skills_under(&src).is_empty());
+
+        // A real skill, a built-in-shadowing skill, and an empty one.
+        for (name, content) in [
+            ("my-workflow", "custom content"),
+            ("redline-plan-review", "shadow attempt"),
+            ("empty-one", "   \n"),
+        ] {
+            let dir = src.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("SKILL.md"), content).unwrap();
+        }
+        // A stray file (not a dir) must be ignored too.
+        fs::write(src.join("stray.md"), "not a skill dir").unwrap();
+
+        let found = discover_user_skills_under(&src);
+        assert_eq!(found.len(), 1, "only the real user skill should survive");
+        assert_eq!(found[0].name, "my-workflow");
+        assert_eq!(found[0].content, "custom content");
+        let _ = fs::remove_dir_all(&src);
+    }
+
+    #[test]
+    fn install_writes_user_skills_and_status_requires_their_presence() {
+        let root = tmpdir();
+        let user = vec![user_skill("my-workflow")];
+
+        let status = install_under(&root, &user).unwrap();
+        assert!(status.installed);
+        assert_eq!(
+            fs::read_to_string(skill_md(&root, "my-workflow")).unwrap(),
+            user[0].content
+        );
+
+        // Remove the installed user skill → aggregate no longer installed,
+        // but not `outdated` (missing ≠ stale, same as built-ins).
+        fs::remove_dir_all(root.join("my-workflow")).unwrap();
+        let status = get_status_under(&root, &user);
+        assert!(!status.installed);
+        assert!(!status.outdated);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn user_skills_are_exempt_from_the_byte_equality_lock() {
+        let root = tmpdir();
+        let user = vec![user_skill("my-workflow")];
+        install_under(&root, &user).unwrap();
+
+        // Diverge the installed copy — e.g. the user iterated on it in place.
+        fs::write(skill_md(&root, "my-workflow"), "edited at destination").unwrap();
+        let status = get_status_under(&root, &user);
+        assert!(status.installed, "presence is enough for a user skill");
+        assert!(!status.outdated, "a diverged user skill must not flag outdated");
+
+        // Re-installing must NOT clobber the destination edits.
+        install_under(&root, &user).unwrap();
+        assert_eq!(
+            fs::read_to_string(skill_md(&root, "my-workflow")).unwrap(),
+            "edited at destination"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 }

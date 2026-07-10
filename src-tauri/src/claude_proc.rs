@@ -28,6 +28,20 @@ use tokio::process::Command;
 ///    first probe.
 /// 3. Fall back to the bare name (correct when launched from a terminal).
 pub fn resolve_claude_bin() -> String {
+    // 0. Explicit overrides beat every probe: the REDLINE_CLAUDE_BIN env var,
+    //    then the settings-surface path (seat::claude_bin_override). Both are
+    //    returned as-given — a wrong path fails loudly at spawn, which beats
+    //    silently probing past a user's explicit choice.
+    if let Some(path) = std::env::var(crate::seat::ENV_CLAUDE_BIN)
+        .ok()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+    {
+        return path;
+    }
+    if let Some(path) = crate::seat::claude_bin_override() {
+        return path;
+    }
     if let Some(path) = known_install_locations().into_iter().find(|p| p.is_file()) {
         return path.to_string_lossy().into_owned();
     }
@@ -84,14 +98,27 @@ pub fn claude_command(claude_bin: &str) -> Command {
     cmd
 }
 
+/// `claude_command` with the seat's binary override applied: the seat's own
+/// `binaryPath`, else the global settings override, else the caller's cached
+/// `resolve_claude_bin()` result. Checked at every spawn (not just at cache
+/// time) so a settings change takes effect without a relaunch.
+pub fn claude_command_for_seat(seat: &str, default_bin: &str) -> Command {
+    match crate::seat::binary_for(seat) {
+        Some(bin) => claude_command(&bin),
+        None => claude_command(default_bin),
+    }
+}
+
 /// The standard arg vector for a headless *browser-bridge* `claude` turn:
 /// stream-json with partial messages, the Read/Grep/Glob/WebFetch/WebSearch/Bash
 /// tool surface, and the localhost curl allow (three quoting variants — see
 /// `browse.rs` for why all three prefix rules are required), with MCP stripped.
-/// Appends `--resume <sid>` when resuming a prior session. Shared by the browse
+/// `seat` tags the spawn with its Agent Seat, appending any configured
+/// `--model`/`--effort`/`--fallback-model` flags (see `seat.rs`). Appends
+/// `--resume <sid>` when resuming a prior session. Shared by the browse
 /// consult path and the linked-discussion agent so the tool surface can't drift
 /// between them. `browse_send`/`mission_send` keep their own inline copies.
-pub fn bridge_args(prompt: String, prior_session: Option<&str>) -> Vec<String> {
+pub fn bridge_args(seat: &str, prompt: String, prior_session: Option<&str>) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "-p".to_string(),
         prompt,
@@ -111,6 +138,7 @@ pub fn bridge_args(prompt: String, prior_session: Option<&str>) -> Vec<String> {
         "Bash(curl -s \"http://127.0.0.1:7676/*)".to_string(),
         "--strict-mcp-config".to_string(),
     ];
+    args.extend(crate::seat::flag_args(seat));
     if let Some(sid) = prior_session {
         args.push("--resume".to_string());
         args.push(sid.to_string());
@@ -316,6 +344,38 @@ mod tests {
         // Re-read routes so a mid-conversation goal/pin change stays reachable.
         assert!(b.contains("/v1/mission/active"));
         assert!(b.contains("/v1/mission/findings"));
+    }
+
+    #[test]
+    fn bridge_args_unconfigured_seat_adds_no_flags() {
+        let args = bridge_args("companion", "hi".to_string(), None);
+        assert!(!args.iter().any(|a| a == "--model"));
+        assert!(!args.iter().any(|a| a == "--effort"));
+        assert!(!args.iter().any(|a| a == "--fallback-model"));
+    }
+
+    #[test]
+    fn bridge_args_carry_the_seats_model_and_effort_before_resume() {
+        // "voice" is written by no other test in this process (the seat store
+        // is process-global) — configure, assert, clean up.
+        crate::seat::set_seat_for_test(
+            "voice",
+            Some(crate::seat::SeatConfig {
+                model: Some("sonnet".to_string()),
+                effort: Some("medium".to_string()),
+                ..Default::default()
+            }),
+        );
+        let args = bridge_args("voice", "hi".to_string(), Some("sid-1"));
+        let model_idx = args.iter().position(|a| a == "--model").unwrap();
+        assert_eq!(args[model_idx + 1], "sonnet");
+        let effort_idx = args.iter().position(|a| a == "--effort").unwrap();
+        assert_eq!(args[effort_idx + 1], "medium");
+        // The resume tail must stay terminal (flags precede it).
+        let resume_idx = args.iter().position(|a| a == "--resume").unwrap();
+        assert!(model_idx < resume_idx && effort_idx < resume_idx);
+        assert_eq!(args[resume_idx + 1], "sid-1");
+        crate::seat::set_seat_for_test("voice", None);
     }
 
     #[test]

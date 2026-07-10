@@ -6,7 +6,7 @@
 // styles.css routes the whole app's chrome + document onto that variable. Only
 // the terminal and code blocks stay pinned to `--font-mono`.
 
-export type FontName =
+export type BuiltinFontName =
   | "san-francisco"
   | "new-york"
   | "helvetica-neue"
@@ -22,12 +22,12 @@ export type FontName =
   | "american-typewriter"
   | "menlo"
   | "sf-mono"
-  | "courier-new"
-  | "chalkboard-se"
-  | "marker-felt"
-  | "noteworthy"
-  | "bradley-hand"
-  | "snell-roundhand";
+  | "courier-new";
+
+// A font choice is a built-in name OR a free-text custom family stored as
+// `custom:<family>` (see customFontName). The `string & {}` keeps literal
+// autocompletion for the built-ins while admitting custom values.
+export type FontName = BuiltinFontName | (string & {});
 
 export interface FontEntry {
   name: FontName;
@@ -111,28 +111,11 @@ export const FONTS: FontEntry[] = [
     label: "Courier New",
     stack: '"Courier New", Courier, monospace',
   },
-  {
-    name: "chalkboard-se",
-    label: "Chalkboard SE",
-    stack: '"Chalkboard SE", "Comic Sans MS", sans-serif',
-  },
-  {
-    name: "marker-felt",
-    label: "Marker Felt",
-    stack: '"Marker Felt", "Comic Sans MS", cursive',
-  },
-  { name: "noteworthy", label: "Noteworthy", stack: "Noteworthy, cursive" },
-  {
-    name: "bradley-hand",
-    label: "Bradley Hand",
-    stack: '"Bradley Hand", cursive',
-  },
-  {
-    name: "snell-roundhand",
-    label: "Snell Roundhand",
-    stack: '"Snell Roundhand", cursive',
-  },
 ];
+// The five handwriting/novelty faces (Chalkboard SE, Marker Felt, Noteworthy,
+// Bradley Hand, Snell Roundhand) were pruned from the built-ins; a saved pick
+// of one falls back to San Francisco via getFont's default. Anyone who really
+// wants them can type the family into the free-text custom entry.
 
 // First-launch default: San Francisco. `readStoredFont()` only consults this
 // when the user has no saved choice yet, so existing installs keep their pick.
@@ -148,10 +131,58 @@ export const SUGGESTED_FONT_FOR_THEME: Partial<Record<string, FontName>> = {
 
 const BY_NAME = new Map(FONTS.map((f) => [f.name, f]));
 
-export function getFont(name: string): FontEntry {
-  return BY_NAME.get(name as FontName) ?? FONTS[0];
+// ---- Free-text custom fonts ------------------------------------------------
+// A custom pick is stored as `custom:<family>` so it can never collide with a
+// built-in name, and so an *unknown bare* name (e.g. a pruned built-in from an
+// old install) still falls back to San Francisco rather than being applied as
+// a family. The family is sanitized to what a CSS font-family value can carry.
+
+const CUSTOM_PREFIX = "custom:";
+
+/** Strip characters that could break out of a CSS font-family value. */
+function sanitizeFamily(family: string): string {
+  return family.replace(/["'`;{}()\\]/g, "").trim();
 }
 
+/** Build the stored FontName for a free-text family ("" if unusable). */
+export function customFontName(family: string): FontName {
+  const clean = sanitizeFamily(family);
+  return clean ? `${CUSTOM_PREFIX}${clean}` : "";
+}
+
+export function isCustomFontName(value: unknown): boolean {
+  return (
+    typeof value === "string" &&
+    value.startsWith(CUSTOM_PREFIX) &&
+    sanitizeFamily(value.slice(CUSTOM_PREFIX.length)).length > 0
+  );
+}
+
+/** The human-readable family of a custom FontName ("" for built-ins). */
+export function customFontFamily(name: string): string {
+  return isCustomFontName(name)
+    ? sanitizeFamily(name.slice(CUSTOM_PREFIX.length))
+    : "";
+}
+
+export function getFont(name: string): FontEntry {
+  const builtin = BY_NAME.get(name as BuiltinFontName);
+  if (builtin) return builtin;
+  const family = customFontFamily(name);
+  if (family) {
+    return {
+      name,
+      label: family,
+      stack: `"${family}", -apple-system, system-ui, sans-serif`,
+    };
+  }
+  return FONTS[0];
+}
+
+/** True for a built-in name OR a well-formed custom `custom:<family>` value. */
 export function isFontName(value: unknown): value is FontName {
-  return typeof value === "string" && BY_NAME.has(value as FontName);
+  return (
+    (typeof value === "string" && BY_NAME.has(value as BuiltinFontName)) ||
+    isCustomFontName(value)
+  );
 }

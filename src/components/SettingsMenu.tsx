@@ -15,6 +15,8 @@ interface SettingsMenuProps {
   theme: ReactNode;
   font: ReactNode;
   lint: ReactNode;
+  /** Agent Seats — per-agent model/effort (see AgentSeats.tsx). */
+  agents: ReactNode;
   notifications: ReactNode;
   memory: ReactNode;
 }
@@ -46,6 +48,7 @@ export function SettingsMenu({
   theme,
   font,
   lint,
+  agents,
   notifications,
   memory,
 }: SettingsMenuProps) {
@@ -133,6 +136,7 @@ export function SettingsMenu({
           <Row label="Theme">{theme}</Row>
           <Row label="Font">{font}</Row>
           <Row label="Linting">{lint}</Row>
+          <Row label="Agent Seats">{agents}</Row>
           <Row label="Notifications">{notifications}</Row>
           <div className="flex items-center px-3 py-2">{memory}</div>
         </div>

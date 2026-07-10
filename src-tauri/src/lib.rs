@@ -37,10 +37,12 @@ mod pty;
 mod resolutions;
 mod review;
 mod review_feedback;
+mod seat;
 mod skill;
 mod state;
 mod tts;
 mod update;
+mod userconfig;
 mod voice;
 mod worktree;
 
@@ -5559,6 +5561,88 @@ fn set_interception_mode(app: AppHandle, mode: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Appearance preferences (theme / font / lint names) live in `app_settings`
+/// so a fork or second machine carries the user's appearance with the DB;
+/// browser localStorage remains only the pre-paint cache (index.html replays
+/// it before the bundle loads). The frontend read-through-migrates old
+/// localStorage-only values into here on startup.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UiPrefs {
+    theme: Option<String>,
+    font: Option<String>,
+    lint: Option<String>,
+}
+
+/// `key` → `app_settings` row; the allowlist keeps this command from becoming
+/// a generic KV write surface.
+fn ui_pref_setting_key(key: &str) -> Option<&'static str> {
+    match key {
+        "theme" => Some("redline.ui.theme"),
+        "font" => Some("redline.ui.font"),
+        "lint" => Some("redline.ui.lint"),
+        _ => None,
+    }
+}
+
+#[tauri::command]
+fn get_ui_prefs(settings: tauri::State<'_, Settings>) -> UiPrefs {
+    UiPrefs {
+        theme: settings.db.get_setting("redline.ui.theme"),
+        font: settings.db.get_setting("redline.ui.font"),
+        lint: settings.db.get_setting("redline.ui.lint"),
+    }
+}
+
+#[tauri::command]
+fn set_ui_pref(
+    settings: tauri::State<'_, Settings>,
+    key: String,
+    value: String,
+) -> Result<(), String> {
+    let setting_key = ui_pref_setting_key(&key).ok_or_else(|| format!("unknown ui pref: {key}"))?;
+    settings
+        .db
+        .set_setting(setting_key, &value)
+        .map_err(|e| e.to_string())
+}
+
+/// Agent Seats (see `seat.rs`): the whole configured map plus the global
+/// claude-binary override, for the settings pane.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentSeatsView {
+    seats: std::collections::HashMap<String, seat::SeatConfig>,
+    known_seats: Vec<String>,
+    claude_bin: Option<String>,
+}
+
+#[tauri::command]
+fn get_agent_seats() -> AgentSeatsView {
+    AgentSeatsView {
+        seats: seat::all_seats(),
+        known_seats: seat::KNOWN_SEATS.iter().map(|s| s.to_string()).collect(),
+        claude_bin: seat::claude_bin_override(),
+    }
+}
+
+#[tauri::command]
+fn set_agent_seat(
+    settings: tauri::State<'_, Settings>,
+    seat_name: String,
+    config: seat::SeatConfig,
+) -> Result<(), String> {
+    seat::set_seat(&settings.db, &seat_name, config)
+}
+
+#[tauri::command]
+fn set_claude_bin_override(
+    settings: tauri::State<'_, Settings>,
+    path: String,
+) -> Result<(), String> {
+    seat::set_claude_bin_override(&settings.db, &path)
+}
+
 /// Relay settings for live collaboration: the signaling server URLs minted
 /// into invite codes and the owner's presence display name. Stored in
 /// `app_settings` (signaling as a JSON array) so invites are prefilled.
@@ -7628,6 +7712,13 @@ pub fn run() {
             attach_discussion,
             get_interception_mode,
             set_interception_mode,
+            get_ui_prefs,
+            set_ui_pref,
+            get_agent_seats,
+            set_agent_seat,
+            set_claude_bin_override,
+            userconfig::list_user_themes,
+            userconfig::save_user_theme,
             get_relay_config,
             set_relay_config,
             get_owner_secret,
@@ -7935,6 +8026,11 @@ pub fn run() {
 
             let settings = Settings::load(db.clone());
             app.manage(settings.clone());
+
+            // Agent Seats: mirror the per-seat model/effort/binary config (and
+            // the global claude-binary override) into the process-global store
+            // before any agent can spawn.
+            seat::load_from_db(&db);
 
             let claims = ClaimFlags::new();
             app.manage(claims.clone());

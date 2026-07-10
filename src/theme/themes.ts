@@ -2,7 +2,7 @@
 // Copyright 2026 Yusuf Al-Bazian
 import type { ThemeBase } from "./derive";
 
-export type ThemeName =
+export type BuiltinThemeName =
   | "studio"
   | "basic"
   | "pro"
@@ -17,6 +17,11 @@ export type ThemeName =
   | "grass"
   | "terminal"
   | "redline";
+
+// A theme choice is a built-in name OR the name of a user theme loaded from
+// `~/.redline/themes/<name>.json` (see registerUserThemes). The `string & {}`
+// keeps literal autocompletion for the built-ins while admitting user names.
+export type ThemeName = BuiltinThemeName | (string & {});
 
 /** The 16 ANSI palette slots xterm accepts as theme overrides. */
 export type AnsiSlot =
@@ -40,6 +45,9 @@ export type AnsiSlot =
 export interface ThemeEntry {
   name: ThemeName;
   label: string;
+  /** True for themes loaded from `~/.redline/themes/*.json` — rendered in the
+   *  picker's "user" section, and never shipped with the app. */
+  user?: boolean;
   base: ThemeBase;
   /** Hand-tuned ANSI overrides for the embedded terminal, merged over the
    *  light/dark default palette in TerminalView. Only needed when a theme's
@@ -217,10 +225,84 @@ export const DEFAULT_THEME: ThemeName = "studio";
 
 const BY_NAME = new Map(THEMES.map((t) => [t.name, t]));
 
+// ---- User themes -----------------------------------------------------------
+// JSON files in `~/.redline/themes/*.json` become picker entries alongside the
+// built-ins. The backend only reads the files; parsing + validation live here
+// so bad JSON can never take the picker down — invalid files are skipped.
+
+const USER_THEMES = new Map<string, ThemeEntry>();
+
+const HEX_COLOR = /^#[0-9a-fA-F]{3,8}$/;
+const BASE_KEYS = ["bg", "fg", "blue", "yellow", "green", "selection"] as const;
+
+/** Parse one user theme file's JSON text. `name` is the filename stem; a
+ *  built-in name is rejected so a user file can never shadow a shipped theme.
+ *  Returns null (never throws) on any shape problem. */
+export function parseUserTheme(name: string, json: string): ThemeEntry | null {
+  const clean = name.trim();
+  if (!clean || BY_NAME.has(clean as BuiltinThemeName)) return null;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(json);
+  } catch {
+    return null;
+  }
+  if (typeof raw !== "object" || raw === null) return null;
+  const obj = raw as Record<string, unknown>;
+  const baseRaw = obj.base;
+  if (typeof baseRaw !== "object" || baseRaw === null) return null;
+  const base: Record<string, string> = {};
+  for (const key of BASE_KEYS) {
+    const value = (baseRaw as Record<string, unknown>)[key];
+    if (typeof value !== "string" || !HEX_COLOR.test(value.trim())) return null;
+    base[key] = value.trim();
+  }
+  const entry: ThemeEntry = {
+    name: clean,
+    label: typeof obj.label === "string" && obj.label.trim() ? obj.label.trim() : clean,
+    user: true,
+    base: base as unknown as ThemeBase,
+  };
+  // Optional ANSI overrides: keep only valid slot → hex pairs.
+  if (typeof obj.ansi === "object" && obj.ansi !== null) {
+    const ansi: Partial<Record<AnsiSlot, string>> = {};
+    for (const [slot, value] of Object.entries(obj.ansi as Record<string, unknown>)) {
+      if (typeof value === "string" && HEX_COLOR.test(value.trim())) {
+        ansi[slot as AnsiSlot] = value.trim();
+      }
+    }
+    if (Object.keys(ansi).length > 0) entry.ansi = ansi;
+  }
+  return entry;
+}
+
+/** Replace the user-theme registry with the given (name, json) files —
+ *  invalid files are skipped. Returns the accepted entries. */
+export function registerUserThemes(
+  files: Array<{ name: string; json: string }>,
+): ThemeEntry[] {
+  USER_THEMES.clear();
+  for (const file of files) {
+    const entry = parseUserTheme(file.name, file.json);
+    if (entry) USER_THEMES.set(entry.name, entry);
+  }
+  return [...USER_THEMES.values()];
+}
+
+/** Built-ins plus registered user themes, in picker order. */
+export function allThemes(): ThemeEntry[] {
+  return [...THEMES, ...USER_THEMES.values()];
+}
+
 export function getTheme(name: string): ThemeEntry {
-  return BY_NAME.get(name as ThemeName) ?? THEMES[0];
+  return (
+    BY_NAME.get(name as BuiltinThemeName) ?? USER_THEMES.get(name) ?? THEMES[0]
+  );
 }
 
 export function isThemeName(value: unknown): value is ThemeName {
-  return typeof value === "string" && BY_NAME.has(value as ThemeName);
+  return (
+    typeof value === "string" &&
+    (BY_NAME.has(value as BuiltinThemeName) || USER_THEMES.has(value))
+  );
 }

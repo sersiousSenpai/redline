@@ -28,7 +28,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::classmem::{self, auto_collapse_safe, subtree_stats, ClassNode};
-use crate::claude_proc::{classify_line, claude_command, resolve_claude_bin, StreamLine};
+use crate::claude_proc::{classify_line, resolve_claude_bin, StreamLine};
 use crate::db::Database;
 use crate::ledger::{self, now_millis};
 
@@ -322,8 +322,8 @@ pub async fn run_keeper_summarizer(cwd: &str, prompt: String) -> Result<String, 
         .await
         .map_err(|e| e.to_string())?;
     ledger::register_agent_prompt(&ledger::body_hash(&prompt));
-    let args = crate::claude_proc::bridge_args(prompt, None);
-    let mut cmd = claude_command(&claude_bin);
+    let args = crate::claude_proc::bridge_args("keeper", prompt, None);
+    let mut cmd = crate::claude_proc::claude_command_for_seat("keeper", &claude_bin);
     let mut child = cmd
         .current_dir(cwd)
         .args(&args)

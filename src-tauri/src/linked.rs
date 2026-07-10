@@ -30,7 +30,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdout};
 
 use crate::claude_proc::{
-    bridge_args, classify_line, claude_command, mission_context_block, resolve_claude_bin,
+    bridge_args, classify_line, mission_context_block, resolve_claude_bin,
     StreamLine,
 };
 use crate::db::Database;
@@ -132,10 +132,10 @@ impl LinkedState {
         };
         crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
 
-        let args = bridge_args(prompt, prior_session.as_deref());
+        let args = bridge_args("linked", prompt, prior_session.as_deref());
         let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
         let claude_bin = self.claude_bin().await?;
-        let mut cmd = claude_command(&claude_bin);
+        let mut cmd = crate::claude_proc::claude_command_for_seat("linked", &claude_bin);
         let mut child = cmd
             .current_dir(&cwd)
             .args(&args)
@@ -576,7 +576,7 @@ pub async fn linked_send(
         crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
     }
 
-    let args = bridge_args(prompt, prior_session.as_deref());
+    let args = bridge_args("linked", prompt, prior_session.as_deref());
 
     let cwd = cwd
         .filter(|c| !c.trim().is_empty())
@@ -584,7 +584,7 @@ pub async fn linked_send(
         .unwrap_or_else(|| "/".to_string());
 
     let claude_bin = linked.claude_bin().await?;
-    let mut cmd = claude_command(&claude_bin);
+    let mut cmd = crate::claude_proc::claude_command_for_seat("linked", &claude_bin);
     let mut child = cmd
         .current_dir(&cwd)
         .args(&args)

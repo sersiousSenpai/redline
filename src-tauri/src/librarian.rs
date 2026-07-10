@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-use crate::claude_proc::{classify_line, claude_command, resolve_claude_bin, StreamLine};
+use crate::claude_proc::{classify_line, resolve_claude_bin, StreamLine};
 use crate::context::FrictionDigest;
 use crate::ledger;
 
@@ -243,8 +243,8 @@ pub async fn run_librarian(cwd: &str, prompt: String) -> Result<(String, Option<
         .await
         .map_err(|e| e.to_string())?;
     ledger::register_agent_prompt(&ledger::body_hash(&prompt));
-    let args = crate::claude_proc::bridge_args(prompt, None);
-    let mut cmd = claude_command(&claude_bin);
+    let args = crate::claude_proc::bridge_args("librarian", prompt, None);
+    let mut cmd = crate::claude_proc::claude_command_for_seat("librarian", &claude_bin);
     let mut child = cmd
         .current_dir(cwd)
         .args(&args)

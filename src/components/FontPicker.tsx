@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { useEffect, useRef, useState } from "react";
-import { FONTS } from "../theme/fonts";
+import {
+  FONTS,
+  customFontFamily,
+  customFontName,
+  getFont,
+} from "../theme/fonts";
 import type { FontName } from "../theme/fonts";
 import { useMenuOverlay } from "./menuOverlay";
 
@@ -12,11 +17,23 @@ interface FontPickerProps {
 
 // Compact dropdown matching ThemePicker: a trigger showing the current font
 // (rendered in that font) and a popover that previews each option in its own
-// typeface, so the look reads at a glance.
+// typeface, so the look reads at a glance. A free-text row at the bottom
+// accepts any installed font family (stored as `custom:<family>`).
 export function FontPicker({ font, onFontChange }: FontPickerProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
-  const current = FONTS.find((f) => f.name === font) ?? FONTS[0];
+  // getFont resolves built-ins, `custom:` names, and falls back to the default
+  // for anything unknown (e.g. a pruned novelty face from an old install).
+  const current = getFont(font);
+  const currentCustomFamily = customFontFamily(font);
+  const [customDraft, setCustomDraft] = useState(currentCustomFamily);
+
+  const applyCustom = () => {
+    const name = customFontName(customDraft);
+    if (!name || name === font) return;
+    onFontChange(name);
+    setOpen(false);
+  };
 
   // Hide the native browser webview while this menu is up (see useMenuOverlay).
   useMenuOverlay(open);
@@ -121,6 +138,57 @@ export function FontPicker({ font, onFontChange }: FontPickerProps) {
               </button>
             );
           })}
+          <div
+            className="px-3 py-2 flex items-center gap-2"
+            style={{ borderTop: "1px solid var(--color-rule)" }}
+          >
+            <input
+              type="text"
+              value={customDraft}
+              placeholder="Custom font family…"
+              aria-label="Custom font family"
+              onChange={(e) => setCustomDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") applyCustom();
+                // Keep Escape for the menu, but don't let other keys leak to
+                // global shortcuts while typing a family name.
+                if (e.key !== "Escape") e.stopPropagation();
+              }}
+              className="font-sans flex-1 min-w-0 rounded-sm px-2 py-1"
+              style={{
+                fontSize: "12px",
+                border: "1px solid var(--color-rule)",
+                background: "var(--color-paper)",
+                color: "var(--color-ink)",
+              }}
+            />
+            <button
+              type="button"
+              onClick={applyCustom}
+              disabled={!customFontName(customDraft)}
+              className="font-sans rounded-sm px-2 py-1"
+              style={{
+                fontSize: "11px",
+                fontWeight: 600,
+                border: "1px solid var(--color-rule)",
+                background: "var(--color-bg-elevated)",
+                color: customFontName(customDraft)
+                  ? "var(--color-ink)"
+                  : "var(--color-ink-muted)",
+                cursor: customFontName(customDraft) ? "pointer" : "default",
+              }}
+            >
+              Use
+            </button>
+          </div>
+          {currentCustomFamily && (
+            <div
+              className="font-sans px-3 pb-2"
+              style={{ fontSize: "10px", color: "var(--color-ink-muted)" }}
+            >
+              Using custom face “{currentCustomFamily}”
+            </div>
+          )}
         </div>
       )}
     </div>

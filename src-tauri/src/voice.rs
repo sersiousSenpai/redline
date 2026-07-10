@@ -29,7 +29,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout};
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::claude_proc::{classify_line, claude_command, resolve_claude_bin, StreamLine};
+use crate::claude_proc::{classify_line, resolve_claude_bin, StreamLine};
 use crate::db::Database;
 use crate::state::SessionStore;
 
@@ -372,6 +372,7 @@ pub async fn voice_session_start(
         "Bash(curl -s http://127.0.0.1:7676/*)".to_string(),
         "--strict-mcp-config".to_string(),
     ];
+    args.extend(crate::seat::flag_args("voice"));
     // The plan markdown to prime a fresh session with (`None` when resuming our
     // own prior fork, which already knows the conversation).
     let mut prime: Option<String> = None;
@@ -399,7 +400,7 @@ pub async fn voice_session_start(
     }
 
     let claude_bin = voice.claude_bin().await?;
-    let mut cmd = claude_command(&claude_bin);
+    let mut cmd = crate::claude_proc::claude_command_for_seat("voice", &claude_bin);
     let mut child = cmd
         .current_dir(&cwd)
         .args(&args)
@@ -631,7 +632,9 @@ pub async fn voice_clean(
 /// Spawn the conversation-free cleanup child: fast model, no tools, primed once
 /// with [`CLEANUP_SYSTEM`] so each turn carries only the raw transcript.
 fn spawn_cleanup(claude_bin: &str) -> Result<CleanupProc, String> {
-    let mut cmd = claude_command(claude_bin);
+    // Deliberately NOT seat-configurable: this is a fixed fast-model utility
+    // (transcript cleanup), not an agent seat — it keeps its hardcoded model.
+    let mut cmd = crate::claude_proc::claude_command(claude_bin);
     let mut child = cmd
         .args([
             "-p",

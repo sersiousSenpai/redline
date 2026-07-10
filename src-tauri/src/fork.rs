@@ -24,7 +24,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdout};
 
-use crate::claude_proc::{classify_line, claude_command, resolve_claude_bin, StreamLine};
+use crate::claude_proc::{classify_line, resolve_claude_bin, StreamLine};
 use crate::db::Database;
 use crate::state::{now_millis, CommentKind, ReviewAnnotation, SessionStore, ThreadMessage};
 
@@ -120,13 +120,13 @@ impl ForkState {
         );
         crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&framed));
 
-        let mut args: Vec<String> = discussion_fork_args(framed);
+        let mut args: Vec<String> = discussion_fork_args("fork_plan", framed);
         args.push("--resume".to_string());
         args.push(session_id.clone());
         args.push("--fork-session".to_string());
 
         let claude_bin = self.claude_bin().await?;
-        let mut cmd = claude_command(&claude_bin);
+        let mut cmd = crate::claude_proc::claude_command_for_seat("fork_plan", &claude_bin);
         let mut child = cmd
             .current_dir(&cwd)
             .args(&args)
@@ -318,11 +318,14 @@ fn build_first_turn_prompt(
 /// `ExitPlanMode` stay out of `--tools`, and `--strict-mcp-config` still strips
 /// MCP. See `docs/protocol-verification.md` Experiment (i).
 ///
-/// All three fork spawn sites share this one builder so the tool surface can't
+/// All fork spawn sites share this one builder so the tool surface can't
 /// drift between them; each caller appends its own `--resume [--fork-session]`
 /// tail. `prompt` is moved into the returned vector (arg position after `-p`).
-fn discussion_fork_args(prompt: String) -> Vec<String> {
-    vec![
+/// `seat` is the fork's Agent Seat category (`fork_plan` / `fork_review` /
+/// `fork_drafter`) — unconfigured categories add no flags, so the thread
+/// inherits its parent surface exactly (see `seat.rs`).
+fn discussion_fork_args(seat: &str, prompt: String) -> Vec<String> {
+    let mut args = vec![
         "-p".to_string(),
         prompt,
         "--output-format".to_string(),
@@ -342,7 +345,9 @@ fn discussion_fork_args(prompt: String) -> Vec<String> {
         "Bash(curl -s 'http://127.0.0.1:7676/*)".to_string(),
         "Bash(curl -s \"http://127.0.0.1:7676/*)".to_string(),
         "--strict-mcp-config".to_string(),
-    ]
+    ];
+    args.extend(crate::seat::flag_args(seat));
+    args
 }
 
 // --- Commands --------------------------------------------------------------
@@ -454,7 +459,7 @@ pub async fn fork_thread_send(
     // scoped localhost-daemon `curl` allow (the ClassMemory retrieval surface).
     // Edit/Write/ExitPlanMode stay excluded and MCP is stripped; never plan mode.
     // See `discussion_fork_args` and docs/protocol-verification.md Experiment (i).
-    let mut args: Vec<String> = discussion_fork_args(prompt);
+    let mut args: Vec<String> = discussion_fork_args("fork_plan", prompt);
     match &prior_fork {
         None => {
             args.push("--resume".to_string());
@@ -471,7 +476,7 @@ pub async fn fork_thread_send(
     // `claude_command` prepends the binary's own dir to PATH so an
     // `#!/usr/bin/env node` shebang (npm installs) finds its `node`.
     let claude_bin = fork.claude_bin().await?;
-    let mut cmd = claude_command(&claude_bin);
+    let mut cmd = crate::claude_proc::claude_command_for_seat("fork_plan", &claude_bin);
     let mut child = cmd
         .current_dir(&cwd)
         .args(&args)
@@ -668,7 +673,7 @@ pub async fn review_thread_send(
 
     // Same read-only discussion-fork tool surface as plan threads (scoped curl
     // allow included — see `discussion_fork_args`).
-    let mut args: Vec<String> = discussion_fork_args(prompt);
+    let mut args: Vec<String> = discussion_fork_args("fork_review", prompt);
     // First turn: fresh session (no --resume). Follow-ups resume it.
     if let Some(fork_sid) = &prior_fork {
         args.push("--resume".to_string());
@@ -676,7 +681,7 @@ pub async fn review_thread_send(
     }
 
     let claude_bin = fork.claude_bin().await?;
-    let mut cmd = claude_command(&claude_bin);
+    let mut cmd = crate::claude_proc::claude_command_for_seat("fork_review", &claude_bin);
     let mut child = cmd
         .current_dir(&cwd)
         .args(&args)
@@ -839,14 +844,14 @@ pub async fn review_question_send(
 
     // Same read-only discussion-fork tool surface as the annotation threads
     // (scoped curl allow included — see `discussion_fork_args`).
-    let mut args: Vec<String> = discussion_fork_args(prompt);
+    let mut args: Vec<String> = discussion_fork_args("fork_review", prompt);
     if let Some(fork_sid) = &prior_fork {
         args.push("--resume".to_string());
         args.push(fork_sid.clone());
     }
 
     let claude_bin = fork.claude_bin().await?;
-    let mut cmd = claude_command(&claude_bin);
+    let mut cmd = crate::claude_proc::claude_command_for_seat("fork_review", &claude_bin);
     let mut child = cmd
         .current_dir(&cwd)
         .args(&args)
@@ -1048,14 +1053,14 @@ pub async fn draft_thread_send(
         crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
     }
 
-    let mut args: Vec<String> = discussion_fork_args(prompt);
+    let mut args: Vec<String> = discussion_fork_args("fork_drafter", prompt);
     if let Some(fork_sid) = &prior_fork {
         args.push("--resume".to_string());
         args.push(fork_sid.clone());
     }
 
     let claude_bin = fork.claude_bin().await?;
-    let mut cmd = claude_command(&claude_bin);
+    let mut cmd = crate::claude_proc::claude_command_for_seat("fork_drafter", &claude_bin);
     let mut child = cmd
         .current_dir(&cwd)
         .args(&args)
@@ -1390,7 +1395,7 @@ mod tests {
     /// consciously-widened read-only fork invariant.
     #[test]
     fn discussion_fork_args_grant_only_the_scoped_localhost_curl_allow() {
-        let args = discussion_fork_args("the prompt".to_string());
+        let args = discussion_fork_args("fork_plan", "the prompt".to_string());
 
         // `-p <prompt>` leads; MCP is stripped; never plan mode.
         assert_eq!(args[0], "-p");

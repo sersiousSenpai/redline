@@ -1,7 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { describe, expect, it } from "vitest";
-import { DEFAULT_FONT, FONTS, getFont, isFontName } from "./fonts";
+import {
+  DEFAULT_FONT,
+  FONTS,
+  customFontFamily,
+  customFontName,
+  getFont,
+  isFontName,
+} from "./fonts";
 
 describe("fonts catalog", () => {
   it("includes San Francisco and sets it as the default", () => {
@@ -44,5 +51,60 @@ describe("getFont", () => {
 
   it("falls back to the first entry for an unknown name", () => {
     expect(getFont("does-not-exist")).toBe(FONTS[0]);
+  });
+});
+
+describe("pruned novelty faces", () => {
+  const pruned = [
+    "chalkboard-se",
+    "marker-felt",
+    "noteworthy",
+    "bradley-hand",
+    "snell-roundhand",
+  ];
+
+  it("are absent from the built-in list", () => {
+    for (const name of pruned) {
+      expect(FONTS.some((f) => f.name === name)).toBe(false);
+    }
+  });
+
+  it("fall back to San Francisco when saved from an old install", () => {
+    for (const name of pruned) {
+      expect(isFontName(name)).toBe(false);
+      expect(getFont(name).name).toBe(DEFAULT_FONT);
+    }
+  });
+});
+
+describe("custom fonts (free-text entry)", () => {
+  it("round-trips a family through the custom: name", () => {
+    const name = customFontName("Comic Sans MS");
+    expect(name).toBe("custom:Comic Sans MS");
+    expect(isFontName(name)).toBe(true);
+    expect(customFontFamily(name)).toBe("Comic Sans MS");
+    const entry = getFont(name);
+    expect(entry.label).toBe("Comic Sans MS");
+    expect(entry.stack).toContain('"Comic Sans MS"');
+    // Graceful fallback for machines without the face.
+    expect(entry.stack).toContain("-apple-system");
+  });
+
+  it("sanitizes CSS-hostile characters out of the family", () => {
+    const name = customFontName('Evil"; } body { display:none');
+    expect(customFontFamily(name)).not.toMatch(/["';{}]/);
+    expect(getFont(name).stack).not.toMatch(/[;{}]/);
+  });
+
+  it("rejects an empty or all-junk family", () => {
+    expect(customFontName("   ")).toBe("");
+    expect(customFontName('";{}\'')).toBe("");
+    expect(isFontName("custom:")).toBe(false);
+  });
+
+  it("a bare unknown family (no custom: prefix) is NOT a font name", () => {
+    // Free text must go through customFontName — a stray string in storage
+    // (e.g. a pruned built-in) still lands on the default.
+    expect(isFontName("Papyrus")).toBe(false);
   });
 });
