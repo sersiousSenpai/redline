@@ -88,13 +88,18 @@ fn known_install_locations() -> Vec<PathBuf> {
 /// A `tokio::process::Command` for `claude_bin` with PATH prepended with the
 /// binary's own directory. A Dock-launched app passes a minimal PATH to
 /// children; an `#!/usr/bin/env node` shebang (npm installs) needs the `node`
-/// that lives alongside `claude` to be findable.
+/// that lives alongside `claude` to be findable. Every spawn also carries the
+/// per-boot daemon token in the environment — that's how an agent's curl to a
+/// protected `/v1` route authenticates (`-H "Authorization: Bearer
+/// $REDLINE_DAEMON_TOKEN"` after the URL, so the pre-authorized allow-prefix
+/// rules still match).
 pub fn claude_command(claude_bin: &str) -> Command {
     let mut cmd = Command::new(claude_bin);
     if let Some(bin_dir) = Path::new(claude_bin).parent().filter(|p| p.is_dir()) {
         let inherited = std::env::var("PATH").unwrap_or_default();
         cmd.env("PATH", format!("{}:{inherited}", bin_dir.display()));
     }
+    cmd.env(crate::auth::ENV_DAEMON_TOKEN, crate::auth::daemon_token());
     cmd
 }
 

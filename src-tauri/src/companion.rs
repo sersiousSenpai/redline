@@ -258,8 +258,11 @@ fn routes_block() -> &'static str {
      parent_session=&session=&q=\n\n\
      CHECK IN WITH A COLLEAGUE. Every surface has its own agent holding its \
      full context — don't re-derive what a colleague already knows. Delegate a \
-     synthesis and fold back only the digest:\n  \
-     curl -s http://127.0.0.1:7676/v1/global/consult -X POST \
+     synthesis and fold back only the digest (this is a write route — it \
+     requires the Authorization header shown, with the \
+     `$REDLINE_DAEMON_TOKEN` already in your environment):\n  \
+     curl -s http://127.0.0.1:7676/v1/global/consult \
+     -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST \
      -H 'Content-Type: application/json' \
      -d '{\"surface\":\"<browse|plan|mission|linked|drafter>\",\"id\":\"<its id \
      — for browse, the tab number>\",\"question\":\"<what you need synthesized>\"}'\n\

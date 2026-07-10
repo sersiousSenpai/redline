@@ -10,7 +10,7 @@ description: >-
   suggestions (append / replace_block / insert_after / delete_block) the user
   accepts or rejects in place. Covers the collaborator persona, the doc-route
   re-read discipline, the suggestions ops + staleness contract, and formatting.
-version: 1
+version: 2
 ---
 
 # Redline drafter discussion
@@ -43,10 +43,13 @@ said the doc moved.
 
 ## Writing into the document
 
-You can draft and edit the prompt directly. Post a suggestion:
+You can draft and edit the prompt directly. Post a suggestion. Write routes
+require `-H "Authorization: Bearer $REDLINE_DAEMON_TOKEN"` after the URL (the
+token is already in your environment):
 
 ```
-curl -s -X POST http://127.0.0.1:7676/v1/drafter/<draft_id>/suggestions \
+curl -s http://127.0.0.1:7676/v1/drafter/<draft_id>/suggestions -X POST \
+  -H "Authorization: Bearer $REDLINE_DAEMON_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"op":"append","markdown":"<content>","agentId":"draft-agent","body":"<one-line why>"}'
 ```

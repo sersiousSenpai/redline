@@ -2,6 +2,7 @@
 // Copyright 2026 Yusuf Al-Bazian
 mod agent;
 mod ai_review;
+mod auth;
 mod browse;
 #[cfg(target_os = "macos")]
 mod browser_popup;
@@ -15,6 +16,7 @@ mod db;
 mod dictation;
 mod dictation_whisper;
 mod draft_chat;
+mod extension;
 mod feedback;
 mod fork;
 mod fsbrowse;
@@ -1881,6 +1883,13 @@ async fn run_server(state: AppState) {
                 .post(handle_review_annotations_add)
                 .delete(handle_review_annotations_clear),
         )
+        // Control-plane auth (Shardplate Phase 2): every request is checked
+        // against the frozen v1 contract in `auth::ROUTE_TABLE` — mutating
+        // routes demand the per-boot bearer token (or a scoped extension
+        // token), hook-contract and read-only routes pass. Fails closed on
+        // routes missing from the table, so registering a route here without
+        // a contract entry is a loud 401, not a silent hole.
+        .layer(axum::middleware::from_fn(auth::require_daemon_auth))
         .with_state(state);
     match tokio::net::TcpListener::bind(DAEMON_ADDR).await {
         Ok(listener) => {
@@ -5717,6 +5726,55 @@ fn get_owner_secret(settings: tauri::State<'_, Settings>) -> Result<String, Stri
     Ok(secret)
 }
 
+/// Durable Review Request registry (IV.2): shares + returns live in SQLite
+/// via the daemon's database — localStorage was per-webview and couldn't
+/// join with the comments a return produces (`comments.share_request_id`).
+#[tauri::command]
+fn record_share(
+    store: tauri::State<'_, SessionStore>,
+    share: crate::db::ShareRecord,
+) -> Result<(), String> {
+    store.database().record_share(&share).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_share(
+    store: tauri::State<'_, SessionStore>,
+    request_id: String,
+) -> Result<(), String> {
+    store.database().delete_share(&request_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_shares(
+    store: tauri::State<'_, SessionStore>,
+    session_id: String,
+) -> Result<Vec<crate::db::ShareRecord>, String> {
+    store.database().list_shares(&session_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn record_share_return(
+    store: tauri::State<'_, SessionStore>,
+    ret: crate::db::ShareReturnRecord,
+) -> Result<(), String> {
+    store
+        .database()
+        .record_share_return(&ret)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_share_returns(
+    store: tauri::State<'_, SessionStore>,
+    session_id: String,
+) -> Result<Vec<crate::db::ShareReturnRecord>, String> {
+    store
+        .database()
+        .list_share_returns(&session_id)
+        .map_err(|e| e.to_string())
+}
+
 /// Replace the owner secret (e.g. key rotation after a suspected leak).
 /// Outstanding shared snapshots stop verifying their returns.
 #[tauri::command]
@@ -7725,6 +7783,11 @@ pub fn run() {
             set_owner_secret,
             build_plan_snapshot,
             import_shared_plan,
+            record_share,
+            delete_share,
+            list_shares,
+            record_share_return,
+            list_share_returns,
             get_collab_requests,
             set_collab_requests,
             get_collab_share,
@@ -8170,6 +8233,17 @@ pub fn run() {
                 active_surface,
             };
             tauri::async_runtime::spawn(run_server(app_state));
+
+            // Extension tokens (plugin manifest v1): mint per-boot scoped
+            // tokens for every valid manifest under ~/.redline/extensions,
+            // before any agent or extension can race the daemon. Skip-with-
+            // warning posture — a bad manifest never blocks the boot.
+            if let Some(ext_root) = extension::extensions_root() {
+                let loaded = extension::install_boot_tokens(&ext_root);
+                if !loaded.is_empty() {
+                    tracing::info!("{} extension token(s) issued", loaded.len());
+                }
+            }
 
             // Tray menu mirrors the interception mode (radio-style check items).
             let current = settings.get();
@@ -8967,6 +9041,8 @@ mod tests {
                     selection: None,
                     author: None,
                     reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
                 },
             )
             .unwrap();

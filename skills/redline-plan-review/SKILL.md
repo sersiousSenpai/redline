@@ -6,7 +6,7 @@ description: >-
   [feedback], or [question], rl:blk- block-identity sidecars, or a
   REDLINE_RESOLUTIONS block. Covers presentation-aware plan markdown,
   preserving sidecars, and emitting resolutions.
-version: 9
+version: 10
 ---
 
 # Redline review protocol
@@ -159,10 +159,13 @@ block is `{ blockId, anchorId, kind, markdown, openComment }`. A block with
 `openComment: true` already carries an open comment — a suggestion against it
 will be rejected.
 
-**Post one suggestion per block:**
+**Post one suggestion per block.** Write routes require
+`-H "Authorization: Bearer $REDLINE_DAEMON_TOKEN"` after the URL (the token is
+already in your environment):
 
 ```bash
-curl -s -X POST http://127.0.0.1:7676/v1/sessions/<session_id>/suggestions \
+curl -s http://127.0.0.1:7676/v1/sessions/<session_id>/suggestions \
+  -H "Authorization: Bearer $REDLINE_DAEMON_TOKEN" -X POST \
   -H 'Content-Type: application/json' \
   -d '{
     "blockId": "blk-abc12345",

@@ -242,6 +242,11 @@ pub fn pty_spawn(
         cmd.cwd(dir);
     }
     cmd.env("TERM", "xterm-256color");
+    // Redline-spawned terminals are trusted children: a claude session (or
+    // any tool) running in a dock terminal authenticates to the daemon's
+    // protected /v1 routes with this per-boot token. Truly external
+    // terminals never see it — that asymmetry IS the auth model.
+    cmd.env(crate::auth::ENV_DAEMON_TOKEN, crate::auth::daemon_token());
 
     let mut child = pair
         .slave

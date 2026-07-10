@@ -381,7 +381,9 @@ fn build_first_turn_prompt(
     p.push_str(
         "You can act on the live browser tab by calling these local endpoints \
          with curl (already permitted — no approval needed). Put the URL \
-         immediately after `-s`:\n\n\
+         immediately after `-s`. Write routes require \
+         `-H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\"` after the URL (the \
+         token is already in your environment):\n\n\
          - See the page as it is right now (url, title, selection, text, \
          headings, links):\n  \
          curl -s http://127.0.0.1:7676/v1/browser/snapshot\n\
@@ -393,25 +395,30 @@ fn build_first_turn_prompt(
          curl -s http://127.0.0.1:7676/v1/browser/tabs\n\
          - Open a URL in a NEW tab and show it (leaves the user's other tabs \
          open; the new tab becomes the active one you then act on):\n  \
-         curl -s http://127.0.0.1:7676/v1/browser/open -X POST \
+         curl -s http://127.0.0.1:7676/v1/browser/open \
+         -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST \
          -H 'Content-Type: application/json' -d '{\"url\":\"https://example.com\"}'\n\
          - Switch the user INTO an existing tab (bring it to the foreground and \
          move them into its conversation) — use when they want to BE in that \
          tab, after you've checked it with ?tab=/thread:\n  \
-         curl -s 'http://127.0.0.1:7676/v1/browser/focus?tab=<n>' -X POST\n\
+         curl -s 'http://127.0.0.1:7676/v1/browser/focus?tab=<n>' \
+         -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST\n\
          - Read another tab's discussion history (what was already discussed \
          there — a cheap way to \"check in\" with that tab without re-deriving \
          it):\n  \
          curl -s 'http://127.0.0.1:7676/v1/browser/thread?tab=<n>'\n\
          - Navigate the tab to a URL:\n  \
-         curl -s http://127.0.0.1:7676/v1/browser/navigate -X POST \
+         curl -s http://127.0.0.1:7676/v1/browser/navigate \
+         -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST \
          -H 'Content-Type: application/json' -d '{\"url\":\"https://example.com\"}'\n\
          - Click the first element matching a CSS selector:\n  \
-         curl -s http://127.0.0.1:7676/v1/browser/click -X POST \
+         curl -s http://127.0.0.1:7676/v1/browser/click \
+         -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST \
          -H 'Content-Type: application/json' -d '{\"selector\":\"a.next\"}'\n\
          - Extract structured data with a scrape schema (fields of type text / \
          html / attr / list with itemSelector+itemFields):\n  \
-         curl -s http://127.0.0.1:7676/v1/browser/query -X POST \
+         curl -s http://127.0.0.1:7676/v1/browser/query \
+         -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST \
          -H 'Content-Type: application/json' \
          -d '{\"version\":1,\"name\":\"links\",\"fields\":[{\"name\":\"links\",\
          \"type\":\"list\",\"itemSelector\":\"a[href]\",\"itemFields\":[{\"name\":\
@@ -421,7 +428,8 @@ fn build_first_turn_prompt(
          them the saved path the route returns. Omit `url` to save the page \
          they're viewing; pass `url` to save a specific linked file; pass \
          `dialog:true` to let them choose the location:\n  \
-         curl -s http://127.0.0.1:7676/v1/browser/download -X POST \
+         curl -s http://127.0.0.1:7676/v1/browser/download \
+         -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST \
          -H 'Content-Type: application/json' -d '{}'\n\n\
          IMPORTANT: this `/download` route is the ONLY way you can save a file. \
          `curl -o`, `wget`, redirecting to a file, and any other Bash command are \

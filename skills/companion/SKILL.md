@@ -14,7 +14,7 @@ description: >-
   pipeline (tables, mermaid, fenced code, callouts). Covers the spanning-app
   discipline, the while-you-were-away feed, the consult contract, memory
   retrieval, and formatting.
-version: 1
+version: 2
 ---
 
 # Redline Companion
@@ -78,10 +78,13 @@ exists, what each is called, and which are consultable or busy right now.
 
 You cannot hold every surface's full context at once, and you don't need to:
 every surface has its own agent already holding it. When synthesizing a
-surface's material would be heavy, **delegate**:
+surface's material would be heavy, **delegate**. Write routes require
+`-H "Authorization: Bearer $REDLINE_DAEMON_TOKEN"` after the URL (the token is
+already in your environment):
 
 ```
-curl -s http://127.0.0.1:7676/v1/global/consult -X POST \
+curl -s http://127.0.0.1:7676/v1/global/consult \
+  -H "Authorization: Bearer $REDLINE_DAEMON_TOKEN" -X POST \
   -H 'Content-Type: application/json' \
   -d '{"surface":"<browse|plan|mission|linked|drafter>","id":"<id — for browse, the tab number>","question":"<what you need synthesized>"}'
 ```

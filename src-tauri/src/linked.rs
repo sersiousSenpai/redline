@@ -295,7 +295,9 @@ fn build_first_turn_prompt(
     p.push_str(
         "You can see and read across every open tab by calling these local \
          endpoints with curl (already permitted — no approval needed). Put the \
-         URL immediately after `-s`:\n\n\
+         URL immediately after `-s`. Write routes require \
+         `-H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\"` after the URL (the \
+         token is already in your environment):\n\n\
          - List every open tab — your map of the user's browse. Each has a number \
          `n` (its position in the tab strip, what the USER sees), plus url, \
          title, and which is active:\n  \
@@ -307,10 +309,12 @@ fn build_first_turn_prompt(
          thread):\n  \
          curl -s 'http://127.0.0.1:7676/v1/browser/thread?tab=<n>'\n\
          - Open a URL in a NEW tab (leaves the user's tabs open):\n  \
-         curl -s http://127.0.0.1:7676/v1/browser/open -X POST \
+         curl -s http://127.0.0.1:7676/v1/browser/open \
+         -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST \
          -H 'Content-Type: application/json' -d '{\"url\":\"https://example.com\"}'\n\
          - Switch the user INTO a tab (only when they want to BE there):\n  \
-         curl -s 'http://127.0.0.1:7676/v1/browser/focus?tab=<n>' -X POST\n\n\
+         curl -s 'http://127.0.0.1:7676/v1/browser/focus?tab=<n>' \
+         -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST\n\n\
          Reading a tab by `?tab=<n>` is like glancing at a neighbour's screen — it \
          does NOT move the user's current tab. Tab numbers are positional and \
          shift as tabs open/close, so re-read /tabs for the current mapping each \
@@ -320,7 +324,8 @@ fn build_first_turn_prompt(
          don't re-derive it yourself — that tab has its OWN page-discussion agent \
          holding its full thread. Ask it to synthesize, and only its digest comes \
          back to you (you stay light). Call:\n  \
-         curl -s http://127.0.0.1:7676/v1/linked/consult -X POST \
+         curl -s http://127.0.0.1:7676/v1/linked/consult \
+         -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST \
          -H 'Content-Type: application/json' \
          -d '{\"tab\":\"<n>\",\"question\":\"<what you need synthesized from that tab>\"}'\n\
          The response is JSON {\"digest\":\"...\",\"n\":<n>,\"title\":\"...\"}. Fold the \

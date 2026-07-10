@@ -54,7 +54,7 @@ struct EmbeddedSkill {
 const SKILLS: &[EmbeddedSkill] = &[
     EmbeddedSkill {
         name: "redline-plan-review",
-        version: 9,
+        version: 10,
         content: include_str!("../../skills/redline-plan-review/SKILL.md"),
     },
     EmbeddedSkill {
@@ -69,27 +69,27 @@ const SKILLS: &[EmbeddedSkill] = &[
     },
     EmbeddedSkill {
         name: "browse",
-        version: 5,
+        version: 6,
         content: include_str!("../../skills/browse/SKILL.md"),
     },
     EmbeddedSkill {
         name: "mission",
-        version: 2,
+        version: 3,
         content: include_str!("../../skills/mission/SKILL.md"),
     },
     EmbeddedSkill {
         name: "linked",
-        version: 1,
+        version: 2,
         content: include_str!("../../skills/linked/SKILL.md"),
     },
     EmbeddedSkill {
         name: "drafter",
-        version: 1,
+        version: 2,
         content: include_str!("../../skills/drafter/SKILL.md"),
     },
     EmbeddedSkill {
         name: "companion",
-        version: 1,
+        version: 2,
         content: include_str!("../../skills/companion/SKILL.md"),
     },
     EmbeddedSkill {

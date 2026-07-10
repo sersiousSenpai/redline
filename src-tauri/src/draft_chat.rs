@@ -209,9 +209,12 @@ impl DraftChatState {
 fn suggestions_contract(draft_id: &str) -> String {
     format!(
         "WRITING INTO THE DOCUMENT — you can draft and edit the prompt directly. \
-         Post a suggestion (already permitted — no approval needed):\n\
+         Post a suggestion (already permitted — no approval needed). This write \
+         route requires the Authorization header shown, with \
+         `$REDLINE_DAEMON_TOKEN` already in your environment:\n\
          ```\n\
-         curl -s -X POST http://127.0.0.1:7676/v1/drafter/{draft_id}/suggestions \\\n\
+         curl -s http://127.0.0.1:7676/v1/drafter/{draft_id}/suggestions -X POST \\\n\
+           -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" \\\n\
            -H 'Content-Type: application/json' \\\n\
            -d '{{\"op\":\"append\",\"markdown\":\"<new content>\",\"agentId\":\"draft-agent\",\"body\":\"<one-line why>\"}}'\n\
          ```\n\

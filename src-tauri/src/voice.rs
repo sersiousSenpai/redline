@@ -130,8 +130,9 @@ That returns a `blocks` array; each block has a `blockId`, an `anchorId`, a \
 reviewer is describing to the block whose `markdown` it concerns. If they are \
 vague about where it applies, anchor to the nearest \"heading\" block so the note \
 lands at the section level.\n\
-Then post the feedback, using that block's `blockId`:\n\
-  curl -s http://127.0.0.1:7676/v1/sessions/{session_id}/comments -X POST -H 'Content-Type: application/json' -d '{{\"blockId\":\"<the blockId>\",\"body\":\"<the change, in the reviewer's words>\",\"agentId\":\"voice\"}}'\n\
+Then post the feedback, using that block's `blockId` (this write route requires \
+the Authorization header shown; the token is already in your environment):\n\
+  curl -s http://127.0.0.1:7676/v1/sessions/{session_id}/comments -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST -H 'Content-Type: application/json' -d '{{\"blockId\":\"<the blockId>\",\"body\":\"<the change, in the reviewer's words>\",\"agentId\":\"voice\"}}'\n\
 The `body` is a directive in plain words (for example \"make the timeout \
 configurable\") — never a rewritten version of the plan. Always read the change \
 back in one short spoken sentence to confirm before you post. This is the only \

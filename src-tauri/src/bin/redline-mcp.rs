@@ -25,6 +25,12 @@ fn main() {
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_DAEMON_ADDR.to_string());
     let base = format!("http://{addr}");
+    // All five facade tools ride open read-only routes today, so no token is
+    // required — but forward one if the environment carries it, so this
+    // binary survives the planned second-pass tokenization of reads.
+    let token = std::env::var("REDLINE_DAEMON_TOKEN")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
 
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -41,7 +47,11 @@ fn main() {
             params.iter().map(|(k, v)| (k.as_str(), v.as_str())),
         )
         .map_err(|e| e.to_string())?;
-        let resp = client.get(url).send().map_err(|e| e.to_string())?;
+        let mut req = client.get(url);
+        if let Some(t) = &token {
+            req = req.bearer_auth(t);
+        }
+        let resp = req.send().map_err(|e| e.to_string())?;
         let status = resp.status();
         let text = resp.text().map_err(|e| e.to_string())?;
         if !status.is_success() {

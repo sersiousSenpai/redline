@@ -8,7 +8,7 @@ description: >-
   markdown pipeline (tables, mermaid, fenced code, callouts). Covers which tool
   to use for which job (the browser bridge vs WebSearch vs WebFetch), driving
   discipline, and answer formatting.
-version: 5
+version: 6
 ---
 
 # Redline browser page-discussion
@@ -25,6 +25,10 @@ better than a wall of prose.
 You have three distinct ways to reach information. Pick by what the user actually
 needs — using the wrong one (e.g. driving the tab to a search engine instead of
 searching the web) wastes their tab and reads as confused.
+
+Write routes on the bridge (`/open`, `/focus`, `/navigate`, `/click`, `/query`,
+`/download`) require `-H "Authorization: Bearer $REDLINE_DAEMON_TOKEN"` after
+the URL (the token is already in your environment).
 
 | The user wants… | Use |
 |---|---|

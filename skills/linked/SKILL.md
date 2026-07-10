@@ -12,7 +12,7 @@ description: >-
   through Redline's markdown pipeline (tables, mermaid, fenced code, callouts).
   Covers the spanning-conversation discipline, the consult contract, and
   formatting.
-version: 1
+version: 2
 ---
 
 # Redline linked discussion
@@ -58,10 +58,13 @@ diagrams, syntax-highlighted code, GitHub callouts), so structure earns its keep
 You cannot hold every tab's full thread in your own context at once. So when
 synthesizing a tab's material would be heavy, **don't re-derive it — delegate.**
 Each tab has its own page-discussion agent that already holds that tab's entire
-thread. Ask it to synthesize, and only its digest comes back to you:
+thread. Ask it to synthesize, and only its digest comes back to you. Write
+routes require `-H "Authorization: Bearer $REDLINE_DAEMON_TOKEN"` after the URL
+(the token is already in your environment):
 
 ```
-curl -s http://127.0.0.1:7676/v1/linked/consult -X POST \
+curl -s http://127.0.0.1:7676/v1/linked/consult \
+  -H "Authorization: Bearer $REDLINE_DAEMON_TOKEN" -X POST \
   -H 'Content-Type: application/json' \
   -d '{"tab":"<n>","question":"<what you need synthesized from that tab>"}'
 ```

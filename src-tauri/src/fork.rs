@@ -941,8 +941,11 @@ fn build_draft_first_turn_prompt(
          curl -s http://127.0.0.1:7676/v1/drafter/{draft_id}/doc\n\n\
          You may propose an edit to YOUR anchored block only — post a tracked \
          suggestion (rendered with accept/reject) with `commentId` set so the \
-         daemon can scope-check it:\n  \
-         curl -s -X POST http://127.0.0.1:7676/v1/drafter/{draft_id}/suggestions \
+         daemon can scope-check it. This write route requires \
+         `-H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\"` after the URL (the \
+         token is already in your environment):\n  \
+         curl -s http://127.0.0.1:7676/v1/drafter/{draft_id}/suggestions \
+         -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST \
          -H 'Content-Type: application/json' -d '{{\"op\":\"replace_block\",\
 \"blockId\":\"<your block>\",\"original\":\"<its markdown as you read it>\",\
 \"markdown\":\"<your rewrite>\",\"commentId\":\"{comment_id}\",\

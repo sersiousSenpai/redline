@@ -300,7 +300,9 @@ fn build_first_turn_prompt(
     p.push_str(
         "You can see and read across the user's tabs by calling these local \
          endpoints with curl (already permitted — no approval needed). Put the \
-         URL immediately after `-s`:\n\n\
+         URL immediately after `-s`. Write routes require \
+         `-H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\"` after the URL (the \
+         token is already in your environment):\n\n\
          - The mission's goal/title/status (in case you need it again):\n  \
          curl -s http://127.0.0.1:7676/v1/mission/active\n\
          - The user's PINNED findings — re-read this each turn, the user pins \
@@ -318,10 +320,12 @@ fn build_first_turn_prompt(
          curl -s 'http://127.0.0.1:7676/v1/browser/snapshot?tab=<n>'\n\
          - Go look at something yourself: open a URL in a NEW tab (leaves the \
          user's tabs open):\n  \
-         curl -s http://127.0.0.1:7676/v1/browser/open -X POST \
+         curl -s http://127.0.0.1:7676/v1/browser/open \
+         -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST \
          -H 'Content-Type: application/json' -d '{\"url\":\"https://example.com\"}'\n\
          - Switch the user INTO a tab (use only when they want to BE there):\n  \
-         curl -s 'http://127.0.0.1:7676/v1/browser/focus?tab=<n>' -X POST\n\n\
+         curl -s 'http://127.0.0.1:7676/v1/browser/focus?tab=<n>' \
+         -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST\n\n\
          Reading a tab by `?tab=<n>` (its number from /tabs) is like a colleague \
          glancing at a neighbour's screen — it does NOT move the user's current \
          tab. Tab numbers are positional and shift as tabs open/close, so \
