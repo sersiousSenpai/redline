@@ -114,6 +114,16 @@ import { DecisionWindowBanner } from "./components/DecisionWindowBanner";
 import { FlashOverlay } from "./components/FlashOverlay";
 import { playInterceptBeep, DEFAULT_SOUND } from "./audio/beep";
 import { buildResumeCommand } from "./lib/resumeCommand";
+import {
+  TOC_RAIL_W,
+  TOC_RAIL_W_WIDE,
+  clampTocDrag,
+  snapTocWide,
+} from "./lib/tocRail";
+import {
+  type MainSurface,
+  migrateMainSurfaceOnce,
+} from "./lib/mainSurface";
 import { computePaneLayout } from "./lib/paneLayout";
 import { buildPlanLaunchCommand } from "./lib/planLaunchCommand";
 import { guessProjectForPlan } from "./lib/guessProject";
@@ -134,6 +144,10 @@ import type {
   SessionSummary,
   SkillStatus,
 } from "./types";
+
+// Upgrade pre-quick-switch persisted pane state (four booleans → one surface
+// value + a doc pin) exactly once, before the first usePersistedState read.
+migrateMainSurfaceOnce(localStorage);
 
 interface ComposingState {
   type: CommentType;
@@ -272,6 +286,11 @@ function App() {
   // plan's headings, docked to the left of the document column. Persisted so a
   // reader's preference sticks across sessions.
   const [tocOpen, setTocOpen] = usePersistedState("redline.tocOpen", true);
+  // Rail width: two snap points (230 / 340). `tocWide` is the persisted snap;
+  // `tocDragW` is the transient width while the user drags the rail's edge —
+  // release snaps to whichever point is nearer (see snapTocWide).
+  const [tocWide, setTocWide] = usePersistedState("redline.tocWide", false);
+  const [tocDragW, setTocDragW] = useState<number | null>(null);
   // The "How Redline works" explainer (Phase 3) — opened from the empty state
   // and the post-install screen; purely informational.
   const [howItWorksOpen, setHowItWorksOpen] = useState(false);
@@ -325,21 +344,28 @@ function App() {
   // see `effectiveDiscussionContext`.
   const [discussionPinned, setDiscussionPinned] =
     usePersistedState<DiscussionContext>("redline.discussion.context", "plan");
-  // The center pane hosts two independently-toggleable views: the document
-  // (editor/plan) and the embedded browser. Each has a toolbar toggle. When
-  // both are on, they share the pane as a foldable split (see SplitPane);
+  // The center pane shows exactly ONE surface at a time (document / browser /
+  // drafter / review) — the header buttons are a radio group, so switching is
+  // always a full quick-switch. Tiling is a separate explicit choice: while
+  // `docPinned` is on, the document stays alongside whichever non-document
+  // surface is selected, sharing the pane as a foldable split (see SplitPane);
   // `splitVertical` flips between side-by-side (default) and stacked, and
   // `splitRatio` is the document's share. `splitDragging` hides the native
   // webview during a split-divider drag so it doesn't swallow the pointer.
-  // `docOpen` only matters while the browser is open: it adds the document to a
-  // split alongside the browser. With the browser closed, the document is the
-  // default full view regardless. So the document toolbar toggle is shown only
-  // when the browser is open.
-  const [docOpen, setDocOpen] = usePersistedState("redline.doc.open", false);
-  const [browserOpen, setBrowserOpen] = usePersistedState(
-    "redline.browser.open",
+  const [mainSurface, setMainSurface] = usePersistedState<MainSurface>(
+    "redline.mainSurface",
+    "document",
+  );
+  const [docPinned, setDocPinned] = usePersistedState(
+    "redline.doc.pinned",
     false,
   );
+  // Derived views of the single surface value — they keep the many read sites
+  // below near-diff-free, and make disagreeing pane booleans unrepresentable.
+  const browserOpen = mainSurface === "browser";
+  const drafterOpen = mainSurface === "drafter";
+  const reviewOpen = mainSurface === "review";
+  const docVisible = mainSurface === "document" || docPinned;
   const [splitVertical, setSplitVertical] = usePersistedState(
     "redline.split.vertical",
     false,
@@ -349,13 +375,28 @@ function App() {
     0.5,
   );
   const [splitDragging, setSplitDragging] = useState(false);
-  // The Prompt Drafter — a Word-style authoring surface that takes over the
-  // center pane (mutually exclusive with the browser). Its draft (Tiptap JSON)
-  // and the project it launches into persist across reloads.
-  const [drafterOpen, setDrafterOpen] = usePersistedState(
-    "redline.drafter.open",
-    false,
+  // The one way any surface comes forward — header radio clicks and every
+  // programmatic open funnel through here. Resets the split so a previously
+  // folded pane can't come back invisible, and hands the Discussion sidecar
+  // to the review on enter / back to the plan on leave.
+  const selectSurface = useCallback(
+    (next: MainSurface) => {
+      setSplitRatio(0.5);
+      if (next === "review" && mainSurface !== "review") {
+        setDiscussionPinned("review");
+      } else if (next !== "review" && mainSurface === "review") {
+        setDiscussionPinned("plan");
+      }
+      setMainSurface(next);
+    },
+    [mainSurface, setSplitRatio, setDiscussionPinned, setMainSurface],
   );
+  // Fresh view of selectSurface for mount-once listeners (review-requested).
+  const selectSurfaceRef = useRef(selectSurface);
+  selectSurfaceRef.current = selectSurface;
+  // The Prompt Drafter — a Word-style authoring surface selected into the
+  // center pane. Its draft (Tiptap JSON) and the project it launches into
+  // persist across reloads.
   // The voice agent — a drawer docked to the plan pane that reads the plan
   // aloud or discusses it (spoken) via the warm Claude session. Kept on the
   // plan surface (not the Header) so it reads as a plan feature.
@@ -424,14 +465,6 @@ function App() {
     markdown: string;
     initialProject: string | null;
   } | null>(null);
-  // The Code Review surface — a third secondary pane (mutually exclusive with
-  // the browser/drafter): the annotatable git diff of what the agent just
-  // wrote. `useReview` owns the repo/source choice, the parsed diff, and the
-  // line-anchored annotations.
-  const [reviewOpen, setReviewOpen] = usePersistedState(
-    "redline.review.open",
-    false,
-  );
   // Memory is plumbing: no per-surface toolbar panes anymore. One ephemeral,
   // read-mostly inspector (Lake / Catalog / Settings) behind the quiet pill.
   const [memoryInspectorOpen, setMemoryInspectorOpen] = useState(false);
@@ -457,10 +490,7 @@ function App() {
     let alive = true;
     const p = listen("review-requested", () => {
       if (!alive) return;
-      setSplitRatio(0.5);
-      setBrowserOpen(false);
-      setDrafterOpen(false);
-      setReviewOpen(true);
+      selectSurfaceRef.current("review");
     });
     return () => {
       alive = false;
@@ -815,12 +845,11 @@ function App() {
   const handleOpenFile = useCallback(
     (path: string) => {
       setActiveFile(path);
-      // If a secondary pane (browser or drafter) is filling the center pane on
-      // its own, opening a document would otherwise load hidden behind it.
-      // Bring up the split so both show.
-      if ((browserOpen || drafterOpen || reviewOpen) && !docOpen) {
-        setSplitRatio(0.5);
-        setDocOpen(true);
+      // If a non-document surface fills the center pane, the opened file would
+      // load hidden behind it — switch to the document, unless the user has
+      // pinned it (the file is already visible in the tile).
+      if (mainSurface !== "document" && !docPinned) {
+        selectSurface("document");
       }
       if (sidebarTab.kind === "folder") {
         folderFileRef.current.set(sidebarTab.id, path);
@@ -832,7 +861,7 @@ function App() {
         }
       }
     },
-    [setActiveFile, sidebarTab, activeTermId, browserOpen, drafterOpen, reviewOpen, docOpen, setDocOpen, setSplitRatio],
+    [setActiveFile, sidebarTab, activeTermId, mainSurface, docPinned, selectSurface],
   );
   const handleCloseFile = useCallback(() => {
     setActiveFile(null);
@@ -915,9 +944,9 @@ function App() {
   // toward the right edge — once its text (minus the article's right padding)
   // reaches the control's left edge, drop the control. Recomputed on any pane
   // resize via a ResizeObserver on the scroll container. Re-runs on the
-  // browser/drafter/docOpen toggles too: those unmount and remount the document,
-  // giving a fresh ref/observer — otherwise the pill would stay stale-hidden
-  // after the secondary pane is toggled back off.
+  // surface switches / doc-pin toggles too: those unmount and remount the
+  // document, giving a fresh ref/observer — otherwise the pill would stay
+  // stale-hidden after another surface is switched back off.
   useEffect(() => {
     const article = documentRef.current;
     const container = article?.parentElement ?? null;
@@ -939,7 +968,7 @@ function App() {
     const ro = new ResizeObserver(recompute);
     ro.observe(container);
     return () => ro.disconnect();
-  }, [sidebarTab, activeFile, activeId, browserOpen, drafterOpen, reviewOpen, docOpen]);
+  }, [sidebarTab, activeFile, activeId, mainSurface, docPinned]);
 
   // Position the latch over the visible remnant of the document. The doc
   // column's flow box floors at DOC_MIN now, so "squeezed shut" means the
@@ -1092,7 +1121,8 @@ function App() {
   // The Discussion sidecar's context. Plan comments need the doc pane on a
   // sessions tab; the review context needs the Code Review pane open. In a
   // true split the header toggle (discussionPinned) decides.
-  const planDiscussionAvailable = docOpen && sidebarTab.kind === "sessions";
+  const planDiscussionAvailable =
+    docVisible && sidebarTab.kind === "sessions";
   const discussionContext = effectiveDiscussionContext(
     reviewOpen,
     planDiscussionAvailable,
@@ -1623,9 +1653,9 @@ function App() {
     activeFile,
     hasTerminal: termTabCount > 0,
   });
-  const activeSurfaceKey = `${activeSurface.kind} ${activeSurface.id ?? ""} ${
+  const activeSurfaceKey = `${activeSurface.kind}\u0000${activeSurface.id ?? ""}\u0000${
     activeSurface.label ?? ""
-  } ${activeSurface.detail ?? ""}`;
+  }\u0000${activeSurface.detail ?? ""}`;
   useEffect(() => {
     const t = window.setTimeout(() => {
       void invoke("surface_set_active", { info: activeSurface }).catch(
@@ -1861,9 +1891,10 @@ function App() {
   const joinedInfo = useJoinedSession(joinedRoom, joinedPresence);
   const joinedActive = !!joinedInfo && activeId === joinedInfo.key;
 
-  // Width of the table-of-contents rail. Kept in one place so the rail and the
-  // left space it reserves in the document scroller stay in lockstep.
-  const TOC_RAIL_W = 230;
+  // Width of the table-of-contents rail. Snap constants live in lib/tocRail so
+  // the rail and the left space it reserves in the document scroller stay in
+  // lockstep; a live drag overrides with its transient width.
+  const tocRailW = tocDragW ?? (tocWide ? TOC_RAIL_W_WIDE : TOC_RAIL_W);
   // The TOC rail applies only over a plainly-displayed plan document (a real
   // session, latest or historical, with headings) — never the folder viewer, a
   // joined shadow session, or while a secondary pane (browser/drafter/review)
@@ -1874,9 +1905,7 @@ function App() {
     sidebarTab.kind === "sessions" &&
     !joinedActive &&
     sessionReady &&
-    !browserOpen &&
-    !drafterOpen &&
-    !reviewOpen &&
+    mainSurface === "document" &&
     displaySections.length > 0;
   const tocDocked = tocEligible && tocOpen;
 
@@ -2404,7 +2433,7 @@ function App() {
     const folder = sidebarTab.kind === "folder" ? sidebarTab.id : null;
     const initialProject =
       guessProjectForPlan(markdown, projectOptions) ?? folder ?? drafterProject;
-    setBrowserOpen(false);
+    selectSurface("document");
     setSendConfirm({ markdown, initialProject });
   };
 
@@ -2414,8 +2443,7 @@ function App() {
     const markdown = sendConfirm?.markdown;
     setSendConfirm(null);
     if (!markdown) return;
-    setDrafterOpen(false);
-    setDocOpen(true);
+    selectSurface("document");
     launchPromptDraft(markdown, project);
   };
 
@@ -2437,8 +2465,7 @@ function App() {
     }
     const guess = guessProjectForPlan(markdown, projectOptions);
     if (guess !== null) setDrafterProject(guess);
-    setBrowserOpen(false);
-    setDrafterOpen(true);
+    selectSurface("drafter");
   };
 
   // "Synthesize → Drafter" from a mission: the orchestrator's brief becomes a
@@ -2820,51 +2847,13 @@ function App() {
           setFlashSeq((n) => n + 1);
           if (flashSound) playInterceptBeep(flashSoundConfig);
         }}
-        docOpen={docOpen}
-        onToggleDoc={() => {
-          // Entering/leaving a split — start it even so both panes are visible.
+        surface={mainSurface}
+        onSelectSurface={selectSurface}
+        docPinned={docPinned}
+        onToggleDocPin={() => {
+          // Entering/leaving a tile — reset the split so both panes show.
           setSplitRatio(0.5);
-          setDocOpen((v) => !v);
-        }}
-        browserOpen={browserOpen}
-        onToggleBrowser={() => {
-          // Browser, drafter and review share the single "secondary pane" slot,
-          // so opening one closes the others; the split resets to even so a
-          // folded pane reappears.
-          setSplitRatio(0.5);
-          setBrowserOpen((v) => {
-            if (!v) {
-              setDrafterOpen(false);
-              setReviewOpen(false);
-            }
-            return !v;
-          });
-        }}
-        drafterOpen={drafterOpen}
-        onToggleDrafter={() => {
-          setSplitRatio(0.5);
-          setDrafterOpen((v) => {
-            if (!v) {
-              setBrowserOpen(false);
-              setReviewOpen(false);
-            }
-            return !v;
-          });
-        }}
-        reviewOpen={reviewOpen}
-        onToggleReview={() => {
-          setSplitRatio(0.5);
-          setReviewOpen((v) => {
-            if (!v) {
-              setBrowserOpen(false);
-              setDrafterOpen(false);
-            }
-            // Opening the review pulls the Discussion sidecar with it (the
-            // toggle can pin it back to the plan in a split); closing it
-            // hands the sidecar back to the plan.
-            setDiscussionPinned(v ? "plan" : "review");
-            return !v;
-          });
+          setDocPinned((v) => !v);
         }}
         companionOpen={companionOpen}
         onToggleCompanion={() => setCompanionOpen((v) => !v)}
@@ -2875,7 +2864,7 @@ function App() {
         onJoinSession={() => setJoinOpen(true)}
         canShare={sessionReady && !!latest}
         onShareSnapshot={() => setShareOpen(true)}
-        splitActive={docOpen && (browserOpen || drafterOpen || reviewOpen)}
+        splitActive={docPinned && mainSurface !== "document"}
         splitVertical={splitVertical}
         onToggleSplitOrientation={() => {
           // Flipping orientation resets to 50/50 so a folded-away pane reappears.
@@ -3042,13 +3031,17 @@ function App() {
                   top: 0,
                   left: 0,
                   bottom: 0,
-                  width: `${TOC_RAIL_W}px`,
+                  width: `${tocRailW}px`,
                   zIndex: 20,
                   display: "flex",
                   flexDirection: "column",
                   background: "var(--color-bg-elevated)",
                   borderRight: "1px solid var(--color-rule)",
                   boxShadow: "4px 0 16px rgba(0,0,0,0.12)",
+                  transition:
+                    tocDragW != null
+                      ? "none"
+                      : "width 160ms cubic-bezier(0.4,0,0.2,1)",
                 }}
               >
                 <div
@@ -3072,22 +3065,44 @@ function App() {
                   >
                     Contents
                   </span>
-                  <button
-                    type="button"
-                    onClick={() => setTocOpen(false)}
-                    title="Hide contents"
-                    aria-label="Hide contents"
-                    style={{
-                      border: "none",
-                      background: "transparent",
-                      color: "var(--color-ink-muted)",
-                      cursor: "pointer",
-                      fontSize: "14px",
-                      lineHeight: 1,
-                    }}
+                  <div
+                    style={{ display: "flex", alignItems: "center", gap: "8px" }}
                   >
-                    ‹
-                  </button>
+                    <button
+                      type="button"
+                      onClick={() => setTocWide(!tocWide)}
+                      title={tocWide ? "Narrow the rail" : "Widen the rail"}
+                      aria-label={
+                        tocWide ? "Narrow the contents rail" : "Widen the contents rail"
+                      }
+                      style={{
+                        border: "none",
+                        background: "transparent",
+                        color: "var(--color-ink-muted)",
+                        cursor: "pointer",
+                        fontSize: "12px",
+                        lineHeight: 1,
+                      }}
+                    >
+                      {tocWide ? "⤡" : "⤢"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTocOpen(false)}
+                      title="Hide contents"
+                      aria-label="Hide contents"
+                      style={{
+                        border: "none",
+                        background: "transparent",
+                        color: "var(--color-ink-muted)",
+                        cursor: "pointer",
+                        fontSize: "14px",
+                        lineHeight: 1,
+                      }}
+                    >
+                      ‹
+                    </button>
+                  </div>
                 </div>
                 <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
                   <PlanToc
@@ -3095,6 +3110,49 @@ function App() {
                     scopeSelector=".doc-article"
                   />
                 </div>
+                {/* Drag-to-snap handle on the rail's right edge: transient
+                    width while dragging, release snaps to 230/340 (the width
+                    transition above animates the settle). */}
+                <div
+                  onPointerDown={(e) => {
+                    e.preventDefault();
+                    const rail = (e.currentTarget as HTMLElement)
+                      .parentElement;
+                    if (!rail) return;
+                    const left = rail.getBoundingClientRect().left;
+                    // Coalesce to one width commit per frame (SplitPane's
+                    // startDrag pattern).
+                    let rafId = 0;
+                    let pending = tocRailW;
+                    const flush = () => {
+                      rafId = 0;
+                      setTocDragW(pending);
+                    };
+                    const move = (ev: PointerEvent) => {
+                      pending = clampTocDrag(ev.clientX - left);
+                      if (!rafId) rafId = requestAnimationFrame(flush);
+                    };
+                    const up = () => {
+                      if (rafId) cancelAnimationFrame(rafId);
+                      window.removeEventListener("pointermove", move);
+                      window.removeEventListener("pointerup", up);
+                      setTocWide(snapTocWide(pending));
+                      setTocDragW(null);
+                    };
+                    window.addEventListener("pointermove", move);
+                    window.addEventListener("pointerup", up);
+                  }}
+                  title="Drag to resize the contents rail"
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    right: "-3px",
+                    bottom: 0,
+                    width: "6px",
+                    cursor: "col-resize",
+                    zIndex: 21,
+                  }}
+                />
               </div>
             ) : (
               <button
@@ -3137,8 +3195,11 @@ function App() {
           <div
             className="rl-thin-scroll-y flex-1 overflow-y-auto"
             style={{
-              paddingLeft: tocDocked ? `${TOC_RAIL_W}px` : undefined,
-              transition: "padding-left 160ms cubic-bezier(0.4,0,0.2,1)",
+              paddingLeft: tocDocked ? `${tocRailW}px` : undefined,
+              transition:
+                tocDragW != null
+                  ? "none"
+                  : "padding-left 160ms cubic-bezier(0.4,0,0.2,1)",
             }}
           >
           <article
@@ -3276,7 +3337,7 @@ function App() {
               );
             const browserBody = (
               <BrowserPane
-                onClose={() => setBrowserOpen(false)}
+                onClose={() => selectSurface("document")}
                 visible={browserVisible}
                 projectDir={sidebarTab.kind === "folder" ? sidebarTab.id : null}
                 // Drop a plan/prompt drafted while browsing into a fresh Redline
@@ -3292,7 +3353,7 @@ function App() {
                 // and reflows the slot without a drag (e.g. closing the comment
                 // pane, which otherwise leaves the webview stranded at its old
                 // size with a gap of blank space).
-                layoutKey={`${paneCollapsed}|${sidebarCollapsed}|${docOpen}|${splitVertical}|${layout.curtainActive}`}
+                layoutKey={`${paneCollapsed}|${sidebarCollapsed}|${docVisible}|${splitVertical}|${layout.curtainActive}`}
               />
             );
             const drafterBody = (
@@ -3313,22 +3374,22 @@ function App() {
               <ReviewPanel
                 review={codeReview}
                 projectOptions={projectOptions}
-                onClose={() => setReviewOpen(false)}
+                onClose={() => selectSurface("document")}
               />
             );
-            // The browser and drafter are mutually-exclusive "secondary" panes;
-            // whichever is open splits against the document with the exact same
-            // SplitPane (orientation toggle, ratio and fold-to-edge divider) the
-            // browser has always used. With `docOpen` off, the secondary pane
-            // takes the whole column; the 📄 toggle adds the document back.
-            const secondaryBody = browserOpen
-              ? browserBody
-              : drafterOpen
-                ? drafterBody
-                : reviewOpen
-                  ? reviewBody
-                  : null;
-            if (secondaryBody && docOpen)
+            // Exactly one surface owns the pane; a non-document surface splits
+            // against the document only while the doc pin is on, with the exact
+            // same SplitPane (orientation toggle, ratio and fold-to-edge
+            // divider) the browser has always used.
+            const secondaryBody =
+              mainSurface === "browser"
+                ? browserBody
+                : mainSurface === "drafter"
+                  ? drafterBody
+                  : mainSurface === "review"
+                    ? reviewBody
+                    : null;
+            if (secondaryBody && docPinned)
               return (
                 <SplitPane
                   vertical={splitVertical}
@@ -3349,9 +3410,7 @@ function App() {
               viewer). */}
           {sessionReady &&
             latest &&
-            !browserOpen &&
-            !drafterOpen &&
-            !reviewOpen &&
+            mainSurface === "document" &&
             !(sidebarTab.kind === "folder" && activeFile) && (
               <>
                 {!voiceOpen && (
@@ -3394,7 +3453,7 @@ function App() {
           {/* Drafter voice — the same 🎙️ drawer over the Prompt Drafter, keyed
               `drafter:<draft_id>` (the backend derives the kind from the key
               shape) and primed with the draft's markdown mirror. */}
-          {drafterOpen && drafterDraftId && !reviewOpen && (
+          {mainSurface === "drafter" && drafterDraftId && (
             <>
               {!drafterVoiceOpen && (
                 <button

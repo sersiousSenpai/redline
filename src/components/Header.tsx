@@ -13,7 +13,7 @@ import { DownloadMenu } from "./DownloadMenu";
 import { ModeToggle } from "./ModeToggle";
 import { AlertSettings } from "./AlertSettings";
 import { MemoryStatusPill } from "./MemoryStatusPill";
-import { CollaborateMenu } from "./CollaborateMenu";
+import { LiveSessionMenu } from "./LiveSessionMenu";
 import { SettingsMenu } from "./SettingsMenu";
 import type { SoundConfig } from "../audio/beep";
 import { latestDisplayVersion } from "../lib/revisionVersions";
@@ -298,14 +298,12 @@ export function Header({
             }
             label="Companion"
           />
-          {/* Invite + Join folded into one Collaborate dropdown. */}
-          <CollaborateMenu
+          {/* Invite + Join folded into one Live Session dropdown. */}
+          <LiveSessionMenu
             canInvite={canInvite}
             collabActive={collabActive}
             onInvite={onInvite}
             onJoinSession={onJoinSession}
-            canShare={canShare}
-            onShareSnapshot={onShareSnapshot}
           />
           {splitActive && (
             <HeaderButton
@@ -352,6 +350,8 @@ export function Header({
             onSaveObsidian={() =>
               onSaveObsidian(session.sessionId, downloadVersion)
             }
+            canShare={canShare}
+            onShareSnapshot={onShareSnapshot}
           />
         )}
         {latest && (

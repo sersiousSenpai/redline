@@ -14,12 +14,17 @@ interface DownloadMenuProps {
   onExportDocx: () => void;
   /** Save the revision as a note in the user's Obsidian vault. */
   onSaveObsidian: () => void;
+  /** Async snapshot share needs an active plan session (tighter than the
+   *  menu's own render gate, so the row keeps its own disabled state). */
+  canShare: boolean;
+  onShareSnapshot: () => void;
 }
 
 const ACTIONS = [
   { key: "md", label: "Download markdown (.md)" },
   { key: "obsidian", label: "Save to Obsidian" },
   { key: "docx", label: "Export Word (.docx)" },
+  { key: "share", label: "Share a snapshot…" },
 ] as const;
 
 // Compact caret dropdown matching ThemePicker: one "Options" trigger, a popover
@@ -30,6 +35,8 @@ export function DownloadMenu({
   onExportMarkdown,
   onExportDocx,
   onSaveObsidian,
+  canShare,
+  onShareSnapshot,
 }: DownloadMenuProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -60,6 +67,7 @@ export function DownloadMenu({
     setOpen(false);
     if (key === "md") onExportMarkdown();
     else if (key === "obsidian") onSaveObsidian();
+    else if (key === "share") onShareSnapshot();
     else onExportDocx();
   };
 
@@ -105,28 +113,42 @@ export function DownloadMenu({
             boxShadow: "0 8px 24px rgba(0,0,0,0.28)",
           }}
         >
-          {ACTIONS.map((a, idx) => (
-            <button
-              key={a.key}
-              type="button"
-              role="menuitem"
-              onClick={() => pick(a.key)}
-              title={`${a.label} — v${version}`}
-              className="rl-menu-item w-full text-left px-3 py-2 font-sans"
-              style={{
-                fontSize: "12px",
-                fontWeight: 600,
-                color: "var(--color-ink)",
-                cursor: "pointer",
-                borderBottom:
-                  idx < ACTIONS.length - 1
-                    ? "1px solid var(--color-rule)"
-                    : "none",
-              }}
-            >
-              {a.label}
-            </button>
-          ))}
+          {ACTIONS.map((a, idx) => {
+            const shareDisabled = a.key === "share" && !canShare;
+            return (
+              <button
+                key={a.key}
+                type="button"
+                role="menuitem"
+                disabled={shareDisabled}
+                onClick={() => {
+                  if (shareDisabled) return;
+                  pick(a.key);
+                }}
+                title={
+                  a.key === "share"
+                    ? shareDisabled
+                      ? "Open a plan session to share a snapshot"
+                      : "Send an encrypted, zero-install snapshot link of the latest version"
+                    : `${a.label} — v${version}`
+                }
+                className="rl-menu-item w-full text-left px-3 py-2 font-sans"
+                style={{
+                  fontSize: "12px",
+                  fontWeight: 600,
+                  color: "var(--color-ink)",
+                  cursor: shareDisabled ? "default" : "pointer",
+                  opacity: shareDisabled ? 0.45 : 1,
+                  borderBottom:
+                    idx < ACTIONS.length - 1
+                      ? "1px solid var(--color-rule)"
+                      : "none",
+                }}
+              >
+                {a.label}
+              </button>
+            );
+          })}
         </div>
       )}
     </div>

@@ -3,29 +3,25 @@
 import { useEffect, useRef, useState } from "react";
 import { useMenuOverlay } from "./menuOverlay";
 
-interface CollaborateMenuProps {
+interface LiveSessionMenuProps {
   /** Inviting needs an active plan session to share. */
   canInvite: boolean;
   /** A live room is already active (sharing or joined). */
   collabActive: boolean;
   onInvite: () => void;
   onJoinSession: () => void;
-  /** Async snapshot share needs an active plan session too. */
-  canShare: boolean;
-  onShareSnapshot: () => void;
 }
 
-// One "Collaborate" entry point folding the former Invite + Join header
-// buttons into a single labelled dropdown — collaboration is one concept, so
-// it reads as one control. A small live dot marks an active room.
-export function CollaborateMenu({
+// One "Live Session" entry point folding the former Invite + Join header
+// buttons into a single labelled dropdown — live collaboration is one
+// concept, so it reads as one control. A small live dot marks an active room.
+// (Async snapshot sharing lives in the Options menu; it needs no live room.)
+export function LiveSessionMenu({
   canInvite,
   collabActive,
   onInvite,
   onJoinSession,
-  canShare,
-  onShareSnapshot,
-}: CollaborateMenuProps) {
+}: LiveSessionMenuProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
 
@@ -57,7 +53,7 @@ export function CollaborateMenu({
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        title="Collaborate — invite someone or join a live session"
+        title="Live Session — invite someone or join a live session"
         aria-haspopup="menu"
         aria-expanded={open}
         aria-pressed={collabActive}
@@ -85,7 +81,7 @@ export function CollaborateMenu({
             }}
           />
         )}
-        <span style={{ fontWeight: 600 }}>Collaborate</span>
+        <span style={{ fontWeight: 600 }}>Live Session</span>
         <span style={{ color: "var(--color-ink-muted)", fontSize: "9px" }}>
           ▾
         </span>
@@ -94,7 +90,7 @@ export function CollaborateMenu({
       {open && (
         <div
           role="menu"
-          aria-label="Collaborate"
+          aria-label="Live Session"
           className="absolute right-0 z-50 rounded-md overflow-hidden"
           style={{
             top: "calc(100% + 6px)",
@@ -148,36 +144,9 @@ export function CollaborateMenu({
               fontWeight: 600,
               color: "var(--color-ink)",
               cursor: "pointer",
-              borderBottom: "1px solid var(--color-rule)",
             }}
           >
             Join a session…
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            disabled={!canShare}
-            onClick={() => {
-              if (!canShare) return;
-              onShareSnapshot();
-              setOpen(false);
-            }}
-            title={
-              canShare
-                ? "Send an encrypted, zero-install snapshot link — no live session needed"
-                : "Open a plan session to share a snapshot"
-            }
-            className="rl-menu-item w-full text-left px-3 py-2 font-sans"
-            style={{
-              display: "block",
-              fontSize: "12px",
-              fontWeight: 600,
-              color: "var(--color-ink)",
-              cursor: canShare ? "pointer" : "default",
-              opacity: canShare ? 1 : 0.45,
-            }}
-          >
-            Share a snapshot…
           </button>
         </div>
       )}
