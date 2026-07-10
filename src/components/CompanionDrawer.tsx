@@ -13,6 +13,7 @@ import type {
   CompanionMessage,
 } from "../types";
 import { MarkdownView } from "./MarkdownView";
+import { WorkingIndicator } from "./WorkingIndicator";
 
 interface CompanionDrawerProps {
   companion: Companion;
@@ -339,7 +340,12 @@ export function CompanionDrawer({
         ) : (
           messages.map((m) => <Bubble key={m.id} msg={m} />)
         )}
-        {status === "streaming" && <StreamingBubble text={liveText} />}
+        {status === "streaming" &&
+          (liveText ? (
+            <StreamingBubble text={liveText} />
+          ) : (
+            <WorkingIndicator />
+          ))}
       </div>
 
       <div className="shrink-0 px-3 py-2" style={{ borderTop: "1px solid var(--color-rule)" }}>

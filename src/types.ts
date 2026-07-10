@@ -141,6 +141,13 @@ export interface Comment {
    *  Distinct from `author` (an AGENT id, drives the M4 block-lock); absent
    *  for every comment the session owner wrote themselves. */
   reviewer?: string;
+  /** When the external reviewer actually wrote this comment (the return
+   *  payload's `createdAt`) — `createdAt` above is when the import landed it
+   *  here. Absent for every owner-originated comment. */
+  externalCreatedAt?: number;
+  /** The Review Request (share `requestId`) this comment arrived on — the
+   *  back-link from an imported comment to its share. Absent unless imported. */
+  shareRequestId?: string;
 }
 
 export interface NewCommentRequest {
@@ -161,6 +168,10 @@ export interface NewCommentRequest {
    *  `Comment.reviewer`). Sent by the Review Request import path and the
    *  live-collab mirror; omitted on every owner-originated comment. */
   reviewer?: string;
+  /** Provenance for imported Review Request returns (see the matching fields
+   *  on `Comment`); omitted on every owner-originated comment. */
+  externalCreatedAt?: number;
+  shareRequestId?: string;
 }
 
 export interface UpdateCommentRequest {

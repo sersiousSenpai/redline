@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { memo, useEffect, useRef, useState } from "react";
-import type { Comment, CommentStatus } from "../types";
+import type { Comment, CommentStatus, UpdateCommentRequest } from "../types";
+import { buildDraftCommentUpdate } from "../lib/draftCommentUpdate";
 import { compactEditPreview } from "../editor/wordDiff";
 import { AnchorPill } from "./AnchorPill";
 import { CommentThread } from "./CommentThread";
@@ -28,6 +29,10 @@ interface CommentCardProps {
    *  comment types). */
   onSelect?: (id: string) => void;
   onDelete: (id: string) => void;
+  /** Edit a still-draft comment's text before it rides a Submit. Only the
+   *  body (and, for edit-kind, the revised text) can change — the anchor
+   *  (selection/blockId) is fixed by the original selection. */
+  onUpdate?: (id: string, update: UpdateCommentRequest) => void;
   onAccept: (id: string) => void;
   /** M4: accept a still-draft agent suggestion in place — the editor settles
    *  the marks, the backend records agentState. Reject reuses onDelete. */
@@ -94,6 +99,7 @@ export const CommentCard = memo(function CommentCard({
   onAutoOpenConsumed,
   onSelect,
   onDelete,
+  onUpdate,
   onAccept,
   onAcceptSuggestion,
   onReopen,
@@ -144,6 +150,39 @@ export const CommentCard = memo(function CommentCard({
   useEffect(() => {
     if (autoOpen) setCollapsed(false);
   }, [autoOpen]);
+
+  // Inline edit of a still-draft, user-authored comment — fix a typo or
+  // sharpen the wording before it rides a Submit. Agent suggestions keep
+  // Accept/Reject instead (gated on `!comment.author`). Body is always
+  // editable; for edit-kind the revised text too, while the original stays
+  // read-only — it anchors the selection and must not change.
+  const canEditDraft =
+    !!onUpdate && comment.status === "draft" && !comment.author;
+  const [editOpen, setEditOpen] = useState(false);
+  const [bodyDraft, setBodyDraft] = useState("");
+  const [revisedDraft, setRevisedDraft] = useState("");
+  const openEdit = () => {
+    setBodyDraft(comment.body === "(edit)" ? "" : comment.body);
+    setRevisedDraft(comment.edit?.revised ?? "");
+    setCollapsed(false);
+    setEditOpen(true);
+  };
+  const confirmEdit = () => {
+    onUpdate?.(
+      comment.id,
+      buildDraftCommentUpdate(
+        comment,
+        bodyDraft,
+        comment.edit ? revisedDraft : undefined,
+      ),
+    );
+    setEditOpen(false);
+  };
+  // Edit-kind: the revised text is the payload, the note is optional.
+  // Everything else: the body is the payload.
+  const editSaveDisabled = comment.edit
+    ? !revisedDraft.trim()
+    : !bodyDraft.trim();
 
   // Inline "reopen with a follow-up note" composer. Seeded from any pending
   // note so reopening an already-reopened card edits the same note.
@@ -278,6 +317,27 @@ export const CommentCard = memo(function CommentCard({
               ✦ {comment.author}
             </span>
           )}
+          {comment.reviewer && (
+            <span
+              className="rounded px-1 font-mono"
+              title={`External feedback from ${comment.reviewer}${
+                comment.externalCreatedAt
+                  ? ` · ${new Date(comment.externalCreatedAt).toLocaleString()}`
+                  : ""
+              }${
+                comment.shareRequestId
+                  ? ` · share ${comment.shareRequestId.slice(0, 8)}`
+                  : ""
+              }`}
+              style={{
+                fontSize: "10px",
+                color: "var(--color-warning)",
+                background: "var(--color-anchor-bg)",
+              }}
+            >
+              👤 {comment.reviewer} · external
+            </span>
+          )}
           {comment.agentState === "accepted" && (
             <span
               className="rounded px-1 font-mono"
@@ -299,6 +359,23 @@ export const CommentCard = memo(function CommentCard({
           >
             {comment.id}
           </span>
+          {canEditDraft && !editOpen && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                openEdit();
+              }}
+              title="Edit draft comment"
+              className="opacity-50 hover:opacity-100"
+              style={{
+                fontSize: "12px",
+                color: "var(--color-ink-muted)",
+              }}
+            >
+              ✎
+            </button>
+          )}
           {canDelete && (
             <button
               type="button"
@@ -325,7 +402,117 @@ export const CommentCard = memo(function CommentCard({
         </div>
       )}
 
-      {!collapsed && comment.edit && (
+      {/* Inline draft-edit composer — replaces the body/edit display while
+          open. Same visual pattern as the reopen composer below. */}
+      {!collapsed && editOpen && (
+        <div
+          className="mb-2 flex flex-col gap-1.5"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {comment.edit && (
+            <>
+              <div
+                style={{
+                  fontSize: "10px",
+                  fontWeight: 600,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.06em",
+                  color: "var(--color-ink-muted)",
+                }}
+                title="The original text anchors this comment's highlight — it can't change here"
+              >
+                Original · fixed
+              </div>
+              <div
+                className="line-through rounded px-2 py-1"
+                style={{
+                  fontSize: "12px",
+                  color: "var(--color-ink-muted)",
+                  background: "var(--color-paper)",
+                  border: "1px solid var(--color-rule)",
+                }}
+              >
+                {comment.edit.original}
+              </div>
+              <div
+                style={{
+                  fontSize: "10px",
+                  fontWeight: 600,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.06em",
+                  color: "var(--color-info)",
+                }}
+              >
+                Revised
+              </div>
+              <textarea
+                value={revisedDraft}
+                onChange={(e) => setRevisedDraft(e.target.value)}
+                autoFocus
+                placeholder="Replacement text…"
+                rows={3}
+                className="rounded px-2 py-1"
+                style={{
+                  fontSize: "12px",
+                  border: "1px solid var(--color-rule)",
+                  background: "var(--color-paper)",
+                  color: "var(--color-ink)",
+                  fontFamily: "inherit",
+                  resize: "vertical",
+                  maxHeight: "200px",
+                }}
+              />
+            </>
+          )}
+          <textarea
+            value={bodyDraft}
+            onChange={(e) => setBodyDraft(e.target.value)}
+            autoFocus={!comment.edit}
+            placeholder={
+              comment.edit ? "Optional note for Claude…" : "Comment text…"
+            }
+            rows={3}
+            className="rounded px-2 py-1"
+            style={{
+              fontSize: "12px",
+              border: "1px solid var(--color-rule)",
+              background: "var(--color-paper)",
+              color: "var(--color-ink)",
+              fontFamily: "inherit",
+              resize: "vertical",
+              maxHeight: "200px",
+            }}
+          />
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={confirmEdit}
+              disabled={editSaveDisabled}
+              className="rounded px-2 py-0.5 font-medium disabled:opacity-40"
+              style={{
+                background: "var(--color-info)",
+                color: "var(--color-on-accent)",
+                fontSize: "11px",
+              }}
+            >
+              Save
+            </button>
+            <button
+              type="button"
+              onClick={() => setEditOpen(false)}
+              className="rounded px-2 py-0.5"
+              style={{
+                color: "var(--color-ink-muted)",
+                fontSize: "11px",
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {!collapsed && !editOpen && comment.edit && (
         <div className="mb-2 font-serif" style={{ fontSize: "13px" }}>
           {showFullEdit ? (
             <>
@@ -395,7 +582,7 @@ export const CommentCard = memo(function CommentCard({
         </div>
       )}
 
-      {!collapsed && comment.body && comment.body.trim() !== "(edit)" && (
+      {!collapsed && !editOpen && comment.body && comment.body.trim() !== "(edit)" && (
         <div className="rl-comment-body-scroll">
           <MarkdownView body={comment.body} />
         </div>

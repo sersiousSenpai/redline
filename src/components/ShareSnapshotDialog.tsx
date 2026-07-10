@@ -13,15 +13,16 @@
  *
  * This is the async half of the hybrid share — richer than thin margin notes
  * because returns become full track-change suggestions and questions, not
- * read-only annotations. Owner-local share metadata lives in localStorage; the
- * cryptographic round-trip needs no server-side registry (the signing key is
- * deterministic from the owner secret + request id).
+ * read-only annotations. Owner-local share metadata lives in SQLite via the
+ * daemon (durable across webviews, joinable with the comments a return
+ * produces); the cryptographic round-trip needs no server-side registry (the
+ * signing key is deterministic from the owner secret + request id).
  */
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
-import type { NewCommentRequest, Section } from "../types";
+import type { Comment, NewCommentRequest, Section } from "../types";
 import { anchorByBlockId } from "../editor/docModel";
 import {
   encodeSnapshot,
@@ -40,8 +41,34 @@ const LOCAL_VIEWER_BASE = "http://localhost:7676/viewer/";
 
 /** Owner-local record of one minted share — non-secret metadata so the owner
  *  can see what's outstanding and re-open a preview. The key never lives here
- *  (it's regenerated per mint and only ever rides the link fragment). */
-interface SharedSnapshot {
+ *  (it's regenerated per mint and only ever rides the link fragment).
+ *  Mirrors the daemon's `shares` row (db.rs ShareRecord). */
+export interface ShareRecord {
+  requestId: string;
+  sessionId: string;
+  reviewerName: string;
+  note: string;
+  baseVersion: number;
+  createdAt: number;
+}
+
+/** One imported return — mirrors the daemon's `share_returns` row.
+ *  `landedVersion` is the revision the comments re-anchored onto at import
+ *  (the then-current one); navigation targets it, never `baseVersion`. */
+export interface ShareReturnRecord {
+  id: string;
+  requestId: string;
+  sessionId: string;
+  reviewerName: string;
+  importedAt: number;
+  landedVersion: number;
+  placed: number;
+  orphans: number;
+  commentIds: string[];
+}
+
+/** Shape of the legacy per-session localStorage list (pre-registry). */
+interface LegacySharedSnapshot {
   requestId: string;
   reviewerName: string;
   note: string;
@@ -68,31 +95,45 @@ interface ShareSnapshotDialogProps {
   ownerName: string;
   /** The CURRENT revision's sections — returns re-anchor by blockId onto it. */
   currentSections: Section[];
-  /** Persist one re-anchored annotation as a native comment/suggestion. */
+  /** Persist one re-anchored annotation as a native comment/suggestion.
+   *  Resolves to the created `Comment` (the returns registry records its id). */
   addComment: (req: NewCommentRequest) => Promise<unknown>;
+  /** Jump to an imported return: navigate to its landed version and focus its
+   *  first comment. The parent closes the dialog. */
+  onNavigateToReturn?: (ret: ShareReturnRecord) => void;
   onClose: () => void;
 }
 
-function storeKey(sessionId: string): string {
+function legacyStoreKey(sessionId: string): string {
   return `rl-owner-shares.${sessionId}`;
 }
 
-function loadShares(sessionId: string): SharedSnapshot[] {
+/** One-time migration: fold the pre-registry localStorage list into SQLite
+ *  (idempotent — record_share is INSERT OR REPLACE on requestId), then drop
+ *  the key so this never runs again for the session. */
+async function migrateLegacyShares(sessionId: string): Promise<void> {
+  let legacy: LegacySharedSnapshot[] = [];
   try {
-    const raw = localStorage.getItem(storeKey(sessionId));
-    const parsed = raw ? (JSON.parse(raw) as SharedSnapshot[]) : [];
-    return Array.isArray(parsed) ? parsed : [];
+    const raw = localStorage.getItem(legacyStoreKey(sessionId));
+    if (!raw) return;
+    const parsed = JSON.parse(raw) as LegacySharedSnapshot[];
+    legacy = Array.isArray(parsed) ? parsed : [];
   } catch {
-    return [];
+    return;
   }
-}
-
-function saveShares(sessionId: string, shares: SharedSnapshot[]): void {
-  try {
-    localStorage.setItem(storeKey(sessionId), JSON.stringify(shares));
-  } catch {
-    // Private-mode browsers — the list survives the tab, not a reload.
+  for (const s of legacy) {
+    if (!s?.requestId) continue;
+    const share: ShareRecord = {
+      requestId: s.requestId,
+      sessionId,
+      reviewerName: s.reviewerName ?? "reviewer",
+      note: s.note ?? "",
+      baseVersion: s.baseVersion ?? 0,
+      createdAt: s.createdAt ?? 0,
+    };
+    await invoke("record_share", { share });
   }
+  localStorage.removeItem(legacyStoreKey(sessionId));
 }
 
 export function ShareSnapshotDialog({
@@ -101,20 +142,31 @@ export function ShareSnapshotDialog({
   ownerName,
   currentSections,
   addComment,
+  onNavigateToReturn,
   onClose,
 }: ShareSnapshotDialogProps) {
   const [tab, setTab] = useState<"mint" | "import">("mint");
-  const [shares, setShares] = useState<SharedSnapshot[]>(() =>
-    loadShares(sessionId),
-  );
+  const [shares, setShares] = useState<ShareRecord[]>([]);
+  const [returns, setReturns] = useState<ShareReturnRecord[]>([]);
 
-  const persist = useCallback(
-    (next: SharedSnapshot[]) => {
-      setShares(next);
-      saveShares(sessionId, next);
-    },
-    [sessionId],
-  );
+  const refresh = useCallback(async () => {
+    try {
+      const [s, r] = await Promise.all([
+        invoke<ShareRecord[]>("list_shares", { sessionId }),
+        invoke<ShareReturnRecord[]>("list_share_returns", { sessionId }),
+      ]);
+      setShares(s);
+      setReturns(r);
+    } catch {
+      // Registry unavailable — the mint/import crypto flow still works.
+    }
+  }, [sessionId]);
+
+  useEffect(() => {
+    void migrateLegacyShares(sessionId)
+      .catch(() => {})
+      .then(refresh);
+  }, [sessionId, refresh]);
 
   return (
     <div className="rl-modal-overlay" onClick={onClose}>
@@ -184,12 +236,17 @@ export function ShareSnapshotDialog({
               version={version}
               ownerName={ownerName}
               shares={shares}
-              persist={persist}
+              returns={returns}
+              refresh={refresh}
+              onNavigateToReturn={onNavigateToReturn}
             />
           ) : (
             <ImportPanel
+              sessionId={sessionId}
+              landedVersion={version}
               currentSections={currentSections}
               addComment={addComment}
+              onImported={refresh}
             />
           )}
         </div>
@@ -236,13 +293,17 @@ function MintPanel({
   version,
   ownerName,
   shares,
-  persist,
+  returns,
+  refresh,
+  onNavigateToReturn,
 }: {
   sessionId: string;
   version: number;
   ownerName: string;
-  shares: SharedSnapshot[];
-  persist: (next: SharedSnapshot[]) => void;
+  shares: ShareRecord[];
+  returns: ShareReturnRecord[];
+  refresh: () => Promise<void>;
+  onNavigateToReturn?: (ret: ShareReturnRecord) => void;
 }) {
   const [reviewerName, setReviewerName] = useState("");
   const [note, setNote] = useState("");
@@ -314,16 +375,16 @@ function MintPanel({
       const token = await encodeSnapshot(payload);
       const link = snapshotLink(LOCAL_VIEWER_BASE, token);
       setBuilt({ requestId, reviewerName: who, link, token });
-      persist([
-        {
-          requestId,
-          reviewerName: who,
-          note: note.trim(),
-          baseVersion: snap.baseVersion,
-          createdAt: Date.now(),
-        },
-        ...shares,
-      ]);
+      const share: ShareRecord = {
+        requestId,
+        sessionId,
+        reviewerName: who,
+        note: note.trim(),
+        baseVersion: snap.baseVersion,
+        createdAt: Date.now(),
+      };
+      await invoke("record_share", { share }).catch(() => {});
+      await refresh();
     } catch (err) {
       setError(String(err));
     } finally {
@@ -476,39 +537,77 @@ function MintPanel({
             Shared so far
           </div>
           <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: "4px" }}>
-            {shares.map((s) => (
-              <li
-                key={s.requestId}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  fontSize: "11.5px",
-                  color: "var(--color-ink)",
-                  padding: "4px 0",
-                }}
-              >
-                <span>
-                  {s.reviewerName} · v{s.baseVersion}
-                  {s.note ? ` — “${s.note}”` : ""}
-                </span>
-                <button
-                  title="Forget this share"
-                  onClick={() =>
-                    persist(shares.filter((x) => x.requestId !== s.requestId))
-                  }
-                  style={{
-                    border: "none",
-                    background: "transparent",
-                    color: "var(--color-ink-muted)",
-                    cursor: "pointer",
-                    fontSize: "12px",
-                  }}
-                >
-                  ✕
-                </button>
-              </li>
-            ))}
+            {shares.map((s) => {
+              const shareReturns = returns.filter(
+                (r) => r.requestId === s.requestId,
+              );
+              return (
+                <li key={s.requestId} style={{ padding: "4px 0" }}>
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      fontSize: "11.5px",
+                      color: "var(--color-ink)",
+                    }}
+                  >
+                    <span>
+                      {s.reviewerName} · v{s.baseVersion}
+                      {s.note ? ` — “${s.note}”` : ""}
+                    </span>
+                    <button
+                      title="Forget this share (imported feedback stays)"
+                      onClick={() => {
+                        void invoke("delete_share", {
+                          requestId: s.requestId,
+                        })
+                          .catch(() => {})
+                          .then(refresh);
+                      }}
+                      style={{
+                        border: "none",
+                        background: "transparent",
+                        color: "var(--color-ink-muted)",
+                        cursor: "pointer",
+                        fontSize: "12px",
+                      }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  {shareReturns.map((r) => (
+                    <button
+                      key={r.id}
+                      onClick={() => onNavigateToReturn?.(r)}
+                      disabled={!onNavigateToReturn || r.commentIds.length === 0}
+                      title={
+                        r.commentIds.length === 0
+                          ? "Nothing landed from this return"
+                          : `Jump to v${r.landedVersion} and the imported comments`
+                      }
+                      style={{
+                        display: "block",
+                        border: "none",
+                        background: "transparent",
+                        color: "var(--color-info)",
+                        cursor:
+                          onNavigateToReturn && r.commentIds.length > 0
+                            ? "pointer"
+                            : "default",
+                        fontSize: "11px",
+                        padding: "2px 0 0 14px",
+                        textAlign: "left",
+                      }}
+                    >
+                      ↩ {new Date(r.importedAt).toLocaleString()} · {r.placed}{" "}
+                      comment{r.placed === 1 ? "" : "s"} → v{r.landedVersion}
+                      {r.orphans > 0 ? ` · ${r.orphans} unplaced` : ""}
+                    </button>
+                  ))}
+                </li>
+              );
+            })}
           </ul>
         </div>
       )}
@@ -517,11 +616,18 @@ function MintPanel({
 }
 
 function ImportPanel({
+  sessionId,
+  landedVersion,
   currentSections,
   addComment,
+  onImported,
 }: {
+  sessionId: string;
+  /** The current (latest) revision — where the placed comments land. */
+  landedVersion: number;
   currentSections: Section[];
   addComment: (req: NewCommentRequest) => Promise<unknown>;
+  onImported: () => Promise<void>;
 }) {
   const [blob, setBlob] = useState("");
   const [busy, setBusy] = useState(false);
@@ -555,9 +661,28 @@ function ImportPanel({
         return;
       }
       const { placed, orphans } = reanchorReturn(verified, anchors);
+      const commentIds: string[] = [];
       for (const req of placed) {
-        await addComment(req);
+        const created = (await addComment(req)) as Comment | undefined;
+        if (created?.id) commentIds.push(created.id);
       }
+      // Record the return in the durable registry — the "Shared so far" list
+      // grows a ↩ row that navigates to where these comments landed.
+      const ret: ShareReturnRecord = {
+        id:
+          globalThis.crypto?.randomUUID?.() ??
+          `ret-${Date.now()}-${Math.floor(Math.random() * 1e9)}`,
+        requestId: verified.requestId,
+        sessionId,
+        reviewerName: verified.reviewerName,
+        importedAt: Date.now(),
+        landedVersion,
+        placed: placed.length,
+        orphans: orphans.length,
+        commentIds,
+      };
+      await invoke("record_share_return", { ret }).catch(() => {});
+      await onImported();
       setResult({
         reviewerName: verified.reviewerName,
         placed: placed.length,

@@ -2,6 +2,7 @@
 // Copyright 2026 Yusuf Al-Bazian
 import { useEffect, useRef, useState } from "react";
 import { MarkdownView } from "./MarkdownView";
+import { WorkingIndicator } from "./WorkingIndicator";
 import {
   useAgentThread,
   type AgentThreadMessage,
@@ -133,7 +134,12 @@ export function DrafterChat({
         ) : (
           messages.map((m) => <Bubble key={m.id} msg={m} />)
         )}
-        {status === "streaming" && <StreamingBubble text={liveText} />}
+        {status === "streaming" &&
+          (liveText ? (
+            <StreamingBubble text={liveText} />
+          ) : (
+            <WorkingIndicator />
+          ))}
       </div>
 
       <div

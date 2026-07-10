@@ -1854,6 +1854,25 @@ p.rl-block-modified {
   }
 }
 
+/* One-shot acknowledgement flash on the element a focus gesture scrolled to
+   (comment highlight or fallback block). Info-tinted background that fades;
+   `forwards` holds the transparent end state until the JS timer removes the
+   class, so there's no end-of-animation snap. */
+@keyframes rl-focus-flash-kf {
+  0% { background-color: color-mix(in srgb, var(--color-info) 28%, transparent); }
+  100% { background-color: transparent; }
+}
+.rl-focus-flash {
+  animation: rl-focus-flash-kf 1.2s ease-out forwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rl-focus-flash {
+    animation: none;
+    outline: 2px solid var(--color-info);
+    outline-offset: 2px;
+  }
+}
+
 /* ── Conversation-mode pulse (PulseLogo) ─────────────────────────────────
    The Redline strike-line blooms into a spinning fractal whose speed tracks
    the fork's state: idle → still (just the strike), thinking/waiting → fast
@@ -1900,6 +1919,47 @@ p.rl-block-modified {
   .rl-pulse-blades[data-state="listening"],
   .rl-pulse-blades[data-state="thinking"],
   .rl-pulse-blades[data-state="streaming"] {
+    animation: none;
+  }
+}
+
+/* ── WorkingIndicator (shared "agent is working" cue) ────────────────────
+   A left-to-right shimmer over the label plus three staggered trailing dots.
+   The shimmer paints the text itself (background-clip: text) so it works on
+   any theme's muted-ink color without hardcoding a hue. */
+.rl-working-label {
+  background: linear-gradient(
+    90deg,
+    var(--color-ink-muted) 0%,
+    var(--color-ink) 50%,
+    var(--color-ink-muted) 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: rl-working-shimmer 1.8s linear infinite;
+}
+@keyframes rl-working-shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+.rl-working-dots span {
+  animation: rl-working-dot 1.2s ease-in-out infinite;
+}
+.rl-working-dots span:nth-child(2) { animation-delay: 0.2s; }
+.rl-working-dots span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes rl-working-dot {
+  0%, 100% { opacity: 0.25; }
+  50% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rl-working-label {
+    animation: none;
+    background: none;
+    color: var(--color-ink-muted);
+  }
+  .rl-working-dots span {
     animation: none;
   }
 }

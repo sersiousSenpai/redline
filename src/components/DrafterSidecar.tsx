@@ -13,6 +13,7 @@ import type {
   ThreadMessage,
 } from "../types";
 import { MarkdownView } from "./MarkdownView";
+import { WorkingIndicator } from "./WorkingIndicator";
 
 interface DrafterSidecarProps {
   draftId: string;
@@ -338,7 +339,7 @@ function DraftCommentCard({
               {liveText ? (
                 <MarkdownView body={liveText} compact />
               ) : (
-                "thinking…"
+                <WorkingIndicator compact />
               )}
             </div>
           )}

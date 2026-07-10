@@ -2806,6 +2806,7 @@ function App() {
     // re-flashes its highlight instead of silently clearing the focus.
     select: focusComment,
     remove: deleteComment,
+    update: updateComment,
     accept: acceptResolution,
     acceptSuggestion: acceptAgentSuggestion,
     reopen: reopenResolution,
@@ -2814,6 +2815,7 @@ function App() {
   commentHandlersRef.current = {
     select: focusComment,
     remove: deleteComment,
+    update: updateComment,
     accept: acceptResolution,
     acceptSuggestion: acceptAgentSuggestion,
     reopen: reopenResolution,
@@ -2826,6 +2828,8 @@ function App() {
     () => ({
       onSelect: (id: string) => commentHandlersRef.current.select(id),
       onDelete: (id: string) => commentHandlersRef.current.remove(id),
+      onUpdate: (id: string, update: import("./types").UpdateCommentRequest) =>
+        commentHandlersRef.current.update(id, update),
       onAccept: (id: string) => commentHandlersRef.current.accept(id),
       onAcceptSuggestion: (c: Comment) =>
         commentHandlersRef.current.acceptSuggestion(c),
@@ -4155,6 +4159,7 @@ function App() {
                 onAutoOpenConsumed={clearAutoOpen}
                 onSelect={commentCallbacks.onSelect}
                 onDelete={commentCallbacks.onDelete}
+                onUpdate={commentCallbacks.onUpdate}
                 onAccept={commentCallbacks.onAccept}
                 onAcceptSuggestion={commentCallbacks.onAcceptSuggestion}
                 onReopen={commentCallbacks.onReopen}
@@ -4320,6 +4325,18 @@ function App() {
           ownerName={relayDefaults.displayName}
           currentSections={latest.sections}
           addComment={addEditorComment}
+          onNavigateToReturn={(ret) => {
+            // Land where the comments actually live: the revision that was
+            // current at import time (viewed as latest when they coincide),
+            // with the first imported comment scrolled + flashed.
+            setShareOpen(false);
+            setViewedVersionNumber(
+              ret.landedVersion === latest.versionNumber
+                ? null
+                : ret.landedVersion,
+            );
+            if (ret.commentIds[0]) focusComment(ret.commentIds[0]);
+          }}
           onClose={() => setShareOpen(false)}
         />
       )}

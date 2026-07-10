@@ -12,6 +12,7 @@ import type {
   BrowseMessage,
 } from "../types";
 import { MarkdownView } from "./MarkdownView";
+import { WorkingIndicator } from "./WorkingIndicator";
 
 interface BrowserChatProps {
   /** Stable per-tab id — keys the browse-agent backend + persisted thread. */
@@ -470,12 +471,15 @@ export const BrowserChat = memo(function BrowserChat({
             />
           ))
         )}
-        {status === "streaming" && (
-          <StreamingBubble
-            text={tandem ? stripStreamingSources(liveText) : liveText}
-            onOpenLink={onOpenLink}
-          />
-        )}
+        {status === "streaming" &&
+          ((tandem ? stripStreamingSources(liveText) : liveText) ? (
+            <StreamingBubble
+              text={tandem ? stripStreamingSources(liveText) : liveText}
+              onOpenLink={onOpenLink}
+            />
+          ) : (
+            <WorkingIndicator />
+          ))}
       </div>
 
       <div className="px-3 py-2 shrink-0" style={{ borderTop: "1px solid var(--color-rule)" }}>

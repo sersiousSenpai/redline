@@ -13,6 +13,7 @@ import type {
   ThreadMessage,
 } from "../types";
 import { MarkdownView } from "./MarkdownView";
+import { WorkingIndicator } from "./WorkingIndicator";
 
 interface CommentThreadProps {
   /** The review session id — keys the fork backend with the comment id. */
@@ -71,6 +72,9 @@ export const CommentThread = memo(function CommentThread({
   const [enlarged, setEnlarged] = useState(true);
   const [loaded, setLoaded] = useState(false);
   const [draft, setDraft] = useState("");
+  // When the current wait began (set on send) — drives the WorkingIndicator's
+  // elapsed counter through the dead air before the first delta.
+  const [workStartedAt, setWorkStartedAt] = useState<number | null>(null);
   // When the reviewer manually collapses an expanded thread, suppress the
   // streaming auto-expand until the next send — otherwise a long Claude reply
   // keeps re-opening a thread they're deliberately trying to set aside.
@@ -188,6 +192,7 @@ export const CommentThread = memo(function CommentThread({
     ]);
     setLiveText("");
     setStatus("streaming");
+    setWorkStartedAt(Date.now());
     // A fresh send re-grants the auto-expand-on-delta behavior — the user
     // just asked something, so they want to see the reply unfold.
     userCollapsedRef.current = false;
@@ -387,11 +392,11 @@ export const CommentThread = memo(function CommentThread({
             · {visible.length}
           </span>
           {status === "streaming" && (
-            <span
-              className="normal-case"
-              style={{ color: "var(--color-ink-muted)", fontWeight: 400 }}
-            >
-              — streaming…
+            <span className="normal-case" style={{ fontWeight: 400 }}>
+              <WorkingIndicator
+                compact
+                label={liveText ? "Streaming" : "Thinking"}
+              />
             </span>
           )}
           {/* The attached/sent flag lives on the discussion itself — the rider
@@ -478,7 +483,12 @@ export const CommentThread = memo(function CommentThread({
             {visible.map((m) => (
               <MessageBubble key={m.id} msg={m} />
             ))}
-            {status === "streaming" && <StreamingBubble text={liveText} />}
+            {status === "streaming" &&
+              (liveText ? (
+                <StreamingBubble text={liveText} />
+              ) : (
+                <WorkingIndicator startedAt={workStartedAt ?? undefined} />
+              ))}
           </div>
 
           <Composer

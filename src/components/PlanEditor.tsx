@@ -113,6 +113,9 @@ interface PlanEditorProps {
   /** Drives the `--focused` modifier on the matching in-doc highlight (and
    *  scrolls it into view when set). Single source of truth for the App. */
   focusedCommentId?: string | null;
+  /** Bumped by the App on every deliberate focus gesture so the scroll +
+   *  flash re-fire even when `focusedCommentId` is unchanged (re-click). */
+  focusNonce?: number;
   /** Imperative escape hatch so the App-rendered SelectionMenu can drive
    *  editor commands (e.g. Strike) without owning the editor instance. */
   actionsRef?: MutableRefObject<PlanEditorActions | null>;
@@ -151,6 +154,7 @@ export function PlanEditor({
   onDeleteComment,
   onHighlightClick,
   focusedCommentId,
+  focusNonce,
   actionsRef,
   onLockedEdit,
   collab,
@@ -564,11 +568,22 @@ export function PlanEditor({
     if (!editor) return;
     editor.commands.focusCommentHighlight(focusedCommentId ?? null);
     if (!focusedCommentId) return;
+    // Visible acknowledgement of the focus gesture: a brief background flash
+    // on the scrolled-to element. Remove → reflow → re-add so a re-click on
+    // an already-flashed element restarts the animation; a timer clears the
+    // class afterwards so it can't linger on a node the effect never revisits.
+    const flash = (el: HTMLElement) => {
+      el.classList.remove("rl-focus-flash");
+      void el.offsetWidth;
+      el.classList.add("rl-focus-flash");
+      window.setTimeout(() => el.classList.remove("rl-focus-flash"), 1300);
+    };
     const dom = editor.view.dom.querySelector(
       `[data-comment-id="${cssEscape(focusedCommentId)}"]`,
     );
     if (dom instanceof HTMLElement) {
       dom.scrollIntoView({ block: "center", behavior: "smooth" });
+      flash(dom);
       return;
     }
     const target = (comments ?? []).find((c) => c.id === focusedCommentId);
@@ -581,10 +596,11 @@ export function PlanEditor({
       const dom = editor.view.nodeDOM(pos);
       if (dom instanceof HTMLElement) {
         dom.scrollIntoView({ block: "center", behavior: "smooth" });
+        flash(dom);
         scrolled = true;
       }
     });
-  }, [editor, focusedCommentId, comments]);
+  }, [editor, focusedCommentId, focusNonce, comments]);
 
   // Click on any highlight → fire the parent's callback. Re-binds when the
   // parent's handler identity changes so a stale closure can't capture an

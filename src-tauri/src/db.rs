@@ -42,6 +42,38 @@ fn reopen_history_to_json(history: &[RoundHistoryEntry]) -> Option<String> {
 /// One lexical hit from the browse-events FTS index (Dojo P3). `score` is the
 /// BM25 relevance (SQLite returns it negative-lower-is-better; we sort ascending
 /// and pass it through). `snippet` shows the matched span with `[...]` markers.
+/// One minted Review Request share link (owner-local, non-secret metadata —
+/// the encryption key only ever rides the link fragment).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareRecord {
+    pub request_id: String,
+    pub session_id: String,
+    pub reviewer_name: String,
+    #[serde(default)]
+    pub note: String,
+    pub base_version: u32,
+    pub created_at: i64,
+}
+
+/// One imported return. `landed_version` is where the comments re-anchored at
+/// import (the then-current revision) — navigation targets it, never the
+/// share's base_version.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareReturnRecord {
+    pub id: String,
+    pub request_id: String,
+    pub session_id: String,
+    pub reviewer_name: String,
+    pub imported_at: i64,
+    pub landed_version: u32,
+    pub placed: u32,
+    pub orphans: u32,
+    #[serde(default)]
+    pub comment_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowseHit {
@@ -705,6 +737,36 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_draft_suggestions
                 ON draft_suggestions (draft_id, status, created_at);
+
+            -- Review Request registry: one row per minted share link. Durable
+            -- (replaces the per-webview localStorage list) and joinable with
+            -- the comments a return produces (comments.share_request_id).
+            CREATE TABLE IF NOT EXISTS shares (
+                request_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                reviewer_name TEXT NOT NULL,
+                note TEXT NOT NULL DEFAULT '',
+                base_version INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_shares_session ON shares (session_id);
+
+            -- One row per imported return. landed_version is the revision the
+            -- comments actually re-anchored onto at import time (the CURRENT
+            -- revision then) — navigation must target it, not base_version.
+            CREATE TABLE IF NOT EXISTS share_returns (
+                id TEXT PRIMARY KEY,
+                request_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                reviewer_name TEXT NOT NULL,
+                imported_at INTEGER NOT NULL,
+                landed_version INTEGER NOT NULL,
+                placed INTEGER NOT NULL,
+                orphans INTEGER NOT NULL,
+                comment_ids TEXT NOT NULL DEFAULT '[]'
+            );
+            CREATE INDEX IF NOT EXISTS idx_share_returns_session
+                ON share_returns (session_id, imported_at);
             "#,
         )?;
         // Best-effort additive migrations (errors on existing columns are ignored)
@@ -914,6 +976,14 @@ impl Database {
         // comment came from ("John Doe"). NULL for every owner-originated
         // comment and every pre-collab row. Distinct from `author` (agent id).
         let _ = conn.execute("ALTER TABLE comments ADD COLUMN reviewer TEXT", []);
+        // Review Request return provenance: when the external reviewer wrote
+        // the comment (their clock) and which share (request_id) it arrived
+        // on. NULL for every owner-originated comment and every legacy row.
+        let _ = conn.execute(
+            "ALTER TABLE comments ADD COLUMN external_created_at INTEGER",
+            [],
+        );
+        let _ = conn.execute("ALTER TABLE comments ADD COLUMN share_request_id TEXT", []);
         // Persisted attach state: lets detachment survive app restarts and be
         // visible for background sessions (the live `held` flag is recomputed
         // from in-memory senders and tells nothing after a crash).
@@ -4033,8 +4103,9 @@ impl Database {
                 block_id, structural_json,
                 sel_char_start, sel_char_end, sel_quoted_text,
                 sel_sub_block_id, reopen_note, reopen_history, actionable,
-                author, agent_state, reviewer
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
+                author, agent_state, reviewer,
+                external_created_at, share_request_id
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)",
             params![
                 comment.id,
                 session_id,
@@ -4062,6 +4133,8 @@ impl Database {
                 comment.author,
                 comment.agent_state,
                 comment.reviewer,
+                comment.external_created_at,
+                comment.share_request_id,
             ],
         )?;
         Self::touch_session(&conn, session_id, comment.created_at);
@@ -4114,8 +4187,10 @@ impl Database {
                 actionable = ?17,
                 author = ?18,
                 agent_state = ?19,
-                reviewer = ?20
-             WHERE session_id = ?21 AND id = ?22",
+                reviewer = ?20,
+                external_created_at = ?21,
+                share_request_id = ?22
+             WHERE session_id = ?23 AND id = ?24",
             params![
                 comment.scope.map(|s| s.as_str()),
                 comment.body,
@@ -4137,11 +4212,111 @@ impl Database {
                 comment.author,
                 comment.agent_state,
                 comment.reviewer,
+                comment.external_created_at,
+                comment.share_request_id,
                 session_id,
                 comment.id,
             ],
         )?;
         Ok(())
+    }
+
+    /// Record a minted share link (idempotent on request_id — a re-record
+    /// from the localStorage migration overwrites with identical data).
+    pub fn record_share(&self, share: &ShareRecord) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO shares (
+                request_id, session_id, reviewer_name, note, base_version, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                share.request_id,
+                share.session_id,
+                share.reviewer_name,
+                share.note,
+                share.base_version,
+                share.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Forget a share. Its returns (and their imported comments) stay — they
+    /// are the session's history, not the link's.
+    pub fn delete_share(&self, request_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM shares WHERE request_id = ?1", params![request_id])?;
+        Ok(())
+    }
+
+    pub fn list_shares(&self, session_id: &str) -> rusqlite::Result<Vec<ShareRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT request_id, session_id, reviewer_name, note, base_version, created_at
+             FROM shares WHERE session_id = ?1 ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![session_id], |row| {
+            Ok(ShareRecord {
+                request_id: row.get(0)?,
+                session_id: row.get(1)?,
+                reviewer_name: row.get(2)?,
+                note: row.get(3)?,
+                base_version: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn record_share_return(&self, ret: &ShareReturnRecord) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let comment_ids_json =
+            serde_json::to_string(&ret.comment_ids).unwrap_or_else(|_| "[]".to_string());
+        conn.execute(
+            "INSERT OR REPLACE INTO share_returns (
+                id, request_id, session_id, reviewer_name, imported_at,
+                landed_version, placed, orphans, comment_ids
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                ret.id,
+                ret.request_id,
+                ret.session_id,
+                ret.reviewer_name,
+                ret.imported_at,
+                ret.landed_version,
+                ret.placed,
+                ret.orphans,
+                comment_ids_json,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_share_returns(
+        &self,
+        session_id: &str,
+    ) -> rusqlite::Result<Vec<ShareReturnRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, request_id, session_id, reviewer_name, imported_at,
+                    landed_version, placed, orphans, comment_ids
+             FROM share_returns WHERE session_id = ?1 ORDER BY imported_at DESC",
+        )?;
+        let rows = stmt.query_map(params![session_id], |row| {
+            let comment_ids_json: String = row.get(8)?;
+            Ok(ShareReturnRecord {
+                id: row.get(0)?,
+                request_id: row.get(1)?,
+                session_id: row.get(2)?,
+                reviewer_name: row.get(3)?,
+                imported_at: row.get(4)?,
+                landed_version: row.get(5)?,
+                placed: row.get(6)?,
+                orphans: row.get(7)?,
+                comment_ids: serde_json::from_str(&comment_ids_json).unwrap_or_default(),
+            })
+        })?;
+        rows.collect()
     }
 
     /// Targeted attach-state write — callable from the detach drop-guard with
@@ -5452,7 +5627,8 @@ impl Database {
                     block_id, structural_json,
                     sel_char_start, sel_char_end, sel_quoted_text,
                     sel_sub_block_id, reopen_note, reopen_history, actionable,
-                    author, agent_state, reviewer
+                    author, agent_state, reviewer,
+                    external_created_at, share_request_id
              FROM comments
              ORDER BY session_id, version_number, created_at",
         )?;
@@ -5508,6 +5684,8 @@ impl Database {
             let author: Option<String> = row.get(23)?;
             let agent_state: Option<String> = row.get(24)?;
             let reviewer: Option<String> = row.get(25)?;
+            let external_created_at: Option<i64> = row.get(26)?;
+            let share_request_id: Option<String> = row.get(27)?;
             Ok((
                 row.get::<_, String>(1)?, // session_id
                 row.get::<_, u32>(2)?,    // version_number
@@ -5530,6 +5708,8 @@ impl Database {
                     author,
                     agent_state,
                     reviewer,
+                    external_created_at,
+                    share_request_id,
                 },
             ))
         })?;
@@ -6909,6 +7089,8 @@ mod tests {
             selection: None,
             author: None,
             reviewer: None,
+            external_created_at: None,
+            share_request_id: None,
         };
         // Normal mint starts the c-NNN sequence.
         let a = store.add_comment("s", req(None)).unwrap();
@@ -6950,6 +7132,8 @@ mod tests {
             selection: None,
             author: None,
             reviewer: None,
+            external_created_at: None,
+            share_request_id: None,
         };
         // A submitted comment (stays on v1), a reopened one and a draft (carried).
         let settled = store.add_comment("s", comment("settled")).unwrap();
@@ -7013,6 +7197,8 @@ mod tests {
                     selection: None,
                     author: None,
                     reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
                 },
             )
             .expect("add comment");
@@ -7053,6 +7239,8 @@ mod tests {
                     selection: None,
                     author: None,
                     reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
                 },
             )
             .expect("add comment");
@@ -7122,6 +7310,8 @@ mod tests {
                     selection: None,
                     author: None,
                     reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
                 },
             )
             .expect("add comment");
@@ -7155,6 +7345,8 @@ mod tests {
             selection: None,
             author: None,
             reviewer: None,
+            external_created_at: None,
+            share_request_id: None,
         };
         let c1 = store.add_comment("sess-1", req).expect("add");
         assert_eq!(c1.id, "c-001");
@@ -7173,6 +7365,8 @@ mod tests {
             selection: None,
             author: None,
             reviewer: None,
+            external_created_at: None,
+            share_request_id: None,
         };
         let c2 = store.add_comment("sess-1", req2).expect("add 2");
         assert_eq!(c2.id, "c-002");
@@ -7210,6 +7404,8 @@ mod tests {
                     selection: None,
                     author: Some("claude-code".to_string()),
                     reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
                 },
             )
             .expect("add agent comment");
@@ -7231,6 +7427,8 @@ mod tests {
                     selection: None,
                     author: None,
                     reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
                 },
             )
             .expect("add user comment");
@@ -7272,6 +7470,8 @@ mod tests {
             selection: None,
             author: None,
             reviewer: reviewer.map(|s| s.to_string()),
+            external_created_at: None,
+            share_request_id: None,
         };
         let imported = store
             .add_comment("sess-r", mk(Some("John Doe")))
@@ -7287,6 +7487,98 @@ mod tests {
             Some("John Doe")
         );
         assert!(s.revisions[0].comments[1].reviewer.is_none());
+    }
+
+    // Return provenance: `external_created_at` + `share_request_id` survive
+    // insert → reload and stay None for owner-originated comments.
+    #[test]
+    fn return_provenance_round_trips() {
+        use crate::state::CommentKind;
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let store = SessionStore::new(db.clone());
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("sess-p", "/tmp/p", md.to_string(), reparse_sections(md), true, false);
+        let mk = |prov: bool| NewCommentRequest {
+            id: None,
+            kind: CommentKind::Feedback,
+            scope: None,
+            anchor_id: "A".to_string(),
+            block_id: Some("blk-1".to_string()),
+            structural: None,
+            body: "from a return".to_string(),
+            edit: None,
+            selection: None,
+            author: None,
+            reviewer: prov.then(|| "John Doe".to_string()),
+            external_created_at: prov.then_some(1_700_000_100_000),
+            share_request_id: prov.then(|| "req-abc123".to_string()),
+        };
+        let imported = store
+            .add_comment("sess-p", mk(true))
+            .expect("add imported comment");
+        assert_eq!(imported.external_created_at, Some(1_700_000_100_000));
+        assert_eq!(imported.share_request_id.as_deref(), Some("req-abc123"));
+        let own = store.add_comment("sess-p", mk(false)).expect("add own comment");
+        assert!(own.external_created_at.is_none());
+        assert!(own.share_request_id.is_none());
+
+        let reloaded = SessionStore::new(db);
+        let s = reloaded.get("sess-p").expect("session");
+        let rc = &s.revisions[0].comments[0];
+        assert_eq!(rc.external_created_at, Some(1_700_000_100_000));
+        assert_eq!(rc.share_request_id.as_deref(), Some("req-abc123"));
+        let ro = &s.revisions[0].comments[1];
+        assert!(ro.external_created_at.is_none());
+        assert!(ro.share_request_id.is_none());
+    }
+
+    // Shares/returns registry (IV.2): record → list round-trips, session
+    // scoping holds, and deleting a share leaves its returns intact.
+    #[test]
+    fn shares_and_returns_registry_round_trips() {
+        let db = Database::open_in_memory().unwrap();
+        let share = |req: &str, sess: &str, at: i64| ShareRecord {
+            request_id: req.to_string(),
+            session_id: sess.to_string(),
+            reviewer_name: "Jordan".to_string(),
+            note: "please look at §2".to_string(),
+            base_version: 3,
+            created_at: at,
+        };
+        db.record_share(&share("req-1", "sess-a", 100)).unwrap();
+        db.record_share(&share("req-2", "sess-a", 200)).unwrap();
+        db.record_share(&share("req-3", "sess-b", 300)).unwrap();
+
+        let listed = db.list_shares("sess-a").unwrap();
+        assert_eq!(listed.len(), 2);
+        // Newest first.
+        assert_eq!(listed[0].request_id, "req-2");
+        assert_eq!(listed[1].request_id, "req-1");
+        assert_eq!(listed[1].note, "please look at §2");
+        assert_eq!(listed[1].base_version, 3);
+
+        let ret = ShareReturnRecord {
+            id: "ret-1".to_string(),
+            request_id: "req-1".to_string(),
+            session_id: "sess-a".to_string(),
+            reviewer_name: "Jordan".to_string(),
+            imported_at: 400,
+            landed_version: 5,
+            placed: 2,
+            orphans: 1,
+            comment_ids: vec!["c-004".to_string(), "c-005".to_string()],
+        };
+        db.record_share_return(&ret).unwrap();
+        let returns = db.list_share_returns("sess-a").unwrap();
+        assert_eq!(returns.len(), 1);
+        assert_eq!(returns[0].landed_version, 5);
+        assert_eq!(returns[0].comment_ids, vec!["c-004", "c-005"]);
+        assert!(db.list_share_returns("sess-b").unwrap().is_empty());
+
+        // Forgetting the share keeps the imported history.
+        db.delete_share("req-1").unwrap();
+        assert_eq!(db.list_shares("sess-a").unwrap().len(), 1);
+        assert_eq!(db.list_share_returns("sess-a").unwrap().len(), 1);
     }
 
     #[test]
@@ -7372,6 +7664,8 @@ mod tests {
             selection: None,
             author: None,
             reviewer: None,
+            external_created_at: None,
+            share_request_id: None,
         };
         store.add_comment("s1", mk_q()).expect("add comment");
         let db = store.database();
@@ -7416,6 +7710,8 @@ mod tests {
                     selection: None,
                     author: None,
                     reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
                 },
             )
             .expect("add comment");
@@ -7464,6 +7760,8 @@ mod tests {
                         selection: None,
                         author: None,
                         reviewer: None,
+                        external_created_at: None,
+                        share_request_id: None,
                     },
                 )
                 .expect("add comment");
@@ -7554,6 +7852,8 @@ mod tests {
                     selection: None,
                     author: None,
                     reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
                 },
             )
             .expect("add comment");
@@ -7618,6 +7918,8 @@ mod tests {
                 selection: None,
                 author: None,
                 reviewer: None,
+                external_created_at: None,
+                share_request_id: None,
             },
         )
         .expect("add comment");
@@ -7635,6 +7937,8 @@ mod tests {
                 selection: None,
                 author: None,
                 reviewer: None,
+                external_created_at: None,
+                share_request_id: None,
             },
         )
         .expect("add comment");
@@ -7789,6 +8093,8 @@ Restructured detail body.
                     selection: None,
                     author: None,
                     reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
                 },
             )
             .expect("add q1");
@@ -7807,6 +8113,8 @@ Restructured detail body.
                     selection: None,
                     author: None,
                     reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
                 },
             )
             .expect("add q2");
@@ -7922,6 +8230,8 @@ body.
                     selection: None,
                     author: None,
                     reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
                 },
             )
             .expect("add comment");
@@ -7965,6 +8275,8 @@ body.
                     selection: None,
                     author: None,
                     reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
                 },
             )
             .expect("add");
@@ -8033,6 +8345,8 @@ body.
                     selection: None,
                     author: None,
                     reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
                 },
             )
             .expect("add structural");
@@ -8081,6 +8395,8 @@ body.
             selection: None,
             author: None,
             reviewer: None,
+            external_created_at: None,
+            share_request_id: None,
         };
 
         let a = store
@@ -8226,6 +8542,8 @@ body.
                     selection: None,
                     author: None,
                     reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
                 },
             )
             .expect("fresh session c-001 persists");
@@ -8336,6 +8654,8 @@ body.
                     selection: None,
                     author: None,
                     reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
                 },
             )
             .unwrap();

@@ -470,6 +470,16 @@ pub struct Comment {
     /// shape byte-identical to the pre-collab contract.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviewer: Option<String>,
+    /// When the external reviewer actually wrote this comment (the return
+    /// payload's `createdAt`), as opposed to `created_at` — when the import
+    /// landed it here. `None` for every owner-originated comment, keeping the
+    /// serialized shape (and the feedback payload) byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_created_at: Option<i64>,
+    /// The Review Request this comment arrived on (the share's `requestId`),
+    /// back-linking an imported comment to its share. `None` unless imported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_request_id: Option<String>,
 }
 
 /// One turn in a comment's fork-agent discussion thread (Phase 2). Rows are
@@ -852,6 +862,12 @@ pub struct NewCommentRequest {
     /// live-collab mirror; absent on every owner-originated comment.
     #[serde(default)]
     pub reviewer: Option<String>,
+    /// Provenance for imported Review Request returns (see the matching
+    /// fields on `Comment`); absent on every owner-originated comment.
+    #[serde(default)]
+    pub external_created_at: Option<i64>,
+    #[serde(default)]
+    pub share_request_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1241,6 +1257,8 @@ impl SessionStore {
             author: request.author,
             agent_state: None,
             reviewer: request.reviewer,
+            external_created_at: request.external_created_at,
+            share_request_id: request.share_request_id,
         };
 
         let latest = session.revisions.last_mut().expect("non-empty checked above");
@@ -1833,6 +1851,8 @@ mod tests {
             author: None,
             agent_state: None,
             reviewer: None,
+            external_created_at: None,
+            share_request_id: None,
         }
     }
 

@@ -306,4 +306,19 @@ describe("re-anchor to current revision", () => {
     expect(orphans).toHaveLength(1);
     expect(orphans[0].blockId).toBe("blk-gone");
   });
+
+  it("stamps provenance on placed comments, never on orphans", () => {
+    const anchors = new Map([
+      ["blk-2", "A.p2"],
+      ["blk-3", "A.s1"],
+    ]);
+    const { placed, orphans } = reanchorReturn(returnPayload(), anchors);
+    for (const p of placed) {
+      expect(p.externalCreatedAt).toBe(1_700_000_100_000);
+      expect(p.shareRequestId).toBe("req-1");
+    }
+    // Orphans stay raw ReturnComments — provenance is stamped at placement.
+    expect(orphans[0]).not.toHaveProperty("externalCreatedAt");
+    expect(orphans[0]).not.toHaveProperty("shareRequestId");
+  });
 });

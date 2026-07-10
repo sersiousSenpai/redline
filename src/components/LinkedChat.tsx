@@ -13,6 +13,7 @@ import type {
 } from "../types";
 import { captureSnapshotOrCached } from "../lib/domSnapshot";
 import { MarkdownView } from "./MarkdownView";
+import { WorkingIndicator } from "./WorkingIndicator";
 
 interface LinkedChatProps {
   linked: Linked;
@@ -272,7 +273,12 @@ export function LinkedChat({
             <MessageBubble key={m.id} msg={m} onOpenLink={onOpenLink} onSendToRedline={onSendToRedline} onSendToDrafter={onSendToDrafter} />
           ))
         )}
-        {status === "streaming" && <StreamingBubble text={liveText} onOpenLink={onOpenLink} />}
+        {status === "streaming" &&
+          (liveText ? (
+            <StreamingBubble text={liveText} onOpenLink={onOpenLink} />
+          ) : (
+            <WorkingIndicator />
+          ))}
       </div>
 
       <div className="px-3 py-2 shrink-0" style={{ borderTop: "1px solid var(--color-rule)" }}>

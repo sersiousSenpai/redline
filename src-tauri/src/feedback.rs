@@ -457,6 +457,8 @@ mod tests {
             author: None,
             agent_state: None,
             reviewer: None,
+            external_created_at: None,
+            share_request_id: None,
         }
     }
 
@@ -589,6 +591,8 @@ mod tests {
             author: None,
             agent_state: None,
             reviewer: None,
+            external_created_at: None,
+            share_request_id: None,
         };
         let prose = mk_comment(
             "c-001",

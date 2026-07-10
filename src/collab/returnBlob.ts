@@ -194,6 +194,10 @@ export function reanchorReturn(
       // block whose text changed — same machinery as native comments.
       ...(c.selection ? { selection: c.selection } : {}),
       reviewer: payload.reviewerName,
+      // Provenance: when the reviewer actually wrote it and which share it
+      // arrived on — rendered as the "external" chip, never into feedback.
+      externalCreatedAt: payload.createdAt,
+      shareRequestId: payload.requestId,
     });
   }
   return { placed, orphans };

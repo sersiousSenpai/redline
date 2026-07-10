@@ -13,6 +13,7 @@ import type {
   MissionMessage,
 } from "../types";
 import { MarkdownView } from "./MarkdownView";
+import { WorkingIndicator } from "./WorkingIndicator";
 
 interface MissionChatProps {
   mission: Mission;
@@ -249,7 +250,12 @@ export function MissionChat({
             <MessageBubble key={m.id} msg={m} onOpenLink={onOpenLink} onSynthesize={onSynthesize} />
           ))
         )}
-        {status === "streaming" && <StreamingBubble text={liveText} onOpenLink={onOpenLink} />}
+        {status === "streaming" &&
+          (liveText ? (
+            <StreamingBubble text={liveText} onOpenLink={onOpenLink} />
+          ) : (
+            <WorkingIndicator />
+          ))}
       </div>
 
       <div className="px-3 py-2 shrink-0" style={{ borderTop: "1px solid var(--color-rule)" }}>

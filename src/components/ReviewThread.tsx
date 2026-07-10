@@ -14,6 +14,7 @@ import type {
   ThreadMessage,
 } from "../types";
 import { MarkdownView } from "./MarkdownView";
+import { WorkingIndicator } from "./WorkingIndicator";
 
 // Per-annotation discussion thread for the Code Review surface. The compact
 // sibling of CommentThread: same `fork-*` streaming contract and
@@ -158,7 +159,7 @@ export function ReviewThread({ reviewId, annotationId, kind = "annotation" }: Re
           {streamText ? (
             <MarkdownView body={streamText} compact />
           ) : (
-            <span style={{ color: "var(--color-ink-muted)" }}>Thinking…</span>
+            <WorkingIndicator />
           )}
         </div>
       )}
