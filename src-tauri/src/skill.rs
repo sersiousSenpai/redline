@@ -256,6 +256,129 @@ pub fn install() -> Result<SkillStatus, String> {
     install_under(&skills_root(), &discover_user_skills())
 }
 
+/// One card in the settings Skills panel. Built-ins are the opinionated
+/// defaults that teach the format; user skills are the freely-editable copies
+/// living under `~/.redline/skills/`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillCard {
+    pub name: String,
+    pub builtin: bool,
+    /// Bundle version — built-ins only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
+    /// Editable source path — user skills only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// The frontmatter `description:` scalar's first line, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// The first line of the frontmatter `description:` — enough for a card
+/// subtitle. Handles both inline scalars (`description: text`) and the
+/// block-scalar form (`description: >-` followed by indented lines).
+fn frontmatter_description(content: &str) -> Option<String> {
+    let mut lines = content.lines().take(40).peekable();
+    while let Some(line) = lines.next() {
+        let Some(rest) = line.strip_prefix("description:") else {
+            continue;
+        };
+        let inline = rest.trim();
+        let text = if inline.is_empty() || inline.starts_with('>') || inline.starts_with('|') {
+            lines
+                .peek()
+                .map(|l| l.trim().to_string())
+                .unwrap_or_default()
+        } else {
+            inline.to_string()
+        };
+        if text.is_empty() {
+            return None;
+        }
+        let mut out = text;
+        if out.len() > 140 {
+            out.truncate(140);
+        }
+        return Some(out);
+    }
+    None
+}
+
+/// Cards for every built-in plus the user skills discovered under `user_dir`.
+pub fn list_cards_under(user_dir: &std::path::Path) -> Vec<SkillCard> {
+    let mut out: Vec<SkillCard> = SKILLS
+        .iter()
+        .map(|s| SkillCard {
+            name: s.name.to_string(),
+            builtin: true,
+            version: Some(s.version),
+            path: None,
+            description: frontmatter_description(s.content),
+        })
+        .collect();
+    for user in discover_user_skills_under(user_dir) {
+        out.push(SkillCard {
+            name: user.name.clone(),
+            builtin: false,
+            version: None,
+            path: Some(
+                user_dir
+                    .join(&user.name)
+                    .join("SKILL.md")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            description: frontmatter_description(&user.content),
+        });
+    }
+    out
+}
+
+/// Duplicate a built-in skill into `<user_dir>/my-<name>/SKILL.md`, where it
+/// is freely editable (user skills are presence-only — never clobbered on
+/// reinstall). Remixing an opinionated default beats authoring from scratch,
+/// so the copy is byte-faithful except the frontmatter `name:` line, which is
+/// retargeted so the duplicate never masquerades as the shipped skill.
+pub fn duplicate_skill_under(user_dir: &std::path::Path, name: &str) -> Result<String, String> {
+    let skill = SKILLS
+        .iter()
+        .find(|s| s.name == name)
+        .ok_or_else(|| format!("unknown built-in skill: {name}"))?;
+    let new_name = format!("my-{name}");
+    let dest = user_dir.join(&new_name);
+    if dest.join("SKILL.md").is_file() {
+        return Err(format!("{new_name} already exists — edit it in place"));
+    }
+    let mut content = String::with_capacity(skill.content.len());
+    let mut renamed = false;
+    for line in skill.content.split_inclusive('\n') {
+        if !renamed && line.trim_end() == format!("name: {name}") {
+            content.push_str(&format!("name: {new_name}\n"));
+            renamed = true;
+        } else {
+            content.push_str(line);
+        }
+    }
+    fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
+    fs::write(dest.join("SKILL.md"), content).map_err(|e| e.to_string())?;
+    Ok(new_name)
+}
+
+/// Tauri command: cards for the settings Skills panel.
+#[tauri::command]
+pub fn list_skill_cards() -> Vec<SkillCard> {
+    list_cards_under(&user_skills_root())
+}
+
+/// Tauri command: duplicate a built-in into `~/.redline/skills/` and return
+/// the new skill's name. The frontend follows up with `install_skill` so the
+/// copy syncs to `~/.claude/skills` like any user skill.
+#[tauri::command]
+pub fn duplicate_skill(name: String) -> Result<String, String> {
+    duplicate_skill_under(&user_skills_root(), &name)
+}
+
 /// Write every embedded skill plus the given user skills under `root`
 /// (`<root>/<name>/SKILL.md`), creating directories as needed. Idempotent by
 /// overwrite — a skill is a whole-file artifact Redline owns, so (unlike the
@@ -651,5 +774,61 @@ mod tests {
             "edited at destination"
         );
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cards_list_builtins_then_user_skills_with_descriptions() {
+        let dir = tmpdir();
+        fs::create_dir_all(dir.join("my-notes")).unwrap();
+        fs::write(
+            skill_md(&dir, "my-notes"),
+            "---\nname: my-notes\ndescription: Take notes my way.\n---\nbody",
+        )
+        .unwrap();
+
+        let cards = list_cards_under(&dir);
+        assert_eq!(cards.len(), SKILLS.len() + 1);
+        let browse = cards.iter().find(|c| c.name == "browse").unwrap();
+        assert!(browse.builtin);
+        assert_eq!(browse.version, Some(6));
+        assert!(browse.path.is_none());
+        // Block-scalar (`description: >-`) frontmatter still yields a subtitle.
+        assert!(browse.description.as_deref().unwrap().starts_with("Discussing"));
+        let mine = cards.iter().find(|c| c.name == "my-notes").unwrap();
+        assert!(!mine.builtin);
+        assert_eq!(mine.version, None);
+        assert!(mine.path.as_deref().unwrap().ends_with("my-notes/SKILL.md"));
+        assert_eq!(mine.description.as_deref(), Some("Take notes my way."));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn duplicate_copies_a_builtin_and_retargets_its_frontmatter_name() {
+        let dir = tmpdir();
+        let new_name = duplicate_skill_under(&dir, "browse").unwrap();
+        assert_eq!(new_name, "my-browse");
+        let content = fs::read_to_string(skill_md(&dir, "my-browse")).unwrap();
+        assert!(content.starts_with("---\nname: my-browse\n"));
+        // Byte-faithful apart from the name line.
+        let original = SKILLS.iter().find(|s| s.name == "browse").unwrap().content;
+        assert_eq!(
+            content.replacen("name: my-browse", "name: browse", 1),
+            original
+        );
+        // The duplicate is now discoverable as a user skill.
+        assert!(discover_user_skills_under(&dir)
+            .iter()
+            .any(|s| s.name == "my-browse"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn duplicate_rejects_unknown_names_and_existing_copies() {
+        let dir = tmpdir();
+        assert!(duplicate_skill_under(&dir, "no-such-skill").is_err());
+        duplicate_skill_under(&dir, "browse").unwrap();
+        let err = duplicate_skill_under(&dir, "browse").unwrap_err();
+        assert!(err.contains("already exists"));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

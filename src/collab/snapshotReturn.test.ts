@@ -25,6 +25,9 @@ import {
   verifyReturn,
   type ReturnPayload,
 } from "./returnBlob";
+import { serializeDocBlocks } from "../editor/docModel";
+import { planMarkdownToDoc } from "../editor/markdown";
+import { reconstructReturnEdits } from "../editor/returnEditReconstruct";
 
 beforeAll(async () => {
   // jsdom's crypto lacks subtle; fall back to Node's WebCrypto in tests.
@@ -320,5 +323,45 @@ describe("re-anchor to current revision", () => {
     // Orphans stay raw ReturnComments — provenance is stamped at placement.
     expect(orphans[0]).not.toHaveProperty("externalCreatedAt");
     expect(orphans[0]).not.toHaveProperty("shareRequestId");
+  });
+
+  it("reconstructs a viewer snippet edit into a whole-block edit at import", () => {
+    // The viewer sends selection-scoped edits (original = the selected words
+    // only). Import must rebuild the whole-block {original, revised} so the
+    // editor renders a fine-grained word diff, not a whole-paragraph strike.
+    const md =
+      "<!-- rl:blk-2 -->\nThe plan evaluates each facet against the actual codebase.\n";
+    const anchors = new Map([["blk-2", "A.p1"]]);
+    const seed = new Map(
+      serializeDocBlocks(planMarkdownToDoc(md), anchors).map(
+        (b) => [b.blockId, b.markdown] as const,
+      ),
+    );
+    const payload: ReturnPayload = {
+      v: 1,
+      requestId: "req-1",
+      baseVersion: 3,
+      reviewerName: "John Doe",
+      createdAt: 1_700_000_100_000,
+      comments: [
+        {
+          type: "edit",
+          blockId: "blk-2",
+          body: "",
+          edit: { original: "each facet", revised: "every single facet" },
+          selection: { charStart: 19, charEnd: 29, quotedText: "each facet" },
+        },
+      ],
+    };
+    const { placed } = reanchorReturn(payload, anchors);
+    const [normalized] = reconstructReturnEdits(placed, seed);
+    expect(normalized.edit).toEqual({
+      original: "The plan evaluates each facet against the actual codebase.",
+      revised:
+        "The plan evaluates every single facet against the actual codebase.",
+    });
+    expect(normalized.edit!.original).toBe(seed.get("blk-2"));
+    // The selection keeps riding along — it still drives the highlight.
+    expect(normalized.selection?.quotedText).toBe("each facet");
   });
 });

@@ -131,6 +131,31 @@ import {
   type MainSurface,
   migrateMainSurfaceOnce,
 } from "./lib/mainSurface";
+import {
+  defaultWorkspace,
+  headerSurfaces,
+  initialSurface,
+  moveHeaderSurface,
+  parseWorkspace,
+  serializeWorkspace,
+  setLanding,
+  setSurfaceEnabled,
+  surfaceEnabled,
+  type ToggleableSurface,
+  type Workspace,
+} from "./config/workspace";
+import { SurfacesPanel } from "./components/SurfacesPanel";
+import { NudgeCard } from "./components/NudgeCard";
+import {
+  dismissSuggestion,
+  emptyNudgeState,
+  parseNudgeState,
+  recordLaunch,
+  serializeNudgeState,
+  suggestLanding,
+  NUDGE_WINDOW_MS,
+  type NudgeState,
+} from "./lib/nudge";
 import { computePaneLayout } from "./lib/paneLayout";
 import { buildPlanLaunchCommand } from "./lib/planLaunchCommand";
 import { guessProjectForPlan } from "./lib/guessProject";
@@ -404,6 +429,88 @@ function App() {
   // Fresh view of selectSurface for mount-once listeners (review-requested).
   const selectSurfaceRef = useRef(selectSurface);
   selectSurfaceRef.current = selectSurface;
+  // The workspace manifest — ~/.redline/workspace.json, the file that makes
+  // this build *yours*: which surfaces exist, header order, landing surface.
+  // GUI–file duality: the file is the store, this state is the lens; every
+  // customization gesture funnels through updateWorkspace, which rewrites the
+  // file. Loaded in the initial-load effect; until then, defaults (= today's
+  // stock UI) apply.
+  const [workspace, setWorkspace] = useState<Workspace>(() =>
+    defaultWorkspace(),
+  );
+  const updateWorkspace = useCallback(
+    (fn: (ws: Workspace) => Workspace) => {
+      setWorkspace((prev) => {
+        const next = fn(prev);
+        if (next !== prev) {
+          void invoke("save_workspace", {
+            json: serializeWorkspace(next),
+          }).catch(() => {});
+        }
+        return next;
+      });
+    },
+    [],
+  );
+  const headerSurfaceList = useMemo(
+    () => headerSurfaces(workspace),
+    [workspace],
+  );
+  // Workspace-nudge bookkeeping (src/lib/nudge.ts): the launch-habit history
+  // feeding the one quiet suggestion. Loaded with the other DB prefs; every
+  // change writes back so "fires at most once" survives restarts.
+  const [nudgeState, setNudgeState] = useState<NudgeState>(() =>
+    emptyNudgeState(),
+  );
+  const saveNudgeState = useCallback((next: NudgeState) => {
+    setNudgeState(next);
+    void invoke("set_ui_pref", {
+      key: "workspaceNudge",
+      value: serializeNudgeState(next),
+    }).catch(() => {});
+  }, []);
+  const nudgeStateRef = useRef(nudgeState);
+  nudgeStateRef.current = nudgeState;
+  // Launch-habit watcher: after boot settles, the FIRST surface switch inside
+  // the watch window is this launch's habit sample. One sample per launch.
+  const launchWatchRef = useRef<{
+    from: MainSurface;
+    startedAt: number;
+    done: boolean;
+  } | null>(null);
+  useEffect(() => {
+    const watch = launchWatchRef.current;
+    if (!watch || watch.done) return;
+    if (mainSurface === watch.from) return;
+    watch.done = true;
+    if (Date.now() - watch.startedAt <= NUDGE_WINDOW_MS) {
+      saveNudgeState(recordLaunch(nudgeStateRef.current, mainSurface));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mainSurface]);
+  const nudgeSuggestion = useMemo(
+    () => suggestLanding(nudgeState, workspace),
+    [nudgeState, workspace],
+  );
+  const voiceEnabled = surfaceEnabled(workspace, "voice");
+  const companionEnabled = surfaceEnabled(workspace, "companion");
+  // Fresh view of mainSurface for the boot-time landing decision.
+  const mainSurfaceRef = useRef(mainSurface);
+  mainSurfaceRef.current = mainSurface;
+  // Hiding a surface you're standing on sends you to the document; the
+  // header entry is already gone, so staying would strand the pane with no
+  // way back. (Only manifest changes trigger this — programmatic opens like
+  // review-requested still work on a hidden surface by design: a blocking
+  // agent review must never be stranded by a cosmetic hide.)
+  useEffect(() => {
+    if (
+      mainSurface !== "document" &&
+      !surfaceEnabled(workspace, mainSurface as ToggleableSurface)
+    ) {
+      selectSurfaceRef.current("document");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspace]);
   // The Prompt Drafter — a Word-style authoring surface selected into the
   // center pane. Its draft (Tiptap JSON) and the project it launches into
   // persist across reloads.
@@ -484,6 +591,11 @@ function App() {
   const [companionOpen, setCompanionOpen] = useState(false);
   const companionCtl = useCompanion(companionOpen);
   useEffect(() => {
+    if (!companionEnabled) {
+      // Disabled in the workspace manifest: drop the drawer and the shortcut.
+      setCompanionOpen(false);
+      return;
+    }
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && (e.key === "j" || e.key === "J")) {
         e.preventDefault();
@@ -492,7 +604,14 @@ function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [companionEnabled]);
+  // Same rule for the voice drawers when the voice surface is manifest-off.
+  useEffect(() => {
+    if (!voiceEnabled) {
+      setVoiceOpen(false);
+      setDrafterVoiceOpen(false);
+    }
+  }, [voiceEnabled]);
   const codeReview = useReview();
   // A `/redline-code-review` curl is holding for feedback → surface the review
   // pane immediately (the hook itself adopts the repo/source/round).
@@ -1075,6 +1194,7 @@ function App() {
         theme?: string | null;
         font?: string | null;
         lint?: string | null;
+        workspaceNudge?: string | null;
       };
       try {
         prefs = await invoke("get_ui_prefs");
@@ -1082,6 +1202,7 @@ function App() {
         return;
       }
       if (cancelled) return;
+      setNudgeState(parseNudgeState(prefs.workspaceNudge));
       const setPref = (key: string, value: string) => {
         void invoke("set_ui_pref", { key, value }).catch(() => {});
       };
@@ -1159,6 +1280,22 @@ function App() {
       setLint(suggestedLint);
       applyLint(suggestedLint);
     }
+  };
+
+  // The theme editor saved ~/.redline/themes/<slug>.json — re-list the dir so
+  // the new file registers (same path a hand-dropped file takes), then switch
+  // to it through the normal pick flow (applies + persists to DB).
+  const onUserThemeSaved = (slug: string) => {
+    void (async () => {
+      try {
+        const files =
+          await invoke<{ name: string; json: string }[]>("list_user_themes");
+        setUserThemes(registerUserThemes(files));
+      } catch {
+        return;
+      }
+      onThemeChange(slug);
+    })();
   };
 
   const onFontChange = (name: FontName) => {
@@ -1341,10 +1478,37 @@ function App() {
       } catch (err) {
         console.error("get_daemon_status failed", err);
       }
+      // The workspace manifest gates what mounts, so it loads with the other
+      // boot lookups. Missing/malformed file = defaults = today's stock UI.
+      let ws = defaultWorkspace();
+      try {
+        ws = parseWorkspace(await invoke<string | null>("get_workspace"));
+        setWorkspace(ws);
+      } catch {
+        /* command unavailable (tests / web) — defaults apply */
+      }
       const list = await refreshSummaries();
       const first = list[0]?.sessionId ?? null;
       setActiveId(first);
       await loadSession(first);
+      // Landing: "last" (default) keeps the persisted surface — today's
+      // behavior. A fixed or per-project landing overrides it; a landing on
+      // a disabled surface falls back to the document.
+      const target = initialSurface(
+        ws,
+        mainSurfaceRef.current,
+        list[0]?.projectPath ?? null,
+      );
+      if (target !== mainSurfaceRef.current) {
+        selectSurfaceRef.current(target);
+      }
+      // Boot has settled — the next surface switch (if soon) is this
+      // launch's habit sample for the landing nudge.
+      launchWatchRef.current = {
+        from: target,
+        startedAt: Date.now(),
+        done: false,
+      };
       setLoading(false);
     })();
   }, []);
@@ -2955,6 +3119,20 @@ function App() {
         }}
         surface={mainSurface}
         onSelectSurface={selectSurface}
+        surfaces={headerSurfaceList}
+        onHideSurface={(id) =>
+          updateWorkspace((ws) => setSurfaceEnabled(ws, id, false))
+        }
+        onMoveSurface={(id, delta) =>
+          updateWorkspace((ws) => moveHeaderSurface(ws, id, delta))
+        }
+        companionEnabled={companionEnabled}
+        collabEnabled={surfaceEnabled(workspace, "collab")}
+        memoryEnabled={surfaceEnabled(workspace, "memory")}
+        surfacesPanel={
+          <SurfacesPanel workspace={workspace} onUpdate={updateWorkspace} />
+        }
+        onUserThemeSaved={onUserThemeSaved}
         docPinned={docPinned}
         onToggleDocPin={() => {
           // Entering/leaving a tile — reset the split so both panes show.
@@ -3516,7 +3694,8 @@ function App() {
               Header), so it reads as a plan feature reached while working with
               the plan. Only over an actual plan (not the browser/drafter/folder
               viewer). */}
-          {sessionReady &&
+          {voiceEnabled &&
+            sessionReady &&
             latest &&
             mainSurface === "document" &&
             !(sidebarTab.kind === "folder" && activeFile) && (
@@ -3561,7 +3740,7 @@ function App() {
           {/* Drafter voice — the same 🎙️ drawer over the Prompt Drafter, keyed
               `drafter:<draft_id>` (the backend derives the kind from the key
               shape) and primed with the draft's markdown mirror. */}
-          {mainSurface === "drafter" && drafterDraftId && (
+          {voiceEnabled && mainSurface === "drafter" && drafterDraftId && (
             <>
               {!drafterVoiceOpen && (
                 <button
@@ -4324,6 +4503,7 @@ function App() {
           version={latest.versionNumber}
           ownerName={relayDefaults.displayName}
           currentSections={latest.sections}
+          currentMarkdown={latest.rawPlanMarkdown}
           addComment={addEditorComment}
           onNavigateToReturn={(ret) => {
             // Land where the comments actually live: the revision that was
@@ -4405,6 +4585,22 @@ function App() {
           onNew={() => void companionCtl.create()}
           onDelete={(id) => void companionCtl.remove(id)}
           onClose={() => setCompanionOpen(false)}
+        />
+      )}
+      {/* The one quiet workspace suggestion (nudge.ts) — accept edits the
+          manifest, dismiss retires it; either way it never fires again. */}
+      {nudgeSuggestion && !loading && (
+        <NudgeCard
+          message={nudgeSuggestion.message}
+          onAccept={() => {
+            updateWorkspace((ws) => setLanding(ws, nudgeSuggestion.surface));
+            saveNudgeState(
+              dismissSuggestion(nudgeState, nudgeSuggestion.id),
+            );
+          }}
+          onDismiss={() =>
+            saveNudgeState(dismissSuggestion(nudgeState, nudgeSuggestion.id))
+          }
         />
       )}
     </div>

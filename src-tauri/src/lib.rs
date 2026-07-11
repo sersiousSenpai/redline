@@ -5581,6 +5581,11 @@ struct UiPrefs {
     theme: Option<String>,
     font: Option<String>,
     lint: Option<String>,
+    /// Workspace-nudge bookkeeping (launch-habit history + retired
+    /// suggestions) — an opaque JSON blob owned by src/lib/nudge.ts. In the
+    /// DB rather than localStorage so "fires at most once" survives a
+    /// cache clear.
+    workspace_nudge: Option<String>,
 }
 
 /// `key` → `app_settings` row; the allowlist keeps this command from becoming
@@ -5590,6 +5595,7 @@ fn ui_pref_setting_key(key: &str) -> Option<&'static str> {
         "theme" => Some("redline.ui.theme"),
         "font" => Some("redline.ui.font"),
         "lint" => Some("redline.ui.lint"),
+        "workspaceNudge" => Some("redline.ui.workspaceNudge"),
         _ => None,
     }
 }
@@ -5600,6 +5606,7 @@ fn get_ui_prefs(settings: tauri::State<'_, Settings>) -> UiPrefs {
         theme: settings.db.get_setting("redline.ui.theme"),
         font: settings.db.get_setting("redline.ui.font"),
         lint: settings.db.get_setting("redline.ui.lint"),
+        workspace_nudge: settings.db.get_setting("redline.ui.workspaceNudge"),
     }
 }
 
@@ -7777,6 +7784,10 @@ pub fn run() {
             set_claude_bin_override,
             userconfig::list_user_themes,
             userconfig::save_user_theme,
+            userconfig::get_workspace,
+            userconfig::save_workspace,
+            skill::list_skill_cards,
+            skill::duplicate_skill,
             get_relay_config,
             set_relay_config,
             get_owner_secret,

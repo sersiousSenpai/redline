@@ -23,7 +23,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 import type { Comment, NewCommentRequest, Section } from "../types";
-import { anchorByBlockId } from "../editor/docModel";
+import { anchorByBlockId, serializeDocBlocks } from "../editor/docModel";
+import { planMarkdownToDoc } from "../editor/markdown";
+import { reconstructReturnEdits } from "../editor/returnEditReconstruct";
 import {
   encodeSnapshot,
   snapshotLink,
@@ -95,6 +97,9 @@ interface ShareSnapshotDialogProps {
   ownerName: string;
   /** The CURRENT revision's sections — returns re-anchor by blockId onto it. */
   currentSections: Section[];
+  /** The CURRENT revision's raw plan markdown — the whole-block seed viewer
+   *  snippet edits are reconstructed against at import. */
+  currentMarkdown: string;
   /** Persist one re-anchored annotation as a native comment/suggestion.
    *  Resolves to the created `Comment` (the returns registry records its id). */
   addComment: (req: NewCommentRequest) => Promise<unknown>;
@@ -141,6 +146,7 @@ export function ShareSnapshotDialog({
   version,
   ownerName,
   currentSections,
+  currentMarkdown,
   addComment,
   onNavigateToReturn,
   onClose,
@@ -245,6 +251,7 @@ export function ShareSnapshotDialog({
               sessionId={sessionId}
               landedVersion={version}
               currentSections={currentSections}
+              currentMarkdown={currentMarkdown}
               addComment={addComment}
               onImported={refresh}
             />
@@ -619,6 +626,7 @@ function ImportPanel({
   sessionId,
   landedVersion,
   currentSections,
+  currentMarkdown,
   addComment,
   onImported,
 }: {
@@ -626,6 +634,7 @@ function ImportPanel({
   /** The current (latest) revision — where the placed comments land. */
   landedVersion: number;
   currentSections: Section[];
+  currentMarkdown: string;
   addComment: (req: NewCommentRequest) => Promise<unknown>;
   onImported: () => Promise<void>;
 }) {
@@ -637,6 +646,18 @@ function ImportPanel({
   const anchors = useMemo(
     () => anchorByBlockId(currentSections),
     [currentSections],
+  );
+  // Whole-block seed markdown in round-trip space — the same bytes
+  // PlanEditor's seedMap holds (parse + serialize fixed point), so
+  // reconstructed edits align with the materialize pristine checks.
+  const seedMap = useMemo(
+    () =>
+      new Map(
+        serializeDocBlocks(planMarkdownToDoc(currentMarkdown), anchors).map(
+          (b) => [b.blockId, b.markdown] as const,
+        ),
+      ),
+    [currentMarkdown, anchors],
   );
 
   const importReturn = async () => {
@@ -660,7 +681,12 @@ function ImportPanel({
         );
         return;
       }
-      const { placed, orphans } = reanchorReturn(verified, anchors);
+      const { placed: raw, orphans } = reanchorReturn(verified, anchors);
+      // Viewer edits are selection-scoped snippets; rebuild them as
+      // whole-block {original, revised} so they materialize as fine-grained
+      // word diffs (unreconstructable ones stay card-only, never a
+      // whole-paragraph strike).
+      const placed = reconstructReturnEdits(raw, seedMap);
       const commentIds: string[] = [];
       for (const req of placed) {
         const created = (await addComment(req)) as Comment | undefined;

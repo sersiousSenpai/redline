@@ -1,15 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { useEffect, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import type { InterceptionMode, ReviewSession } from "../types";
 import type { MainSurface } from "../lib/mainSurface";
+import type { SurfaceDescriptor, ToggleableSurface } from "../config/workspace";
+import { useMenuOverlay } from "./menuOverlay";
 import type { ThemeEntry, ThemeName } from "../theme/themes";
 import type { FontName } from "../theme/fonts";
 import type { LintName } from "../theme/lint";
 import { ThemePicker } from "./ThemePicker";
+import { ThemeEditor } from "./ThemeEditor";
 import { FontPicker } from "./FontPicker";
 import { AgentSeats } from "./AgentSeats";
+import { SkillsPanel } from "./SkillsPanel";
 import { LintPicker } from "./LintPicker";
 import { DownloadMenu } from "./DownloadMenu";
 import { ModeToggle } from "./ModeToggle";
@@ -145,10 +150,26 @@ interface HeaderProps {
   onFlashSoundConfigChange: (next: SoundConfig) => void;
   onFlashSoundPreview: (config: SoundConfig) => void;
   onFlashTest: () => void;
-  /** Which single surface owns the center pane. The four surface buttons are
+  /** Which single surface owns the center pane. The surface buttons are
    *  a radio group: clicking always full-switches, never tiles. */
   surface: MainSurface;
   onSelectSurface: (next: MainSurface) => void;
+  /** The main-pane radio group, composed by the workspace manifest — order
+   *  and membership come from ~/.redline/workspace.json (see workspace.ts). */
+  surfaces: SurfaceDescriptor[];
+  /** Edit-in-place: right-click a surface button → hide / move. Both write
+   *  the workspace manifest — customization happens where the thing is. */
+  onHideSurface: (id: ToggleableSurface) => void;
+  onMoveSurface: (id: MainSurface, delta: -1 | 1) => void;
+  /** Manifest-gated auxiliary surfaces. */
+  companionEnabled: boolean;
+  collabEnabled: boolean;
+  /** The Surfaces row content for the settings menu (SurfacesPanel). */
+  surfacesPanel: ReactNode;
+  memoryEnabled: boolean;
+  /** The theme editor wrote ~/.redline/themes/<slug>.json — refresh the
+   *  registry and switch to it. */
+  onUserThemeSaved: (slug: string) => void;
   /** Explicit tiling: keep the document alongside a non-document surface. */
   docPinned: boolean;
   onToggleDocPin: () => void;
@@ -203,6 +224,14 @@ export function Header({
   onFlashTest,
   surface,
   onSelectSurface,
+  surfaces,
+  onHideSurface,
+  onMoveSurface,
+  companionEnabled,
+  collabEnabled,
+  surfacesPanel,
+  memoryEnabled,
+  onUserThemeSaved,
   docPinned,
   onToggleDocPin,
   splitActive,
@@ -218,6 +247,53 @@ export function Header({
   canShare,
   onShareSnapshot,
 }: HeaderProps) {
+  // Edit-in-place context menu: right-click a surface button to hide or move
+  // it. Each action writes the workspace manifest — the file is the store.
+  const [ctxMenu, setCtxMenu] = useState<{
+    x: number;
+    y: number;
+    id: MainSurface | "companion";
+  } | null>(null);
+  useMenuOverlay(!!ctxMenu);
+  useEffect(() => {
+    if (!ctxMenu) return;
+    const close = () => setCtxMenu(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setCtxMenu(null);
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [ctxMenu]);
+
+  const ctxItems: { label: string; onPick: () => void }[] = [];
+  if (ctxMenu) {
+    if (ctxMenu.id !== "companion") {
+      const idx = surfaces.findIndex((d) => d.id === ctxMenu.id);
+      if (idx > 0) {
+        ctxItems.push({
+          label: "Move left",
+          onPick: () => onMoveSurface(ctxMenu.id as MainSurface, -1),
+        });
+      }
+      if (idx >= 0 && idx < surfaces.length - 1) {
+        ctxItems.push({
+          label: "Move right",
+          onPick: () => onMoveSurface(ctxMenu.id as MainSurface, 1),
+        });
+      }
+    }
+    if (ctxMenu.id !== "document") {
+      ctxItems.push({
+        label: "Hide",
+        onPick: () => onHideSurface(ctxMenu.id as ToggleableSurface),
+      });
+    }
+  }
+
   const latest = session?.revisions[session.revisions.length - 1];
   const downloadVersion = viewedVersionNumber ?? latest?.versionNumber;
   // Badge shows the substantive version — restores re-use the version they
@@ -240,28 +316,29 @@ export function Header({
     >
       <div className="flex items-center gap-3">
         <div className="flex items-center gap-1.5" role="radiogroup" aria-label="Main pane surface">
-          {/* Surface radio group — always visible, clicking full-switches the
-              center pane (clicking the active surface is a no-op). Text-only
-              labels (no glyphs; the emoji read as toy-like and one filled its
-              button). The tooltip carries the longer description. */}
-          {(
-            [
-              ["document", "Document", "Show the document"],
-              ["browser", "Browser", "Switch to the browser"],
-              ["drafter", "Prompt Drafter", "Draft a new prompt"],
-              ["review", "Code Review", "Review code changes"],
-            ] as const
-          ).map(([key, label, title]) => (
-            <HeaderButton
-              key={key}
-              onClick={() => {
-                if (surface !== key) onSelectSurface(key);
+          {/* Surface radio group — clicking full-switches the center pane
+              (clicking the active surface is a no-op). Membership and order
+              come from the workspace manifest; right-click edits in place.
+              Text-only labels (no glyphs; the emoji read as toy-like and one
+              filled its button). The tooltip carries the longer description. */}
+          {surfaces.map(({ id, label, title }) => (
+            <span
+              key={id}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setCtxMenu({ x: e.clientX, y: e.clientY, id });
               }}
-              active={surface === key}
-              title={surface === key ? `${label} is showing` : title}
-              ariaLabel={title}
-              label={label}
-            />
+            >
+              <HeaderButton
+                onClick={() => {
+                  if (surface !== id) onSelectSurface(id);
+                }}
+                active={surface === id}
+                title={surface === id ? `${label} is showing` : title}
+                ariaLabel={title}
+                label={label}
+              />
+            </span>
           ))}
           {/* Explicit tiling: while a non-document surface is up, pin the
               document alongside it. Sticky — switching surfaces then swaps
@@ -283,26 +360,37 @@ export function Header({
               icon="◫"
             />
           )}
-          <HeaderButton
-            onClick={onToggleCompanion}
-            active={companionOpen}
-            title={
-              companionOpen
-                ? "Close the Companion (⌘J)"
-                : "The Companion — one conversation that follows you everywhere (⌘J)"
-            }
-            ariaLabel={
-              companionOpen ? "Close the Companion" : "Open the Companion"
-            }
-            label="Companion"
-          />
+          {companionEnabled && (
+            <span
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setCtxMenu({ x: e.clientX, y: e.clientY, id: "companion" });
+              }}
+            >
+              <HeaderButton
+                onClick={onToggleCompanion}
+                active={companionOpen}
+                title={
+                  companionOpen
+                    ? "Close the Companion (⌘J)"
+                    : "The Companion — one conversation that follows you everywhere (⌘J)"
+                }
+                ariaLabel={
+                  companionOpen ? "Close the Companion" : "Open the Companion"
+                }
+                label="Companion"
+              />
+            </span>
+          )}
           {/* Invite + Join folded into one Live Session dropdown. */}
-          <LiveSessionMenu
-            canInvite={canInvite}
-            collabActive={collabActive}
-            onInvite={onInvite}
-            onJoinSession={onJoinSession}
-          />
+          {collabEnabled && (
+            <LiveSessionMenu
+              canInvite={canInvite}
+              collabActive={collabActive}
+              onInvite={onInvite}
+              onJoinSession={onJoinSession}
+            />
+          )}
           {splitActive && (
             <HeaderButton
               onClick={onToggleSplitOrientation}
@@ -317,15 +405,20 @@ export function Header({
         <SettingsMenu
           mode={<ModeToggle mode={mode} onChange={onModeChange} />}
           theme={
-            <ThemePicker
-              theme={theme}
-              onThemeChange={onThemeChange}
-              userThemes={userThemes}
-            />
+            <div className="flex items-center gap-1.5">
+              <ThemePicker
+                theme={theme}
+                onThemeChange={onThemeChange}
+                userThemes={userThemes}
+              />
+              <ThemeEditor theme={theme} onSaved={onUserThemeSaved} />
+            </div>
           }
           font={<FontPicker font={font} onFontChange={onFontChange} />}
           lint={<LintPicker lint={lint} onLintChange={onLintChange} />}
           agents={<AgentSeats />}
+          surfaces={surfacesPanel}
+          skills={<SkillsPanel />}
           notifications={
             <AlertSettings
               enabled={flashEnabled}
@@ -340,7 +433,9 @@ export function Header({
               onTest={onFlashTest}
             />
           }
-          memory={<MemoryStatusPill onOpen={onOpenMemory} />}
+          memory={
+            memoryEnabled ? <MemoryStatusPill onOpen={onOpenMemory} /> : null
+          }
         />
         {session && downloadVersion !== undefined && (
           <DownloadMenu
@@ -372,6 +467,45 @@ export function Header({
           </span>
         )}
       </div>
+      {ctxMenu && ctxItems.length > 0 && (
+        <div
+          role="menu"
+          aria-label="Customize surface"
+          className="fixed z-50 rounded-md py-1"
+          style={{
+            left: ctxMenu.x,
+            top: ctxMenu.y,
+            minWidth: "120px",
+            border: "1px solid var(--color-rule)",
+            background: "var(--color-bg-elevated)",
+            boxShadow: "0 8px 24px rgba(0,0,0,0.28)",
+          }}
+          // Keep the click-away closer from eating the item click.
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          {ctxItems.map((item) => (
+            <button
+              key={item.label}
+              type="button"
+              role="menuitem"
+              className="block w-full text-left px-3 py-1 font-sans"
+              style={{
+                fontSize: "11px",
+                background: "transparent",
+                border: "none",
+                color: "var(--color-ink)",
+                cursor: "pointer",
+              }}
+              onClick={() => {
+                item.onPick();
+                setCtxMenu(null);
+              }}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      )}
     </header>
   );
 }

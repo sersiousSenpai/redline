@@ -17,7 +17,12 @@ interface SettingsMenuProps {
   lint: ReactNode;
   /** Agent Seats — per-agent model/effort (see AgentSeats.tsx). */
   agents: ReactNode;
+  /** Surfaces — the workspace-manifest lens (see SurfacesPanel.tsx). */
+  surfaces: ReactNode;
+  /** Skills — duplicate-and-edit cards (see SkillsPanel.tsx). */
+  skills: ReactNode;
   notifications: ReactNode;
+  /** null when the memory surface is disabled in the workspace manifest. */
   memory: ReactNode;
 }
 
@@ -49,6 +54,8 @@ export function SettingsMenu({
   font,
   lint,
   agents,
+  surfaces,
+  skills,
   notifications,
   memory,
 }: SettingsMenuProps) {
@@ -137,8 +144,12 @@ export function SettingsMenu({
           <Row label="Font">{font}</Row>
           <Row label="Linting">{lint}</Row>
           <Row label="Agent Seats">{agents}</Row>
+          <Row label="Surfaces">{surfaces}</Row>
+          <Row label="Skills">{skills}</Row>
           <Row label="Notifications">{notifications}</Row>
-          <div className="flex items-center px-3 py-2">{memory}</div>
+          {memory != null && (
+            <div className="flex items-center px-3 py-2">{memory}</div>
+          )}
         </div>
       )}
     </div>
