@@ -99,13 +99,8 @@ import {
   storeLint,
   storeTheme,
 } from "./theme/applyTheme";
-import type { ThemeEntry, ThemeName } from "./theme/themes";
-import {
-  DEFAULT_THEME,
-  THEMES,
-  isThemeName,
-  registerUserThemes,
-} from "./theme/themes";
+import type { ThemeName } from "./theme/themes";
+import { DEFAULT_THEME, isThemeName } from "./theme/themes";
 import { SUGGESTED_FONT_FOR_THEME, isFontName } from "./theme/fonts";
 import { reconcilePick, reconcileTheme } from "./theme/prefsSync";
 import type { LintName } from "./theme/lint";
@@ -311,9 +306,6 @@ function App() {
   const [theme, setTheme] = useState<ThemeName>(() => readStoredTheme());
   const [font, setFont] = useState<FontName>(() => readStoredFont());
   const [lint, setLint] = useState<LintName>(() => readStoredLint());
-  // User themes from ~/.redline/themes/*.json, registered on mount. Held in
-  // state (not just the module registry) so the picker re-renders once loaded.
-  const [userThemes, setUserThemes] = useState<ThemeEntry[]>([]);
   // Flash-on-intercept alert: an opt-in full-window pulse (+ optional beep)
   // fired whenever a plan is intercepted. `flashSeq` bumps to (re)trigger the
   // overlay; the three prefs persist via localStorage.
@@ -1175,21 +1167,12 @@ function App() {
 
   // Appearance prefs live in the DB (`app_settings`) so a fork or second
   // machine carries them; localStorage is only the pre-paint cache. This mount
-  // effect (1) registers ~/.redline/themes/*.json user themes so their names
-  // resolve, then (2) reconciles DB vs local: a valid DB value wins (and marks
-  // the pick explicit), otherwise a real local pick migrates into the DB. The
-  // one-time migration is idempotent — once the DB row exists it simply wins.
+  // effect reconciles DB vs local: a valid DB value wins (and marks the pick
+  // explicit), otherwise a real local pick migrates into the DB. The one-time
+  // migration is idempotent — once the DB row exists it simply wins.
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      try {
-        const files =
-          await invoke<{ name: string; json: string }[]>("list_user_themes");
-        if (cancelled) return;
-        setUserThemes(registerUserThemes(files));
-      } catch {
-        /* command unavailable (tests / web) — built-ins only */
-      }
       let prefs: {
         theme?: string | null;
         font?: string | null;
@@ -1207,17 +1190,18 @@ function App() {
         void invoke("set_ui_pref", { key, value }).catch(() => {});
       };
       // THEME — the DB name wins when it resolves; otherwise the local pick
-      // migrates into the DB (rules in prefsSync.ts). `appliedAtBoot` is false
-      // for user themes: the pre-paint bootstrap skipped them.
-      const localTheme = readStoredTheme();
+      // migrates into the DB (rules in prefsSync.ts). readStoredTheme() only
+      // returns built-ins, which the pre-paint bootstrap already applied.
       const themeDecision = reconcileTheme({
         db: prefs.theme,
-        local: localTheme,
+        local: readStoredTheme(),
         resolves: isThemeName,
-        appliedAtBoot: THEMES.some((t) => t.name === localTheme),
+        appliedAtBoot: true,
         fallback: DEFAULT_THEME,
       });
-      if (themeDecision.apply) {
+      // The guard re-narrows prefsSync's plain strings to the closed unions —
+      // every branch inside reconcileTheme already resolved through it.
+      if (themeDecision.apply && isThemeName(themeDecision.apply)) {
         setTheme(themeDecision.apply);
         applyTheme(themeDecision.apply);
         storeTheme(themeDecision.apply);
@@ -1231,7 +1215,7 @@ function App() {
         hasExplicitLocal: hasStoredFont(),
         isValid: isFontName,
       });
-      if (fontDecision.apply) {
+      if (fontDecision.apply && isFontName(fontDecision.apply)) {
         setFont(fontDecision.apply);
         applyFont(fontDecision.apply);
         storeFont(fontDecision.apply);
@@ -1280,22 +1264,6 @@ function App() {
       setLint(suggestedLint);
       applyLint(suggestedLint);
     }
-  };
-
-  // The theme editor saved ~/.redline/themes/<slug>.json — re-list the dir so
-  // the new file registers (same path a hand-dropped file takes), then switch
-  // to it through the normal pick flow (applies + persists to DB).
-  const onUserThemeSaved = (slug: string) => {
-    void (async () => {
-      try {
-        const files =
-          await invoke<{ name: string; json: string }[]>("list_user_themes");
-        setUserThemes(registerUserThemes(files));
-      } catch {
-        return;
-      }
-      onThemeChange(slug);
-    })();
   };
 
   const onFontChange = (name: FontName) => {
@@ -3092,7 +3060,6 @@ function App() {
         session={session}
         theme={theme}
         onThemeChange={onThemeChange}
-        userThemes={userThemes}
         font={font}
         onFontChange={onFontChange}
         lint={lint}
@@ -3132,7 +3099,6 @@ function App() {
         surfacesPanel={
           <SurfacesPanel workspace={workspace} onUpdate={updateWorkspace} />
         }
-        onUserThemeSaved={onUserThemeSaved}
         docPinned={docPinned}
         onToggleDocPin={() => {
           // Entering/leaving a tile — reset the split so both panes show.

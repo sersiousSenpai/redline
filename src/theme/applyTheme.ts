@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { deriveTokens } from "./derive";
-import { DEFAULT_THEME, getTheme } from "./themes";
+import { DEFAULT_THEME, getTheme, isThemeName } from "./themes";
 import type { ThemeName } from "./themes";
 import { DEFAULT_FONT, getFont, isFontName } from "./fonts";
 import type { FontName } from "./fonts";
@@ -54,11 +54,8 @@ export function applyTheme(name: ThemeName): void {
 // a flash of the default theme on launch).
 export function readStoredTheme(): ThemeName {
   try {
-    // Any stored name is kept, not just registered ones: a saved *user* theme
-    // (~/.redline/themes) isn't registered yet this early, and getTheme()
-    // falls back safely until registerUserThemes() runs, then App re-applies.
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (typeof raw === "string" && raw.trim() && raw.length <= 64) return raw;
+    if (isThemeName(raw)) return raw;
   } catch {
     /* localStorage unavailable (private mode / quota) — fall through */
   }

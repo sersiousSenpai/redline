@@ -7,14 +7,12 @@ import type { InterceptionMode, ReviewSession } from "../types";
 import type { MainSurface } from "../lib/mainSurface";
 import type { SurfaceDescriptor, ToggleableSurface } from "../config/workspace";
 import { useMenuOverlay } from "./menuOverlay";
-import type { ThemeEntry, ThemeName } from "../theme/themes";
+import type { ThemeName } from "../theme/themes";
 import type { FontName } from "../theme/fonts";
 import type { LintName } from "../theme/lint";
 import { ThemePicker } from "./ThemePicker";
-import { ThemeEditor } from "./ThemeEditor";
 import { FontPicker } from "./FontPicker";
 import { AgentSeats } from "./AgentSeats";
-import { SkillsPanel } from "./SkillsPanel";
 import { LintPicker } from "./LintPicker";
 import { DownloadMenu } from "./DownloadMenu";
 import { ModeToggle } from "./ModeToggle";
@@ -119,8 +117,6 @@ interface HeaderProps {
   session: ReviewSession | null;
   theme: ThemeName;
   onThemeChange: (name: ThemeName) => void;
-  /** User themes loaded from ~/.redline/themes — the picker's "user" section. */
-  userThemes: ThemeEntry[];
   font: FontName;
   onFontChange: (name: FontName) => void;
   lint: LintName;
@@ -167,9 +163,6 @@ interface HeaderProps {
   /** The Surfaces row content for the settings menu (SurfacesPanel). */
   surfacesPanel: ReactNode;
   memoryEnabled: boolean;
-  /** The theme editor wrote ~/.redline/themes/<slug>.json — refresh the
-   *  registry and switch to it. */
-  onUserThemeSaved: (slug: string) => void;
   /** Explicit tiling: keep the document alongside a non-document surface. */
   docPinned: boolean;
   onToggleDocPin: () => void;
@@ -200,7 +193,6 @@ export function Header({
   session,
   theme,
   onThemeChange,
-  userThemes,
   font,
   onFontChange,
   lint,
@@ -231,7 +223,6 @@ export function Header({
   collabEnabled,
   surfacesPanel,
   memoryEnabled,
-  onUserThemeSaved,
   docPinned,
   onToggleDocPin,
   splitActive,
@@ -404,21 +395,11 @@ export function Header({
         </div>
         <SettingsMenu
           mode={<ModeToggle mode={mode} onChange={onModeChange} />}
-          theme={
-            <div className="flex items-center gap-1.5">
-              <ThemePicker
-                theme={theme}
-                onThemeChange={onThemeChange}
-                userThemes={userThemes}
-              />
-              <ThemeEditor theme={theme} onSaved={onUserThemeSaved} />
-            </div>
-          }
+          theme={<ThemePicker theme={theme} onThemeChange={onThemeChange} />}
           font={<FontPicker font={font} onFontChange={onFontChange} />}
           lint={<LintPicker lint={lint} onLintChange={onLintChange} />}
           agents={<AgentSeats />}
           surfaces={surfacesPanel}
-          skills={<SkillsPanel />}
           notifications={
             <AlertSettings
               enabled={flashEnabled}

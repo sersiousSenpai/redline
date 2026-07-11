@@ -456,6 +456,9 @@ function CatalogTab() {
   const [links, setLinks] = useState<LinkView[] | null>(null);
   const [observations, setObservations] = useState<Observation[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // Collapsed branch ids. Everything starts expanded (nothing hidden by
+  // default); the chevrons + Collapse all make deep trees navigable.
+  const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
 
   const load = useCallback(async () => {
     try {
@@ -508,11 +511,60 @@ function CatalogTab() {
 
   const tree = buildTree(nodes);
 
+  const toggleBranch = useCallback((id: string) => {
+    setCollapsedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const collapseAll = () => {
+    const withChildren = new Set<string>();
+    const walk = (list: TreeNode[]) => {
+      for (const n of list) {
+        if (n.children.length > 0) withChildren.add(n.id);
+        walk(n.children);
+      }
+    };
+    walk(tree);
+    setCollapsedIds(withChildren);
+  };
+
+  const treeCtlBtn: React.CSSProperties = {
+    border: "1px solid var(--color-rule)",
+    background: "transparent",
+    color: "var(--color-ink-muted)",
+    borderRadius: 3,
+    padding: "0 6px",
+    fontSize: 11,
+    cursor: "pointer",
+  };
+
   return (
     <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
       <div style={{ flex: "1 1 52%", overflowY: "auto", minWidth: 0, borderRight: "1px solid var(--color-rule)" }}>
-        <div style={{ padding: "6px 12px", fontSize: 12, color: "var(--color-ink-muted)", borderBottom: "1px solid var(--color-rule)" }}>
-          {nodes.length} class{nodes.length === 1 ? "" : "es"} · organized automatically
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "6px 12px",
+            fontSize: 12,
+            color: "var(--color-ink-muted)",
+            borderBottom: "1px solid var(--color-rule)",
+          }}
+        >
+          <span style={{ flex: 1, minWidth: 0 }}>
+            {nodes.length} class{nodes.length === 1 ? "" : "es"} · organized automatically
+          </span>
+          <button style={treeCtlBtn} onClick={() => setCollapsedIds(new Set())} title="Expand every branch">
+            Expand all
+          </button>
+          <button style={treeCtlBtn} onClick={collapseAll} title="Collapse to the root classes">
+            Collapse all
+          </button>
         </div>
         {error && (
           <div style={{ padding: "6px 12px", color: "var(--color-warning)", fontSize: 13 }}>{error}</div>
@@ -524,7 +576,15 @@ function CatalogTab() {
           </div>
         ) : (
           tree.map((n) => (
-            <TreeRow key={n.id} node={n} depth={0} selected={selected} onSelect={openNode} />
+            <TreeRow
+              key={n.id}
+              node={n}
+              depth={0}
+              selected={selected}
+              onSelect={openNode}
+              collapsedIds={collapsedIds}
+              onToggle={toggleBranch}
+            />
           ))
         )}
       </div>
@@ -644,18 +704,29 @@ function CatalogTab() {
   );
 }
 
+/** Descendant count — what a collapsed chevron is hiding. */
+function countDescendants(node: TreeNode): number {
+  return node.children.reduce((sum, c) => sum + 1 + countDescendants(c), 0);
+}
+
 function TreeRow({
   node,
   depth,
   selected,
   onSelect,
+  collapsedIds,
+  onToggle,
 }: {
   node: TreeNode;
   depth: number;
   selected: string | null;
   onSelect: (id: string) => void;
+  collapsedIds: Set<string>;
+  onToggle: (id: string) => void;
 }) {
   const isDigest = node.kind === "digest";
+  const hasChildren = node.children.length > 0;
+  const collapsed = hasChildren && collapsedIds.has(node.id);
   return (
     <>
       <div
@@ -664,24 +735,95 @@ function TreeRow({
           display: "flex",
           alignItems: "center",
           gap: 6,
-          padding: "5px 12px",
-          paddingLeft: 12 + depth * 16,
+          padding: "5px 12px 5px 8px",
           borderBottom: "1px solid var(--color-rule)",
           background: selected === node.id ? "var(--color-bg-elevated)" : "transparent",
           cursor: "pointer",
           fontSize: 13,
         }}
       >
-        <span>{isDigest ? "🗄️" : depth === 0 ? "📁" : "•"}</span>
-        <span style={{ fontWeight: depth === 0 ? 600 : 400 }}>{node.title}</span>
+        {/* Depth rails — one hairline per ancestor level, so nesting reads
+            at a glance even in a deep tree. */}
+        {Array.from({ length: depth }, (_, i) => (
+          <span
+            key={i}
+            aria-hidden
+            style={{
+              flex: "0 0 14px",
+              alignSelf: "stretch",
+              borderLeft: "1px solid var(--color-rule)",
+              marginLeft: 6,
+            }}
+          />
+        ))}
+        {hasChildren ? (
+          <button
+            aria-label={collapsed ? `Expand ${node.title}` : `Collapse ${node.title}`}
+            aria-expanded={!collapsed}
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggle(node.id);
+            }}
+            style={{
+              flex: "0 0 16px",
+              border: "none",
+              background: "transparent",
+              color: "var(--color-ink-muted)",
+              fontSize: 10,
+              padding: 0,
+              cursor: "pointer",
+            }}
+          >
+            {collapsed ? "▸" : "▾"}
+          </button>
+        ) : (
+          <span aria-hidden style={{ flex: "0 0 16px" }} />
+        )}
+        <span>{isDigest ? "🗄️" : hasChildren ? (collapsed ? "📁" : "📂") : "•"}</span>
+        <span
+          style={{
+            fontWeight: depth === 0 ? 600 : 400,
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {node.title}
+        </span>
         {node.pinned && <span title="Pinned (anti-decay)">📌</span>}
         {node.linkCount > 0 && (
           <span style={{ color: "var(--color-ink-muted)", fontSize: 11 }}>{node.linkCount}</span>
         )}
+        {collapsed && (
+          <span
+            title="Hidden nested classes"
+            style={{
+              marginLeft: "auto",
+              fontSize: 10.5,
+              color: "var(--color-ink-muted)",
+              border: "1px solid var(--color-rule)",
+              borderRadius: 999,
+              padding: "0 7px",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {countDescendants(node)} inside
+          </span>
+        )}
       </div>
-      {node.children.map((c) => (
-        <TreeRow key={c.id} node={c} depth={depth + 1} selected={selected} onSelect={onSelect} />
-      ))}
+      {!collapsed &&
+        node.children.map((c) => (
+          <TreeRow
+            key={c.id}
+            node={c}
+            depth={depth + 1}
+            selected={selected}
+            onSelect={onSelect}
+            collapsedIds={collapsedIds}
+            onToggle={onToggle}
+          />
+        ))}
     </>
   );
 }
