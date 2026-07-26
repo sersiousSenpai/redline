@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { ChevronDown, Search } from "lucide-react";
 import { useMenuOverlay } from "./menuOverlay";
 
 // Agent Seats — per-seat model/effort configuration for every headless agent
@@ -73,6 +74,43 @@ const SEAT_GROUPS: { label: string; seats: SeatRow[] }[] = [
 const MODEL_OPTIONS = ["opus", "sonnet", "haiku"];
 const EFFORT_OPTIONS = ["low", "medium", "high", "max"];
 
+/** One selectable row of the picker: a full (model, effort) choice. The
+ *  Default/Inherit row is `{}`; a plain model row leaves effort unset. */
+interface SeatOption {
+  model?: string;
+  effort?: string;
+}
+
+/** The full pick list: Default/Inherit, then each model plain + its four
+ *  effort variants (the LM Studio-style flat searchable list, ~16 rows). */
+function seatOptions(): SeatOption[] {
+  return [
+    {},
+    ...MODEL_OPTIONS.flatMap((m) => [
+      { model: m },
+      ...EFFORT_OPTIONS.map((ef) => ({ model: m, effort: ef })),
+    ]),
+  ];
+}
+
+/** Case-insensitive token match against "model effort" (e.g. "op ma" hits
+ *  "opus · max"). Exported shape kept pure for unit testing. */
+export function matchesSeatQuery(
+  opt: SeatOption,
+  defaultLabel: string,
+  query: string,
+): boolean {
+  const hay = (opt.model
+    ? `${opt.model} ${opt.effort ?? ""}`
+    : defaultLabel
+  ).toLowerCase();
+  return query
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean)
+    .every((tok) => hay.includes(tok));
+}
+
 const selectStyle: React.CSSProperties = {
   fontSize: "11px",
   border: "1px solid var(--color-rule)",
@@ -119,6 +157,317 @@ function seatSummary(cfg: SeatConfig | undefined): string | null {
     (v): v is string => !!v && v.trim() !== "",
   );
   return bits.length ? bits.join(" · ") : null;
+}
+
+/** One rich popover picker per seat (replaces the old model + effort native
+ *  selects): a search filter, the Default/Inherit row, every model × effort
+ *  combo as a flat selectable list, and a Custom… section for free-text
+ *  model ids with inline effort. Presentation-only — a pick still lands as
+ *  the same `SeatConfig.model` + `SeatConfig.effort`. */
+function SeatPicker({
+  rowLabel,
+  defaultLabel,
+  cfg,
+  onPick,
+}: {
+  rowLabel: string;
+  defaultLabel: string;
+  cfg: SeatConfig;
+  onPick: (choice: SeatOption) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [customOpen, setCustomOpen] = useState(false);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
+  const [popTop, setPopTop] = useState(0);
+  const [popRight, setPopRight] = useState(0);
+  const [popUp, setPopUp] = useState(false);
+
+  const model = cfg.model ?? "";
+  const isCustomModel = model !== "" && !MODEL_OPTIONS.includes(model);
+  const buttonLabel = model
+    ? cfg.effort
+      ? `${model} · ${cfg.effort}`
+      : model
+    : defaultLabel;
+
+  const openPop = () => {
+    const r = btnRef.current?.getBoundingClientRect();
+    if (r) {
+      // Fixed positioning so the popover escapes the dialog's scroll clip;
+      // flip upward when the row sits in the lower half of the viewport.
+      const up = r.bottom > window.innerHeight - 340;
+      setPopUp(up);
+      setPopTop(up ? window.innerHeight - r.top + 4 : r.bottom + 4);
+      setPopRight(window.innerWidth - r.right);
+    }
+    setQuery("");
+    setCustomOpen(isCustomModel);
+    setOpen(true);
+  };
+
+  // Outside-click + Escape close (Escape stops here — it must not also
+  // dismiss the whole dialog).
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (popRef.current?.contains(t) || btnRef.current?.contains(t)) return;
+      setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey, true);
+    };
+  }, [open]);
+
+  const pick = (choice: SeatOption) => {
+    onPick(choice);
+    setOpen(false);
+  };
+
+  const options = seatOptions().filter((o) =>
+    matchesSeatQuery(o, defaultLabel, query),
+  );
+  const isActive = (o: SeatOption) =>
+    (o.model ?? "") === model && (o.effort ?? "") === (cfg.effort ?? "");
+
+  const rowStyle = (active: boolean): React.CSSProperties => ({
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+    width: "100%",
+    textAlign: "left",
+    padding: "5px 10px",
+    fontSize: "11.5px",
+    cursor: "pointer",
+    border: "none",
+    borderRadius: "5px",
+    color: "var(--color-ink)",
+    background: active
+      ? "color-mix(in srgb, var(--color-info) 14%, transparent)"
+      : "transparent",
+  });
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        aria-label={`${rowLabel} model & effort`}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => (open ? setOpen(false) : openPop())}
+        className="font-sans flex items-center gap-1.5"
+        style={{
+          ...selectStyle,
+          cursor: "pointer",
+          whiteSpace: "nowrap",
+          maxWidth: "180px",
+        }}
+      >
+        <span className="truncate">{buttonLabel}</span>
+        <ChevronDown size={12} strokeWidth={2} style={{ flexShrink: 0 }} />
+      </button>
+
+      {open && (
+        <div
+          ref={popRef}
+          role="listbox"
+          aria-label={`${rowLabel} choices`}
+          className="font-sans"
+          style={{
+            position: "fixed",
+            ...(popUp ? { bottom: popTop } : { top: popTop }),
+            right: popRight,
+            zIndex: 60,
+            width: "230px",
+            display: "flex",
+            flexDirection: "column",
+            background: "var(--color-bg-elevated)",
+            border: "1px solid var(--color-rule)",
+            borderRadius: "8px",
+            boxShadow: "0 12px 32px rgba(0,0,0,0.32)",
+            overflow: "hidden",
+          }}
+        >
+          {/* Search filter — the LM Studio move. */}
+          <div
+            className="flex items-center gap-1.5 px-2.5 py-2"
+            style={{ borderBottom: "1px solid var(--color-rule)" }}
+          >
+            <Search
+              size={12}
+              strokeWidth={2}
+              style={{ color: "var(--color-ink-muted)", flexShrink: 0 }}
+            />
+            <input
+              autoFocus
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Filter models…"
+              aria-label={`Filter ${rowLabel} choices`}
+              style={{
+                flex: 1,
+                minWidth: 0,
+                fontSize: "11.5px",
+                border: "none",
+                outline: "none",
+                background: "transparent",
+                color: "var(--color-ink)",
+              }}
+            />
+          </div>
+
+          <div
+            className="rl-thin-scroll-y"
+            style={{ overflowY: "auto", maxHeight: "240px", padding: "4px" }}
+          >
+            {options.map((o, i) => {
+              const isGroupStart =
+                !!o.model && !o.effort && (i === 0 || options[i - 1]?.model !== o.model);
+              return (
+                <div key={`${o.model ?? "__default"}-${o.effort ?? ""}`}>
+                  {isGroupStart && i > 0 && (
+                    <div
+                      aria-hidden
+                      style={{
+                        height: "1px",
+                        margin: "3px 6px",
+                        background: "var(--color-rule)",
+                      }}
+                    />
+                  )}
+                  <button
+                    type="button"
+                    role="option"
+                    aria-selected={isActive(o)}
+                    onClick={() => pick(o)}
+                    style={rowStyle(isActive(o))}
+                  >
+                    <span style={{ flex: 1, minWidth: 0 }} className="truncate">
+                      {o.model ?? defaultLabel}
+                    </span>
+                    {o.effort && (
+                      <span
+                        style={{
+                          fontSize: "10px",
+                          color: "var(--color-ink-muted)",
+                          border: "1px solid var(--color-rule)",
+                          borderRadius: "999px",
+                          padding: "0 6px",
+                          flexShrink: 0,
+                        }}
+                      >
+                        {o.effort}
+                      </span>
+                    )}
+                  </button>
+                </div>
+              );
+            })}
+            {options.length === 0 && !customOpen && (
+              <div
+                style={{
+                  padding: "8px 10px",
+                  fontSize: "11px",
+                  color: "var(--color-ink-muted)",
+                }}
+              >
+                No matches — try Custom…
+              </div>
+            )}
+          </div>
+
+          {/* Custom… — free-text model id + inline effort. */}
+          <div style={{ borderTop: "1px solid var(--color-rule)", padding: "4px" }}>
+            {!customOpen ? (
+              <button
+                type="button"
+                onClick={() => setCustomOpen(true)}
+                style={rowStyle(isCustomModel)}
+              >
+                <span style={{ flex: 1 }}>Custom…</span>
+                {isCustomModel && (
+                  <span
+                    className="truncate"
+                    style={{
+                      fontSize: "10px",
+                      color: "var(--color-ink-muted)",
+                      maxWidth: "110px",
+                    }}
+                  >
+                    {model}
+                  </span>
+                )}
+              </button>
+            ) : (
+              <div className="flex flex-col gap-1.5 px-1.5 py-1">
+                <input
+                  type="text"
+                  aria-label={`${rowLabel} custom model id`}
+                  defaultValue={isCustomModel ? model : "claude-"}
+                  autoFocus
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      const v = (e.target as HTMLInputElement).value.trim();
+                      pick({ model: v || undefined, effort: cfg.effort });
+                    }
+                    if (e.key !== "Escape") e.stopPropagation();
+                  }}
+                  onBlur={(e) => {
+                    const v = e.target.value.trim();
+                    // Commit without closing — effort chips below may be next.
+                    if (v && v !== model) onPick({ model: v, effort: cfg.effort });
+                  }}
+                  placeholder="claude-…"
+                  style={{ ...selectStyle, width: "100%", boxSizing: "border-box" }}
+                />
+                <div className="flex items-center gap-1" role="group" aria-label="Custom model effort">
+                  {["", ...EFFORT_OPTIONS].map((ef) => (
+                    <button
+                      key={ef || "__none"}
+                      type="button"
+                      onClick={() =>
+                        onPick({ model: cfg.model, effort: ef || undefined })
+                      }
+                      style={{
+                        fontSize: "10px",
+                        padding: "2px 7px",
+                        borderRadius: "999px",
+                        cursor: "pointer",
+                        border:
+                          (cfg.effort ?? "") === ef
+                            ? "1px solid color-mix(in srgb, var(--color-info) 55%, var(--color-rule))"
+                            : "1px solid var(--color-rule)",
+                        background:
+                          (cfg.effort ?? "") === ef
+                            ? "color-mix(in srgb, var(--color-info) 14%, transparent)"
+                            : "transparent",
+                        color: "var(--color-ink)",
+                      }}
+                    >
+                      {ef || "default"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </>
+  );
 }
 
 export function AgentSeats() {
@@ -171,8 +520,6 @@ export function AgentSeats() {
 
   const renderSeat = (row: SeatRow) => {
     const cfg = seats[row.name] ?? {};
-    const model = cfg.model ?? "";
-    const isCustomModel = model !== "" && !MODEL_OPTIONS.includes(model);
     const defaultLabel = row.inherit ? "Inherit" : "Default";
     const summary = seatSummary(seats[row.name]);
     return (
@@ -206,64 +553,14 @@ export function AgentSeats() {
             </span>
           )}
         </span>
-        <select
-          aria-label={`${row.label} model`}
-          value={isCustomModel ? "__custom" : model}
-          onChange={(e) => {
-            const v = e.target.value;
-            if (v === "__custom") {
-              // Seed the free-text state; saved on blur/Enter below.
-              update(row.name, { model: model || "claude-" });
-            } else {
-              update(row.name, { model: v || undefined });
-            }
-          }}
-          style={selectStyle}
-        >
-          <option value="">{defaultLabel}</option>
-          {MODEL_OPTIONS.map((m) => (
-            <option key={m} value={m}>
-              {m}
-            </option>
-          ))}
-          <option value="__custom">custom…</option>
-        </select>
-        {isCustomModel && (
-          <input
-            type="text"
-            aria-label={`${row.label} custom model id`}
-            defaultValue={model}
-            onBlur={(e) =>
-              update(row.name, { model: e.target.value.trim() || undefined })
-            }
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                update(row.name, {
-                  model:
-                    (e.target as HTMLInputElement).value.trim() || undefined,
-                });
-              }
-              if (e.key !== "Escape") e.stopPropagation();
-            }}
-            className="font-sans"
-            style={{ ...selectStyle, width: "110px" }}
-          />
-        )}
-        <select
-          aria-label={`${row.label} effort`}
-          value={cfg.effort ?? ""}
-          onChange={(e) =>
-            update(row.name, { effort: e.target.value || undefined })
+        <SeatPicker
+          rowLabel={row.label}
+          defaultLabel={defaultLabel}
+          cfg={cfg}
+          onPick={(choice) =>
+            update(row.name, { model: choice.model, effort: choice.effort })
           }
-          style={selectStyle}
-        >
-          <option value="">{row.inherit ? "Inherit" : "Default"}</option>
-          {EFFORT_OPTIONS.map((ef) => (
-            <option key={ef} value={ef}>
-              {ef}
-            </option>
-          ))}
-        </select>
+        />
       </div>
     );
   };
