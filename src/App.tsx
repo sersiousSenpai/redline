@@ -3662,9 +3662,11 @@ function App() {
                 selectedProject={drafterProject}
                 onSelectedProjectChange={setDrafterProject}
                 onLaunch={launchPromptDraft}
-                // The floating Discuss pill inside the drafter pane: opens the
-                // Companion, or (legacy manifest: companion off, voice on) the
-                // drafter voice panel. Hidden while either drawer is up.
+                // The floating Discuss pill inside the drafter pane: the main
+                // segment opens the Companion, the 🎙 segment opens the draft
+                // voice panel directly (or, legacy manifest with companion
+                // off, the main segment goes straight to voice). Hidden while
+                // either drawer is up.
                 onDiscuss={
                   companionEnabled
                     ? companionOpen
@@ -3673,6 +3675,14 @@ function App() {
                     : voiceEnabled && drafterDraftId && !drafterVoiceOpen
                       ? () => setDrafterVoiceOpen(true)
                       : null
+                }
+                onVoice={
+                  companionEnabled &&
+                  voiceEnabled &&
+                  drafterDraftId &&
+                  !drafterVoiceOpen
+                    ? () => setDrafterVoiceOpen(true)
+                    : null
                 }
               />
             );
@@ -3710,17 +3720,27 @@ function App() {
             // No secondary pane open → the document is the default full view.
             return documentBody;
           })()}
-          {/* The Discuss pill — the single discussion entry on the document
-              pane. Opens the global Companion (works on the welcome doc too);
-              on a legacy manifest (companion off, voice on) it opens the plan
-              VoicePanel instead so voice stays reachable. Hidden while either
-              drawer is up. */}
+          {/* The Discuss pill — the discussion entry on the document pane.
+              The main segment opens the global Companion (works on the
+              welcome doc too); the 🎙 segment opens the plan VoicePanel
+              DIRECTLY (the voice agent stays a first-class one-click entry —
+              its add-action-items flow is a daily driver). On a legacy
+              manifest (companion off, voice on) the main segment goes
+              straight to voice. Hidden while either drawer is up. */}
           {mainSurface === "document" &&
             !(sidebarTab.kind === "folder" && activeFile) &&
             !voiceOpen &&
             (companionEnabled
               ? !companionOpen && (
-                  <DiscussPill onClick={() => setCompanionOpen(true)} />
+                  <DiscussPill
+                    onClick={() => setCompanionOpen(true)}
+                    onVoice={
+                      voiceEnabled && sessionReady && latest
+                        ? () => setVoiceOpen(true)
+                        : null
+                    }
+                    voiceTitle="Discuss the plan by voice — the voice agent can add action items"
+                  />
                 )
               : voiceEnabled &&
                 sessionReady &&

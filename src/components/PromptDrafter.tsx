@@ -43,6 +43,9 @@ interface PromptDrafterProps {
   /** Open the discussion for this draft (the Companion drawer, or the voice
    *  panel on a legacy manifest). Null hides the floating Discuss pill. */
   onDiscuss?: (() => void) | null;
+  /** Open the draft's voice panel directly (the pill's 🎙 segment). Null
+   *  hides the segment. */
+  onVoice?: (() => void) | null;
 }
 
 // The Prompt Drafter: a Word-style document editor for authoring a prompt and
@@ -58,6 +61,7 @@ export function PromptDrafter({
   onSelectedProjectChange,
   onLaunch,
   onDiscuss = null,
+  onVoice = null,
 }: PromptDrafterProps) {
   const persistTimer = useRef<number | null>(null);
   // Latest onMarkdownChange without re-creating the editor on identity churn.
@@ -637,7 +641,13 @@ export function PromptDrafter({
             onClose={() => setSidecarOpen(false)}
           />
         )}
-        {onDiscuss && <DiscussPill onClick={onDiscuss} />}
+        {onDiscuss && (
+          <DiscussPill
+            onClick={onDiscuss}
+            onVoice={onVoice}
+            voiceTitle="Discuss this draft by voice"
+          />
+        )}
       </div>
 
       {/* One slim footer row: project picker · word count · Send. Comments
