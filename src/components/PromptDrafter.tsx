@@ -40,12 +40,9 @@ interface PromptDrafterProps {
   onSelectedProjectChange: (path: string | null) => void;
   /** Launch a fresh Claude plan session with this prompt (markdown) + cwd. */
   onLaunch: (markdown: string, projectPath: string | null) => void;
-  /** Open the discussion for this draft (the Companion drawer, or the voice
-   *  panel on a legacy manifest). Null hides the floating Discuss pill. */
+  /** Open the draft's discussion (the voice panel — talk or type). Null
+   *  hides the floating Discuss pill. */
   onDiscuss?: (() => void) | null;
-  /** Open the draft's voice panel directly (the pill's 🎙 segment). Null
-   *  hides the segment. */
-  onVoice?: (() => void) | null;
 }
 
 // The Prompt Drafter: a Word-style document editor for authoring a prompt and
@@ -61,7 +58,6 @@ export function PromptDrafter({
   onSelectedProjectChange,
   onLaunch,
   onDiscuss = null,
-  onVoice = null,
 }: PromptDrafterProps) {
   const persistTimer = useRef<number | null>(null);
   // Latest onMarkdownChange without re-creating the editor on identity churn.
@@ -644,8 +640,7 @@ export function PromptDrafter({
         {onDiscuss && (
           <DiscussPill
             onClick={onDiscuss}
-            onVoice={onVoice}
-            voiceTitle="Discuss this draft by voice"
+            title="Discuss this draft — talk or type"
           />
         )}
       </div>

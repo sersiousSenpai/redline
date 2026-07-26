@@ -26,16 +26,18 @@ export type ToggleableSurface =
   | "drafter"
   | "review"
   | "voice"
-  | "companion"
   | "collab"
   | "memory";
 
+// "companion" is gone from this list on purpose: the Companion's scope merged
+// into the voice agent (the Voice toggle covers the whole discussion surface
+// now). A stored manifest that still carries a `companion` key is simply
+// ignored by lookups.
 export const TOGGLEABLE_SURFACES: readonly ToggleableSurface[] = [
   "browser",
   "drafter",
   "review",
   "voice",
-  "companion",
   "collab",
   "memory",
 ];
@@ -63,7 +65,6 @@ export const SURFACE_LABELS: Record<ToggleableSurface, string> = {
   drafter: "Prompt Drafter",
   review: "Code Review",
   voice: "Voice",
-  companion: "Companion",
   collab: "Live Session",
   memory: "Memory",
 };

@@ -26,11 +26,6 @@ import { JoinDialog } from "./components/JoinDialog";
 import { ShareSnapshotDialog } from "./components/ShareSnapshotDialog";
 import { importSharedPlanFromUrl } from "./collab/importSharedLink";
 import { deriveActiveSurface } from "./lib/activeSurface";
-import {
-  COMPANION_DRAWER_WIDTH,
-  CompanionDrawer,
-} from "./components/CompanionDrawer";
-import { useCompanion } from "./hooks/useCompanion";
 import { PresenceBar } from "./components/PresenceBar";
 import {
   collabRevisionKey,
@@ -490,7 +485,6 @@ function App() {
     [nudgeState, workspace],
   );
   const voiceEnabled = surfaceEnabled(workspace, "voice");
-  const companionEnabled = surfaceEnabled(workspace, "companion");
   // Fresh view of mainSurface for the boot-time landing decision.
   const mainSurfaceRef = useRef(mainSurface);
   mainSurfaceRef.current = mainSurface;
@@ -577,26 +571,25 @@ function App() {
   // Memory is plumbing: no per-surface toolbar panes anymore. One ephemeral,
   // read-mostly inspector (Lake / Catalog / Settings) behind the quiet pill.
   const [memoryInspectorOpen, setMemoryInspectorOpen] = useState(false);
-  // The Companion — the global cross-surface discussion. A right-docked
-  // overlay drawer OUTSIDE the secondary-pane exclusivity (it must coexist
-  // with browser/drafter/review). ⌘J toggles it from anywhere.
-  const [companionOpen, setCompanionOpen] = useState(false);
-  const companionCtl = useCompanion(companionOpen);
+  // ⌘J — toggle the discussion for the current surface. The voice panel IS
+  // the app's discussion surface now (voice-first, typed composer inside);
+  // the Companion's separate drawer UI is gone — its scope folded into the
+  // voice agent (voice.rs embeds the cross-surface map + write routes).
   useEffect(() => {
-    if (!companionEnabled) {
-      // Disabled in the workspace manifest: drop the drawer and the shortcut.
-      setCompanionOpen(false);
-      return;
-    }
+    if (!voiceEnabled) return;
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && (e.key === "j" || e.key === "J")) {
         e.preventDefault();
-        setCompanionOpen((v) => !v);
+        if (mainSurfaceRef.current === "drafter") {
+          setDrafterVoiceOpen((v) => !v);
+        } else if (mainSurfaceRef.current === "document") {
+          setVoiceOpen((v) => !v);
+        }
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [companionEnabled]);
+  }, [voiceEnabled]);
   // Same rule for the voice drawers when the voice surface is manifest-off.
   useEffect(() => {
     if (!voiceEnabled) {
@@ -3039,17 +3032,7 @@ function App() {
 
   return (
     <MenuOverlayProvider value={adjustMenuOverlay}>
-    {/* While the Companion drawer is open the whole window reflows to its
-        left (a docked margin, not an overlay) — the browser surface's native
-        WKWebView would otherwise paint OVER the fixed drawer. */}
-    <div
-      className="h-full flex flex-col"
-      style={{
-        marginRight: companionOpen
-          ? `min(${COMPANION_DRAWER_WIDTH}px, 90vw)`
-          : undefined,
-      }}
-    >
+    <div className="h-full flex flex-col">
       <FlashOverlay seq={flashSeq} color={flashColor} />
       {/* Error containment: each independent region gets its own boundary so
           a render throw stays inside it. The terminal dock is deliberately a
@@ -3649,7 +3632,7 @@ function App() {
                 // and reflows the slot without a drag (e.g. closing the comment
                 // pane, which otherwise leaves the webview stranded at its old
                 // size with a gap of blank space).
-                layoutKey={`${paneCollapsed}|${sidebarCollapsed}|${docVisible}|${splitVertical}|${layout.curtainActive}|${companionOpen}`}
+                layoutKey={`${paneCollapsed}|${sidebarCollapsed}|${docVisible}|${splitVertical}|${layout.curtainActive}`}
               />
             );
             const drafterBody = (
@@ -3662,25 +3645,11 @@ function App() {
                 selectedProject={drafterProject}
                 onSelectedProjectChange={setDrafterProject}
                 onLaunch={launchPromptDraft}
-                // The floating Discuss pill inside the drafter pane: the main
-                // segment opens the Companion, the 🎙 segment opens the draft
-                // voice panel directly (or, legacy manifest with companion
-                // off, the main segment goes straight to voice). Hidden while
-                // either drawer is up.
+                // The floating Discuss pill inside the drafter pane opens the
+                // draft's voice panel — the one discussion surface (talk or
+                // type). Hidden while the panel is up.
                 onDiscuss={
-                  companionEnabled
-                    ? companionOpen
-                      ? null
-                      : () => setCompanionOpen(true)
-                    : voiceEnabled && drafterDraftId && !drafterVoiceOpen
-                      ? () => setDrafterVoiceOpen(true)
-                      : null
-                }
-                onVoice={
-                  companionEnabled &&
-                  voiceEnabled &&
-                  drafterDraftId &&
-                  !drafterVoiceOpen
+                  voiceEnabled && drafterDraftId && !drafterVoiceOpen
                     ? () => setDrafterVoiceOpen(true)
                     : null
                 }
@@ -3721,37 +3690,19 @@ function App() {
             return documentBody;
           })()}
           {/* The Discuss pill — the discussion entry on the document pane.
-              The main segment opens the global Companion (works on the
-              welcome doc too); the 🎙 segment opens the plan VoicePanel
-              DIRECTLY (the voice agent stays a first-class one-click entry —
-              its add-action-items flow is a daily driver). On a legacy
-              manifest (companion off, voice on) the main segment goes
-              straight to voice. Hidden while either drawer is up. */}
+              Opens the plan's voice panel: the one discussion surface
+              (voice-first, typed composer inside). Hidden while the panel
+              is up. */}
           {mainSurface === "document" &&
             !(sidebarTab.kind === "folder" && activeFile) &&
             !voiceOpen &&
-            (companionEnabled
-              ? !companionOpen && (
-                  <DiscussPill
-                    onClick={() => setCompanionOpen(true)}
-                    onVoice={
-                      voiceEnabled && sessionReady && latest
-                        ? () => setVoiceOpen(true)
-                        : null
-                    }
-                    voiceTitle="Discuss the plan by voice — the voice agent can add action items"
-                  />
-                )
-              : voiceEnabled &&
-                sessionReady &&
-                latest && (
-                  <DiscussPill
-                    onClick={() => setVoiceOpen(true)}
-                    title="Discuss the plan by voice"
-                  />
-                ))}
-          {/* Voice drawer — mount unchanged; opened via the pill (legacy) or
-              the Companion drawer's mic. Only over an actual plan. */}
+            voiceEnabled &&
+            sessionReady &&
+            latest && (
+              <DiscussPill onClick={() => setVoiceOpen(true)} />
+            )}
+          {/* Voice drawer — opened via the pill or ⌘J. Only over an actual
+              plan. */}
           {voiceEnabled &&
             sessionReady &&
             latest &&
@@ -3769,11 +3720,10 @@ function App() {
                 onClose={() => setVoiceOpen(false)}
               />
             )}
-          {/* Drafter voice — the same 🎙️ drawer over the Prompt Drafter, keyed
+          {/* Drafter voice — the same drawer over the Prompt Drafter, keyed
               `drafter:<draft_id>` (the backend derives the kind from the key
               shape) and primed with the draft's markdown mirror. Its entry
-              point is the drafter's own Discuss pill (legacy manifest) or the
-              Companion drawer's mic. */}
+              point is the drafter's own Discuss pill or ⌘J. */}
           {voiceEnabled &&
             mainSurface === "drafter" &&
             drafterDraftId &&
@@ -4632,39 +4582,6 @@ function App() {
           />
         );
       })()}
-      {/* The Companion — a root-level overlay drawer (sibling of the memory
-          inspector), never part of the center-pane exclusivity dance. */}
-      {companionOpen && companionCtl.active && (
-        <CompanionDrawer
-          companion={companionCtl.active}
-          companions={companionCtl.companions}
-          onSwitch={companionCtl.setActiveId}
-          onNew={() => void companionCtl.create()}
-          onDelete={(id) => void companionCtl.remove(id)}
-          onClose={() => setCompanionOpen(false)}
-          // The mic hands off to the current surface's voice panel (one
-          // modality at a time — close the drawer, then open voice). Hidden
-          // on surfaces with no voice target.
-          onVoice={
-            !voiceEnabled
-              ? null
-              : mainSurface === "drafter" && drafterDraftId
-                ? () => {
-                    setCompanionOpen(false);
-                    setDrafterVoiceOpen(true);
-                  }
-                : mainSurface === "document" &&
-                    sessionReady &&
-                    latest &&
-                    !(sidebarTab.kind === "folder" && activeFile)
-                  ? () => {
-                      setCompanionOpen(false);
-                      setVoiceOpen(true);
-                    }
-                  : null
-          }
-        />
-      )}
       {/* The one quiet workspace suggestion (nudge.ts) — accept edits the
           manifest, dismiss retires it; either way it never fires again. */}
       {nudgeSuggestion && !loading && (

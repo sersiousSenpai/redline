@@ -56,7 +56,8 @@ section by section, narrate continuously and read their reactions — silently \
 adapt as you go: simplify and slow down if they seem lost, go deeper and move \
 faster if they clearly follow; never quiz them. You may read files, search the \
 code, and fetch web pages to ground your answers, but you must not edit files, \
-produce a new plan, or call ExitPlanMode. The one exception: when the reviewer \
+produce a new plan, or call ExitPlanMode. The headline exception: when the \
+reviewer \
 explicitly asks you to capture or note a change — for example \"make a note\", \
 \"capture that as feedback\", or \"I want to change X\" — you may record it as a \
 single feedback comment on the plan through the local bridge described below. \
@@ -83,8 +84,9 @@ with your actual take, keep each turn tight so they can jump back in, and end \
 on the open question when there is one. If you are walking them through the \
 draft section by section, narrate continuously and silently adapt to their \
 reactions; never quiz them. You may read files, search the code, and fetch web \
-pages to ground your answers, but you must not edit files or the document, \
-produce a plan, or call ExitPlanMode.";
+pages to ground your answers, but you must not edit files or the document \
+directly — user-directed changes go through the staged routes in your scope \
+brief — and never produce a plan or call ExitPlanMode.";
 
 /// The drafter voice agent's read bridge: how to re-read the live draft. No
 /// write surface — voice on a draft is read-only (see DRAFTER_VOICE_PREAMBLE).
@@ -95,8 +97,30 @@ needed — put the URL immediately after `-s`):\n\
   curl -s http://127.0.0.1:7676/v1/drafter/{draft_id}/doc\n\
 It returns the live markdown (ignore any `<!-- rl:blk-… -->` markers when \
 reading aloud). The user edits continuously while you talk, so re-read before \
-answering about specific wording. This bridge is read-only: you must not \
-attempt any other call, edit files, or produce a plan."
+answering about specific wording. This doc route is read-only — the document \
+is theirs to type; when they explicitly ask you to put a change IN it, use the \
+staged suggestion route from your app-wide scope below (they accept or reject \
+it in place), and read the change back to confirm before posting. Never edit \
+files or produce a plan."
+    )
+}
+
+/// The whole-app scope block: the voice agent is not boxed into the one
+/// document it opened on. It carries the Companion's cross-surface map,
+/// consult contract, and staged write routes (embedded verbatim from
+/// `companion::routes_block`, so the two contracts can never drift) — the
+/// Companion's scope folded into the voice agent.
+fn scope_preamble() -> String {
+    format!(
+        "YOUR SCOPE IS THE WHOLE APP, not just the document in front of you. \
+You are the user's one continuous discussion partner across Redline — plans, \
+drafts, the embedded browser, research missions, code reviews, and their \
+organized memory. When the conversation reaches beyond this document, use the \
+map below to glance yourself, delegate a synthesis to a colleague agent, or — \
+only at the user's explicit direction — write a staged, reviewable artifact. \
+You speak for the ear: when you fold in something you looked up, summarize it \
+in short prose; never read URLs, JSON, or route names aloud.\n\n{}",
+        crate::companion::routes_block()
     )
 }
 
@@ -135,8 +159,10 @@ the Authorization header shown; the token is already in your environment):\n\
   curl -s http://127.0.0.1:7676/v1/sessions/{session_id}/comments -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST -H 'Content-Type: application/json' -d '{{\"blockId\":\"<the blockId>\",\"body\":\"<the change, in the reviewer's words>\",\"agentId\":\"voice\"}}'\n\
 The `body` is a directive in plain words (for example \"make the timeout \
 configurable\") — never a rewritten version of the plan. Always read the change \
-back in one short spoken sentence to confirm before you post. This is the only \
-write you may perform: do not edit files, produce a new plan, or call ExitPlanMode."
+back in one short spoken sentence to confirm before you post. This is your \
+primary write; the rest of your app-wide scope (and its own staged write \
+routes, equally gated on the user's explicit direction) is described below. \
+Never edit files, produce a new plan, or call ExitPlanMode."
     )
 }
 
@@ -517,11 +543,14 @@ pub async fn voice_send(
             ),
             None => (VOICE_PREAMBLE, bridge_preamble(&session_id), "PLAN"),
         };
+        // Persona, then this document's own bridge, then the whole-app scope
+        // (the Companion contract) — grounded here, reaching everywhere.
+        let scope = scope_preamble();
         match &prime {
             Some(doc) => format!(
-                "{preamble}\n\n{bridge}\n\n--- {doc_tag} ---\n{doc}\n--- END {doc_tag} ---\n\n{text}"
+                "{preamble}\n\n{bridge}\n\n{scope}\n\n--- {doc_tag} ---\n{doc}\n--- END {doc_tag} ---\n\n{text}"
             ),
-            None => format!("{preamble}\n\n{bridge}\n\n{text}"),
+            None => format!("{preamble}\n\n{bridge}\n\n{scope}\n\n{text}"),
         }
     } else {
         text
@@ -1106,6 +1135,24 @@ mod tests {
         // Anchoring + confirm-before-post guidance is taught.
         assert!(b.contains("heading"));
         assert!(b.contains("read the change back"));
+    }
+
+    #[test]
+    fn scope_preamble_embeds_the_full_companion_contract() {
+        // The Companion's scope folded into voice: the voice agent's first
+        // turn carries the whole-app framing plus companion::routes_block
+        // verbatim — glance map, consult, and the staged write contract.
+        let s = scope_preamble();
+        assert!(s.contains("WHOLE APP"));
+        assert!(s.contains("/v1/global/agents"));
+        assert!(s.contains("/v1/global/consult"));
+        assert!(s.contains("/v1/context/threads/"));
+        assert!(s.contains("/v1/memory/tree"));
+        assert!(s.contains("WRITES — ONLY AT THE USER'S DIRECTION"));
+        assert!(s.contains("/v1/drafter/<draft_id>/suggestions"));
+        assert!(s.contains("NEVER: /v1/browser/*"));
+        // Spoken-reply discipline survives the scope expansion.
+        assert!(s.contains("never read URLs"));
     }
 
     #[test]

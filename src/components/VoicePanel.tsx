@@ -566,6 +566,18 @@ export function VoicePanel({
     [sendToSession],
   );
 
+  // Typed turn (the chat half of the panel): same warm session, same
+  // transcript, same spoken reply — just entered without the mic. Typing
+  // mid-speech barges in like voice does.
+  const [typed, setTyped] = useState("");
+  const sendTyped = useCallback(() => {
+    const t = typed.trim();
+    if (!t || thinking) return;
+    setTyped("");
+    queueRef.current?.cancel();
+    sendTurn(t, t);
+  }, [typed, thinking, sendTurn]);
+
   // Send a *dictated* turn: polish the raw transcript through the AI cleanup
   // pass first (the Wispr-style layer), then hand it to `sendTurn`. Best-effort
   // — on any cleanup error/timeout we fall back to the raw text so a turn is
@@ -1220,6 +1232,55 @@ export function VoicePanel({
                 {partial || "Listening…"}
               </p>
             )}
+
+            {/* Typed turn — chat into the same conversation when you don't
+                want to talk. Enter sends; the reply is spoken as usual. */}
+            <form
+              className="flex items-center gap-1.5"
+              onSubmit={(e) => {
+                e.preventDefault();
+                sendTyped();
+              }}
+            >
+              <input
+                value={typed}
+                onChange={(e) => setTyped(e.target.value)}
+                placeholder="Or type instead…"
+                aria-label="Type a message to the voice agent"
+                spellCheck={false}
+                className="flex-1 rounded-md px-2.5 py-1.5"
+                style={{
+                  fontSize: "12.5px",
+                  border: "1px solid var(--color-rule)",
+                  background: "var(--color-paper)",
+                  color: "var(--color-ink)",
+                  outline: "none",
+                  minWidth: 0,
+                }}
+              />
+              <button
+                type="submit"
+                disabled={busy || !typed.trim()}
+                title="Send (Enter)"
+                className="rounded-md px-2.5 py-1.5"
+                style={{
+                  fontSize: "12px",
+                  fontWeight: 600,
+                  border: "1px solid var(--color-rule)",
+                  background:
+                    busy || !typed.trim()
+                      ? "transparent"
+                      : "var(--color-anchor-bg)",
+                  color:
+                    busy || !typed.trim()
+                      ? "var(--color-ink-muted)"
+                      : "var(--color-anchor-text)",
+                  cursor: busy || !typed.trim() ? "default" : "pointer",
+                }}
+              >
+                Send
+              </button>
+            </form>
 
             {/* Walkthrough controls — only while a guided walk is running. It
                 waits here for "Next section" instead of auto-running. */}

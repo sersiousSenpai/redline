@@ -233,7 +233,10 @@ pub fn render_journal_delta(rows: &[JournalRow], max_bytes: usize) -> String {
 
 // --- Prompt builders -----------------------------------------------------------
 
-fn routes_block() -> &'static str {
+/// The cross-surface map + consult + staged-write contract. `pub(crate)`
+/// because the voice agent embeds this verbatim too (the Companion's scope
+/// folded into voice — one contract, two mouths, no drift).
+pub(crate) fn routes_block() -> &'static str {
     "YOUR MAP AND GLANCE ROUTES — all local, already permitted (no approval \
      needed; put the URL immediately after `-s`):\n\
      - Every agent and thread across the app (who exists, what's busy, what's \
