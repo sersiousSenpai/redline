@@ -110,6 +110,7 @@ import { usePersistedState } from "./theme/usePersistedState";
 import { useResizablePane } from "./hooks/useResizablePane";
 import { useAutoExitFullscreen } from "./hooks/useAutoExitFullscreen";
 import { PaneDivider } from "./components/PaneDivider";
+import { BoundaryFallback, ErrorBoundary } from "./components/ErrorBoundary";
 import { TerminalTabs } from "./components/TerminalTabs";
 import type { TerminalTabsHandle } from "./components/TerminalTabs";
 import { DecisionWindowBanner } from "./components/DecisionWindowBanner";
@@ -3041,6 +3042,31 @@ function App() {
     <MenuOverlayProvider value={adjustMenuOverlay}>
     <div className="h-full flex flex-col">
       <FlashOverlay seq={flashSeq} color={flashColor} />
+      {/* Error containment: each independent region gets its own boundary so
+          a render throw stays inside it. The terminal dock is deliberately a
+          SIBLING of every wrapped region — a crash elsewhere must never
+          unmount a TerminalView (its cleanup kills the PTY session). */}
+      <ErrorBoundary
+        fallback={(_err, reset) => (
+          <div
+            className="flex items-center justify-center gap-2 px-4 py-2"
+            style={{
+              borderBottom: "1px solid var(--color-rule)",
+              color: "var(--color-ink-muted)",
+              fontSize: "12px",
+            }}
+          >
+            <span>The header hit a rendering error.</span>
+            <button
+              type="button"
+              onClick={reset}
+              style={{ textDecoration: "underline", cursor: "pointer" }}
+            >
+              Try again
+            </button>
+          </div>
+        )}
+      >
       {!daemonBound && (
         <div
           role="alert"
@@ -3148,7 +3174,19 @@ function App() {
           onRevokePeer={(inviteHash) => revokeByHash(inviteHash)}
         />
       ) : null}
+      </ErrorBoundary>
       <main className="relative flex-1 overflow-hidden flex flex-col">
+        <ErrorBoundary
+          fallback={(err, reset) => (
+            <div className="flex-1 overflow-hidden flex items-center justify-center">
+              <BoundaryFallback
+                region="content area"
+                error={err}
+                reset={reset}
+              />
+            </div>
+          )}
+        >
         <div className="flex-1 overflow-hidden flex">
         {!sidebarCollapsed && (
         // Clip wrapper for the drawer reveal. In curtain state (the doc is at
@@ -4320,6 +4358,7 @@ function App() {
         </div>
         )}
         </div>
+        </ErrorBoundary>
 
         {!termFullscreen && (
           <PaneDivider
@@ -4408,6 +4447,27 @@ function App() {
           )}
         </div>
       </main>
+      <ErrorBoundary
+        fallback={(_err, reset) => (
+          <div
+            className="flex items-center justify-center gap-2 px-4 py-1"
+            style={{
+              borderTop: "1px solid var(--color-rule)",
+              color: "var(--color-ink-muted)",
+              fontSize: "12px",
+            }}
+          >
+            <span>The footer hit a rendering error.</span>
+            <button
+              type="button"
+              onClick={reset}
+              style={{ textDecoration: "underline", cursor: "pointer" }}
+            >
+              Try again
+            </button>
+          </div>
+        )}
+      >
       <Footer
         comments={threadComments}
         sessionReady={sessionReady}
@@ -4422,6 +4482,31 @@ function App() {
         termHasUnseen={termHasUnseen}
         onExpandTerminal={() => setTermCollapsed(false)}
       />
+      </ErrorBoundary>
+      {/* The trailing modal/overlay cluster: a crash in any dialog collapses
+          to a quiet toast instead of taking down the app tree. */}
+      <ErrorBoundary
+        fallback={(_err, reset) => (
+          <div
+            className="fixed bottom-4 right-4 z-50 flex items-center gap-2 px-3 py-2 rounded shadow-lg"
+            style={{
+              background: "var(--color-bg-elevated)",
+              border: "1px solid var(--color-rule)",
+              color: "var(--color-ink)",
+              fontSize: "12px",
+            }}
+          >
+            <span>A dialog hit a rendering error and was closed.</span>
+            <button
+              type="button"
+              onClick={reset}
+              style={{ textDecoration: "underline", cursor: "pointer" }}
+            >
+              Retry
+            </button>
+          </div>
+        )}
+      >
       {selection && !composing && !isViewingHistorical && (
         <SelectionMenu
           rect={selection.rect}
@@ -4569,6 +4654,7 @@ function App() {
           }
         />
       )}
+      </ErrorBoundary>
     </div>
     </MenuOverlayProvider>
   );

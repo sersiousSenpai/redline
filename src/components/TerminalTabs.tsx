@@ -13,6 +13,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { homeDir } from "@tauri-apps/api/path";
 import { usePersistedState } from "../theme/usePersistedState";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { TerminalTabBar } from "./TerminalTabBar";
 import { TerminalView, enqueuePtyOp } from "./TerminalView";
 import { TerminalSplitDivider } from "./TerminalSplitDivider";
@@ -534,6 +535,32 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
 
   return (
     <div data-tour="terminal" className="flex flex-col h-full">
+      {/* The strip and the divider are the risky render regions (drag math);
+          they get their own boundaries so a crash there can never unmount the
+          TerminalViews below — unmounting a TerminalView kills its PTY. */}
+      <ErrorBoundary
+        fallback={(_err, reset) => (
+          <div
+            className="flex items-center gap-2 px-3 shrink-0"
+            style={{
+              height: "30px",
+              borderBottom: "1px solid var(--color-rule)",
+              background: "var(--color-bg-elevated)",
+              color: "var(--color-ink-muted)",
+              fontSize: "12px",
+            }}
+          >
+            <span>Tab bar hit a rendering error — terminals are unaffected.</span>
+            <button
+              type="button"
+              onClick={reset}
+              style={{ textDecoration: "underline", cursor: "pointer" }}
+            >
+              Reload tab bar
+            </button>
+          </div>
+        )}
+      >
       {split && paneB ? (
         // One tab strip per pane, aligned over its pane so a split session's
         // tab indicator sits above the pane it's actually running in.
@@ -573,6 +600,7 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
           onSelect={selectTab}
         />
       )}
+      </ErrorBoundary>
       <div ref={paneContainerRef} className="flex-1 relative">
         {tabs.map((t) => {
           const role: "A" | "B" | null =
@@ -594,18 +622,26 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
           );
         })}
         {split && (
-          <TerminalSplitDivider
-            ratio={splitRatio}
-            onRatioChange={setSplitRatio}
-            containerRef={paneContainerRef}
-          />
+          // Null fallback: a crashed divider just disappears (toggle the
+          // split off/on to get it back); the panes keep their shells.
+          <ErrorBoundary fallback={() => null}>
+            <TerminalSplitDivider
+              ratio={splitRatio}
+              onRatioChange={setSplitRatio}
+              containerRef={paneContainerRef}
+            />
+          </ErrorBoundary>
         )}
       </div>
       {showCloseConfirm && (
         <CloseConfirmModal
           onConfirm={() => {
-            // destroy() bypasses the onCloseRequested guard we set above.
-            void getCurrentWindow().destroy();
+            // destroy() bypasses the onCloseRequested guard we set above —
+            // and normal unmount teardown with it, so kill the shells first
+            // rather than leaving orphans to outlive the window.
+            void invoke("pty_kill_all")
+              .catch(() => {})
+              .finally(() => void getCurrentWindow().destroy());
           }}
           onCancel={() => setShowCloseConfirm(false)}
         />

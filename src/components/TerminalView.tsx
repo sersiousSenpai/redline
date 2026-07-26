@@ -61,6 +61,11 @@ export function enqueuePtyOp(
   const prev = ptyLifecycle.get(id) ?? Promise.resolve();
   const next = prev.then(op, op).catch(() => {});
   ptyLifecycle.set(id, next);
+  // Prune the entry once this tail settles (identity-checked: a later op may
+  // have chained past us) so closed terminals don't accumulate in the map.
+  void next.finally(() => {
+    if (ptyLifecycle.get(id) === next) ptyLifecycle.delete(id);
+  });
   return next;
 }
 

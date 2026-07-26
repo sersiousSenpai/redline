@@ -1,10 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 interface Tab {
   id: string;
   title: string;
+}
+
+/** Resolve a drag commit against the CURRENT tab list — which may have
+ *  changed mid-drag (a shell exited and its tab closed, a new tab appeared).
+ *  The dragged tab is identified by id, never by its captured start index: a
+ *  stale index would reorder (or splice out) the wrong tab, and the wrong
+ *  tab's PTY is a killed session. Returns the {from, to} move to commit, or
+ *  null when nothing should happen (tab vanished, or already at rest). */
+export function resolveReorder(
+  tabIds: string[],
+  dragId: string,
+  target: number,
+): { from: number; to: number } | null {
+  const from = tabIds.indexOf(dragId);
+  if (from === -1) return null;
+  const to = Math.max(0, Math.min(tabIds.length - 1, target));
+  if (from === to) return null;
+  return { from, to };
 }
 
 interface TerminalTabBarProps {
@@ -117,14 +135,16 @@ export function TerminalTabBar({
       drag.started || Math.abs(dx) > DRAG_THRESHOLD;
     if (!started) return;
 
-    // Center of the dragged tab in its travel, in bar-local coords.
+    // Center of the dragged tab in its travel, in bar-local coords. Geometry
+    // lookups are `?? 0`-guarded — the tab list can change mid-drag, leaving
+    // the captured widths/lefts arrays short.
     const draggedCenter =
-      d.lefts[d.originIndex] + d.widths[d.originIndex] / 2 + dx;
+      (d.lefts[d.originIndex] ?? 0) + (d.widths[d.originIndex] ?? 0) / 2 + dx;
 
     let target = d.originIndex;
     for (let i = 0; i < tabs.length; i++) {
       if (i === d.originIndex) continue;
-      const mid = d.lefts[i] + d.widths[i] / 2;
+      const mid = (d.lefts[i] ?? 0) + (d.widths[i] ?? 0) / 2;
       if (i > d.originIndex && draggedCenter > mid) target = Math.max(target, i);
       if (i < d.originIndex && draggedCenter < mid) target = Math.min(target, i);
     }
@@ -134,16 +154,32 @@ export function TerminalTabBar({
 
   const endDrag = () => {
     const d = dragRef.current;
-    if (d && drag.started && drag.target !== d.originIndex) {
-      onReorder(d.originIndex, drag.target);
+    if (d && drag.started) {
+      // Resolve against the current tabs by id (see resolveReorder) — never
+      // trust the index captured at drag start.
+      const r = resolveReorder(
+        tabs.map((t) => t.id),
+        d.id,
+        drag.target,
+      );
+      if (r) onReorder(r.from, r.to);
     }
     dragRef.current = null;
     setDrag({ id: null, dx: 0, target: -1, started: false });
   };
 
+  // If the dragged tab vanishes mid-drag (its shell exited and the tab
+  // closed), cancel the drag rather than committing against a ghost.
+  useEffect(() => {
+    if (drag.id && !tabs.some((t) => t.id === drag.id)) {
+      dragRef.current = null;
+      setDrag({ id: null, dx: 0, target: -1, started: false });
+    }
+  }, [tabs, drag.id]);
+
   const draggedWidth =
     dragRef.current && drag.id
-      ? dragRef.current.widths[dragRef.current.originIndex]
+      ? (dragRef.current.widths[dragRef.current.originIndex] ?? 0)
       : 0;
 
   return (
