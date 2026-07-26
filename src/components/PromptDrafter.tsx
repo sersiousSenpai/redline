@@ -16,8 +16,8 @@ import {
 } from "../editor/drafterSuggestions";
 import { DrafterToolbar } from "./DrafterToolbar";
 import { DrafterFindBar } from "./DrafterFindBar";
-import { DrafterChat } from "./DrafterChat";
 import { DrafterSidecar } from "./DrafterSidecar";
+import { DiscussPill } from "./DiscussPill";
 import { ProjectPicker, type ProjectOption } from "./ProjectPicker";
 import { useTextSelection } from "../hooks/useTextSelection";
 import type { CommentHighlightRange } from "../editor/extensions/CommentHighlights";
@@ -40,9 +40,9 @@ interface PromptDrafterProps {
   onSelectedProjectChange: (path: string | null) => void;
   /** Launch a fresh Claude plan session with this prompt (markdown) + cwd. */
   onLaunch: (markdown: string, projectPath: string | null) => void;
-  /** The 💬 discussion pane (internal split). */
-  chatOpen: boolean;
-  onChatOpenChange: (open: boolean) => void;
+  /** Open the discussion for this draft (the Companion drawer, or the voice
+   *  panel on a legacy manifest). Null hides the floating Discuss pill. */
+  onDiscuss?: (() => void) | null;
 }
 
 // The Prompt Drafter: a Word-style document editor for authoring a prompt and
@@ -57,8 +57,7 @@ export function PromptDrafter({
   selectedProject,
   onSelectedProjectChange,
   onLaunch,
-  chatOpen,
-  onChatOpenChange,
+  onDiscuss = null,
 }: PromptDrafterProps) {
   const persistTimer = useRef<number | null>(null);
   // Latest onMarkdownChange without re-creating the editor on identity churn.
@@ -414,17 +413,21 @@ export function PromptDrafter({
   }, [editor, searchQuery, syncSearchState]);
 
   // useEditor re-renders on every transaction, so reading the text here yields
-  // a live word/character count without an extra extension or subscription.
+  // a live word count without an extra extension or subscription.
   const text = editor?.getText() ?? "";
   const words = text.trim() ? text.trim().split(/\s+/).length : 0;
-  const chars = text.length;
 
   return (
     <div
       className="flex h-full min-h-0 flex-col"
       style={{ background: "var(--color-paper)" }}
     >
-      <DrafterToolbar editor={editor} />
+      <DrafterToolbar
+        editor={editor}
+        sidecarOpen={sidecarOpen}
+        onToggleSidecar={() => setSidecarOpen((v) => !v)}
+        commentCount={comments.length}
+      />
 
       {suggestions.length > 0 && (
         <div
@@ -494,7 +497,9 @@ export function PromptDrafter({
         </div>
       )}
 
-      <div className="flex min-h-0 flex-1">
+      {/* `relative` so the floating Discuss pill anchors to this body row (not
+          the scroll container — an abspos child there would scroll away). */}
+      <div className="relative flex min-h-0 flex-1">
         <div
           ref={workspaceRef}
           className="rl-thin-scroll-y rl-page-workspace relative min-h-0 flex-1 overflow-y-auto"
@@ -632,83 +637,14 @@ export function PromptDrafter({
             onClose={() => setSidecarOpen(false)}
           />
         )}
-        {chatOpen && (
-          <DrafterChat
-            draftId={draftId}
-            projectPath={selectedProject}
-            getMarkdown={() =>
-              editor
-                ? planDocToMarkdown(editor.state.doc, { sidecars: true })
-                : ""
-            }
-            onClose={() => onChatOpenChange(false)}
-          />
-        )}
+        {onDiscuss && <DiscussPill onClick={onDiscuss} />}
       </div>
 
+      {/* One slim footer row: project picker · word count · Send. Comments
+          moved to the toolbar ribbon; discussion lives in the floating pill. */}
       <div
         data-no-drag="true"
         className="flex items-center gap-3 px-4 py-1.5"
-        style={{
-          borderTop: "1px solid var(--color-rule)",
-          background: "var(--color-paper)",
-          fontSize: "11px",
-          color: "var(--color-ink-muted)",
-          fontVariantNumeric: "tabular-nums",
-        }}
-      >
-        <span style={{ flex: 1 }}>
-          {words} {words === 1 ? "word" : "words"} · {chars}{" "}
-          {chars === 1 ? "character" : "characters"}
-        </span>
-        <button
-          type="button"
-          onClick={() => setSidecarOpen((v) => !v)}
-          title={
-            sidecarOpen
-              ? "Close the comment sidecar"
-              : "Comments anchored to this draft"
-          }
-          className="rounded-sm px-2 py-0.5"
-          style={{
-            fontSize: "11px",
-            border: "1px solid var(--color-rule)",
-            background: sidecarOpen
-              ? "var(--color-bg-elevated)"
-              : "var(--color-paper)",
-            color: sidecarOpen ? "var(--color-info)" : "var(--color-ink-muted)",
-            cursor: "pointer",
-          }}
-        >
-          🗨️ Comments{comments.length > 0 ? ` (${comments.length})` : ""}
-        </button>
-        <button
-          type="button"
-          onClick={() => onChatOpenChange(!chatOpen)}
-          title={
-            chatOpen
-              ? "Close the draft discussion"
-              : "Discuss this draft with an agent that can write into it"
-          }
-          className="rounded-sm px-2 py-0.5"
-          style={{
-            fontSize: "11px",
-            border: "1px solid var(--color-rule)",
-            background: chatOpen
-              ? "var(--color-bg-elevated)"
-              : "var(--color-paper)",
-            color: chatOpen ? "var(--color-info)" : "var(--color-ink-muted)",
-            cursor: "pointer",
-          }}
-        >
-          💬 Discuss
-        </button>
-        <span style={{ opacity: 0.7 }}>⌘F to find &amp; replace</span>
-      </div>
-
-      <div
-        data-no-drag="true"
-        className="flex items-center gap-3 px-4 py-3"
         style={{
           borderTop: "1px solid var(--color-rule)",
           background: "var(--color-paper)",
@@ -721,26 +657,27 @@ export function PromptDrafter({
           onAfterPick={() => editor?.chain().focus().run()}
         />
         <span
-          className="rl-chrome-label"
+          className="ml-auto"
           style={{
-            fontSize: "10px",
-            opacity: 0.55,
-            flex: 1,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
+            fontSize: "11px",
+            color: "var(--color-ink-muted)",
+            fontVariantNumeric: "tabular-nums",
             whiteSpace: "nowrap",
           }}
         >
-          Sent as structured text — fonts, color & styling are drafting aids only
+          {words} {words === 1 ? "word" : "words"}
         </span>
         <button
           type="button"
           onClick={launch}
           disabled={!canSend}
-          title="Launch a new Claude Code plan session seeded with this prompt"
-          className="rounded-sm px-3 py-1.5"
+          title={
+            "Launch a new Claude Code plan session seeded with this prompt. " +
+            "Sent as structured text — fonts, color & styling are drafting aids only."
+          }
+          className="rounded-sm px-3 py-1"
           style={{
-            fontSize: "13px",
+            fontSize: "12.5px",
             border: "1px solid var(--color-rule)",
             background: canSend
               ? "var(--color-anchor-bg)"

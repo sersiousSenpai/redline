@@ -26,7 +26,10 @@ import { JoinDialog } from "./components/JoinDialog";
 import { ShareSnapshotDialog } from "./components/ShareSnapshotDialog";
 import { importSharedPlanFromUrl } from "./collab/importSharedLink";
 import { deriveActiveSurface } from "./lib/activeSurface";
-import { CompanionDrawer } from "./components/CompanionDrawer";
+import {
+  COMPANION_DRAWER_WIDTH,
+  CompanionDrawer,
+} from "./components/CompanionDrawer";
 import { useCompanion } from "./hooks/useCompanion";
 import { PresenceBar } from "./components/PresenceBar";
 import {
@@ -111,6 +114,7 @@ import { useResizablePane } from "./hooks/useResizablePane";
 import { useAutoExitFullscreen } from "./hooks/useAutoExitFullscreen";
 import { PaneDivider } from "./components/PaneDivider";
 import { BoundaryFallback, ErrorBoundary } from "./components/ErrorBoundary";
+import { DiscussPill } from "./components/DiscussPill";
 import { TerminalTabs } from "./components/TerminalTabs";
 import type { TerminalTabsHandle } from "./components/TerminalTabs";
 import { DecisionWindowBanner } from "./components/DecisionWindowBanner";
@@ -530,11 +534,6 @@ function App() {
     if (!drafterDraftId) setDrafterDraftId(crypto.randomUUID());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [drafterDraftId]);
-  // The drafter's 💬 discussion pane (internal split inside the drafter).
-  const [drafterChatOpen, setDrafterChatOpen] = usePersistedState(
-    "redline.drafter.chatOpen",
-    false,
-  );
   // The drafter's 🎙️ voice drawer + what it's primed with: the latest mirrored
   // markdown and its parsed Section tree (for the Guided Walkthrough).
   const [drafterVoiceOpen, setDrafterVoiceOpen] = useState(false);
@@ -3040,7 +3039,17 @@ function App() {
 
   return (
     <MenuOverlayProvider value={adjustMenuOverlay}>
-    <div className="h-full flex flex-col">
+    {/* While the Companion drawer is open the whole window reflows to its
+        left (a docked margin, not an overlay) — the browser surface's native
+        WKWebView would otherwise paint OVER the fixed drawer. */}
+    <div
+      className="h-full flex flex-col"
+      style={{
+        marginRight: companionOpen
+          ? `min(${COMPANION_DRAWER_WIDTH}px, 90vw)`
+          : undefined,
+      }}
+    >
       <FlashOverlay seq={flashSeq} color={flashColor} />
       {/* Error containment: each independent region gets its own boundary so
           a render throw stays inside it. The terminal dock is deliberately a
@@ -3119,7 +3128,6 @@ function App() {
         onMoveSurface={(id, delta) =>
           updateWorkspace((ws) => moveHeaderSurface(ws, id, delta))
         }
-        companionEnabled={companionEnabled}
         collabEnabled={surfaceEnabled(workspace, "collab")}
         memoryEnabled={surfaceEnabled(workspace, "memory")}
         surfacesPanel={
@@ -3131,8 +3139,6 @@ function App() {
           setSplitRatio(0.5);
           setDocPinned((v) => !v);
         }}
-        companionOpen={companionOpen}
-        onToggleCompanion={() => setCompanionOpen((v) => !v)}
         onOpenMemory={() => setMemoryInspectorOpen(true)}
         collabActive={!!collabShare || !!joinedRoom}
         canInvite={sessionReady && !!latest}
@@ -3643,7 +3649,7 @@ function App() {
                 // and reflows the slot without a drag (e.g. closing the comment
                 // pane, which otherwise leaves the webview stranded at its old
                 // size with a gap of blank space).
-                layoutKey={`${paneCollapsed}|${sidebarCollapsed}|${docVisible}|${splitVertical}|${layout.curtainActive}`}
+                layoutKey={`${paneCollapsed}|${sidebarCollapsed}|${docVisible}|${splitVertical}|${layout.curtainActive}|${companionOpen}`}
               />
             );
             const drafterBody = (
@@ -3656,8 +3662,18 @@ function App() {
                 selectedProject={drafterProject}
                 onSelectedProjectChange={setDrafterProject}
                 onLaunch={launchPromptDraft}
-                chatOpen={drafterChatOpen}
-                onChatOpenChange={setDrafterChatOpen}
+                // The floating Discuss pill inside the drafter pane: opens the
+                // Companion, or (legacy manifest: companion off, voice on) the
+                // drafter voice panel. Hidden while either drawer is up.
+                onDiscuss={
+                  companionEnabled
+                    ? companionOpen
+                      ? null
+                      : () => setCompanionOpen(true)
+                    : voiceEnabled && drafterDraftId && !drafterVoiceOpen
+                      ? () => setDrafterVoiceOpen(true)
+                      : null
+                }
               />
             );
             const reviewBody = (
@@ -3694,93 +3710,63 @@ function App() {
             // No secondary pane open → the document is the default full view.
             return documentBody;
           })()}
-          {/* Voice agent — entry point and drawer live ON the plan pane (not the
-              Header), so it reads as a plan feature reached while working with
-              the plan. Only over an actual plan (not the browser/drafter/folder
-              viewer). */}
+          {/* The Discuss pill — the single discussion entry on the document
+              pane. Opens the global Companion (works on the welcome doc too);
+              on a legacy manifest (companion off, voice on) it opens the plan
+              VoicePanel instead so voice stays reachable. Hidden while either
+              drawer is up. */}
+          {mainSurface === "document" &&
+            !(sidebarTab.kind === "folder" && activeFile) &&
+            !voiceOpen &&
+            (companionEnabled
+              ? !companionOpen && (
+                  <DiscussPill onClick={() => setCompanionOpen(true)} />
+                )
+              : voiceEnabled &&
+                sessionReady &&
+                latest && (
+                  <DiscussPill
+                    onClick={() => setVoiceOpen(true)}
+                    title="Discuss the plan by voice"
+                  />
+                ))}
+          {/* Voice drawer — mount unchanged; opened via the pill (legacy) or
+              the Companion drawer's mic. Only over an actual plan. */}
           {voiceEnabled &&
             sessionReady &&
             latest &&
             mainSurface === "document" &&
-            !(sidebarTab.kind === "folder" && activeFile) && (
-              <>
-                {!voiceOpen && (
-                  <button
-                    type="button"
-                    onClick={() => setVoiceOpen(true)}
-                    title="Discuss the plan by voice"
-                    aria-label="Discuss the plan by voice"
-                    className="absolute flex items-center gap-1.5 rounded-full"
-                    style={{
-                      left: "16px",
-                      bottom: "16px",
-                      padding: "6px 12px",
-                      fontSize: "13px",
-                      background: "var(--color-bg-elevated)",
-                      border: "1px solid var(--color-rule)",
-                      color: "var(--color-ink)",
-                      boxShadow: "0 4px 14px rgba(0,0,0,0.18)",
-                      cursor: "pointer",
-                      zIndex: 20,
-                    }}
-                  >
-                    🎙️ Discuss
-                  </button>
-                )}
-                {voiceOpen && (
-                  <VoicePanel
-                    // Remount cleanly if the active session changes (a revision
-                    // arriving calls setActiveId) instead of mutating sessionId
-                    // under a live warm session.
-                    key={activeId ?? ""}
-                    sessionId={activeId ?? ""}
-                    markdown={latest.rawPlanMarkdown}
-                    sections={sections}
-                    onClose={() => setVoiceOpen(false)}
-                  />
-                )}
-              </>
+            !(sidebarTab.kind === "folder" && activeFile) &&
+            voiceOpen && (
+              <VoicePanel
+                // Remount cleanly if the active session changes (a revision
+                // arriving calls setActiveId) instead of mutating sessionId
+                // under a live warm session.
+                key={activeId ?? ""}
+                sessionId={activeId ?? ""}
+                markdown={latest.rawPlanMarkdown}
+                sections={sections}
+                onClose={() => setVoiceOpen(false)}
+              />
             )}
           {/* Drafter voice — the same 🎙️ drawer over the Prompt Drafter, keyed
               `drafter:<draft_id>` (the backend derives the kind from the key
-              shape) and primed with the draft's markdown mirror. */}
-          {voiceEnabled && mainSurface === "drafter" && drafterDraftId && (
-            <>
-              {!drafterVoiceOpen && (
-                <button
-                  type="button"
-                  onClick={() => setDrafterVoiceOpen(true)}
-                  title="Discuss this draft by voice"
-                  aria-label="Discuss this draft by voice"
-                  className="absolute flex items-center gap-1.5 rounded-full"
-                  style={{
-                    left: "16px",
-                    bottom: "60px",
-                    padding: "6px 12px",
-                    fontSize: "13px",
-                    background: "var(--color-bg-elevated)",
-                    border: "1px solid var(--color-rule)",
-                    color: "var(--color-ink)",
-                    boxShadow: "0 4px 14px rgba(0,0,0,0.18)",
-                    cursor: "pointer",
-                    zIndex: 20,
-                  }}
-                >
-                  🎙️ Discuss
-                </button>
-              )}
-              {drafterVoiceOpen && (
-                <VoicePanel
-                  key={drafterDraftId}
-                  sessionId={`drafter:${drafterDraftId}`}
-                  markdown={drafterMarkdown}
-                  sections={drafterSections}
-                  cwd={drafterProject}
-                  onClose={() => setDrafterVoiceOpen(false)}
-                />
-              )}
-            </>
-          )}
+              shape) and primed with the draft's markdown mirror. Its entry
+              point is the drafter's own Discuss pill (legacy manifest) or the
+              Companion drawer's mic. */}
+          {voiceEnabled &&
+            mainSurface === "drafter" &&
+            drafterDraftId &&
+            drafterVoiceOpen && (
+              <VoicePanel
+                key={drafterDraftId}
+                sessionId={`drafter:${drafterDraftId}`}
+                markdown={drafterMarkdown}
+                sections={drafterSections}
+                cwd={drafterProject}
+                onClose={() => setDrafterVoiceOpen(false)}
+              />
+            )}
           {/* Floating document-zoom control — pinned to the pane (doesn't scroll
               with the plan). Hidden over the folder file viewer. */}
           {mainSurface === "document" && !(sidebarTab.kind === "folder" && activeFile) && zoomVisible && (
@@ -4636,6 +4622,27 @@ function App() {
           onNew={() => void companionCtl.create()}
           onDelete={(id) => void companionCtl.remove(id)}
           onClose={() => setCompanionOpen(false)}
+          // The mic hands off to the current surface's voice panel (one
+          // modality at a time — close the drawer, then open voice). Hidden
+          // on surfaces with no voice target.
+          onVoice={
+            !voiceEnabled
+              ? null
+              : mainSurface === "drafter" && drafterDraftId
+                ? () => {
+                    setCompanionOpen(false);
+                    setDrafterVoiceOpen(true);
+                  }
+                : mainSurface === "document" &&
+                    sessionReady &&
+                    latest &&
+                    !(sidebarTab.kind === "folder" && activeFile)
+                  ? () => {
+                      setCompanionOpen(false);
+                      setVoiceOpen(true);
+                    }
+                  : null
+          }
         />
       )}
       {/* The one quiet workspace suggestion (nudge.ts) — accept edits the

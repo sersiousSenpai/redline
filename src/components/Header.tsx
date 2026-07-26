@@ -158,7 +158,6 @@ interface HeaderProps {
   onHideSurface: (id: ToggleableSurface) => void;
   onMoveSurface: (id: MainSurface, delta: -1 | 1) => void;
   /** Manifest-gated auxiliary surfaces. */
-  companionEnabled: boolean;
   collabEnabled: boolean;
   /** The Surfaces row content for the settings menu (SurfacesPanel). */
   surfacesPanel: ReactNode;
@@ -173,9 +172,6 @@ interface HeaderProps {
   splitVertical: boolean;
   /** Flip the split between side-by-side and stacked. */
   onToggleSplitOrientation: () => void;
-  /** The Companion drawer — the global cross-surface discussion (⌘J). */
-  companionOpen: boolean;
-  onToggleCompanion: () => void;
   /** Open the one quiet memory surface (the read-mostly inspector). */
   onOpenMemory: () => void;
   /** A live collaboration room is active (sharing or joined). */
@@ -219,7 +215,6 @@ export function Header({
   surfaces,
   onHideSurface,
   onMoveSurface,
-  companionEnabled,
   collabEnabled,
   surfacesPanel,
   memoryEnabled,
@@ -228,8 +223,6 @@ export function Header({
   splitActive,
   splitVertical,
   onToggleSplitOrientation,
-  companionOpen,
-  onToggleCompanion,
   onOpenMemory,
   collabActive,
   canInvite,
@@ -243,7 +236,7 @@ export function Header({
   const [ctxMenu, setCtxMenu] = useState<{
     x: number;
     y: number;
-    id: MainSurface | "companion";
+    id: MainSurface;
   } | null>(null);
   useMenuOverlay(!!ctxMenu);
   useEffect(() => {
@@ -262,20 +255,18 @@ export function Header({
 
   const ctxItems: { label: string; onPick: () => void }[] = [];
   if (ctxMenu) {
-    if (ctxMenu.id !== "companion") {
-      const idx = surfaces.findIndex((d) => d.id === ctxMenu.id);
-      if (idx > 0) {
-        ctxItems.push({
-          label: "Move left",
-          onPick: () => onMoveSurface(ctxMenu.id as MainSurface, -1),
-        });
-      }
-      if (idx >= 0 && idx < surfaces.length - 1) {
-        ctxItems.push({
-          label: "Move right",
-          onPick: () => onMoveSurface(ctxMenu.id as MainSurface, 1),
-        });
-      }
+    const idx = surfaces.findIndex((d) => d.id === ctxMenu.id);
+    if (idx > 0) {
+      ctxItems.push({
+        label: "Move left",
+        onPick: () => onMoveSurface(ctxMenu.id, -1),
+      });
+    }
+    if (idx >= 0 && idx < surfaces.length - 1) {
+      ctxItems.push({
+        label: "Move right",
+        onPick: () => onMoveSurface(ctxMenu.id, 1),
+      });
     }
     if (ctxMenu.id !== "document") {
       ctxItems.push({
@@ -350,28 +341,6 @@ export function Header({
               }
               icon="◫"
             />
-          )}
-          {companionEnabled && (
-            <span
-              onContextMenu={(e) => {
-                e.preventDefault();
-                setCtxMenu({ x: e.clientX, y: e.clientY, id: "companion" });
-              }}
-            >
-              <HeaderButton
-                onClick={onToggleCompanion}
-                active={companionOpen}
-                title={
-                  companionOpen
-                    ? "Close the Companion (⌘J)"
-                    : "The Companion — one conversation that follows you everywhere (⌘J)"
-                }
-                ariaLabel={
-                  companionOpen ? "Close the Companion" : "Open the Companion"
-                }
-                label="Companion"
-              />
-            </span>
           )}
           {/* Invite + Join folded into one Live Session dropdown. */}
           {collabEnabled && (

@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { Mic } from "lucide-react";
 
 import type {
   Companion,
@@ -15,6 +16,12 @@ import type {
 import { MarkdownView } from "./MarkdownView";
 import { WorkingIndicator } from "./WorkingIndicator";
 
+/** The drawer's docked width. App reserves this as a right margin on the root
+ *  column while the drawer is open, so the window reflows beside it instead of
+ *  being painted over — which is what makes the drawer usable over the
+ *  browser surface (the native WKWebView would otherwise paint above it). */
+export const COMPANION_DRAWER_WIDTH = 400;
+
 interface CompanionDrawerProps {
   companion: Companion;
   companions: Companion[];
@@ -22,6 +29,10 @@ interface CompanionDrawerProps {
   onNew: () => void;
   onDelete: (companionId: string) => void;
   onClose: () => void;
+  /** Open the voice panel for the current surface (closing this drawer
+   *  first — one modality at a time). Null hides the mic (no voice target
+   *  on this surface). */
+  onVoice?: (() => void) | null;
 }
 
 type ChatStatus = "idle" | "streaming" | "error";
@@ -62,6 +73,7 @@ export function CompanionDrawer({
   onNew,
   onDelete,
   onClose,
+  onVoice = null,
 }: CompanionDrawerProps) {
   const companionId = companion.companionId;
   const [messages, setMessages] = useState<CompanionMessage[]>([]);
@@ -218,7 +230,7 @@ export function CompanionDrawer({
     <div
       className="fixed inset-y-0 right-0 z-40 flex flex-col"
       style={{
-        width: "400px",
+        width: `${COMPANION_DRAWER_WIDTH}px`,
         maxWidth: "90vw",
         background: "var(--color-paper)",
         borderLeft: "1px solid var(--color-rule)",
@@ -247,6 +259,18 @@ export function CompanionDrawer({
               : "follows you across the whole app · ⌘J"}
           </span>
         </div>
+        {onVoice && (
+          <button
+            type="button"
+            onClick={onVoice}
+            title="Switch to voice for this surface"
+            aria-label="Switch to voice for this surface"
+            className="px-1 leading-none opacity-60 hover:opacity-100"
+            style={{ color: "var(--color-ink-muted)" }}
+          >
+            <Mic size={14} strokeWidth={2} />
+          </button>
+        )}
         <div className="relative">
           <button
             type="button"

@@ -20,6 +20,7 @@ import {
   Link as LinkIcon,
   List,
   ListOrdered,
+  MessageSquare,
   Minus,
   MoveVertical,
   Redo2,
@@ -42,6 +43,10 @@ import { applyLink } from "../editor/drafterInserts";
 
 interface DrafterToolbarProps {
   editor: Editor | null;
+  /** The comment sidecar toggle (moved here from the old fat footer). */
+  sidecarOpen?: boolean;
+  onToggleSidecar?: () => void;
+  commentCount?: number;
 }
 
 const ICON = 16;
@@ -462,7 +467,12 @@ const LINE_SPACINGS: { label: string; value: string }[] = [
   { label: "Double", value: "2" },
 ];
 
-export function DrafterToolbar({ editor }: DrafterToolbarProps) {
+export function DrafterToolbar({
+  editor,
+  sidecarOpen = false,
+  onToggleSidecar,
+  commentCount = 0,
+}: DrafterToolbarProps) {
   const disabled = !editor;
 
   // The link input popover, with its prefill. Commits through applyLink.
@@ -1070,6 +1080,45 @@ export function DrafterToolbar({ editor }: DrafterToolbarProps) {
           <Eraser size={ICON} strokeWidth={STROKE} />
         </ToolButton>
       </Group>
+
+      {/* Comments — the sidecar toggle, with a count badge when any exist. */}
+      {onToggleSidecar && (
+        <Group>
+          <ToolButton
+            title={
+              sidecarOpen
+                ? "Close the comment sidecar"
+                : "Comments anchored to this draft"
+            }
+            active={sidecarOpen}
+            onClick={onToggleSidecar}
+            style={{ position: "relative" }}
+          >
+            <MessageSquare size={ICON} strokeWidth={STROKE} />
+            {commentCount > 0 && (
+              <span
+                aria-hidden
+                style={{
+                  position: "absolute",
+                  top: "1px",
+                  right: "1px",
+                  minWidth: "13px",
+                  height: "13px",
+                  padding: "0 3px",
+                  borderRadius: "7px",
+                  fontSize: "9px",
+                  lineHeight: "13px",
+                  fontWeight: 600,
+                  background: "var(--color-info)",
+                  color: "var(--color-on-accent)",
+                }}
+              >
+                {commentCount > 99 ? "99+" : commentCount}
+              </span>
+            )}
+          </ToolButton>
+        </Group>
+      )}
     </div>
   );
 }
