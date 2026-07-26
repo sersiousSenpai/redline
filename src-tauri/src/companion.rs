@@ -269,7 +269,60 @@ fn routes_block() -> &'static str {
      The response is {\"digest\":\"...\",\"surface\":\"...\",\"label\":\"...\"}. \
      A GLANCE (a fact, a title) you do yourself via the read routes above; a \
      SYNTHESIS you delegate. \"busy\" means retry-or-glance, not failure. Voice \
-     sessions have no consult — read /v1/context/threads/voice/<id> instead.\n"
+     sessions have no consult — read /v1/context/threads/voice/<id> instead.\n\n\
+     WRITES — ONLY AT THE USER'S DIRECTION. When the user explicitly asks you \
+     to capture something, you can create STAGED, REVIEWABLE artifacts — each \
+     lands in the UI for their review, never as a silent change. If the target \
+     is ambiguous (which plan, which draft), confirm in one line first. Every \
+     write needs the Authorization header shown, with `$REDLINE_DAEMON_TOKEN` \
+     already in your environment.\n\
+     - An action item / feedback comment on a plan (fetch the plan first for a \
+     blockId — anchor section-level feedback to a heading block):\n  \
+     curl -s http://127.0.0.1:7676/v1/sessions/<session_id>/plan\n  \
+     curl -s http://127.0.0.1:7676/v1/sessions/<session_id>/comments \
+     -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST \
+     -H 'Content-Type: application/json' \
+     -d '{\"blockId\":\"<the blockId>\",\"body\":\"<the item, in the user's \
+     words>\",\"agentId\":\"companion\"}'\n\
+     - A tracked suggestion in a Prompt Drafter document (read the doc first; \
+     ops append | replace_block | insert_after | delete_block anchor on the \
+     doc's current block ids and `original` bodies — a 409 means stale: \
+     re-read and retry, exactly the drafter skill's contract):\n  \
+     curl -s http://127.0.0.1:7676/v1/drafter/<draft_id>/doc\n  \
+     curl -s http://127.0.0.1:7676/v1/drafter/<draft_id>/suggestions \
+     -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST \
+     -H 'Content-Type: application/json' \
+     -d '{\"op\":\"<op>\",\"block_id\":\"<anchor>\",\"original\":\"<current block \
+     markdown, for replace/delete>\",\"markdown\":\"<new content>\",\
+     \"agent_id\":\"companion\"}'\n\
+     - A code-review annotation (a note on the open review's diff):\n  \
+     curl -s 'http://127.0.0.1:7676/v1/reviews/annotations?repo=<repo_path>' \
+     -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST \
+     -H 'Content-Type: application/json' \
+     -d '{\"file_path\":\"<path>\",\"side\":\"new\",\"quoted\":\"<the exact \
+     line(s)>\",\"body\":\"<the note>\",\"source\":\"companion\"}'\n\
+     - A memory proposal (stage a filing into the user's organized memory — \
+     staging only, they accept or reject it in the inspector):\n  \
+     curl -s http://127.0.0.1:7676/v1/memory/proposals \
+     -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST \
+     -H 'Content-Type: application/json' \
+     -d '{\"proposals\":[{\"op\":\"file\",\"prompt_id\":<id>,\"node\":\"<class \
+     path>\",\"reason\":\"<why>\"}]}'\n\
+     NEVER: /v1/browser/* writes (the browser is the user's hands), plan \
+     suggestions (/v1/sessions/<id>/suggestions — plan revision belongs to \
+     that session's own claude), file edits, producing a plan, or \
+     ExitPlanMode.\n"
+}
+
+/// The per-turn "where the user is" line, with the surface's id appended —
+/// the write routes key on it (session id, draft id), so handing it over
+/// saves the agent a curl round-trip through /v1/surface/active.
+fn surface_line(surface: &SurfaceInfo) -> String {
+    let mut line = describe_surface(surface);
+    if let Some(id) = surface.id.as_deref().filter(|s| !s.trim().is_empty()) {
+        line.push_str(&format!(" [surface id: {id}]"));
+    }
+    line
 }
 
 /// First turn: the spanning-app role, where the user is, the journal delta,
@@ -293,7 +346,7 @@ pub fn build_first_turn_prompt(
     p.push_str(&mission_context_block(mission));
     p.push_str(&format!(
         "The user is currently on {}.\n\n",
-        describe_surface(surface)
+        surface_line(surface)
     ));
     if !journal_delta.trim().is_empty() {
         p.push_str(journal_delta.trim());
@@ -306,8 +359,11 @@ pub fn build_first_turn_prompt(
     p.push_str(
         "\nFORMATTING — your replies render through Redline's markdown pipeline \
          (tables, strict-mode mermaid, fenced code, callouts). Never raw HTML. \
-         You are read-only outside the consult endpoint: never edit files, never \
-         produce a plan, never call ExitPlanMode.\n\n\
+         You observe by default and WRITE only at the user's explicit \
+         direction, through the write routes above — everything you write is a \
+         staged, reviewable artifact, never a silent change; confirm an \
+         ambiguous target in one line first. Never edit files, never produce a \
+         plan, never call ExitPlanMode.\n\n\
          The user says:\n",
     );
     for line in user_text.lines() {
@@ -325,7 +381,7 @@ pub fn build_followup_prompt(
     journal_delta: &str,
     user_text: &str,
 ) -> String {
-    let mut p = format!("The user is now on {}.\n\n", describe_surface(surface));
+    let mut p = format!("The user is now on {}.\n\n", surface_line(surface));
     if !journal_delta.trim().is_empty() {
         p.push_str(journal_delta.trim());
         p.push_str("\n\n");
@@ -808,6 +864,8 @@ mod tests {
         );
         assert!(p.contains("COMPANION"));
         assert!(p.contains("the plan review — Companion plan"));
+        // The surface id rides the per-turn line (the write routes key on it).
+        assert!(p.contains("[surface id: x-1]"));
         assert!(p.contains("WHILE YOU WERE AWAY"));
         assert!(p.contains("/v1/global/agents"));
         assert!(p.contains("/v1/global/consult"));
@@ -818,6 +876,24 @@ mod tests {
         // Mission inheritance rides the shared block.
         assert!(p.contains("Find the best DB"));
         assert!(p.contains("what did I miss?"));
+
+        // The write contract: user-directed only, staged/reviewable, all four
+        // recipes present with the auth header, and the exclusions explicit.
+        assert!(p.contains("WRITES — ONLY AT THE USER'S DIRECTION"));
+        assert!(p.contains("curl -s http://127.0.0.1:7676/v1/sessions/<session_id>/plan"));
+        assert!(p.contains("curl -s http://127.0.0.1:7676/v1/sessions/<session_id>/comments"));
+        assert!(p.contains("\"agentId\":\"companion\""));
+        assert!(p.contains("curl -s http://127.0.0.1:7676/v1/drafter/<draft_id>/doc"));
+        assert!(p.contains("curl -s http://127.0.0.1:7676/v1/drafter/<draft_id>/suggestions"));
+        assert!(p.contains("curl -s 'http://127.0.0.1:7676/v1/reviews/annotations?repo=<repo_path>'"));
+        assert!(p.contains("\"source\":\"companion\""));
+        assert!(p.contains("curl -s http://127.0.0.1:7676/v1/memory/proposals"));
+        assert!(p.contains("Authorization: Bearer $REDLINE_DAEMON_TOKEN"));
+        assert!(p.contains("/v1/sessions/<id>/suggestions"), "plan-suggestion exclusion");
+        assert!(p.contains("NEVER: /v1/browser/*"));
+        // The old blanket read-only line is gone in favor of the new contract.
+        assert!(p.contains("WRITE only at the user's explicit"));
+        assert!(p.contains("staged, reviewable artifact"));
     }
 
     #[test]
@@ -825,6 +901,8 @@ mod tests {
         let s = surface("drafter", None, None);
         let p = build_followup_prompt(&s, "", "and now?");
         assert!(p.contains("the Prompt Drafter"));
+        // The surface id rides every turn — follow-up writes need it too.
+        assert!(p.contains("[surface id: x-1]"));
         assert!(!p.contains("COMPANION"), "role is not re-embedded");
         assert!(!p.contains("/v1/global/consult"), "routes are not re-embedded");
         assert!(p.ends_with("> and now?\n"));
