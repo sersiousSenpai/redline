@@ -92,6 +92,9 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
   const [splitRatio, setSplitRatio] = usePersistedState(
     "redline.terminalPane.splitRatio",
     0.5,
+    // The divider commits a ratio per frame during a drag; batch the
+    // localStorage writes so the drag stays main-thread-cheap.
+    { debounceMs: 250 },
   );
   const [unseen, setUnseen] = useState<Set<string>>(() => new Set());
   // Set when a window-close is intercepted because a terminal has moved off its

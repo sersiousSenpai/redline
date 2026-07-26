@@ -11,6 +11,11 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { contrastRatio, luminance, mix } from "../theme/derive";
 import { getTheme, type AnsiSlot } from "../theme/themes";
+import {
+  createResizeScheduler,
+  isUsableTermSize,
+  type ResizeScheduler,
+} from "../lib/termSize";
 
 interface TerminalViewProps {
   /** Stable per-tab id; keys the backend PTY and filters its events. */
@@ -177,6 +182,44 @@ export const TerminalView = memo(function TerminalView({
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+
+  // Debounced, deduped PTY-resize path shared by every fit site. The send is
+  // chained per id through enqueuePtyOp so an in-flight resize (or the spawn
+  // itself) is never overlapped by the next one.
+  const schedulerRef = useRef<ResizeScheduler | null>(null);
+  if (schedulerRef.current === null) {
+    schedulerRef.current = createResizeScheduler((size) => {
+      void enqueuePtyOp(id, () =>
+        invoke("pty_resize", { id, cols: size.cols, rows: size.rows }).catch(
+          () => {},
+        ),
+      );
+    });
+  }
+
+  // The one way any code here fits the terminal: verify the proposed geometry
+  // is usable first (a squished host proposes FitAddon's 2×1 floor, which
+  // corrupts claude's TUI if it ever reaches the PTY), then fit and hand the
+  // resulting size to the scheduler. `immediate` marks single-shot callers
+  // (tab shown, window focus); drag-driven callers debounce to a settle.
+  const applyFit = useCallback((immediate: boolean) => {
+    const term = termRef.current;
+    const fit = fitRef.current;
+    if (!term || !fit) return;
+    let dims: { cols: number; rows: number } | undefined;
+    try {
+      dims = fit.proposeDimensions();
+    } catch {
+      return; /* host detached */
+    }
+    if (!isUsableTermSize(dims)) return;
+    try {
+      fit.fit();
+    } catch {
+      return; /* host detached mid-fit */
+    }
+    schedulerRef.current?.schedule({ cols: term.cols, rows: term.rows }, immediate);
+  }, []);
 
   // The mount effect runs once ([]-deps, "spawn once"), so anything it closes
   // over goes stale. Mirror the live values into refs it can read each tick.
@@ -355,21 +398,11 @@ export const TerminalView = memo(function TerminalView({
     host.addEventListener("paste", onPaste, true);
 
     const ro = new ResizeObserver(() => {
-      // A hidden or zero-sized view yields 0 cols/rows; never push that to the
-      // PTY (it corrupts output). The [visible] effect re-fits when shown.
-      if (!visibleRef.current || term.rows === 0 || term.cols === 0) return;
-      try {
-        fit.fit();
-        if (term.cols > 0 && term.rows > 0) {
-          void invoke("pty_resize", {
-            id,
-            cols: term.cols,
-            rows: term.rows,
-          }).catch(() => {});
-        }
-      } catch {
-        /* host detached mid-resize */
-      }
+      // A hidden view has no usable geometry; the [visible] effect re-fits
+      // when shown. Divider drags fire this at pointer rate — the debounced
+      // path collapses the storm into one PTY resize at rest.
+      if (!visibleRef.current) return;
+      applyFit(false);
     });
     ro.observe(host);
 
@@ -384,17 +417,8 @@ export const TerminalView = memo(function TerminalView({
         requestAnimationFrame(() => {
           const term = termRef.current;
           if (!term) return;
-          try {
-            fitRef.current?.fit();
-          } catch {
-            /* host detached */
-          }
+          applyFit(true);
           if (term.cols > 0 && term.rows > 0) {
-            void invoke("pty_resize", {
-              id,
-              cols: term.cols,
-              rows: term.rows,
-            }).catch(() => {});
             term.refresh(0, term.rows - 1);
           }
           term.focus();
@@ -404,6 +428,7 @@ export const TerminalView = memo(function TerminalView({
 
     return () => {
       ro.disconnect();
+      schedulerRef.current?.cancel();
       dataSub.dispose();
       host.removeEventListener("dragover", swallowDrag);
       host.removeEventListener("drop", swallowDrag);
@@ -436,17 +461,8 @@ export const TerminalView = memo(function TerminalView({
       // Flush whatever streamed in while hidden, in one write, before re-fitting
       // and repainting — so the tab shows fully caught up the instant it opens.
       drainPending();
-      try {
-        fitRef.current?.fit();
-      } catch {
-        /* host detached */
-      }
+      applyFit(true);
       if (term && term.cols > 0 && term.rows > 0) {
-        void invoke("pty_resize", {
-          id,
-          cols: term.cols,
-          rows: term.rows,
-        }).catch(() => {});
         // Force a renderer repaint — a pane that was hidden (display:none)
         // can come back with a stale xterm render surface.
         term.refresh(0, term.rows - 1);
@@ -454,7 +470,7 @@ export const TerminalView = memo(function TerminalView({
       term?.focus();
     });
     return () => cancelAnimationFrame(raf);
-  }, [visible, id, drainPending]);
+  }, [visible, id, drainPending, applyFit]);
 
   return (
     <div

@@ -391,7 +391,9 @@ export const CommentThread = memo(function CommentThread({
           >
             · {visible.length}
           </span>
-          {status === "streaming" && (
+          {/* Collapsed only — an expanded thread shows the body spinner
+              (with the elapsed counter) instead, never both at once. */}
+          {status === "streaming" && !expanded && (
             <span className="normal-case" style={{ fontWeight: 400 }}>
               <WorkingIndicator
                 compact
@@ -400,8 +402,8 @@ export const CommentThread = memo(function CommentThread({
             </span>
           )}
           {/* The attached/sent flag lives on the discussion itself — the rider
-              IS this transcript, so there's nothing else to show. Visible
-              collapsed or expanded. */}
+              IS this transcript, so there's nothing else to show. The flag
+              stays visible collapsed or expanded. */}
           {riderAttached && (
             <span style={{ color: "var(--color-warning)" }}>
               {comment.actionable

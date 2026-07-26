@@ -1879,46 +1879,26 @@ p.rl-block-modified {
 }
 
 /* ── Conversation-mode pulse (PulseLogo) ─────────────────────────────────
-   The Redline strike-line blooms into a spinning fractal whose speed tracks
-   the fork's state: idle → still (just the strike), thinking/waiting → fast
-   fractal spin, streaming → a slower breathing beat. The extra blades only
-   surface while active, so an idle indicator reads as the plain logo. */
+   The Redline strike-line simply spins, at a speed that tracks the fork's
+   state: idle → still (the plain mark), listening → a slow receptive spin,
+   thinking/waiting and streaming → a steady working spin. */
 @keyframes rl-blades-spin {
   to {
     transform: rotate(360deg);
-  }
-}
-@keyframes rl-blades-beat {
-  0%,
-  100% {
-    transform: rotate(0deg) scale(1);
-  }
-  50% {
-    transform: rotate(20deg) scale(1.06);
   }
 }
 .rl-pulse-blades {
   transform-box: fill-box;
   transform-origin: center;
 }
-.rl-blade-extra {
-  transition: opacity 0.4s ease;
-}
-/* Idle: no spin, and the fractal blades fold away — just the strike-line. */
-.rl-pulse-blades[data-state="idle"] .rl-blade-extra {
-  opacity: 0 !important;
-}
-/* Listening (mic open): a slow, receptive spin, blades softly bloomed. */
+/* Listening (mic open): a slow, receptive spin. */
 .rl-pulse-blades[data-state="listening"] {
   animation: rl-blades-spin 2.4s linear infinite;
 }
-/* Thinking / waiting: fast fractal spin, blades fully bloomed. */
-.rl-pulse-blades[data-state="thinking"] {
-  animation: rl-blades-spin 0.7s linear infinite;
-}
-/* Streaming: a slower breathing beat while a reply flows. */
+/* Thinking / waiting and streaming: a steady working spin. */
+.rl-pulse-blades[data-state="thinking"],
 .rl-pulse-blades[data-state="streaming"] {
-  animation: rl-blades-beat 1.4s ease-in-out infinite;
+  animation: rl-blades-spin 1.2s linear infinite;
 }
 @media (prefers-reduced-motion: reduce) {
   .rl-pulse-blades[data-state="listening"],

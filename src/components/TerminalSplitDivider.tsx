@@ -25,10 +25,16 @@ export function TerminalSplitDivider({
 }: TerminalSplitDividerProps) {
   const [dragging, setDragging] = useState(false);
   const draggingRef = useRef(false);
+  // Coalesce to one ratio commit per frame (mirrors SplitPane) — an
+  // uncoalesced 120 Hz drag commits state + persistence + PTY resizes per
+  // pointermove. `pending` holds the freshest ratio; the rAF flush applies it.
+  const rafRef = useRef(0);
+  const pendingRef = useRef(ratio);
 
   const onPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
     draggingRef.current = true;
+    pendingRef.current = ratio;
     setDragging(true);
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
   };
@@ -40,12 +46,25 @@ export function TerminalSplitDivider({
     const r = el.getBoundingClientRect();
     if (r.width <= 0) return;
     const next = (e.clientX - r.left) / r.width;
-    onRatioChange(Math.min(MAX, Math.max(MIN, next)));
+    pendingRef.current = Math.min(MAX, Math.max(MIN, next));
+    if (!rafRef.current) {
+      rafRef.current = requestAnimationFrame(() => {
+        rafRef.current = 0;
+        onRatioChange(pendingRef.current);
+      });
+    }
   };
 
   const end = () => {
+    if (!draggingRef.current) return;
     draggingRef.current = false;
     setDragging(false);
+    if (rafRef.current) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = 0;
+    }
+    // Commit the exact rest position (the last frame's flush may not have run).
+    onRatioChange(pendingRef.current);
   };
 
   return (

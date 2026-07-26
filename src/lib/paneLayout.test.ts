@@ -5,7 +5,9 @@ import { describe, expect, it } from "vitest";
 import {
   DIVIDER_W,
   DOC_MIN,
+  DOC_MIN_FRAC,
   computePaneLayout,
+  docMinFor,
   type PaneLayoutInput,
 } from "./paneLayout";
 
@@ -30,13 +32,13 @@ describe("computePaneLayout", () => {
     expect(l.docVisibleW).toBe(l.docFlowW);
   });
 
-  it("floors the doc at DOC_MIN and turns the overage into curtain", () => {
+  it("floors the doc at its minimum and turns the overage into curtain", () => {
     // Pane dragged so wide the doc would squish to ~100px.
     const l = computePaneLayout({ ...base, paneWidth: 1000 });
-    expect(l.docFlowW).toBe(DOC_MIN);
+    expect(l.docFlowW).toBe(docMinFor(1440));
     expect(l.curtainActive).toBe(true);
     const available = 1440 - 2 * DIVIDER_W;
-    const deficit = 240 + 1000 + DOC_MIN - available;
+    const deficit = 240 + 1000 + docMinFor(1440) - available;
     expect(l.sidebarOverlayPx + l.paneOverlayPx).toBe(deficit);
     // The wide pane absorbs nearly all of it.
     expect(l.paneOverlayPx).toBeGreaterThan(l.sidebarOverlayPx);
@@ -55,7 +57,21 @@ describe("computePaneLayout", () => {
     expect(l.paneOverlayPx).toBeLessThanOrEqual(2000);
     const available = 900 - 2 * DIVIDER_W;
     expect(l.sidebarFlowW + l.paneFlowW + l.docFlowW).toBe(available);
-    expect(l.docFlowW).toBe(DOC_MIN);
+    expect(l.docFlowW).toBe(docMinFor(900));
+  });
+
+  it("scales the doc floor to 20% of the window when that beats DOC_MIN", () => {
+    expect(docMinFor(1000)).toBe(DOC_MIN); // 200 < 300 → absolute floor
+    expect(docMinFor(2000)).toBe(Math.round(2000 * DOC_MIN_FRAC)); // 400
+    // On a wide window the curtain engages while the doc is still 20% wide.
+    const l = computePaneLayout({
+      ...base,
+      winWidth: 2000,
+      sidebarWidth: 400,
+      paneWidth: 1400,
+    });
+    expect(l.docFlowW).toBe(400);
+    expect(l.curtainActive).toBe(true);
   });
 
   it("collapsed panes contribute nothing and never curtain", () => {

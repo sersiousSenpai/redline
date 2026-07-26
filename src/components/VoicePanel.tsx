@@ -850,9 +850,9 @@ export function VoicePanel({
   }, [advanceWalk]);
 
   const busy = thinking;
-  // Drives the spinning-logo pulse in the header: fast fractal spin while
-  // thinking, a steady beat while speaking, a slow receptive spin while the mic
-  // is open, still otherwise.
+  // Drives the spinning-logo pulse in the header: a steady working spin while
+  // thinking or speaking, a slow receptive spin while the mic is open, still
+  // otherwise.
   const voicePulse: PulseState = thinking
     ? "thinking"
     : speechState === "speaking"
