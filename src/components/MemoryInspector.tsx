@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
+import { usePersistedState } from "../theme/usePersistedState";
+
 import { describeVerdict, kindLabel, KIND_COLOR } from "./LedgerPane";
 import {
   buildTree,
@@ -81,6 +83,12 @@ export function MemoryInspector({
   activeSessionName,
 }: MemoryInspectorProps) {
   const [tab, setTab] = useState<Tab>("lake");
+  // Deep catalog trees and long lake prompts need room; the maximize state
+  // persists so a user who always wants the big view keeps it.
+  const [maximized, setMaximized] = usePersistedState(
+    "redline.memory.maximized",
+    false,
+  );
 
   return (
     <div
@@ -91,9 +99,8 @@ export function MemoryInspector({
       <div
         className="rounded-md shadow-xl border"
         style={{
-          width: "860px",
-          maxWidth: "94vw",
-          height: "78vh",
+          width: maximized ? "98vw" : "min(1180px, 94vw)",
+          height: maximized ? "94vh" : "86vh",
           display: "flex",
           flexDirection: "column",
           borderColor: "var(--color-rule)",
@@ -139,6 +146,22 @@ export function MemoryInspector({
             ))}
           </div>
           <div style={{ flex: 1 }} />
+          <button
+            type="button"
+            onClick={() => setMaximized((v) => !v)}
+            aria-label={maximized ? "Restore size" : "Maximize"}
+            aria-pressed={maximized}
+            title={maximized ? "Restore size" : "Maximize"}
+            style={{
+              border: "none",
+              background: "transparent",
+              color: "var(--color-ink-muted)",
+              cursor: "pointer",
+              fontSize: 14,
+            }}
+          >
+            {maximized ? "⤡" : "⤢"}
+          </button>
           <button
             type="button"
             onClick={onClose}
@@ -352,9 +375,28 @@ function LakeTab() {
                       🗜 gist
                     </span>
                   )}
-                  <span style={{ flex: "0 0 auto" }}>{ev.author}</span>
+                  {/* The one variable-width field: shrink + ellipsize rather
+                      than clipping the fixed-width fields after it. */}
+                  <span
+                    style={{
+                      flex: "0 1 auto",
+                      minWidth: 0,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                    title={ev.author}
+                  >
+                    {ev.author}
+                  </span>
                   <span style={{ flex: 1 }} />
-                  <span style={{ color: "var(--color-ink-muted)", flex: "0 0 auto" }}>
+                  <span
+                    style={{
+                      color: "var(--color-ink-muted)",
+                      flex: "0 0 auto",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
                     {fmtTime(ev.ts)}
                   </span>
                   <code style={{ color: "var(--color-ink-muted)", flex: "0 0 auto", fontSize: 11 }}>
@@ -419,6 +461,8 @@ function LakeTab() {
                       ? "Gist (original words released; hash retained as proof)"
                       : "Body"}
                   </div>
+                  {/* No inner height cap — the right column already scrolls,
+                      so the body can use all of it. */}
                   <pre
                     style={{
                       whiteSpace: "pre-wrap",
@@ -427,8 +471,6 @@ function LakeTab() {
                       padding: 8,
                       borderRadius: 4,
                       margin: 0,
-                      maxHeight: 320,
-                      overflow: "auto",
                       fontSize: 12,
                     }}
                   >
@@ -544,7 +586,18 @@ function CatalogTab() {
 
   return (
     <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
-      <div style={{ flex: "1 1 52%", overflowY: "auto", minWidth: 0, borderRight: "1px solid var(--color-rule)" }}>
+      {/* Left column: the Expand/Collapse toolbar stays OUTSIDE the scroll
+          container so it's always reachable however deep the tree scrolls. */}
+      <div
+        style={{
+          flex: "1 1 52%",
+          minWidth: 0,
+          minHeight: 0,
+          display: "flex",
+          flexDirection: "column",
+          borderRight: "1px solid var(--color-rule)",
+        }}
+      >
         <div
           style={{
             display: "flex",
@@ -554,6 +607,7 @@ function CatalogTab() {
             fontSize: 12,
             color: "var(--color-ink-muted)",
             borderBottom: "1px solid var(--color-rule)",
+            flex: "0 0 auto",
           }}
         >
           <span style={{ flex: 1, minWidth: 0 }}>
@@ -567,8 +621,9 @@ function CatalogTab() {
           </button>
         </div>
         {error && (
-          <div style={{ padding: "6px 12px", color: "var(--color-warning)", fontSize: 13 }}>{error}</div>
+          <div style={{ padding: "6px 12px", color: "var(--color-warning)", fontSize: 13, flex: "0 0 auto" }}>{error}</div>
         )}
+        <div style={{ overflowY: "auto", flex: 1, minHeight: 0 }}>
         {tree.length === 0 ? (
           <div style={{ padding: 16, color: "var(--color-ink-muted)", fontSize: 13 }}>
             No classes yet — the keeper builds a class tree over your captured
@@ -587,6 +642,7 @@ function CatalogTab() {
             />
           ))
         )}
+        </div>
       </div>
       <div style={{ flex: "1 1 48%", overflowY: "auto", padding: 12, fontSize: 13, minWidth: 0 }}>
         {!selected ? (
@@ -743,16 +799,17 @@ function TreeRow({
         }}
       >
         {/* Depth rails — one hairline per ancestor level, so nesting reads
-            at a glance even in a deep tree. */}
+            at a glance even in a deep tree. 12px per level: deep branches
+            keep most of the row width for their titles. */}
         {Array.from({ length: depth }, (_, i) => (
           <span
             key={i}
             aria-hidden
             style={{
-              flex: "0 0 14px",
+              flex: "0 0 8px",
               alignSelf: "stretch",
               borderLeft: "1px solid var(--color-rule)",
-              marginLeft: 6,
+              marginLeft: 4,
             }}
           />
         ))}
@@ -779,9 +836,15 @@ function TreeRow({
         ) : (
           <span aria-hidden style={{ flex: "0 0 16px" }} />
         )}
-        <span>{isDigest ? "🗄️" : hasChildren ? (collapsed ? "📁" : "📂") : "•"}</span>
+        <span style={{ flexShrink: 0 }}>
+          {isDigest ? "🗄️" : hasChildren ? (collapsed ? "📁" : "📂") : "•"}
+        </span>
+        {/* The title claims all remaining width and ellipsizes; badges after
+            it never shrink. The native tooltip carries the full text. */}
         <span
+          title={node.title}
           style={{
+            flex: "1 1 auto",
             fontWeight: depth === 0 ? 600 : 400,
             minWidth: 0,
             overflow: "hidden",
@@ -791,15 +854,27 @@ function TreeRow({
         >
           {node.title}
         </span>
-        {node.pinned && <span title="Pinned (anti-decay)">📌</span>}
+        {node.pinned && (
+          <span title="Pinned (anti-decay)" style={{ flexShrink: 0 }}>
+            📌
+          </span>
+        )}
         {node.linkCount > 0 && (
-          <span style={{ color: "var(--color-ink-muted)", fontSize: 11 }}>{node.linkCount}</span>
+          <span
+            style={{
+              color: "var(--color-ink-muted)",
+              fontSize: 11,
+              flexShrink: 0,
+            }}
+          >
+            {node.linkCount}
+          </span>
         )}
         {collapsed && (
           <span
             title="Hidden nested classes"
             style={{
-              marginLeft: "auto",
+              flexShrink: 0,
               fontSize: 10.5,
               color: "var(--color-ink-muted)",
               border: "1px solid var(--color-rule)",
