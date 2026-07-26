@@ -35,6 +35,9 @@ const HIGHLIGHT_NOTICE_BYTES = 1024 * 1024;
 interface CodeViewProps {
   /** Absolute path of the file to display. */
   path: string;
+  /** Reports the freshly loaded file's meta (size / binary / too-large) so
+   *  the host can decide whether the Edit affordance is available. */
+  onMeta?: (m: DocMeta) => void;
 }
 
 /** The currently-displayed document. `inlineLines` is present for normal-sized
@@ -48,8 +51,12 @@ interface LoadedDoc {
   inlineLines?: DocLine[];
 }
 
-export default function CodeView({ path }: CodeViewProps) {
+export default function CodeView({ path, onMeta }: CodeViewProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  // Ref-mirrored so `reload` (keyed on path alone) always reports through the
+  // latest callback without re-running on handler identity churn.
+  const onMetaRef = useRef(onMeta);
+  onMetaRef.current = onMeta;
   const [doc, setDoc] = useState<LoadedDoc | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Paged windows, keyed by chunk index (lineIndex / CHUNK). Only used when the
@@ -84,6 +91,7 @@ export default function CodeView({ path }: CodeViewProps) {
         setChunks(new Map());
         requested.current = new Set();
         setError(null);
+        onMetaRef.current?.(d.meta);
       })
       .catch((e) => {
         if (!cancelled && latestPath.current === path) setError(String(e));

@@ -3,7 +3,7 @@
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-import type { BinaryFile, FileContent } from "../types";
+import type { BinaryFile, DocMeta, FileContent } from "../types";
 import { useLiveFile } from "../hooks/useFsWatch";
 import { MarkdownView } from "./MarkdownView";
 
@@ -23,6 +23,18 @@ let codeViewPreloaded: Promise<unknown> | null = null;
  *  dedupes this with the `lazy()` import so they share one fetch. */
 export function preloadCodeView(): void {
   if (!codeViewPreloaded) codeViewPreloaded = codeViewImport();
+}
+
+// The editor (CodeMirror + friends) is a bigger chunk and most file opens are
+// read-only — so unlike CodeView it is NOT warmed on explorer open, only when
+// the user hovers/clicks Edit.
+const codeEditorImport = () => import("./CodeEditor");
+const CodeEditor = lazy(codeEditorImport);
+
+let codeEditorPreloaded: Promise<unknown> | null = null;
+/** Warm the CodeEditor chunk (Edit hover/click). Idempotent. */
+export function preloadCodeEditor(): void {
+  if (!codeEditorPreloaded) codeEditorPreloaded = codeEditorImport();
 }
 
 // Image types the browser can render from a data URL. svg is text but renders
@@ -189,13 +201,90 @@ function TextBody({
   onSaved?: (path: string) => void;
 }) {
   if (isMarkdown(path)) return <MarkdownBody path={path} onSaved={onSaved} />;
+  return <CodeBody path={path} onSaved={onSaved} />;
+}
+
+// `save_text_file` matches `read_text_file`'s guard: a file is editable iff
+// the text read succeeds — ≤ this many bytes, UTF-8, no NUL. Larger/binary
+// files stay on the (paged) read-only CodeView.
+const EDITABLE_MAX_BYTES = 2 * 1024 * 1024;
+
+// Code files: CodeView stays the default read view; Edit swaps in the lazy
+// CodeMirror editor. Editability is decided from the meta CodeView already
+// loads (size / binary), so no extra read is needed to enable the button.
+function CodeBody({
+  path,
+  onSaved,
+}: {
+  path: string;
+  onSaved?: (path: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [meta, setMeta] = useState<DocMeta | null>(null);
+
+  // Switching files leaves edit mode — the buffer belongs to the old file —
+  // and forgets its meta until the new file reports in.
+  useEffect(() => {
+    setEditing(false);
+    setMeta(null);
+  }, [path]);
+
+  const editable = !!meta && !meta.isBinary && meta.size <= EDITABLE_MAX_BYTES;
+  const editTitle = !meta
+    ? "Edit this file"
+    : meta.isBinary
+      ? "Binary file — not editable"
+      : meta.size > EDITABLE_MAX_BYTES
+        ? "Too large to edit (2 MB cap)"
+        : "Edit this file";
+
+  if (editing) {
+    return (
+      <Suspense
+        fallback={
+          <div className="h-full w-full" style={{ background: "var(--color-paper)" }} />
+        }
+      >
+        <CodeEditor
+          path={path}
+          onDone={() => setEditing(false)}
+          onSaved={onSaved}
+        />
+      </Suspense>
+    );
+  }
+
   return (
-    // Blank (not a "Loading…" notice) while the chunk loads: it's preloaded on
-    // explorer open so this rarely shows, and a silent hold avoids stacking a
-    // second flash on CodeView's own (delayed, content-preserving) loader.
-    <Suspense fallback={<div className="h-full w-full" style={{ background: "var(--color-paper)" }} />}>
-      <CodeView path={path} />
-    </Suspense>
+    <div className="flex flex-col h-full min-h-0">
+      <div
+        className="flex items-center justify-end gap-2 px-6 py-1.5 shrink-0"
+        style={{ fontSize: "12px", borderBottom: "1px solid var(--color-rule)" }}
+      >
+        <span title={editTitle} onMouseEnter={preloadCodeEditor}>
+          <EditBtn
+            onClick={() => {
+              preloadCodeEditor();
+              setEditing(true);
+            }}
+            disabled={!editable}
+          >
+            Edit
+          </EditBtn>
+        </span>
+      </div>
+      <div className="flex-1 min-h-0">
+        {/* Blank (not a "Loading…" notice) while the chunk loads: it's
+            preloaded on explorer open so this rarely shows, and a silent hold
+            avoids stacking a second flash on CodeView's own loader. */}
+        <Suspense
+          fallback={
+            <div className="h-full w-full" style={{ background: "var(--color-paper)" }} />
+          }
+        >
+          <CodeView path={path} onMeta={setMeta} />
+        </Suspense>
+      </div>
+    </div>
   );
 }
 
