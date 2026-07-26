@@ -17,7 +17,6 @@ import { FontSize } from "./FontSize";
 import { LineHeight } from "./LineHeight";
 import { Indent } from "./Indent";
 import { ListStyle } from "./ListStyle";
-import { Footnote } from "./Footnote";
 import { SearchHighlight } from "./SearchHighlight";
 import { TableControls } from "./TableControls";
 import { TableAlign } from "./TableAlign";
@@ -89,9 +88,6 @@ export function drafterExtensions(): Extensions {
     // parenthetical, …). Unlike the visual aids above, `listStyle` is semantic
     // and DOES serialize — the emitted marker matches what's on screen.
     ListStyle,
-    // Footnote references (superscript, CSS-auto-numbered). Also semantic: they
-    // serialize to markdown `[^n]` + a trailing definitions block.
-    Footnote,
     // Tables. Unlike the formatting aids above, tables DO serialize to markdown,
     // so they carry real structure into the sent prompt. `resizable` gives the
     // Word-like column drag handles.

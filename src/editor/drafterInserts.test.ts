@@ -4,12 +4,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { Editor } from "@tiptap/core";
 
 import { drafterExtensions } from "./extensions/drafterExtensions";
-import { planDocToMarkdown } from "./markdown/serializer";
-import { applyFootnote, applyLink } from "./drafterInserts";
+import { applyLink } from "./drafterInserts";
 
-// The ribbon's Link and Footnote buttons commit through these helpers (the
-// popover only collects the text). Drive them against a real headless editor
-// so the tested path matches what the buttons actually run.
+// The ribbon's Link button commits through this helper (the popover only
+// collects the text). Drive it against a real headless editor so the tested
+// path matches what the button actually runs.
 
 const editors: Editor[] = [];
 function makeEditor(html: string): Editor {
@@ -25,31 +24,6 @@ function makeEditor(html: string): Editor {
 }
 afterEach(() => {
   for (const e of editors.splice(0)) e.destroy();
-});
-
-describe("applyFootnote", () => {
-  it("inserts a footnote at the caret", () => {
-    const editor = makeEditor("<p>Hello</p>");
-    editor.commands.focus("end");
-    applyFootnote(editor, "a clarifying note");
-    const md = planDocToMarkdown(editor.state.doc, { sidecars: false });
-    expect(md).toContain("Hello[^1]");
-    expect(md).toContain("[^1]: a clarifying note");
-  });
-
-  it("updates the selected footnote instead of inserting a second one", () => {
-    const editor = makeEditor("<p>Hello</p>");
-    editor.commands.focus("end");
-    applyFootnote(editor, "first draft");
-    // Select the footnote node that now sits after "Hello" (pos 6).
-    editor.commands.setNodeSelection(6);
-    expect(editor.isActive("footnote")).toBe(true);
-    applyFootnote(editor, "revised text");
-    const md = planDocToMarkdown(editor.state.doc, { sidecars: false });
-    expect(md).toContain("[^1]: revised text");
-    expect(md).not.toContain("first draft");
-    expect(md).not.toContain("[^2]");
-  });
 });
 
 describe("applyLink", () => {

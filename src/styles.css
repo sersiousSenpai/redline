@@ -564,24 +564,6 @@ body {
   suffix: " ";
 }
 
-/* Footnote references (Footnote extension): a superscript marker whose number
-   is drawn by a CSS counter so refs renumber automatically on any edit. */
-.rl-prose {
-  counter-reset: rl-footnote;
-}
-.rl-footnote {
-  counter-increment: rl-footnote;
-  cursor: pointer;
-  color: var(--color-info);
-  font-weight: 600;
-}
-.rl-footnote::before {
-  content: "[" counter(rl-footnote) "]";
-}
-.rl-footnote.ProseMirror-selectednode::before {
-  background: color-mix(in srgb, var(--color-info) 22%, transparent);
-  border-radius: 3px;
-}
 .rl-prose strong {
   font-weight: 600;
 }

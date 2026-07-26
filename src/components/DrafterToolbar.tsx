@@ -24,14 +24,13 @@ import {
   MoveVertical,
   Redo2,
   Strikethrough,
-  Superscript,
   Table as TableIcon,
   Underline as UnderlineIcon,
   Undo2,
 } from "lucide-react";
 
 import { FONTS } from "../theme/fonts";
-import { applyFootnote, applyLink } from "../editor/drafterInserts";
+import { applyLink } from "../editor/drafterInserts";
 
 // A persistent Word-style formatting ribbon for the Prompt Drafter. Every
 // control drives the live Tiptap editor through `editor.chain().focus()…` and
@@ -466,10 +465,9 @@ const LINE_SPACINGS: { label: string; value: string }[] = [
 export function DrafterToolbar({ editor }: DrafterToolbarProps) {
   const disabled = !editor;
 
-  // Which input popover (link / footnote) is open, with its prefill. The
-  // popovers commit through applyLink/applyFootnote.
+  // The link input popover, with its prefill. Commits through applyLink.
   const [inputPop, setInputPop] = useState<null | {
-    kind: "link" | "footnote";
+    kind: "link";
     initial: string;
   }>(null);
 
@@ -477,14 +475,6 @@ export function DrafterToolbar({ editor }: DrafterToolbarProps) {
     if (!editor) return;
     const prev = editor.getAttributes("link").href as string | undefined;
     setInputPop({ kind: "link", initial: prev ?? "https://" });
-  };
-
-  const openFootnotePop = () => {
-    if (!editor) return;
-    const prev = editor.isActive("footnote")
-      ? (editor.getAttributes("footnote").text as string | undefined)
-      : "";
-    setInputPop({ kind: "footnote", initial: prev ?? "" });
   };
 
   // Live reflections of the current selection for the dropdown labels.
@@ -1055,27 +1045,6 @@ export function DrafterToolbar({ editor }: DrafterToolbarProps) {
               placeholder="https://"
               initialValue={inputPop.initial}
               onCommit={(url) => editor && applyLink(editor, url)}
-              onClose={() => setInputPop(null)}
-            />
-          )}
-        </div>
-        <div style={{ position: "relative" }}>
-          <ToolButton
-            title={
-              editor?.isActive("footnote") ? "Edit footnote" : "Insert footnote"
-            }
-            disabled={disabled}
-            active={editor?.isActive("footnote")}
-            onClick={openFootnotePop}
-          >
-            <Superscript size={ICON} strokeWidth={STROKE} />
-          </ToolButton>
-          {inputPop?.kind === "footnote" && (
-            <RibbonInputPopover
-              title="Footnote text"
-              placeholder="Footnote text"
-              initialValue={inputPop.initial}
-              onCommit={(text) => editor && applyFootnote(editor, text)}
               onClose={() => setInputPop(null)}
             />
           )}

@@ -21,51 +21,16 @@ export function planDocToMarkdown(
   doc: PMNode,
   opts: SerializeOptions = { sidecars: false },
 ): string {
-  const footnotes = collectFootnotes(doc);
-  footnoteOrdinals = footnotes.map;
-  try {
-    const parts: string[] = [];
-    doc.forEach((block) => {
-      const body = serializeBlock(block, "");
-      if (opts.sidecars && block.attrs && block.attrs.blockId) {
-        parts.push(`${sidecarComment(block.attrs.blockId)}\n${body}`);
-      } else {
-        parts.push(body);
-      }
-    });
-    let out = parts.join("\n\n") + "\n";
-    // Footnote definitions trail the document as a pandoc/GFM block.
-    if (footnotes.texts.length) {
-      const defs = footnotes.texts
-        .map((t, i) => `[^${i + 1}]: ${t}`)
-        .join("\n");
-      out += `\n${defs}\n`;
-    }
-    return out;
-  } finally {
-    footnoteOrdinals = null;
-  }
-}
-
-// Footnote references need a document-global ordinal and a trailing definitions
-// block, neither of which the recursive per-block walk can see. A pre-pass maps
-// each footnote node (by identity — stable within one synchronous serialize
-// pass) to its 1-based ordinal; `serializeInline` reads it to emit `[^n]`.
-let footnoteOrdinals: Map<PMNode, number> | null = null;
-
-function collectFootnotes(root: PMNode): {
-  map: Map<PMNode, number>;
-  texts: string[];
-} {
-  const map = new Map<PMNode, number>();
-  const texts: string[] = [];
-  root.descendants((n) => {
-    if (n.type.name === "footnote") {
-      map.set(n, texts.length + 1);
-      texts.push((n.attrs.text as string) || "");
+  const parts: string[] = [];
+  doc.forEach((block) => {
+    const body = serializeBlock(block, "");
+    if (opts.sidecars && block.attrs && block.attrs.blockId) {
+      parts.push(`${sidecarComment(block.attrs.blockId)}\n${body}`);
+    } else {
+      parts.push(body);
     }
   });
-  return { map, texts };
+  return parts.join("\n\n") + "\n";
 }
 
 /** Clean markdown for one block (no sidecar) — the value that maps to an
@@ -187,11 +152,6 @@ function serializeInline(node: PMNode): string {
     if (child.type.name === "hardBreak") {
       flush();
       out += "\\\n";
-      return;
-    }
-    if (child.type.name === "footnote") {
-      flush();
-      out += `[^${footnoteOrdinals?.get(child) ?? 1}]`;
       return;
     }
     if (child.isText) {

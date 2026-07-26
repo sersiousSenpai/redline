@@ -512,31 +512,6 @@ describe("ListStyle Word AutoFormat input rules", () => {
   });
 });
 
-describe("Footnote", () => {
-  it("emits [^n] inline and a trailing definitions block", () => {
-    const editor = makeEditor("<p>Hello</p>");
-    editor.commands.focus("end");
-    editor.commands.insertFootnote("a clarifying note");
-    const md = planDocToMarkdown(editor.state.doc, { sidecars: false });
-    expect(md).toContain("Hello[^1]");
-    expect(md).toContain("[^1]: a clarifying note");
-  });
-
-  it("numbers multiple footnotes in document order", () => {
-    const editor = makeEditor("<p>first</p><p>second</p>");
-    // Footnote after "first" (end of paragraph 1).
-    editor.commands.setTextSelection(6);
-    editor.commands.insertFootnote("note one");
-    editor.commands.focus("end");
-    editor.commands.insertFootnote("note two");
-    const md = planDocToMarkdown(editor.state.doc, { sidecars: false });
-    expect(md).toContain("first[^1]");
-    expect(md).toContain("second[^2]");
-    expect(md).toContain("[^1]: note one");
-    expect(md).toContain("[^2]: note two");
-  });
-});
-
 describe("TableAlign", () => {
   it("setTableAlign writes the align attr on the table node", () => {
     const editor = makeEditor("<p></p>");

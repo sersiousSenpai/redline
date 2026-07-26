@@ -7,7 +7,7 @@
  * writes those vars inline on <html>, and every rule below reads them. The
  * `:root` block is a Studio-theme fallback for first paint before JS runs.
  *
- * The code-block / mermaid / highlight.js / footnote rule blocks are lifted
+ * The code-block / mermaid / highlight.js rule blocks are lifted
  * from src/styles.css so fenced code and diagrams — already rendered by the
  * shared TipTap schema — look identical to the app. They depend only on plain
  * CSS vars, so they port without Tailwind. */
@@ -956,7 +956,7 @@ body {
 }
 
 /* ══════════════════════  Lifted from src/styles.css  ═══════════════════════
-   Code blocks, mermaid, highlight.js palette, footnote counter. These render
+   Code blocks, mermaid, highlight.js palette. These render
    content already produced by the shared TipTap schema (richCodeBlock /
    MermaidView), so keeping the rules identical makes shared code + diagrams
    look exactly like the desktop app. They depend only on plain CSS vars. */
@@ -1135,7 +1135,6 @@ body {
   font-family: var(--font-serif);
   font-size: 16.5px;
   line-height: 1.7;
-  counter-reset: rl-footnote;
 }
 .rl-prose h1,
 .rl-prose h2,
@@ -1295,17 +1294,6 @@ body {
 .rl-prose [data-rl-del] {
   color: var(--color-ink-muted);
   text-decoration: line-through;
-}
-
-/* Footnote references (if a shared doc ever carries them). */
-.rl-footnote {
-  counter-increment: rl-footnote;
-  cursor: help;
-  color: var(--color-info);
-  font-weight: 600;
-}
-.rl-footnote::before {
-  content: "[" counter(rl-footnote) "]";
 }
 
 /* ─────────────────────────────  Responsive  ────────────────────────────── */
