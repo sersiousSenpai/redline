@@ -1,6 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  ArrowLeft,
+  ArrowRight,
+  ChevronDown,
+  Link2,
+  MessageSquare,
+  Palette,
+  Plus,
+  Settings,
+  Star,
+  Target,
+  X,
+} from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Window } from "@tauri-apps/api/window";
@@ -1590,6 +1603,9 @@ export function BrowserPane({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tandem]);
 
+  // Lucide icons render at size 14 inside these (stroke currentColor, so the
+  // active-state tinting keeps working); inline-flex centers icon and text
+  // buttons alike.
   const chromeBtn: React.CSSProperties = {
     fontSize: "13px",
     lineHeight: 1,
@@ -1599,6 +1615,9 @@ export function BrowserPane({
     color: "var(--color-ink)",
     borderRadius: "4px",
     cursor: "pointer",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
   };
 
   return (
@@ -1689,9 +1708,11 @@ export function BrowserPane({
                   border: "none",
                   cursor: "pointer",
                   flexShrink: 0,
+                  display: "inline-flex",
+                  alignItems: "center",
                 }}
               >
-                ✕
+                <X size={12} strokeWidth={2} />
               </button>
             </div>
           );
@@ -1706,13 +1727,14 @@ export function BrowserPane({
             ...chromeBtn,
             border: "none",
             background: "transparent",
-            fontSize: "16px",
             flexShrink: 0,
+            display: "inline-flex",
+            alignItems: "center",
             opacity: tabs.length >= MAX_TABS ? 0.4 : 1,
             cursor: tabs.length >= MAX_TABS ? "default" : "pointer",
           }}
         >
-          +
+          <Plus size={15} strokeWidth={2} />
         </button>
       </div>
 
@@ -1732,7 +1754,7 @@ export function BrowserPane({
           aria-label="Back"
           onClick={() => evalActive("history.back()")}
         >
-          ◀
+          <ArrowLeft size={14} strokeWidth={2} />
         </button>
         <button
           type="button"
@@ -1741,7 +1763,7 @@ export function BrowserPane({
           aria-label="Forward"
           onClick={() => evalActive("history.forward()")}
         >
-          ▶
+          <ArrowRight size={14} strokeWidth={2} />
         </button>
         <form
           className="flex-1 flex gap-2"
@@ -1787,7 +1809,11 @@ export function BrowserPane({
           aria-haspopup="menu"
           onClick={openBookmarksMenu}
         >
-          {isBookmarked ? "★" : "☆"}
+          <Star
+            size={14}
+            strokeWidth={2}
+            fill={isBookmarked ? "currentColor" : "none"}
+          />
         </button>
         <button
           type="button"
@@ -1800,7 +1826,7 @@ export function BrowserPane({
           aria-haspopup="menu"
           onClick={openViewMenu}
         >
-          🎨
+          <Palette size={14} strokeWidth={2} />
         </button>
         <button
           type="button"
@@ -1813,7 +1839,7 @@ export function BrowserPane({
           aria-haspopup="menu"
           onClick={openSettingsMenu}
         >
-          ⚙️
+          <Settings size={14} strokeWidth={2} />
         </button>
         {/* 🎯 and the missions ▾ menu read as ONE control: a single bordered
             chip with two borderless segments split by a hairline, so there's no
@@ -1835,9 +1861,10 @@ export function BrowserPane({
               border: "none",
               background: "transparent",
               cursor: "pointer",
-              fontSize: "13px",
               lineHeight: 1,
               padding: "3px 6px",
+              display: "inline-flex",
+              alignItems: "center",
               // Fully rounded when it's the lone segment; left-rounded when the
               // ▾ menu sits beside it.
               borderRadius: missionShowMenu ? "3px 0 0 3px" : "3px",
@@ -1859,7 +1886,7 @@ export function BrowserPane({
               }
             }}
           >
-            🎯
+            <Target size={14} strokeWidth={2} />
           </button>
           {/* The ▾ missions menu (switch / resume / archive / start another)
               only earns its place once a mission exists to manage; with none,
@@ -1873,9 +1900,10 @@ export function BrowserPane({
                   border: "none",
                   background: "transparent",
                   cursor: "pointer",
-                  fontSize: "8px",
                   lineHeight: 1,
-                  padding: "0 5px",
+                  padding: "0 4px",
+                  display: "inline-flex",
+                  alignItems: "center",
                   borderRadius: "0 3px 3px 0",
                   color: mission.activeMission ? "var(--color-info)" : "var(--color-ink-muted)",
                 }}
@@ -1884,7 +1912,7 @@ export function BrowserPane({
                 aria-haspopup="menu"
                 onClick={() => setMissionMenuOpen((x) => !x)}
               >
-                ▾
+                <ChevronDown size={11} strokeWidth={2} />
               </button>
             </>
           )}
@@ -1952,7 +1980,7 @@ export function BrowserPane({
             }
           }}
         >
-          💬
+          <MessageSquare size={14} strokeWidth={2} />
         </button>
         <button
           type="button"
@@ -1975,7 +2003,7 @@ export function BrowserPane({
             }
           }}
         >
-          🔗
+          <Link2 size={14} strokeWidth={2} />
         </button>
         <button
           type="button"
@@ -1984,7 +2012,7 @@ export function BrowserPane({
           aria-label="Close browser"
           onClick={onClose}
         >
-          ✕
+          <X size={14} strokeWidth={2} />
         </button>
       </div>
         </>
@@ -2158,6 +2186,9 @@ function DiscussionSwitcher({
     color: active ? "var(--color-on-accent)" : "var(--color-ink-muted)",
     cursor: "pointer",
     whiteSpace: "nowrap",
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "4px",
   });
   return (
     <div
@@ -2165,13 +2196,14 @@ function DiscussionSwitcher({
       style={{ borderBottom: "1px solid var(--color-rule)", background: "var(--color-bg-elevated)" }}
     >
       <button type="button" style={pill(tab === "page")} onClick={() => setTab("page")}>
-        💬 This page
+        <MessageSquare size={11} strokeWidth={2} /> This page
       </button>
       <button type="button" style={pill(tab === "mission")} onClick={() => setTab("mission")}>
-        🎯 Mission{hasMission && pinCount > 0 ? ` · ${pinCount}` : ""}
+        <Target size={11} strokeWidth={2} /> Mission
+        {hasMission && pinCount > 0 ? ` · ${pinCount}` : ""}
       </button>
       <button type="button" style={pill(tab === "linked")} onClick={() => setTab("linked")}>
-        🔗 Linked
+        <Link2 size={11} strokeWidth={2} /> Linked
       </button>
     </div>
   );
@@ -2181,7 +2213,7 @@ function DiscussionSwitcher({
 function LinkedEmptyState({ onStart }: { onStart: () => void }) {
   return (
     <div className="flex flex-col items-center justify-center h-full gap-3 px-6 text-center">
-      <span style={{ fontSize: "28px" }}>🔗</span>
+      <Link2 size={28} strokeWidth={1.5} style={{ color: "var(--color-ink-muted)" }} />
       <p style={{ fontSize: "12px", color: "var(--color-ink-muted)", lineHeight: 1.5 }}>
         A linked discussion is one conversation that follows you across every tab.
         Switch tabs and keep talking — it carries the thread and checks in with a
@@ -2193,7 +2225,7 @@ function LinkedEmptyState({ onStart }: { onStart: () => void }) {
         className="rounded px-3 py-1.5 font-medium"
         style={{ fontSize: "12px", background: "var(--color-info)", color: "var(--color-on-accent)" }}
       >
-        Start a linked discussion 🔗
+        Start a linked discussion
       </button>
     </div>
   );
@@ -2203,7 +2235,7 @@ function LinkedEmptyState({ onStart }: { onStart: () => void }) {
 function MissionEmptyState({ onStart }: { onStart: () => void }) {
   return (
     <div className="flex flex-col items-center justify-center h-full gap-3 px-6 text-center">
-      <span style={{ fontSize: "28px" }}>🎯</span>
+      <Target size={28} strokeWidth={1.5} style={{ color: "var(--color-ink-muted)" }} />
       <p style={{ fontSize: "12px", color: "var(--color-ink-muted)", lineHeight: 1.5 }}>
         A mission gives your browsing one goal. An orchestrator watches every tab,
         gathers what you pin, and helps you synthesize it toward that goal.
@@ -2214,7 +2246,7 @@ function MissionEmptyState({ onStart }: { onStart: () => void }) {
         className="rounded px-3 py-1.5 font-medium"
         style={{ fontSize: "12px", background: "var(--color-info)", color: "var(--color-on-accent)" }}
       >
-        Start a mission 🎯
+        Start a mission
       </button>
     </div>
   );

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { useEffect, useRef, useState } from "react";
+import { Copy, Link2, PenLine, X } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
@@ -317,7 +318,7 @@ function LinkedHeader({
       className="flex items-start gap-1.5 px-3 py-2 shrink-0"
       style={{ borderBottom: "1px solid var(--color-rule)" }}
     >
-      <span style={{ fontSize: "13px", lineHeight: "16px" }}>🔗</span>
+      <Link2 size={14} strokeWidth={2} style={{ marginTop: "1px", flexShrink: 0 }} />
       <div className="flex flex-col min-w-0 flex-1">
         <span
           style={{ fontSize: "12px", fontWeight: 600, color: "var(--color-ink)" }}
@@ -335,9 +336,9 @@ function LinkedHeader({
         onClick={onClose}
         title="Close"
         className="px-1 leading-none opacity-60 hover:opacity-100"
-        style={{ fontSize: "13px", color: "var(--color-ink-muted)" }}
+        style={{ color: "var(--color-ink-muted)" }}
       >
-        ✕
+        <X size={13} strokeWidth={2} />
       </button>
     </div>
   );
@@ -421,7 +422,13 @@ function MessageActions({
   return (
     <div className="flex items-center gap-1.5 mt-0.5 opacity-0 group-hover/msg:opacity-100 transition-opacity">
       <button type="button" onClick={copy} title="Copy this reply" style={actionStyle}>
-        {copied ? "Copied ✓" : "⧉ Copy"}
+        {copied ? (
+          "Copied ✓"
+        ) : (
+          <span className="inline-flex items-center gap-1">
+            <Copy size={10} strokeWidth={2} /> Copy
+          </span>
+        )}
       </button>
       {onSendToDrafter && (
         <button
@@ -430,7 +437,9 @@ function MessageActions({
           title="Open this reply in the Prompt Drafter to shape before sending"
           style={{ ...actionStyle, color: "var(--color-info)" }}
         >
-          ✍️ Open in Drafter
+          <span className="inline-flex items-center gap-1">
+            <PenLine size={10} strokeWidth={2} /> Open in Drafter
+          </span>
         </button>
       )}
       {onSendToRedline && (
