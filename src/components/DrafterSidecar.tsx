@@ -144,6 +144,18 @@ function DraftCommentCard({
       .then((rows) => alive && setMessages(rows))
       .catch(() => {});
 
+    // Seed streaming state from the fork registry — an in-flight turn
+    // survives unmount/remount (draft switches), but this component's status
+    // is local and would otherwise read idle until the next delta.
+    void invoke<{ streaming: boolean; startedAt: number | null }>(
+      "fork_thread_status",
+      { scopeId: draftId, itemId: commentId },
+    )
+      .then((s) => {
+        if (alive && s.streaming) setStatus("streaming");
+      })
+      .catch(() => {});
+
     const mine = (p: { sessionId: string; commentId: string }) =>
       p.sessionId === draftId && p.commentId === commentId;
     const deltaP = listen<ForkDeltaEvent>("fork-delta", (e) => {

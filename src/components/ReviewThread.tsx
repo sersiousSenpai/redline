@@ -55,6 +55,18 @@ export function ReviewThread({ reviewId, annotationId, kind = "annotation" }: Re
         if (alive) setMessages(rows);
       })
       .catch(() => {});
+    // Seed streaming state from the fork registry: an in-flight turn survives
+    // this component unmounting (pane switches), and here streaming is just
+    // `streamText !== null` — start it as an empty stream so the indicator
+    // shows; deltas append from there.
+    void invoke<{ streaming: boolean; startedAt: number | null }>(
+      "fork_thread_status",
+      { scopeId: reviewId, itemId: annotationId },
+    )
+      .then((s) => {
+        if (alive && s.streaming) setStreamText((t) => t ?? "");
+      })
+      .catch(() => {});
     return () => {
       alive = false;
     };

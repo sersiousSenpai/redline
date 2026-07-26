@@ -55,6 +55,10 @@ fn fork_key(session_id: &str, comment_id: &str) -> String {
 /// needed — the registry owns the whole `Child`.
 struct ForkProc {
     child: Child,
+    /// Unix-ms when this turn was registered — surfaced by
+    /// `fork_thread_status` so a remounted thread can restore its elapsed
+    /// counter after a session switch.
+    started_at: i64,
 }
 
 type ForkRegistry = Arc<Mutex<HashMap<String, ForkProc>>>;
@@ -142,7 +146,13 @@ impl ForkState {
             self.procs
                 .lock()
                 .unwrap()
-                .insert(key.clone(), ForkProc { child });
+                .insert(
+                key.clone(),
+                ForkProc {
+                    child,
+                    started_at: now_millis(),
+                },
+            );
         }
 
         let outcome = tokio::time::timeout(
@@ -504,7 +514,13 @@ pub async fn fork_thread_send(
         fork.procs
             .lock()
             .unwrap()
-            .insert(key.clone(), ForkProc { child });
+            .insert(
+                key.clone(),
+                ForkProc {
+                    child,
+                    started_at: now_millis(),
+                },
+            );
     }
     tauri::async_runtime::spawn(read_fork(
         app,
@@ -708,7 +724,13 @@ pub async fn review_thread_send(
         fork.procs
             .lock()
             .unwrap()
-            .insert(key.clone(), ForkProc { child });
+            .insert(
+                key.clone(),
+                ForkProc {
+                    child,
+                    started_at: now_millis(),
+                },
+            );
     }
     tauri::async_runtime::spawn(read_fork(
         app,
@@ -868,7 +890,13 @@ pub async fn review_question_send(
         fork.procs
             .lock()
             .unwrap()
-            .insert(key.clone(), ForkProc { child });
+            .insert(
+                key.clone(),
+                ForkProc {
+                    child,
+                    started_at: now_millis(),
+                },
+            );
     }
     tauri::async_runtime::spawn(read_fork(
         app,
@@ -1090,7 +1118,13 @@ pub async fn draft_thread_send(
         fork.procs
             .lock()
             .unwrap()
-            .insert(key.clone(), ForkProc { child });
+            .insert(
+                key.clone(),
+                ForkProc {
+                    child,
+                    started_at: now_millis(),
+                },
+            );
     }
     tauri::async_runtime::spawn(read_fork(
         app,
@@ -1135,6 +1169,46 @@ pub fn get_thread(
     fork.db
         .load_thread(&session_id, &comment_id)
         .map_err(|e| format!("failed to load thread: {e}"))
+}
+
+/// Snapshot of whether a thread has a turn in flight right now.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForkThreadStatus {
+    pub streaming: bool,
+    pub started_at: Option<i64>,
+}
+
+/// Core lookup shared by the command and its test.
+fn thread_status_in(procs: &ForkRegistry, scope_id: &str, item_id: &str) -> ForkThreadStatus {
+    let guard = procs.lock().unwrap();
+    match guard.get(&fork_key(scope_id, item_id)) {
+        Some(p) => ForkThreadStatus {
+            streaming: true,
+            started_at: Some(p.started_at),
+        },
+        None => ForkThreadStatus {
+            streaming: false,
+            started_at: None,
+        },
+    }
+}
+
+/// Whether a discussion thread has a turn streaming right now, and since
+/// when. Generic over all four fork families — plan comments, review
+/// annotations, review questions, drafter comments — because they share one
+/// registry keyed by `fork_key(scope, item)`. Streaming state is otherwise
+/// component-local in the frontend: switching sessions unmounts the thread,
+/// and a remount would look idle mid-turn (silent thinking stretches emit no
+/// deltas) until the send path rejected with "a reply is still streaming".
+/// The thread components seed from this on mount instead.
+#[tauri::command]
+pub fn fork_thread_status(
+    fork: tauri::State<'_, ForkState>,
+    scope_id: String,
+    item_id: String,
+) -> ForkThreadStatus {
+    thread_status_in(&fork.procs, &scope_id, &item_id)
 }
 
 /// Kill the in-flight turn for a comment, if any. `read_fork` then sees the
@@ -1461,6 +1535,50 @@ mod tests {
         // The same comment id in different sessions must not collide.
         assert_ne!(fork_key("s1", "c-001"), fork_key("s2", "c-001"));
         assert_eq!(fork_key("s1", "c-001"), fork_key("s1", "c-001"));
+    }
+
+    #[test]
+    fn thread_status_streams_while_registered_and_idles_after_removal() {
+        // The status command is what lets a remounted thread rediscover an
+        // in-flight turn after a session switch — it must mirror the registry
+        // exactly: streaming (with the start stamp) while the entry exists,
+        // idle the moment it's removed.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let procs: ForkRegistry = Arc::new(Mutex::new(HashMap::new()));
+            let idle = thread_status_in(&procs, "scope-1", "item-1");
+            assert!(!idle.streaming);
+            assert_eq!(idle.started_at, None);
+
+            let child = tokio::process::Command::new("sleep")
+                .arg("30")
+                .kill_on_drop(true)
+                .spawn()
+                .expect("spawn sleep");
+            let key = fork_key("scope-1", "item-1");
+            procs.lock().unwrap().insert(
+                key.clone(),
+                ForkProc {
+                    child,
+                    started_at: 1234,
+                },
+            );
+
+            let live = thread_status_in(&procs, "scope-1", "item-1");
+            assert!(live.streaming);
+            assert_eq!(live.started_at, Some(1234));
+            // Scoping holds: the same item id in another scope reads idle.
+            assert!(!thread_status_in(&procs, "scope-2", "item-1").streaming);
+
+            let mut p = procs.lock().unwrap().remove(&key).unwrap();
+            let _ = p.child.start_kill();
+            let done = thread_status_in(&procs, "scope-1", "item-1");
+            assert!(!done.streaming);
+            assert_eq!(done.started_at, None);
+        });
     }
 
     #[test]

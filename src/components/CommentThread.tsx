@@ -108,6 +108,21 @@ export const CommentThread = memo(function CommentThread({
         if (alive) setLoaded(true);
       });
 
+    // Streaming state is component-local, but the fork registry survives a
+    // session switch — seed from it so a remount mid-turn shows the spinner
+    // (and elapsed counter) again instead of a silently "idle" thread. The
+    // fork-* listeners below take over from the next event on.
+    void invoke<{ streaming: boolean; startedAt: number | null }>(
+      "fork_thread_status",
+      { scopeId: sessionId, itemId: commentId },
+    )
+      .then((s) => {
+        if (!alive || !s.streaming) return;
+        setStatus("streaming");
+        setWorkStartedAt(s.startedAt ?? Date.now());
+      })
+      .catch(() => {});
+
     const mine = (p: { sessionId: string; commentId: string }) =>
       p.sessionId === sessionId && p.commentId === commentId;
 

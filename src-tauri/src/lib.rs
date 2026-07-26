@@ -7826,6 +7826,7 @@ pub fn run() {
             fswatch::watch_dir,
             fswatch::unwatch_dir,
             fork::fork_thread_send,
+            fork::fork_thread_status,
             fork::get_thread,
             fork::fork_thread_cancel,
             fork::fork_thread_discard,
