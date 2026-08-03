@@ -104,10 +104,15 @@ objc2-foundation = "0.3.2" # NSString/NSLocale/NSError bridging
 # (OAuth/SSO popup) support: our own `WKUIDelegate` returns a real WebKit-created
 # child webview from `createWebView…` — the only way `window.opener`,
 # `window.close()`, and `.closed` work — and hosts it in a floating `NSWindow`.
-# Feature lists mirror wry 0.55's exactly (same crate versions already resolved
-# in the tree), so Cargo feature-unification adds no extra build and every class
-# our delegate touches is guaranteed present. Without this, WebKit routes those
-# requests to wry's UI delegate, which has no new-window handler and drops them.
+# The feature lists are wry 0.55's (same crate versions already resolved in the
+# tree, so Cargo feature-unification adds no extra build and every class the
+# delegate touches is guaranteed present) PLUS the few `thumbs.rs` needs for the
+# Localhost dashboard's screenshots — `WKSnapshotConfiguration` to ask WebKit for
+# a downscaled snapshot, and the NSImage/NSImageRep/NSBitmapImageRep trio to
+# encode the result as PNG. Both additions are purely additive: they pull only
+# objc2-foundation features already switched on, so the build cost is unchanged.
+# Without the wry-matching baseline, WebKit routes new-window requests to wry's
+# UI delegate, which has no new-window handler and drops them.
 objc2-web-kit = { version = "0.3.2", default-features = false, features = [
     "std", "objc2-core-foundation", "objc2-app-kit", "block2",
     "WKWebView", "WKWebViewConfiguration", "WKWebsiteDataStore", "WKDownload",
@@ -117,10 +122,16 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = [
     "WKOpenPanelParameters", "WKFrameInfo", "WKSecurityOrigin", "WKScriptMessage",
     "WKNavigationAction", "WKWebpagePreferences", "WKNavigationResponse",
     "WKUserScript", "WKHTTPCookieStore", "WKWindowFeatures",
+    "WKSnapshotConfiguration",
 ] }
+# NSImage arrives transitively via objc2-web-kit's `objc2-app-kit` feature, but
+# name it explicitly — `NSImageRep` is what gates the `representationUsingType:
+# properties:` impl block we call, and a feature we depend on shouldn't be
+# somebody else's implementation detail.
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "std", "objc2-core-foundation", "NSApplication", "NSButton", "NSControl",
     "NSEvent", "NSWindow", "NSView", "NSPasteboard", "NSPanel", "NSResponder",
     "NSOpenPanel", "NSSavePanel", "NSMenu", "NSGraphics", "NSScreen",
+    "NSImage", "NSImageRep", "NSBitmapImageRep",
 ] }
 

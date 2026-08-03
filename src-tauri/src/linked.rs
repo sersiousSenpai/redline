@@ -166,6 +166,12 @@ impl LinkedState {
                 if let Some(mut p) = proc {
                     let _ = p.child.start_kill();
                 }
+                let _ = self.db.record_friction(
+                    "turn_timeout",
+                    Some("linked"),
+                    Some(&linked_id),
+                    Some("180s turn ceiling"),
+                );
                 return Err("the colleague took too long to respond".to_string());
             }
         };
@@ -295,9 +301,11 @@ fn build_first_turn_prompt(
     p.push_str(
         "You can see and read across every open tab by calling these local \
          endpoints with curl (already permitted — no approval needed). Put the \
-         URL immediately after `-s`. Write routes require \
-         `-H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\"` after the URL (the \
-         token is already in your environment):\n\n\
+         URL immediately after `-s`. Write routes need the bearer token: add \
+         `--variable %REDLINE_DAEMON_TOKEN= --expand-header \"Authorization: \
+         Bearer {{REDLINE_DAEMON_TOKEN}}\"` after the URL, which imports it \
+         straight from the environment — never write `$REDLINE_DAEMON_TOKEN` \
+         into the command yourself (requires curl >= 8.3):\n\n\
          - List every open tab — your map of the user's browse. Each has a number \
          `n` (its position in the tab strip, what the USER sees), plus url, \
          title, and which is active:\n  \
@@ -310,11 +318,13 @@ fn build_first_turn_prompt(
          curl -s 'http://127.0.0.1:7676/v1/browser/thread?tab=<n>'\n\
          - Open a URL in a NEW tab (leaves the user's tabs open):\n  \
          curl -s http://127.0.0.1:7676/v1/browser/open \
-         -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST \
+         --variable %REDLINE_DAEMON_TOKEN= \
+         --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" -X POST \
          -H 'Content-Type: application/json' -d '{\"url\":\"https://example.com\"}'\n\
          - Switch the user INTO a tab (only when they want to BE there):\n  \
          curl -s 'http://127.0.0.1:7676/v1/browser/focus?tab=<n>' \
-         -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST\n\n\
+         --variable %REDLINE_DAEMON_TOKEN= \
+         --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" -X POST\n\n\
          Reading a tab by `?tab=<n>` is like glancing at a neighbour's screen — it \
          does NOT move the user's current tab. Tab numbers are positional and \
          shift as tabs open/close, so re-read /tabs for the current mapping each \
@@ -325,7 +335,8 @@ fn build_first_turn_prompt(
          holding its full thread. Ask it to synthesize, and only its digest comes \
          back to you (you stay light). Call:\n  \
          curl -s http://127.0.0.1:7676/v1/linked/consult \
-         -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST \
+         --variable %REDLINE_DAEMON_TOKEN= \
+         --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" -X POST \
          -H 'Content-Type: application/json' \
          -d '{\"tab\":\"<n>\",\"question\":\"<what you need synthesized from that tab>\"}'\n\
          The response is JSON {\"digest\":\"...\",\"n\":<n>,\"title\":\"...\"}. Fold the \

@@ -31,7 +31,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::claude_proc::{classify_line, resolve_claude_bin, StreamLine};
 use crate::db::Database;
-use crate::state::SessionStore;
+use crate::state::{now_millis, SessionStore, VoiceMessage};
 
 /// Standing instruction prepended to the first turn of a *fresh* voice fork
 /// (skipped when resuming an existing one — it was primed in a past run). It
@@ -136,33 +136,66 @@ fn drafter_key_id(session_id: &str) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
-/// The capture-feedback bridge, appended to a fresh fork's first turn with the
-/// plan's own `session_id` baked into the curl templates. Teaches the agent to
-/// (1) read the plan's blocks to anchor against, then (2) POST a `[feedback]`
-/// comment — the only write it is permitted, and only on explicit request.
-/// The URL sits immediately after `-s` (the headless `curl` allow matches that
-/// shape exactly; anything else is silently auto-denied).
+/// The plan bridge, appended to a fresh fork's first turn with the plan's own
+/// `session_id` baked into the curl templates. It teaches two distinct moves,
+/// in the order they matter:
+///
+///  1. **Offer** — the new default. When the agent proposes a concrete change it
+///     stages it mid-turn; the panel renders a `＋ Add as item` chip under that
+///     reply and the user's tap does the writing. Nothing reaches the plan, so
+///     this needs no "at the user's direction" gate — and the round trip where
+///     the reviewer says "add that as feedback" and the agent posts a turn later
+///     disappears.
+///  2. **Write** — the original `/comments` recipe, unchanged and still gated on
+///     an explicit "capture that".
+///
+/// The offer travels as its own HTTP call rather than as an in-prose fence: the
+/// panel feeds raw `voice-delta` text straight into the speech queue, so any
+/// sidecar in the reply would be **spoken aloud** — and would land in the
+/// persisted transcript and rehydrate on every mount.
+///
+/// In both recipes the URL sits immediately after `-s` (the headless `curl`
+/// allow matches that shape exactly; anything else is silently auto-denied).
 fn bridge_preamble(session_id: &str) -> String {
     format!(
-        "If — and only if — the reviewer explicitly asks you to capture a change, \
-record it as a feedback comment on the plan with two curl calls (already \
-permitted; no approval needed). Put the URL immediately after `-s`.\n\
-First, read the plan's blocks to find what to anchor to:\n\
+        "You can turn what you say into items on the plan, two ways. Both curl \
+recipes below are already permitted (no approval needed). Put the URL \
+immediately after `-s`.\n\
+Either way, first read the plan's blocks to find what to anchor to:\n\
   curl -s http://127.0.0.1:7676/v1/sessions/{session_id}/plan\n\
 That returns a `blocks` array; each block has a `blockId`, an `anchorId`, a \
-`kind` (\"heading\" or \"paragraph\"), and its `markdown`. Match the change the \
-reviewer is describing to the block whose `markdown` it concerns. If they are \
-vague about where it applies, anchor to the nearest \"heading\" block so the note \
-lands at the section level.\n\
-Then post the feedback, using that block's `blockId` (this write route requires \
-the Authorization header shown; the token is already in your environment):\n\
-  curl -s http://127.0.0.1:7676/v1/sessions/{session_id}/comments -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST -H 'Content-Type: application/json' -d '{{\"blockId\":\"<the blockId>\",\"body\":\"<the change, in the reviewer's words>\",\"agentId\":\"voice\"}}'\n\
-The `body` is a directive in plain words (for example \"make the timeout \
-configurable\") — never a rewritten version of the plan. Always read the change \
-back in one short spoken sentence to confirm before you post. This is your \
-primary write; the rest of your app-wide scope (and its own staged write \
-routes, equally gated on the user's explicit direction) is described below. \
-Never edit files, produce a new plan, or call ExitPlanMode."
+`kind` (\"heading\" or \"paragraph\"), and its `markdown`. Match the change to the \
+block whose `markdown` it concerns. If it is vague about where it applies, \
+anchor to the nearest \"heading\" block so the note lands at the section level.\n\
+Both write routes need the bearer token: the two `--variable`/`--expand-header` \
+flags shown import it straight from your environment — never write \
+`$REDLINE_DAEMON_TOKEN` into the command yourself; requires curl >= 8.3.\n\
+\n\
+1. OFFER, DON'T WAIT TO BE ASKED — this is your default. Whenever you propose a \
+concrete change to the plan, stage it as an offer in the same turn, before your \
+closing sentence:\n\
+  curl -s http://127.0.0.1:7676/v1/sessions/{session_id}/comment-offers --variable %REDLINE_DAEMON_TOKEN= \
+  --expand-header \"Authorization: Bearer {{{{REDLINE_DAEMON_TOKEN}}}}\" -X POST -H 'Content-Type: application/json' -d '{{\"blockId\":\"<the blockId>\",\"body\":\"<the change, in plain words>\",\"label\":\"<a short chip line>\",\"agentId\":\"voice\"}}'\n\
+That writes NOTHING to the plan. It puts a `＋ Add as item` chip under your \
+reply, and one tap by the user creates the item. `label` is at most 60 \
+characters. Do this silently: never say the route, the curl, or the word \
+\"offer\" out loud — just say what you would add (\"I'd add that as an item — \
+want it?\") and carry on. At most 2 offers in one turn, and never offer the same \
+thing twice.\n\
+\n\
+2. WRITE DIRECTLY — only if the reviewer explicitly asks you to capture a change \
+(\"capture that\", \"make a note of that\"). Then post the feedback comment \
+itself, using that block's `blockId`:\n\
+  curl -s http://127.0.0.1:7676/v1/sessions/{session_id}/comments --variable %REDLINE_DAEMON_TOKEN= \
+  --expand-header \"Authorization: Bearer {{{{REDLINE_DAEMON_TOKEN}}}}\" -X POST -H 'Content-Type: application/json' -d '{{\"blockId\":\"<the blockId>\",\"body\":\"<the change, in the reviewer's words>\",\"agentId\":\"voice\"}}'\n\
+Always read the change back in one short spoken sentence to confirm before you \
+post this one.\n\
+\n\
+In both, `body` is a directive in plain words (for example \"make the timeout \
+configurable\") — never a rewritten version of the plan. These are your writes \
+on this plan; the rest of your app-wide scope (and its own staged write routes, \
+equally gated on the user's explicit direction) is described below. Never edit \
+files, produce a new plan, or call ExitPlanMode."
     )
 }
 
@@ -284,6 +317,11 @@ struct VoiceDelta {
 struct VoiceDone {
     session_id: String,
     body: String,
+    /// The `voice_messages` row this reply was persisted as. The panel appends
+    /// the live agent line from this event, so without the id a just-staged
+    /// offer would have nothing to bind to until the next remount — binding in
+    /// Rust alone only fixes rehydration.
+    message_id: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -322,6 +360,39 @@ fn push_stderr_tail(tail: &StderrTail, line: String) {
         buf.pop_front();
     }
     buf.push_back(line);
+}
+
+// --- Transcript persistence ------------------------------------------------
+// The agent's memory has always survived (the forked session id in
+// `voice_sessions`); the *screen* did not. Every visible line is appended to
+// `voice_messages` from RUST — never from the panel — so a reply still lands
+// when the panel is unmounted (a new plan arriving, a session switch, a quit
+// mid-turn). The panel hydrates from these rows on mount instead of starting
+// empty. Best-effort throughout: a failed write is logged, never fatal — losing
+// a transcript line must not break the conversation.
+
+/// Append one visible transcript line for `session_key`. `role` is the panel's
+/// own line kind ("you" | "agent" | "note"), not a wire role.
+///
+/// Returns the new row's id — what an offer staged during that turn binds to —
+/// or `None` when nothing was written (empty text, or a failed insert).
+fn persist_line(db: &Database, session_key: &str, role: &str, text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let msg = VoiceMessage {
+        id: uuid::Uuid::new_v4().to_string(),
+        session_key: session_key.to_string(),
+        role: role.to_string(),
+        text: text.to_string(),
+        created_at: now_millis(),
+    };
+    if let Err(e) = db.insert_voice_message(&msg) {
+        tracing::warn!(error = %e, "failed to persist voice transcript line");
+        return None;
+    }
+    Some(msg.id)
 }
 
 /// Build one stream-json user-turn line (newline-terminated) for the child's
@@ -396,7 +467,14 @@ pub async fn voice_session_start(
         "--allowedTools".to_string(),
         "WebSearch".to_string(),
         "WebFetch".to_string(),
+        // All three quoting variants, matching every other spawn site
+        // (`claude_proc::bridge_args`, `fork.rs`, `browse.rs`, `mission.rs`).
+        // `scope_preamble` embeds `companion::routes_block()` verbatim, which
+        // teaches single-quoted URLs (`'…/v1/reviews/annotations?repo=…'`);
+        // granting only the bare prefix auto-denied those calls.
         "Bash(curl -s http://127.0.0.1:7676/*)".to_string(),
+        "Bash(curl -s 'http://127.0.0.1:7676/*)".to_string(),
+        "Bash(curl -s \"http://127.0.0.1:7676/*)".to_string(),
         "--strict-mcp-config".to_string(),
     ];
     args.extend(crate::seat::flag_args("voice"));
@@ -503,15 +581,24 @@ pub async fn voice_session_start(
 
 /// Send one turn to the live voice session. Streams back over `voice-*` events.
 /// Rejects a turn while a reply is still streaming.
+///
+/// `label` is what the panel *shows* for this turn, when that differs from what
+/// is actually sent — the canned starters send a long prompt but display
+/// "▶ Summarize the plan", and a walkthrough step displays its section title.
+/// The transcript is persisted from here (not the panel) so the line survives
+/// an unmount, so the display text has to come along.
 #[tauri::command]
 pub async fn voice_send(
     voice: tauri::State<'_, VoiceState>,
     session_id: String,
     text: String,
+    label: Option<String>,
 ) -> Result<(), String> {
     if text.trim().is_empty() {
         return Err("empty message".to_string());
     }
+    // Captured before `text` is folded into the first-turn preamble below.
+    let display = label.unwrap_or_else(|| text.clone());
     let (stdin, in_flight, primed, prime) = {
         let guard = voice.procs.lock().unwrap();
         let proc = guard
@@ -624,7 +711,46 @@ pub async fn voice_send(
         in_flight.store(false, Ordering::SeqCst);
         return Err(format!("failed to flush voice session: {e}"));
     }
+    // The turn is genuinely on its way — record the user's line. Persisting only
+    // after the write keeps the transcript free of turns that never left.
+    persist_line(&voice.db, &session_id, "you", &display);
     Ok(())
+}
+
+/// Append a transcript line the *panel* produced, with no backend turn behind
+/// it — the "▶ Read the plan" marker (local TTS, no agent involved) and the
+/// "📝 Captured as feedback" acknowledgment. Keeping them in the same table is
+/// what makes a rehydrated transcript match what was on screen.
+#[tauri::command]
+pub fn voice_note(
+    voice: tauri::State<'_, VoiceState>,
+    session_id: String,
+    role: String,
+    text: String,
+) -> Result<(), String> {
+    // Roles come from a fixed set; anything else would render as an unstyled
+    // line on rehydrate.
+    let role = match role.as_str() {
+        "you" | "agent" | "note" => role,
+        other => return Err(format!("unknown transcript role `{other}`")),
+    };
+    persist_line(&voice.db, &session_id, &role, &text);
+    Ok(())
+}
+
+/// A voice key's persisted transcript, oldest-first. The panel hydrates from
+/// this on mount instead of starting empty, so the conversation survives a
+/// session switch, an incoming plan, and an app restart — matching the
+/// agent-side memory that already did.
+#[tauri::command]
+pub fn voice_thread(
+    voice: tauri::State<'_, VoiceState>,
+    session_id: String,
+) -> Result<Vec<VoiceMessage>, String> {
+    voice
+        .db
+        .list_voice_messages(&session_id)
+        .map_err(|e| format!("failed to load the voice transcript: {e}"))
 }
 
 /// Clean up a raw dictation transcript into well-punctuated prose via the warm
@@ -757,16 +883,64 @@ async fn read_cleanup_result<R: AsyncBufRead + Unpin>(
 
 /// Stop and drop the live voice session. Its memory (the forked session id)
 /// stays in the DB, so re-entering resumes the conversation.
+///
+/// **A turn in flight is left alone** unless `force` is set. The panel's
+/// unmount teardown is the ordinary caller, and it fires for reasons that have
+/// nothing to do with the conversation — a new plan arriving, a session switch,
+/// closing the drawer. Killing a streaming turn there threw away the reply the
+/// user was waiting on. Letting it finish costs one idle child for a few
+/// seconds; `read_voice` persists the reply, so it is simply *there* when they
+/// come back. `force` is the deliberate interrupt (the user pressed stop), the
+/// one case where discarding the in-flight reply is the point.
 #[tauri::command]
 pub fn voice_session_stop(
     voice: tauri::State<'_, VoiceState>,
     session_id: String,
+    force: Option<bool>,
 ) -> Result<(), String> {
-    let proc = { voice.procs.lock().unwrap().remove(&session_id) };
+    let mut guard = voice.procs.lock().unwrap();
+    if !force.unwrap_or(false) {
+        if let Some(proc) = guard.get(&session_id) {
+            if proc.in_flight.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+        }
+    }
+    let proc = guard.remove(&session_id);
+    drop(guard);
     if let Some(mut proc) = proc {
         let _ = proc.child.start_kill();
     }
     Ok(())
+}
+
+/// Whether a voice session is live and whether a turn is streaming right now.
+/// A remount reads this to restore its spinner — otherwise a panel that comes
+/// back mid-turn looks idle and the reply arrives out of nowhere. Same shape as
+/// `fork::fork_thread_status`.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceStatus {
+    up: bool,
+    in_flight: bool,
+}
+
+#[tauri::command]
+pub fn voice_session_status(
+    voice: tauri::State<'_, VoiceState>,
+    session_id: String,
+) -> VoiceStatus {
+    let guard = voice.procs.lock().unwrap();
+    match guard.get(&session_id) {
+        Some(proc) => VoiceStatus {
+            up: true,
+            in_flight: proc.in_flight.load(Ordering::SeqCst),
+        },
+        None => VoiceStatus {
+            up: false,
+            in_flight: false,
+        },
+    }
 }
 
 /// Diagnostic for a session that never reported `init` (the UI's readiness
@@ -808,8 +982,12 @@ pub fn voice_session_probe(
     }
 }
 
-/// Forget a plan's voice memory entirely: stop the process and clear the
-/// persisted fork id, so the next session starts a brand-new conversation.
+/// Forget a plan's voice memory entirely: stop the process, clear the persisted
+/// fork id, and wipe the visible transcript, so the next session starts a
+/// brand-new conversation with a blank panel. Both halves go — otherwise
+/// "forget" would leave the old thread on screen while the agent had no
+/// recollection of it. Unconditional kill: forgetting is explicit, so an
+/// in-flight reply to a conversation being erased is exactly what to discard.
 #[tauri::command]
 pub fn voice_forget(
     voice: tauri::State<'_, VoiceState>,
@@ -821,8 +999,83 @@ pub fn voice_forget(
     }
     voice
         .db
+        .clear_voice_messages(&session_id)
+        .map_err(|e| format!("failed to clear the voice transcript: {e}"))?;
+    // Offered items are part of the conversation, not the plan — a chip that
+    // outlived the reply it came from would be an offer with no provenance.
+    voice
+        .db
+        .clear_comment_offers(&session_id)
+        .map_err(|e| format!("failed to clear offered items: {e}"))?;
+    voice
+        .db
         .clear_voice_fork_session(&session_id)
         .map_err(|e| format!("failed to clear voice memory: {e}"))
+}
+
+// --- Offered plan items ----------------------------------------------------
+// The panel's half of the offer contract (the agent's half is the daemon route
+// `POST /v1/sessions/:id/comment-offers`, see `bridge_preamble`). These live
+// here rather than in lib.rs because this is where the voice DB handle is —
+// though the *write* also needs the session store, so both are taken.
+
+/// A plan's still-open offers, drained by the panel on mount so a chip staged
+/// while it was closed isn't lost. Each row is decorated with `stale` — whether
+/// its block still exists in the latest revision — so a plan that moved on
+/// under an offer disables the chip instead of failing on the tap.
+#[tauri::command]
+pub fn comment_offers_pending(
+    voice: tauri::State<'_, VoiceState>,
+    store: tauri::State<'_, SessionStore>,
+    session_id: String,
+) -> Result<Vec<crate::state::CommentOffer>, String> {
+    let mut offers = voice
+        .db
+        .list_open_comment_offers(&session_id)
+        .map_err(|e| format!("failed to load offered items: {e}"))?;
+    for o in &mut offers {
+        o.stale = crate::agent::resolve_block_anchor(&store, &session_id, &o.block_id).is_err();
+    }
+    Ok(offers)
+}
+
+/// The `＋ Add as item` tap: turn a staged offer into the real `[feedback]`
+/// comment. Same shape as `agent_suggest_edit` — the comment pane picks the new
+/// card up through `comments-changed`, and its auto-focus on a `voice` comment
+/// *is* the confirmation.
+#[tauri::command]
+pub fn comment_offer_add(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    offer_id: String,
+) -> Result<crate::state::Comment, String> {
+    // Read the plan it belongs to *before* the add: a `Comment` carries no
+    // session id, and this is the id `comments-changed` is filtered on.
+    let session_id = store
+        .database()
+        .get_comment_offer(&offer_id)
+        .map_err(|e| format!("failed to read the offered item: {e}"))?
+        .map(|o| o.session_id)
+        .ok_or_else(|| format!("no offer found for id {offer_id}"))?;
+
+    let comment = crate::agent::add_feedback_from_offer(&store, &offer_id)
+        .map_err(|e| e.message().to_string())?;
+    let _ = app.emit("comments-changed", crate::SessionEvent { session_id });
+    crate::refresh_tray(&app, &store);
+    Ok(comment)
+}
+
+/// The `✕` tap: resolve an offer without writing it. Returns whether a pending
+/// row was actually transitioned (a second tap is a harmless `false`).
+#[tauri::command]
+pub fn comment_offer_dismiss(
+    voice: tauri::State<'_, VoiceState>,
+    offer_id: String,
+) -> Result<bool, String> {
+    voice
+        .db
+        .resolve_comment_offer(&offer_id, "dismissed")
+        .map_err(|e| format!("failed to dismiss the offered item: {e}"))
 }
 
 /// Kill every running voice session — also invoked on app teardown.
@@ -911,6 +1164,27 @@ async fn read_voice(
                     );
                 } else {
                     saw_success = true;
+                    // The visible transcript, written here rather than in the
+                    // panel: this runs whether or not anything is mounted, so a
+                    // reply that lands while the user is off reading a freshly
+                    // intercepted plan is waiting for them when they return.
+                    let message_id = persist_line(&db, &session_id, "agent", &body);
+                    // Attach anything this turn offered to the reply it came
+                    // from. The offer's curl blocks the turn, so it is always
+                    // already in the table by the time we get here; the floor
+                    // inside `bind_comment_offers` is what scopes it to *this*
+                    // turn. Best-effort, like the persistence around it.
+                    if let Some(msg_id) = &message_id {
+                        match db.bind_comment_offers(&session_id, msg_id) {
+                            Ok(n) if n > 0 => {
+                                tracing::debug!(bound = n, "bound offered items to a voice reply")
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "failed to bind offered items")
+                            }
+                            Ok(_) => {}
+                        }
+                    }
                     // Companion journal: the voice agent completed a turn.
                     let _ = db.append_journal(
                         "agent_turn",
@@ -924,6 +1198,7 @@ async fn read_voice(
                         VoiceDone {
                             session_id: session_id.clone(),
                             body,
+                            message_id,
                         },
                     );
                 }
@@ -1135,6 +1410,54 @@ mod tests {
         // Anchoring + confirm-before-post guidance is taught.
         assert!(b.contains("heading"));
         assert!(b.contains("read the change back"));
+        // The comment POST authenticates via curl's own variable import. This
+        // is a `format!` string, so the braces are quadrupled in source; a
+        // wrong escape level renders `{TOKEN}` and silently 401s.
+        assert!(b.contains(
+            "--variable %REDLINE_DAEMON_TOKEN= \
+             --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\""
+        ));
+        // Shell expansion never survives the agent bash sandbox.
+        assert!(!b.contains("Bearer $REDLINE_DAEMON_TOKEN"));
+    }
+
+    #[test]
+    fn bridge_preamble_teaches_offering_as_the_default() {
+        let b = bridge_preamble("sess-XYZ");
+        // The offer route carries the plan id and the same `-s <URL>` shape.
+        assert!(b.contains(
+            "curl -s http://127.0.0.1:7676/v1/sessions/sess-XYZ/comment-offers"
+        ));
+        // …and the same token import as the other write route.
+        assert!(
+            b.matches("--expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\"")
+                .count()
+                >= 2,
+            "both the offer and the direct write authenticate the same way"
+        );
+        // An offer carries a chip line the write route has no notion of.
+        assert!(b.contains("\"label\""));
+        // Offering is framed as the DEFAULT, not as another gated write…
+        assert!(b.contains("OFFER, DON'T WAIT TO BE ASKED"));
+        assert!(b.contains("your default"));
+        // …and it is explicitly not a write.
+        assert!(b.contains("writes NOTHING to the plan"));
+        // Nothing about the mechanism is ever spoken aloud.
+        assert!(b.contains("never say the route, the curl, or the word"));
+        // The cap the server also enforces.
+        assert!(b.contains("At most 2 offers"));
+    }
+
+    #[test]
+    fn bridge_preamble_still_gates_the_direct_write() {
+        // Offering must not dissolve the "only on explicit direction" gate on
+        // the route that actually touches the plan.
+        let b = bridge_preamble("sess-XYZ");
+        assert!(b.contains("WRITE DIRECTLY"));
+        assert!(b.contains("only if the reviewer explicitly asks you to capture a change"));
+        assert!(b.contains("capture that"));
+        // And the read-only floor survives the restructure.
+        assert!(b.contains("Never edit files, produce a new plan, or call ExitPlanMode."));
     }
 
     #[test]

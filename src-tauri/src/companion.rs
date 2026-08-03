@@ -261,11 +261,13 @@ pub(crate) fn routes_block() -> &'static str {
      parent_session=&session=&q=\n\n\
      CHECK IN WITH A COLLEAGUE. Every surface has its own agent holding its \
      full context — don't re-derive what a colleague already knows. Delegate a \
-     synthesis and fold back only the digest (this is a write route — it \
-     requires the Authorization header shown, with the \
-     `$REDLINE_DAEMON_TOKEN` already in your environment):\n  \
+     synthesis and fold back only the digest (this is a write route — the two \
+     `--variable`/`--expand-header` flags shown import the bearer token \
+     straight from your environment; never write `$REDLINE_DAEMON_TOKEN` into \
+     the command yourself, and note this needs curl >= 8.3):\n  \
      curl -s http://127.0.0.1:7676/v1/global/consult \
-     -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST \
+     --variable %REDLINE_DAEMON_TOKEN= \
+     --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" -X POST \
      -H 'Content-Type: application/json' \
      -d '{\"surface\":\"<browse|plan|mission|linked|drafter>\",\"id\":\"<its id \
      — for browse, the tab number>\",\"question\":\"<what you need synthesized>\"}'\n\
@@ -277,13 +279,14 @@ pub(crate) fn routes_block() -> &'static str {
      to capture something, you can create STAGED, REVIEWABLE artifacts — each \
      lands in the UI for their review, never as a silent change. If the target \
      is ambiguous (which plan, which draft), confirm in one line first. Every \
-     write needs the Authorization header shown, with `$REDLINE_DAEMON_TOKEN` \
-     already in your environment.\n\
+     write carries the same two flags shown, which import the bearer token \
+     from your environment.\n\
      - An action item / feedback comment on a plan (fetch the plan first for a \
      blockId — anchor section-level feedback to a heading block):\n  \
      curl -s http://127.0.0.1:7676/v1/sessions/<session_id>/plan\n  \
      curl -s http://127.0.0.1:7676/v1/sessions/<session_id>/comments \
-     -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST \
+     --variable %REDLINE_DAEMON_TOKEN= \
+     --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" -X POST \
      -H 'Content-Type: application/json' \
      -d '{\"blockId\":\"<the blockId>\",\"body\":\"<the item, in the user's \
      words>\",\"agentId\":\"companion\"}'\n\
@@ -293,21 +296,24 @@ pub(crate) fn routes_block() -> &'static str {
      re-read and retry, exactly the drafter skill's contract):\n  \
      curl -s http://127.0.0.1:7676/v1/drafter/<draft_id>/doc\n  \
      curl -s http://127.0.0.1:7676/v1/drafter/<draft_id>/suggestions \
-     -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST \
+     --variable %REDLINE_DAEMON_TOKEN= \
+     --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" -X POST \
      -H 'Content-Type: application/json' \
      -d '{\"op\":\"<op>\",\"block_id\":\"<anchor>\",\"original\":\"<current block \
      markdown, for replace/delete>\",\"markdown\":\"<new content>\",\
      \"agent_id\":\"companion\"}'\n\
      - A code-review annotation (a note on the open review's diff):\n  \
      curl -s 'http://127.0.0.1:7676/v1/reviews/annotations?repo=<repo_path>' \
-     -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST \
+     --variable %REDLINE_DAEMON_TOKEN= \
+     --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" -X POST \
      -H 'Content-Type: application/json' \
      -d '{\"file_path\":\"<path>\",\"side\":\"new\",\"quoted\":\"<the exact \
      line(s)>\",\"body\":\"<the note>\",\"source\":\"companion\"}'\n\
      - A memory proposal (stage a filing into the user's organized memory — \
      staging only, they accept or reject it in the inspector):\n  \
      curl -s http://127.0.0.1:7676/v1/memory/proposals \
-     -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST \
+     --variable %REDLINE_DAEMON_TOKEN= \
+     --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" -X POST \
      -H 'Content-Type: application/json' \
      -d '{\"proposals\":[{\"op\":\"file\",\"prompt_id\":<id>,\"node\":\"<class \
      path>\",\"reason\":\"<why>\"}]}'\n\
@@ -891,7 +897,14 @@ mod tests {
         assert!(p.contains("curl -s 'http://127.0.0.1:7676/v1/reviews/annotations?repo=<repo_path>'"));
         assert!(p.contains("\"source\":\"companion\""));
         assert!(p.contains("curl -s http://127.0.0.1:7676/v1/memory/proposals"));
-        assert!(p.contains("Authorization: Bearer $REDLINE_DAEMON_TOKEN"));
+        // The auth flags must survive verbatim as curl's own variable import:
+        // shell expansion (`$REDLINE_DAEMON_TOKEN`) never reaches the daemon
+        // because the agent bash sandbox rejects the command outright.
+        assert!(p.contains(
+            "--variable %REDLINE_DAEMON_TOKEN= \
+             --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\""
+        ));
+        assert!(!p.contains("Bearer $REDLINE_DAEMON_TOKEN"));
         assert!(p.contains("/v1/sessions/<id>/suggestions"), "plan-suggestion exclusion");
         assert!(p.contains("NEVER: /v1/browser/*"));
         // The old blanket read-only line is gone in favor of the new contract.

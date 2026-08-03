@@ -25,6 +25,7 @@ export type ToggleableSurface =
   | "browser"
   | "drafter"
   | "review"
+  | "servers"
   | "voice"
   | "collab"
   | "memory";
@@ -37,6 +38,7 @@ export const TOGGLEABLE_SURFACES: readonly ToggleableSurface[] = [
   "browser",
   "drafter",
   "review",
+  "servers",
   "voice",
   "collab",
   "memory",
@@ -57,6 +59,7 @@ export const MAIN_SURFACE_DESCRIPTORS: readonly SurfaceDescriptor[] = [
   { id: "browser", label: "Browser", title: "Switch to the browser" },
   { id: "drafter", label: "Prompt Drafter", title: "Draft a new prompt" },
   { id: "review", label: "Code Review", title: "Review code changes" },
+  { id: "servers", label: "Localhost", title: "See your local dev servers" },
 ];
 
 /** Human-readable names for the surface checkboxes and context menus. */
@@ -64,6 +67,7 @@ export const SURFACE_LABELS: Record<ToggleableSurface, string> = {
   browser: "Browser",
   drafter: "Prompt Drafter",
   review: "Code Review",
+  servers: "Localhost",
   voice: "Voice",
   collab: "Live Session",
   memory: "Memory",

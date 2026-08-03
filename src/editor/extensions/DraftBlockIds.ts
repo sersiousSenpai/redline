@@ -34,22 +34,36 @@ export function mintBlockId(): string {
 import type { EditorState, Transaction } from "@tiptap/pm/state";
 
 /** Build the id-fix transaction for `state`, or null when nothing needs
- *  stamping. Mints for blocks missing an id, re-mints duplicates (a
- *  split/copy can duplicate attrs), and mirrors `anchorId = blockId`. */
+ *  stamping. Top level: mints for blocks missing an id, re-mints duplicates
+ *  (a split/copy can duplicate attrs), and mirrors `anchorId = blockId`.
+ *  Nested levels: CLEARS any id — identity lives on the top-level block only.
+ *  Wrapping a stamped paragraph into a list keeps its attrs on the now-inner
+ *  node, and a stale id there draws a second gutter label on top of the
+ *  list's own and hijacks `closest('[data-anchor-id]')` selection capture.
+ *  Because the plugin's `view` hook runs this on mount, drafts persisted with
+ *  stale nested ids self-heal on open. */
 function fixTransaction(state: EditorState): Transaction | null {
   const seen = new Set<string>();
   const fixes: { pos: number; id: string | null }[] = [];
-  state.doc.forEach((node, pos) => {
-    if (!TYPES.has(node.type.name)) return;
+  const clears: number[] = [];
+  state.doc.descendants((node, pos, parent) => {
+    if (!TYPES.has(node.type.name)) return true;
+    if (parent !== state.doc) {
+      if (node.attrs.blockId != null || node.attrs.anchorId != null) {
+        clears.push(pos);
+      }
+      return true;
+    }
     const id = node.attrs.blockId as string | null;
     if (id && !seen.has(id)) {
       seen.add(id);
       if (node.attrs.anchorId !== id) fixes.push({ pos, id });
-      return;
+      return true;
     }
     fixes.push({ pos, id: null });
+    return true;
   });
-  if (fixes.length === 0) return null;
+  if (fixes.length === 0 && clears.length === 0) return null;
   const tr = state.tr;
   for (const f of fixes) {
     const node = state.doc.nodeAt(f.pos);
@@ -59,6 +73,17 @@ function fixTransaction(state: EditorState): Transaction | null {
       ...node.attrs,
       blockId: id,
       anchorId: id,
+    });
+  }
+  // setNodeMarkup never changes node sizes, so original-doc positions stay
+  // valid across the whole batch.
+  for (const pos of clears) {
+    const node = state.doc.nodeAt(pos);
+    if (!node) continue;
+    tr.setNodeMarkup(pos, undefined, {
+      ...node.attrs,
+      blockId: null,
+      anchorId: null,
     });
   }
   if (tr.steps.length === 0) return null;

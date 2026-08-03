@@ -5,6 +5,7 @@ const base: SurfaceInputs = {
   browserOpen: false,
   drafterOpen: false,
   reviewOpen: false,
+  serversOpen: false,
   activeId: null,
   planTitle: null,
   planProject: null,
@@ -20,6 +21,24 @@ const base: SurfaceInputs = {
 describe("deriveActiveSurface", () => {
   it("falls back to welcome when nothing is open", () => {
     expect(deriveActiveSurface(base).kind).toBe("welcome");
+  });
+
+  it("reports the Localhost grid without an id or a project", () => {
+    // Machine-scoped, not project-scoped: it outranks the plan/terminal
+    // fallbacks (it OCCUPIES the center pane) but carries no session identity.
+    const s = deriveActiveSurface({
+      ...base,
+      serversOpen: true,
+      activeId: "sess-1",
+      planProject: "/repo",
+      hasTerminal: true,
+    });
+    expect(s).toMatchObject({
+      kind: "servers",
+      id: null,
+      label: "Localhost",
+      projectPath: null,
+    });
   });
 
   it("reports terminal when a dock terminal exists but no plan is selected", () => {

@@ -11,6 +11,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { contrastRatio, luminance, mix } from "../theme/derive";
 import { getTheme, type AnsiSlot } from "../theme/themes";
+import { isResizing, onResizeSession } from "../lib/resizeSession";
 import {
   createResizeScheduler,
   isUsableTermSize,
@@ -30,6 +31,10 @@ interface TerminalViewProps {
   onActivity: (id: string) => void;
   /** Called when this tab's shell exits. */
   onExit: (id: string) => void;
+  /** Called when the shell or a TUI rewrites the window title (OSC 0/2) — the
+   *  one "what is running in here" signal a terminal volunteers. Fires only on
+   *  an actual title sequence, never per output chunk. */
+  onTitle?: (id: string, title: string) => void;
   /** Called when the user clicks into this pane — lets the host mark which of
    *  two split panes is the focused/"active" terminal. */
   onPaneFocus?: () => void;
@@ -52,6 +57,16 @@ function shellQuote(p: string): string {
 // after the drain, so the visible result is identical to never having hidden it
 // (minus ancient output a flood would have evicted from scrollback anyway).
 const MAX_HIDDEN_BUFFER_BYTES = 2 * 1024 * 1024;
+
+/** A column-changing fit this cheap can run on every frame of a drag — it fits
+ *  inside a 120Hz frame with room for the rest of the app. */
+const COL_FIT_BUDGET_MS = 6;
+/** Over budget, a reflow may occupy at most 1/DUTY of the wall clock, so an
+ *  expensive scrollback rate-limits itself instead of starving every frame. */
+const COL_FIT_DUTY = 6;
+/** …but never slower than this, so even a pathological buffer still visibly
+ *  reflows a few times during a drag rather than appearing frozen. */
+const COL_FIT_MIN_GAP_MS = 120;
 
 const ptyLifecycle = new Map<string, Promise<unknown>>();
 export function enqueuePtyOp(
@@ -182,6 +197,7 @@ export const TerminalView = memo(function TerminalView({
   visible,
   onActivity,
   onExit,
+  onTitle,
   onPaneFocus,
 }: TerminalViewProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -202,38 +218,86 @@ export const TerminalView = memo(function TerminalView({
     });
   }
 
+  // What a column-changing fit cost this terminal last time, and when. See
+  // `applyFit` — the reflow's cost is a property of THIS terminal's scrollback,
+  // so it is measured rather than guessed.
+  const colFitCostRef = useRef(0);
+  const colFitAtRef = useRef(0);
+
   // The one way any code here fits the terminal: verify the proposed geometry
   // is usable first (a squished host proposes FitAddon's 2×1 floor, which
   // corrupts claude's TUI if it ever reaches the PTY), then fit and hand the
   // resulting size to the scheduler. `immediate` marks single-shot callers
   // (tab shown, window focus); drag-driven callers debounce to a settle.
-  const applyFit = useCallback((immediate: boolean) => {
-    const term = termRef.current;
-    const fit = fitRef.current;
-    if (!term || !fit) return;
-    let dims: { cols: number; rows: number } | undefined;
-    try {
-      dims = fit.proposeDimensions();
-    } catch {
-      return; /* host detached */
-    }
-    if (!isUsableTermSize(dims)) return;
-    try {
-      fit.fit();
-    } catch {
-      return; /* host detached mid-fit */
-    }
-    schedulerRef.current?.schedule({ cols: term.cols, rows: term.rows }, immediate);
-  }, []);
+  //
+  // `live` marks a caller running inside a drag, where the frame budget is the
+  // whole point:
+  //
+  //   ROWS are free. xterm reflows only when the COLUMN count changes; a row
+  //   change just moves the viewport over the buffer, and xterm backfills new
+  //   rows from scrollback so the prompt stays exactly where it is. That is
+  //   precisely how a native terminal behaves when you drag its edge, so rows
+  //   always track the pointer.
+  //
+  //   COLUMNS rewrap every line of scrollback. A young buffer does that in well
+  //   under a frame and can stay just as live; a 5000-line one cannot. So the
+  //   last reflow is timed, and while it is over budget further ones are rate
+  //   limited to what this terminal can actually sustain — the text keeps
+  //   reflowing as you drag, just not every frame, and the settle fit at the
+  //   end of the drag always lands the exact final size.
+  const applyFit = useCallback(
+    (opts: { immediate: boolean; live?: boolean }) => {
+      const term = termRef.current;
+      const fit = fitRef.current;
+      if (!term || !fit) return;
+      let dims: { cols: number; rows: number } | undefined;
+      try {
+        dims = fit.proposeDimensions();
+      } catch {
+        return; /* host detached */
+      }
+      if (!isUsableTermSize(dims)) return;
+      const colsChanged = dims.cols !== term.cols;
+      // We already know the proposal — if it matches, skipping the call also
+      // skips FitAddon's own redundant second `proposeDimensions()` (two more
+      // `getComputedStyle` reads).
+      if (colsChanged || dims.rows !== term.rows) {
+        if (opts.live && colsChanged && colFitCostRef.current > COL_FIT_BUDGET_MS) {
+          const gap = Math.max(
+            COL_FIT_MIN_GAP_MS,
+            colFitCostRef.current * COL_FIT_DUTY,
+          );
+          if (performance.now() - colFitAtRef.current < gap) return;
+        }
+        const started = colsChanged ? performance.now() : 0;
+        try {
+          fit.fit();
+        } catch {
+          return; /* host detached mid-fit */
+        }
+        if (colsChanged) {
+          colFitCostRef.current = performance.now() - started;
+          colFitAtRef.current = performance.now();
+        }
+      }
+      schedulerRef.current?.schedule(
+        { cols: term.cols, rows: term.rows },
+        opts.immediate,
+      );
+    },
+    [],
+  );
 
   // The mount effect runs once ([]-deps, "spawn once"), so anything it closes
   // over goes stale. Mirror the live values into refs it can read each tick.
   const visibleRef = useRef(visible);
   const onActivityRef = useRef(onActivity);
   const onExitRef = useRef(onExit);
+  const onTitleRef = useRef(onTitle);
   visibleRef.current = visible;
   onActivityRef.current = onActivity;
   onExitRef.current = onExit;
+  onTitleRef.current = onTitle;
 
   // Raw PTY bytes that arrived while this tab was hidden. We skip xterm's ANSI
   // parse for off-screen terminals (the dominant background cost with a fleet
@@ -282,6 +346,10 @@ export const TerminalView = memo(function TerminalView({
     fit.fit();
     termRef.current = term;
     fitRef.current = fit;
+
+    // OSC 0/2. Disposed with the terminal below, along with every other addon
+    // and listener it owns.
+    term.onTitleChange((title) => onTitleRef.current?.(id, title));
 
     // GPU renderer: offloads cell rendering to WebGL so a fast stream doesn't
     // peg the main thread compositing the DOM. WebGL can fail to init on some
@@ -404,10 +472,11 @@ export const TerminalView = memo(function TerminalView({
 
     const ro = new ResizeObserver(() => {
       // A hidden view has no usable geometry; the [visible] effect re-fits
-      // when shown. Divider drags fire this at pointer rate — the debounced
-      // path collapses the storm into one PTY resize at rest.
+      // when shown. Divider drags fire this once per frame — rows apply now,
+      // a column change waits for the drag to end (see applyFit). The PTY
+      // resize is debounced either way, so the shell is told once, at rest.
       if (!visibleRef.current) return;
-      applyFit(false);
+      applyFit({ immediate: false, live: isResizing() });
     });
     ro.observe(host);
 
@@ -422,7 +491,7 @@ export const TerminalView = memo(function TerminalView({
         requestAnimationFrame(() => {
           const term = termRef.current;
           if (!term) return;
-          applyFit(true);
+          applyFit({ immediate: true });
           if (term.cols > 0 && term.rows > 0) {
             term.refresh(0, term.rows - 1);
           }
@@ -457,6 +526,28 @@ export const TerminalView = memo(function TerminalView({
     if (term) term.options.theme = readXtermTheme(theme);
   }, [theme]);
 
+  // Settle at the end of every resize. Rows have been tracking the drag all
+  // along; this is where a deferred COLUMN change finally reflows — once, at
+  // rest, instead of once per frame.
+  useEffect(() => {
+    let raf = 0;
+    const off = onResizeSession((active) => {
+      if (active) return;
+      // Next frame, so the release's React commit and the browser's layout
+      // have both landed and we fit against the real resting size.
+      if (raf) cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        if (!visibleRef.current) return;
+        applyFit({ immediate: true });
+      });
+    });
+    return () => {
+      off();
+      if (raf) cancelAnimationFrame(raf);
+    };
+  }, [applyFit]);
+
   // Becoming visible: the host had no usable geometry while hidden, so re-fit
   // on the next frame and tell the PTY its real size.
   useEffect(() => {
@@ -466,7 +557,7 @@ export const TerminalView = memo(function TerminalView({
       // Flush whatever streamed in while hidden, in one write, before re-fitting
       // and repainting — so the tab shows fully caught up the instant it opens.
       drainPending();
-      applyFit(true);
+      applyFit({ immediate: true });
       if (term && term.cols > 0 && term.rows > 0) {
         // Force a renderer repaint — a pane that was hidden (display:none)
         // can come back with a stale xterm render surface.

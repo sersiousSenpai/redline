@@ -8,7 +8,7 @@ description: >-
   markdown pipeline (tables, mermaid, fenced code, callouts). Covers which tool
   to use for which job (the browser bridge vs WebSearch vs WebFetch), driving
   discipline, and answer formatting.
-version: 6
+version: 7
 ---
 
 # Redline browser page-discussion
@@ -27,8 +27,11 @@ needs — using the wrong one (e.g. driving the tab to a search engine instead o
 searching the web) wastes their tab and reads as confused.
 
 Write routes on the bridge (`/open`, `/focus`, `/navigate`, `/click`, `/query`,
-`/download`) require `-H "Authorization: Bearer $REDLINE_DAEMON_TOKEN"` after
-the URL (the token is already in your environment).
+`/download`) need the bearer token. Never write `$REDLINE_DAEMON_TOKEN` into the
+command yourself — the bash sandbox rejects any command containing shell
+expansion before it runs. Have curl import the variable instead, with these two
+flags after the URL (needs curl ≥ 8.3):
+`--variable %REDLINE_DAEMON_TOKEN= --expand-header "Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}"`.
 
 | The user wants… | Use |
 |---|---|

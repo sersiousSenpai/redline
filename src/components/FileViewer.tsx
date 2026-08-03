@@ -1,11 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
+import {
+  Suspense,
+  lazy,
+  memo,
+  useCallback,
+  useEffect,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 import type { BinaryFile, DocMeta, FileContent } from "../types";
 import { useLiveFile } from "../hooks/useFsWatch";
+import {
+  initialEditSwap,
+  reduceEditSwap,
+  type EditSwapEvent,
+  type EditSwapState,
+} from "../lib/editSwap";
 import { MarkdownView } from "./MarkdownView";
+// Type-only: erased at build, so the main bundle stays CodeMirror-free.
+import type { PreparedEdit } from "./CodeEditor";
 
 // Don't flash a loading notice for reads faster than this; markdown files resolve
 // well under it, so switching between them shows no flicker. Mirrors CodeView.
@@ -27,9 +44,10 @@ export function preloadCodeView(): void {
 
 // The editor (CodeMirror + friends) is a bigger chunk and most file opens are
 // read-only — so unlike CodeView it is NOT warmed on explorer open, only when
-// the user hovers/clicks Edit.
+// the user hovers/clicks Edit. No `lazy()` wrapper: CodeBody awaits this
+// import itself as part of *preparing* an edit, then renders the component
+// directly — so there's no Suspense fallback frame to reason about.
 const codeEditorImport = () => import("./CodeEditor");
-const CodeEditor = lazy(codeEditorImport);
 
 let codeEditorPreloaded: Promise<unknown> | null = null;
 /** Warm the CodeEditor chunk (Edit hover/click). Idempotent. */
@@ -83,7 +101,7 @@ function isMarkdown(path: string): boolean {
 // Read-only viewer for a single file picked from the FileTree. Images render
 // inline; markdown renders rich; everything else shows syntax-highlighted
 // source. Oversized files report why they weren't loaded.
-export function FileViewer({ path, onClose, onSaved }: FileViewerProps) {
+function FileViewerBase({ path, onClose, onSaved }: FileViewerProps) {
   const mime = imageMime(path);
 
   return (
@@ -209,9 +227,22 @@ function TextBody({
 // files stay on the (paged) read-only CodeView.
 const EDITABLE_MAX_BYTES = 2 * 1024 * 1024;
 
-// Code files: CodeView stays the default read view; Edit swaps in the lazy
-// CodeMirror editor. Editability is decided from the meta CodeView already
-// loads (size / binary), so no extra read is needed to enable the button.
+/** What a finished prepare hands the render: the file it was for, the
+ *  pre-loaded content+grammar, and the editor component out of the awaited
+ *  chunk (rendered directly — no lazy/Suspense in the edit path). */
+interface EditPayload {
+  path: string;
+  prep: PreparedEdit;
+  Editor: (typeof import("./CodeEditor"))["default"];
+}
+
+// Code files: CodeView stays the read surface for the whole life of the file;
+// Edit overlays a fully *prepared* CodeMirror editor above it in one commit —
+// chunk imported + text read + grammar resolved first (lib/editSwap.ts holds
+// the race rules) — so the swap never paints a blank or uncolored frame. Done
+// unmounts the overlay over the still-painted view: flicker-free both ways.
+// Editability is decided from the meta CodeView already loads (size / binary),
+// so no extra read is needed to enable the button.
 function CodeBody({
   path,
   onSaved,
@@ -219,15 +250,39 @@ function CodeBody({
   path: string;
   onSaved?: (path: string) => void;
 }) {
-  const [editing, setEditing] = useState(false);
+  const [swap, dispatch] = useReducer(
+    (s: EditSwapState<EditPayload>, e: EditSwapEvent<EditPayload>) =>
+      reduceEditSwap(s, e),
+    initialEditSwap as EditSwapState<EditPayload>,
+  );
+  const seqRef = useRef(0);
   const [meta, setMeta] = useState<DocMeta | null>(null);
+  // Read-view scroll offset, mirrored by CodeView on every scroll — seeds the
+  // editor so entering edit mode keeps the same lines on screen (both surfaces
+  // share the 18px line grid and 16px top padding).
+  const scrollPosRef = useRef(0);
 
   // Switching files leaves edit mode — the buffer belongs to the old file —
-  // and forgets its meta until the new file reports in.
+  // invalidates any in-flight prepare, and forgets meta until the new file
+  // reports in.
   useEffect(() => {
-    setEditing(false);
+    seqRef.current++;
+    dispatch({ type: "path-changed" });
     setMeta(null);
   }, [path]);
+
+  // Delayed "Opening…" label: a warm chunk + normal file prepares well under
+  // LOADING_DELAY_MS, so the common path shows nothing at all.
+  const preparing = swap.mode === "preparing";
+  const [showOpening, setShowOpening] = useState(false);
+  useEffect(() => {
+    if (!preparing) {
+      setShowOpening(false);
+      return;
+    }
+    const t = setTimeout(() => setShowOpening(true), LOADING_DELAY_MS);
+    return () => clearTimeout(t);
+  }, [preparing]);
 
   const editable = !!meta && !meta.isBinary && meta.size <= EDITABLE_MAX_BYTES;
   const editTitle = !meta
@@ -238,52 +293,86 @@ function CodeBody({
         ? "Too large to edit (2 MB cap)"
         : "Edit this file";
 
-  if (editing) {
-    return (
-      <Suspense
-        fallback={
-          <div className="h-full w-full" style={{ background: "var(--color-paper)" }} />
-        }
-      >
-        <CodeEditor
-          path={path}
-          onDone={() => setEditing(false)}
-          onSaved={onSaved}
-        />
-      </Suspense>
-    );
-  }
+  const beginEdit = () => {
+    if (swap.mode !== "view") return;
+    const seq = ++seqRef.current;
+    dispatch({ type: "edit", seq });
+    void codeEditorImport()
+      .then((mod) =>
+        mod.prepareEdit(path).then((prep) =>
+          dispatch({
+            type: "prepared",
+            seq,
+            payload: { path, prep, Editor: mod.default },
+          }),
+        ),
+      )
+      .catch((e) =>
+        dispatch({ type: "prepare-failed", seq, error: String(e) }),
+      );
+  };
+
+  // Render guard on payload.path covers the one frame between a path change
+  // and its effect dispatching `path-changed`.
+  const editorOn = swap.mode === "editing" && swap.payload.path === path;
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div className="relative h-full min-h-0">
+      {/* The read column stays mounted while editing — its ResizeObserver,
+          scroll position and live-reload subscription keep working under the
+          overlay — but goes inert so the covered controls can't take focus. */}
       <div
-        className="flex items-center justify-end gap-2 px-6 py-1.5 shrink-0"
-        style={{ fontSize: "12px", borderBottom: "1px solid var(--color-rule)" }}
+        className="flex flex-col h-full min-h-0"
+        inert={editorOn || undefined}
       >
-        <span title={editTitle} onMouseEnter={preloadCodeEditor}>
-          <EditBtn
-            onClick={() => {
-              preloadCodeEditor();
-              setEditing(true);
-            }}
-            disabled={!editable}
-          >
-            Edit
-          </EditBtn>
-        </span>
-      </div>
-      <div className="flex-1 min-h-0">
-        {/* Blank (not a "Loading…" notice) while the chunk loads: it's
-            preloaded on explorer open so this rarely shows, and a silent hold
-            avoids stacking a second flash on CodeView's own loader. */}
-        <Suspense
-          fallback={
-            <div className="h-full w-full" style={{ background: "var(--color-paper)" }} />
-          }
+        <div
+          className="flex items-center justify-end gap-2 px-6 py-1.5 shrink-0"
+          style={{ fontSize: "12px", borderBottom: "1px solid var(--color-rule)" }}
         >
-          <CodeView path={path} onMeta={setMeta} />
-        </Suspense>
+          {swap.mode === "view" && swap.error && (
+            <span
+              className="truncate"
+              style={{ color: "var(--color-warning)", marginRight: "auto" }}
+              title={swap.error}
+            >
+              {swap.error}
+            </span>
+          )}
+          <span title={editTitle} onMouseEnter={preloadCodeEditor}>
+            <EditBtn
+              onClick={beginEdit}
+              disabled={!editable || swap.mode !== "view"}
+            >
+              {preparing && showOpening ? "Opening…" : "Edit"}
+            </EditBtn>
+          </span>
+        </div>
+        <div className="flex-1 min-h-0">
+          {/* Blank (not a "Loading…" notice) while the chunk loads: it's
+              preloaded on explorer open so this rarely shows, and a silent hold
+              avoids stacking a second flash on CodeView's own loader. */}
+          <Suspense
+            fallback={
+              <div className="h-full w-full" style={{ background: "var(--color-paper)" }} />
+            }
+          >
+            <CodeView path={path} onMeta={setMeta} scrollPosRef={scrollPosRef} />
+          </Suspense>
+        </div>
       </div>
+      {editorOn && (
+        // The editor paints opaque over the view; in any frame before its
+        // first paint the user simply keeps seeing the highlighted read view.
+        <div className="absolute inset-0">
+          <swap.payload.Editor
+            path={path}
+            prepared={swap.payload.prep}
+            initialScrollTop={scrollPosRef.current}
+            onDone={() => dispatch({ type: "done" })}
+            onSaved={onSaved}
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -489,3 +578,7 @@ function Notice({ children }: { children: React.ReactNode }) {
     </div>
   );
 }
+
+/** Memoized: the viewer is one of the center-pane surfaces that used to
+ *  reconcile on every frame of a divider drag. */
+export const FileViewer = memo(FileViewerBase);

@@ -13,6 +13,9 @@
 //!    with the agent's authorId. From there the existing machinery owns it:
 //!    accept resolves it in place, delete rejects it, submit ships it to
 //!    Claude as a normal [edit].
+//!  - `add_feedback_core` — a directive `[feedback]` comment with no verbatim
+//!    rewrite, and `add_feedback_from_offer`, the same write reached from a
+//!    *staged offer* the user accepted with one tap (see `CommentOffer`).
 //!
 //! Invariant the Conflict checks protect: **one block ⇒ at most one open
 //! suggestion** — exactly what `byBlock` dedupe, the pristine-block
@@ -62,6 +65,22 @@ pub struct SuggestFeedbackRequest {
     /// The feedback directive, verbatim.
     pub body: String,
     pub agent_id: String,
+}
+
+/// The same content as a `SuggestFeedbackRequest`, *offered* rather than
+/// written: the agent stages it mid-turn, the panel renders a `＋ Add as item`
+/// chip, and only the user's tap turns it into the comment. The extra `label`
+/// is the chip's own short line — the body would be too long to read at a
+/// glance.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OfferFeedbackRequest {
+    pub block_id: String,
+    pub body: String,
+    pub agent_id: String,
+    /// A ≤60-char chip line. Falls back to a truncated `body` in the UI.
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -252,9 +271,42 @@ pub fn suggest_edit_core(
                 reviewer: None,
                 external_created_at: None,
                 share_request_id: None,
+                // Agents propose text, never files.
+                attachments: Vec::new(),
             },
         )
         .map_err(AgentError::BadRequest)
+}
+
+/// The `anchor_id` a block id resolves to in the session's **latest** revision.
+///
+/// Shared by the write path (`add_feedback_core`) and the *offer* path, which
+/// calls it at stage time: a bogus block id then 404s the agent while it can
+/// still re-read the plan, instead of becoming a chip that only fails when the
+/// user finally taps it.
+pub fn resolve_block_anchor(
+    store: &SessionStore,
+    session_id: &str,
+    block_id: &str,
+) -> Result<String, AgentError> {
+    let session = store
+        .get(session_id)
+        .ok_or_else(|| AgentError::NotFound(format!("no session found for id {session_id}")))?;
+    let latest = session
+        .revisions
+        .last()
+        .ok_or_else(|| AgentError::NotFound(format!("session {session_id} has no revisions")))?;
+
+    let mut flat = Vec::new();
+    flatten_blocks(&latest.sections, &mut flat);
+    flat.iter()
+        .find(|(bid, ..)| bid == block_id)
+        .map(|(_, anchor, _, _)| anchor.clone())
+        .ok_or_else(|| {
+            AgentError::NotFound(format!(
+                "no block {block_id} in the latest revision — re-read the plan"
+            ))
+        })
 }
 
 /// Land a directive `[feedback]` comment on a block, anchored by id. Mirrors a
@@ -277,26 +329,7 @@ pub fn add_feedback_core(
         ));
     }
 
-    let session = store
-        .get(session_id)
-        .ok_or_else(|| AgentError::NotFound(format!("no session found for id {session_id}")))?;
-    let latest = session
-        .revisions
-        .last()
-        .ok_or_else(|| AgentError::NotFound(format!("session {session_id} has no revisions")))?;
-
-    let mut flat = Vec::new();
-    flatten_blocks(&latest.sections, &mut flat);
-    let anchor_id = flat
-        .iter()
-        .find(|(block_id, ..)| *block_id == req.block_id)
-        .map(|(_, anchor, _, _)| anchor.clone())
-        .ok_or_else(|| {
-            AgentError::NotFound(format!(
-                "no block {} in the latest revision — re-read the plan",
-                req.block_id
-            ))
-        })?;
+    let anchor_id = resolve_block_anchor(store, session_id, &req.block_id)?;
 
     store
         .add_comment(
@@ -315,9 +348,55 @@ pub fn add_feedback_core(
                 reviewer: None,
                 external_created_at: None,
                 share_request_id: None,
+                // Agents propose text, never files.
+                attachments: Vec::new(),
             },
         )
         .map_err(AgentError::BadRequest)
+}
+
+/// Turn a staged offer into the real `[feedback]` comment — the `＋ Add as item`
+/// tap, server-side.
+///
+/// The claim comes *first* and is a compare-and-set, so a double-tap (or a tap
+/// racing a dismiss) writes exactly one comment; if the write then fails — most
+/// often because the plan was revised out from under the offer — the claim is
+/// rolled back so the chip survives to be tried again. Living here rather than
+/// in the Tauri command is what makes that path unit-testable.
+pub fn add_feedback_from_offer(
+    store: &SessionStore,
+    offer_id: &str,
+) -> Result<Comment, AgentError> {
+    let db = store.database();
+    let offer = db
+        .get_comment_offer(offer_id)
+        .map_err(|e| AgentError::BadRequest(format!("failed to read the offer: {e}")))?
+        .ok_or_else(|| AgentError::NotFound(format!("no offer found for id {offer_id}")))?;
+
+    let claimed = db
+        .claim_comment_offer(offer_id)
+        .map_err(|e| AgentError::BadRequest(format!("failed to claim the offer: {e}")))?;
+    if !claimed {
+        return Err(AgentError::Conflict(format!(
+            "offer {offer_id} is no longer pending"
+        )));
+    }
+
+    let result = add_feedback_core(
+        store,
+        &offer.session_id,
+        SuggestFeedbackRequest {
+            block_id: offer.block_id,
+            body: offer.body,
+            agent_id: offer.agent_id,
+        },
+    );
+    if result.is_err() {
+        if let Err(e) = db.release_comment_offer(offer_id) {
+            tracing::warn!(error = %e, "failed to release a claimed comment offer");
+        }
+    }
+    result
 }
 
 #[cfg(test)]
@@ -473,6 +552,7 @@ mod tests {
                     reviewer: None,
                     external_created_at: None,
                     share_request_id: None,
+                    attachments: Vec::new(),
                 },
             )
             .unwrap();
@@ -555,5 +635,77 @@ mod tests {
             .find(|b| b.kind == "paragraph" && b.block_id != block.block_id)
             .expect("a second paragraph block");
         assert!(suggest_edit_core(&store, "sess-1", suggest(&other, Some(&other.markdown))).is_ok());
+    }
+
+    // --- Offered items (staged, then added on a tap) ------------------------
+
+    fn stage_offer(store: &SessionStore, id: &str, block_id: &str) {
+        store
+            .database()
+            .insert_comment_offer(&crate::state::CommentOffer {
+                id: id.to_string(),
+                session_id: "sess-1".to_string(),
+                message_id: None,
+                block_id: block_id.to_string(),
+                body: "make the retry budget configurable".to_string(),
+                label: Some("Configurable retry budget".to_string()),
+                agent_id: "voice".to_string(),
+                status: "pending".to_string(),
+                created_at: 100,
+                stale: false,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn adding_an_offer_lands_the_same_feedback_comment() {
+        let store = make_store();
+        let block = paragraph_block(&store);
+        stage_offer(&store, "off-1", &block.block_id);
+
+        let c = add_feedback_from_offer(&store, "off-1").unwrap();
+        assert!(matches!(c.kind, CommentKind::Feedback));
+        assert_eq!(c.author.as_deref(), Some("voice"));
+        assert_eq!(c.anchor_id, block.anchor_id);
+        assert_eq!(c.body, "make the retry budget configurable");
+        // The offer is spent — the chip is gone for good.
+        assert!(store
+            .database()
+            .list_open_comment_offers("sess-1")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn re_adding_a_claimed_offer_conflicts() {
+        let store = make_store();
+        let block = paragraph_block(&store);
+        stage_offer(&store, "off-1", &block.block_id);
+        add_feedback_from_offer(&store, "off-1").unwrap();
+
+        assert!(matches!(
+            add_feedback_from_offer(&store, "off-1"),
+            Err(AgentError::Conflict(_))
+        ));
+        assert!(matches!(
+            add_feedback_from_offer(&store, "no-such-offer"),
+            Err(AgentError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn an_offer_whose_block_vanished_is_released_back_to_pending() {
+        // The plan was revised under the offer: the write 404s, and the claim
+        // must roll back so the chip is still there to show the error against.
+        let store = make_store();
+        stage_offer(&store, "off-1", "blk-does-not-exist");
+
+        assert!(matches!(
+            add_feedback_from_offer(&store, "off-1"),
+            Err(AgentError::NotFound(_))
+        ));
+        let open = store.database().list_open_comment_offers("sess-1").unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].status, "pending");
     }
 }

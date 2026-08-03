@@ -4,11 +4,18 @@
 // a new interaction thread is created, and `GET /v1/surface/active`.
 //
 // Pure so the precedence is unit-testable: the secondary panes are mutually
-// exclusive occupants of the center pane, so review > drafter > browser wins
-// over the plan/terminal fallbacks.
+// exclusive occupants of the center pane, so review > drafter > browser >
+// servers wins over the plan/terminal fallbacks.
 
 export interface SurfaceInfo {
-  kind: "plan" | "drafter" | "browser" | "review" | "terminal" | "welcome";
+  kind:
+    | "plan"
+    | "drafter"
+    | "browser"
+    | "review"
+    | "servers"
+    | "terminal"
+    | "welcome";
   id: string | null;
   label: string | null;
   detail: string | null;
@@ -20,6 +27,7 @@ export interface SurfaceInputs {
   browserOpen: boolean;
   drafterOpen: boolean;
   reviewOpen: boolean;
+  serversOpen: boolean;
   /** The active plan review session, when one is selected. */
   activeId: string | null;
   planTitle: string | null;
@@ -65,6 +73,19 @@ export function deriveActiveSurface(s: SurfaceInputs): SurfaceInfo {
       id: s.activeTab?.browseId ?? null,
       label: s.activeTab?.title ?? null,
       detail: s.activeTab?.url ?? null,
+      projectPath: null,
+    };
+  }
+  if (s.serversOpen) {
+    // The Localhost grid is machine-scoped, not project-scoped — there is no id
+    // and no project path to report, which is exactly what it means for the
+    // Companion to say "they're looking at what's running."
+    return {
+      ...base,
+      kind: "servers",
+      id: null,
+      label: "Localhost",
+      detail: null,
       projectPath: null,
     };
   }

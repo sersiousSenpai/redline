@@ -59,6 +59,22 @@ complete picture; none is a Redline telemetry channel.
 | Agent `WebSearch` / `WebFetch` tools | Web requests by the spawned research agents | User-initiated research turns. |
 | `tts.rs` | ElevenLabs / OpenAI speech APIs | Only when the user configures an API key and selects that engine. |
 | `tts.rs` (Kokoro), `dictation_whisper.rs` | One-time model download (GitHub / Hugging Face) | Only when the user enables that local engine; the model then runs offline. |
+| `codehealth.rs` — the **Shipwright digest**, Tier A | Redacted excerpts of the user's own reopen notes and edit pairs, baked into the Shipwright's model prompt | Only when the user clicks the Shipwright. |
+
+> **The Shipwright digest is the one egress this program adds**, and it is the
+> only one that carries the user's own prose. Reopen notes and edit pairs are
+> text *they* wrote that had only ever lived on this disk. So
+> `codehealth::redact_evidence` (a pure function with its own tests) caps each
+> quote at **240 characters**, allows at most **3 quotes per signal**, and strips
+> paths, URLs and absolute-home prefixes. Counts and round numbers pass through
+> whole — the number is the signal; the prose is only illustrative.
+
+Worth noting while here: this table lists agent `WebSearch`/`WebFetch` but **not
+agent model calls at all**. Every spawned `claude` turn sends its prompt to a
+model API, and that has always been true of every agent Redline runs. It is a
+pre-existing gap in this document, worth its own fix, and deliberately not
+folded into the Shipwright's row above — which would have quietly made the new
+egress look like the whole story.
 
 There is **no** analytics, crash-reporting, or licensing phone-home.
 
@@ -76,6 +92,49 @@ otherwise be unrecoverable. The snapshot routine is the crown-jewels backup
   `backups/redline-*.db` (rename it to `redline.db`), relaunch. Open the Ledger
   pane and click **Verify chain** — a green result confirms the restored chain
   is intact.
+
+### The Bookshelf is data, not cache
+
+Until the Bookshelf, every byte Redline owned was either **rebuildable** (the
+memory mirror, from the hash chain) or **incidental** (thumbs). The Bookshelf is
+neither: the documents you author, revisit and launch live in
+`drafts.doc_json` — it *is* the data, and `drafts.doc_markdown` is only a
+derived mirror. So it is named here alongside `redline.db`, because the mirror
+could afford to be casual precisely by being disposable and this cannot.
+
+- **What to back up:** `<app-data>/redline.db` (the documents themselves) **and**
+  `<app-data>/bookshelf/<draft_id>/` (files attached to a document). They are one
+  backup unit, in the same directory as `attachments/` and `thumbs/`.
+- **What replaced localStorage:** the TipTap fidelity source used to live in the
+  webview's localStorage, where a cache clear wiped it. A one-time,
+  frontend-initiated migration (flagged in `app_settings` as
+  `redline.bookshelf.migrated`, so it survives that same cache clear) moved it
+  into the DB. Nothing about this touches the network.
+- **Deletes have no undo:** deleting a document or a folder cascades through its
+  discussion thread, comments, pending suggestions and sources, and destroys the
+  only copy of the document. Both are gated behind a typed-name confirm that
+  names the counts first.
+
+## Friction telemetry (`friction_events`) — local, and not the ledger
+
+Redline computes a lot of failure information at runtime and used to throw all
+of it away: a stall-killed agent, a context overflow, an Ask-mode violation, a
+malformed resolutions block, a fired revise watchdog, a turn timeout, a 401, a
+rejected memory proposal, a contained React render crash. `tracing` wrote some
+of it to **stderr**, which goes nowhere when Redline is launched from
+`/Applications`.
+
+`friction_events` records them so the Shipwright's digest can rank real pain
+instead of guessing. Three properties, stated so they aren't relaxed later:
+
+- **It never leaves the machine.** No new egress; it is a local SQLite table in
+  the same `redline.db` as everything else.
+- **It is deliberately NOT hash-chained into the ledger.** The ledger records
+  *decisions*; a stall-kill is not a decision. Mixing telemetry into the chain
+  would dilute exactly the thing the chain is for.
+- **It is self-bounding.** Prune-on-insert keeps the newest 5,000 rows and
+  nothing older than 90 days, modelled on `context_journal`. No sweeper task, no
+  unbounded growth. `detail` is capped at 500 characters at write time.
 
 ## External-session capture toggle
 

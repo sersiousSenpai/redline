@@ -6,7 +6,12 @@
 // panes tile unpredictably), so the surface is a single value and illegal
 // states are unrepresentable. Tiling is a separate, explicit choice: `docPinned`
 // keeps the document alongside whichever non-document surface is selected.
-export type MainSurface = "document" | "browser" | "drafter" | "review";
+export type MainSurface =
+  | "document"
+  | "browser"
+  | "drafter"
+  | "review"
+  | "servers";
 
 export const MAIN_SURFACE_KEY = "redline.mainSurface";
 export const DOC_PINNED_KEY = "redline.doc.pinned";

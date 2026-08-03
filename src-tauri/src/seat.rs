@@ -29,6 +29,9 @@ use crate::db::Database;
 const SETTING_AGENT_SEATS: &str = "redline.agentSeats";
 /// The `app_settings` key holding the global claude binary override.
 const SETTING_CLAUDE_BIN: &str = "redline.claudeBin";
+/// The `app_settings` key holding the pre-apply seat map — the undo for a
+/// Seat Assignment "Apply all" (see `snapshot_seats` / `restore_snapshot`).
+const SETTING_SEATS_PREVIOUS: &str = "redline.agentSeats.previous";
 /// Environment override for the claude binary — checked before everything.
 pub const ENV_CLAUDE_BIN: &str = "REDLINE_CLAUDE_BIN";
 
@@ -44,6 +47,8 @@ pub const KNOWN_SEATS: &[&str] = &[
     "keeper",
     "classifier",
     "librarian",
+    "shipwright",
+    "seatassign",
     "ai_review",
     "fork_plan",
     "fork_review",
@@ -149,7 +154,82 @@ pub fn set_seat(db: &Database, seat: &str, config: SeatConfig) -> Result<(), Str
     }
     let json = serde_json::to_string(&s.seats).map_err(|e| e.to_string())?;
     db.set_setting(SETTING_AGENT_SEATS, &json)
+        .map_err(|e| e.to_string())?;
+    // A hand-edit retires the batch undo. Otherwise Revert would sit there
+    // indefinitely and, days later, restore a chart from before edits the user
+    // has since made by hand — silently destroying them.
+    drop(s);
+    clear_snapshot(db);
+    Ok(())
+}
+
+/// Apply many seats in one shot: validate every name first, then mutate and
+/// persist once. All-or-nothing, so a batch from the Seat Assignment agent can
+/// never half-land.
+pub fn set_seats(db: &Database, updates: &[(String, SeatConfig)]) -> Result<(), String> {
+    for (seat, _) in updates {
+        if !KNOWN_SEATS.contains(&seat.as_str()) {
+            return Err(format!("unknown agent seat: {seat}"));
+        }
+    }
+    let mut s = store().write().unwrap();
+    for (seat, config) in updates {
+        if config.is_empty() {
+            s.seats.remove(seat);
+        } else {
+            s.seats.insert(seat.clone(), config.clone());
+        }
+    }
+    let json = serde_json::to_string(&s.seats).map_err(|e| e.to_string())?;
+    db.set_setting(SETTING_AGENT_SEATS, &json)
         .map_err(|e| e.to_string())
+}
+
+/// Stash the whole current map so a batch apply is revertible in one click.
+/// Called once per Seat Assignment card, before its first apply.
+pub fn snapshot_seats(db: &Database) -> Result<(), String> {
+    let json = {
+        let s = store().read().unwrap();
+        serde_json::to_string(&s.seats).map_err(|e| e.to_string())?
+    };
+    db.set_setting(SETTING_SEATS_PREVIOUS, &json)
+        .map_err(|e| e.to_string())
+}
+
+/// Drop the batch undo. Called whenever the snapshot stops describing "the
+/// chart immediately before the last applied batch".
+fn clear_snapshot(db: &Database) {
+    let _ = db.set_setting(SETTING_SEATS_PREVIOUS, "");
+}
+
+/// Restore the stashed map wholesale — the undo for "Apply all". Errors when
+/// nothing has been stashed, so the GUI can hide the button.
+///
+/// One-shot: the snapshot is consumed, so Revert disappears afterwards rather
+/// than lingering as a button that would re-apply a stale chart over whatever
+/// the user has done since.
+pub fn restore_snapshot(db: &Database) -> Result<(), String> {
+    let json = db
+        .get_setting(SETTING_SEATS_PREVIOUS)
+        .filter(|j| !j.trim().is_empty())
+        .ok_or("there is no previous seat chart to restore")?;
+    let restored: HashMap<String, SeatConfig> =
+        serde_json::from_str(&json).map_err(|e| e.to_string())?;
+    {
+        let mut s = store().write().unwrap();
+        s.seats = restored;
+        let out = serde_json::to_string(&s.seats).map_err(|e| e.to_string())?;
+        db.set_setting(SETTING_AGENT_SEATS, &out)
+            .map_err(|e| e.to_string())?;
+    }
+    clear_snapshot(db);
+    Ok(())
+}
+
+/// Whether a revertible snapshot exists (drives the Revert button's presence).
+pub fn has_snapshot(db: &Database) -> bool {
+    db.get_setting(SETTING_SEATS_PREVIOUS)
+        .is_some_and(|j| !j.trim().is_empty())
 }
 
 /// The global claude binary override (settings surface).
@@ -229,6 +309,19 @@ pub(crate) fn set_seat_for_test(seat: &str, config: Option<SeatConfig>) {
     };
 }
 
+/// Tests across the whole crate share the process-global seat store, and
+/// `snapshot_seats` / `restore_snapshot` read and write the *whole* map — so
+/// **any** test that touches it must hold this guard, in this module or any
+/// other (`claude_proc`'s spawn-arg tests included), or a parallel test's
+/// writes leak in and both flake.
+#[cfg(test)]
+pub(crate) fn store_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,6 +372,7 @@ mod tests {
 
     #[test]
     fn store_roundtrip_and_inheritance() {
+        let _guard = store_guard();
         // Global-store test: use seats no other test writes.
         {
             let mut s = store().write().unwrap();
@@ -305,6 +399,124 @@ mod tests {
         let mut s = store().write().unwrap();
         s.seats.remove("drafter");
         s.seats.remove("fork_drafter");
+    }
+
+    #[test]
+    fn set_seats_is_all_or_nothing_and_an_empty_config_clears_the_row() {
+        let _guard = store_guard();
+        let db = Database::open_in_memory().unwrap();
+        {
+            let mut s = store().write().unwrap();
+            s.seats.clear();
+        }
+        // One bad name must abort the whole batch — a half-landed chart is
+        // worse than a rejected one.
+        let err = set_seats(
+            &db,
+            &[
+                ("browse".to_string(), cfg(Some("sonnet"), None)),
+                ("not_a_seat".to_string(), cfg(Some("opus"), None)),
+            ],
+        )
+        .unwrap_err();
+        assert!(err.contains("not_a_seat"));
+        assert!(
+            store().read().unwrap().seats.is_empty(),
+            "the valid seat in a rejected batch must not have landed"
+        );
+
+        set_seats(
+            &db,
+            &[
+                ("browse".to_string(), cfg(Some("sonnet"), None)),
+                ("voice".to_string(), cfg(Some("haiku"), Some("low"))),
+            ],
+        )
+        .unwrap();
+        assert_eq!(flag_args("browse"), vec!["--model", "sonnet"]);
+        // An all-blank config removes the row, back to Default.
+        set_seats(&db, &[("browse".to_string(), SeatConfig::default())]).unwrap();
+        assert!(flag_args("browse").is_empty());
+        assert_eq!(flag_args("voice"), vec!["--model", "haiku", "--effort", "low"]);
+
+        store().write().unwrap().seats.clear();
+    }
+
+    #[test]
+    fn snapshot_then_restore_undoes_a_whole_batch() {
+        let _guard = store_guard();
+        let db = Database::open_in_memory().unwrap();
+        assert!(!has_snapshot(&db), "nothing stashed yet");
+        assert!(
+            restore_snapshot(&db).is_err(),
+            "restoring with no snapshot must fail loudly, not silently wipe"
+        );
+
+        // A pre-existing hand-picked seat, plus one left at Default.
+        {
+            let mut s = store().write().unwrap();
+            s.seats.clear();
+            s.seats
+                .insert("mission".to_string(), cfg(Some("opus"), Some("high")));
+        }
+        snapshot_seats(&db).unwrap();
+        assert!(has_snapshot(&db));
+
+        // The agent's batch: overwrite the hand-pick and configure a fresh seat.
+        set_seats(
+            &db,
+            &[
+                ("mission".to_string(), cfg(Some("haiku"), None)),
+                ("keeper".to_string(), cfg(Some("haiku"), Some("low"))),
+            ],
+        )
+        .unwrap();
+        assert_eq!(flag_args("mission"), vec!["--model", "haiku"]);
+        assert_eq!(flag_args("keeper"), vec!["--model", "haiku", "--effort", "low"]);
+
+        restore_snapshot(&db).unwrap();
+        // The hand-pick is back exactly as it was…
+        assert_eq!(flag_args("mission"), vec!["--model", "opus", "--effort", "high"]);
+        // …and a seat the batch newly configured is returned to Default.
+        assert!(
+            flag_args("keeper").is_empty(),
+            "revert must remove seats the batch added, not just restore old ones"
+        );
+
+        // Restore also has to survive a reload from the DB, not just the store.
+        load_from_db(&db);
+        assert_eq!(flag_args("mission"), vec!["--model", "opus", "--effort", "high"]);
+        assert!(flag_args("keeper").is_empty());
+
+        // Revert is one-shot: the snapshot is consumed, so the button goes away
+        // instead of lingering as a stale second undo.
+        assert!(!has_snapshot(&db));
+        assert!(restore_snapshot(&db).is_err());
+
+        store().write().unwrap().seats.clear();
+    }
+
+    #[test]
+    fn a_hand_edit_retires_the_batch_undo() {
+        let _guard = store_guard();
+        let db = Database::open_in_memory().unwrap();
+        {
+            let mut s = store().write().unwrap();
+            s.seats.clear();
+        }
+        snapshot_seats(&db).unwrap();
+        set_seats(&db, &[("mission".to_string(), cfg(Some("haiku"), None))]).unwrap();
+        assert!(has_snapshot(&db), "the batch is still undoable");
+
+        // The user hand-edits a seat afterwards. Reverting now would restore a
+        // chart from before that edit and silently destroy it, so the undo is
+        // retired instead.
+        set_seat(&db, "browse", cfg(Some("opus"), None)).unwrap();
+        assert!(!has_snapshot(&db));
+        assert!(restore_snapshot(&db).is_err());
+        assert_eq!(flag_args("browse"), vec!["--model", "opus"]);
+
+        store().write().unwrap().seats.clear();
     }
 
     #[test]

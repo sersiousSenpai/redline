@@ -16,6 +16,57 @@
 //! Spawned headless with the same `bridge_args` tool surface as the classifier
 //! (curl bridge to the localhost daemon so it can read `/v1/context/overview`,
 //! `/v1/memory/*`, `/v1/mission/*` for detail), MCP stripped.
+//!
+//! # Status: VACANT, not dead — the repurposing spec
+//!
+//! This module has no caller in `src/` today. `LibrarianCard.tsx` and
+//! `lib/librarian.ts` went when the Librarian dissolved into `keeper.rs`; the
+//! surviving traces are a past-tense comment in `MemoryInspector.tsx` and a seat
+//! row in `AgentSeats.tsx`. Commit `9827088` added the Librarian and collapsed
+//! the Polis panes in the same breath, so its checklist UI was never built.
+//!
+//! **Do not delete it.** What the dissolution vacated is a *role*, and the role
+//! is worth more now than it was then, because there are far more surfaces to be
+//! incoherent across. Keeping the module also means the Shipwright inherited a
+//! working spawn/parse template instead of a deleted one — which it did.
+//!
+//! ## The three roles, once the Shipwright lands
+//!
+//! - **Keeper** *acts* on memory (auto-applies reversible ops on the idle tick,
+//!   escalates destructive ones).
+//! - **Shipwright** *advises* on code (`shipwright.rs`, `codehealth.rs`).
+//! - **Librarian** *advises* on unreconciled work across every surface.
+//!
+//! ## Its ground truth: the seam between the agents and you
+//!
+//! Staged artifacts that were produced and never closed out — Spike-3a's F1/F3/F7
+//! extended to every surface that has appeared since:
+//!
+//! | signal | accessor |
+//! |---|---|
+//! | held class proposals | `list_class_proposals()` (F1, unchanged) |
+//! | in-review sessions with unresolved comments | `in_review_friction()` (F3) |
+//! | stale missions / browse + linked threads | `list_missions()` (F7) + `thread_stats` |
+//! | pending draft suggestions | `draft_suggestions.status = 'pending'` |
+//! | unaccepted memory proposals / observations | `class_observations` undismissed, unpinned |
+//! | open code-review annotations | `review_annotations` unresolved, by round |
+//! | the Shipwright's own open findings | `shipwright_findings.status = 'pending'` |
+//!
+//! Same contract as the Shipwright: a Rust digest computes every number, the
+//! agent ranks with the cite-a-number discipline, and a signal with no backing
+//! state is not emitted.
+//!
+//! ## Hard constraint: advisory only
+//!
+//! The Librarian must never direct, dispatch or steer another agent. That is the
+//! Loop Orchestrator, which was built and **pulled on 2026-07-03 for exactly
+//! this reason** (v1 parked on `feature/loop-orchestrator`). Coherence between
+//! agents stays **declarative** — the precedent is
+//! `claude_proc::mission_context_block`, where browse and linked *inherit* the
+//! active mission's goal and orient toward it without anything driving them. The
+//! Librarian may state what is unreconciled; it may not hand work out. The
+//! reason is written down here so a later session doesn't relax it as an obvious
+//! improvement.
 
 use std::process::Stdio;
 

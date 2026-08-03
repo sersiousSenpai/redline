@@ -6,8 +6,11 @@ import {
   DIVIDER_W,
   DOC_MIN,
   DOC_MIN_FRAC,
+  VOICE_DOC_MIN,
+  VOICE_PANE_MIN,
   computePaneLayout,
   docMinFor,
+  voicePaneMaxW,
   type PaneLayoutInput,
 } from "./paneLayout";
 
@@ -113,5 +116,43 @@ describe("computePaneLayout", () => {
       winWidth: 900,
     });
     expect(l.docVisibleW).toBe(0);
+  });
+});
+
+describe("voicePaneMaxW", () => {
+  it("caps at 60% of the column when the column is roomy", () => {
+    // 1200 - 360 = 840, but 60% = 720 binds first.
+    expect(voicePaneMaxW(1200)).toBe(720);
+    expect(voicePaneMaxW(1200)).toBeLessThan(1200 - VOICE_DOC_MIN);
+  });
+
+  it("leaves the document its minimum strip once the column tightens", () => {
+    // 60% of 800 = 480, but the doc floor allows only 440.
+    expect(voicePaneMaxW(800)).toBe(800 - VOICE_DOC_MIN);
+  });
+
+  it("holds at the panel's hard stop once the doc floor stops fitting", () => {
+    // 400px column: the doc floor would leave only 40px of panel, so the panel
+    // holds at its 300 minimum and the document takes the squeeze instead.
+    expect(voicePaneMaxW(400)).toBe(VOICE_PANE_MIN);
+    // 700px is the other side of that trade: 340 of panel, 360 of document.
+    expect(voicePaneMaxW(700)).toBe(700 - VOICE_DOC_MIN);
+    expect(voicePaneMaxW(700)).toBeGreaterThan(VOICE_PANE_MIN);
+  });
+
+  it("degrades to the column width rather than overflowing it", () => {
+    expect(voicePaneMaxW(200)).toBe(200);
+    expect(voicePaneMaxW(0)).toBe(0);
+    expect(voicePaneMaxW(-50)).toBe(0);
+  });
+
+  it("is monotonic — a wider column never allows a narrower panel", () => {
+    let prev = -Infinity;
+    for (let w = 0; w <= 2400; w += 10) {
+      const max = voicePaneMaxW(w);
+      expect(max).toBeGreaterThanOrEqual(prev);
+      expect(max).toBeLessThanOrEqual(Math.max(w, VOICE_PANE_MIN));
+      prev = max;
+    }
   });
 });

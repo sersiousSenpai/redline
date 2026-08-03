@@ -54,7 +54,7 @@ struct EmbeddedSkill {
 const SKILLS: &[EmbeddedSkill] = &[
     EmbeddedSkill {
         name: "redline-plan-review",
-        version: 10,
+        version: 12,
         content: include_str!("../../skills/redline-plan-review/SKILL.md"),
     },
     EmbeddedSkill {
@@ -69,27 +69,27 @@ const SKILLS: &[EmbeddedSkill] = &[
     },
     EmbeddedSkill {
         name: "browse",
-        version: 6,
+        version: 7,
         content: include_str!("../../skills/browse/SKILL.md"),
     },
     EmbeddedSkill {
         name: "mission",
-        version: 3,
+        version: 4,
         content: include_str!("../../skills/mission/SKILL.md"),
     },
     EmbeddedSkill {
         name: "linked",
-        version: 2,
+        version: 3,
         content: include_str!("../../skills/linked/SKILL.md"),
     },
     EmbeddedSkill {
         name: "drafter",
-        version: 2,
+        version: 3,
         content: include_str!("../../skills/drafter/SKILL.md"),
     },
     EmbeddedSkill {
         name: "companion",
-        version: 3,
+        version: 4,
         content: include_str!("../../skills/companion/SKILL.md"),
     },
     EmbeddedSkill {
@@ -106,6 +106,16 @@ const SKILLS: &[EmbeddedSkill] = &[
         name: "librarian",
         version: 2,
         content: include_str!("../../skills/librarian/SKILL.md"),
+    },
+    EmbeddedSkill {
+        name: "shipwright",
+        version: 1,
+        content: include_str!("../../skills/shipwright/SKILL.md"),
+    },
+    EmbeddedSkill {
+        name: "seat-assignment",
+        version: 1,
+        content: include_str!("../../skills/seat-assignment/SKILL.md"),
     },
     EmbeddedSkill {
         name: "context-analysis",
@@ -325,6 +335,71 @@ mod tests {
             assert!(
                 lib.content.contains(needle),
                 "librarian SKILL.md is missing `{needle}`"
+            );
+        }
+    }
+
+    #[test]
+    fn shipwright_skill_teaches_the_disciplines_that_make_it_not_slop() {
+        let sw = SKILLS.iter().find(|s| s.name == "shipwright").unwrap();
+        // Each needle is a defence against the one failure mode: an agent that
+        // returns five plausible refactors every run. Losing any of them turns
+        // the Shipwright back into a generic AI code advisor.
+        for needle in [
+            "\"findings\"",
+            "At most 5 findings",   // the cap
+            "must quote a number",  // evidence is cited, not asserted
+            "guard test",           // rule+guard preferred over refactor
+            "perf-budget",          // the precedent it imitates
+            "re-word a dismissed finding", // the named dedupe escape hatch
+            "Do not claim one",     // the GUI-verification gap
+            "repurpose candidates, not deletions", // dead_wiring discipline
+            "never write to the repo",
+            "on-demand",
+        ] {
+            assert!(
+                sw.content.contains(needle),
+                "shipwright SKILL.md is missing `{needle}`"
+            );
+        }
+        // The L2 seam must stay documented and un-collapsed.
+        for needle in ["proposal", "guard", "files"] {
+            assert!(sw.content.contains(needle));
+        }
+    }
+
+    #[test]
+    fn seat_assignment_skill_teaches_the_chart_contract() {
+        let sa = SKILLS.iter().find(|s| s.name == "seat-assignment").unwrap();
+        // The output contract, the posture/discretion axes, and the two rules
+        // that keep a thirteen-seat batch safe.
+        for needle in [
+            "\"picks\"",
+            "rationale",
+            "deviates",
+            "discretion",
+            "Cost-conscious",
+            "aliases, never pinned model ids",
+            "on-demand",
+        ] {
+            assert!(
+                sa.content.contains(needle),
+                "seat-assignment SKILL.md is missing `{needle}`"
+            );
+        }
+        // Every effort level the CLI documents must be named, or the agent will
+        // never propose the ones the picker newly exposes.
+        for level in crate::seatassign::EFFORT_LEVELS {
+            assert!(
+                sa.content.contains(level),
+                "seat-assignment SKILL.md never mentions effort `{level}`"
+            );
+        }
+        // Same for the model aliases it is allowed to pick from.
+        for alias in crate::seatassign::MODEL_ALIASES {
+            assert!(
+                sa.content.contains(alias),
+                "seat-assignment SKILL.md never mentions model alias `{alias}`"
             );
         }
     }

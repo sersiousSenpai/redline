@@ -2,16 +2,17 @@
 // Copyright 2026 Yusuf Al-Bazian
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::state::{
-    reparse_sections, AttachState, BrowseMessage, CodeReviewSession, Comment, CommentKind,
+    reparse_sections, AttachState, BrowseMessage, CodeReviewSession, Comment, CommentAttachment,
+    CommentKind, CommentOffer,
     CommentScope, CommentSelection, CommentStatus, EditPayload, Linked, LinkedMessage, Mission,
     MissionFinding, MissionMessage, Resolution, ReviewAnnotation, ReviewQuestion,
     ReviewSession, Revision, RoundHistoryEntry, SessionStatus, SourceFeedback, StructuralPayload,
-    ThreadMessage,
+    ThreadMessage, VoiceMessage,
 };
 
 /// Reduce a URL to a bare host for feedback aggregation: strip scheme, any path/
@@ -37,6 +38,25 @@ fn reopen_history_to_json(history: &[RoundHistoryEntry]) -> Option<String> {
         return None;
     }
     serde_json::to_string(history).ok()
+}
+
+/// Serialize a comment's (or thread turn's) attachment metadata. Same rule as
+/// `reopen_history_to_json`: no attachments stores NULL, so every pre-feature
+/// row and every comment without a file keeps a clean column.
+fn attachments_to_json(attachments: &[CommentAttachment]) -> Option<String> {
+    if attachments.is_empty() {
+        return None;
+    }
+    serde_json::to_string(attachments).ok()
+}
+
+/// Read attachment metadata back. A NULL, or JSON this build can't parse,
+/// degrades to "no attachments" rather than failing the whole row — losing a
+/// chip is recoverable; losing the comment is not.
+fn attachments_from_json(json: Option<String>) -> Vec<CommentAttachment> {
+    json.as_deref()
+        .and_then(|s| serde_json::from_str::<Vec<CommentAttachment>>(s).ok())
+        .unwrap_or_default()
 }
 
 /// One lexical hit from the browse-events FTS index (Dojo P3). `score` is the
@@ -118,6 +138,22 @@ pub struct JournalRow {
     pub detail: Option<String>,
 }
 
+/// One remembered dev server — a `(project_path, port)` pair we have seen
+/// listening at least once. Rows outlive the process, so the Localhost surface
+/// can offer "run it again" for a server that is no longer up.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DevServerRow {
+    pub id: i64,
+    pub project_path: String,
+    pub project_name: String,
+    pub port: u16,
+    pub url: String,
+    pub stack: String,
+    pub run_command: String,
+    pub last_seen_at: i64,
+    pub thumb_path: Option<String>,
+}
+
 /// One turn from a generic thread read (`/v1/context/threads/:kind/:id`).
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -125,6 +161,195 @@ pub struct GenericThreadMsg {
     pub role: String,
     pub body: String,
     pub created_at: i64,
+}
+
+/// One Agent Seat's observed workload, from `Database::seat_activity` —
+/// the behavioural half of the Seat Assignment agent's digest.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeatActivity {
+    pub seat: String,
+    /// Agent turns inside the caller's window (the digest uses 30 days).
+    pub turns_window: i64,
+    pub turns_total: i64,
+    /// Epoch millis of the seat's most recent turn; `None` = never ran.
+    pub last_ts: Option<i64>,
+}
+
+/// One shelf item: a document, with the counts the shelf list renders. The
+/// document body itself (`doc_json`) is deliberately absent — the list must
+/// stay cheap however many documents accumulate.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BookshelfDraft {
+    pub draft_id: String,
+    pub title: Option<String>,
+    pub project_path: Option<String>,
+    pub folder_id: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub source_count: i64,
+    /// Whether the document body has ever been written. A row created only by
+    /// the markdown mirror (or a pre-Bookshelf draft awaiting migration) has
+    /// none, and the shelf shouldn't pretend otherwise.
+    pub has_doc: bool,
+}
+
+/// One folder in the shelf's adjacency list. `parent_id = None` is the root.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BookshelfFolder {
+    pub folder_id: String,
+    pub parent_id: Option<String>,
+    pub name: String,
+    pub created_at: i64,
+}
+
+/// One source attached to a document (a captured page, a mission finding, a
+/// URL, an uploaded file, a digest). Always hangs off a document, never a
+/// folder.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftSource {
+    pub id: String,
+    pub draft_id: String,
+    pub kind: String,
+    pub ref_id: Option<String>,
+    pub url: Option<String>,
+    pub title: Option<String>,
+    pub excerpt: Option<String>,
+    pub file_path: Option<String>,
+    pub created_at: i64,
+}
+
+/// What a `delete_draft` / `delete_folder` would actually destroy, so the
+/// confirm dialog can name it. These two commands are the only Bookshelf
+/// commands that aren't idempotent and they cascade with no undo.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteImpact {
+    pub drafts: i64,
+    pub folders: i64,
+    pub comments: i64,
+    pub pending_suggestions: i64,
+    pub sources: i64,
+    pub chat_messages: i64,
+}
+
+/// Process-global friction sink, installed once at boot.
+///
+/// Most call sites already hold a `Database`. Two don't and can't reasonably be
+/// given one: the axum auth middleware (`auth::require_daemon_auth` is a pure
+/// function over the route table plus thin glue) and anything reached from a
+/// context with no Tauri state. They record through here instead.
+static FRICTION_SINK: std::sync::OnceLock<Arc<Database>> = std::sync::OnceLock::new();
+
+/// Install the sink. Idempotent — a second call is ignored, so tests that build
+/// their own `Database` can't hijack the running app's.
+pub fn install_friction_sink(db: Arc<Database>) {
+    let _ = FRICTION_SINK.set(db);
+}
+
+/// Record friction from a context with no `Database` in hand. Silently does
+/// nothing before the sink is installed, which is the correct behaviour for
+/// telemetry: never block, never fail, never panic a caller's path.
+pub fn note_friction(kind: &str, surface: Option<&str>, session_id: Option<&str>, detail: Option<&str>) {
+    if let Some(db) = FRICTION_SINK.get() {
+        let _ = db.record_friction(kind, surface, session_id, detail);
+    }
+}
+
+/// One `friction_events` kind, aggregated: how often it fired in the window and
+/// when it last did. The digest ranks by both — 14 overflows in three days is a
+/// different signal from 14 spread over three months.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrictionCount {
+    pub kind: String,
+    pub count: i64,
+    pub last_ts: i64,
+    /// The most recent `detail`, truncated at write time. Illustrative only.
+    pub last_detail: Option<String>,
+}
+
+/// One thing the Shipwright found, and what you did with it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShipwrightFinding {
+    pub id: String,
+    pub run_id: String,
+    pub category: String,
+    pub summary: String,
+    pub evidence: Option<String>,
+    pub proposal: Option<String>,
+    pub guard: Option<String>,
+    /// JSON array of repo-relative paths. Shipped-detection reads this.
+    pub files: Option<String>,
+    pub status: String,
+    pub dismissed: bool,
+    pub draft_id: Option<String>,
+    pub created_at: i64,
+    pub resolved_at: Option<i64>,
+}
+
+/// How the Shipwright has actually been doing, per category — accept-rate and
+/// dismiss-rate straight off `shipwright_findings`, so the next digest carries
+/// its own track record instead of the agent asserting one.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CategoryScore {
+    pub category: String,
+    pub total: i64,
+    pub accepted: i64,
+    pub dismissed: i64,
+    pub shipped: i64,
+}
+
+/// Every folder in `root`'s subtree, `root` included. Walked breadth-first over
+/// the adjacency edges, with a visited set so a pre-existing cycle (a DB written
+/// by an older build, say) terminates instead of hanging. Pure.
+pub fn folder_subtree(edges: &[(String, Option<String>)], root: &str) -> Vec<String> {
+    let mut out = vec![root.to_string()];
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    seen.insert(root.to_string());
+    let mut i = 0;
+    while i < out.len() {
+        let parent = out[i].clone();
+        i += 1;
+        for (id, p) in edges {
+            if p.as_deref() == Some(parent.as_str()) && seen.insert(id.clone()) {
+                out.push(id.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Why a folder move must be refused, or `None` if it's legal. The load-bearing
+/// case is reparenting a folder **into its own subtree**: adjacency has no
+/// structural guard against it, and the resulting cycle would silently orphan
+/// the whole subtree from the root walk. Pure, so the rule is tested directly.
+pub fn folder_move_rejection(
+    edges: &[(String, Option<String>)],
+    folder_id: &str,
+    new_parent: Option<&str>,
+) -> Option<String> {
+    let Some(parent) = new_parent else {
+        return None; // the shelf root is always a legal destination
+    };
+    if parent == folder_id {
+        return Some("a folder can't be its own parent".to_string());
+    }
+    if !edges.iter().any(|(id, _)| id == parent) {
+        return Some(format!("no such folder `{parent}`"));
+    }
+    if folder_subtree(edges, folder_id)
+        .iter()
+        .any(|id| id == parent)
+    {
+        return Some("can't move a folder into its own subtree".to_string());
+    }
+    None
 }
 
 pub struct Database {
@@ -240,6 +465,47 @@ impl Database {
                 session_id TEXT PRIMARY KEY,
                 fork_session_id TEXT NOT NULL
             );
+
+            -- The *visible* half of that memory: the discussion panel's
+            -- transcript. `voice_sessions` above keeps the agent's recollection
+            -- across restarts; without this table the screen did not match it —
+            -- the panel held its lines in component state, so an incoming plan,
+            -- a session switch, or a relaunch wiped the thread the user was
+            -- reading. Keyed by the same voice key `voice.rs` uses (a plan
+            -- session id, or `drafter:<draft_id>`). Written from Rust so a
+            -- reply lands even while the panel is unmounted.
+            CREATE TABLE IF NOT EXISTS voice_messages (
+                id TEXT PRIMARY KEY,
+                session_key TEXT NOT NULL,
+                role TEXT NOT NULL,
+                text TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_voice_messages
+                ON voice_messages (session_key, created_at);
+
+            -- Offered (not yet written) plan action items. The voice agent
+            -- stages one mid-turn when it proposes a concrete change; the panel
+            -- renders it as a `＋ Add as item` chip under the reply it came
+            -- from, and only the user's tap creates the real comment. Nothing
+            -- here is visible on the plan. `message_id` is filled in once the
+            -- reply is persisted (see `bind_comment_offers`) — the offer's curl
+            -- necessarily precedes its own turn's `result` line.
+            CREATE TABLE IF NOT EXISTS comment_offers (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                message_id TEXT,
+                block_id TEXT NOT NULL,
+                body TEXT NOT NULL,
+                label TEXT,
+                agent_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_comment_offers
+                ON comment_offers (session_id, status, created_at);
 
             -- Research Missions: an orchestrator that holds one shared goal
             -- across the whole browser pane, a tier above the per-tab browse
@@ -675,10 +941,13 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_companion_messages
                 ON companion_messages (companion_id, created_at);
 
-            -- Prompt Drafter durable identity: the doc's markdown mirror (what
-            -- agents read via /v1/drafter/:id/doc — TipTap JSON stays in
-            -- localStorage as the fidelity source), plus the draft's discussion
-            -- thread, comment sidecar, and queued agent suggestions.
+            -- Prompt Drafter durable identity, and as of the Bookshelf the
+            -- **primary storage** for the document itself. `doc_json` is the
+            -- TipTap fidelity source (it used to live in localStorage, where a
+            -- cache clear wiped it); `doc_markdown` stays exactly what it was —
+            -- the derived, agent-readable mirror behind /v1/drafter/:id/doc.
+            -- Alongside: the draft's discussion thread, comment sidecar, queued
+            -- agent suggestions, and its attached sources.
             CREATE TABLE IF NOT EXISTS drafts (
                 draft_id TEXT PRIMARY KEY,
                 title TEXT,
@@ -687,6 +956,76 @@ impl Database {
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             );
+
+            -- The shelf's folder tree, as an **adjacency list**: move and rename
+            -- are a single row update, where materialized paths would be
+            -- O(subtree) for no gain at this size. Building the tree from
+            -- adjacency is the house pattern (ClassMemoryPane's buildTree,
+            -- lib/reviewTree.ts). A move must walk parents first — reparenting a
+            -- folder into its own subtree is rejected (`would_cycle`).
+            CREATE TABLE IF NOT EXISTS bookshelf_folders (
+                folder_id TEXT PRIMARY KEY,
+                parent_id TEXT,                 -- NULL = shelf root
+                name TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_bookshelf_folders_parent
+                ON bookshelf_folders (parent_id, name);
+
+            -- Sources attach to a DOCUMENT, never to a folder. Folders hold
+            -- documents only: a dropped PDF attaches *to* the document it
+            -- informs, so every shelf item stays reviewable, agent-attached and
+            -- launch-into-plan. Allowing loose files would forfeit all three.
+            CREATE TABLE IF NOT EXISTS draft_sources (
+                id TEXT PRIMARY KEY,
+                draft_id TEXT NOT NULL,
+                kind TEXT NOT NULL,      -- browse_event | mission_finding | url | file | digest
+                ref_id TEXT,             -- browse_events rowid / mission_findings id
+                url TEXT, title TEXT, excerpt TEXT,
+                file_path TEXT,          -- relative to <app_data_dir>/bookshelf/<draft_id>/
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_draft_sources
+                ON draft_sources (draft_id, created_at);
+
+            -- The app's own failures. Each of these was already *computed* at
+            -- runtime and thrown away — no row, no counter, and the tracing
+            -- subscriber writes to stderr, which goes nowhere when Redline is
+            -- launched from /Applications. This is TELEMETRY, deliberately NOT
+            -- hash-chained into the ledger: the ledger records decisions, and a
+            -- stall-kill is not a decision. Local-only (docs/local-only-audit).
+            CREATE TABLE IF NOT EXISTS friction_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                surface TEXT, session_id TEXT, detail TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_friction_events
+                ON friction_events (kind, ts);
+
+            -- What the Shipwright found, and what you did with it. The plan
+            -- mines your corrections of the agent, so it must also record your
+            -- corrections of IT — that is what makes run five smarter than run
+            -- one. Dedupe follows class_observations exactly: on
+            -- (category, summary) REGARDLESS of `dismissed`, so a dismissed
+            -- finding never resurfaces under the same wording.
+            --
+            -- `shipped` is DETECTED, not self-declared: a later commit touching
+            -- a file this finding's `files` array named flips it. Self-declared
+            -- success is the one number an agent will always report favourably.
+            CREATE TABLE IF NOT EXISTS shipwright_findings (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                category TEXT NOT NULL,
+                summary TEXT NOT NULL,          -- dedupe key with category
+                evidence TEXT, proposal TEXT, guard TEXT,
+                files TEXT,                     -- JSON array; shipped-detection reads this
+                status TEXT NOT NULL DEFAULT 'pending',   -- pending|accepted|dismissed|shipped
+                dismissed INTEGER NOT NULL DEFAULT 0,
+                draft_id TEXT, created_at INTEGER NOT NULL, resolved_at INTEGER
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_shipwright_dedupe
+                ON shipwright_findings (category, summary);
 
             CREATE TABLE IF NOT EXISTS draft_chat_threads (
                 draft_id TEXT PRIMARY KEY,
@@ -767,6 +1106,30 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_share_returns_session
                 ON share_returns (session_id, imported_at);
+
+            -- Localhost dashboard: one row per dev server we have ever seen
+            -- listening out of a known project. The key is (project_path, port)
+            -- — "the same server" as a card. Keying on the run command instead
+            -- would fragment the row every time a lockfile churn changed the
+            -- package manager; keying on the project alone would merge a repo's
+            -- web and api servers into one card.
+            CREATE TABLE IF NOT EXISTS dev_servers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_path TEXT NOT NULL,
+                project_name TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                url TEXT NOT NULL,
+                stack TEXT NOT NULL DEFAULT '',
+                run_command TEXT NOT NULL DEFAULT '',
+                last_pid INTEGER,
+                last_args TEXT,
+                first_seen_at INTEGER NOT NULL,
+                last_seen_at INTEGER NOT NULL,
+                thumb_path TEXT,
+                UNIQUE (project_path, port)
+            );
+            CREATE INDEX IF NOT EXISTS idx_dev_servers_seen
+                ON dev_servers (last_seen_at DESC);
             "#,
         )?;
         // Best-effort additive migrations (errors on existing columns are ignored)
@@ -984,6 +1347,18 @@ impl Database {
             [],
         );
         let _ = conn.execute("ALTER TABLE comments ADD COLUMN share_request_id TEXT", []);
+        // Files the reviewer attached to a comment: JSON `[{path, name, mime,
+        // bytes}]`, same additive shape as `reopen_history`. The column holds
+        // METADATA only — the files themselves live under
+        // `<app_data_dir>/attachments/<session_id>/`. NULL for every comment
+        // without one.
+        let _ = conn.execute("ALTER TABLE comments ADD COLUMN attachments TEXT", []);
+        // The same, per sidecar-discussion turn: a reviewer can drop an image
+        // into a follow-up inside a comment's Discuss thread.
+        let _ = conn.execute(
+            "ALTER TABLE thread_messages ADD COLUMN attachments TEXT",
+            [],
+        );
         // Persisted attach state: lets detachment survive app restarts and be
         // visible for background sessions (the live `held` flag is recomputed
         // from in-memory senders and tells nothing after a crash).
@@ -1007,6 +1382,13 @@ impl Database {
              ) WHERE updated_at = 0",
             [],
         );
+        // Bookshelf: the document's fidelity source moves off localStorage and
+        // into the DB, and every document gains a shelf location. Both additive,
+        // both nullable — an existing draft keeps its markdown mirror and is
+        // backfilled with its TipTap JSON by the one-time frontend migration
+        // (only the webview can read localStorage).
+        let _ = conn.execute("ALTER TABLE drafts ADD COLUMN doc_json TEXT", []);
+        let _ = conn.execute("ALTER TABLE drafts ADD COLUMN folder_id TEXT", []);
         Ok(())
     }
 
@@ -1656,30 +2038,37 @@ impl Database {
     }
 
     // -----------------------------------------------------------------------
-    // Prompt Drafter: durable draft identity + markdown mirror
+    // Prompt Drafter / Bookshelf: the document itself, plus its shelf location
     // -----------------------------------------------------------------------
 
-    /// Upsert a draft's markdown mirror (what agents read via
-    /// `/v1/drafter/:id/doc`). The TipTap JSON stays in localStorage as the
-    /// fidelity source; this row is the agent-readable projection.
+    /// Upsert a draft. `doc_json` is the TipTap **fidelity source** — the real
+    /// document, which the Bookshelf now owns; `doc_markdown` is the derived,
+    /// agent-readable mirror behind `/v1/drafter/:id/doc`.
+    ///
+    /// `doc_json = None` means "mirror only, don't touch the document" — the
+    /// server-side flush in `draft_chat` passes it, and `COALESCE` keeps the
+    /// stored JSON intact. A markdown-only writer must never be able to blank
+    /// the only copy of the document.
     pub fn upsert_draft(
         &self,
         draft_id: &str,
         title: Option<&str>,
         project_path: Option<&str>,
         doc_markdown: &str,
+        doc_json: Option<&str>,
     ) -> rusqlite::Result<()> {
         let now = crate::ledger::now_millis();
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO drafts (draft_id, title, project_path, doc_markdown, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+            "INSERT INTO drafts (draft_id, title, project_path, doc_markdown, doc_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
              ON CONFLICT(draft_id) DO UPDATE SET
                 title = excluded.title,
                 project_path = excluded.project_path,
                 doc_markdown = excluded.doc_markdown,
+                doc_json = COALESCE(excluded.doc_json, drafts.doc_json),
                 updated_at = excluded.updated_at",
-            params![draft_id, title, project_path, doc_markdown, now],
+            params![draft_id, title, project_path, doc_markdown, doc_json, now],
         )?;
         Ok(())
     }
@@ -1697,6 +2086,665 @@ impl Database {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()
+    }
+
+    /// The document itself: `(doc_json, doc_markdown, project_path)`. `doc_json`
+    /// is `None` for a row that has only ever been mirrored — the drafter then
+    /// opens blank rather than inventing a body.
+    pub fn get_draft_doc(
+        &self,
+        draft_id: &str,
+    ) -> rusqlite::Result<Option<(Option<String>, String, Option<String>)>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT doc_json, doc_markdown, project_path FROM drafts WHERE draft_id = ?1",
+            params![draft_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+    }
+
+    // --- Bookshelf: documents ---
+
+    /// Every shelf document, most-recently-updated first.
+    pub fn list_drafts(&self) -> rusqlite::Result<Vec<BookshelfDraft>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT d.draft_id, d.title, d.project_path, d.folder_id, d.created_at, d.updated_at,
+                    (SELECT COUNT(*) FROM draft_sources s WHERE s.draft_id = d.draft_id),
+                    (d.doc_json IS NOT NULL AND d.doc_json <> '')
+             FROM drafts d ORDER BY d.updated_at DESC, d.draft_id ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(BookshelfDraft {
+                draft_id: r.get(0)?,
+                title: r.get(1)?,
+                project_path: r.get(2)?,
+                folder_id: r.get(3)?,
+                created_at: r.get(4)?,
+                updated_at: r.get(5)?,
+                source_count: r.get(6)?,
+                has_doc: r.get::<_, i64>(7)? != 0,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Rename a document. The title is normally derived from the markdown's
+    /// first heading; this is the explicit override the shelf offers.
+    pub fn rename_draft(&self, draft_id: &str, title: &str) -> rusqlite::Result<()> {
+        let now = crate::ledger::now_millis();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE drafts SET title = ?2, updated_at = ?3 WHERE draft_id = ?1",
+            params![draft_id, title, now],
+        )?;
+        Ok(())
+    }
+
+    /// Move a document to a folder (`None` = shelf root). A single row update —
+    /// the whole reason the tree is an adjacency list.
+    pub fn move_draft(&self, draft_id: &str, folder_id: Option<&str>) -> rusqlite::Result<()> {
+        let now = crate::ledger::now_millis();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE drafts SET folder_id = ?2, updated_at = ?3 WHERE draft_id = ?1",
+            params![draft_id, folder_id, now],
+        )?;
+        Ok(())
+    }
+
+    /// What deleting this document destroys — for the confirm dialog.
+    pub fn draft_delete_impact(&self, draft_id: &str) -> rusqlite::Result<DeleteImpact> {
+        let conn = self.conn.lock().unwrap();
+        Self::draft_impact_locked(&conn, draft_id)
+    }
+
+    fn draft_impact_locked(conn: &Connection, draft_id: &str) -> rusqlite::Result<DeleteImpact> {
+        let count = |sql: &str| -> rusqlite::Result<i64> {
+            conn.query_row(sql, params![draft_id], |r| r.get(0))
+        };
+        Ok(DeleteImpact {
+            drafts: count("SELECT COUNT(*) FROM drafts WHERE draft_id = ?1")?,
+            folders: 0,
+            comments: count("SELECT COUNT(*) FROM draft_comments WHERE draft_id = ?1")?,
+            pending_suggestions: count(
+                "SELECT COUNT(*) FROM draft_suggestions WHERE draft_id = ?1 AND status = 'pending'",
+            )?,
+            sources: count("SELECT COUNT(*) FROM draft_sources WHERE draft_id = ?1")?,
+            chat_messages: count("SELECT COUNT(*) FROM draft_chat_messages WHERE draft_id = ?1")?,
+        })
+    }
+
+    /// Delete a document and everything hanging off it — the chat thread, its
+    /// comments, its queued suggestions, its sources. There is no undo, and as
+    /// of the Bookshelf this destroys the only copy of the document, which is
+    /// why the caller gates it behind a typed-title confirm.
+    pub fn delete_draft(&self, draft_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        Self::delete_draft_locked(&conn, draft_id)
+    }
+
+    fn delete_draft_locked(conn: &Connection, draft_id: &str) -> rusqlite::Result<()> {
+        for sql in [
+            "DELETE FROM draft_sources WHERE draft_id = ?1",
+            "DELETE FROM draft_suggestions WHERE draft_id = ?1",
+            "DELETE FROM draft_comments WHERE draft_id = ?1",
+            "DELETE FROM draft_chat_messages WHERE draft_id = ?1",
+            "DELETE FROM draft_chat_threads WHERE draft_id = ?1",
+            "DELETE FROM drafts WHERE draft_id = ?1",
+        ] {
+            conn.execute(sql, params![draft_id])?;
+        }
+        Ok(())
+    }
+
+    // --- Bookshelf: folders ---
+
+    /// Every folder, parent-then-name ordered (the tree is built client-side by
+    /// the same `buildTree` pattern the memory and review trees use).
+    pub fn list_folders(&self) -> rusqlite::Result<Vec<BookshelfFolder>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT folder_id, parent_id, name, created_at FROM bookshelf_folders
+             ORDER BY parent_id IS NOT NULL, parent_id, name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(BookshelfFolder {
+                folder_id: r.get(0)?,
+                parent_id: r.get(1)?,
+                name: r.get(2)?,
+                created_at: r.get(3)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn create_folder(
+        &self,
+        folder_id: &str,
+        parent_id: Option<&str>,
+        name: &str,
+    ) -> rusqlite::Result<()> {
+        let now = crate::ledger::now_millis();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO bookshelf_folders (folder_id, parent_id, name, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![folder_id, parent_id, name, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn rename_folder(&self, folder_id: &str, name: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE bookshelf_folders SET name = ?2 WHERE folder_id = ?1",
+            params![folder_id, name],
+        )?;
+        Ok(())
+    }
+
+    /// Reparent a folder (`None` = shelf root). **Rejects a move into the
+    /// folder's own subtree** — the adjacency list has no structural guard
+    /// against a cycle, and a cycle would orphan the whole subtree from the
+    /// root walk. Returns `Err` with a readable reason so the UI can show it.
+    pub fn move_folder(
+        &self,
+        folder_id: &str,
+        new_parent: Option<&str>,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().unwrap();
+        let edges = Self::folder_edges_locked(&conn).map_err(|e| e.to_string())?;
+        if let Some(reason) = folder_move_rejection(&edges, folder_id, new_parent) {
+            return Err(reason);
+        }
+        conn.execute(
+            "UPDATE bookshelf_folders SET parent_id = ?2 WHERE folder_id = ?1",
+            params![folder_id, new_parent],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// `(folder_id, parent_id)` for every folder — the adjacency edges the
+    /// cycle guard walks.
+    fn folder_edges_locked(conn: &Connection) -> rusqlite::Result<Vec<(String, Option<String>)>> {
+        let mut stmt = conn.prepare("SELECT folder_id, parent_id FROM bookshelf_folders")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
+    }
+
+    /// What deleting this folder destroys, counting its whole subtree.
+    pub fn folder_delete_impact(&self, folder_id: &str) -> rusqlite::Result<DeleteImpact> {
+        let conn = self.conn.lock().unwrap();
+        let edges = Self::folder_edges_locked(&conn)?;
+        let subtree = folder_subtree(&edges, folder_id);
+        let mut impact = DeleteImpact {
+            folders: subtree.len() as i64,
+            ..Default::default()
+        };
+        for fid in &subtree {
+            let mut stmt = conn.prepare("SELECT draft_id FROM drafts WHERE folder_id = ?1")?;
+            let ids: Vec<String> = stmt
+                .query_map(params![fid], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            drop(stmt);
+            for id in ids {
+                let d = Self::draft_impact_locked(&conn, &id)?;
+                impact.drafts += d.drafts;
+                impact.comments += d.comments;
+                impact.pending_suggestions += d.pending_suggestions;
+                impact.sources += d.sources;
+                impact.chat_messages += d.chat_messages;
+            }
+        }
+        Ok(impact)
+    }
+
+    /// Delete a folder, its subtree, and every document inside — with the same
+    /// cascade `delete_draft` performs. No undo; gated by a typed-title confirm.
+    /// Returns the ids of the documents that went, so the caller can remove
+    /// their source directories too.
+    pub fn delete_folder(&self, folder_id: &str) -> rusqlite::Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let edges = Self::folder_edges_locked(&conn)?;
+        let subtree = folder_subtree(&edges, folder_id);
+        let mut deleted: Vec<String> = Vec::new();
+        for fid in &subtree {
+            let mut stmt = conn.prepare("SELECT draft_id FROM drafts WHERE folder_id = ?1")?;
+            let ids: Vec<String> = stmt
+                .query_map(params![fid], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            drop(stmt);
+            for id in ids {
+                Self::delete_draft_locked(&conn, &id)?;
+                deleted.push(id);
+            }
+            conn.execute(
+                "DELETE FROM bookshelf_folders WHERE folder_id = ?1",
+                params![fid],
+            )?;
+        }
+        Ok(deleted)
+    }
+
+    // --- Bookshelf: sources (attached to a document, never to a folder) ---
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_draft_source(
+        &self,
+        id: &str,
+        draft_id: &str,
+        kind: &str,
+        ref_id: Option<&str>,
+        url: Option<&str>,
+        title: Option<&str>,
+        excerpt: Option<&str>,
+        file_path: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        let now = crate::ledger::now_millis();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO draft_sources
+                (id, draft_id, kind, ref_id, url, title, excerpt, file_path, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![id, draft_id, kind, ref_id, url, title, excerpt, file_path, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_draft_sources(&self, draft_id: &str) -> rusqlite::Result<Vec<DraftSource>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, draft_id, kind, ref_id, url, title, excerpt, file_path, created_at
+             FROM draft_sources WHERE draft_id = ?1 ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![draft_id], |r| {
+            Ok(DraftSource {
+                id: r.get(0)?,
+                draft_id: r.get(1)?,
+                kind: r.get(2)?,
+                ref_id: r.get(3)?,
+                url: r.get(4)?,
+                title: r.get(5)?,
+                excerpt: r.get(6)?,
+                file_path: r.get(7)?,
+                created_at: r.get(8)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Delete one source row, returning its `file_path` so the caller can
+    /// remove the backing file under `<app_data_dir>/bookshelf/<draft_id>/`.
+    pub fn delete_draft_source(&self, id: &str) -> rusqlite::Result<Option<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let row: Option<(String, Option<String>)> = conn
+            .query_row(
+                "SELECT draft_id, file_path FROM draft_sources WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        conn.execute("DELETE FROM draft_sources WHERE id = ?1", params![id])?;
+        Ok(row.and_then(|(draft_id, file)| file.map(|f| (draft_id, f))))
+    }
+
+    // -----------------------------------------------------------------------
+    // Friction telemetry + the Shipwright's own outcomes
+    // -----------------------------------------------------------------------
+
+    /// Append a friction event, pruning the table in the same statement as the
+    /// insert — modelled directly on `append_journal`'s prune-on-insert, so
+    /// there is no sweeper task and no unbounded growth. 90 days is long enough
+    /// that a digest can say "14 overflows in the last three days" against a
+    /// real baseline.
+    ///
+    /// Call sites use `let _ = …`: this is fire-and-forget by contract and must
+    /// never block or fail the path it observes.
+    pub fn record_friction(
+        &self,
+        kind: &str,
+        surface: Option<&str>,
+        session_id: Option<&str>,
+        detail: Option<&str>,
+    ) -> rusqlite::Result<i64> {
+        const FRICTION_KEEP_ROWS: i64 = 5000;
+        const FRICTION_KEEP_MS: i64 = 90 * 24 * 60 * 60 * 1000;
+        /// `detail` is free-form error text from a model or a subprocess —
+        /// capped here so one pathological message can't dominate the table.
+        const MAX_DETAIL: usize = 500;
+        let detail = detail.map(|d| {
+            if d.len() <= MAX_DETAIL {
+                d.to_string()
+            } else {
+                d.chars().take(MAX_DETAIL).collect()
+            }
+        });
+        let now = crate::ledger::now_millis();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO friction_events (ts, kind, surface, session_id, detail)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![now, kind, surface, session_id, detail],
+        )?;
+        let id = conn.last_insert_rowid();
+        let _ = conn.execute(
+            "DELETE FROM friction_events
+             WHERE id <= ?1 - ?2 OR ts < ?3 - ?4",
+            params![id, FRICTION_KEEP_ROWS, now, FRICTION_KEEP_MS],
+        );
+        Ok(id)
+    }
+
+    /// Friction kinds inside `window_ms`, most-frequent first.
+    pub fn friction_summary(&self, window_ms: i64) -> rusqlite::Result<Vec<FrictionCount>> {
+        let cutoff = crate::ledger::now_millis() - window_ms.max(0);
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT kind, COUNT(*), MAX(ts),
+                    (SELECT detail FROM friction_events f2
+                     WHERE f2.kind = f1.kind AND f2.ts >= ?1
+                     ORDER BY f2.ts DESC LIMIT 1)
+             FROM friction_events f1 WHERE ts >= ?1
+             GROUP BY kind ORDER BY COUNT(*) DESC, MAX(ts) DESC",
+        )?;
+        let rows = stmt.query_map(params![cutoff], |r| {
+            Ok(FrictionCount {
+                kind: r.get(0)?,
+                count: r.get(1)?,
+                last_ts: r.get(2)?,
+                last_detail: r.get(3)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Insert one finding, deduping on `(category, summary)` **regardless of
+    /// `dismissed`** — the property (copied from `insert_class_observation`)
+    /// that makes a dismissed finding never resurface under the same wording.
+    /// Returns `None` when the finding was a duplicate and nothing was written.
+    pub fn insert_shipwright_finding(
+        &self,
+        f: &ShipwrightFinding,
+    ) -> rusqlite::Result<Option<String>> {
+        if f.summary.trim().is_empty() || f.category.trim().is_empty() {
+            return Ok(None);
+        }
+        let conn = self.conn.lock().unwrap();
+        let dup: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM shipwright_findings WHERE category = ?1 AND summary = ?2",
+            params![f.category, f.summary],
+            |r| r.get(0),
+        )?;
+        if dup > 0 {
+            return Ok(None);
+        }
+        conn.execute(
+            "INSERT INTO shipwright_findings
+                (id, run_id, category, summary, evidence, proposal, guard, files,
+                 status, dismissed, draft_id, created_at, resolved_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', 0, ?9, ?10, NULL)",
+            params![
+                f.id,
+                f.run_id,
+                f.category,
+                f.summary,
+                f.evidence,
+                f.proposal,
+                f.guard,
+                f.files,
+                f.draft_id,
+                f.created_at,
+            ],
+        )?;
+        Ok(Some(f.id.clone()))
+    }
+
+    /// Findings, newest first. `include_dismissed = false` is what the digest
+    /// carries as "open"; the dismissed *summaries* go in separately so the
+    /// agent is told not to re-word them.
+    pub fn list_shipwright_findings(
+        &self,
+        include_dismissed: bool,
+    ) -> rusqlite::Result<Vec<ShipwrightFinding>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = if include_dismissed {
+            "SELECT id, run_id, category, summary, evidence, proposal, guard, files,
+                    status, dismissed, draft_id, created_at, resolved_at
+             FROM shipwright_findings ORDER BY created_at DESC, id ASC"
+        } else {
+            "SELECT id, run_id, category, summary, evidence, proposal, guard, files,
+                    status, dismissed, draft_id, created_at, resolved_at
+             FROM shipwright_findings WHERE dismissed = 0
+             ORDER BY created_at DESC, id ASC"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map([], |r| {
+            Ok(ShipwrightFinding {
+                id: r.get(0)?,
+                run_id: r.get(1)?,
+                category: r.get(2)?,
+                summary: r.get(3)?,
+                evidence: r.get(4)?,
+                proposal: r.get(5)?,
+                guard: r.get(6)?,
+                files: r.get(7)?,
+                status: r.get(8)?,
+                dismissed: r.get::<_, i64>(9)? != 0,
+                draft_id: r.get(10)?,
+                created_at: r.get(11)?,
+                resolved_at: r.get(12)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Record what you did with a finding. `accepted` is set when it survives
+    /// your trim into the launched document; `dismissed` also sets the flag the
+    /// dedupe reads, which is what makes a dismissal stick.
+    pub fn resolve_shipwright_finding(
+        &self,
+        id: &str,
+        status: &str,
+        draft_id: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        let now = crate::ledger::now_millis();
+        let dismissed = i64::from(status == "dismissed");
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE shipwright_findings
+             SET status = ?2,
+                 dismissed = MAX(dismissed, ?3),
+                 draft_id = COALESCE(?4, draft_id),
+                 resolved_at = ?5
+             WHERE id = ?1",
+            params![id, status, dismissed, draft_id, now],
+        )?;
+        Ok(())
+    }
+
+    /// Accepted findings that haven't shipped yet, as `(id, files_json)` — the
+    /// input to shipped-**detection**. The caller compares each `files` entry
+    /// against the paths a later commit touched; nothing here is self-declared.
+    pub fn shipwright_unshipped(&self) -> rusqlite::Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, COALESCE(files, '[]') FROM shipwright_findings
+             WHERE status = 'accepted'",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
+    }
+
+    /// Accept/dismiss/ship rates per category — the agent's own track record.
+    pub fn shipwright_scores(&self) -> rusqlite::Result<Vec<CategoryScore>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT category, COUNT(*),
+                    SUM(status IN ('accepted','shipped')),
+                    SUM(dismissed),
+                    SUM(status = 'shipped')
+             FROM shipwright_findings GROUP BY category ORDER BY COUNT(*) DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(CategoryScore {
+                category: r.get(0)?,
+                total: r.get(1)?,
+                accepted: r.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                dismissed: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                shipped: r.get::<_, Option<i64>>(4)?.unwrap_or(0),
+            })
+        })?;
+        rows.collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // Recorded correction (the Shipwright's Tier A) — scoped to one repo
+    // -----------------------------------------------------------------------
+    //
+    // Everything here already existed on disk and nobody mined it. It is a
+    // labeled corpus of "the agent got this wrong and I corrected it," in the
+    // user's own words, with round counts — and it needs no schema change to
+    // read. It is also the highest-signal input the Shipwright has: a 4-round
+    // reopen is evidence of real pain, where a long file is only a hypothesis.
+
+    /// Comments reopened at least once on this repo's sessions, most rounds
+    /// first: `(session_id, rounds, body, reopen_note)`. `rounds` counts the
+    /// entries in `reopen_history` — N entries means "we went N rounds on this
+    /// one point".
+    pub fn reopen_rounds_for_repo(
+        &self,
+        project_path: &str,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<(String, i64, String, Option<String>)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT c.session_id, c.reopen_history, c.body, c.reopen_note
+             FROM comments c JOIN sessions s ON s.session_id = c.session_id
+             WHERE s.project_path = ?1 AND c.reopen_history IS NOT NULL
+             ORDER BY c.created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![project_path], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+            ))
+        })?;
+        let mut out: Vec<(String, i64, String, Option<String>)> = Vec::new();
+        for row in rows {
+            let (session_id, history, body, note) = row?;
+            let rounds = history
+                .as_deref()
+                .and_then(|h| serde_json::from_str::<serde_json::Value>(h).ok())
+                .and_then(|v| v.as_array().map(|a| a.len() as i64))
+                .unwrap_or(0);
+            if rounds > 0 {
+                out.push((session_id, rounds, body, note));
+            }
+        }
+        out.sort_by(|a, b| b.1.cmp(&a.1));
+        out.truncate(limit.max(0) as usize);
+        Ok(out)
+    }
+
+    /// Verbatim before/after pairs where the user rewrote the agent's prose on
+    /// this repo: `(session_id, original, revised)`, newest first.
+    pub fn edit_pairs_for_repo(
+        &self,
+        project_path: &str,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<(String, String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT c.session_id, c.edit_original, c.edit_revised
+             FROM comments c JOIN sessions s ON s.session_id = c.session_id
+             WHERE s.project_path = ?1
+               AND c.edit_original IS NOT NULL AND c.edit_revised IS NOT NULL
+               AND c.edit_original <> c.edit_revised
+             ORDER BY c.created_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![project_path, limit], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        rows.collect()
+    }
+
+    /// Code reviews on this repo that took more than one round:
+    /// `(review_id, round, source)`, most rounds first.
+    pub fn review_rounds_for_repo(
+        &self,
+        repo_path: &str,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<(String, i64, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT review_id, round, source FROM review_sessions
+             WHERE repo_path = ?1 AND round > 1
+             ORDER BY round DESC, created_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![repo_path, limit], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        rows.collect()
+    }
+
+    /// Re-anchoring success on returned review requests for this repo:
+    /// `(placed, orphans)` summed across every return.
+    pub fn share_anchoring_for_repo(&self, project_path: &str) -> rusqlite::Result<(i64, i64)> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COALESCE(SUM(r.placed), 0), COALESCE(SUM(r.orphans), 0)
+             FROM share_returns r JOIN sessions s ON s.session_id = r.session_id
+             WHERE s.project_path = ?1",
+            params![project_path],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+    }
+
+    /// Agent write-suggestions the user rejected: `(count, most_recent_op)`.
+    /// Not repo-scoped — drafts carry a `project_path` only when one was picked.
+    pub fn rejected_suggestion_summary(
+        &self,
+        project_path: &str,
+    ) -> rusqlite::Result<Vec<(String, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT g.op, COUNT(*) FROM draft_suggestions g
+             JOIN drafts d ON d.draft_id = g.draft_id
+             WHERE g.status = 'rejected' AND d.project_path = ?1
+             GROUP BY g.op ORDER BY COUNT(*) DESC",
+        )?;
+        let rows = stmt.query_map(params![project_path], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
+    }
+
+    /// Approved plans on this repo whose code never went through a review:
+    /// `(session_id, project_name, created_at)`. The Tier D "a plan shipped
+    /// without its code being reviewed" signal.
+    pub fn approved_unreviewed_for_repo(
+        &self,
+        project_path: &str,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<(String, String, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT s.session_id, s.project_name, s.created_at
+             FROM sessions s
+             WHERE s.project_path = ?1 AND s.status = 'approved'
+               AND NOT EXISTS (
+                   SELECT 1 FROM review_sessions v
+                   WHERE v.repo_path = s.project_path AND v.created_at >= s.created_at
+               )
+             ORDER BY s.created_at ASC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![project_path, limit], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        rows.collect()
     }
 
     /// Persist a draft-chat turn (terminal row; streaming is frontend-only).
@@ -2377,6 +3425,145 @@ impl Database {
         let mut out: Vec<(String, i64)> = totals
             .into_iter()
             .map(|(root, c)| (title.get(&root).cloned().unwrap_or(root), c))
+            .collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        Ok(out)
+    }
+
+    /// One Agent Seat's observed workload: agent turns inside the recent
+    /// window, all-time turns, and when the seat last produced anything.
+    /// Feeds the Seat Assignment agent's ground-truth digest (`seatassign.rs`).
+    pub fn seat_activity(&self, since_ts: i64) -> Vec<SeatActivity> {
+        // (seat, FROM clause, timestamp column, extra predicate, distinct-on).
+        // Every per-surface message table shares `(role, created_at)`, so the
+        // shape is mostly uniform; `distinct_on` is for sources where one run
+        // writes many rows and counting rows would overstate the seat.
+        //
+        // Seats deliberately absent report zero, which the digest states
+        // explicitly:
+        //   * `librarian` / `seatassign` — neither persists its runs.
+        //   * `keeper` — `compaction` ledger events are written **per prompt**
+        //     (up to 40 per pass), and the deterministic fallback writes them
+        //     even when the summarizer agent never spawned. Counting them would
+        //     report hundreds of "turns" for an agent that may never have run,
+        //     inside a block labelled GROUND TRUTH. No per-run record exists,
+        //     so the honest answer is to report nothing and say so.
+        const SOURCES: &[(&str, &str, &str, &str, &str)] = &[
+            ("companion", "companion_messages", "created_at", "role = 'assistant'", ""),
+            ("browse", "browse_messages", "created_at", "role = 'assistant'", ""),
+            ("linked", "linked_messages", "created_at", "role = 'assistant'", ""),
+            ("mission", "mission_messages", "created_at", "role = 'assistant'", ""),
+            ("voice", "voice_messages", "created_at", "role = 'assistant'", ""),
+            ("drafter", "draft_chat_messages", "created_at", "role = 'assistant'", ""),
+            // Plan sidecar threads and Drafter comment threads BOTH write to
+            // `thread_messages`; the only thing separating them is whether the
+            // `comment_id` resolves to a `draft_comments` row.
+            (
+                "fork_plan",
+                "thread_messages tm LEFT JOIN draft_comments dc ON dc.id = tm.comment_id",
+                "tm.created_at",
+                "tm.role = 'assistant' AND dc.id IS NULL",
+                "",
+            ),
+            (
+                "fork_drafter",
+                "thread_messages tm JOIN draft_comments dc ON dc.id = tm.comment_id",
+                "tm.created_at",
+                "tm.role = 'assistant'",
+                "",
+            ),
+            ("fork_review", "review_questions", "created_at", "1", ""),
+            // AI review is opt-in per review, so `review_sessions` would count
+            // every code review the user *opened* — including the ones they
+            // never pointed the agent at. Its findings are the only real trace:
+            // one run writes many annotations, hence DISTINCT.
+            (
+                "ai_review",
+                "review_annotations",
+                "created_at",
+                "source = 'ai'",
+                "review_id",
+            ),
+            ("classifier", "class_runs", "started_at", "1", ""),
+        ];
+        let conn = self.conn.lock().unwrap();
+        SOURCES
+            .iter()
+            .map(|(seat, from, ts, pred, distinct_on)| {
+                let (window_expr, total_expr) = if distinct_on.is_empty() {
+                    (
+                        format!("COALESCE(SUM(CASE WHEN {ts} >= ?1 THEN 1 ELSE 0 END), 0)"),
+                        "COUNT(*)".to_string(),
+                    )
+                } else {
+                    (
+                        format!(
+                            "COUNT(DISTINCT CASE WHEN {ts} >= ?1 THEN {distinct_on} END)"
+                        ),
+                        format!("COUNT(DISTINCT {distinct_on})"),
+                    )
+                };
+                // Best-effort per seat, exactly as `context::build_digest` is:
+                // a table this build doesn't have yields zero, never an error
+                // that sinks the whole digest.
+                let (turns_window, turns_total, last_ts) = conn
+                    .query_row(
+                        &format!(
+                            "SELECT {window_expr}, {total_expr}, MAX({ts})
+                             FROM {from} WHERE {pred}"
+                        ),
+                        params![since_ts],
+                        |r| {
+                            Ok((
+                                r.get::<_, i64>(0)?,
+                                r.get::<_, i64>(1)?,
+                                r.get::<_, Option<i64>>(2)?,
+                            ))
+                        },
+                    )
+                    .unwrap_or((0, 0, None));
+                SeatActivity {
+                    seat: (*seat).to_string(),
+                    turns_window,
+                    turns_total,
+                    last_ts,
+                }
+            })
+            .collect()
+    }
+
+    /// Prompt body-length distribution per capture surface — the cheapest
+    /// available proxy for "how hard is the thinking on this surface". Returns
+    /// `(surface, count, median_bytes, p90_bytes)`, heaviest surface first.
+    pub fn prompt_length_by_surface(&self) -> rusqlite::Result<Vec<(String, i64, i64, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        // Percentiles without a window function: rank rows per surface and pick
+        // the row at the requested fraction. `prompts` is small enough that the
+        // ordering cost is irrelevant, and this stays portable across the
+        // bundled SQLite build.
+        let mut stmt = conn.prepare(
+            "SELECT surface, LENGTH(body) AS len FROM prompts ORDER BY surface, len ASC",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut by_surface: std::collections::HashMap<String, Vec<i64>> =
+            std::collections::HashMap::new();
+        for row in rows {
+            let (surface, len) = row?;
+            by_surface.entry(surface).or_default().push(len);
+        }
+        let pick = |sorted: &[i64], frac: f64| -> i64 {
+            if sorted.is_empty() {
+                return 0;
+            }
+            let idx = ((sorted.len() as f64 - 1.0) * frac).round() as usize;
+            sorted[idx.min(sorted.len() - 1)]
+        };
+        let mut out: Vec<(String, i64, i64, i64)> = by_surface
+            .into_iter()
+            .map(|(surface, lens)| {
+                let n = lens.len() as i64;
+                (surface, n, pick(&lens, 0.5), pick(&lens, 0.9))
+            })
             .collect();
         out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         Ok(out)
@@ -3172,8 +4359,27 @@ impl Database {
     }
 
     pub fn reject_class_proposal(&self, id: i64) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM class_proposals WHERE id = ?1", params![id])?;
+        {
+            let conn = self.conn.lock().unwrap();
+            // Reject just drops the row — so without this, every rejection of a
+            // classifier proposal left no trace at all of the agent having been
+            // wrong. Read the op first, while the row still exists.
+            let op: Option<String> = conn
+                .query_row(
+                    "SELECT op FROM class_proposals WHERE id = ?1",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            conn.execute("DELETE FROM class_proposals WHERE id = ?1", params![id])?;
+            drop(conn);
+            let _ = self.record_friction(
+                "proposal_rejected",
+                Some("memory"),
+                None,
+                op.as_deref(),
+            );
+        }
         Ok(())
     }
 
@@ -4104,8 +5310,8 @@ impl Database {
                 sel_char_start, sel_char_end, sel_quoted_text,
                 sel_sub_block_id, reopen_note, reopen_history, actionable,
                 author, agent_state, reviewer,
-                external_created_at, share_request_id
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)",
+                external_created_at, share_request_id, attachments
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)",
             params![
                 comment.id,
                 session_id,
@@ -4135,6 +5341,7 @@ impl Database {
                 comment.reviewer,
                 comment.external_created_at,
                 comment.share_request_id,
+                attachments_to_json(&comment.attachments),
             ],
         )?;
         Self::touch_session(&conn, session_id, comment.created_at);
@@ -4189,8 +5396,9 @@ impl Database {
                 agent_state = ?19,
                 reviewer = ?20,
                 external_created_at = ?21,
-                share_request_id = ?22
-             WHERE session_id = ?23 AND id = ?24",
+                share_request_id = ?22,
+                attachments = ?23
+             WHERE session_id = ?24 AND id = ?25",
             params![
                 comment.scope.map(|s| s.as_str()),
                 comment.body,
@@ -4214,6 +5422,7 @@ impl Database {
                 comment.reviewer,
                 comment.external_created_at,
                 comment.share_request_id,
+                attachments_to_json(&comment.attachments),
                 session_id,
                 comment.id,
             ],
@@ -4415,6 +5624,30 @@ impl Database {
         tx.commit()
     }
 
+    /// Rewrite stored attachment paths after a session was re-keyed.
+    ///
+    /// Attachment `path`s are absolute and embed the session id
+    /// (`…/attachments/<session_id>/<file>`), so moving the directory without
+    /// this leaves every comment pointing at a directory that no longer exists
+    /// — and the failure would only surface later, when Claude tried to read
+    /// the file named in a payload. Runs AFTER `rekey_session`, so the rows
+    /// already carry the new id.
+    pub fn rekey_attachment_paths(&self, old_id: &str, new_id: &str) -> rusqlite::Result<()> {
+        let from = format!("/attachments/{old_id}/");
+        let to = format!("/attachments/{new_id}/");
+        let conn = self.conn.lock().unwrap();
+        for table in ["comments", "thread_messages"] {
+            conn.execute(
+                &format!(
+                    "UPDATE {table} SET attachments = REPLACE(attachments, ?1, ?2)
+                     WHERE session_id = ?3 AND attachments IS NOT NULL"
+                ),
+                params![from, to, new_id],
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn delete_session(&self, session_id: &str) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -4427,6 +5660,13 @@ impl Database {
         )?;
         conn.execute(
             "DELETE FROM revisions WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        // Staged (never-written) offers go with the session that produced them.
+        // NOTE: `voice_messages` / `voice_sessions` are *not* cleared here —
+        // pre-existing, and out of scope for this change.
+        conn.execute(
+            "DELETE FROM comment_offers WHERE session_id = ?1",
             params![session_id],
         )?;
         conn.execute(
@@ -4445,8 +5685,9 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO thread_messages
-                (id, session_id, comment_id, role, body, status, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                (id, session_id, comment_id, role, body, status, created_at,
+                 attachments)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 msg.id,
                 msg.session_id,
@@ -4455,6 +5696,7 @@ impl Database {
                 msg.body,
                 msg.status,
                 msg.created_at,
+                attachments_to_json(&msg.attachments),
             ],
         )?;
         Self::touch_session(&conn, &msg.session_id, msg.created_at);
@@ -4468,7 +5710,8 @@ impl Database {
     ) -> rusqlite::Result<Vec<ThreadMessage>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, session_id, comment_id, role, body, status, created_at
+            "SELECT id, session_id, comment_id, role, body, status, created_at,
+                    attachments
              FROM thread_messages
              WHERE session_id = ?1 AND comment_id = ?2
              ORDER BY created_at, id",
@@ -4482,6 +5725,7 @@ impl Database {
                 body: row.get(4)?,
                 status: row.get(5)?,
                 created_at: row.get(6)?,
+                attachments: attachments_from_json(row.get(7)?),
             })
         })?;
         rows.collect()
@@ -5116,6 +6360,129 @@ impl Database {
         rows.collect()
     }
 
+    // --- localhost dashboard (dev servers) -----------------------------------
+
+    /// Record that this `(project_path, port)` is (or just was) serving. On
+    /// conflict the volatile facts refresh — but NEVER `first_seen_at` (the
+    /// "known since" fact) and NEVER `thumb_path` (a fresh scan must not blank
+    /// a card's screenshot; only `set_dev_server_thumb` writes it).
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_dev_server(
+        &self,
+        project_path: &str,
+        project_name: &str,
+        port: u16,
+        url: &str,
+        stack: &str,
+        run_command: &str,
+        last_pid: Option<u32>,
+        last_args: Option<&str>,
+        now: i64,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO dev_servers
+                 (project_path, project_name, port, url, stack, run_command,
+                  last_pid, last_args, first_seen_at, last_seen_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+             ON CONFLICT (project_path, port) DO UPDATE SET
+                 project_name = excluded.project_name,
+                 url          = excluded.url,
+                 stack        = excluded.stack,
+                 run_command  = excluded.run_command,
+                 last_pid     = excluded.last_pid,
+                 last_args    = excluded.last_args,
+                 last_seen_at = excluded.last_seen_at",
+            params![
+                project_path,
+                project_name,
+                port as i64,
+                url,
+                stack,
+                run_command,
+                last_pid.map(|p| p as i64),
+                last_args,
+                now,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Remembered dev servers, most-recently-seen first. Rows are returned
+    /// verbatim — the caller filters out the ones that are live right now and
+    /// the ones whose project directory has since disappeared.
+    pub fn list_dev_servers(&self, limit: i64) -> rusqlite::Result<Vec<DevServerRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, project_path, project_name, port, url, stack, run_command,
+                    last_seen_at, thumb_path
+             FROM dev_servers
+             ORDER BY last_seen_at DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit], |row| {
+            Ok(DevServerRow {
+                id: row.get(0)?,
+                project_path: row.get(1)?,
+                project_name: row.get(2)?,
+                port: row.get::<_, i64>(3)? as u16,
+                url: row.get(4)?,
+                stack: row.get(5)?,
+                run_command: row.get(6)?,
+                last_seen_at: row.get(7)?,
+                thumb_path: row.get(8)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Drop all but the `keep` most-recently-seen rows. Deliberately a COUNT
+    /// prune and not an existence prune: an unmounted volume or a repo that is
+    /// briefly moved must not destroy its history.
+    pub fn prune_dev_servers(&self, keep: i64) -> rusqlite::Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM dev_servers WHERE id NOT IN (
+                 SELECT id FROM dev_servers ORDER BY last_seen_at DESC LIMIT ?1
+             )",
+            params![keep],
+        )
+    }
+
+    /// `first_seen_at` is deliberately not part of `DevServerRow` (nothing in
+    /// the UI shows it) — but the invariant that an upsert never rewrites it is
+    /// worth a test, so tests can read it directly.
+    #[cfg(test)]
+    pub fn dev_server_first_seen(&self, id: i64) -> rusqlite::Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT first_seen_at FROM dev_servers WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+    }
+
+    /// Attach a freshly-captured thumbnail to a row — the only writer of
+    /// `thumb_path`. Keyed on `(project_path, port)` rather than the row id
+    /// because that pair IS a card's identity everywhere else in this feature;
+    /// keying on the id would mean carrying one through the capture pipeline for
+    /// no other reason. A capture for a row that has since been pruned is a
+    /// silent no-op.
+    pub fn set_dev_server_thumb(
+        &self,
+        project_path: &str,
+        port: u16,
+        path: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE dev_servers SET thumb_path = ?3
+             WHERE project_path = ?1 AND port = ?2",
+            params![project_path, port as i64, path],
+        )?;
+        Ok(())
+    }
+
     // --- code-review surface -------------------------------------------------
 
     const REVIEW_SESSION_COLS: &'static str =
@@ -5562,6 +6929,206 @@ impl Database {
         Ok(())
     }
 
+    // --- Voice-agent transcript (the visible half of that memory) -----------
+    // Mirrors the browse-thread helpers, keyed by the same voice key. See
+    // `VoiceMessage` for why these rows exist at all.
+
+    pub fn insert_voice_message(&self, msg: &VoiceMessage) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO voice_messages (id, session_key, role, text, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![msg.id, msg.session_key, msg.role, msg.text, msg.created_at],
+        )?;
+        Ok(())
+    }
+
+    /// A voice key's transcript, oldest-first — the order the panel replays it
+    /// in. Ties on `created_at` break by `rowid` (insertion order): a "you" line
+    /// and the marker that follows it can land in the same millisecond, and a
+    /// uuid tiebreak would invert them.
+    pub fn list_voice_messages(&self, session_key: &str) -> rusqlite::Result<Vec<VoiceMessage>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, session_key, role, text, created_at
+             FROM voice_messages
+             WHERE session_key = ?1
+             ORDER BY created_at, rowid",
+        )?;
+        let rows = stmt.query_map(params![session_key], |row| {
+            Ok(VoiceMessage {
+                id: row.get(0)?,
+                session_key: row.get(1)?,
+                role: row.get(2)?,
+                text: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Wipe a voice key's visible transcript. Paired with
+    /// `clear_voice_fork_session` by `voice_forget`, so "forget" is a true
+    /// reset: neither the agent's recollection nor the screen survives it.
+    pub fn clear_voice_messages(&self, session_key: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM voice_messages WHERE session_key = ?1",
+            params![session_key],
+        )?;
+        Ok(())
+    }
+
+    // --- Offered plan items (staged, not written) ---------------------------
+    // See `CommentOffer`. Rows here are proposals: nothing reaches the plan
+    // until `claim_comment_offer` wins and `add_feedback_from_offer` writes the
+    // comment.
+
+    /// `stale` is not a column — it is computed against the current plan by
+    /// `comment_offers_pending`, so every row reads back as fresh.
+    fn map_comment_offer(row: &rusqlite::Row<'_>) -> rusqlite::Result<CommentOffer> {
+        Ok(CommentOffer {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            message_id: row.get(2)?,
+            block_id: row.get(3)?,
+            body: row.get(4)?,
+            label: row.get(5)?,
+            agent_id: row.get(6)?,
+            status: row.get(7)?,
+            created_at: row.get(8)?,
+            stale: false,
+        })
+    }
+
+    pub fn insert_comment_offer(&self, offer: &CommentOffer) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO comment_offers
+                (id, session_id, message_id, block_id, body, label, agent_id, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                offer.id,
+                offer.session_id,
+                offer.message_id,
+                offer.block_id,
+                offer.body,
+                offer.label,
+                offer.agent_id,
+                offer.status,
+                offer.created_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_comment_offer(&self, id: &str) -> rusqlite::Result<Option<CommentOffer>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, session_id, message_id, block_id, body, label, agent_id, status, created_at
+             FROM comment_offers WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![id], Self::map_comment_offer)?;
+        rows.next().transpose()
+    }
+
+    /// A session's still-open offers, oldest-first. Same `created_at, rowid`
+    /// tiebreak as `list_voice_messages`: two offers staged in one turn can land
+    /// in the same millisecond, and a uuid tiebreak would invert them.
+    pub fn list_open_comment_offers(&self, session_id: &str) -> rusqlite::Result<Vec<CommentOffer>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, session_id, message_id, block_id, body, label, agent_id, status, created_at
+             FROM comment_offers
+             WHERE session_id = ?1 AND status = 'pending'
+             ORDER BY created_at, rowid",
+        )?;
+        let rows = stmt.query_map(params![session_id], Self::map_comment_offer)?;
+        rows.collect()
+    }
+
+    /// Attach this turn's still-unbound offers to the reply they came from.
+    ///
+    /// The floor is the newest persisted `"you"` line: `voice_send` writes it
+    /// immediately after the stdin write, therefore strictly before the child
+    /// can issue any curl. So everything staged at or after it belongs to the
+    /// turn that just finished — no per-turn counter on `VoiceProc` needed.
+    /// Returns how many rows were bound.
+    pub fn bind_comment_offers(
+        &self,
+        session_id: &str,
+        message_id: &str,
+    ) -> rusqlite::Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE comment_offers SET message_id = ?2
+              WHERE session_id = ?1 AND message_id IS NULL AND status = 'pending'
+                AND created_at >= (SELECT COALESCE(MAX(created_at), 0) FROM voice_messages
+                                    WHERE session_key = ?1 AND role = 'you')",
+            params![session_id, message_id],
+        )
+    }
+
+    /// How many offers this turn has already staged — the server-side cap. Same
+    /// `"you"`-line floor as `bind_comment_offers`.
+    pub fn count_open_offers_this_turn(&self, session_id: &str) -> rusqlite::Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM comment_offers
+              WHERE session_id = ?1 AND message_id IS NULL AND status = 'pending'
+                AND created_at >= (SELECT COALESCE(MAX(created_at), 0) FROM voice_messages
+                                    WHERE session_key = ?1 AND role = 'you')",
+            params![session_id],
+            |r| r.get(0),
+        )
+    }
+
+    /// Take ownership of an offer before writing its comment. A compare-and-set:
+    /// only the first caller sees `true`, which is what makes a double-tap
+    /// (or a tap racing a dismiss) land exactly one comment.
+    pub fn claim_comment_offer(&self, id: &str) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE comment_offers SET status = 'added' WHERE id = ?1 AND status = 'pending'",
+            params![id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Undo a claim whose write then failed, so the chip survives a transient
+    /// error instead of vanishing with nothing to show for it.
+    pub fn release_comment_offer(&self, id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE comment_offers SET status = 'pending' WHERE id = ?1 AND status = 'added'",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    /// Resolve an offer without writing it (`dismissed`). Returns whether a
+    /// pending row was actually transitioned — mirrors `resolve_draft_suggestion`.
+    pub fn resolve_comment_offer(&self, id: &str, status: &str) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE comment_offers SET status = ?2 WHERE id = ?1 AND status = 'pending'",
+            params![id, status],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Wipe a session's offers. Paired with `clear_voice_messages` by
+    /// `voice_forget` — a chip outliving the conversation it came from would be
+    /// an offer with no visible provenance.
+    pub fn clear_comment_offers(&self, session_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM comment_offers WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        Ok(())
+    }
+
     pub fn load_all(&self) -> rusqlite::Result<HashMap<String, ReviewSession>> {
         let conn = self.conn.lock().unwrap();
         let mut sessions: HashMap<String, ReviewSession> = HashMap::new();
@@ -5628,7 +7195,7 @@ impl Database {
                     sel_char_start, sel_char_end, sel_quoted_text,
                     sel_sub_block_id, reopen_note, reopen_history, actionable,
                     author, agent_state, reviewer,
-                    external_created_at, share_request_id
+                    external_created_at, share_request_id, attachments
              FROM comments
              ORDER BY session_id, version_number, created_at",
         )?;
@@ -5686,6 +7253,7 @@ impl Database {
             let reviewer: Option<String> = row.get(25)?;
             let external_created_at: Option<i64> = row.get(26)?;
             let share_request_id: Option<String> = row.get(27)?;
+            let attachments = attachments_from_json(row.get(28)?);
             Ok((
                 row.get::<_, String>(1)?, // session_id
                 row.get::<_, u32>(2)?,    // version_number
@@ -5710,6 +7278,7 @@ impl Database {
                     reviewer,
                     external_created_at,
                     share_request_id,
+                    attachments,
                 },
             ))
         })?;
@@ -6256,6 +7825,127 @@ mod tests {
                 .unwrap()
         };
         assert!(n <= 2000, "journal working set stays bounded, got {n}");
+    }
+
+    #[test]
+    fn friction_events_prune_on_insert_and_summarize_by_kind() {
+        let db = Database::open_in_memory().unwrap();
+        db.record_friction("stall_kill", Some("review"), Some("r1"), Some("180s"))
+            .unwrap();
+        for _ in 0..3 {
+            db.record_friction("context_overflow", Some("browse"), Some("b1"), Some("too long"))
+                .unwrap();
+        }
+        let summary = db.friction_summary(90 * 24 * 60 * 60 * 1000).unwrap();
+        // Most-frequent first, so the digest ranks without re-sorting.
+        assert_eq!(summary[0].kind, "context_overflow");
+        assert_eq!(summary[0].count, 3);
+        assert_eq!(summary[0].last_detail.as_deref(), Some("too long"));
+        assert_eq!(summary[1].kind, "stall_kill");
+
+        // `detail` is capped so one pathological error can't dominate the table.
+        db.record_friction("transient_fail", None, None, Some(&"x".repeat(5000)))
+            .unwrap();
+        let long = db
+            .friction_summary(i64::MAX / 2)
+            .unwrap()
+            .into_iter()
+            .find(|f| f.kind == "transient_fail")
+            .unwrap();
+        assert_eq!(long.last_detail.unwrap().len(), 500);
+
+        // Prune-on-insert: the working set stays bounded past the row cap.
+        for i in 0..5010 {
+            db.record_friction("turn_timeout", None, Some(&format!("t{i}")), None)
+                .unwrap();
+        }
+        let n: i64 = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row("SELECT COUNT(*) FROM friction_events", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert!(n <= 5000, "friction working set stays bounded, got {n}");
+    }
+
+    #[test]
+    fn a_window_older_than_every_row_summarizes_to_nothing() {
+        let db = Database::open_in_memory().unwrap();
+        db.record_friction("stall_kill", None, None, None).unwrap();
+        // A zero-length window excludes everything written before "now".
+        assert!(db.friction_summary(0).unwrap().len() <= 1);
+    }
+
+    #[test]
+    fn shipwright_dedupe_ignores_dismissed_so_a_dismissal_sticks() {
+        let db = Database::open_in_memory().unwrap();
+        let f = |id: &str, summary: &str| ShipwrightFinding {
+            id: id.to_string(),
+            run_id: "run-1".to_string(),
+            category: "ci_coverage".to_string(),
+            summary: summary.to_string(),
+            evidence: Some("457 Rust tests, 0 workflows".to_string()),
+            proposal: None,
+            guard: None,
+            files: Some(r#"[".github/workflows/ci.yml"]"#.to_string()),
+            status: "pending".to_string(),
+            dismissed: false,
+            draft_id: None,
+            created_at: 1,
+            resolved_at: None,
+        };
+        assert!(db.insert_shipwright_finding(&f("a", "No test workflow")).unwrap().is_some());
+        // Same (category, summary) → skipped, even before any dismissal.
+        assert!(db.insert_shipwright_finding(&f("b", "No test workflow")).unwrap().is_none());
+
+        db.resolve_shipwright_finding("a", "dismissed", None).unwrap();
+        // …and still skipped afterwards: a dismissed finding never resurfaces
+        // under the same wording. This is the property the whole loop rests on.
+        assert!(db.insert_shipwright_finding(&f("c", "No test workflow")).unwrap().is_none());
+        assert!(db.list_shipwright_findings(false).unwrap().is_empty());
+        assert_eq!(db.list_shipwright_findings(true).unwrap().len(), 1);
+
+        // A genuinely new summary still lands.
+        assert!(db.insert_shipwright_finding(&f("d", "No typecheck script")).unwrap().is_some());
+    }
+
+    #[test]
+    fn shipped_is_detected_from_files_not_self_declared() {
+        let db = Database::open_in_memory().unwrap();
+        let f = ShipwrightFinding {
+            id: "f1".to_string(),
+            run_id: "run-1".to_string(),
+            category: "command_hygiene".to_string(),
+            summary: "drafter_set_doc is sync".to_string(),
+            evidence: None,
+            proposal: None,
+            guard: None,
+            files: Some(r#"["src-tauri/src/lib.rs"]"#.to_string()),
+            status: "pending".to_string(),
+            dismissed: false,
+            draft_id: None,
+            created_at: 1,
+            resolved_at: None,
+        };
+        db.insert_shipwright_finding(&f).unwrap();
+        // Pending findings aren't candidates — only accepted ones.
+        assert!(db.shipwright_unshipped().unwrap().is_empty());
+
+        db.resolve_shipwright_finding("f1", "accepted", Some("d1")).unwrap();
+        let unshipped = db.shipwright_unshipped().unwrap();
+        assert_eq!(unshipped.len(), 1);
+        assert!(unshipped[0].1.contains("lib.rs"));
+
+        db.resolve_shipwright_finding("f1", "shipped", None).unwrap();
+        assert!(db.shipwright_unshipped().unwrap().is_empty());
+        let scores = db.shipwright_scores().unwrap();
+        assert_eq!(scores[0].category, "command_hygiene");
+        assert_eq!(scores[0].shipped, 1);
+        assert_eq!(scores[0].accepted, 1, "shipped still counts as accepted");
+        assert_eq!(scores[0].dismissed, 0);
+
+        // The draft binding survives a later status change (COALESCE, not clobber).
+        let rows = db.list_shipwright_findings(true).unwrap();
+        assert_eq!(rows[0].draft_id.as_deref(), Some("d1"));
     }
 
     #[test]
@@ -7091,6 +8781,7 @@ mod tests {
             reviewer: None,
             external_created_at: None,
             share_request_id: None,
+            attachments: Vec::new(),
         };
         // Normal mint starts the c-NNN sequence.
         let a = store.add_comment("s", req(None)).unwrap();
@@ -7134,6 +8825,7 @@ mod tests {
             reviewer: None,
             external_created_at: None,
             share_request_id: None,
+            attachments: Vec::new(),
         };
         // A submitted comment (stays on v1), a reopened one and a draft (carried).
         let settled = store.add_comment("s", comment("settled")).unwrap();
@@ -7199,12 +8891,20 @@ mod tests {
                     reviewer: None,
                     external_created_at: None,
                     share_request_id: None,
+                    attachments: Vec::new(),
                 },
             )
             .expect("add comment");
         store.upsert_plan("keep", "/tmp/k", md.to_string(), reparse_sections(md), true, false);
+        // A staged offer against each — the doomed one must not outlive its plan.
+        db.insert_comment_offer(&mk_offer("o-doomed", "doomed", 100))
+            .unwrap();
+        db.insert_comment_offer(&mk_offer("o-keep", "keep", 100))
+            .unwrap();
 
         assert!(store.delete_session("doomed"));
+        assert!(db.list_open_comment_offers("doomed").unwrap().is_empty());
+        assert_eq!(db.list_open_comment_offers("keep").unwrap().len(), 1);
         assert!(!store.has_session("doomed"));
         assert!(store.get("doomed").is_none());
         assert!(store.has_session("keep")); // unrelated session untouched
@@ -7241,6 +8941,7 @@ mod tests {
                     reviewer: None,
                     external_created_at: None,
                     share_request_id: None,
+                    attachments: Vec::new(),
                 },
             )
             .expect("add comment");
@@ -7312,6 +9013,7 @@ mod tests {
                     reviewer: None,
                     external_created_at: None,
                     share_request_id: None,
+                    attachments: Vec::new(),
                 },
             )
             .expect("add comment");
@@ -7347,6 +9049,7 @@ mod tests {
             reviewer: None,
             external_created_at: None,
             share_request_id: None,
+            attachments: Vec::new(),
         };
         let c1 = store.add_comment("sess-1", req).expect("add");
         assert_eq!(c1.id, "c-001");
@@ -7367,6 +9070,7 @@ mod tests {
             reviewer: None,
             external_created_at: None,
             share_request_id: None,
+            attachments: Vec::new(),
         };
         let c2 = store.add_comment("sess-1", req2).expect("add 2");
         assert_eq!(c2.id, "c-002");
@@ -7406,6 +9110,7 @@ mod tests {
                     reviewer: None,
                     external_created_at: None,
                     share_request_id: None,
+                    attachments: Vec::new(),
                 },
             )
             .expect("add agent comment");
@@ -7429,6 +9134,7 @@ mod tests {
                     reviewer: None,
                     external_created_at: None,
                     share_request_id: None,
+                    attachments: Vec::new(),
                 },
             )
             .expect("add user comment");
@@ -7472,6 +9178,7 @@ mod tests {
             reviewer: reviewer.map(|s| s.to_string()),
             external_created_at: None,
             share_request_id: None,
+            attachments: Vec::new(),
         };
         let imported = store
             .add_comment("sess-r", mk(Some("John Doe")))
@@ -7491,6 +9198,106 @@ mod tests {
 
     // Return provenance: `external_created_at` + `share_request_id` survive
     // insert → reload and stay None for owner-originated comments.
+    #[test]
+    fn comment_attachments_round_trip_and_survive_a_rekey() {
+        use crate::state::{CommentAttachment, CommentKind};
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let store = SessionStore::new(db.clone());
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("old-sid", "/tmp/p", md.to_string(), reparse_sections(md), true, false);
+        let att = CommentAttachment {
+            path: "/data/attachments/old-sid/ui-mock.png".to_string(),
+            name: "ui-mock.png".to_string(),
+            mime: "image/png".to_string(),
+            bytes: 4096,
+        };
+        let with_files = store
+            .add_comment(
+                "old-sid",
+                NewCommentRequest {
+                    id: None,
+                    kind: CommentKind::Feedback,
+                    scope: None,
+                    anchor_id: "A".to_string(),
+                    block_id: Some("blk-1".to_string()),
+                    structural: None,
+                    body: "make it look like this".to_string(),
+                    edit: None,
+                    selection: None,
+                    author: None,
+                    reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
+                    attachments: vec![att.clone()],
+                },
+            )
+            .expect("add comment with an attachment");
+        assert_eq!(with_files.attachments, vec![att.clone()]);
+
+        // A comment with no files stores NULL, not "[]" — the pre-attachment
+        // shape is preserved exactly.
+        let plain = store
+            .add_comment(
+                "old-sid",
+                NewCommentRequest {
+                    id: None,
+                    kind: CommentKind::Feedback,
+                    scope: None,
+                    anchor_id: "A".to_string(),
+                    block_id: Some("blk-1".to_string()),
+                    structural: None,
+                    body: "just words".to_string(),
+                    edit: None,
+                    selection: None,
+                    author: None,
+                    reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
+                    attachments: Vec::new(),
+                },
+            )
+            .expect("add plain comment");
+        assert!(plain.attachments.is_empty());
+
+        // Survives a reload (the column round-trips).
+        let reloaded = SessionStore::new(db.clone());
+        let s = reloaded.get("old-sid").expect("session");
+        let rc = s.revisions[0]
+            .comments
+            .iter()
+            .find(|c| c.id == with_files.id)
+            .expect("comment");
+        assert_eq!(rc.attachments, vec![att]);
+
+        // A restore handshake re-keys the session; the stored paths must follow
+        // the directory, or the payload would name a file that isn't there.
+        assert!(reloaded.rekey_session("old-sid", "new-sid"));
+        let moved = reloaded.get("new-sid").expect("rekeyed session");
+        let mc = moved.revisions[0]
+            .comments
+            .iter()
+            .find(|c| c.id == with_files.id)
+            .expect("comment");
+        assert_eq!(
+            mc.attachments[0].path,
+            "/data/attachments/new-sid/ui-mock.png",
+            "in-memory path follows the rekey"
+        );
+        let after = SessionStore::new(db);
+        let dc = after.get("new-sid").expect("session after reload");
+        assert_eq!(
+            dc.revisions[0]
+                .comments
+                .iter()
+                .find(|c| c.id == with_files.id)
+                .expect("comment")
+                .attachments[0]
+                .path,
+            "/data/attachments/new-sid/ui-mock.png",
+            "the persisted path follows it too"
+        );
+    }
+
     #[test]
     fn return_provenance_round_trips() {
         use crate::state::CommentKind;
@@ -7512,6 +9319,7 @@ mod tests {
             reviewer: prov.then(|| "John Doe".to_string()),
             external_created_at: prov.then_some(1_700_000_100_000),
             share_request_id: prov.then(|| "req-abc123".to_string()),
+            attachments: Vec::new(),
         };
         let imported = store
             .add_comment("sess-p", mk(true))
@@ -7592,6 +9400,7 @@ mod tests {
             body: body.to_string(),
             status: "complete".to_string(),
             created_at: at,
+            attachments: Vec::new(),
         };
         // Inserted out of order — load_thread must return them by created_at.
         db.insert_thread_message(&mk("m2", "assistant", "second", 200))
@@ -7648,6 +9457,153 @@ mod tests {
     }
 
     #[test]
+    fn voice_messages_round_trip_and_are_scoped_per_key() {
+        let db = Database::open_in_memory().unwrap();
+        let mk = |id: &str, key: &str, role: &str, text: &str, at: i64| VoiceMessage {
+            id: id.to_string(),
+            session_key: key.to_string(),
+            role: role.to_string(),
+            text: text.to_string(),
+            created_at: at,
+        };
+        assert!(db.list_voice_messages("plan-1").unwrap().is_empty());
+
+        // Inserted out of order — the read must come back oldest-first, which is
+        // the order the panel replays them in.
+        db.insert_voice_message(&mk("v2", "plan-1", "agent", "second", 200))
+            .unwrap();
+        db.insert_voice_message(&mk("v1", "plan-1", "you", "first", 100))
+            .unwrap();
+        db.insert_voice_message(&mk("v3", "plan-1", "note", "▶ Read the plan", 300))
+            .unwrap();
+        // A different voice key (here a drafter session) must not leak in.
+        db.insert_voice_message(&mk("v4", "drafter:d-9", "you", "other", 150))
+            .unwrap();
+
+        let thread = db.list_voice_messages("plan-1").unwrap();
+        assert_eq!(
+            thread.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["v1", "v2", "v3"],
+        );
+        assert_eq!(thread[0].role, "you");
+        assert_eq!(thread[0].text, "first");
+        assert_eq!(thread[2].role, "note", "markers are part of the transcript");
+        assert_eq!(db.list_voice_messages("drafter:d-9").unwrap().len(), 1);
+
+        // "Forget" is a true reset for this key only.
+        db.clear_voice_messages("plan-1").unwrap();
+        assert!(db.list_voice_messages("plan-1").unwrap().is_empty());
+        assert_eq!(db.list_voice_messages("drafter:d-9").unwrap().len(), 1);
+    }
+
+    fn mk_offer(id: &str, session: &str, at: i64) -> CommentOffer {
+        CommentOffer {
+            id: id.to_string(),
+            session_id: session.to_string(),
+            message_id: None,
+            block_id: "rl:blk-abc".to_string(),
+            body: "Make the retry budget configurable".to_string(),
+            label: Some("Configurable retry budget".to_string()),
+            agent_id: "voice".to_string(),
+            status: "pending".to_string(),
+            created_at: at,
+            stale: false,
+        }
+    }
+
+    #[test]
+    fn comment_offers_round_trip_and_are_scoped_per_session() {
+        let db = Database::open_in_memory().unwrap();
+        assert!(db.list_open_comment_offers("plan-1").unwrap().is_empty());
+
+        db.insert_comment_offer(&mk_offer("o2", "plan-1", 200)).unwrap();
+        db.insert_comment_offer(&mk_offer("o1", "plan-1", 100)).unwrap();
+        db.insert_comment_offer(&mk_offer("o3", "plan-2", 150)).unwrap();
+
+        let open = db.list_open_comment_offers("plan-1").unwrap();
+        assert_eq!(
+            open.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
+            vec!["o1", "o2"],
+            "oldest-first, and another session's offers never leak in",
+        );
+        assert_eq!(open[0].label.as_deref(), Some("Configurable retry budget"));
+        assert!(open[0].message_id.is_none(), "unbound until the reply lands");
+        assert!(!open[0].stale, "staleness is computed on read, never stored");
+
+        let one = db.get_comment_offer("o1").unwrap().unwrap();
+        assert_eq!(one.body, "Make the retry budget configurable");
+        assert!(db.get_comment_offer("nope").unwrap().is_none());
+
+        // Dismissal takes a row out of the open list without deleting it.
+        assert!(db.resolve_comment_offer("o2", "dismissed").unwrap());
+        assert!(
+            !db.resolve_comment_offer("o2", "dismissed").unwrap(),
+            "only a pending row transitions",
+        );
+        assert_eq!(db.list_open_comment_offers("plan-1").unwrap().len(), 1);
+
+        // Scoped wipe, for `voice_forget`.
+        db.clear_comment_offers("plan-1").unwrap();
+        assert!(db.list_open_comment_offers("plan-1").unwrap().is_empty());
+        assert_eq!(db.list_open_comment_offers("plan-2").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn bind_comment_offers_respects_the_you_line_floor() {
+        let db = Database::open_in_memory().unwrap();
+        let you = |id: &str, at: i64| VoiceMessage {
+            id: id.to_string(),
+            session_key: "plan-1".to_string(),
+            role: "you".to_string(),
+            text: "…".to_string(),
+            created_at: at,
+        };
+        // Turn 1 asked at t=100 and staged an offer; turn 2 asked at t=300.
+        db.insert_voice_message(&you("y1", 100)).unwrap();
+        db.insert_comment_offer(&mk_offer("old", "plan-1", 150)).unwrap();
+        db.insert_voice_message(&you("y2", 300)).unwrap();
+        db.insert_comment_offer(&mk_offer("new", "plan-1", 350)).unwrap();
+
+        assert_eq!(db.count_open_offers_this_turn("plan-1").unwrap(), 1);
+        assert_eq!(db.bind_comment_offers("plan-1", "msg-2").unwrap(), 1);
+        assert_eq!(
+            db.get_comment_offer("new").unwrap().unwrap().message_id.as_deref(),
+            Some("msg-2"),
+        );
+        assert!(
+            db.get_comment_offer("old").unwrap().unwrap().message_id.is_none(),
+            "a turn that errored out leaves its offer loose, not mis-attributed",
+        );
+        // Already-bound rows are skipped by the next turn's bind.
+        db.insert_voice_message(&you("y3", 500)).unwrap();
+        assert_eq!(db.bind_comment_offers("plan-1", "msg-3").unwrap(), 0);
+        assert_eq!(
+            db.get_comment_offer("new").unwrap().unwrap().message_id.as_deref(),
+            Some("msg-2"),
+        );
+        // Bound rows also stop counting against the per-turn cap.
+        assert_eq!(db.count_open_offers_this_turn("plan-1").unwrap(), 0);
+    }
+
+    #[test]
+    fn claiming_an_offer_is_a_compare_and_set() {
+        let db = Database::open_in_memory().unwrap();
+        db.insert_comment_offer(&mk_offer("o1", "plan-1", 100)).unwrap();
+
+        assert!(db.claim_comment_offer("o1").unwrap());
+        assert!(
+            !db.claim_comment_offer("o1").unwrap(),
+            "a double-tap must not write two comments",
+        );
+        assert!(db.list_open_comment_offers("plan-1").unwrap().is_empty());
+
+        // A failed write puts the chip back.
+        db.release_comment_offer("o1").unwrap();
+        assert_eq!(db.list_open_comment_offers("plan-1").unwrap().len(), 1);
+        assert!(db.claim_comment_offer("o1").unwrap());
+    }
+
+    #[test]
     fn deleting_comment_cascades_its_thread() {
         let store = make_store();
         let md = "# Plan\n\nBody.\n";
@@ -7666,6 +9622,7 @@ mod tests {
             reviewer: None,
             external_created_at: None,
             share_request_id: None,
+            attachments: Vec::new(),
         };
         store.add_comment("s1", mk_q()).expect("add comment");
         let db = store.database();
@@ -7677,6 +9634,7 @@ mod tests {
             body: "old answer".to_string(),
             status: "complete".to_string(),
             created_at: 100,
+            attachments: Vec::new(),
         })
         .unwrap();
 
@@ -7712,6 +9670,7 @@ mod tests {
                     reviewer: None,
                     external_created_at: None,
                     share_request_id: None,
+                    attachments: Vec::new(),
                 },
             )
             .expect("add comment");
@@ -7762,6 +9721,7 @@ mod tests {
                         reviewer: None,
                         external_created_at: None,
                         share_request_id: None,
+                        attachments: Vec::new(),
                     },
                 )
                 .expect("add comment");
@@ -7854,6 +9814,7 @@ mod tests {
                     reviewer: None,
                     external_created_at: None,
                     share_request_id: None,
+                    attachments: Vec::new(),
                 },
             )
             .expect("add comment");
@@ -7920,6 +9881,7 @@ mod tests {
                 reviewer: None,
                 external_created_at: None,
                 share_request_id: None,
+                attachments: Vec::new(),
             },
         )
         .expect("add comment");
@@ -7939,6 +9901,7 @@ mod tests {
                 reviewer: None,
                 external_created_at: None,
                 share_request_id: None,
+                attachments: Vec::new(),
             },
         )
         .expect("add comment");
@@ -8095,6 +10058,7 @@ Restructured detail body.
                     reviewer: None,
                     external_created_at: None,
                     share_request_id: None,
+                    attachments: Vec::new(),
                 },
             )
             .expect("add q1");
@@ -8115,6 +10079,7 @@ Restructured detail body.
                     reviewer: None,
                     external_created_at: None,
                     share_request_id: None,
+                    attachments: Vec::new(),
                 },
             )
             .expect("add q2");
@@ -8232,6 +10197,7 @@ body.
                     reviewer: None,
                     external_created_at: None,
                     share_request_id: None,
+                    attachments: Vec::new(),
                 },
             )
             .expect("add comment");
@@ -8277,6 +10243,7 @@ body.
                     reviewer: None,
                     external_created_at: None,
                     share_request_id: None,
+                    attachments: Vec::new(),
                 },
             )
             .expect("add");
@@ -8347,6 +10314,7 @@ body.
                     reviewer: None,
                     external_created_at: None,
                     share_request_id: None,
+                    attachments: Vec::new(),
                 },
             )
             .expect("add structural");
@@ -8397,6 +10365,7 @@ body.
             reviewer: None,
             external_created_at: None,
             share_request_id: None,
+            attachments: Vec::new(),
         };
 
         let a = store
@@ -8544,6 +10513,7 @@ body.
                     reviewer: None,
                     external_created_at: None,
                     share_request_id: None,
+                    attachments: Vec::new(),
                 },
             )
             .expect("fresh session c-001 persists");
@@ -8623,6 +10593,7 @@ body.
             body: "hi".to_string(),
             status: "complete".to_string(),
             created_at: later,
+            attachments: Vec::new(),
         })
         .unwrap();
         let reloaded = SessionStore::new(db.clone());
@@ -8656,11 +10627,181 @@ body.
                     reviewer: None,
                     external_created_at: None,
                     share_request_id: None,
+                    attachments: Vec::new(),
                 },
             )
             .unwrap();
         let after = store.get("s").unwrap().updated_at;
         assert!(after >= before);
         assert!(after >= c.created_at);
+    }
+
+    // --- Agent Seat activity (Seat Assignment digest) -------------------
+
+    #[test]
+    fn seat_activity_counts_assistant_turns_in_and_out_of_window() {
+        let db = Database::open_in_memory().unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            let mut msg = |table: &str, id: &str, owner: &str, role: &str, ts: i64| {
+                conn.execute(
+                    &format!(
+                        "INSERT INTO {table} (id, {owner_col}, role, body, status, created_at)
+                         VALUES (?1, ?2, ?3, 'x', 'done', ?4)",
+                        owner_col = owner
+                    ),
+                    params![id, "o1", role, ts],
+                )
+                .unwrap();
+            };
+            // Two assistant turns inside the window, one outside, one user turn
+            // that must never count.
+            msg("browse_messages", "b1", "browse_id", "assistant", 5_000);
+            msg("browse_messages", "b2", "browse_id", "assistant", 6_000);
+            msg("browse_messages", "b3", "browse_id", "assistant", 100);
+            msg("browse_messages", "b4", "browse_id", "user", 5_500);
+            msg("mission_messages", "m1", "mission_id", "assistant", 7_000);
+        }
+        let acts = db.seat_activity(1_000);
+        let by = |seat: &str| {
+            acts.iter()
+                .find(|a| a.seat == seat)
+                .unwrap_or_else(|| panic!("no {seat} row"))
+                .clone()
+        };
+        let browse = by("browse");
+        assert_eq!(browse.turns_window, 2, "only in-window assistant turns");
+        assert_eq!(browse.turns_total, 3, "all-time excludes the user turn");
+        assert_eq!(browse.last_ts, Some(6_000));
+        assert_eq!(by("mission").turns_total, 1);
+        // A seat with no rows reports zero rather than vanishing — the digest
+        // needs the explicit "never ran" signal.
+        let voice = by("voice");
+        assert_eq!((voice.turns_window, voice.turns_total), (0, 0));
+        assert_eq!(voice.last_ts, None);
+    }
+
+    #[test]
+    fn seat_activity_splits_plan_threads_from_drafter_comment_threads() {
+        let db = Database::open_in_memory().unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            // A drafter comment thread: its comment_id resolves to draft_comments.
+            conn.execute(
+                "INSERT INTO draft_comments (id, draft_id, body, created_at)
+                 VALUES ('dc1', 'd1', 'note', 100)",
+                [],
+            )
+            .unwrap();
+            let mut tm = |id: &str, comment: &str, ts: i64| {
+                conn.execute(
+                    "INSERT INTO thread_messages
+                       (id, session_id, comment_id, role, body, status, created_at)
+                     VALUES (?1, 's1', ?2, 'assistant', 'x', 'done', ?3)",
+                    params![id, comment, ts],
+                )
+                .unwrap();
+            };
+            tm("t1", "dc1", 5_000); // drafter comment thread
+            tm("t2", "plan-c1", 5_000); // plan sidecar thread
+            tm("t3", "plan-c2", 5_000);
+        }
+        let acts = db.seat_activity(1_000);
+        let count = |seat: &str| acts.iter().find(|a| a.seat == seat).unwrap().turns_total;
+        assert_eq!(count("fork_drafter"), 1);
+        assert_eq!(count("fork_plan"), 2, "unmatched comment_ids are plan threads");
+    }
+
+    #[test]
+    fn ai_review_activity_counts_agent_runs_not_reviews_the_user_opened() {
+        let db = Database::open_in_memory().unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            // Three code reviews opened by hand…
+            for i in 0..3 {
+                conn.execute(
+                    "INSERT INTO review_sessions (review_id, repo_path, source, round, created_at)
+                     VALUES (?1, '/repo', 'diff', 1, 5000)",
+                    params![format!("r{i}")],
+                )
+                .unwrap();
+            }
+            // …but the AI reviewer only ever ran on one of them, writing four
+            // findings. Counting rows would say 4; counting reviews says 1.
+            let mut ann = |id: &str, review: &str, source: &str, ts: i64| {
+                conn.execute(
+                    "INSERT INTO review_annotations
+                       (id, review_id, round, file_path, side, start_line, end_line,
+                        kind, body, quoted_text, status, created_at, source)
+                     VALUES (?1, ?2, 1, 'a.rs', 'new', 1, 1, 'comment', 'b', 'q', 'open', ?3, ?4)",
+                    params![id, review, ts, source],
+                )
+                .unwrap();
+            };
+            ann("a1", "r0", "ai", 5_000);
+            ann("a2", "r0", "ai", 5_100);
+            ann("a3", "r0", "ai", 5_200);
+            ann("a4", "r0", "ai", 5_300);
+            // A human comment on another review must never count as an AI run.
+            ann("a5", "r1", "user", 5_400);
+        }
+        let acts = db.seat_activity(1_000);
+        let ai = acts.iter().find(|a| a.seat == "ai_review").unwrap();
+        assert_eq!(ai.turns_total, 1, "one AI run, not four findings or three reviews");
+        assert_eq!(ai.turns_window, 1);
+        assert_eq!(ai.last_ts, Some(5_300));
+    }
+
+    #[test]
+    fn keeper_is_not_inferred_from_per_prompt_compaction_events() {
+        let db = Database::open_in_memory().unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            // Compaction events are written one per prompt — and the
+            // deterministic fallback writes them even when no agent spawned.
+            for i in 0..40 {
+                conn.execute(
+                    "INSERT INTO ledger_events
+                       (seq, ts, kind, author, payload_hash, prev_hash, entry_hash)
+                     VALUES (?1, 5000, 'compaction', 'redline', 'p', 'x', ?2)",
+                    params![i + 1, format!("h{i}")],
+                )
+                .unwrap();
+            }
+        }
+        // The seat must NOT claim 40 turns for an agent that may never have run.
+        assert!(
+            !db.seat_activity(1_000).iter().any(|a| a.seat == "keeper"),
+            "keeper has no per-run record, so it must report nothing at all"
+        );
+    }
+
+    #[test]
+    fn prompt_length_by_surface_reports_median_and_p90() {
+        let db = Database::open_in_memory().unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            for (i, len) in [10usize, 20, 30, 40, 100].iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO prompts (ts, source, origin, surface, role, body, body_hash)
+                     VALUES (1, 'hook', 'internal', 'browse', 'user', ?1, ?2)",
+                    params!["x".repeat(*len), format!("h{i}")],
+                )
+                .unwrap();
+            }
+            conn.execute(
+                "INSERT INTO prompts (ts, source, origin, surface, role, body, body_hash)
+                 VALUES (1, 'hook', 'internal', 'plan', 'user', 'xxx', 'hplan')",
+                [],
+            )
+            .unwrap();
+        }
+        let rows = db.prompt_length_by_surface().unwrap();
+        // Heaviest surface first.
+        assert_eq!(rows[0].0, "browse");
+        assert_eq!(rows[0].1, 5);
+        assert_eq!(rows[0].2, 30, "median of 10/20/30/40/100");
+        assert_eq!(rows[0].3, 100, "p90 lands on the long tail");
+        assert_eq!(rows[1].0, "plan");
     }
 }

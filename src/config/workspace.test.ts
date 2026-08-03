@@ -29,7 +29,26 @@ describe("workspace snapshot — default manifest reproduces today's UI", () => 
       ["browser", "Browser", "Switch to the browser"],
       ["drafter", "Prompt Drafter", "Draft a new prompt"],
       ["review", "Code Review", "Review code changes"],
+      ["servers", "Localhost", "See your local dev servers"],
     ]);
+  });
+
+  // The upgrade path for everyone who already customized their header: their
+  // manifest's `order` predates "servers" entirely, and `headerSurfaces`
+  // appends anything missing from it. Without that, adding a surface would
+  // make it invisible to exactly the users who care most about the header.
+  it("appends a surface a pre-existing manifest order never heard of", () => {
+    const ws = parseWorkspace(
+      '{"header":{"order":["document","review","browser","drafter"]}}',
+    );
+    expect(headerSurfaces(ws).map((d) => d.id)).toEqual([
+      "document",
+      "review",
+      "browser",
+      "drafter",
+      "servers",
+    ]);
+    expect(surfaceEnabled(ws, "servers")).toBe(true);
   });
 
   it("enables every toggleable surface by default", () => {
@@ -82,6 +101,7 @@ describe("surface disabling", () => {
       "document",
       "drafter",
       "review",
+      "servers",
     ]);
   });
 
@@ -114,6 +134,7 @@ describe("header ordering", () => {
       "document",
       "browser",
       "drafter",
+      "servers",
     ]);
   });
 
@@ -125,9 +146,10 @@ describe("header ordering", () => {
       "drafter",
       "browser",
       "review",
+      "servers",
     ]);
     expect(moveHeaderSurface(ws, "document", -1)).toBe(ws);
-    expect(moveHeaderSurface(ws, "review", 1)).toBe(ws);
+    expect(moveHeaderSurface(ws, "servers", 1)).toBe(ws);
   });
 
   it("a hidden surface keeps its slot for when it comes back", () => {
@@ -137,6 +159,7 @@ describe("header ordering", () => {
       "document",
       "drafter",
       "review",
+      "servers",
     ]);
     ws = setSurfaceEnabled(ws, "browser", true);
     expect(headerSurfaces(ws).map((d) => d.id)).toEqual([
@@ -144,6 +167,7 @@ describe("header ordering", () => {
       "drafter",
       "browser",
       "review",
+      "servers",
     ]);
   });
 });
@@ -185,6 +209,7 @@ describe("first-gesture materialization", () => {
       "browser",
       "drafter",
       "review",
+      "servers",
     ]);
     for (const s of TOGGLEABLE_SURFACES) {
       expect(ws.surfaces?.[s]).toBe(s !== "voice");

@@ -60,6 +60,18 @@ These are cheap regression nets, not a substitute for the rules above:
 - `src-tauri/src/pty.rs` tests — `Coalescer` batching + `Flow` flow-control
   invariants.
 - `src/lib/virtual.test.ts` — viewer windowing (only visible lines materialized).
+- `src-tauri/src/codehealth.rs` — `probe_command_hygiene` reports **every** sync
+  `#[tauri::command]` whose body reads a file, parses JSON, encodes base64, or
+  shells out. It is a digest signal, not a test, so it never fails a build: the
+  Shipwright surfaces it and you decide. When you act on one, add it to
+  `perf_guard.rs` — a rule the suite enforces beats a rule an agent re-reports
+  every run, which is the whole argument this doc is built on.
+
+> **The guard test is the deliverable.** Two whole-app freezes became four
+> written rules became five source-text tests, and that is the only friction fix
+> in this repo that *compounds*: a refactor fixes today's instance, a guard stops
+> every future one, and a guard is far cheaper to review than a diff. The
+> Shipwright's SKILL tells it to prefer exactly this shape over a refactor.
 
 Run the full set before merging anything that touches a viewer, a stream, or a
 Tauri command:

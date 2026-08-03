@@ -38,6 +38,13 @@ export function readComments(ydoc: Y.Doc): Comment[] {
  * Idempotent by deep compare: unchanged entries produce no Yjs ops, so a
  * reload that changed nothing syncs nothing. Returns the op count so tests
  * (and callers) can assert the no-op case.
+ *
+ * The whole `Comment` rides through, `attachments` included — but the mesh
+ * carries that field's JSON METADATA only, never the files. Attachment paths
+ * are local to the machine that captured them, so a peer receives a comment
+ * that names files it cannot open. That is deliberate: shipping bytes over the
+ * mesh is a separate feature, and the payload transport (an absolute path read
+ * by the author's own Claude Code session) only ever needs to work locally.
  */
 export function writeComments(
   ydoc: Y.Doc,

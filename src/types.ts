@@ -103,6 +103,23 @@ export interface CommentSelection {
   subBlockId?: string;
 }
 
+/** A file the reviewer attached to a comment — a screenshot of the UI they
+ *  mean, a mock, a log.
+ *
+ *  `path` is an ABSOLUTE local path, and that is the whole transport: the
+ *  revise payload goes as plain text to the user's real Claude Code session,
+ *  which has full tool access and can simply `Read` it. The file is COPIED into
+ *  app data at capture time (`save_attachment` / `import_attachment`) so the
+ *  path stays valid — submit can happen long after capture, and a source the
+ *  user has since moved would break the payload silently. */
+export interface CommentAttachment {
+  path: string;
+  name: string;
+  /** Best-effort content type from the extension, e.g. "image/png". */
+  mime: string;
+  bytes: number;
+}
+
 export interface Comment {
   id: string;
   type: CommentType;
@@ -148,6 +165,11 @@ export interface Comment {
   /** The Review Request (share `requestId`) this comment arrived on — the
    *  back-link from an imported comment to its share. Absent unless imported. */
   shareRequestId?: string;
+  /** Files the reviewer attached. Absent for every comment without one, which
+   *  keeps the serialized shape identical to the pre-attachment contract.
+   *  NOTE: this rides the Yjs collab mirror for free, but the mesh carries the
+   *  JSON metadata only — never the files, which are local to their author. */
+  attachments?: CommentAttachment[];
 }
 
 export interface NewCommentRequest {
@@ -172,6 +194,8 @@ export interface NewCommentRequest {
    *  on `Comment`); omitted on every owner-originated comment. */
   externalCreatedAt?: number;
   shareRequestId?: string;
+  /** Files captured by the composer before Save (see `Comment.attachments`). */
+  attachments?: CommentAttachment[];
 }
 
 export interface UpdateCommentRequest {
@@ -375,6 +399,9 @@ export interface ThreadMessage {
   /** "complete" | "error". */
   status: string;
   createdAt: number;
+  /** Files the reviewer dropped into this follow-up. Always absent on
+   *  assistant turns. */
+  attachments?: CommentAttachment[];
 }
 
 /** A chunk of streaming assistant text for a comment's fork thread. */
@@ -826,4 +853,55 @@ export interface AiReviewErrorEvent {
   reviewId: string;
   error: string;
   cancelled: boolean;
+}
+
+// --- Localhost dashboard (dev servers) -------------------------------------
+
+/** A dev server listening right now, mapped to one of the user's repos.
+ *  Mirrors `devmap::RunningServer`. */
+export interface RunningServer {
+  pid: number;
+  /** The card's port: the lowest one this process holds. */
+  port: number;
+  /** Other ports the same process listens on (HMR sockets and friends). */
+  extraPorts: number[];
+  url: string;
+  comm: string;
+  args: string;
+  projectPath: string;
+  projectName: string;
+  stack: string;
+  runCommand: string;
+  thumbPath: string | null;
+}
+
+/** A server we remember but that is not up right now. Mirrors
+ *  `devmap::RecentServer`. */
+export interface RecentServer {
+  id: number;
+  projectPath: string;
+  projectName: string;
+  port: number;
+  url: string;
+  stack: string;
+  runCommand: string;
+  lastSeenAt: number;
+  thumbPath: string | null;
+  /** Something else holds this port now — Run is still offered. */
+  portBusy: boolean;
+}
+
+/** A listener that isn't a project's dev server. Mirrors
+ *  `devmap::OtherListener`. */
+export interface OtherListener {
+  pid: number;
+  port: number;
+  comm: string;
+}
+
+/** One sweep of the machine. Mirrors `devmap::DevServerScan`. */
+export interface DevServerScan {
+  running: RunningServer[];
+  recent: RecentServer[];
+  others: OtherListener[];
 }

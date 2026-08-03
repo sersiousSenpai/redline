@@ -291,6 +291,7 @@ fn write_comment_block(out: &mut String, c: &Comment) {
             if !c.body.is_empty() && c.body.trim() != "(edit)" {
                 let _ = writeln!(out, "  NOTE: {}", quoted(&c.body));
             }
+            write_attachments(out, c);
             write_reopen_continuity(out, c);
             write_discussion_context(out, c);
             let _ = writeln!(out, "  COMMENT_ID: {}", c.id);
@@ -306,6 +307,7 @@ fn write_comment_block(out: &mut String, c: &Comment) {
             out.push_str("    ");
             out.push_str(&indent(c.body.trim(), "    "));
             out.push('\n');
+            write_attachments(out, c);
             write_reopen_continuity(out, c);
             write_discussion_context(out, c);
             let _ = writeln!(out, "  COMMENT_ID: {}", c.id);
@@ -335,6 +337,7 @@ fn write_comment_block(out: &mut String, c: &Comment) {
                     out.push('\n');
                 }
             }
+            write_attachments(out, c);
             let _ = writeln!(out, "  COMMENT_ID: {}", c.id);
             out.push('\n');
         }
@@ -344,6 +347,7 @@ fn write_comment_block(out: &mut String, c: &Comment) {
             out.push_str("    ");
             out.push_str(&indent(c.body.trim(), "    "));
             out.push('\n');
+            write_attachments(out, c);
             write_reopen_continuity(out, c);
             write_discussion_context(out, c);
             let _ = writeln!(out, "  COMMENT_ID: {}", c.id);
@@ -389,6 +393,27 @@ fn write_reopen_continuity(out: &mut String, c: &Comment) {
 /// for actionable questions (their `[decision]` arc already prints the note
 /// as THE REVIEWER DECIDED). The transcript is user+fork text and MUST sit
 /// under a `(verbatim)` frame so the anti-injection invariant holds.
+/// Name the files the reviewer attached, so Claude reads them.
+///
+/// Absolute local paths are the correct transport here, not base64: this
+/// payload is delivered as plain text to the user's own Claude Code session,
+/// which has full tool access — it can simply `Read` the path.
+///
+/// The block sits OUTSIDE any `(verbatim)` frame. That framing exists to mark
+/// user-authored prose as quoted data; a path is structured metadata the app
+/// produced, and wrapping it in the anti-injection frame would misrepresent
+/// both. Emits nothing when there are no attachments, which keeps the payload
+/// byte-identical to the pre-attachment contract for every existing comment.
+fn write_attachments(out: &mut String, c: &Comment) {
+    if c.attachments.is_empty() {
+        return;
+    }
+    out.push_str("  ATTACHED FILES (read these):\n");
+    for a in &c.attachments {
+        let _ = writeln!(out, "    {} ({})", a.path, a.mime);
+    }
+}
+
 fn write_discussion_context(out: &mut String, c: &Comment) {
     if !matches!(c.status, CommentStatus::Draft) {
         return;
@@ -428,7 +453,9 @@ fn indent(s: &str, prefix: &str) -> String {
 mod tests {
     use super::*;
     use crate::parser::parse_plan;
-    use crate::state::{Comment, CommentKind, CommentScope, CommentStatus, EditPayload};
+    use crate::state::{
+        Comment, CommentAttachment, CommentKind, CommentScope, CommentStatus, EditPayload,
+    };
 
     fn mk_comment(
         id: &str,
@@ -459,7 +486,105 @@ mod tests {
             reviewer: None,
             external_created_at: None,
             share_request_id: None,
+            attachments: Vec::new(),
         }
+    }
+
+    #[test]
+    fn payload_without_attachments_never_mentions_them() {
+        // The pre-attachment contract: a comment with no files must serialize
+        // byte-identically to what it always did.
+        let sections = parse_plan("# Alpha\n\nIntro paragraph.\n");
+        let comments = vec![mk_comment(
+            "c-001",
+            CommentKind::Feedback,
+            "1",
+            "Tighten this.",
+            Some(CommentScope::Local),
+            None,
+        )];
+        let out = serialize_revise_payload(&sections, &comments, "# Alpha\n");
+        assert!(!out.contains("ATTACHED FILES"));
+    }
+
+    #[test]
+    fn attached_files_ride_the_payload_as_readable_paths() {
+        let sections = parse_plan("# Alpha\n\nIntro paragraph.\n");
+        let mut c = mk_comment(
+            "c-001",
+            CommentKind::Feedback,
+            "1",
+            "Make it look like this.",
+            Some(CommentScope::Local),
+            None,
+        );
+        c.attachments = vec![
+            CommentAttachment {
+                path: "/Users/x/Library/App/attachments/s1/a-ui-mock.png".to_string(),
+                name: "ui-mock.png".to_string(),
+                mime: "image/png".to_string(),
+                bytes: 4096,
+            },
+            CommentAttachment {
+                path: "/Users/x/Library/App/attachments/s1/b-notes.txt".to_string(),
+                name: "notes.txt".to_string(),
+                mime: "text/plain".to_string(),
+                bytes: 12,
+            },
+        ];
+        let out = serialize_revise_payload(&sections, &[c], "# Alpha\n");
+
+        // The anti-injection preface is still the first bytes — non-negotiable.
+        assert!(out.starts_with(PAYLOAD_PREFACE));
+        // Absolute paths, so the receiving session can just `Read` them.
+        assert!(out.contains("  ATTACHED FILES (read these):\n"));
+        assert!(out.contains("    /Users/x/Library/App/attachments/s1/a-ui-mock.png (image/png)"));
+        assert!(out.contains("    /Users/x/Library/App/attachments/s1/b-notes.txt (text/plain)"));
+
+        // Paths are structured metadata, so they sit OUTSIDE the verbatim frame
+        // that marks user-authored prose — the block must not land between
+        // "USER COMMENT (verbatim):" and the text it introduces.
+        let user_at = out.find("USER COMMENT (verbatim):").unwrap();
+        let body_at = out.find("Make it look like this.").unwrap();
+        let files_at = out.find("ATTACHED FILES").unwrap();
+        assert!(user_at < body_at, "the comment body follows its frame");
+        assert!(files_at > body_at, "attachments follow the verbatim block");
+    }
+
+    #[test]
+    fn attachments_ride_an_edit_and_a_question_too() {
+        let sections = parse_plan("# Alpha\n\nIntro paragraph.\n");
+        let att = CommentAttachment {
+            path: "/tmp/attachments/s1/shot.png".to_string(),
+            name: "shot.png".to_string(),
+            mime: "image/png".to_string(),
+            bytes: 1,
+        };
+        let mut edit = mk_comment(
+            "c-001",
+            CommentKind::Edit,
+            "1",
+            "note",
+            None,
+            Some(EditPayload {
+                original: "a".to_string(),
+                revised: "b".to_string(),
+            }),
+        );
+        edit.attachments = vec![att.clone()];
+        let mut question = mk_comment("c-002", CommentKind::Question, "1", "why?", None, None);
+        question.attachments = vec![att.clone()];
+        // A question promoted into a directive keeps its evidence as well.
+        let mut decision = mk_comment("c-003", CommentKind::Question, "1", "how?", None, None);
+        decision.actionable = true;
+        decision.attachments = vec![att];
+
+        let out = serialize_revise_payload(&sections, &[edit, question, decision], "# Alpha\n");
+        assert_eq!(
+            out.matches("ATTACHED FILES (read these):").count(),
+            3,
+            "every comment kind the composer can produce carries its files"
+        );
     }
 
     #[test]
@@ -593,6 +718,7 @@ mod tests {
             reviewer: None,
             external_created_at: None,
             share_request_id: None,
+            attachments: Vec::new(),
         };
         let prose = mk_comment(
             "c-001",

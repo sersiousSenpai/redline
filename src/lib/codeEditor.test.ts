@@ -2,11 +2,20 @@
 // Copyright 2026 Yusuf Al-Bazian
 import { describe, expect, it, vi } from "vitest";
 
+import type { FileContent } from "../types";
 import {
   languageForPath,
+  prepareEditContent,
   resolveDiskChange,
   saveKeyBinding,
 } from "./codeEditor";
+
+const text = (content: string): FileContent => ({
+  content,
+  isBinary: false,
+  tooLarge: false,
+  size: content.length,
+});
 
 describe("languageForPath", () => {
   it("maps common source extensions to their grammars", () => {
@@ -27,6 +36,68 @@ describe("languageForPath", () => {
   it("returns null when no grammar matches", () => {
     expect(languageForPath("/repo/LICENSE")).toBeNull();
     expect(languageForPath("data.xyzzy")).toBeNull();
+  });
+});
+
+describe("prepareEditContent", () => {
+  it("resolves content and language together", async () => {
+    await expect(
+      prepareEditContent(
+        () => Promise.resolve(text("let x = 1;")),
+        () => Promise.resolve("lang"),
+      ),
+    ).resolves.toEqual({ content: "let x = 1;", language: "lang" });
+  });
+
+  it("no grammar for this file → language null, content intact", async () => {
+    await expect(
+      prepareEditContent(() => Promise.resolve(text("plain")), null),
+    ).resolves.toEqual({ content: "plain", language: null });
+  });
+
+  it("a rejecting grammar load falls back to plain instead of failing", async () => {
+    await expect(
+      prepareEditContent(
+        () => Promise.resolve(text("still fine")),
+        () => Promise.reject(new Error("chunk load failed")),
+      ),
+    ).resolves.toEqual({ content: "still fine", language: null });
+  });
+
+  it("propagates read failures", async () => {
+    await expect(
+      prepareEditContent(
+        () => Promise.reject(new Error("io")),
+        () => Promise.resolve("lang"),
+      ),
+    ).rejects.toThrow("io");
+  });
+
+  it("rejects non-editable files with the editor's exact messages", async () => {
+    await expect(
+      prepareEditContent(
+        () =>
+          Promise.resolve({
+            content: null,
+            isBinary: false,
+            tooLarge: true,
+            size: 99,
+          }),
+        null,
+      ),
+    ).rejects.toThrow("File is too large to edit (2 MB cap).");
+    await expect(
+      prepareEditContent(
+        () =>
+          Promise.resolve({
+            content: null,
+            isBinary: true,
+            tooLarge: false,
+            size: 99,
+          }),
+        null,
+      ),
+    ).rejects.toThrow("Binary file — not editable.");
   });
 });
 

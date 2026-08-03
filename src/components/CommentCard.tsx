@@ -5,6 +5,7 @@ import type { Comment, CommentStatus, UpdateCommentRequest } from "../types";
 import { buildDraftCommentUpdate } from "../lib/draftCommentUpdate";
 import { compactEditPreview } from "../editor/wordDiff";
 import { AnchorPill } from "./AnchorPill";
+import { AttachmentChips } from "./AttachmentChips";
 import { CommentThread } from "./CommentThread";
 import { MarkdownView } from "./MarkdownView";
 
@@ -586,6 +587,13 @@ export const CommentCard = memo(function CommentCard({
         <div className="rl-comment-body-scroll">
           <MarkdownView body={comment.body} />
         </div>
+      )}
+
+      {/* Attached files, read-only once saved — the reviewer sees what rides
+          the payload without being able to detach it out from under a comment
+          Claude may already have been sent. */}
+      {!collapsed && comment.attachments && comment.attachments.length > 0 && (
+        <AttachmentChips attachments={comment.attachments} />
       )}
 
       {/* A draft's attached Discuss-thread rider is flagged inside the

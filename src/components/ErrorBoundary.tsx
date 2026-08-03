@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { Component, type ErrorInfo, type ReactNode } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 interface ErrorBoundaryProps {
   /** Renders in place of the crashed subtree. `reset` clears the error and
    *  retries the children. */
   fallback: (err: Error, reset: () => void) => ReactNode;
+  /** Which region crashed, for the friction row. Defaults to "unknown". */
+  region?: string;
   children?: ReactNode;
 }
 
@@ -31,6 +34,13 @@ export class ErrorBoundary extends Component<
       error,
       info.componentStack,
     );
+    // …and record it, because a console.error lands in a devtools console
+    // nobody has open. Fire-and-forget: a failed write must never turn a
+    // contained crash into an uncontained one.
+    void invoke("record_render_crash", {
+      region: this.props.region ?? "unknown",
+      message: String(error?.message ?? error),
+    }).catch(() => {});
   }
 
   reset = () => this.setState({ error: null });

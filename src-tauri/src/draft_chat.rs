@@ -171,6 +171,12 @@ impl DraftChatState {
                 if let Some(mut p) = proc {
                     let _ = p.child.start_kill();
                 }
+                let _ = self.db.record_friction(
+                    "turn_timeout",
+                    Some("drafter"),
+                    Some(&draft_id),
+                    Some("180s turn ceiling"),
+                );
                 return Err("the colleague took too long to respond".to_string());
             }
         };
@@ -210,11 +216,15 @@ fn suggestions_contract(draft_id: &str) -> String {
     format!(
         "WRITING INTO THE DOCUMENT — you can draft and edit the prompt directly. \
          Post a suggestion (already permitted — no approval needed). This write \
-         route requires the Authorization header shown, with \
-         `$REDLINE_DAEMON_TOKEN` already in your environment:\n\
+         route needs the bearer token, which curl imports straight from the \
+         environment with the two flags shown — never write \
+         `$REDLINE_DAEMON_TOKEN` into the command yourself (requires curl \
+         >= 8.3):\n\
          ```\n\
-         curl -s http://127.0.0.1:7676/v1/drafter/{draft_id}/suggestions -X POST \\\n\
-           -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" \\\n\
+         curl -s http://127.0.0.1:7676/v1/drafter/{draft_id}/suggestions \\\n\
+           --variable %REDLINE_DAEMON_TOKEN= \\\n\
+           --expand-header \"Authorization: Bearer {{{{REDLINE_DAEMON_TOKEN}}}}\" \\\n\
+           -X POST \\\n\
            -H 'Content-Type: application/json' \\\n\
            -d '{{\"op\":\"append\",\"markdown\":\"<new content>\",\"agentId\":\"draft-agent\",\"body\":\"<one-line why>\"}}'\n\
          ```\n\
@@ -423,6 +433,8 @@ pub async fn draft_chat_send(
             title.as_deref(),
             project_path.as_deref(),
             &draft_markdown,
+            // Mirror only — never the document. The frontend owns `doc_json`.
+            None,
         )
         .map_err(|e| format!("failed to mirror the draft: {e}"))?;
 
@@ -823,6 +835,11 @@ mod tests {
         assert!(p.contains("Ship auth."));
         assert!(p.contains("help me tighten this"));
         assert!(p.contains("`drafter` skill"));
+        // The suggestions POST authenticates via curl's own variable import
+        // (a `format!` string — braces are quadrupled in source).
+        assert!(p.contains("--variable %REDLINE_DAEMON_TOKEN="));
+        assert!(p.contains("--expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\""));
+        assert!(!p.contains("Bearer $REDLINE_DAEMON_TOKEN"));
     }
 
     #[test]

@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { EditorContent, useEditor } from "@tiptap/react";
 import type { JSONContent } from "@tiptap/react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { Library } from "lucide-react";
 
 import { drafterExtensions } from "../editor/extensions/drafterExtensions";
 import { planDocToMarkdown } from "../editor/markdown/serializer";
@@ -26,13 +27,14 @@ import type { DraftComment } from "../types";
 interface PromptDrafterProps {
   /** The draft's durable identity — keys its agents, comments, and memory. */
   draftId: string;
-  /** Persisted draft (Tiptap JSON), or null for a blank document. */
+  /** The stored document (Tiptap JSON), or null for a blank one. Read from the
+   *  DB by the host before this component mounts — the Bookshelf owns it. */
   doc: JSONContent | null;
-  /** Called (debounced) with the latest Tiptap JSON so the host can persist it. */
-  onDocChange: (json: JSONContent) => void;
-  /** Called on the same debounce with the markdown mirror (sidecars on) so the
-   *  host can flush it to the backend `drafts` table for the agents to read. */
-  onMarkdownChange?: (markdown: string) => void;
+  /** Called (debounced) with the document AND its markdown mirror, together.
+   *  One callback, because they are one write: `doc_json` is the fidelity
+   *  source and `doc_markdown` is the projection agents read, and a mirror that
+   *  can land without its document is how the two drift. */
+  onPersist: (json: JSONContent, markdown: string) => void;
   /** Candidate project directories for the launch picker. */
   projectOptions: ProjectOption[];
   /** Selected project dir, or null for $HOME. */
@@ -43,26 +45,39 @@ interface PromptDrafterProps {
   /** Open the draft's discussion (the voice panel — talk or type). Null
    *  hides the floating Discuss pill. */
   onDiscuss?: (() => void) | null;
+  /** Show the shelf — the folder tree + document list this document sits in. */
+  onOpenShelf?: () => void;
+  /** Attached sources on the open document, for the footer's count. */
+  sourceCount?: number;
 }
 
 // The Prompt Drafter: a Word-style document editor for authoring a prompt and
 // launching it into a new Claude Code plan session. JSON is the in-editor source
 // of truth (full fidelity, persisted); markdown is generated only at send time.
-export function PromptDrafter({
+function PromptDrafterBase({
   draftId,
   doc,
-  onDocChange,
-  onMarkdownChange,
+  onPersist,
   projectOptions,
   selectedProject,
   onSelectedProjectChange,
   onLaunch,
   onDiscuss = null,
+  onOpenShelf,
+  sourceCount = 0,
 }: PromptDrafterProps) {
   const persistTimer = useRef<number | null>(null);
-  // Latest onMarkdownChange without re-creating the editor on identity churn.
-  const onMarkdownChangeRef = useRef(onMarkdownChange);
-  onMarkdownChangeRef.current = onMarkdownChange;
+  // Latest onPersist without re-creating the editor on identity churn.
+  const onPersistRef = useRef(onPersist);
+  onPersistRef.current = onPersist;
+  // Persist the document + its markdown mirror (sidecars ON so block ids
+  // survive for the agents' block-addressed suggestions) as one write.
+  const persistNow = useCallback((ed: NonNullable<typeof editor>) => {
+    onPersistRef.current(
+      ed.getJSON(),
+      planDocToMarkdown(ed.state.doc, { sidecars: true }),
+    );
+  }, []);
 
   const editor = useEditor({
     extensions: drafterExtensions(),
@@ -74,16 +89,11 @@ export function PromptDrafter({
       },
     },
     onUpdate: ({ editor }) => {
-      // Debounce localStorage writes — avoid a serialize+stringify per keystroke.
+      // Debounce the write — avoid a serialize+stringify per keystroke.
       if (persistTimer.current !== null)
         window.clearTimeout(persistTimer.current);
       persistTimer.current = window.setTimeout(() => {
-        onDocChange(editor.getJSON());
-        // Mirror the markdown (sidecars ON so block ids survive for the
-        // agents' block-addressed suggestions) on the same debounce.
-        onMarkdownChangeRef.current?.(
-          planDocToMarkdown(editor.state.doc, { sidecars: true }),
-        );
+        persistNow(editor);
       }, 400);
     },
   });
@@ -106,10 +116,10 @@ export function PromptDrafter({
     return () => {
       if (persistTimer.current !== null) {
         window.clearTimeout(persistTimer.current);
-        if (editor && !editor.isDestroyed) onDocChange(editor.getJSON());
+        if (editor && !editor.isDestroyed) persistNow(editor);
       }
     };
-  }, [editor, onDocChange]);
+  }, [editor, persistNow]);
 
   // Agent write-suggestions: drain the pending queue on mount (proposals made
   // while the pane was closed), then apply live `drafter-suggestion` events.
@@ -132,10 +142,7 @@ export function PromptDrafter({
         }).catch(() => {});
         // Persist the applied content promptly (skip the debounce race on an
         // immediate launch after a whole-cloth draft).
-        onDocChange(editor.getJSON());
-        onMarkdownChangeRef.current?.(
-          planDocToMarkdown(editor.state.doc, { sidecars: true }),
-        );
+        persistNow(editor);
         return;
       }
       if (outcome === "stale") {
@@ -149,7 +156,7 @@ export function PromptDrafter({
         list.some((x) => x.id === s.id) ? list : [...list, s],
       );
     },
-    [editor, onDocChange],
+    [editor, persistNow],
   );
 
   useEffect(() => {
@@ -193,6 +200,8 @@ export function PromptDrafter({
   const [sidecarOpen, setSidecarOpen] = useState(false);
   const [focusedCommentId, setFocusedCommentId] = useState<string | null>(null);
   const workspaceRef = useRef<HTMLDivElement>(null);
+  // The page sheet — what the floating Discuss pill measures itself against.
+  const pageRef = useRef<HTMLDivElement>(null);
   const [selection, clearSelection] = useTextSelection(workspaceRef, true);
   const [commentDraft, setCommentDraft] = useState<string | null>(null);
   // The selection SNAPSHOT the composer works from. The live `selection`
@@ -621,6 +630,7 @@ export function PromptDrafter({
             />
           )}
           <div
+            ref={pageRef}
             className="rl-page"
             onClick={() => editor?.chain().focus().run()}
           >
@@ -641,6 +651,9 @@ export function PromptDrafter({
           <DiscussPill
             onClick={onDiscuss}
             title="Discuss this draft — talk or type"
+            textRef={pageRef}
+            /* the page's --rl-page-pad-x */
+            textInset={84}
           />
         )}
       </div>
@@ -655,6 +668,33 @@ export function PromptDrafter({
           background: "var(--color-paper)",
         }}
       >
+        {onOpenShelf && (
+          <button
+            type="button"
+            onClick={onOpenShelf}
+            title="Your Bookshelf — every document you've stored, in folders"
+            className="flex items-center gap-1 rounded-sm px-2 py-1"
+            style={{
+              fontSize: "12px",
+              border: "1px solid var(--color-rule)",
+              background: "var(--color-bg-elevated)",
+              color: "var(--color-ink)",
+              cursor: "pointer",
+              whiteSpace: "nowrap",
+            }}
+          >
+            <Library size={14} strokeWidth={2} />
+            Bookshelf
+            {sourceCount > 0 && (
+              <span
+                style={{ color: "var(--color-ink-muted)", fontSize: "11px" }}
+                title={`${sourceCount} source${sourceCount === 1 ? "" : "s"} attached to this document`}
+              >
+                · {sourceCount} src
+              </span>
+            )}
+          </button>
+        )}
         <ProjectPicker
           options={projectOptions}
           value={selectedProject}
@@ -699,3 +739,8 @@ export function PromptDrafter({
     </div>
   );
 }
+
+/** Memoized: one of the center-pane surfaces that used to reconcile on
+ *  every frame of a divider drag. TipTap builds its view in a content-keyed
+ *  effect, so this is reconciliation cost only. */
+export const PromptDrafter = memo(PromptDrafterBase);

@@ -214,6 +214,12 @@ impl BrowseState {
                 if let Some(mut p) = self.procs.lock().unwrap().remove(&browse_id) {
                     let _ = p.child.start_kill();
                 }
+                let _ = self.db.record_friction(
+                    "turn_timeout",
+                    Some("browse"),
+                    Some(&browse_id),
+                    Some("180s consult ceiling"),
+                );
                 let why = "the colleague took too long to respond".to_string();
                 finish_error(&app, &self.db, &browse_id, &why);
                 return Err(why);
@@ -381,9 +387,11 @@ fn build_first_turn_prompt(
     p.push_str(
         "You can act on the live browser tab by calling these local endpoints \
          with curl (already permitted — no approval needed). Put the URL \
-         immediately after `-s`. Write routes require \
-         `-H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\"` after the URL (the \
-         token is already in your environment):\n\n\
+         immediately after `-s`. Write routes need the bearer token: add \
+         `--variable %REDLINE_DAEMON_TOKEN= --expand-header \"Authorization: \
+         Bearer {{REDLINE_DAEMON_TOKEN}}\"` after the URL, which imports it \
+         straight from the environment — never write `$REDLINE_DAEMON_TOKEN` \
+         into the command yourself (requires curl >= 8.3):\n\n\
          - See the page as it is right now (url, title, selection, text, \
          headings, links):\n  \
          curl -s http://127.0.0.1:7676/v1/browser/snapshot\n\
@@ -396,29 +404,34 @@ fn build_first_turn_prompt(
          - Open a URL in a NEW tab and show it (leaves the user's other tabs \
          open; the new tab becomes the active one you then act on):\n  \
          curl -s http://127.0.0.1:7676/v1/browser/open \
-         -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST \
+         --variable %REDLINE_DAEMON_TOKEN= \
+         --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" -X POST \
          -H 'Content-Type: application/json' -d '{\"url\":\"https://example.com\"}'\n\
          - Switch the user INTO an existing tab (bring it to the foreground and \
          move them into its conversation) — use when they want to BE in that \
          tab, after you've checked it with ?tab=/thread:\n  \
          curl -s 'http://127.0.0.1:7676/v1/browser/focus?tab=<n>' \
-         -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST\n\
+         --variable %REDLINE_DAEMON_TOKEN= \
+         --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" -X POST\n\
          - Read another tab's discussion history (what was already discussed \
          there — a cheap way to \"check in\" with that tab without re-deriving \
          it):\n  \
          curl -s 'http://127.0.0.1:7676/v1/browser/thread?tab=<n>'\n\
          - Navigate the tab to a URL:\n  \
          curl -s http://127.0.0.1:7676/v1/browser/navigate \
-         -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST \
+         --variable %REDLINE_DAEMON_TOKEN= \
+         --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" -X POST \
          -H 'Content-Type: application/json' -d '{\"url\":\"https://example.com\"}'\n\
          - Click the first element matching a CSS selector:\n  \
          curl -s http://127.0.0.1:7676/v1/browser/click \
-         -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST \
+         --variable %REDLINE_DAEMON_TOKEN= \
+         --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" -X POST \
          -H 'Content-Type: application/json' -d '{\"selector\":\"a.next\"}'\n\
          - Extract structured data with a scrape schema (fields of type text / \
          html / attr / list with itemSelector+itemFields):\n  \
          curl -s http://127.0.0.1:7676/v1/browser/query \
-         -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST \
+         --variable %REDLINE_DAEMON_TOKEN= \
+         --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" -X POST \
          -H 'Content-Type: application/json' \
          -d '{\"version\":1,\"name\":\"links\",\"fields\":[{\"name\":\"links\",\
          \"type\":\"list\",\"itemSelector\":\"a[href]\",\"itemFields\":[{\"name\":\
@@ -429,7 +442,8 @@ fn build_first_turn_prompt(
          they're viewing; pass `url` to save a specific linked file; pass \
          `dialog:true` to let them choose the location:\n  \
          curl -s http://127.0.0.1:7676/v1/browser/download \
-         -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST \
+         --variable %REDLINE_DAEMON_TOKEN= \
+         --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" -X POST \
          -H 'Content-Type: application/json' -d '{}'\n\n\
          IMPORTANT: this `/download` route is the ONLY way you can save a file. \
          `curl -o`, `wget`, redirecting to a file, and any other Bash command are \
@@ -962,12 +976,26 @@ fn describe_turn_error(db: &Database, browse_id: &str, error: &str) -> String {
         if let Err(e) = db.clear_browse_session(browse_id) {
             tracing::warn!(error = %e, "failed to clear over-limit browse session");
         }
+        // The doc comment above has always named "the common 'kept failing'
+        // case"; now there is a counter behind it.
+        let _ = db.record_friction(
+            "context_overflow",
+            Some("browse"),
+            Some(browse_id),
+            Some(error),
+        );
         return "This discussion outgrew the model's context window, so the turn \
                 failed. I've reset its context — send your message again and I'll \
                 start fresh on this page (the replies above are kept)."
             .to_string();
     }
     if is_transient(error) {
+        let _ = db.record_friction(
+            "transient_fail",
+            Some("browse"),
+            Some(browse_id),
+            Some(error),
+        );
         return "The model hit a temporary error on this turn (not something you \
                 did) — send your message again in a moment. Your conversation is \
                 intact."

@@ -2,12 +2,24 @@
 // Copyright 2026 Yusuf Al-Bazian
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import {
+  beginResizeSession,
+  endResizeSession,
+} from "../lib/resizeSession";
+
 type Axis = "x" | "y";
 
 interface Options {
   /** Current size in px (width for axis "x", height for axis "y"). */
   width: number;
   onWidthChange: (next: number) => void;
+  /** Live per-frame size during the drag. When supplied the rAF flush calls
+   *  THIS instead of `onWidthChange`, and `onWidthChange` fires exactly once —
+   *  on release, with the rest value. That's how a drag frame can cost one CSS
+   *  custom-property write and no React render at all: the host writes the live
+   *  size to a variable descendants already read, and only the resting value
+   *  ever becomes state. Omit it and the hook behaves exactly as before. */
+  onLiveSize?: (next: number) => void;
   /** "x" = right-hand pane (default), "y" = bottom dock. */
   axis?: Axis;
   /** Which edge the pane occupies. "trailing" (default) panes sit at the
@@ -45,6 +57,7 @@ const clamp = (n: number, lo: number, hi: number) =>
 export function useResizablePane({
   width,
   onWidthChange,
+  onLiveSize,
   axis = "x",
   side = "trailing",
   min = 240,
@@ -66,6 +79,29 @@ export function useResizablePane({
   const reopening = useRef(false);
   const lastWidth = useRef(0);
   const settleTimer = useRef<number | undefined>(undefined);
+  // Our own contribution to the app-wide resize refcount, latched so that
+  // however the drag ends — pointerup, a snap-to-close, an unmount mid-drag —
+  // we release exactly the one session we opened.
+  const sessionOpen = useRef(false);
+  const openSession = useCallback(() => {
+    if (sessionOpen.current) return;
+    sessionOpen.current = true;
+    beginResizeSession();
+  }, []);
+  const closeSession = useCallback(() => {
+    if (!sessionOpen.current) return;
+    sessionOpen.current = false;
+    endResizeSession();
+  }, []);
+  // The upper clamp, resolved once at drag start. It reads
+  // `window.innerWidth/Height`, and it used to be called from `onMove` — i.e. at
+  // raw pointer rate, above the frame rate, for a value that cannot change
+  // during the drag.
+  const maxRef = useRef(Infinity);
+  // Latest live callback, read by the drag effect without re-subscribing its
+  // window listeners when the host re-renders with a new closure.
+  const onLiveSizeRef = useRef(onLiveSize);
+  onLiveSizeRef.current = onLiveSize;
 
   const maxSize = useCallback(() => {
     if (max != null) return max;
@@ -104,7 +140,6 @@ export function useResizablePane({
         onWidthChange(0);
         startSize = 0;
         reopening.current = true;
-        lastWidth.current = 0;
       } else {
         reopening.current = false;
       }
@@ -112,9 +147,14 @@ export function useResizablePane({
         pos: axis === "x" ? e.clientX : e.clientY,
         size: startSize,
       };
+      // Seed the rest value so a press-and-release with no movement commits the
+      // size it started at rather than whatever the previous drag left behind.
+      lastWidth.current = startSize;
+      maxRef.current = maxSize();
+      openSession();
       setDragging(true);
     },
-    [axis, width, collapsed, onExpand, onWidthChange],
+    [axis, width, collapsed, onExpand, onWidthChange, maxSize, openSession],
   );
 
   useEffect(() => {
@@ -123,13 +163,21 @@ export function useResizablePane({
     const sign = side === "leading" ? 1 : -1;
     // Coalesce pointer moves to one commit per animation frame. Pointer events
     // can fire well above the display refresh rate (120Hz+ trackpads), and each
-    // commit re-renders the layout; without this a fast drag fires several
-    // `onWidthChange` setStates per frame for no visual gain. `lastWidth` always
-    // holds the latest target, so the rAF flush commits the freshest value.
+    // commit costs at minimum a layout pass; without this a fast drag flushes
+    // several times per frame for no visual gain. `lastWidth` always holds the
+    // latest target, so the rAF flush applies the freshest value.
+    //
+    // `snappedClosed` marks a drag-through past the hard stop that dismissed the
+    // pane. The pointerup that follows must NOT then commit the sub-minimum
+    // width the pointer was sitting at — the pane is closed, and that width is
+    // meaningless.
+    let snappedClosed = false;
     let rafId = 0;
     const flush = () => {
       rafId = 0;
-      onWidthChange(lastWidth.current);
+      const live = onLiveSizeRef.current;
+      if (live) live(lastWidth.current);
+      else onWidthChange(lastWidth.current);
     };
     const onMove = (e: PointerEvent) => {
       const cur = axis === "x" ? e.clientX : e.clientY;
@@ -144,24 +192,28 @@ export function useResizablePane({
           cancelAnimationFrame(rafId);
           rafId = 0;
         }
+        snappedClosed = true;
         setDragging(false);
+        closeSession();
         onCollapse();
         return;
       }
       // While re-opening, the lower bound is 0 so the drawer can be pulled
       // partway; otherwise it's the normal `min` hard stop.
       const lower = reopening.current ? 0 : min;
-      const next = clamp(intended, lower, maxSize());
+      const next = clamp(intended, lower, maxRef.current);
       lastWidth.current = next;
       if (!rafId) rafId = requestAnimationFrame(flush);
     };
     const onUp = () => {
-      // Commit any frame still pending so the rest position is exact.
       if (rafId) {
         cancelAnimationFrame(rafId);
         rafId = 0;
-        onWidthChange(lastWidth.current);
       }
+      // The one React commit of the whole drag when a live path is in use:
+      // every frame before this went to `onLiveSize` and touched no state.
+      // Without one, only the pending frame (if any) was ever committed.
+      if (!snappedClosed) onWidthChange(lastWidth.current);
       setDragging(false);
       // Releasing a partway drawer settles it smoothly open to min.
       if (reopening.current) {
@@ -175,6 +227,10 @@ export function useResizablePane({
           );
         }
       }
+      // Last, so every consumer that defers work to the end of the drag (the
+      // terminal's re-fit, the latch/zoom recomputations) runs against the
+      // committed rest size rather than the frame before it.
+      closeSession();
     };
 
     window.addEventListener("pointermove", onMove);
@@ -190,24 +246,31 @@ export function useResizablePane({
       window.removeEventListener("pointerup", onUp);
       document.body.style.cursor = prevCursor;
       document.body.style.userSelect = prevSelect;
+      // NOTE: the session is deliberately NOT closed here. This effect
+      // re-subscribes whenever the host re-renders with a fresh `onCollapse`
+      // closure, and closing on every teardown would drop the refcount to 0
+      // mid-drag — unfreezing the terminal and re-running every gated effect.
+      // The three real ends (pointerup, snap-to-close, unmount) close it.
     };
   }, [
     isDragging,
     axis,
     side,
     min,
-    maxSize,
     onWidthChange,
     onCollapse,
     collapseOvershoot,
+    closeSession,
   ]);
 
-  // Clear any pending settle timer on unmount.
+  // Clear any pending settle timer on unmount, and release a session that
+  // somehow outlived its drag.
   useEffect(
     () => () => {
       if (settleTimer.current) window.clearTimeout(settleTimer.current);
+      closeSession();
     },
-    [],
+    [closeSession],
   );
 
   return { isDragging, startDrag, settling };

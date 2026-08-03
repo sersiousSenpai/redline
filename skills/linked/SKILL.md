@@ -12,7 +12,7 @@ description: >-
   through Redline's markdown pipeline (tables, mermaid, fenced code, callouts).
   Covers the spanning-conversation discipline, the consult contract, and
   formatting.
-version: 2
+version: 3
 ---
 
 # Redline linked discussion
@@ -59,12 +59,15 @@ You cannot hold every tab's full thread in your own context at once. So when
 synthesizing a tab's material would be heavy, **don't re-derive it — delegate.**
 Each tab has its own page-discussion agent that already holds that tab's entire
 thread. Ask it to synthesize, and only its digest comes back to you. Write
-routes require `-H "Authorization: Bearer $REDLINE_DAEMON_TOKEN"` after the URL
-(the token is already in your environment):
+routes need the bearer token, but never write `$REDLINE_DAEMON_TOKEN` into the
+command yourself — the bash sandbox rejects any command containing shell
+expansion before it runs. Have curl import the variable instead, with these two
+flags after the URL (needs curl ≥ 8.3):
 
 ```
 curl -s http://127.0.0.1:7676/v1/linked/consult \
-  -H "Authorization: Bearer $REDLINE_DAEMON_TOKEN" -X POST \
+  --variable %REDLINE_DAEMON_TOKEN= \
+  --expand-header "Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}" -X POST \
   -H 'Content-Type: application/json' \
   -d '{"tab":"<n>","question":"<what you need synthesized from that tab>"}'
 ```

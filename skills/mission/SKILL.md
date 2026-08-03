@@ -10,7 +10,7 @@ description: >-
   Redline's markdown pipeline (tables, mermaid, fenced code, callouts), and you
   finish by synthesizing a Drafter-ready brief. Covers gathering discipline,
   weaving pins, and synthesis formatting.
-version: 3
+version: 4
 ---
 
 # Redline mission orchestrator
@@ -53,9 +53,12 @@ handle for every `?tab=` selector, and how you name tabs to the user.
   title, selection, text, headings, links — without moving the user's focus.
 - **Go look yourself** — `/v1/browser/open {url}` opens a fresh tab to inspect
   something the user hasn't; `/v1/browser/focus?tab=<n>` switches the user *into*
-  a tab (only when they want to *be* there). These write routes require
-  `-H "Authorization: Bearer $REDLINE_DAEMON_TOKEN"` after the URL (the token is
-  already in your environment).
+  a tab (only when they want to *be* there). These write routes need the bearer
+  token. Never write `$REDLINE_DAEMON_TOKEN` into the command yourself — the bash
+  sandbox rejects any command containing shell expansion before it runs. Have
+  curl import the variable instead, with these two flags after the URL (needs
+  curl ≥ 8.3):
+  `--variable %REDLINE_DAEMON_TOKEN= --expand-header "Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}"`.
 - **The web** — you have **WebSearch** and **WebFetch** (no permission prompt).
   Use them to verify a claim or fill a gap, rather than driving the user's tabs to
   a search engine.

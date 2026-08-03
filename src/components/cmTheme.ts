@@ -35,22 +35,39 @@ const redlineHighlightStyle = HighlightStyle.define([
     color: "var(--color-hl-keyword)",
   },
   {
-    tag: [t.string, t.special(t.string), t.regexp, t.inserted, t.attributeValue],
-    color: "var(--color-hl-string)",
-  },
-  {
-    tag: [t.number, t.typeName, t.className, t.standard(t.variableName), t.atom],
-    color: "var(--color-hl-number)",
-  },
-  {
+    // attributeName/propertyName sit here (not in the title group) because
+    // syntect sends `entity.other.attribute-name` / `support.type.property-name`
+    // to `hljs-attr` → the string var; keeping the same slot means an
+    // attribute doesn't change color when Edit toggles. (For JS `obj.foo`
+    // syntect leaves the property unscoped either way — residual drift there
+    // is string-vs-plain, no worse than before.)
     tag: [
-      t.function(t.variableName),
-      t.function(t.propertyName),
-      t.definition(t.variableName),
-      t.tagName,
+      t.string,
+      t.special(t.string),
+      t.regexp,
+      t.inserted,
+      t.attributeValue,
       t.attributeName,
       t.propertyName,
     ],
+    color: "var(--color-hl-string)",
+  },
+  {
+    tag: [t.number, t.typeName, t.className, t.standard(t.variableName)],
+    color: "var(--color-hl-number)",
+  },
+  {
+    // `atom` rides with the keywords: syntect scopes language constants as
+    // `constant` → `hljs-literal` → the keyword var.
+    tag: [t.atom],
+    color: "var(--color-hl-keyword)",
+  },
+  {
+    // Only genuinely title-colored things: function names and tag names
+    // (syntect: `entity.name.function` / `entity.name.tag` → hljs-title/name).
+    // `definition(variableName)` deliberately falls through to the plain
+    // variable rule below — syntect doesn't scope those as titles.
+    tag: [t.function(t.variableName), t.function(t.propertyName), t.tagName],
     color: "var(--color-hl-title)",
   },
   {
@@ -92,6 +109,15 @@ const redlineEditorChrome = EditorView.theme({
     color: "var(--color-ink-muted)",
     border: "none",
     borderRight: "1px solid var(--color-rule)",
+  },
+  // Pinned (not inherited from the library's base theme) because CodeView's
+  // read-only gutter is sized to these exact metrics (lib/gutter.ts) so the
+  // code column doesn't move when Edit toggles — a @codemirror/view upgrade
+  // must not be able to silently break that parity.
+  ".cm-lineNumbers .cm-gutterElement": {
+    padding: "0 3px 0 5px",
+    minWidth: "20px",
+    boxSizing: "border-box",
   },
   ".cm-activeLineGutter": {
     backgroundColor: "color-mix(in srgb, var(--color-info) 8%, transparent)",

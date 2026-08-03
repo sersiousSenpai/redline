@@ -26,6 +26,7 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
         is never reached — if it IS, the whole tree (terminal dock included)
         has unmounted and every shell session died with it. Be loud. */}
     <ErrorBoundary
+      region="root"
       fallback={(err, reset) => (
         <div
           className="h-full flex flex-col items-center justify-center gap-3 p-8 text-center"

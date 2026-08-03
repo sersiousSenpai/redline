@@ -26,7 +26,9 @@ use tokio::process::{Child, ChildStderr, ChildStdout};
 
 use crate::claude_proc::{classify_line, resolve_claude_bin, StreamLine};
 use crate::db::Database;
-use crate::state::{now_millis, CommentKind, ReviewAnnotation, SessionStore, ThreadMessage};
+use crate::state::{
+    now_millis, CommentAttachment, CommentKind, ReviewAnnotation, SessionStore, ThreadMessage,
+};
 
 /// Where a thread's resumable fork-session id is persisted: plan comments
 /// store it on their `comments` row; review annotations on their
@@ -167,6 +169,12 @@ impl ForkState {
                 if let Some(mut p) = proc {
                     let _ = p.child.start_kill();
                 }
+                let _ = self.db.record_friction(
+                    "turn_timeout",
+                    Some("fork"),
+                    Some(&key),
+                    Some("180s turn ceiling"),
+                );
                 return Err("the colleague took too long to respond".to_string());
             }
         };
@@ -249,12 +257,31 @@ struct ForkCancelled {
 /// plan section in view, read-only, and without re-triggering plan mode.
 /// Follow-up turns send the reviewer's text verbatim (the fork already carries
 /// the discussion context).
+/// Tell the fork about files the reviewer attached. Absolute local paths are the
+/// whole transport — this fork has `Read`, so naming them is enough. Returns an
+/// empty string when there are none, so the prompt stays byte-identical to the
+/// pre-attachment contract for every discussion without a file.
+fn attachments_block(attachments: &[CommentAttachment]) -> String {
+    if attachments.is_empty() {
+        return String::new();
+    }
+    let mut p = String::from(
+        "\nThey attached these files. Read them with the Read tool before \
+         answering — they are local paths:\n",
+    );
+    for a in attachments {
+        p.push_str(&format!("- {} ({})\n", a.path, a.mime));
+    }
+    p
+}
+
 fn build_first_turn_prompt(
     is_question: bool,
     anchor_id: &str,
     quoted: Option<&str>,
     opening: &str,
     prior_resolution: Option<&str>,
+    attachments: &[CommentAttachment],
 ) -> String {
     let mut p = String::from(
         "You are discussing a plan you produced earlier in this session with \
@@ -297,6 +324,7 @@ fn build_first_turn_prompt(
             }
         }
     }
+    p.push_str(&attachments_block(attachments));
     p.push_str(
         "\nFollow the `sidecar` skill for how to structure this reply: lead with \
          the answer, then add a table, mermaid diagram, or callout only when it \
@@ -376,10 +404,13 @@ pub async fn fork_thread_send(
     session_id: String,
     comment_id: String,
     text: String,
+    // Files the reviewer dropped into this follow-up composer.
+    attachments: Option<Vec<CommentAttachment>>,
 ) -> Result<(), String> {
     if text.trim().is_empty() {
         return Err("empty message".to_string());
     }
+    let turn_attachments = attachments.unwrap_or_default();
     let key = fork_key(&session_id, &comment_id);
 
     // Reject a second concurrent turn for the same comment.
@@ -413,6 +444,7 @@ pub async fn fork_thread_send(
         body: text.clone(),
         status: "complete".to_string(),
         created_at: now_millis(),
+        attachments: turn_attachments.clone(),
     };
     fork.db
         .insert_thread_message(&user_msg)
@@ -425,14 +457,23 @@ pub async fn fork_thread_send(
     // first turn uses `text` (the frontend's seed) so the persisted user row
     // and the prompt stay identical.
     let prompt = match &prior_fork {
-        None => build_first_turn_prompt(
-            matches!(comment.kind, CommentKind::Question),
-            &comment.anchor_id,
-            comment.selection.as_ref().map(|s| s.quoted_text.as_str()),
-            &text,
-            comment.resolution.as_ref().map(|r| r.body.as_str()),
-        ),
-        Some(_) => text.clone(),
+        None => {
+            // Turn one sees everything already attached to the comment as well
+            // as anything dropped into this opening message.
+            let mut all = comment.attachments.clone();
+            all.extend(turn_attachments.iter().cloned());
+            build_first_turn_prompt(
+                matches!(comment.kind, CommentKind::Question),
+                &comment.anchor_id,
+                comment.selection.as_ref().map(|s| s.quoted_text.as_str()),
+                &text,
+                comment.resolution.as_ref().map(|r| r.body.as_str()),
+                &all,
+            )
+        }
+        // Follow-ups go verbatim, so a file dropped into one has to announce
+        // itself — otherwise the fork never learns the path exists.
+        Some(_) => format!("{text}{}", attachments_block(&turn_attachments)),
     };
 
     // Polis ledger: record the first-turn discussion prompt with its true
@@ -651,6 +692,7 @@ pub async fn review_thread_send(
         body: text.clone(),
         status: "complete".to_string(),
         created_at: now_millis(),
+        attachments: Vec::new(),
     };
     fork.db
         .insert_thread_message(&user_msg)
@@ -828,6 +870,7 @@ pub async fn review_question_send(
         body: text.clone(),
         status: "complete".to_string(),
         created_at: now_millis(),
+        attachments: Vec::new(),
     };
     fork.db
         .insert_thread_message(&user_msg)
@@ -969,11 +1012,14 @@ fn build_draft_first_turn_prompt(
          curl -s http://127.0.0.1:7676/v1/drafter/{draft_id}/doc\n\n\
          You may propose an edit to YOUR anchored block only — post a tracked \
          suggestion (rendered with accept/reject) with `commentId` set so the \
-         daemon can scope-check it. This write route requires \
-         `-H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\"` after the URL (the \
-         token is already in your environment):\n  \
+         daemon can scope-check it. This write route needs the bearer token: add \
+         the two `--variable`/`--expand-header` flags shown after the URL, which \
+         import it straight from the environment — never write \
+         `$REDLINE_DAEMON_TOKEN` into the command yourself (requires curl \
+         >= 8.3):\n  \
          curl -s http://127.0.0.1:7676/v1/drafter/{draft_id}/suggestions \
-         -H \"Authorization: Bearer $REDLINE_DAEMON_TOKEN\" -X POST \
+         --variable %REDLINE_DAEMON_TOKEN= \
+         --expand-header \"Authorization: Bearer {{{{REDLINE_DAEMON_TOKEN}}}}\" -X POST \
          -H 'Content-Type: application/json' -d '{{\"op\":\"replace_block\",\
 \"blockId\":\"<your block>\",\"original\":\"<its markdown as you read it>\",\
 \"markdown\":\"<your rewrite>\",\"commentId\":\"{comment_id}\",\
@@ -1048,6 +1094,7 @@ pub async fn draft_thread_send(
         body: text.clone(),
         status: "complete".to_string(),
         created_at: now_millis(),
+        attachments: Vec::new(),
     };
     fork.db
         .insert_thread_message(&user_msg)
@@ -1397,6 +1444,7 @@ async fn read_fork(
             body: text.clone(),
             status: "complete".to_string(),
             created_at: now_millis(),
+            attachments: Vec::new(),
         };
         if let Err(e) = db.insert_thread_message(&msg) {
             tracing::warn!(error = %e, "failed to persist assistant message");
@@ -1446,6 +1494,7 @@ fn finish_error(
         body: error.to_string(),
         status: "error".to_string(),
         created_at: now_millis(),
+        attachments: Vec::new(),
     };
     if let Err(e) = db.insert_thread_message(&msg) {
         tracing::warn!(error = %e, "failed to persist error thread message");
@@ -1465,6 +1514,39 @@ mod tests {
     use super::*;
 
     // stream-json line classification is covered by `claude_proc`'s own tests.
+
+    /// The draft-thread write contract authenticates via curl's own variable
+    /// import. It is built from a `format!` string, so the literal braces are
+    /// quadrupled in source; the wrong escape level renders `{TOKEN}` and the
+    /// suggestion silently 401s at runtime with nothing to see in the UI.
+    #[test]
+    fn draft_thread_prompt_imports_the_token_with_curl_not_the_shell() {
+        let comment = crate::state::DraftComment {
+            id: "c-1".to_string(),
+            draft_id: "d-9".to_string(),
+            block_id: Some("rl:blk-abc".to_string()),
+            sel_char_start: None,
+            sel_char_end: None,
+            sel_quoted_text: Some("the selected line".to_string()),
+            body: "tighten this".to_string(),
+            author: None,
+            created_at: 0,
+            fork_session_id: None,
+        };
+        let p = build_draft_first_turn_prompt("d-9", &comment, "what about X?");
+
+        // The URL stays immediately after `-s` so the command-prefix allow
+        // rules still match, with the auth flags after it.
+        assert!(p.contains("curl -s http://127.0.0.1:7676/v1/drafter/d-9/suggestions"));
+        assert!(p.contains(
+            "--variable %REDLINE_DAEMON_TOKEN= \
+             --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\""
+        ));
+        // Shell expansion never survives the agent bash sandbox.
+        assert!(!p.contains("Bearer $REDLINE_DAEMON_TOKEN"));
+        // The scoping payload still round-trips its `format!` args.
+        assert!(p.contains("\"commentId\":\"c-1\""));
+    }
 
     /// The Phase-3 fork loosening must grant EXACTLY the scoped localhost-daemon
     /// curl allow and nothing broader: no bare `Bash` allow, no other curl host,
@@ -1589,6 +1671,7 @@ mod tests {
             Some("the detail section"),
             "Why this order?",
             None,
+            &[],
         );
         assert!(p.contains("Why this order?"));
         assert!(p.contains("the detail section"));
@@ -1601,7 +1684,7 @@ mod tests {
 
     #[test]
     fn first_turn_prompt_without_selection_uses_anchor_only() {
-        let p = build_first_turn_prompt(false, "B", None, "Reconsider this.", None);
+        let p = build_first_turn_prompt(false, "B", None, "Reconsider this.", None, &[]);
         assert!(p.contains("§B"));
         assert!(p.contains("left a comment"));
         assert!(p.contains("Reconsider this."));
@@ -1680,6 +1763,7 @@ mod tests {
             None,
             "But what about retries?",
             Some("I added exponential backoff in §A."),
+            &[],
         );
         assert!(p.contains("You previously resolved this comment with:"));
         assert!(p.contains("exponential backoff"));

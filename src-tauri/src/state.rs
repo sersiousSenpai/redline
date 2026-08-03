@@ -408,6 +408,32 @@ pub struct CommentSelection {
     pub sub_block_id: Option<String>,
 }
 
+/// A file the reviewer attached to a comment — a screenshot of the UI they
+/// mean, a mock, a log.
+///
+/// `path` is an ABSOLUTE local path, and that is the whole transport. The
+/// revise payload is delivered as plain text to the user's real Claude Code
+/// session, which has full tool access, so naming the file is strictly better
+/// than base64-ing it into the prompt: no size blowup, no encoding, and Claude
+/// reads it with the tool it already has. The file is *copied* into app data at
+/// capture time (see `save_attachment` / `import_attachment`) precisely so this
+/// path stays valid — submit can happen long after capture, and a source the
+/// user has since moved or deleted would break the payload silently.
+///
+/// `bytes` and `mime` are recorded at capture so the UI can render a chip
+/// without touching disk.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CommentAttachment {
+    /// Absolute path inside `<app_data_dir>/attachments/<session_id>/`.
+    pub path: String,
+    /// Display name (the original basename, sanitized and de-duplicated).
+    pub name: String,
+    /// Best-effort content type from the extension, e.g. "image/png".
+    pub mime: String,
+    pub bytes: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Comment {
@@ -480,6 +506,12 @@ pub struct Comment {
     /// back-linking an imported comment to its share. `None` unless imported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub share_request_id: Option<String>,
+    /// Files the reviewer attached to this comment ("make it look like this",
+    /// plus a screenshot). Empty for every comment without one, which keeps the
+    /// serialized shape — and the feedback payload — byte-identical to the
+    /// pre-attachment contract.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<CommentAttachment>,
 }
 
 /// One turn in a comment's fork-agent discussion thread (Phase 2). Rows are
@@ -498,6 +530,11 @@ pub struct ThreadMessage {
     pub body: String,
     /// "complete" | "error".
     pub status: String,
+    /// Files the reviewer dropped into this follow-up. The fork can `Read` them
+    /// during the discussion, and their paths ride the `attach_discussion`
+    /// rider into the next Revise payload. Always empty on assistant turns.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<CommentAttachment>,
     pub created_at: i64,
 }
 
@@ -622,6 +659,68 @@ pub struct BrowseMessage {
     /// "complete" | "error".
     pub status: String,
     pub created_at: i64,
+}
+
+/// One visible line of a voice/discussion panel transcript. Mirrors
+/// `BrowseMessage`, keyed by the voice key (a plan session id, or
+/// `drafter:<draft_id>` — the same key `voice.rs` uses everywhere).
+///
+/// The agent's *memory* already survives everything (the forked claude session
+/// id in `voice_sessions`); this is the matching persistence for what the user
+/// can SEE. Without it the panel's transcript lived only in component state and
+/// was destroyed by an incoming plan, a session switch, or a restart —
+/// mid-conversation and unannounced.
+///
+/// Rows are written from Rust, not the panel, so a reply still lands when the
+/// panel is unmounted. `role` mirrors the panel's own three line kinds rather
+/// than the wire roles: "you" (the reviewer's turn, stored as its *displayed*
+/// label), "agent", and "note" (markers like "▶ Read the plan").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceMessage {
+    pub id: String,
+    pub session_key: String,
+    /// "you" | "agent" | "note".
+    pub role: String,
+    pub text: String,
+    pub created_at: i64,
+}
+
+/// A plan action item the voice agent *offered* but has not written. When the
+/// agent proposes a concrete change out loud it stages the offer mid-turn over
+/// the bridge; the panel renders a `＋ Add as item` chip under that reply, and
+/// only the user's tap turns it into a real `[feedback]` comment.
+///
+/// Staging rather than writing is the whole point: an offer is not a write, so
+/// it needs no "at the user's direction" gate — and the round trip where the
+/// user says "add that as feedback" and the agent posts a second turn later
+/// disappears.
+///
+/// `message_id` is the `voice_messages` row of the reply the offer came from,
+/// filled in by `bind_comment_offers` once that reply is persisted (the offer's
+/// curl necessarily lands *before* its own turn finishes). `None` means "loose"
+/// — a valid render state, shown under the streaming bubble or at the tail.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommentOffer {
+    pub id: String,
+    pub session_id: String,
+    pub message_id: Option<String>,
+    /// An `rl:blk-` id from `GET .../plan`, validated at stage time.
+    pub block_id: String,
+    /// The feedback directive, in plain words — what the comment would say.
+    pub body: String,
+    /// A ≤60-char chip line; falls back to a truncated `body` in the UI.
+    pub label: Option<String>,
+    pub agent_id: String,
+    /// `pending | added | dismissed`.
+    pub status: String,
+    pub created_at: i64,
+    /// The plan moved on and this offer's block is gone from the latest
+    /// revision — the chip renders disabled. Computed on read, **not** a
+    /// column: staleness is a fact about the current plan, not about the row.
+    #[serde(default)]
+    pub stale: bool,
 }
 
 /// One turn in a draft's discussion thread (the Prompt Drafter's 💬 agent).
@@ -868,6 +967,9 @@ pub struct NewCommentRequest {
     pub external_created_at: Option<i64>,
     #[serde(default)]
     pub share_request_id: Option<String>,
+    /// Files captured by the composer before Save (see `Comment::attachments`).
+    #[serde(default)]
+    pub attachments: Vec<CommentAttachment>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1259,6 +1361,7 @@ impl SessionStore {
             reviewer: request.reviewer,
             external_created_at: request.external_created_at,
             share_request_id: request.share_request_id,
+            attachments: request.attachments,
         };
 
         let latest = session.revisions.last_mut().expect("non-empty checked above");
@@ -1357,6 +1460,24 @@ impl SessionStore {
         session.session_id = new_id.to_string();
         if let Err(e) = self.db.rekey_session(old_id, new_id) {
             tracing::error!(error = %e, "failed to rekey session in db");
+        }
+        // Attachment paths embed the session id, so they move with the rows.
+        // The directory itself is moved by the caller (it needs the app handle);
+        // the two belong together — see `fsbrowse::rekey_session_attachments`.
+        if let Err(e) = self.db.rekey_attachment_paths(old_id, new_id) {
+            tracing::warn!(error = %e, "failed to rekey attachment paths");
+        }
+        for rev in &mut session.revisions {
+            for c in &mut rev.comments {
+                for a in &mut c.attachments {
+                    a.path = a
+                        .path
+                        .replace(
+                            &format!("/attachments/{old_id}/"),
+                            &format!("/attachments/{new_id}/"),
+                        );
+                }
+            }
         }
         map.insert(new_id.to_string(), session);
         true
@@ -1853,6 +1974,7 @@ mod tests {
             reviewer: None,
             external_created_at: None,
             share_request_id: None,
+            attachments: Vec::new(),
         }
     }
 

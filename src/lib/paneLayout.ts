@@ -17,6 +17,30 @@ export function docMinFor(winWidth: number): number {
 /** Width of one vertical PaneDivider. */
 export const DIVIDER_W = 6;
 
+/** Resting width of the docked voice panel ("Talk to the plan"). */
+export const VOICE_PANE_W = 380;
+/** Hard stop when dragging the voice panel narrower — below this its composer
+ *  and transport row wrap into an unusable stack. */
+export const VOICE_PANE_MIN = 300;
+/** The plan strip that must survive beside a docked voice panel. Unlike the
+ *  side panes, the voice panel never curtains: it lives INSIDE the document
+ *  column, so instead of sliding over the doc it simply stops growing. */
+export const VOICE_DOC_MIN = 360;
+
+/** Widest the voice panel may get inside a document column of `docColW`.
+ *  Bounded twice — it never takes more than 60% of the column, and it always
+ *  leaves `VOICE_DOC_MIN` of readable document — then floored at its own
+ *  minimum (clamped to the column) so a squeezed window still yields a usable
+ *  panel rather than a negative width. */
+export function voicePaneMaxW(docColW: number): number {
+  const w = Math.max(0, docColW);
+  const roomy = Math.min(w - VOICE_DOC_MIN, Math.round(w * 0.6));
+  // No early return for w <= 0: an `if (w <= 0) return VOICE_PANE_MIN` would
+  // make the cap JUMP from 300 at a 0px column down to 50 at a 50px one. Both
+  // terms below rise with the column, so the cap is monotonic all the way down.
+  return Math.max(Math.min(VOICE_PANE_MIN, w), roomy);
+}
+
 export interface PaneLayoutInput {
   winWidth: number;
   sidebarWidth: number;

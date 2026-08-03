@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import {
+  memo,
   useCallback,
   useEffect,
   useMemo,
@@ -142,7 +143,7 @@ export interface PlanEditorActions {
  * the whole document. Phase 2: editable, with the existing debounced
  * `changeLedger` doc↔comment sync wired on top (no inline marks yet).
  */
-export function PlanEditor({
+function PlanEditorBase({
   markdown,
   sections,
   diff,
@@ -708,3 +709,9 @@ function cssEscape(s: string): string {
   }
   return s.replace(/["\\\n]/g, "\\$&");
 }
+
+/** The document surface reconciles a large tree, so it is memoized: a divider
+ *  drag's one commit (or any unrelated App state change) must not walk it.
+ *  Tiptap builds its view in a content-keyed effect, so this is reconciliation
+ *  cost only — the editor itself is never torn down by it. */
+export const PlanEditor = memo(PlanEditorBase);

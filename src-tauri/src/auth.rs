@@ -23,10 +23,27 @@
 //! - The token rides the **environment**, not the `--allowedTools` strings.
 //!   The permission rules are persistent (settings.json backfill) and
 //!   prefix-glob matched, so a per-boot literal there is both impossible to
-//!   keep fresh and a transcript leak. Agents append
-//!   `-H "Authorization: Bearer $REDLINE_DAEMON_TOKEN"` *after* the URL,
-//!   which the existing `curl -s http://127.0.0.1:7676/*` prefix rules
-//!   already match — no allow-string churn anywhere.
+//!   keep fresh and a transcript leak. But agents cannot reach an env var
+//!   through the shell either: the bash sandbox **rejects any command
+//!   containing shell expansion before it runs**, so the obvious
+//!   `-H "Authorization: Bearer $REDLINE_DAEMON_TOKEN"` never executes.
+//!   Agents therefore have *curl itself* import the variable, no shell
+//!   involved:
+//!
+//!   ```text
+//!   curl -s http://127.0.0.1:7676/v1/… \
+//!     --variable %REDLINE_DAEMON_TOKEN= \
+//!     --expand-header "Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}" \
+//!     -X POST -H 'Content-Type: application/json' -d '{…}'
+//!   ```
+//!
+//!   The trailing `=` supplies an empty default, so a caller without the
+//!   variable (an external claude session running the globally installed
+//!   skills) gets a readable 401 instead of curl's `variable expansion
+//!   failure`. Needs curl >= 8.3, where both flags landed. The URL still
+//!   sits immediately after `-s` and every flag after it, so the existing
+//!   `curl -s http://127.0.0.1:7676/*` prefix rules keep matching — no
+//!   allow-string churn anywhere.
 //! - The middleware **fails closed on unregistered routes**: a new route
 //!   401s until it gets a `ROUTE_TABLE` entry. That is the "freeze /v1"
 //!   half of Phase 2 made mechanical — the table (and the generated
@@ -43,8 +60,10 @@ use serde_json::json;
 
 /// Env var carrying the per-boot master token into every process Redline
 /// spawns (agent turns via `claude_proc`, terminals via `pty`). Skills and
-/// embedded prompts reference it as `$REDLINE_DAEMON_TOKEN` inside a
-/// double-quoted `-H` argument so the shell expands it.
+/// embedded prompts never name it to the shell — the bash sandbox rejects
+/// commands containing expansion — so they have curl import it directly with
+/// `--variable %REDLINE_DAEMON_TOKEN= --expand-header "Authorization: Bearer
+/// {{REDLINE_DAEMON_TOKEN}}"` (curl >= 8.3).
 pub const ENV_DAEMON_TOKEN: &str = "REDLINE_DAEMON_TOKEN";
 
 /// How a route is guarded. The three classes are the whole story of the
@@ -79,6 +98,10 @@ pub struct RouteSpec {
 /// these in their manifest; `extension.rs` validates against this list.
 pub const SCOPE_PLAN_SUGGEST: &str = "plan.suggest";
 pub const SCOPE_PLAN_COMMENT: &str = "plan.comment";
+/// Deliberately **not** a reuse of `plan.comment`: "may propose, may not write"
+/// is exactly the capability an offer invents, and `ROUTE_TABLE` is keyed on
+/// `(method, path)` — so a flag in the body could never carry its own class.
+pub const SCOPE_PLAN_OFFER: &str = "plan.offer";
 pub const SCOPE_BROWSER_DRIVE: &str = "browser.drive";
 pub const SCOPE_CONSULT: &str = "consult";
 pub const SCOPE_MEMORY_PROPOSE: &str = "memory.propose";
@@ -88,6 +111,7 @@ pub const SCOPE_REVIEW_ANNOTATE: &str = "review.annotate";
 pub const KNOWN_SCOPES: &[&str] = &[
     SCOPE_PLAN_SUGGEST,
     SCOPE_PLAN_COMMENT,
+    SCOPE_PLAN_OFFER,
     SCOPE_BROWSER_DRIVE,
     SCOPE_CONSULT,
     SCOPE_MEMORY_PROPOSE,
@@ -164,6 +188,14 @@ pub const ROUTE_TABLE: &[RouteSpec] = &[
         purpose: "Capture a [feedback] comment (voice agent and read-only agents) that rides the next Revise",
         request: "JSON {body, block_id?, ...}",
         response: "JSON created comment",
+    },
+    RouteSpec {
+        method: "POST",
+        path: "/v1/sessions/:session_id/comment-offers",
+        class: RouteClass::Protected(SCOPE_PLAN_OFFER),
+        purpose: "Stage an OFFERED plan item — a `＋ Add as item` chip in the discussion panel; nothing is written until the user taps it",
+        request: "JSON {blockId, body, label?, agentId}",
+        response: "JSON {id, status:\"pending\"} — the offer, not a comment",
     },
     RouteSpec {
         method: "GET",
@@ -348,6 +380,14 @@ pub const ROUTE_TABLE: &[RouteSpec] = &[
         purpose: "Librarian friction digest: ground-truth counts and staleness",
         request: "—",
         response: "JSON overview",
+    },
+    RouteSpec {
+        method: "GET",
+        path: "/v1/context/codehealth",
+        class: RouteClass::Open,
+        purpose: "Shipwright code digest: git state, recorded corrections, static repo health, runtime failures, unfinished work",
+        request: "?repo=<absolute path>",
+        response: "JSON code digest",
     },
     RouteSpec {
         method: "GET",
@@ -555,7 +595,7 @@ impl Denial {
                 "route is not in the v1 contract (ROUTE_TABLE) — new routes must be registered there".to_string()
             }
             Denial::MissingToken { scope } => format!(
-                "this route requires a bearer token (scope `{scope}`): send `Authorization: Bearer $REDLINE_DAEMON_TOKEN`"
+                "this route requires a bearer token (scope `{scope}`): add `--variable %REDLINE_DAEMON_TOKEN= --expand-header \"Authorization: Bearer {{{{REDLINE_DAEMON_TOKEN}}}}\"` after the URL (curl >= 8.3)"
             ),
             Denial::BadToken => "bearer token not recognized (stale? tokens rotate every Redline launch)".to_string(),
             Denial::ScopeNotGranted { scope } => {
@@ -608,11 +648,24 @@ pub async fn require_daemon_auth(req: Request, next: Next) -> Response {
     let bearer = bearer_of(&req);
     match authorize(&path, &method, bearer.as_deref()) {
         Ok(()) => next.run(req).await,
-        Err(denial) => (
-            StatusCode::UNAUTHORIZED,
-            axum::Json(json!({ "error": denial.message() })),
-        )
-            .into_response(),
+        Err(denial) => {
+            // Every 401 is friction: a skill carrying a stale curl recipe, an
+            // extension missing a scope, a route added without a ROUTE_TABLE
+            // row. The middleware holds no `Database` (it is thin glue over a
+            // pure decision), so it records through the process-global sink.
+            let message = denial.message();
+            crate::db::note_friction(
+                "auth_denied",
+                Some("daemon"),
+                None,
+                Some(&format!("{method} {path}: {message}")),
+            );
+            (
+                StatusCode::UNAUTHORIZED,
+                axum::Json(json!({ "error": message })),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -626,7 +679,10 @@ pub fn render_api_doc() -> String {
     out.push_str("## Auth classes\n\n");
     out.push_str("- **open** — no credential (read-only surface; may tokenize in a later pass).\n");
     out.push_str("- **hook contract** — no credential *by design*: called by the user's own claude sessions anywhere on the machine through the globally installed hooks/skills, which cannot carry a per-boot secret.\n");
-    out.push_str("- **token: `<scope>`** — requires `Authorization: Bearer <token>`, where the token is either the per-boot master token (env `REDLINE_DAEMON_TOKEN` in every Redline-spawned process) or an extension token granted that scope (see `~/.redline/extensions/`, `src-tauri/src/extension.rs`).\n\n");
+    out.push_str("- **token: `<scope>`** — requires `Authorization: Bearer <token>`, where the token is either the per-boot master token (env `REDLINE_DAEMON_TOKEN` in every Redline-spawned process) or an extension token granted that scope (see `~/.redline/extensions/`, `src-tauri/src/extension.rs`).\n");
+    out.push_str("  Callers must not expand the variable through a shell (agent bash sandboxes reject commands containing expansion). Have curl import it instead, keeping the URL first so command-prefix permission rules still match:\n\n");
+    out.push_str("  ```\n  curl -s http://127.0.0.1:7676/v1/… \\\n    --variable %REDLINE_DAEMON_TOKEN= \\\n    --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" \\\n    -X POST -H 'Content-Type: application/json' -d '{…}'\n  ```\n\n");
+    out.push_str("  Both flags require **curl >= 8.3**. The trailing `=` is an empty default: without it curl aborts with `variable expansion failure`; with it an unset token yields a clean 401. macOS ships curl 8.4 on 14+, but 7.x on 11–13.\n\n");
     out.push_str("Unregistered routes fail closed: a route added to the router without a `ROUTE_TABLE` entry answers 401.\n\n");
     out.push_str("## Routes\n\n");
     out.push_str("| Method | Path | Auth | Purpose | Request | Response |\n");
@@ -747,6 +803,7 @@ mod tests {
         for (path, method) in [
             ("/v1/sessions/:session_id/suggestions", "POST"),
             ("/v1/sessions/:session_id/comments", "POST"),
+            ("/v1/sessions/:session_id/comment-offers", "POST"),
             ("/v1/browser/navigate", "POST"),
             ("/v1/browser/query", "POST"),
             ("/v1/browser/download", "POST"),

@@ -360,6 +360,18 @@ pub async fn ai_review_start(
                             let _ = p.start_kill();
                         }
                         stalled = true;
+                        // Fire-and-forget: a wedged agent is friction the app
+                        // computes and used to throw away.
+                        let _ = db.record_friction(
+                            "stall_kill",
+                            Some("review"),
+                            Some(&rid),
+                            Some(&format!(
+                                "silent for {}s (ceiling {}s)",
+                                silent.as_secs(),
+                                STALL_CEILING.as_secs()
+                            )),
+                        );
                     }
                 }
             }

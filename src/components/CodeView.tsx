@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 import type { DocLine, DocMeta, DocOpen } from "../types";
 import { useLiveFile } from "../hooks/useFsWatch";
+import { gutterWidthCss } from "../lib/gutter";
+import { rafCoalesce } from "../lib/raf";
 import { visibleRange, chunksForRange } from "../lib/virtual";
 
 // Read-only source viewer. Normal-sized files arrive whole from `open_doc` (one
@@ -38,6 +40,10 @@ interface CodeViewProps {
   /** Reports the freshly loaded file's meta (size / binary / too-large) so
    *  the host can decide whether the Edit affordance is available. */
   onMeta?: (m: DocMeta) => void;
+  /** Mirror of the current scroll offset, written on every scroll frame —
+   *  lets the host seed the editor with the same position on an Edit swap
+   *  without subscribing to scroll state. */
+  scrollPosRef?: React.MutableRefObject<number>;
 }
 
 /** The currently-displayed document. `inlineLines` is present for normal-sized
@@ -51,7 +57,7 @@ interface LoadedDoc {
   inlineLines?: DocLine[];
 }
 
-export default function CodeView({ path, onMeta }: CodeViewProps) {
+function CodeView({ path, onMeta, scrollPosRef }: CodeViewProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   // Ref-mirrored so `reload` (keyed on path alone) always reports through the
   // latest callback without re-running on handler identity churn.
@@ -153,7 +159,10 @@ export default function CodeView({ path, onMeta }: CodeViewProps) {
   // New file → start at the top (a live reload of the same file keeps position).
   useLayoutEffect(() => {
     setScrollTop(0);
+    if (scrollPosRef) scrollPosRef.current = 0;
     if (scrollRef.current) scrollRef.current.scrollTop = 0;
+    // scrollPosRef is a stable ref container, not a reactive input.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doc?.path]);
 
   // A body (scroll container) is rendered for any non-notice doc; the measure
@@ -166,9 +175,15 @@ export default function CodeView({ path, onMeta }: CodeViewProps) {
     if (!el) return;
     const measure = () => setViewportH(el.clientHeight);
     measure();
-    const ro = new ResizeObserver(measure);
+    // Coalesced, like the scroll path below: a dock drag changes clientHeight
+    // every frame, and each raw fire re-renders the windowed line list.
+    const onResize = rafCoalesce(measure);
+    const ro = new ResizeObserver(onResize);
     ro.observe(el);
-    return () => ro.disconnect();
+    return () => {
+      ro.disconnect();
+      onResize.cancel();
+    };
   }, [rendersBody]);
 
   // Coalesce scroll events to one state update per frame.
@@ -178,8 +193,12 @@ export default function CodeView({ path, onMeta }: CodeViewProps) {
     rafRef.current = requestAnimationFrame(() => {
       rafRef.current = null;
       const el = scrollRef.current;
-      if (el) setScrollTop(el.scrollTop);
+      if (el) {
+        setScrollTop(el.scrollTop);
+        if (scrollPosRef) scrollPosRef.current = el.scrollTop;
+      }
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useEffect(
     () => () => {
@@ -246,9 +265,12 @@ export default function CodeView({ path, onMeta }: CodeViewProps) {
     return chunk?.[i - Math.floor(i / CHUNK) * CHUNK];
   };
 
+  // Gutter cell width includes the 1px rule inside it, so the code column
+  // starts at exactly the same x as the editor's (CM gutter + its border).
+  const gutterWidth = `calc(${gutterWidthCss(lineCount)} + 1px)`;
   const rows: React.ReactNode[] = [];
   for (let i = start; i < end; i++) {
-    rows.push(<Line key={i} line={lineAt(i)} />);
+    rows.push(<Line key={i} line={lineAt(i)} num={i} gutterWidth={gutterWidth} />);
   }
 
   return (
@@ -309,9 +331,22 @@ export default function CodeView({ path, onMeta }: CodeViewProps) {
 }
 
 // One source line, rendered at a fixed height so the virtualizer's math holds.
-// Highlighted lines render classed token spans; others render raw text. An
-// not-yet-fetched line renders as blank space (its height is already reserved).
-function Line({ line }: { line: DocLine | undefined }) {
+// A line-number gutter cell leads each row, metric-matched to the editor's CM6
+// gutter (same font, same 5px/3px padding, same 20px floor — see lib/gutter.ts
+// and the pinned rule in cmTheme.ts) so toggling Edit never shifts the code
+// column. It sticks to the left edge under the <pre>'s own horizontal scroll,
+// like .cm-gutters. Highlighted lines render classed token spans; others render
+// raw text. A not-yet-fetched paged line still shows its number over reserved
+// blank space.
+function Line({
+  line,
+  num,
+  gutterWidth,
+}: {
+  line: DocLine | undefined;
+  num: number;
+  gutterWidth: string;
+}) {
   return (
     <div
       style={{
@@ -320,21 +355,40 @@ function Line({ line }: { line: DocLine | undefined }) {
         whiteSpace: "pre",
         fontFamily: "var(--font-mono, ui-monospace, Menlo, monospace)",
         fontSize: "12.5px",
-        paddingLeft: "16px",
-        paddingRight: "16px",
+        display: "flex",
       }}
     >
-      {line?.tokens
-        ? line.tokens.map((t, i) =>
-            t.c ? (
-              <span key={i} className={t.c}>
-                {t.t}
-              </span>
-            ) : (
-              <span key={i}>{t.t}</span>
-            ),
-          )
-        : (line?.text ?? "")}
+      <span
+        style={{
+          flex: "none",
+          width: gutterWidth,
+          boxSizing: "border-box",
+          textAlign: "right",
+          padding: "0 3px 0 5px",
+          color: "var(--color-ink-muted)",
+          background: "var(--color-paper)",
+          borderRight: "1px solid var(--color-rule)",
+          position: "sticky",
+          left: 0,
+          zIndex: 1,
+          userSelect: "none",
+        }}
+      >
+        {num + 1}
+      </span>
+      <span style={{ flex: "none", padding: "0 16px" }}>
+        {line?.tokens
+          ? line.tokens.map((t, i) =>
+              t.c ? (
+                <span key={i} className={t.c}>
+                  {t.t}
+                </span>
+              ) : (
+                <span key={i}>{t.t}</span>
+              ),
+            )
+          : (line?.text ?? "")}
+      </span>
     </div>
   );
 }
@@ -349,3 +403,7 @@ function Notice({ children }: { children: React.ReactNode }) {
     </div>
   );
 }
+
+/** Memoized: the windowed line list is the most expensive thing in the
+ *  center pane to reconcile, and a dock drag changes only its height. */
+export default memo(CodeView);

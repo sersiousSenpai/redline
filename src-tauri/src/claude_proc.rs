@@ -90,9 +90,11 @@ fn known_install_locations() -> Vec<PathBuf> {
 /// children; an `#!/usr/bin/env node` shebang (npm installs) needs the `node`
 /// that lives alongside `claude` to be findable. Every spawn also carries the
 /// per-boot daemon token in the environment — that's how an agent's curl to a
-/// protected `/v1` route authenticates (`-H "Authorization: Bearer
-/// $REDLINE_DAEMON_TOKEN"` after the URL, so the pre-authorized allow-prefix
-/// rules still match).
+/// protected `/v1` route authenticates. curl imports the variable itself
+/// (`--variable %REDLINE_DAEMON_TOKEN= --expand-header "Authorization: Bearer
+/// {{REDLINE_DAEMON_TOKEN}}"`, curl >= 8.3) rather than letting the shell
+/// expand it, which the agent bash sandbox would reject; the flags sit after
+/// the URL so the pre-authorized allow-prefix rules still match. See `auth.rs`.
 pub fn claude_command(claude_bin: &str) -> Command {
     let mut cmd = Command::new(claude_bin);
     if let Some(bin_dir) = Path::new(claude_bin).parent().filter(|p| p.is_dir()) {
@@ -361,8 +363,9 @@ mod tests {
 
     #[test]
     fn bridge_args_carry_the_seats_model_and_effort_before_resume() {
-        // "voice" is written by no other test in this process (the seat store
-        // is process-global) — configure, assert, clean up.
+        // The seat store is process-global and `seat::tests` clears it
+        // wholesale, so hold the shared guard while configuring + asserting.
+        let _guard = crate::seat::store_guard();
         crate::seat::set_seat_for_test(
             "voice",
             Some(crate::seat::SeatConfig {

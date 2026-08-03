@@ -17,7 +17,7 @@ description: >-
   callouts). Covers the spanning-app discipline, the while-you-were-away feed,
   the consult contract, writing at the user's direction, memory retrieval, and
   formatting.
-version: 3
+version: 4
 ---
 
 # Redline Companion
@@ -81,15 +81,18 @@ exists, what each is called, and which are consultable or busy right now.
 
 You cannot hold every surface's full context at once, and you don't need to:
 every surface has its own agent already holding it. When synthesizing a
-surface's material would be heavy, **delegate**. Write routes require
-`-H "Authorization: Bearer $REDLINE_DAEMON_TOKEN"` after the URL (the token is
-already in your environment):
+surface's material would be heavy, **delegate**. Write routes need the bearer
+token, but never write `$REDLINE_DAEMON_TOKEN` into the command yourself — the
+bash sandbox rejects any command containing shell expansion before it runs. Have
+curl import the variable instead, with these two flags after the URL (needs
+curl ≥ 8.3):
 
 ```
 curl -s http://127.0.0.1:7676/v1/global/consult \
-  -H "Authorization: Bearer $REDLINE_DAEMON_TOKEN" -X POST \
+  --variable %REDLINE_DAEMON_TOKEN= \
+  --expand-header "Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}" -X POST \
   -H 'Content-Type: application/json' \
-  -d '{"surface":"<browse|plan|mission|linked|drafter>","id":"<id — for browse, the tab number>","question":"<what you need synthesized>"}'
+  -d '{"surface":"<browse|plan|mission|linked|drafter|shipwright>","id":"<id — for browse, the tab number; for shipwright, `-` or a repo path>","question":"<what you need synthesized>"}'
 ```
 
 The response is `{"digest":"...","surface":"...","label":"..."}` — fold the
@@ -106,6 +109,12 @@ digest into your reply; never paste a colleague's raw thread.
   `/v1/context/threads/voice/<id>` instead.
 - A consult of a **plan session** runs an ephemeral read-only fork of it —
   safe against the user's live terminal, nothing persisted.
+- The **Shipwright** (`"surface":"shipwright"`, `"id":"-"`) is the agent that
+  knows Redline's own code health — recorded corrections, static repo health,
+  runtime failures, unfinished work. It is a persistent thread, so a consult
+  lands as a check-in and it answers from the digest and findings it already
+  has. Ask it rather than rebuilding that context yourself; its digest is also
+  readable directly at `GET /v1/context/codehealth`.
 
 ## Writing at the user's direction
 

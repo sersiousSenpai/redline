@@ -7,6 +7,8 @@
 import { LanguageDescription } from "@codemirror/language";
 import { languages } from "@codemirror/language-data";
 
+import type { FileContent } from "../types";
+
 /** The language registry entry for a file path (metadata only — calling
  *  `.load()` on the result does the actual dynamic grammar import, which Vite
  *  splits into a per-language chunk). Null when no grammar matches. */
@@ -14,6 +16,25 @@ export function languageForPath(path: string): LanguageDescription | null {
   const idx = path.lastIndexOf("/");
   const name = idx >= 0 ? path.slice(idx + 1) : path;
   return LanguageDescription.matchFilename(languages, name);
+}
+
+/** Load everything the editor needs to mount already-highlighted: the raw
+ *  text and the grammar, in parallel. A grammar that fails to load resolves to
+ *  `null` — the editor still opens, plain — instead of today's alternative of
+ *  an unhandled rejection leaving the file permanently uncolored. Read
+ *  failures and non-editable files (too large / binary) reject: the caller
+ *  stays in the read view and surfaces the message. */
+export async function prepareEditContent<L>(
+  read: () => Promise<FileContent>,
+  loadLanguage: (() => Promise<L>) | null,
+): Promise<{ content: string; language: L | null }> {
+  const [f, language] = await Promise.all([
+    read(),
+    loadLanguage ? loadLanguage().catch(() => null) : Promise.resolve(null),
+  ]);
+  if (f.tooLarge) throw new Error("File is too large to edit (2 MB cap).");
+  if (f.isBinary || f.content == null) throw new Error("Binary file — not editable.");
+  return { content: f.content, language };
 }
 
 /** What to do when the file changes on disk under an open editor. */

@@ -3,16 +3,19 @@
 mod agent;
 mod ai_review;
 mod auth;
+mod bookshelf;
 mod browse;
 #[cfg(target_os = "macos")]
 mod browser_popup;
 mod bundle;
 mod classmem;
+mod codehealth;
 mod claude_proc;
 mod code;
 mod companion;
 mod context;
 mod db;
+mod devmap;
 mod dictation;
 mod dictation_whisper;
 mod draft_chat;
@@ -27,6 +30,7 @@ mod keeper;
 mod ledger;
 mod linked;
 mod librarian;
+mod seatassign;
 /// The MCP stdio proxy's request→route→response core. `pub` so the
 /// `redline-mcp` binary (`src/bin/`) can share the exact, unit-tested logic.
 pub mod mcp;
@@ -36,12 +40,15 @@ mod parser;
 #[cfg(test)]
 mod perf_guard;
 mod pty;
+mod repoicon;
 mod resolutions;
 mod review;
 mod review_feedback;
 mod seat;
+mod shipwright;
 mod skill;
 mod state;
+mod thumbs;
 mod tts;
 mod update;
 mod userconfig;
@@ -630,7 +637,9 @@ impl ClaudeProc {
 /// `ps -p <pid> -o comm=` — `None` when no such process (dead) or the output is
 /// empty. One call yields both liveness and identity (for the reuse guard),
 /// and shells out like the neighbouring `ppid_of`, so no new dependency.
-fn current_comm(pid: u32) -> Option<String> {
+/// `pub(crate)` because the Localhost dashboard needs the identical guard
+/// before it signals a dev server (`devmap::dev_server_stop`).
+pub(crate) fn current_comm(pid: u32) -> Option<String> {
     let out = std::process::Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "comm="])
         .output()
@@ -758,6 +767,12 @@ fn arm_revise_watchdog(
                         "revise watchdog: no new plan and claude not alive — feedback \
                          likely lost, marking detached"
                     );
+                    let _ = store.database().record_friction(
+                        "revise_watchdog",
+                        Some("plan"),
+                        Some(&session_id),
+                        Some("no new plan and claude not alive — feedback likely lost"),
+                    );
                     mark_session_detached(&app, &store, &session_id);
                     return;
                 }
@@ -877,7 +892,8 @@ impl ActiveMission {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SurfaceInfo {
-    /// `plan | drafter | browser | review | terminal | welcome`.
+    /// `plan | drafter | browser | review | servers | terminal | welcome`.
+    /// Free-form on purpose — a new surface needs no backend change here.
     pub kind: String,
     /// The surface's id in its own id-space (plan session id, draft id,
     /// browse id, review id). `None` for terminal/welcome.
@@ -1189,10 +1205,28 @@ async fn handle_plan(
                 from = %target, to = %session_id,
                 "rebound restore handshake to the live session id"
             );
+            // Attachment files are stored under the session id and referenced
+            // by absolute path. `rekey_session` already rewrote the paths; move
+            // the directory they now point at (that half needs the app handle).
+            fsbrowse::rekey_session_attachments(
+                &app_state.app_handle,
+                &target,
+                &session_id,
+            );
         }
     }
 
     let resolution_result = resolutions::extract_resolutions(&raw_plan);
+    if let Some(err) = resolution_result.parse_error.as_deref() {
+        // A malformed REDLINE_RESOLUTIONS block from the model: computed here
+        // on every revision and, until now, never counted anywhere.
+        let _ = app_state.store.database().record_friction(
+            "resolution_parse_error",
+            Some("plan"),
+            Some(&session_id),
+            Some(err),
+        );
+    }
     // Parse and stamp every block with a stable sidecar id; the augmented
     // markdown is what we persist so block ids survive the reparse-on-load
     // model. When a previous revision exists, rebind freshly-minted v2 ids to
@@ -1274,6 +1308,14 @@ async fn handle_plan(
         tracing::warn!(
             session_id = %session_id,
             "ask_mode_violation: Claude returned a modified plan body during an Ask round-trip"
+        );
+        // `tracing` writes to stderr, which goes nowhere when Redline launches
+        // from /Applications — so the warning above was invisible in practice.
+        let _ = app_state.store.database().record_friction(
+            "ask_mode_violation",
+            Some("plan"),
+            Some(&session_id),
+            Some("Claude returned a modified plan body during an Ask round-trip"),
         );
         Some(true)
     } else {
@@ -1788,6 +1830,13 @@ async fn run_server(state: AppState) {
             "/v1/sessions/:session_id/comments",
             post(handle_suggest_feedback),
         )
+        // …and the same content *offered* rather than written: the agent stages
+        // it mid-turn, the discussion panel shows a `＋ Add as item` chip under
+        // that reply, and only the user's tap creates the comment above.
+        .route(
+            "/v1/sessions/:session_id/comment-offers",
+            post(handle_offer_feedback),
+        )
         // Out-of-band feedback delivery (Layer 1): the denied `ExitPlanMode`
         // reason is now a single calm line; the full review payload is fetched
         // here by the model's pre-authorized curl. See `PendingFeedback`.
@@ -1844,6 +1893,10 @@ async fn run_server(state: AppState) {
         // ground-truth counts/staleness (backlog, held proposals, stalled
         // reviews, bulging branches). Read-only; rides the same `curl` allow.
         .route("/v1/context/overview", get(handle_context_overview))
+        // The Shipwright's code digest as JSON — an on-demand re-read for the
+        // Companion / voice agent / MCP surface. The Shipwright itself never
+        // depends on this: its digest is baked into the spawn prompt.
+        .route("/v1/context/codehealth", get(handle_context_codehealth))
         // Context access (Phase 4): read-only query surface over the lake for
         // agents (internal via curl, external via the MCP proxy). Filtered
         // prompts, one session's full history, and aggregate stats. All bounded,
@@ -2012,6 +2065,84 @@ async fn handle_suggest_feedback(
         }
         Err(e) => agent_error_response(e).into_response(),
     }
+}
+
+/// How many items one turn may offer. Two is a conversation; a list of chips
+/// under every reply is a form.
+const MAX_OFFERS_PER_TURN: i64 = 2;
+
+/// `POST /v1/sessions/:session_id/comment-offers` — stage an offered plan item.
+///
+/// This writes nothing to the plan. The block id is resolved **here**, at stage
+/// time, so a bogus id 404s the agent while it can still re-read the plan
+/// rather than becoming a chip that only fails when the user taps it. And
+/// deliberately no `refresh_tray`: nothing is pending review yet.
+async fn handle_offer_feedback(
+    State(app_state): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(req): Json<agent::OfferFeedbackRequest>,
+) -> axum::response::Response {
+    if req.body.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "body must not be empty").into_response();
+    }
+    if req.agent_id.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "agentId must not be empty").into_response();
+    }
+    if let Err(e) = agent::resolve_block_anchor(&app_state.store, &session_id, &req.block_id) {
+        return agent_error_response(e).into_response();
+    }
+
+    let db = app_state.store.database();
+    match db.count_open_offers_this_turn(&session_id) {
+        Ok(n) if n >= MAX_OFFERS_PER_TURN => {
+            return (
+                StatusCode::CONFLICT,
+                format!(
+                    "this turn has already offered {n} items — say the rest out loud instead"
+                ),
+            )
+                .into_response()
+        }
+        Err(e) => return browser_error_response(e.to_string()),
+        Ok(_) => {}
+    }
+
+    let offer = state::CommentOffer {
+        id: uuid::Uuid::new_v4().to_string(),
+        session_id: session_id.clone(),
+        // Bound to its reply by `bind_comment_offers` when that turn finishes —
+        // the offer necessarily lands first.
+        message_id: None,
+        block_id: req.block_id,
+        body: req.body.trim().to_string(),
+        label: req
+            .label
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty()),
+        agent_id: req.agent_id.trim().to_string(),
+        status: "pending".to_string(),
+        created_at: ledger::now_millis(),
+        stale: false,
+    };
+    if let Err(e) = db.insert_comment_offer(&offer) {
+        return browser_error_response(e.to_string());
+    }
+    tracing::info!(
+        session_id = %session_id,
+        offer_id = %offer.id,
+        agent = %offer.agent_id,
+        "plan item offered (not written)"
+    );
+    let _ = app_state.app_handle.emit("comment-offer", &offer);
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "id": offer.id,
+            "status": "pending",
+            "note": "offered — the user taps ＋ Add as item to create it; do not post it yourself",
+        })),
+    )
+        .into_response()
 }
 
 // --- Browse-agent daemon routes -------------------------------------------
@@ -2741,6 +2872,40 @@ async fn handle_global_consult(
                 .and_then(|r| r)
                 .map(|digest| (digest, label))
         }
+        "shipwright" => {
+            // The Shipwright is a persistent thread, so a consult lands as a
+            // check-in turn in its own session — it answers from its last digest
+            // and findings instead of re-deriving them. That is the whole point:
+            // the voice agent and Companion ASK it rather than rebuild its
+            // context. `id` is the repo path (or empty for the default).
+            let sess = handle.state::<ShipwrightSession>().inner().clone();
+            let repo = if req.id.trim() == "-" || req.id.trim().is_empty() {
+                std::env::current_dir()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| ".".to_string())
+            } else {
+                req.id.clone()
+            };
+            let label = format!("the Shipwright on {repo}");
+            let prior = sess.get();
+            let question = format!(
+                "A colleague is checking in. Answer from the digest and findings \
+                 you already have — do NOT re-run your survey, and do NOT return \
+                 JSON for this turn. Reply in prose, a few sentences, citing the \
+                 numbers you already cited.\n\n{question}"
+            );
+            let repo_for_run = repo.clone();
+            tokio::time::timeout(outer, async move {
+                let (text, sid) =
+                    shipwright::run_shipwright(&repo_for_run, question, prior.as_deref()).await?;
+                sess.set(sid);
+                Ok::<String, String>(text)
+            })
+            .await
+            .map_err(|_| "the consult timed out".to_string())
+            .and_then(|r| r)
+            .map(|digest| (digest, label))
+        }
         "voice" => {
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -2759,7 +2924,10 @@ async fn handle_global_consult(
         other => {
             return (
                 StatusCode::BAD_REQUEST,
-                format!("unknown surface `{other}` — one of browse|plan|mission|linked|drafter"),
+                format!(
+                    "unknown surface `{other}` — one of \
+                     browse|plan|mission|linked|drafter|shipwright"
+                ),
             )
                 .into_response();
         }
@@ -2868,6 +3036,22 @@ async fn handle_global_agents(State(app_state): State<AppState>) -> axum::respon
         })
         .collect();
 
+    // The Shipwright: one persistent thread over the repo, not a per-item list.
+    // It appears on the map so a colleague can ask it about code health instead
+    // of re-deriving that context themselves.
+    let shipwright_findings = db
+        .list_shipwright_findings(false)
+        .map(|f| f.len() as i64)
+        .unwrap_or(0);
+    let shipwright = serde_json::json!({
+        "surface": "shipwright",
+        "id": "-",
+        "label": "the Shipwright (Redline's own code health)",
+        "detail": format!("{shipwright_findings} open finding(s)"),
+        "consultable": true,
+        "busy": false,
+    });
+
     Json(serde_json::json!({
         "activeSurface": app_state.active_surface.get(),
         "journalHead": db.journal_head().unwrap_or(0),
@@ -2876,7 +3060,9 @@ async fn handle_global_agents(State(app_state): State<AppState>) -> axum::respon
         "missions": missions,
         "linked": linkeds,
         "reviews": reviews,
-        "notes": "consult browse|plan|mission|linked|drafter via /v1/global/consult; \
+        "shipwright": shipwright,
+        "notes": "consult browse|plan|mission|linked|drafter|shipwright via \
+                  /v1/global/consult (the shipwright's id is `-`, or a repo path); \
                   voice threads are read-only at /v1/context/threads/voice/<id>",
     }))
     .into_response()
@@ -4156,7 +4342,7 @@ fn host_of(url: &str) -> String {
 /// This is the security boundary — the endpoint writes fetched (and therefore
 /// attacker-influenceable) bytes, so a derived or supplied name must never
 /// escape the target directory.
-fn sanitize_basename(input: &str) -> String {
+pub(crate) fn sanitize_basename(input: &str) -> String {
     let last = input.rsplit(['/', '\\']).next().unwrap_or(input);
     let mut out: String = last.chars().filter(|c| !c.is_control()).collect();
     out = out.trim().trim_start_matches('.').trim().to_string();
@@ -4171,7 +4357,7 @@ fn sanitize_basename(input: &str) -> String {
 
 /// Pick a non-colliding path in `dir` for `name`: `name`, then `name (1).ext`,
 /// `name (2).ext`, … so a repeat download never clobbers an existing file.
-fn dedup_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+pub(crate) fn dedup_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     let chosen = dedup_name(name, |candidate| dir.join(candidate).exists());
     dir.join(chosen)
 }
@@ -4537,6 +4723,9 @@ fn delete_session(
 ) -> Result<bool, String> {
     let removed = delete_session_inner(&store, &pending, &session_id, force.unwrap_or(false))?;
     if removed {
+        // The comments that referenced them are gone; don't leave their files
+        // behind in app data.
+        fsbrowse::delete_session_attachments(&app, &session_id);
         let _ = app.emit(
             "session-status-changed",
             SessionEvent {
@@ -5586,6 +5775,10 @@ struct UiPrefs {
     /// DB rather than localStorage so "fires at most once" survives a
     /// cache clear.
     workspace_nudge: Option<String>,
+    /// Seat Assignment run settings (`{posture, discretion}`) — an opaque JSON
+    /// blob owned by `src/lib/seatAssign.ts`, in the DB so the choice survives
+    /// reopening the dialog.
+    seat_assign_prefs: Option<String>,
 }
 
 /// `key` → `app_settings` row; the allowlist keeps this command from becoming
@@ -5596,6 +5789,7 @@ fn ui_pref_setting_key(key: &str) -> Option<&'static str> {
         "font" => Some("redline.ui.font"),
         "lint" => Some("redline.ui.lint"),
         "workspaceNudge" => Some("redline.ui.workspaceNudge"),
+        "seatAssignPrefs" => Some("redline.ui.seatAssignPrefs"),
         _ => None,
     }
 }
@@ -5607,6 +5801,7 @@ fn get_ui_prefs(settings: tauri::State<'_, Settings>) -> UiPrefs {
         font: settings.db.get_setting("redline.ui.font"),
         lint: settings.db.get_setting("redline.ui.lint"),
         workspace_nudge: settings.db.get_setting("redline.ui.workspaceNudge"),
+        seat_assign_prefs: settings.db.get_setting("redline.ui.seatAssignPrefs"),
     }
 }
 
@@ -5631,15 +5826,27 @@ struct AgentSeatsView {
     seats: std::collections::HashMap<String, seat::SeatConfig>,
     known_seats: Vec<String>,
     claude_bin: Option<String>,
+    /// A previous chart is stashed, so Revert has something to restore.
+    can_revert: bool,
+    /// What each seat does, for the settings tooltips. Served from the same
+    /// `SEAT_FACTS` the Seat Assignment agent reads, so the explanation the
+    /// user hovers and the one the agent reasons from can never disagree.
+    blurbs: Vec<seatassign::SeatBlurb>,
 }
 
-#[tauri::command]
-fn get_agent_seats() -> AgentSeatsView {
+fn agent_seats_view(db: &db::Database) -> AgentSeatsView {
     AgentSeatsView {
         seats: seat::all_seats(),
         known_seats: seat::KNOWN_SEATS.iter().map(|s| s.to_string()).collect(),
         claude_bin: seat::claude_bin_override(),
+        can_revert: seat::has_snapshot(db),
+        blurbs: seatassign::seat_blurbs(),
     }
+}
+
+#[tauri::command]
+fn get_agent_seats(settings: tauri::State<'_, Settings>) -> AgentSeatsView {
+    agent_seats_view(&settings.db)
 }
 
 #[tauri::command]
@@ -5657,6 +5864,96 @@ fn set_claude_bin_override(
     path: String,
 ) -> Result<(), String> {
     seat::set_claude_bin_override(&settings.db, &path)
+}
+
+// --- Seat Assignment agent (see `seatassign.rs`) --------------------------
+
+/// Run the Seat Assignment agent once and return its proposed chart. Read-only:
+/// nothing is written until the user applies a pick, so no change events fire.
+#[tauri::command(async)]
+async fn seat_assignment_agent(
+    store: tauri::State<'_, SessionStore>,
+    state: tauri::State<'_, seatassign::SeatAssignState>,
+    posture: String,
+    discretion: i64,
+) -> Result<seatassign::SeatAssignment, String> {
+    let (prompt, allowed) = {
+        let db = store.database();
+        let digest = seatassign::build_seat_digest(&db);
+        let allowed = seatassign::known_models(&digest);
+        (
+            seatassign::build_seat_prompt_from_digest(&digest, &posture, discretion),
+            allowed,
+        )
+    };
+    let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+    let started = std::time::Instant::now();
+    let outcome = seatassign::run_seat_assigner(&state, &cwd, prompt).await;
+    let elapsed = started.elapsed();
+    let text = match outcome {
+        Ok(t) => t,
+        Err(e) => {
+            seatassign::log_run(&format!("FAILED after {elapsed:?}: {e}"));
+            return Err(e);
+        }
+    };
+    let parsed = seatassign::parse_assignment(&text, &allowed);
+    seatassign::log_run(&format!(
+        "finished in {elapsed:?} — {} pick(s), summary={:?}\n--- reply ---\n{text}",
+        parsed.picks.len(),
+        parsed.summary
+    ));
+    Ok(parsed)
+}
+
+/// Stop an in-flight run. Idempotent — cancelling nothing is not an error.
+#[tauri::command]
+fn seat_assignment_cancel(state: tauri::State<'_, seatassign::SeatAssignState>) {
+    state.cancel();
+}
+
+/// Probe proposed model ids. Aliases short-circuit without spawning, so the
+/// common case costs nothing; only a custom id actually starts a process.
+#[tauri::command(async)]
+async fn seat_preflight(models: Vec<String>) -> Vec<seatassign::ModelCheck> {
+    let mut out = Vec::new();
+    for model in models {
+        out.push(seatassign::preflight_model(&model).await);
+    }
+    out
+}
+
+/// Apply picks atomically. On the first apply of a card (`snapshot_first`) the
+/// whole pre-apply map is stashed first, so Revert can undo the batch.
+#[tauri::command]
+fn apply_seat_picks(
+    settings: tauri::State<'_, Settings>,
+    picks: Vec<seatassign::SeatPick>,
+    snapshot_first: bool,
+) -> Result<AgentSeatsView, String> {
+    if snapshot_first {
+        seat::snapshot_seats(&settings.db)?;
+    }
+    let current = seat::all_seats();
+    let updates: Vec<(String, seat::SeatConfig)> = picks
+        .iter()
+        .map(|p| {
+            let base = current.get(&p.seat).cloned().unwrap_or_default();
+            (p.seat.clone(), seatassign::merge_pick(&base, p))
+        })
+        .collect();
+    seat::set_seats(&settings.db, &updates)?;
+    Ok(agent_seats_view(&settings.db))
+}
+
+/// Undo the whole batch — the answer to "Apply all" collapsing a per-row review
+/// into one click.
+#[tauri::command]
+fn revert_seat_assignment(
+    settings: tauri::State<'_, Settings>,
+) -> Result<AgentSeatsView, String> {
+    seat::restore_snapshot(&settings.db)?;
+    Ok(agent_seats_view(&settings.db))
 }
 
 /// Relay settings for live collaboration: the signaling server URLs minted
@@ -6795,15 +7092,21 @@ fn record_drafted_prompt(
     Ok(())
 }
 
-/// Mirror the drafter's markdown into the `drafts` table so agents can read the
-/// live draft via `GET /v1/drafter/:id/doc`. Called on the drafter's existing
-/// 400ms persist debounce; the title is derived here (first ATX heading, else
-/// first non-blank line) so the frontend sends only the markdown.
-#[tauri::command]
+/// Persist the drafter's document. As of the Bookshelf this writes the **real
+/// document** (`doc_json`, the TipTap fidelity source) as well as the markdown
+/// mirror agents read via `GET /v1/drafter/:id/doc`. Called on the drafter's
+/// existing 400ms persist debounce; the title is derived here (first ATX
+/// heading, else first non-blank line) so the frontend sends only the content.
+///
+/// `(async)` because it now serializes a whole TipTap document on that debounce
+/// — perf-budget rule 4 governs exactly this, and `codehealth`'s own
+/// `command_hygiene` probe would flag it otherwise.
+#[tauri::command(async)]
 fn drafter_set_doc(
     store: tauri::State<'_, SessionStore>,
     draft_id: String,
     markdown: String,
+    doc_json: Option<String>,
     project_path: Option<String>,
 ) -> Result<(), String> {
     if draft_id.trim().is_empty() {
@@ -6817,8 +7120,50 @@ fn drafter_set_doc(
             title.as_deref(),
             project_path.as_deref(),
             &markdown,
+            doc_json.as_deref(),
         )
         .map_err(|e| e.to_string())
+}
+
+/// Record a contained React render crash. `ErrorBoundary` already catches these
+/// and `console.error`s them — which lands in a devtools console nobody has
+/// open. Lightweight by design (one bounded insert), so it stays sync.
+#[tauri::command]
+fn record_render_crash(
+    store: tauri::State<'_, SessionStore>,
+    region: String,
+    message: String,
+) -> Result<(), String> {
+    let _ = store.database().record_friction(
+        "render_crash",
+        Some("ui"),
+        None,
+        Some(&format!("{region}: {message}")),
+    );
+    Ok(())
+}
+
+/// The document the Bookshelf stores: `{docJson, docMarkdown, projectPath}`.
+/// `PromptDrafter` loads from here instead of localStorage — localStorage now
+/// keeps only the *currently open* draft id, which is a UI preference.
+#[tauri::command(async)]
+fn drafter_get_doc(
+    store: tauri::State<'_, SessionStore>,
+    draft_id: String,
+) -> Result<serde_json::Value, String> {
+    if draft_id.trim().is_empty() {
+        return Err("missing draft id".to_string());
+    }
+    let row = store
+        .database()
+        .get_draft_doc(&draft_id)
+        .map_err(|e| e.to_string())?;
+    let (doc_json, doc_markdown, project_path) = row.unwrap_or((None, String::new(), None));
+    Ok(serde_json::json!({
+        "docJson": doc_json,
+        "docMarkdown": doc_markdown,
+        "projectPath": project_path,
+    }))
 }
 
 /// First ATX heading of a draft, else its first non-blank line (trimmed to a
@@ -7019,6 +7364,247 @@ async fn librarian_agent(
     let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
     let (text, _session) = librarian::run_librarian(&cwd, prompt).await?;
     Ok(librarian::parse_checklist(&text))
+}
+
+// ---------------------------------------------------------------------------
+// The Shipwright — a grounded self-improvement agent on the Redline repo
+// ---------------------------------------------------------------------------
+
+/// The Shipwright's persistent session id, so consults and L1 follow-ups land
+/// in the SAME thread as the run they're about. Unlike the one-shot Librarian,
+/// the Shipwright is a thread you can come back to — that's what lets the voice
+/// agent and Companion *ask* it rather than rebuild its context.
+#[derive(Clone, Default)]
+struct ShipwrightSession(Arc<std::sync::Mutex<Option<String>>>);
+
+impl ShipwrightSession {
+    fn get(&self) -> Option<String> {
+        self.0.lock().ok().and_then(|g| g.clone())
+    }
+    fn set(&self, sid: Option<String>) {
+        if let (Ok(mut g), Some(sid)) = (self.0.lock(), sid) {
+            *g = Some(sid);
+        }
+    }
+}
+
+/// What a Shipwright run produced, plus where it landed.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShipwrightRun {
+    summary: String,
+    findings: Vec<shipwright::Finding>,
+    /// The Bookshelf document the findings landed in. A **new** document every
+    /// run — the user's current draft is never touched.
+    draft_id: String,
+    /// The rev the digest measured, so the UI can say so without re-deriving.
+    short_rev: String,
+    /// Findings skipped because an identical `(category, summary)` already
+    /// exists — including one the user dismissed.
+    duplicates: usize,
+}
+
+/// Run the Shipwright once: build the ground-truth code digest, bake it into the
+/// spawn prompt, run the read-only agent headless against the repo, parse its
+/// findings, persist them (deduped), and land them as a **new** Bookshelf
+/// document the user trims and launches.
+///
+/// Read-only with respect to the repo at every step. The only writes are to
+/// Redline's own DB: the findings and the document they became.
+#[tauri::command(async)]
+async fn shipwright_agent(
+    store: tauri::State<'_, SessionStore>,
+    session: tauri::State<'_, ShipwrightSession>,
+    repo_path: Option<String>,
+    folder_id: Option<String>,
+) -> Result<ShipwrightRun, String> {
+    let db = store.database();
+    let repo = repo_path
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or_else(|| std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| ".".to_string()));
+    let digest = {
+        let db = db.clone();
+        let repo = repo.clone();
+        tokio::task::spawn_blocking(move || codehealth::build_code_digest(&db, &repo))
+            .await
+            .map_err(|e| e.to_string())?
+    };
+    let prompt = shipwright::build_shipwright_prompt_from_digest(&digest);
+    let prior = session.get();
+    let (text, sid) = shipwright::run_shipwright(&repo, prompt, prior.as_deref()).await?;
+    session.set(sid);
+    let result = shipwright::parse_findings(&text);
+
+    // Land the findings as a NEW document — the user's open draft is untouched.
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let draft_id = uuid::Uuid::new_v4().to_string();
+    let markdown = shipwright::findings_to_markdown(&result, &digest);
+    let title = draft_title_from_markdown(&markdown);
+    db.upsert_draft(
+        &draft_id,
+        title.as_deref(),
+        Some(&repo),
+        &markdown,
+        // No TipTap body yet: the drafter builds one from the markdown when the
+        // document is first opened. `doc_markdown` is what agents read either way.
+        None,
+    )
+    .map_err(|e| e.to_string())?;
+    if let Some(folder) = folder_id.as_deref().filter(|f| !f.trim().is_empty()) {
+        let _ = db.move_draft(&draft_id, Some(folder));
+    }
+
+    let now = ledger::now_millis();
+    let mut duplicates = 0usize;
+    for f in &result.findings {
+        let row = db::ShipwrightFinding {
+            id: uuid::Uuid::new_v4().to_string(),
+            run_id: run_id.clone(),
+            category: f.category.clone(),
+            summary: f.title.clone(),
+            evidence: Some(f.evidence.clone()),
+            proposal: Some(f.proposal.clone()),
+            guard: Some(f.guard.clone()),
+            files: serde_json::to_string(&f.files).ok(),
+            status: "pending".to_string(),
+            dismissed: false,
+            draft_id: Some(draft_id.clone()),
+            created_at: now,
+            resolved_at: None,
+        };
+        match db.insert_shipwright_finding(&row) {
+            Ok(None) => duplicates += 1,
+            Ok(Some(_)) => {}
+            Err(e) => tracing::warn!(error = %e, "failed to persist a Shipwright finding"),
+        }
+    }
+    let _ = db.append_journal(
+        "shipwright_run",
+        Some("drafter"),
+        Some(&draft_id),
+        title.as_deref(),
+        Some(&format!("{} finding(s)", result.findings.len())),
+    );
+
+    Ok(ShipwrightRun {
+        summary: result.summary,
+        findings: result.findings,
+        draft_id,
+        short_rev: digest.git.short_rev,
+        duplicates,
+    })
+}
+
+/// Every finding the Shipwright has ever produced, for the review strip.
+#[tauri::command(async)]
+fn shipwright_findings(
+    store: tauri::State<'_, SessionStore>,
+    include_dismissed: bool,
+) -> Result<Vec<db::ShipwrightFinding>, String> {
+    store
+        .database()
+        .list_shipwright_findings(include_dismissed)
+        .map_err(|e| e.to_string())
+}
+
+/// Record what the user did with a finding: `accepted` (it survived the trim
+/// into the launched document) or `dismissed` (it never comes back under the
+/// same wording). `shipped` is NOT settable here — it is detected.
+#[tauri::command(async)]
+fn shipwright_resolve(
+    store: tauri::State<'_, SessionStore>,
+    id: String,
+    status: String,
+    draft_id: Option<String>,
+) -> Result<(), String> {
+    if !matches!(status.as_str(), "accepted" | "dismissed" | "pending") {
+        return Err(format!(
+            "`{status}` is not a user verdict — `shipped` is detected from the \
+             files a later commit touched, never self-declared"
+        ));
+    }
+    store
+        .database()
+        .resolve_shipwright_finding(&id, &status, draft_id.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+/// Flip accepted findings to `shipped` when a later commit touched a file their
+/// `files` array named. **Detection, not self-declaration** — self-declared
+/// success is the one number an agent will always report favourably. Returns
+/// how many flipped.
+#[tauri::command(async)]
+async fn shipwright_detect_shipped(
+    store: tauri::State<'_, SessionStore>,
+    repo_path: String,
+) -> Result<usize, String> {
+    let db = store.database();
+    let candidates = db.shipwright_unshipped().map_err(|e| e.to_string())?;
+    if candidates.is_empty() {
+        return Ok(0);
+    }
+    // Files touched by the last 50 commits — a window wide enough to catch work
+    // that landed over a few sessions, narrow enough to stay cheap.
+    let repo = repo_path.clone();
+    let touched: std::collections::HashSet<String> = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["--no-optional-locks", "log", "-50", "--name-only", "--format="])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let mut flipped = 0;
+    for (id, files_json) in candidates {
+        let files: Vec<String> = serde_json::from_str(&files_json).unwrap_or_default();
+        if files.iter().any(|f| touched.contains(f.as_str())) {
+            db.resolve_shipwright_finding(&id, "shipped", None)
+                .map_err(|e| e.to_string())?;
+            flipped += 1;
+        }
+    }
+    Ok(flipped)
+}
+
+/// `GET /v1/context/codehealth` — the same digest as JSON, so an agent can
+/// re-read it mid-conversation. The Shipwright never *depends* on this (its
+/// digest is baked into the spawn prompt); it is for the Companion, the voice
+/// agent, and the external MCP surface.
+async fn handle_context_codehealth(
+    State(app_state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<CodeHealthQ>,
+) -> axum::response::Response {
+    let db = app_state.store.database();
+    let repo = q.repo.filter(|p| !p.trim().is_empty()).unwrap_or_else(|| {
+        std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| ".".to_string())
+    });
+    match tokio::task::spawn_blocking(move || codehealth::build_code_digest(&db, &repo)).await {
+        Ok(digest) => Json(digest).into_response(),
+        Err(e) => browser_error_response(e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct CodeHealthQ {
+    repo: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -7782,6 +8368,11 @@ pub fn run() {
             get_agent_seats,
             set_agent_seat,
             set_claude_bin_override,
+            seat_assignment_agent,
+            seat_assignment_cancel,
+            seat_preflight,
+            apply_seat_picks,
+            revert_seat_assignment,
             userconfig::get_workspace,
             userconfig::save_workspace,
             get_relay_config,
@@ -7819,7 +8410,10 @@ pub fn run() {
             fsbrowse::read_file_base64,
             fsbrowse::save_text_file,
             fsbrowse::ensure_dir,
+            fsbrowse::save_attachment,
+            fsbrowse::import_attachment,
             fsbrowse::home_dir,
+            repoicon::repo_icon,
             highlight::open_doc,
             highlight::doc_lines,
             highlight::highlight_diff,
@@ -7893,6 +8487,12 @@ pub fn run() {
             voice::voice_forget,
             voice::voice_kill_all,
             voice::voice_session_probe,
+            voice::voice_session_status,
+            voice::voice_thread,
+            voice::voice_note,
+            voice::comment_offers_pending,
+            voice::comment_offer_add,
+            voice::comment_offer_dismiss,
             tts::tts_get_settings,
             tts::tts_set_settings,
             tts::tts_synth,
@@ -7907,6 +8507,9 @@ pub fn run() {
             dictation_whisper::whisper_model_present,
             dictation_whisper::dictation_get_engine,
             dictation_whisper::dictation_set_engine,
+            devmap::dev_servers_scan,
+            devmap::dev_server_stop,
+            devmap::dev_server_set_thumb,
             browser_navigate,
             browser_eval,
             browser_close,
@@ -7920,8 +8523,29 @@ pub fn run() {
             browser_suspend,
             browser_set_active,
             browser_set_tabs,
+            thumbs::browser_take_thumbnail,
+            thumbs::thumbs_list,
+            thumbs::thumbs_prune,
             surface_set_active,
             drafter_set_doc,
+            drafter_get_doc,
+            record_render_crash,
+            bookshelf::bookshelf_list,
+            bookshelf::bookshelf_migrate_local,
+            bookshelf::bookshelf_new_draft,
+            bookshelf::bookshelf_rename_draft,
+            bookshelf::bookshelf_move_draft,
+            bookshelf::bookshelf_draft_impact,
+            bookshelf::bookshelf_delete_draft,
+            bookshelf::bookshelf_create_folder,
+            bookshelf::bookshelf_rename_folder,
+            bookshelf::bookshelf_move_folder,
+            bookshelf::bookshelf_folder_impact,
+            bookshelf::bookshelf_delete_folder,
+            bookshelf::draft_source_add,
+            bookshelf::draft_source_import_file,
+            bookshelf::draft_source_list,
+            bookshelf::draft_source_delete,
             draft_chat::draft_chat_send,
             draft_chat::get_draft_chat_thread,
             draft_chat::draft_chat_cancel,
@@ -7979,6 +8603,10 @@ pub fn run() {
             memory_revert_link,
             prompt_text,
             librarian_agent,
+            shipwright_agent,
+            shipwright_findings,
+            shipwright_resolve,
+            shipwright_detect_shipped,
             export_context_bundle,
             mirror_status,
             pick_mirror_dir,
@@ -8107,6 +8735,7 @@ pub fn run() {
             app.manage(claims.clone());
 
             app.manage(pty::PtyState::new());
+            app.manage(seatassign::SeatAssignState::new());
 
             app.manage(fswatch::FsWatcher::new(app.handle().clone()));
 
@@ -8202,8 +8831,16 @@ pub fn run() {
             let active_surface = ActiveSurface::new();
             app.manage(active_surface.clone());
 
+            // The Shipwright's resumable session id — one persistent thread, so
+            // an L1 follow-up or a consult check-in continues the run it's about.
+            app.manage(ShipwrightSession::default());
+
             let store = SessionStore::new(db);
             app.manage(store.clone());
+            // Friction telemetry for the two contexts that hold no `Database`
+            // (the axum auth middleware, chiefly). Installed once, right after
+            // the store exists and before the daemon starts serving.
+            db::install_friction_sink(store.database());
 
             let pending = PendingResponses::new();
             app.manage(pending.clone());
@@ -9051,6 +9688,7 @@ mod tests {
                     reviewer: None,
                     external_created_at: None,
                     share_request_id: None,
+                    attachments: Vec::new(),
                 },
             )
             .unwrap();

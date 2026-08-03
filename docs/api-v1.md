@@ -7,6 +7,16 @@ The local daemon on `127.0.0.1:7676` (loopback only) is Redline's extension API.
 - **open** — no credential (read-only surface; may tokenize in a later pass).
 - **hook contract** — no credential *by design*: called by the user's own claude sessions anywhere on the machine through the globally installed hooks/skills, which cannot carry a per-boot secret.
 - **token: `<scope>`** — requires `Authorization: Bearer <token>`, where the token is either the per-boot master token (env `REDLINE_DAEMON_TOKEN` in every Redline-spawned process) or an extension token granted that scope (see `~/.redline/extensions/`, `src-tauri/src/extension.rs`).
+  Callers must not expand the variable through a shell (agent bash sandboxes reject commands containing expansion). Have curl import it instead, keeping the URL first so command-prefix permission rules still match:
+
+  ```
+  curl -s http://127.0.0.1:7676/v1/… \
+    --variable %REDLINE_DAEMON_TOKEN= \
+    --expand-header "Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}" \
+    -X POST -H 'Content-Type: application/json' -d '{…}'
+  ```
+
+  Both flags require **curl >= 8.3**. The trailing `=` is an empty default: without it curl aborts with `variable expansion failure`; with it an unset token yields a clean 401. macOS ships curl 8.4 on 14+, but 7.x on 11–13.
 
 Unregistered routes fail closed: a route added to the router without a `ROUTE_TABLE` entry answers 401.
 
@@ -22,6 +32,7 @@ Unregistered routes fail closed: a route added to the router without a `ROUTE_TA
 | GET | `/v1/sessions/:session_id/plan` | open | Latest plan revision with block structure (agent-in-doc read) | session id in path | JSON {version, blocks:[{id, markdown}, ...]} |
 | POST | `/v1/sessions/:session_id/suggestions` | token: `plan.suggest` | Post a tracked edit suggestion against a plan block | JSON {block_id, op, markdown, ...} | JSON accepted suggestion (or staleness error) |
 | POST | `/v1/sessions/:session_id/comments` | token: `plan.comment` | Capture a [feedback] comment (voice agent and read-only agents) that rides the next Revise | JSON {body, block_id?, ...} | JSON created comment |
+| POST | `/v1/sessions/:session_id/comment-offers` | token: `plan.offer` | Stage an OFFERED plan item — a `＋ Add as item` chip in the discussion panel; nothing is written until the user taps it | JSON {blockId, body, label?, agentId} | JSON {id, status:"pending"} — the offer, not a comment |
 | GET | `/v1/sessions/:session_id/feedback` | hook contract | Out-of-band delivery of the full review payload after a calm one-line deny | session id in path | the pending feedback body (plain text payload) |
 | GET | `/v1/browser/active` | open | The tab the user is looking at (id, ordinal, url, title) | — | JSON active-tab summary |
 | GET | `/v1/browser/tabs` | open | All open tabs with ordinals | — | JSON tab list |
@@ -45,6 +56,7 @@ Unregistered routes fail closed: a route added to the router without a `ROUTE_TA
 | GET | `/v1/memory/prompts` | open | Prompts under a class (retrieval leaf read) | ?class= node id | JSON prompt list |
 | POST | `/v1/memory/proposals` | token: `memory.propose` | Stage reviewable ClassMemory proposal rows (never accepts or moves a node) | JSON structured proposal ops | JSON staged proposal ids |
 | GET | `/v1/context/overview` | open | Librarian friction digest: ground-truth counts and staleness | — | JSON overview |
+| GET | `/v1/context/codehealth` | open | Shipwright code digest: git state, recorded corrections, static repo health, runtime failures, unfinished work | ?repo=<absolute path> | JSON code digest |
 | GET | `/v1/context/prompts` | open | Filtered lake query (bounded, injection-safe LIKE) | ?q=&project=&limit=... | JSON prompt rows |
 | GET | `/v1/context/sessions/:id/history` | open | One plan session's full history | session id in path | JSON history |
 | GET | `/v1/context/stats` | open | Aggregate lake/catalog stats | — | JSON stats |
@@ -64,6 +76,7 @@ Unregistered routes fail closed: a route added to the router without a `ROUTE_TA
 
 - `plan.suggest` — `POST /v1/sessions/:session_id/suggestions`
 - `plan.comment` — `POST /v1/sessions/:session_id/comments`
+- `plan.offer` — `POST /v1/sessions/:session_id/comment-offers`
 - `browser.drive` — `POST /v1/browser/query`, `POST /v1/browser/navigate`, `POST /v1/browser/click`, `POST /v1/browser/open`, `POST /v1/browser/focus`, `POST /v1/browser/download`
 - `consult` — `POST /v1/linked/consult`, `POST /v1/global/consult`
 - `memory.propose` — `POST /v1/memory/proposals`

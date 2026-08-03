@@ -6,7 +6,7 @@ description: >-
   [feedback], or [question], rl:blk- block-identity sidecars, or a
   REDLINE_RESOLUTIONS block. Covers presentation-aware plan markdown,
   preserving sidecars, and emitting resolutions.
-version: 10
+version: 12
 ---
 
 # Redline review protocol
@@ -115,6 +115,11 @@ Comments are tagged by kind:
   never drives a change to the plan body.
 - **`[structural: insert|delete|move]`** — a whole-block change the reviewer
   made, described under `STRUCTURAL CHANGES:`. Apply it.
+- **`ATTACHED FILES (read these):`** — absolute paths to files the reviewer
+  attached to that comment (usually a screenshot or mock: "make it look like
+  this"). They are local to this machine, so **read each one with the `Read`
+  tool** before acting on the comment — the image or file is the substance of
+  the feedback, not decoration.
 
 The payload comes in two shapes:
 
@@ -159,13 +164,15 @@ block is `{ blockId, anchorId, kind, markdown, openComment }`. A block with
 `openComment: true` already carries an open comment — a suggestion against it
 will be rejected.
 
-**Post one suggestion per block.** Write routes require
-`-H "Authorization: Bearer $REDLINE_DAEMON_TOKEN"` after the URL (the token is
-already in your environment):
+**Post one suggestion per block.** Write routes need the bearer token, but never
+write `$REDLINE_DAEMON_TOKEN` into the command yourself — the bash sandbox
+rejects any command containing shell expansion before it runs. Have curl import
+the variable instead, with these two flags after the URL (needs curl ≥ 8.3):
 
 ```bash
 curl -s http://127.0.0.1:7676/v1/sessions/<session_id>/suggestions \
-  -H "Authorization: Bearer $REDLINE_DAEMON_TOKEN" -X POST \
+  --variable %REDLINE_DAEMON_TOKEN= \
+  --expand-header "Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}" -X POST \
   -H 'Content-Type: application/json' \
   -d '{
     "blockId": "blk-abc12345",

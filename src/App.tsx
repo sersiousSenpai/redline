@@ -1,7 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { ReactNode } from "react";
+import { ChevronsLeftRight, ChevronsRightLeft } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -13,6 +21,7 @@ import { DiscussionZoomContext } from "./components/DiscussionViewContext";
 import { lazy, Suspense } from "react";
 import { installExternalLinkHandler } from "./lib/externalLinks";
 import { isClaudeWorking } from "./lib/claudeWorking";
+import { heldPlanByTerminal, heldTerminalIds } from "./lib/heldTerminals";
 // Tiptap/ProseMirror is heavy; lazy-load so it's off the initial paint path.
 const PlanEditor = lazy(() =>
   import("./components/PlanEditor").then((m) => ({ default: m.PlanEditor })),
@@ -73,7 +82,10 @@ import { PromptDrafter } from "./components/PromptDrafter";
 import ReviewPanel from "./components/ReviewPanel";
 import { MemoryInspector } from "./components/MemoryInspector";
 import ReviewDiscussionPane from "./components/ReviewDiscussionPane";
+import { ServersPane } from "./components/ServersPane";
 import { useReview } from "./hooks/useReview";
+import { useTextClearance } from "./hooks/useTextClearance";
+import { useDevServers } from "./hooks/useDevServers";
 import {
   effectiveDiscussionContext,
   type DiscussionContext,
@@ -151,9 +163,57 @@ import {
   NUDGE_WINDOW_MS,
   type NudgeState,
 } from "./lib/nudge";
-import { computePaneLayout } from "./lib/paneLayout";
+import {
+  DIVIDER_W,
+  VOICE_PANE_MIN,
+  VOICE_PANE_W,
+  computePaneLayout,
+  voicePaneMaxW,
+  type PaneLayout,
+} from "./lib/paneLayout";
+/** Toggle the curtain attribute only on a real flip — `setAttribute` with an
+ *  unchanged value still invalidates style, and this runs every drag frame. */
+function setCurtain(el: HTMLElement | null, on: boolean): void {
+  if (!el) return;
+  if (on === (el.dataset.rlCurtain === "1")) return;
+  if (on) el.dataset.rlCurtain = "1";
+  else delete el.dataset.rlCurtain;
+}
+
+/** Write one geometry property, skipping the assignment when it already holds
+ *  that value. A dock drag changes exactly one of these per frame; the other
+ *  five would otherwise be re-assigned 120 times a second for nothing. */
+function setGeom(
+  el: HTMLElement | null,
+  prop: "width" | "height" | "left" | "right",
+  value: string,
+): void {
+  if (!el || el.style[prop] === value) return;
+  el.style[prop] = value;
+}
+import { rafCoalesce } from "./lib/raf";
+import {
+  DOC_CTRL_ROW_W,
+  DOC_PAD_R_NARROW,
+  DOC_PAD_R_WIDE,
+  docControlFits,
+} from "./lib/docControl";
+import {
+  beginResizeSession,
+  endResizeSession,
+  installWindowResizeSession,
+  isResizing,
+  onResizeSession,
+} from "./lib/resizeSession";
 import { buildPlanLaunchCommand } from "./lib/planLaunchCommand";
 import { guessProjectForPlan } from "./lib/guessProject";
+import {
+  listSources,
+  loadDraftDoc,
+  migrateLegacyDraft,
+  persistDraftDoc,
+} from "./lib/bookshelf";
+import { BookshelfView } from "./components/BookshelfView";
 import { SendToRedlineDialog } from "./components/SendToRedlineDialog";
 import type { JSONContent } from "@tiptap/react";
 import type {
@@ -214,15 +274,27 @@ function isDetachError(err: unknown): boolean {
   );
 }
 
-// A round +/− control used by the floating document-zoom pill.
+/** An actionable toast. Plain strings stay the common case; this is for the
+ *  toasts that report a switch the app chose NOT to make for you, which have to
+ *  offer the switch itself. */
+interface ToastSpec {
+  message: string;
+  tone?: "success" | "info";
+  action?: { label: string; onAction: () => void };
+}
+
+// A round control used by the floating document pill (zoom ±, width toggle).
 function ZoomButton({
   label,
   title,
   onClick,
+  active,
 }: {
-  label: string;
+  label: ReactNode;
   title: string;
   onClick: () => void;
+  /** Draw as engaged — a persistent mode is on, not a momentary press. */
+  active?: boolean;
 }) {
   return (
     <button
@@ -230,19 +302,21 @@ function ZoomButton({
       onClick={onClick}
       title={title}
       aria-label={title}
+      aria-pressed={active}
       style={{
         width: "22px",
         height: "22px",
         borderRadius: "50%",
-        border: "1px solid var(--color-rule)",
+        border: `1px solid ${active ? "var(--color-info)" : "var(--color-rule)"}`,
         background: "var(--color-paper)",
-        color: "var(--color-ink)",
+        color: active ? "var(--color-info)" : "var(--color-ink)",
         fontSize: "13px",
         lineHeight: 1,
         cursor: "pointer",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
+        flexShrink: 0,
       }}
     >
       {label}
@@ -293,7 +367,10 @@ function App() {
   // it survives app restarts and background-session detaches; this flag only
   // hides the banner until the next session switch / plan arrival.
   const [detachDismissed, setDetachDismissed] = useState<boolean>(false);
-  const [toast, setToast] = useState<string | null>(null);
+  // Most toasts are a bare confirmation string. A few report something the app
+  // deliberately declined to do for you and must carry the way to do it, so the
+  // state accepts the richer spec too.
+  const [toast, setToast] = useState<string | ToastSpec | null>(null);
   const [hookStatus, setHookStatus] = useState<HookStatus | null>(null);
   const [skillStatus, setSkillStatus] = useState<SkillStatus | null>(null);
   // First-run setup modal: "setup" until an in-app install fully succeeds,
@@ -314,10 +391,13 @@ function App() {
   // reader's preference sticks across sessions.
   const [tocOpen, setTocOpen] = usePersistedState("redline.tocOpen", true);
   // Rail width: two snap points (230 / 340). `tocWide` is the persisted snap;
-  // `tocDragW` is the transient width while the user drags the rail's edge —
-  // release snaps to whichever point is nearer (see snapTocWide).
+  // the transient width during a drag is written straight onto the rail and the
+  // scroller, and release snaps to whichever point is nearer (see snapTocWide).
   const [tocWide, setTocWide] = usePersistedState("redline.tocWide", false);
-  const [tocDragW, setTocDragW] = useState<number | null>(null);
+  // Drag state is a boolean, not a width: the width itself is written straight
+  // to the DOM so the plan column doesn't re-render per frame. This only
+  // suppresses the settle transition for the duration of the drag.
+  const [tocDragging, setTocDragging] = useState(false);
   // The "How Redline works" explainer (Phase 3) — opened from the empty state
   // and the post-install screen; purely informational.
   const [howItWorksOpen, setHowItWorksOpen] = useState(false);
@@ -346,9 +426,13 @@ function App() {
   flashSoundRef.current = flashSound;
   const flashSoundConfigRef = useRef(flashSoundConfig);
   flashSoundConfigRef.current = flashSoundConfig;
+  // The four size keys below (plus BrowserPane's chat ratio) are written by
+  // drag paths. Without a debounce every commit ran a synchronous
+  // JSON.stringify + localStorage.setItem on the main thread mid-drag.
   const [sidebarWidth, setSidebarWidth] = usePersistedState(
     "redline.sidebar.width",
     240,
+    { debounceMs: 250 },
   );
   const [sidebarCollapsed, setSidebarCollapsed] = usePersistedState(
     "redline.sidebar.collapsed",
@@ -357,6 +441,7 @@ function App() {
   const [paneWidth, setPaneWidth] = usePersistedState(
     "redline.commentPane.width",
     320,
+    { debounceMs: 250 },
   );
   const [paneCollapsed, setPaneCollapsed] = usePersistedState(
     "redline.commentPane.collapsed",
@@ -365,6 +450,14 @@ function App() {
   const [paneFullscreen, setPaneFullscreen] = usePersistedState(
     "redline.commentPane.fullscreen",
     false,
+  );
+  // The voice panel ("Talk to the plan") is a docked column INSIDE the document
+  // column, not one of the app-row panes — so it has a width but no collapsed
+  // flag: its own ✕, the Discuss pill and ⌘J are the open/close affordances.
+  const [voiceWidth, setVoiceWidth] = usePersistedState(
+    "redline.voicePane.width",
+    VOICE_PANE_W,
+    { debounceMs: 250 },
   );
   // Which artifact the Discussion sidecar pertains to (plan comments vs the
   // code review's annotations/questions). Only consulted in a true split —
@@ -392,6 +485,7 @@ function App() {
   const browserOpen = mainSurface === "browser";
   const drafterOpen = mainSurface === "drafter";
   const reviewOpen = mainSurface === "review";
+  const serversOpen = mainSurface === "servers";
   const docVisible = mainSurface === "document" || docPinned;
   const [splitVertical, setSplitVertical] = usePersistedState(
     "redline.split.vertical",
@@ -400,6 +494,7 @@ function App() {
   const [splitRatio, setSplitRatio] = usePersistedState(
     "redline.split.ratio",
     0.5,
+    { debounceMs: 250 },
   );
   const [splitDragging, setSplitDragging] = useState(false);
   // The one way any surface comes forward — header radio clicks and every
@@ -509,17 +604,32 @@ function App() {
   // aloud or discusses it (spoken) via the warm Claude session. Kept on the
   // plan surface (not the Header) so it reads as a plan feature.
   const [voiceOpen, setVoiceOpen] = useState(false);
-  const [drafterDoc, setDrafterDoc] = usePersistedState<JSONContent | null>(
-    "redline.drafter.doc",
-    null,
+  // A discussion is actually going on in the open voice panel (reported by it).
+  // Refs, because the `plan-received` listener is mount-scoped on `activeId` and
+  // must read both without re-subscribing on every keystroke of a conversation.
+  const [discussionLive, setDiscussionLive] = useState(false);
+  const discussionLiveRef = useRef(false);
+  discussionLiveRef.current = discussionLive;
+  const voiceOpenRef = useRef(false);
+  voiceOpenRef.current = voiceOpen;
+  // Sessions whose intercepted plan we did NOT switch to (a live discussion was
+  // in the way). Drives the sidebar's pulsing dot until the row is selected.
+  const [unseenPlanIds, setUnseenPlanIds] = useState<Set<string>>(
+    () => new Set(),
   );
+  // The document itself lives in the DB now (the Bookshelf owns it) — this is
+  // just the loaded copy for the open document. `drafterDocReady` gates the
+  // editor's mount: TipTap captures `content` once, at creation, so mounting
+  // before the read resolves would open a blank document over a real one.
+  const [drafterDoc, setDrafterDoc] = useState<JSONContent | null>(null);
+  const [drafterDocReady, setDrafterDocReady] = useState(false);
   const [drafterProject, setDrafterProject] = usePersistedState<string | null>(
     "redline.drafter.project",
     null,
   );
   // The draft's durable identity — keys its discussion agent, comments, voice
-  // memory, and its lineage in the memory lake. "New draft" mints a fresh id;
-  // old rows stay queryable as history.
+  // memory, and its lineage in the memory lake. The one drafter thing that
+  // stays in localStorage: *which* document is open is a UI preference.
   const [drafterDraftId, setDrafterDraftId] = usePersistedState<string | null>(
     "redline.drafter.draftId",
     null,
@@ -528,22 +638,72 @@ function App() {
     if (!drafterDraftId) setDrafterDraftId(crypto.randomUUID());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [drafterDraftId]);
+  // Load the open document from the DB, after the one-time localStorage
+  // migration has had its chance to put it there. The migration is idempotent
+  // (its flag is a DB setting) and runs before the first read, so the very
+  // first launch on a migrated build still opens the user's existing draft.
+  const bookshelfMigrated = useRef(false);
+  useEffect(() => {
+    if (!drafterDraftId) return;
+    let alive = true;
+    setDrafterDocReady(false);
+    void (async () => {
+      if (!bookshelfMigrated.current) {
+        bookshelfMigrated.current = true;
+        await migrateLegacyDraft();
+      }
+      const loaded = await loadDraftDoc(drafterDraftId).catch(() => null);
+      if (!alive) return;
+      let parsed: JSONContent | null = null;
+      try {
+        parsed = loaded?.docJson ? (JSON.parse(loaded.docJson) as JSONContent) : null;
+      } catch {
+        // A corrupt body opens blank rather than crashing the pane; the
+        // markdown mirror is still on disk and still readable by the agents.
+        parsed = null;
+      }
+      setDrafterDoc(parsed);
+      if (loaded?.projectPath) setDrafterProject(loaded.projectPath);
+      setDrafterDocReady(true);
+    })();
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drafterDraftId]);
+  // The shelf, shown in place of the open document inside the same surface —
+  // no fourth pane, and it inherits the pane's fullscreen and zoom.
+  const [drafterShelfOpen, setDrafterShelfOpen] = useState(false);
+  // Sources attached to the open document (a count for the footer chip).
+  const [drafterSourceCount, setDrafterSourceCount] = useState(0);
+  useEffect(() => {
+    if (!drafterDraftId) return;
+    let alive = true;
+    void listSources(drafterDraftId)
+      .then((rows) => alive && setDrafterSourceCount(rows.length))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [drafterDraftId, drafterShelfOpen]);
   // The drafter's 🎙️ voice drawer + what it's primed with: the latest mirrored
   // markdown and its parsed Section tree (for the Guided Walkthrough).
   const [drafterVoiceOpen, setDrafterVoiceOpen] = useState(false);
   const [drafterMarkdown, setDrafterMarkdown] = useState("");
   const [drafterSections, setDrafterSections] = useState<Section[]>([]);
-  // Flush the draft's markdown mirror (sidecars on) to the backend `drafts`
-  // table so the agents' /v1/drafter/:id/doc reads are never stale.
-  const drafterMarkdownChange = useCallback(
-    (markdown: string) => {
+  // Persist the open document: the TipTap fidelity source AND the markdown
+  // mirror agents read via /v1/drafter/:id/doc, in one write on the drafter's
+  // existing 400ms debounce.
+  const drafterPersist = useCallback(
+    (json: JSONContent, markdown: string) => {
       setDrafterMarkdown(markdown);
       if (!drafterDraftId) return;
-      void invoke("drafter_set_doc", {
-        draftId: drafterDraftId,
+      void persistDraftDoc(
+        drafterDraftId,
         markdown,
-        projectPath: drafterProject,
-      }).catch(() => {});
+        json,
+        drafterProject,
+      ).catch(() => {});
     },
     [drafterDraftId, drafterProject],
   );
@@ -598,6 +758,9 @@ function App() {
     }
   }, [voiceEnabled]);
   const codeReview = useReview();
+  // The Localhost dashboard. Gated on the surface being selected: the scan
+  // forks three subprocesses per tick, so it must not run behind another pane.
+  const devServers = useDevServers(serversOpen);
   // A `/redline-code-review` curl is holding for feedback → surface the review
   // pane immediately (the hook itself adopts the repo/source/round).
   useEffect(() => {
@@ -615,6 +778,16 @@ function App() {
   // Document zoom (content font-scale, not webview zoom). Persisted; clamped
   // 0.8–1.6. Driven by the in-pane control and Cmd +/-/0 shortcuts.
   const [docZoom, setDocZoom] = usePersistedState("redline.docZoom", 1);
+  // Wide view: drop the article's measure so the text fills the pane instead of
+  // sitting in a centred column with empty gutters either side. Persisted, and
+  // a preference rather than a default — the narrow measure is the better read
+  // for sustained prose, but a plan full of tables and code wants the room.
+  const [docWide, setDocWide] = usePersistedState("redline.docWide", false);
+  // The article's right padding, px (`pr-8` in normal view). Wide view widens it
+  // to `pl-16`'s 64: the floating control lives in that gutter, and at full-bleed
+  // width there is no empty margin left to host it otherwise. Shared with the
+  // overlap effect below, so the two can't disagree about where the text ends.
+  const docPadR = docWide ? DOC_PAD_R_WIDE : DOC_PAD_R_NARROW;
 
   // First-run onboarding tour. The flag persists so the tour auto-runs once;
   // `tourOpen` force-shows it (menu replay) regardless of the flag.
@@ -651,6 +824,7 @@ function App() {
   // top of the document text. Driven by the overlap effect below.
   const [zoomVisible, setZoomVisible] = useState(true);
   const zoomCtrlRef = useRef<HTMLDivElement | null>(null);
+  const zoomCtrlW = useRef(DOC_CTRL_ROW_W);
   // Cmd/Ctrl +/-/0 zoom the document. These combos aren't text input, so we
   // claim them globally (and preventDefault the browser's own page zoom).
   useEffect(() => {
@@ -704,6 +878,7 @@ function App() {
   const [termHeight, setTermHeight] = usePersistedState(
     "redline.terminalPane.height",
     260,
+    { debounceMs: 250 },
   );
   const [termCollapsed, setTermCollapsed] = usePersistedState(
     "redline.terminalPane.collapsed",
@@ -1009,6 +1184,12 @@ function App() {
   // with a single vertical "latch" (‹ above, › below) centered over the
   // vanished document; clicking either arrow snaps it back open.
   const docColumnRef = useRef<HTMLDivElement | null>(null);
+  // The two elements the contents-rail drag resizes directly.
+  const tocRailRef = useRef<HTMLDivElement | null>(null);
+  const docScrollerRef = useRef<HTMLDivElement | null>(null);
+  // The collapsed rail's "☰ Contents" button, which drops to a bare burger
+  // when the text column reaches it.
+  const tocBtnRef = useRef<HTMLButtonElement | null>(null);
   const [latchPos, setLatchPos] = useState({ left: 0, top: 0 });
 
   // Track the viewport width so each side pane's max can be "up to the other
@@ -1018,23 +1199,213 @@ function App() {
   const [winWidth, setWinWidth] = useState(() =>
     typeof window !== "undefined" ? window.innerWidth : 1440,
   );
-  useEffect(() => {
-    const onResize = () => setWinWidth(window.innerWidth);
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, []);
 
   // The row's space model: the doc column floors at DOC_MIN and any pane
   // width past that becomes curtain overlay instead of flow. Stateless — it
   // appears and retracts continuously as widths / window / collapse change.
-  const layout = computePaneLayout({
-    winWidth,
-    sidebarWidth,
+  // Memoized because it is destructured straight into effect deps below: a
+  // fresh object literal per render re-ran those effects (and rebuilt their
+  // ResizeObservers) on every unrelated state change in this component.
+  const layout = useMemo(
+    () =>
+      computePaneLayout({
+        winWidth,
+        sidebarWidth,
+        sidebarCollapsed,
+        paneWidth,
+        paneCollapsed,
+        paneFullscreen,
+      }),
+    [
+      winWidth,
+      sidebarWidth,
+      sidebarCollapsed,
+      paneWidth,
+      paneCollapsed,
+      paneFullscreen,
+    ],
+  );
+
+  // ---- The live layout path -------------------------------------------------
+  //
+  // A divider drag must not re-render this component. Instead the drag writes
+  // the derived geometry to CSS custom properties on the shell root and the
+  // sizing sites read them with `var(...)`, exactly as `--rl-discussion-zoom`
+  // already does for text size. React state is still the source of truth
+  // BETWEEN drags: a layout effect re-writes the same variables from state
+  // after every render, so the inline write is simply the freshest value.
+  //
+  // Three things genuinely need a render because they add or remove DOM rather
+  // than resize it — the curtain's extra divider copy, the latch, and hiding
+  // the native browser webview. Those are tracked as booleans and committed
+  // only when one actually flips, at most a couple of times per drag.
+  // Each live size is written DIRECTLY onto the one element that uses it.
+  //
+  // The obvious-looking alternative — one set of custom properties on the shell
+  // root — is a trap: a custom property is inherited, so changing one on an
+  // ancestor invalidates style for its whole subtree. Setting them on the root
+  // meant every drag frame asked the engine to recompute style for the entire
+  // document (plan editor, discussion list, file tree, terminals), which is far
+  // more expensive than the React render it replaced. Writing
+  // `el.style.width` touches exactly one element.
+  const sidebarClipRef = useRef<HTMLDivElement | null>(null);
+  const sidebarAsideRef = useRef<HTMLElement | null>(null);
+  const sidebarCurtainDivRef = useRef<HTMLDivElement | null>(null);
+  const paneClipRef = useRef<HTMLDivElement | null>(null);
+  const paneAsideRef = useRef<HTMLElement | null>(null);
+  const paneCurtainDivRef = useRef<HTMLDivElement | null>(null);
+  const termDockRef = useRef<HTMLDivElement | null>(null);
+  // The voice dock is not part of `applyLiveLayout` — it lives one level down,
+  // inside the document column — but it follows the same rule: its width is
+  // written straight to the element, never rendered from JSX.
+  const voiceDockRef = useRef<HTMLDivElement | null>(null);
+  // Live px the voice panel takes out of the document column (0 when closed).
+  // Kept in a ref, not state, so a drag frame stays render-free — `recomputeLatch`
+  // reads it the same way it reads the live app-row geometry.
+  const voiceFlowRef = useRef(0);
+  const liveSizeRef = useRef({ sidebarWidth, paneWidth, termHeight, winWidth });
+  const layoutFlagsRef = useRef({
     sidebarCollapsed,
-    paneWidth,
     paneCollapsed,
     paneFullscreen,
+    termCollapsed,
+    termFullscreen,
   });
+  layoutFlagsRef.current = {
+    sidebarCollapsed,
+    paneCollapsed,
+    paneFullscreen,
+    termCollapsed,
+    termFullscreen,
+  };
+  // The freshest layout, live during a drag. Consumers that must compute real
+  // geometry mid-drag (the latch's position) read this instead of the
+  // render-time `layout`, which is frozen for the duration.
+  const liveLayoutRef = useRef<PaneLayout>(layout);
+  const [liveFlags, setLiveFlags] = useState({
+    curtain: layout.curtainActive,
+    curtainL: layout.sidebarOverlayPx > 0,
+    curtainR: layout.paneOverlayPx > 0,
+    docObscured: layout.docVisibleW < 56,
+  });
+
+  const applyLiveLayout = useCallback(
+    (over?: Partial<{
+      sidebarWidth: number;
+      paneWidth: number;
+      termHeight: number;
+      winWidth: number;
+    }>) => {
+      const sizes = liveSizeRef.current;
+      if (over) Object.assign(sizes, over);
+      const f = layoutFlagsRef.current;
+      const l = computePaneLayout({
+        winWidth: sizes.winWidth,
+        sidebarWidth: sizes.sidebarWidth,
+        sidebarCollapsed: f.sidebarCollapsed,
+        paneWidth: sizes.paneWidth,
+        paneCollapsed: f.paneCollapsed,
+        paneFullscreen: f.paneFullscreen,
+      });
+      liveLayoutRef.current = l;
+
+      // Drawer-reveal geometry: the clip (outer) tracks the live width while
+      // the content (inner aside) stays pinned at min so it is revealed rather
+      // than reflowed.
+      setGeom(sidebarClipRef.current, "width", `${l.sidebarFlowW}px`);
+      setGeom(
+        sidebarAsideRef.current,
+        "width",
+        `${Math.max(sizes.sidebarWidth, 180)}px`,
+      );
+      setGeom(
+        sidebarCurtainDivRef.current,
+        "right",
+        `${-(l.sidebarOverlayPx + 6)}px`,
+      );
+      // Fullscreen makes the clip `display: contents` — no box to size, and a
+      // stale width left on it would be resurrected on the way out.
+      setGeom(
+        paneClipRef.current,
+        "width",
+        f.paneFullscreen ? "" : `${l.paneFlowW}px`,
+      );
+      setGeom(
+        paneAsideRef.current,
+        "width",
+        f.paneFullscreen ? "" : `${Math.max(sizes.paneWidth, 240)}px`,
+      );
+      setGeom(
+        paneCurtainDivRef.current,
+        "left",
+        `${-(l.paneOverlayPx + 6)}px`,
+      );
+      setGeom(
+        termDockRef.current,
+        "height",
+        f.termFullscreen ? "" : `${f.termCollapsed ? 0 : sizes.termHeight}px`,
+      );
+      // Discrete curtain styling (overflow / stacking / the drop shadow that
+      // reads as "painted over the doc") is a CSS rule keyed on this attribute,
+      // so crossing the threshold re-styles without a render. Set on the clips
+      // themselves, not the root, so the selector match stays local — and only
+      // on a real flip, since an attribute write invalidates either way.
+      setCurtain(sidebarClipRef.current, l.sidebarOverlayPx > 0);
+      setCurtain(paneClipRef.current, !f.paneFullscreen && l.paneOverlayPx > 0);
+      // The three things a variable cannot express: an extra divider node at
+      // the curtain's visible edge, the latch, and hiding the native browser
+      // webview. Committed only when one actually flips.
+      const next = {
+        curtain: l.curtainActive,
+        curtainL: l.sidebarOverlayPx > 0,
+        curtainR: l.paneOverlayPx > 0,
+        docObscured: l.docVisibleW < 56,
+      };
+      setLiveFlags((prev) =>
+        prev.curtain === next.curtain &&
+        prev.curtainL === next.curtainL &&
+        prev.curtainR === next.curtainR &&
+        prev.docObscured === next.docObscured
+          ? prev
+          : next,
+      );
+    },
+    [],
+  );
+
+  // State → geometry, after every render. Cheap (a handful of style writes on
+  // known elements, no reads, no forced layout) and it makes React state the
+  // single source of truth the moment a drag ends.
+  //
+  // Mid-drag it re-applies the LIVE sizes instead of adopting state: an
+  // unrelated render (a plan arriving, a poll landing) must not snap the pane
+  // back to where it was when the drag started.
+  useLayoutEffect(() => {
+    if (!isResizing()) {
+      liveSizeRef.current = { sidebarWidth, paneWidth, termHeight, winWidth };
+    }
+    applyLiveLayout();
+  });
+
+  // Native window resizing rides the same path. There is no `pointerup` to end
+  // it, so `installWindowResizeSession` opens a session on the first event and
+  // closes it on a settle timer; `winWidth` state is committed once, then.
+  useEffect(() => {
+    const uninstall = installWindowResizeSession();
+    const onResize = rafCoalesce(() =>
+      applyLiveLayout({ winWidth: window.innerWidth }),
+    );
+    const off = onResizeSession((active) => {
+      if (!active) setWinWidth(window.innerWidth);
+    });
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      onResize.cancel();
+      off();
+      uninstall();
+    };
+  }, [applyLiveLayout]);
 
   // When collapsing the sidebar (or growing the window) frees enough room
   // for the fullscreen discussion to fit beside a full-width doc, drop it
@@ -1071,60 +1442,119 @@ function App() {
     const recompute = () => {
       const a = article.getBoundingClientRect();
       const c = container.getBoundingClientRect();
-      const controlW = zoomCtrlRef.current?.offsetWidth ?? 84;
-      const controlLeft = c.right - 16 - controlW;
-      // pr-8 (32px) of the article is empty padding, so the text ends short of
-      // the article's right edge.
-      const textRight = a.right - 32;
-      setZoomVisible(textRight + 12 <= controlLeft);
+      // Once hidden the control is unmounted, so there is nothing left to
+      // measure — and the question is still "would it fit if it came back?".
+      // Answer it with the last width it actually had; the constant only ever
+      // covers the frames before the first measurement.
+      const measured = zoomCtrlRef.current?.offsetWidth;
+      if (measured) zoomCtrlW.current = measured;
+      const controlW = measured ?? zoomCtrlW.current;
+      setZoomVisible(
+        docControlFits({
+          articleRight: a.right,
+          containerRight: c.right,
+          padRight: docPadR,
+          controlWidth: controlW,
+        }),
+      );
     };
     recompute();
-    const ro = new ResizeObserver(recompute);
+    // Three forced-layout reads and a possible render — worth nothing while a
+    // divider is mid-flight, since the answer is about where things come to
+    // rest. Skipped for the duration and recomputed once the drag ends;
+    // rAF-coalesced otherwise so a burst of observer fires costs one pass.
+    const onGeometry = rafCoalesce(() => {
+      if (isResizing()) return;
+      recompute();
+    });
+    const ro = new ResizeObserver(onGeometry);
     ro.observe(container);
-    return () => ro.disconnect();
-  }, [sidebarTab, activeFile, activeId, mainSurface, docPinned]);
+    const off = onResizeSession((active) => {
+      if (!active) recompute();
+    });
+    return () => {
+      ro.disconnect();
+      onGeometry.cancel();
+      off();
+    };
+    // `docPadR` is in the deps because toggling the view changes BOTH sides of
+    // the comparison in the same commit — the article's padding and the
+    // control's own width — and the ResizeObserver only sees the container,
+    // which didn't move.
+  }, [sidebarTab, activeFile, activeId, mainSurface, docPinned, docPadR]);
 
   // Position the latch over the visible remnant of the document. The doc
   // column's flow box floors at DOC_MIN now, so "squeezed shut" means the
   // curtains cover it — center the latch on the strip they leave uncovered.
   // Position is relative to the positioned <main> ancestor (the document
   // column's offsetParent).
-  const { sidebarOverlayPx, paneOverlayPx, docVisibleW } = layout;
+  // Reads the LIVE layout, not the render-time one, so a recompute triggered
+  // mid-drag (the latch appearing) lands in the right place instead of using
+  // the geometry from before the drag started.
+  const recomputeLatch = useCallback(() => {
+    const el = docColumnRef.current;
+    if (!el) return;
+    const l = liveLayoutRef.current;
+    // Keep the latch on-screen when the visible strip clamps against a
+    // window edge (one pane collapsed).
+    const parent = el.offsetParent as HTMLElement | null;
+    const maxLeft = (parent?.clientWidth ?? window.innerWidth) - 12;
+    // A docked voice panel eats the right end of the doc column, so the strip
+    // the curtains leave uncovered is not all document. `computePaneLayout`
+    // deliberately doesn't know about it (it models the app row, and the voice
+    // panel splits one cell of that row) — so discount it here, where "where is
+    // the document" is the actual question being asked.
+    const docStrip = Math.max(0, l.docVisibleW - voiceFlowRef.current);
+    const rawLeft = el.offsetLeft + l.sidebarOverlayPx + docStrip / 2;
+    const next = {
+      left: Math.min(maxLeft, Math.max(12, rawLeft)),
+      top: el.offsetTop + el.offsetHeight / 2,
+    };
+    // Guarded: an unchanged position must not allocate a fresh object, which
+    // would re-render this component and (via the deps below) rebuild the
+    // observer — the loop that made every drag frame cost two full renders.
+    setLatchPos((prev) =>
+      prev.left === next.left && prev.top === next.top ? prev : next,
+    );
+  }, []);
+
   useEffect(() => {
     const el = docColumnRef.current;
     if (!el) return;
-    const recompute = () => {
-      // Keep the latch on-screen when the visible strip clamps against a
-      // window edge (one pane collapsed).
-      const parent = el.offsetParent as HTMLElement | null;
-      const maxLeft = (parent?.clientWidth ?? window.innerWidth) - 12;
-      const rawLeft = el.offsetLeft + sidebarOverlayPx + docVisibleW / 2;
-      setLatchPos({
-        left: Math.min(maxLeft, Math.max(12, rawLeft)),
-        top: el.offsetTop + el.offsetHeight / 2,
-      });
+    recomputeLatch();
+    // `sidebarWidth`/`paneWidth` are deliberately NOT deps: with them, a drag
+    // tore down and rebuilt this ResizeObserver every single frame, and
+    // `recompute` then ran twice per frame (direct call + observer fire), each
+    // doing five forced-layout reads. The observer already fires on every
+    // geometry change; the drag itself is handled by the session hook below.
+    const onGeometry = () => {
+      if (isResizing()) return;
+      recomputeLatch();
     };
-    recompute();
-    const ro = new ResizeObserver(recompute);
+    const ro = new ResizeObserver(onGeometry);
     ro.observe(el);
-    return () => ro.disconnect();
+    const off = onResizeSession((active) => {
+      if (!active) recomputeLatch();
+    });
+    return () => {
+      ro.disconnect();
+      off();
+    };
   }, [
-    sidebarWidth,
-    paneWidth,
+    recomputeLatch,
     sidebarCollapsed,
     paneCollapsed,
     paneFullscreen,
-    sidebarOverlayPx,
-    paneOverlayPx,
-    docVisibleW,
+    // The latch mounting/unmounting changes what the position is for; recompute
+    // against the live layout at that moment.
+    liveFlags.docObscured,
   ]);
 
   // The latch appears whenever the document's uncovered strip has shrunk to a
   // sliver — the curtains (or a collapsed pane's edge) have swallowed it. Each
   // arrow reopens the document by shrinking whichever pane is actually open on
   // that side (falling back to the other side when one pane is collapsed).
-  const docObscured = docVisibleW < 56;
-  const latchActive = docObscured && !paneFullscreen;
+  const latchActive = liveFlags.docObscured && !paneFullscreen;
   const reopenDocFromLeft = () => {
     if (!sidebarCollapsed) setSidebarWidth(180);
     else setPaneWidth(240);
@@ -1292,6 +1722,7 @@ function App() {
   } = useResizablePane({
     width: sidebarWidth,
     onWidthChange: setSidebarWidth,
+    onLiveSize: (w) => applyLiveLayout({ sidebarWidth: w }),
     side: "leading",
     min: 180,
     max: sidebarMaxW,
@@ -1309,16 +1740,62 @@ function App() {
   } = useResizablePane({
     width: paneWidth,
     onWidthChange: setPaneWidth,
+    onLiveSize: (w) => applyLiveLayout({ paneWidth: w }),
     max: paneMaxW,
     // Same for the comment pane on the right edge.
     onCollapse: () => setPaneCollapsed(true),
     collapsed: paneCollapsed,
     onExpand: () => setPaneCollapsed(false),
   });
-  // Drawer-reveal geometry: the clip (outer) tracks the live width while the
-  // content (inner aside) stays pinned at min so it's revealed, not reflowed.
-  const revealSidebarW = Math.max(sidebarWidth, 180);
-  const revealPaneW = Math.max(paneWidth, 240);
+
+  // The voice panel splits the *document column*, so its ceiling is what the
+  // two app-row panes leave behind (their two dividers, plus the voice
+  // panel's own). Unlike them it never curtains — `voicePaneMaxW` just stops
+  // it growing, so the plan always keeps a readable strip.
+  const docColW = Math.max(
+    0,
+    winWidth -
+      (sidebarCollapsed ? 0 : sidebarWidth) -
+      (paneCollapsed || paneFullscreen ? 0 : paneWidth) -
+      12 -
+      DIVIDER_W,
+  );
+  const voiceMaxW = voicePaneMaxW(docColW);
+  const voiceRestW = Math.min(
+    Math.max(voiceWidth, VOICE_PANE_MIN),
+    voiceMaxW,
+  );
+
+  const { isDragging: voiceDragging, startDrag: startVoiceDrag } =
+    useResizablePane({
+      width: voiceWidth,
+      onWidthChange: setVoiceWidth,
+      // One element write per frame, no React render — the voice panel
+      // re-renders on every streamed `voice-delta`, and a commit landing
+      // mid-drag would otherwise fight the pointer for the width.
+      onLiveSize: (w) => {
+        const el = voiceDockRef.current;
+        if (el) el.style.width = `${w}px`;
+        voiceFlowRef.current = w + DIVIDER_W;
+      },
+      min: VOICE_PANE_MIN,
+      max: voiceMaxW,
+    });
+
+  // Adopt the resting width after every render — but never mid-drag, where the
+  // live value on the element is the truth (same contract as the app-row
+  // layout effect above). No dep array: any render can be the one that changes
+  // the ceiling (window resize, a sidecar drag) or mounts the dock.
+  useLayoutEffect(() => {
+    const el = voiceDockRef.current;
+    if (!el) {
+      voiceFlowRef.current = 0;
+      return;
+    }
+    if (isResizing()) return;
+    el.style.width = `${voiceRestW}px`;
+    voiceFlowRef.current = voiceRestW + DIVIDER_W;
+  });
 
   // The Discussion sidecar's context. Plan comments need the doc pane on a
   // sessions tab; the review context needs the Code Review pane open. In a
@@ -1335,6 +1812,7 @@ function App() {
     useResizablePane({
       width: termHeight,
       onWidthChange: setTermHeight,
+      onLiveSize: (h) => applyLiveLayout({ termHeight: h }),
       axis: "y",
       min: 120,
     });
@@ -1540,12 +2018,50 @@ function App() {
         // view — browsing project files, sitting on another session, or no
         // session at all. The whole point of an intercept is to review the new
         // plan, so flip the sidebar back to Sessions and select it.
-        selectSessions();
-        setActiveId(payload.sessionId);
-        // Land on the clean latest, even if the reviewer was parked on a
-        // historical version when the revision arrived.
-        setViewedVersionNumber(null);
-        void loadSession(payload.sessionId);
+        const focusIntercepted = () => {
+          selectSessions();
+          setActiveId(payload.sessionId);
+          // Land on the clean latest, even if the reviewer was parked on a
+          // historical version when the revision arrived.
+          setViewedVersionNumber(null);
+          void loadSession(payload.sessionId);
+        };
+        // …with one exception. A plan for ANOTHER session, arriving while the
+        // reviewer is mid-conversation in the discussion panel, must not yank
+        // them away from it: the panel is keyed on the session, so the switch
+        // remounts it and the thread they were reading disappears
+        // mid-sentence. A revision for the session you're already on is not
+        // that case — it's the answer you were waiting for, so it still lands.
+        const stealsFocus =
+          payload.sessionId !== activeId &&
+          discussionLiveRef.current &&
+          voiceOpenRef.current;
+        if (!stealsFocus) {
+          focusIntercepted();
+          return;
+        }
+        // Suppressed — so the arrival has to announce itself instead. The
+        // window flash + beep above already fired; add a pulsing dot on the
+        // session's sidebar row and an actionable toast that performs the
+        // switch we just declined to make.
+        setUnseenPlanIds((prev) => {
+          if (prev.has(payload.sessionId)) return prev;
+          const next = new Set(prev);
+          next.add(payload.sessionId);
+          return next;
+        });
+        setToast({
+          message: "New plan intercepted",
+          tone: "info",
+          action: {
+            label: "Review",
+            onAction: () => {
+              setToast(null);
+              focusIntercepted();
+            },
+          },
+        });
+        setTimeout(() => setToast(null), 8000);
       });
       if (
         payload.sessionId === activeId &&
@@ -1689,6 +2205,13 @@ function App() {
       setWarning(null);
       setAskModeViolation(false);
       setDetachDismissed(false);
+      // Landing on the session is what "seen" means — drop its pulse.
+      setUnseenPlanIds((prev) => {
+        if (!prev.has(activeId)) return prev;
+        const next = new Set(prev);
+        next.delete(activeId);
+        return next;
+      });
     } else {
       setSession(null);
     }
@@ -1738,7 +2261,10 @@ function App() {
     }
     return revs.slice(start);
   }, [session]);
-  const sections = latest?.sections ?? [];
+  // Memoized because `?? []` allocated a fresh empty array on every render,
+  // which invalidated `blockIdByAnchor` below and PlanEditor's `anchors` memo —
+  // turning every unrelated state change in this component into anchor work.
+  const sections = useMemo(() => latest?.sections ?? [], [latest]);
   // Headings shown in the doc pane right now — the historical revision when
   // one is being viewed, otherwise the latest. Drives the TOC rail.
   const displaySections =
@@ -1871,6 +2397,7 @@ function App() {
     browserOpen,
     drafterOpen,
     reviewOpen,
+    serversOpen,
     activeId,
     planTitle: activeSummary?.planTitle ?? null,
     planProject: activeSummary?.projectPath ?? null,
@@ -2122,8 +2649,11 @@ function App() {
 
   // Width of the table-of-contents rail. Snap constants live in lib/tocRail so
   // the rail and the left space it reserves in the document scroller stay in
-  // lockstep; a live drag overrides with its transient width.
-  const tocRailW = tocDragW ?? (tocWide ? TOC_RAIL_W_WIDE : TOC_RAIL_W);
+  // lockstep. The RESTING width is state; during a drag the width is written
+  // straight onto the rail and the doc scroller — this handle relayouts the
+  // entire plan text column every frame, so it is the one that matters most
+  // after the terminal.
+  const tocRailW = tocWide ? TOC_RAIL_W_WIDE : TOC_RAIL_W;
   // The TOC rail applies only over a plainly-displayed plan document (a real
   // session, latest or historical, with headings) — never the folder viewer, a
   // joined shadow session, or while a secondary pane (browser/drafter/review)
@@ -2137,6 +2667,62 @@ function App() {
     mainSurface === "document" &&
     displaySections.length > 0;
   const tocDocked = tocEligible && tocOpen;
+
+  // The collapsed rail's "☰ Contents" button yields to the text the same way
+  // the zoom control does — but by shedding its label rather than vanishing,
+  // since it is the only way back to the rail. 64 is the article's pl-16, i.e.
+  // where its text starts rather than where its box does. `tocDocked` and
+  // `tocEligible` are in the deps because the button only exists while the rail
+  // is closed: without them the observer would never attach to a button that
+  // appeared after mount.
+  useTextClearance({
+    ctrlRef: tocBtnRef,
+    textRef: documentRef,
+    textInset: 64,
+    flag: "rlBurger",
+    // Pin the label's real width for the collapse to animate against. Scoped to
+    // the button, not the shell root: a custom property is inherited, and one
+    // set high up invalidates style for everything beneath it.
+    onMeasure: (el) => {
+      const label = el.querySelector<HTMLElement>(".rl-toc-btn-label");
+      if (!label) return;
+      // +1 because scrollWidth is an integer: a 50.4px label clamped to a
+      // measured 50px starts overflowing, which reads back as 51 and then 50
+      // again, rewriting the property every frame of a drag. The pixel of slack
+      // is the difference between a fixed point and a wobble.
+      const w = `${label.scrollWidth + 1}px`;
+      if (el.style.getPropertyValue("--rl-toc-label-w") !== w)
+        el.style.setProperty("--rl-toc-label-w", w);
+    },
+    // `docWide` for the same reason it's in the zoom control's deps: switching
+    // views moves the text column's left edge from "centred" to the pane's edge
+    // without resizing the scroller the observer watches, so the measurement has
+    // to be asked for rather than waited on.
+    deps: [tocDocked, tocEligible, mainSurface, activeId, activeFile, docWide],
+  });
+
+  // The voice panel docks on the OTHER side of the same document column, over
+  // whichever of its two surfaces is live. One source of truth for the JSX and
+  // for the surrounding layout, so the dock, the divider and the pill can never
+  // disagree about whether the panel is up.
+  const planVoiceOpen =
+    voiceEnabled &&
+    sessionReady &&
+    !!latest &&
+    mainSurface === "document" &&
+    !(sidebarTab.kind === "folder" && activeFile) &&
+    voiceOpen;
+  const drafterVoicePanelOpen =
+    voiceEnabled &&
+    mainSurface === "drafter" &&
+    !!drafterDraftId &&
+    drafterVoiceOpen;
+  const voiceDocked = planVoiceOpen || drafterVoicePanelOpen;
+  // Which "close" the divider's chevron means depends on which surface is up.
+  const closeVoicePanel = useCallback(() => {
+    setVoiceOpen(false);
+    setDrafterVoiceOpen(false);
+  }, []);
 
   const joinRoom = useCallback((config: CollabConfig, name: string) => {
     setJoinedRoom({ config, name });
@@ -2344,13 +2930,17 @@ function App() {
   // and release without its own wiring.
   const activeHeld =
     summaries.find((s) => s.sessionId === activeId)?.held ?? false;
-  // The focused terminal tab hosts a held plan (any session's): the backend
-  // pins each held POST to the dock terminal whose claude sent it, so the
-  // "plan intercepted" strip renders only inside that terminal — never in a
-  // sibling tab, and never for plans intercepted from external terminals.
-  const heldInFocusedTerm =
-    activeTermId !== null &&
-    summaries.some((s) => s.held && s.heldTerminalId === activeTermId);
+  // Every dock terminal currently holding a plan: the backend pins each held
+  // POST to the terminal whose claude sent it, so the "plan intercepted" strip
+  // renders inside exactly those tabs — never in a sibling tab, and never for
+  // plans intercepted from external terminals. A *set*, not a boolean about the
+  // focused tab: in a split dock each pane answers for itself, and approving
+  // one pane's plan must leave the other pane's strip standing.
+  const heldTermIds = useMemo(() => heldTerminalIds(summaries), [summaries]);
+  // The same linkage carrying the plan's *name*, so the tab bar's repo popover
+  // can say which piece of work each held terminal is sitting on rather than
+  // only that it is held.
+  const heldPlanTitles = useMemo(() => heldPlanByTerminal(summaries), [summaries]);
   // Detached is *derived* from the active session's persisted attach state —
   // the backend records detachment (drop-guard, failed submit, startup sweep
   // for POSTs orphaned by a restart), so this survives restarts and detaches
@@ -2648,6 +3238,53 @@ function App() {
     }
     setToast("Launching plan in the terminal below ↓");
     setTimeout(() => setToast(null), 4000);
+  };
+
+  // "Run" on a Localhost card: bring a dev server back without hunting for the
+  // command. Same spawn → 900ms → write choreography as launchPromptDraft (let
+  // the freshly-spawned shell finish its rc files before the command lands).
+  // No `cd` prefix — openSessionTerminal spawns the PTY *in* that directory,
+  // and prefixing one would break on a path the shell would need quoted.
+  const runDevServer = (projectPath: string, runCommand: string) => {
+    const cmd = runCommand.trim();
+    if (!cmd) return;
+    setTermFullscreen(false);
+    setTermCollapsed(false);
+    const id = terminalsRef.current?.openSessionTerminal(projectPath) ?? null;
+    if (id) {
+      window.setTimeout(() => {
+        void invoke("pty_write", { id, data: `${cmd}\r` });
+      }, 900);
+    }
+    setToast("Starting the dev server in the terminal below ↓");
+    setTimeout(() => setToast(null), 4000);
+  };
+
+  // A card's screenshot just landed: remember it against that server's row so
+  // it survives a restart, and so a card whose server is DOWN still shows what
+  // it was serving. Best-effort — a lost thumbnail just means a recapture.
+  const persistDevServerThumb = (
+    projectPath: string,
+    port: number,
+    path: string,
+  ) => {
+    void invoke("dev_server_set_thumb", { projectPath, port, path }).catch(
+      () => {},
+    );
+  };
+
+  // "Open" on a Localhost card: bring the browser surface forward with a tab on
+  // that URL. Handed to BrowserPane as a nonce-keyed PROP rather than an emitted
+  // event — BrowserPane only mounts when the browser surface is selected, so an
+  // event fired at selection time would race its own listener's subscription and
+  // be dropped.
+  const [browserOpenRequest, setBrowserOpenRequest] = useState<{
+    url: string;
+    nonce: number;
+  } | null>(null);
+  const openUrlInBrowser = (url: string) => {
+    setBrowserOpenRequest({ url, nonce: Date.now() });
+    selectSurface("browser");
   };
 
   // "Send to Claude Code" from a browser page-discussion reply. The plan was
@@ -3027,7 +3664,7 @@ function App() {
     !isDragging &&
     !termDragging &&
     !splitDragging &&
-    !layout.curtainActive &&
+    !liveFlags.curtain &&
     openMenuCount === 0;
 
   return (
@@ -3039,6 +3676,7 @@ function App() {
           SIBLING of every wrapped region — a crash elsewhere must never
           unmount a TerminalView (its cleanup kills the PTY session). */}
       <ErrorBoundary
+        region="session header"
         fallback={(_err, reset) => (
           <div
             className="flex items-center justify-center gap-2 px-4 py-2"
@@ -3166,6 +3804,7 @@ function App() {
       </ErrorBoundary>
       <main className="relative flex-1 overflow-hidden flex flex-col">
         <ErrorBoundary
+          region="content area"
           fallback={(err, reset) => (
             <div className="flex-1 overflow-hidden flex items-center justify-center">
               <BoundaryFallback
@@ -3182,29 +3821,22 @@ function App() {
         // its floor) it reserves only the flow width and lets the full-width
         // aside spill right OVER the doc, painted above it.
         <div
-          className="shrink-0"
+          ref={sidebarClipRef}
+          className="shrink-0 rl-sidebar-clip"
+          data-rl-pane
+          // No `width` here on purpose: `applyLiveLayout` owns it, so a drag
+          // frame never has to go through React and React never clobbers a
+          // live value. Same for the aside and the dock below.
           style={{
-            width: `${layout.sidebarFlowW}px`,
-            overflow: layout.sidebarOverlayPx > 0 ? "visible" : "hidden",
-            position: layout.sidebarOverlayPx > 0 ? "relative" : undefined,
-            zIndex: layout.sidebarOverlayPx > 0 ? 25 : undefined,
             display: "flex",
             justifyContent: "flex-start",
             transition: sidebarSettling ? "width 160ms ease" : undefined,
           }}
         >
         <aside
+          ref={sidebarAsideRef}
           data-tour="sessions"
-          className="flex flex-col shrink-0"
-          style={{
-            width: `${revealSidebarW}px`,
-            ...(layout.sidebarOverlayPx > 0
-              ? {
-                  background: "var(--color-paper)",
-                  boxShadow: "8px 0 24px rgba(0,0,0,0.18)",
-                }
-              : null),
-          }}
+          className="flex flex-col shrink-0 rl-sidebar-aside"
         >
           <SidebarTabStrip
             openFolders={openFolders}
@@ -3237,6 +3869,7 @@ function App() {
                 setViewedVersionNumber(versionNumber);
               }}
               viewedVersionNumber={viewedVersionNumber}
+              unseenIds={unseenPlanIds}
             />
           ) : (
             <div className="flex-1 overflow-y-auto" style={{ background: "var(--color-paper)" }}>
@@ -3250,13 +3883,13 @@ function App() {
         </aside>
         {/* In curtain state the flow boundary sits under the spilled aside, so
             the divider rides the curtain's visible right edge instead. */}
-        {layout.sidebarOverlayPx > 0 && (
+        {liveFlags.curtainL && (
           <div
+            ref={sidebarCurtainDivRef}
             style={{
               position: "absolute",
               top: 0,
               bottom: 0,
-              right: `${-(layout.sidebarOverlayPx + 6)}px`,
               zIndex: 26,
               display: "flex",
             }}
@@ -3286,13 +3919,29 @@ function App() {
           dragging={sidebarDragging}
           onToggle={() => setSidebarCollapsed((c) => !c)}
           onPointerDown={startSidebarDrag}
-          hideChevron={latchActive || layout.sidebarOverlayPx > 0}
+          hideChevron={latchActive || liveFlags.curtainL}
         />
         <div
           ref={docColumnRef}
-          className="flex-1 overflow-hidden flex flex-col relative"
+          className="flex-1 overflow-hidden flex relative rl-doc-column"
           style={{ background: "var(--color-paper)" }}
         >
+          {/* The document region: everything the doc column used to hold
+              directly. The column itself is now a ROW — content here, the
+              voice panel docked beside it — so the panel shrinks the document
+              instead of painting over it, exactly as the discussion sidecar
+              already shrinks the whole column.
+
+              `relative` matters: the TOC rail, the Contents button, the
+              Discuss pill and the zoom control all anchor HERE rather than to
+              the outer column, which is what keeps the right-hand zoom control
+              from sliding back underneath the voice panel. `min-w-0` lets the
+              plan's long code lines actually shrink instead of jamming the
+              flex row open.
+
+              Its children are deliberately NOT re-indented — a whole-block
+              shift would bury this change in ~530 lines of whitespace diff. */}
+          <div className="flex-1 min-w-0 overflow-hidden flex flex-col relative">
           {/* Table-of-contents rail (Phase 2). Docked to the left of the
               document column: the scroller below reserves `TOC_RAIL_W` of left
               padding while this is open (see `tocDocked`), so the rail sits
@@ -3302,6 +3951,7 @@ function App() {
             if (!tocEligible) return null;
             return tocOpen ? (
               <div
+                ref={tocRailRef}
                 className="rl-toc-rail"
                 style={{
                   position: "absolute",
@@ -3315,10 +3965,9 @@ function App() {
                   background: "var(--color-bg-elevated)",
                   borderRight: "1px solid var(--color-rule)",
                   boxShadow: "4px 0 16px rgba(0,0,0,0.12)",
-                  transition:
-                    tocDragW != null
-                      ? "none"
-                      : "width 160ms cubic-bezier(0.4,0,0.2,1)",
+                  transition: tocDragging
+                    ? "none"
+                    : "width 160ms cubic-bezier(0.4,0,0.2,1)",
                 }}
               >
                 <div
@@ -3393,28 +4042,49 @@ function App() {
                 <div
                   onPointerDown={(e) => {
                     e.preventDefault();
-                    const rail = (e.currentTarget as HTMLElement)
-                      .parentElement;
+                    const rail = tocRailRef.current;
+                    const scroller = docScrollerRef.current;
                     if (!rail) return;
+                    (e.currentTarget as HTMLElement).setPointerCapture(
+                      e.pointerId,
+                    );
                     const left = rail.getBoundingClientRect().left;
-                    // Coalesce to one width commit per frame (SplitPane's
-                    // startDrag pattern).
-                    let rafId = 0;
+                    setTocDragging(true);
+                    beginResizeSession();
+                    // Written straight onto the two elements that use it. A
+                    // custom property on the doc column would have been tidier
+                    // to read, but it would invalidate style for the entire
+                    // plan document on every frame — which is exactly the cost
+                    // this handle is trying to avoid.
                     let pending = tocRailW;
-                    const flush = () => {
-                      rafId = 0;
-                      setTocDragW(pending);
-                    };
+                    const apply = rafCoalesce((px: number) => {
+                      rail.style.width = `${px}px`;
+                      if (scroller) scroller.style.paddingLeft = `${px}px`;
+                    });
                     const move = (ev: PointerEvent) => {
                       pending = clampTocDrag(ev.clientX - left);
-                      if (!rafId) rafId = requestAnimationFrame(flush);
+                      apply(pending);
                     };
                     const up = () => {
-                      if (rafId) cancelAnimationFrame(rafId);
+                      apply.cancel();
                       window.removeEventListener("pointermove", move);
                       window.removeEventListener("pointerup", up);
-                      setTocWide(snapTocWide(pending));
-                      setTocDragW(null);
+                      const wide = snapTocWide(pending);
+                      setTocDragging(false);
+                      setTocWide(wide);
+                      // The snap often lands back on the width React already
+                      // rendered (drag 230 → 250 → snap 230), in which case its
+                      // style diff writes nothing and the last drag frame would
+                      // stick. Set the resting width explicitly — next frame,
+                      // so the just-restored transition animates the settle.
+                      const rest = wide ? TOC_RAIL_W_WIDE : TOC_RAIL_W;
+                      requestAnimationFrame(() => {
+                        rail.style.width = `${rest}px`;
+                        if (scroller) {
+                          scroller.style.paddingLeft = `${rest}px`;
+                        }
+                      });
+                      endResizeSession();
                     };
                     window.addEventListener("pointermove", move);
                     window.addEventListener("pointerup", up);
@@ -3428,16 +4098,24 @@ function App() {
                     width: "6px",
                     cursor: "col-resize",
                     zIndex: 21,
+                    touchAction: "none",
                   }}
                 />
               </div>
             ) : (
+              // Sheds "Contents" and stands down to the bare ☰ once the text
+              // column grows out to meet it — see useTextClearance below. The
+              // aria-label is the full name in both forms, so the burger never
+              // becomes an unlabelled glyph to a screen reader. `gap` lives in
+              // .rl-toc-btn rather than here so it can animate closed with the
+              // label; an inline value would outrank the collapsed rule.
               <button
+                ref={tocBtnRef}
                 type="button"
                 onClick={() => setTocOpen(true)}
                 title="Show contents"
                 aria-label="Show table of contents"
-                className="font-sans"
+                className="rl-toc-btn font-sans"
                 style={{
                   position: "absolute",
                   top: "10px",
@@ -3445,7 +4123,6 @@ function App() {
                   zIndex: 20,
                   display: "flex",
                   alignItems: "center",
-                  gap: "6px",
                   padding: "4px 8px",
                   fontSize: "11px",
                   fontWeight: 600,
@@ -3456,7 +4133,8 @@ function App() {
                   cursor: "pointer",
                 }}
               >
-                <span aria-hidden>☰</span> Contents
+                <span aria-hidden>☰</span>
+                <span className="rl-toc-btn-label">Contents</span>
               </button>
             );
           })()}
@@ -3470,22 +4148,26 @@ function App() {
             />
           ) : (
           <div
+            ref={docScrollerRef}
             className="rl-thin-scroll-y flex-1 overflow-y-auto"
             style={{
               paddingLeft: tocDocked ? `${tocRailW}px` : undefined,
-              transition:
-                tocDragW != null
-                  ? "none"
-                  : "padding-left 160ms cubic-bezier(0.4,0,0.2,1)",
+              transition: tocDragging
+                ? "none"
+                : "padding-left 160ms cubic-bezier(0.4,0,0.2,1)",
             }}
           >
           <article
             ref={documentRef}
             data-tour="editor"
-            className="doc-article mx-auto pl-16 pr-8 py-10"
+            className="doc-article mx-auto pl-16 py-10"
             style={
               {
-                maxWidth: "820px",
+                // Wide view drops the measure entirely and lets the column run
+                // to the pane's edges (`mx-auto` then has nothing to centre);
+                // normal view keeps the 820px reading measure.
+                maxWidth: docWide ? "none" : "820px",
+                paddingRight: `${docPadR}px`,
                 "--rl-doc-zoom": docZoom,
               } as React.CSSProperties
             }
@@ -3628,19 +4310,40 @@ function App() {
                 onSendToDrafter={sendBrowserToDrafter}
                 // A synthesized mission brief seeds the Prompt Drafter.
                 onSynthesizeToDrafter={seedDrafterFromMission}
+                // "Open" on a Localhost card. A prop, not an event: this pane
+                // mounts only when the browser surface is selected, so an event
+                // emitted at selection time would beat its own listener.
+                openRequest={browserOpenRequest}
                 // Re-sync the native webview whenever a surrounding pane toggles
                 // and reflows the slot without a drag (e.g. closing the comment
                 // pane, which otherwise leaves the webview stranded at its old
                 // size with a gap of blank space).
-                layoutKey={`${paneCollapsed}|${sidebarCollapsed}|${docVisible}|${splitVertical}|${layout.curtainActive}`}
+                layoutKey={`${paneCollapsed}|${sidebarCollapsed}|${docVisible}|${splitVertical}|${liveFlags.curtain}|${voiceDocked}`}
               />
             );
-            const drafterBody = (
+            const drafterBody = drafterShelfOpen ? (
+              <BookshelfView
+                openDraftId={drafterDraftId}
+                defaultProject={drafterProject}
+                onOpen={(id) => {
+                  setDrafterDraftId(id);
+                  setDrafterShelfOpen(false);
+                }}
+                onClose={() => setDrafterShelfOpen(false)}
+              />
+            ) : !drafterDocReady ? (
+              <EmptyState
+                title="Opening the document…"
+                body="Reading it from your Bookshelf."
+              />
+            ) : (
               <PromptDrafter
+                // Remount on the open document so TipTap picks up its content:
+                // `content` is captured once, at editor creation.
+                key={drafterDraftId ?? ""}
                 draftId={drafterDraftId ?? ""}
                 doc={drafterDoc}
-                onDocChange={setDrafterDoc}
-                onMarkdownChange={drafterMarkdownChange}
+                onPersist={drafterPersist}
                 projectOptions={projectOptions}
                 selectedProject={drafterProject}
                 onSelectedProjectChange={setDrafterProject}
@@ -3653,6 +4356,8 @@ function App() {
                     ? () => setDrafterVoiceOpen(true)
                     : null
                 }
+                onOpenShelf={() => setDrafterShelfOpen(true)}
+                sourceCount={drafterSourceCount}
               />
             );
             const reviewBody = (
@@ -3660,6 +4365,18 @@ function App() {
                 review={codeReview}
                 projectOptions={projectOptions}
                 onClose={() => selectSurface("document")}
+              />
+            );
+            const serversBody = (
+              <ServersPane
+                scan={devServers.scan}
+                error={devServers.error}
+                active={serversOpen}
+                onRefresh={devServers.refresh}
+                onStop={devServers.stopServer}
+                onRun={runDevServer}
+                onOpenUrl={openUrlInBrowser}
+                onThumbCaptured={persistDevServerThumb}
               />
             );
             // Exactly one surface owns the pane; a non-document surface splits
@@ -3673,7 +4390,9 @@ function App() {
                   ? drafterBody
                   : mainSurface === "review"
                     ? reviewBody
-                    : null;
+                    : mainSurface === "servers"
+                      ? serversBody
+                      : null;
             if (secondaryBody && docPinned)
               return (
                 <SplitPane
@@ -3692,57 +4411,34 @@ function App() {
           {/* The Discuss pill — the discussion entry on the document pane.
               Opens the plan's voice panel: the one discussion surface
               (voice-first, typed composer inside). Hidden while the panel
-              is up. */}
+              is up. Stands up out of the article's way when the pane gets too
+              narrow to hold both; 64 is the article's pl-16. */}
           {mainSurface === "document" &&
             !(sidebarTab.kind === "folder" && activeFile) &&
             !voiceOpen &&
             voiceEnabled &&
             sessionReady &&
             latest && (
-              <DiscussPill onClick={() => setVoiceOpen(true)} />
-            )}
-          {/* Voice drawer — opened via the pill or ⌘J. Only over an actual
-              plan. */}
-          {voiceEnabled &&
-            sessionReady &&
-            latest &&
-            mainSurface === "document" &&
-            !(sidebarTab.kind === "folder" && activeFile) &&
-            voiceOpen && (
-              <VoicePanel
-                // Remount cleanly if the active session changes (a revision
-                // arriving calls setActiveId) instead of mutating sessionId
-                // under a live warm session.
-                key={activeId ?? ""}
-                sessionId={activeId ?? ""}
-                markdown={latest.rawPlanMarkdown}
-                sections={sections}
-                onClose={() => setVoiceOpen(false)}
+              <DiscussPill
+                onClick={() => setVoiceOpen(true)}
+                textRef={documentRef}
+                textInset={64}
+                measureKey={docWide}
               />
             )}
-          {/* Drafter voice — the same drawer over the Prompt Drafter, keyed
-              `drafter:<draft_id>` (the backend derives the kind from the key
-              shape) and primed with the draft's markdown mirror. Its entry
-              point is the drafter's own Discuss pill or ⌘J. */}
-          {voiceEnabled &&
-            mainSurface === "drafter" &&
-            drafterDraftId &&
-            drafterVoiceOpen && (
-              <VoicePanel
-                key={drafterDraftId}
-                sessionId={`drafter:${drafterDraftId}`}
-                markdown={drafterMarkdown}
-                sections={drafterSections}
-                cwd={drafterProject}
-                onClose={() => setDrafterVoiceOpen(false)}
-              />
-            )}
-          {/* Floating document-zoom control — pinned to the pane (doesn't scroll
-              with the plan). Hidden over the folder file viewer. */}
+          {/* Floating document zoom + width control — pinned to the pane
+              (doesn't scroll with the plan). Hidden over the folder file viewer.
+
+              In wide view it stacks into a narrow column: full-bleed text leaves
+              no horizontal gutter to lie in, but the vertical one is free, and
+              standing up is what keeps the way back OUT of wide view on screen
+              (a horizontal row here would trip the overlap check and hide the
+              only affordance that undoes the mode). `column-reverse` so the
+              order still reads + above − with the mode toggle on top. */}
           {mainSurface === "document" && !(sidebarTab.kind === "folder" && activeFile) && zoomVisible && (
             <div
               ref={zoomCtrlRef}
-              className="absolute flex items-center gap-1 rounded-full"
+              className={`absolute flex items-center gap-1 rounded-full${docWide ? " flex-col-reverse" : ""}`}
               style={{
                 right: "16px",
                 bottom: "16px",
@@ -3761,17 +4457,93 @@ function App() {
                 className="font-mono"
                 style={{
                   fontSize: "10px",
-                  minWidth: "34px",
+                  // Stacked, the readout sets the whole column's width — so it
+                  // drops the "%" and its reserved room for the three digits it
+                  // actually needs. The column has to stay inside the article's
+                  // 64px right padding or it lands on the text.
+                  minWidth: docWide ? "22px" : "34px",
                   color: "var(--color-ink-muted)",
                   background: "transparent",
                   border: "none",
                   cursor: "pointer",
                 }}
               >
-                {Math.round(docZoom * 100)}%
+                {Math.round(docZoom * 100)}
+                {docWide ? "" : "%"}
               </button>
               <ZoomButton label="+" title="Zoom in (⌘+)" onClick={zoomIn} />
+              <ZoomButton
+                active={docWide}
+                label={
+                  docWide ? (
+                    <ChevronsRightLeft size={12} strokeWidth={2} />
+                  ) : (
+                    <ChevronsLeftRight size={12} strokeWidth={2} />
+                  )
+                }
+                title={
+                  docWide
+                    ? "Narrow view — a centred reading column"
+                    : "Wide view — fill the pane with text"
+                }
+                onClick={() => setDocWide((w) => !w)}
+              />
             </div>
+          )}
+          </div>
+          {/* Voice panel — the app's one discussion surface, opened by the
+              Discuss pill or ⌘J over a plan, or by the drafter's own pill over
+              a draft. A docked, resizable column rather than a drawer painted
+              over the document: the two surfaces are mutually exclusive, so
+              one dock hosts whichever is live and the differing `key`s keep
+              the remount-per-session behaviour. */}
+          {voiceDocked && (
+            <>
+              <PaneDivider
+                label="voice"
+                collapsed={false}
+                dragging={voiceDragging}
+                // The chevron closes the panel; the pill and ⌘J reopen it (a
+                // collapsed voice column has no divider left to drag from).
+                onToggle={closeVoicePanel}
+                onPointerDown={startVoiceDrag}
+                hideChevron={latchActive}
+              />
+              {/* Width is owned by the resize hook + the adopt effect, never
+                  rendered from here. `data-rl-pane` lets the app-wide resizing
+                  flag kill its transition mid-drag. */}
+              <div
+                ref={voiceDockRef}
+                data-rl-pane
+                className="shrink-0 flex overflow-hidden"
+              >
+                {planVoiceOpen ? (
+                  <VoicePanel
+                    // Remount cleanly if the active session changes (a revision
+                    // arriving calls setActiveId) instead of mutating sessionId
+                    // under a live warm session.
+                    key={activeId ?? ""}
+                    sessionId={activeId ?? ""}
+                    markdown={latest?.rawPlanMarkdown ?? ""}
+                    sections={sections}
+                    onActivityChange={setDiscussionLive}
+                    onClose={() => setVoiceOpen(false)}
+                  />
+                ) : (
+                  <VoicePanel
+                    // Keyed `drafter:<draft_id>` — the backend derives the kind
+                    // from the key shape — and primed with the draft's markdown
+                    // mirror.
+                    key={`drafter:${drafterDraftId ?? ""}`}
+                    sessionId={`drafter:${drafterDraftId ?? ""}`}
+                    markdown={drafterMarkdown}
+                    sections={drafterSections}
+                    cwd={drafterProject}
+                    onClose={() => setDrafterVoiceOpen(false)}
+                  />
+                )}
+              </div>
+            </>
           )}
         </div>
 
@@ -3785,7 +4557,7 @@ function App() {
             dragging={isDragging}
             onToggle={() => setPaneCollapsed((c) => !c)}
             onPointerDown={startDrag}
-            hideChevron={latchActive || layout.paneOverlayPx > 0}
+            hideChevron={latchActive || liveFlags.curtainR}
           />
         )}
 
@@ -3852,15 +4624,13 @@ function App() {
         // flex clip whose width tracks the live pane width while the aside inside
         // stays pinned at min and is revealed from the right.
         <div
+          ref={paneClipRef}
+          className={paneFullscreen ? undefined : "rl-pane-clip"}
+          data-rl-pane={paneFullscreen ? undefined : ""}
           style={
             paneFullscreen
               ? { display: "contents" }
               : {
-                  width: `${layout.paneFlowW}px`,
-                  overflow: layout.paneOverlayPx > 0 ? "visible" : "hidden",
-                  position:
-                    layout.paneOverlayPx > 0 ? "relative" : undefined,
-                  zIndex: layout.paneOverlayPx > 0 ? 25 : undefined,
                   display: "flex",
                   justifyContent: "flex-end",
                   flexShrink: 0,
@@ -3870,13 +4640,13 @@ function App() {
         >
         {/* Curtain state: the divider copy rides the curtain's visible left
             edge (the in-flow divider is painted over). */}
-        {!paneFullscreen && layout.paneOverlayPx > 0 && (
+        {!paneFullscreen && liveFlags.curtainR && (
           <div
+            ref={paneCurtainDivRef}
             style={{
               position: "absolute",
               top: 0,
               bottom: 0,
-              left: `${-(layout.paneOverlayPx + 6)}px`,
               zIndex: 26,
               display: "flex",
             }}
@@ -3891,28 +4661,30 @@ function App() {
           </div>
         )}
         <aside
-          ref={sidebarRef as React.RefObject<HTMLElement>}
+          ref={(el) => {
+            (sidebarRef as React.MutableRefObject<HTMLElement | null>).current =
+              el;
+            paneAsideRef.current = el;
+          }}
           data-tour="discussion"
           data-context={discussionContext}
           className={
             paneFullscreen
               ? "absolute inset-0 z-30 overflow-y-auto rl-discussion"
-              : "overflow-y-auto border-l shrink-0 rl-discussion"
+              : "overflow-y-auto border-l shrink-0 rl-discussion rl-pane-aside"
           }
           style={
             {
               background: "var(--color-paper)",
               borderColor: "var(--color-rule)",
-              // Curtain state: read as painted above the doc.
-              boxShadow:
-                !paneFullscreen && layout.paneOverlayPx > 0
-                  ? "-8px 0 24px rgba(0,0,0,0.18)"
-                  : undefined,
-              // Fullscreen lets the aside fill its absolute box (no fixed width).
-              width: paneFullscreen ? undefined : `${revealPaneW}px`,
+              // Curtain state (read as painted above the doc) is a CSS rule on
+              // `.rl-pane-clip[data-rl-curtain] .rl-pane-aside` — see
+              // styles.css. Width is owned by `applyLiveLayout`; fullscreen
+              // clears it so the aside fills its absolute box.
               // One place to drive every discussion's text size — descendants
               // read `--rl-discussion-zoom` via CSS, so the A−/A+ controls never
-              // re-render the comment list.
+              // re-render the comment list. (Safe as a custom property: it is
+              // set on the aside, not the root, and only when the user zooms.)
               "--rl-discussion-zoom": discussionZoom,
             } as React.CSSProperties
           }
@@ -4130,6 +4902,7 @@ function App() {
             {composing && (
               <CommentComposer
                 type={composing.type}
+                sessionId={activeId ?? ""}
                 anchorId={composing.anchorId}
                 selectedText={composing.selectedText}
                 charStart={composing.charStart}
@@ -4327,16 +5100,17 @@ function App() {
           />
         )}
         <div
+          ref={termDockRef}
           className={
             termFullscreen
               ? "absolute inset-0 z-30"
-              : "relative shrink-0 overflow-hidden"
+              : "relative shrink-0 overflow-hidden rl-term-dock"
           }
-          style={
-            termFullscreen
-              ? { background: "var(--color-paper)" }
-              : { height: termCollapsed ? 0 : `${termHeight}px` }
-          }
+          data-rl-pane={termFullscreen ? undefined : ""}
+          // Height is owned by `applyLiveLayout` (it folds in the collapsed
+          // state), so the dock tracks the divider without a render — and
+          // without touching style for anything else on the page.
+          style={termFullscreen ? { background: "var(--color-paper)" } : undefined}
         >
           {/* In fullscreen, an overlay divider at the top of the terminal
               gives the user the same top-edge caret they use to collapse
@@ -4372,38 +5146,14 @@ function App() {
             onActivityChange={setTermHasUnseen}
             collapsed={termFullscreen ? false : termCollapsed}
             onActiveTabChange={setActiveTermId}
+            heldTerminalIds={heldTermIds}
+            heldPlanTitles={heldPlanTitles}
+            projectOptions={projectOptions}
           />
-          {/* Since text can't be injected into the held PTY, fake one line of
-              terminal output: a strip pinned to the dock's bottom edge,
-              terminal bg + mono font + matching padding so it sits on the
-              glyph grid and reads as native output. Click-through so the
-              shell underneath stays usable. */}
-          {heldInFocusedTerm && (!termCollapsed || termFullscreen) && (
-            <div
-              aria-hidden
-              style={{
-                position: "absolute",
-                left: 0,
-                right: 0,
-                bottom: 0,
-                zIndex: 20,
-                pointerEvents: "none",
-                background: "var(--color-paper)",
-                fontFamily: "var(--font-mono)",
-                fontSize: 13,
-                lineHeight: "18px",
-                padding: "2px 8px",
-                color: "#e8553d",
-                whiteSpace: "pre",
-                overflow: "hidden",
-              }}
-            >
-              {"── plan intercepted by redline ──"}
-            </div>
-          )}
         </div>
       </main>
       <ErrorBoundary
+        region="status bar"
         fallback={(_err, reset) => (
           <div
             className="flex items-center justify-center gap-2 px-4 py-1"
@@ -4442,6 +5192,7 @@ function App() {
       {/* The trailing modal/overlay cluster: a crash in any dialog collapses
           to a quiet toast instead of taking down the app tree. */}
       <ErrorBoundary
+        region="toast"
         fallback={(_err, reset) => (
           <div
             className="fixed bottom-4 right-4 z-50 flex items-center gap-2 px-3 py-2 rounded shadow-lg"
@@ -4479,7 +5230,16 @@ function App() {
           onCancel={() => setSendConfirm(null)}
         />
       )}
-      {toast && <ApproveToast message={toast} />}
+      {toast &&
+        (typeof toast === "string" ? (
+          <ApproveToast message={toast} />
+        ) : (
+          <ApproveToast
+            message={toast.message}
+            tone={toast.tone}
+            action={toast.action}
+          />
+        ))}
       {inviteOpen && (
         <InviteDialog
           sharing={collabShare}

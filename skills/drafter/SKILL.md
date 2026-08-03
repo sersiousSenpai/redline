@@ -10,7 +10,7 @@ description: >-
   suggestions (append / replace_block / insert_after / delete_block) the user
   accepts or rejects in place. Covers the collaborator persona, the doc-route
   re-read discipline, the suggestions ops + staleness contract, and formatting.
-version: 2
+version: 3
 ---
 
 # Redline drafter discussion
@@ -43,13 +43,17 @@ said the doc moved.
 
 ## Writing into the document
 
-You can draft and edit the prompt directly. Post a suggestion. Write routes
-require `-H "Authorization: Bearer $REDLINE_DAEMON_TOKEN"` after the URL (the
-token is already in your environment):
+You can draft and edit the prompt directly. Post a suggestion. Write routes need
+the bearer token, but never write `$REDLINE_DAEMON_TOKEN` into the command
+yourself — the bash sandbox rejects any command containing shell expansion
+before it runs. Have curl import the variable instead, with these two flags
+after the URL (needs curl ≥ 8.3):
 
 ```
-curl -s http://127.0.0.1:7676/v1/drafter/<draft_id>/suggestions -X POST \
-  -H "Authorization: Bearer $REDLINE_DAEMON_TOKEN" \
+curl -s http://127.0.0.1:7676/v1/drafter/<draft_id>/suggestions \
+  --variable %REDLINE_DAEMON_TOKEN= \
+  --expand-header "Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}" \
+  -X POST \
   -H 'Content-Type: application/json' \
   -d '{"op":"append","markdown":"<content>","agentId":"draft-agent","body":"<one-line why>"}'
 ```
