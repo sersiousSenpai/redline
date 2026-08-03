@@ -301,6 +301,7 @@ mod tests {
             revisions: Vec::new(),
             status: SessionStatus::InReview,
             attach_state: AttachState::Idle,
+            updated_at: at,
         };
         db.upsert_session(&mk("s1", "/a", 100)).unwrap();
         db.upsert_session(&mk("s2", "/b", 300)).unwrap();

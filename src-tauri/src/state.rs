@@ -151,6 +151,9 @@ pub struct ReviewSession {
     pub revisions: Vec<Revision>,
     pub status: SessionStatus,
     pub attach_state: AttachState,
+    /// Last-activity timestamp (revision/comment/thread message/status
+    /// change) — the sidebar orders sessions by it, newest first.
+    pub updated_at: i64,
 }
 
 /// A lightweight per-revision projection for the sidebar's revisions tree —
@@ -193,6 +196,8 @@ pub struct SessionSummary {
     /// Persisted attach state — `Detached` means the held POST died before a
     /// decision and the session needs a restore before submit/approve work.
     pub attach_state: AttachState,
+    /// Last-activity timestamp — `list()` sorts by it, newest first.
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -403,6 +408,32 @@ pub struct CommentSelection {
     pub sub_block_id: Option<String>,
 }
 
+/// A file the reviewer attached to a comment — a screenshot of the UI they
+/// mean, a mock, a log.
+///
+/// `path` is an ABSOLUTE local path, and that is the whole transport. The
+/// revise payload is delivered as plain text to the user's real Claude Code
+/// session, which has full tool access, so naming the file is strictly better
+/// than base64-ing it into the prompt: no size blowup, no encoding, and Claude
+/// reads it with the tool it already has. The file is *copied* into app data at
+/// capture time (see `save_attachment` / `import_attachment`) precisely so this
+/// path stays valid — submit can happen long after capture, and a source the
+/// user has since moved or deleted would break the payload silently.
+///
+/// `bytes` and `mime` are recorded at capture so the UI can render a chip
+/// without touching disk.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CommentAttachment {
+    /// Absolute path inside `<app_data_dir>/attachments/<session_id>/`.
+    pub path: String,
+    /// Display name (the original basename, sanitized and de-duplicated).
+    pub name: String,
+    /// Best-effort content type from the extension, e.g. "image/png".
+    pub mime: String,
+    pub bytes: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Comment {
@@ -465,6 +496,22 @@ pub struct Comment {
     /// shape byte-identical to the pre-collab contract.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviewer: Option<String>,
+    /// When the external reviewer actually wrote this comment (the return
+    /// payload's `createdAt`), as opposed to `created_at` — when the import
+    /// landed it here. `None` for every owner-originated comment, keeping the
+    /// serialized shape (and the feedback payload) byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_created_at: Option<i64>,
+    /// The Review Request this comment arrived on (the share's `requestId`),
+    /// back-linking an imported comment to its share. `None` unless imported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_request_id: Option<String>,
+    /// Files the reviewer attached to this comment ("make it look like this",
+    /// plus a screenshot). Empty for every comment without one, which keeps the
+    /// serialized shape — and the feedback payload — byte-identical to the
+    /// pre-attachment contract.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<CommentAttachment>,
 }
 
 /// One turn in a comment's fork-agent discussion thread (Phase 2). Rows are
@@ -483,6 +530,11 @@ pub struct ThreadMessage {
     pub body: String,
     /// "complete" | "error".
     pub status: String,
+    /// Files the reviewer dropped into this follow-up. The fork can `Read` them
+    /// during the discussion, and their paths ride the `attach_discussion`
+    /// rider into the next Revise payload. Always empty on assistant turns.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<CommentAttachment>,
     pub created_at: i64,
 }
 
@@ -605,6 +657,162 @@ pub struct BrowseMessage {
     pub role: String,
     pub body: String,
     /// "complete" | "error".
+    pub status: String,
+    pub created_at: i64,
+}
+
+/// One visible line of a voice/discussion panel transcript. Mirrors
+/// `BrowseMessage`, keyed by the voice key (a plan session id, or
+/// `drafter:<draft_id>` — the same key `voice.rs` uses everywhere).
+///
+/// The agent's *memory* already survives everything (the forked claude session
+/// id in `voice_sessions`); this is the matching persistence for what the user
+/// can SEE. Without it the panel's transcript lived only in component state and
+/// was destroyed by an incoming plan, a session switch, or a restart —
+/// mid-conversation and unannounced.
+///
+/// Rows are written from Rust, not the panel, so a reply still lands when the
+/// panel is unmounted. `role` mirrors the panel's own three line kinds rather
+/// than the wire roles: "you" (the reviewer's turn, stored as its *displayed*
+/// label), "agent", and "note" (markers like "▶ Read the plan").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceMessage {
+    pub id: String,
+    pub session_key: String,
+    /// "you" | "agent" | "note".
+    pub role: String,
+    pub text: String,
+    pub created_at: i64,
+}
+
+/// A plan action item the voice agent *offered* but has not written. When the
+/// agent proposes a concrete change out loud it stages the offer mid-turn over
+/// the bridge; the panel renders a `＋ Add as item` chip under that reply, and
+/// only the user's tap turns it into a real `[feedback]` comment.
+///
+/// Staging rather than writing is the whole point: an offer is not a write, so
+/// it needs no "at the user's direction" gate — and the round trip where the
+/// user says "add that as feedback" and the agent posts a second turn later
+/// disappears.
+///
+/// `message_id` is the `voice_messages` row of the reply the offer came from,
+/// filled in by `bind_comment_offers` once that reply is persisted (the offer's
+/// curl necessarily lands *before* its own turn finishes). `None` means "loose"
+/// — a valid render state, shown under the streaming bubble or at the tail.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommentOffer {
+    pub id: String,
+    pub session_id: String,
+    pub message_id: Option<String>,
+    /// An `rl:blk-` id from `GET .../plan`, validated at stage time.
+    pub block_id: String,
+    /// The feedback directive, in plain words — what the comment would say.
+    pub body: String,
+    /// A ≤60-char chip line; falls back to a truncated `body` in the UI.
+    pub label: Option<String>,
+    pub agent_id: String,
+    /// `pending | added | dismissed`.
+    pub status: String,
+    pub created_at: i64,
+    /// The plan moved on and this offer's block is gone from the latest
+    /// revision — the chip renders disabled. Computed on read, **not** a
+    /// column: staleness is a fact about the current plan, not about the row.
+    #[serde(default)]
+    pub stale: bool,
+}
+
+/// One turn in a draft's discussion thread (the Prompt Drafter's 💬 agent).
+/// Mirrors `BrowseMessage`, scoped to a `draft_id`. The agent's resumable
+/// session id + the last doc hash it saw live in `draft_chat_threads`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftChatMessage {
+    pub id: String,
+    pub draft_id: String,
+    /// "user" | "assistant".
+    pub role: String,
+    pub body: String,
+    /// "complete" | "error".
+    pub status: String,
+    pub created_at: i64,
+}
+
+/// A Companion session: ONE global discussion that follows the user across
+/// every surface of the app (plan reviews, Prompt Drafter, browser, missions,
+/// code review). Backed by `companion_sessions`; the resumable claude session
+/// id lives on the row, and `last_journal_seq` is the high-water mark of
+/// context-journal rows already folded into the conversation ("while you were
+/// away"). See companion.rs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Companion {
+    pub companion_id: String,
+    pub title: String,
+    /// "active" | "archived".
+    pub status: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// One persisted turn in a Companion discussion. Each turn is surface-tagged
+/// with where the user was when it was sent, so the UI can show "on the plan —
+/// My plan" per message (the Companion's analog of linked's tab tags).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompanionMessage {
+    pub id: String,
+    pub companion_id: String,
+    /// "user" | "assistant".
+    pub role: String,
+    pub body: String,
+    /// "complete" | "error".
+    pub status: String,
+    pub surface_kind: Option<String>,
+    pub surface_id: Option<String>,
+    pub surface_label: Option<String>,
+    pub created_at: i64,
+}
+
+/// A comment anchored to a draft block — the Prompt Drafter's sidecar
+/// (selection-anchored discussion threads, like plan comments but leaner:
+/// no kinds/resolutions/structural payloads). The thread itself lives in
+/// `thread_messages` keyed `(draft_id, comment_id)` (the review-thread
+/// precedent); the fork's resumable session id lives here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftComment {
+    pub id: String,
+    pub draft_id: String,
+    pub block_id: Option<String>,
+    pub sel_char_start: Option<i64>,
+    pub sel_char_end: Option<i64>,
+    pub sel_quoted_text: Option<String>,
+    pub body: String,
+    pub author: Option<String>,
+    pub created_at: i64,
+    pub fork_session_id: Option<String>,
+}
+
+/// An agent write-suggestion against a draft — a tracked change the drafter
+/// renders with accept/reject. Queued in `draft_suggestions` (status `pending`)
+/// so a proposal made while the pane is closed is drained on mount.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftSuggestion {
+    pub id: String,
+    pub draft_id: String,
+    /// `append | replace_block | insert_after | delete_block`.
+    pub op: String,
+    pub block_id: Option<String>,
+    /// The block markdown the agent read (staleness guard).
+    pub original: Option<String>,
+    pub markdown: String,
+    pub agent_id: Option<String>,
+    /// Optional one-line rationale shown on the card.
+    pub body: Option<String>,
+    /// `pending | applied | rejected`.
     pub status: String,
     pub created_at: i64,
 }
@@ -753,6 +961,15 @@ pub struct NewCommentRequest {
     /// live-collab mirror; absent on every owner-originated comment.
     #[serde(default)]
     pub reviewer: Option<String>,
+    /// Provenance for imported Review Request returns (see the matching
+    /// fields on `Comment`); absent on every owner-originated comment.
+    #[serde(default)]
+    pub external_created_at: Option<i64>,
+    #[serde(default)]
+    pub share_request_id: Option<String>,
+    /// Files captured by the composer before Save (see `Comment::attachments`).
+    #[serde(default)]
+    pub attachments: Vec<CommentAttachment>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -826,8 +1043,19 @@ impl SessionStore {
             return;
         }
         session.attach_state = state;
+        session.updated_at = now_millis();
         if let Err(e) = self.db.set_session_attach_state(session_id, state.as_str()) {
             tracing::error!(error = %e, "failed to persist attach state");
+        }
+    }
+
+    /// Bump a session's in-memory last-activity timestamp. Used by callers
+    /// that persist activity through the `Database` directly (fork threads),
+    /// where the DB row is already touched but the store copy would go stale.
+    pub fn touch(&self, session_id: &str) {
+        let mut map = self.inner.lock().unwrap();
+        if let Some(session) = map.get_mut(session_id) {
+            session.updated_at = now_millis();
         }
     }
 
@@ -876,6 +1104,7 @@ impl SessionStore {
                 revisions: Vec::new(),
                 status: SessionStatus::InReview,
                 attach_state: AttachState::Idle,
+                updated_at: now,
             };
             if let Err(e) = self.db.upsert_session(&s) {
                 tracing::error!(error = %e, "failed to persist session");
@@ -896,7 +1125,25 @@ impl SessionStore {
         if let Err(e) = self.db.insert_revision(session_id, &revision) {
             tracing::error!(error = %e, "failed to persist revision");
         }
+        // Polis ledger: record the plan edit (idempotent per session/version/hash).
+        if let Err(e) = crate::ledger::record_revision_event(
+            &self.db,
+            session_id,
+            version_number as i64,
+            &revision.raw_plan_markdown,
+        ) {
+            tracing::warn!(error = %e, "failed to record revision ledger event");
+        }
+        // Companion journal: a plan revision arrived (v{n}).
+        let _ = self.db.append_journal(
+            "revision",
+            Some("plan"),
+            Some(session_id),
+            None,
+            Some(&format!("v{version_number}")),
+        );
         session.revisions.push(revision);
+        session.updated_at = session.updated_at.max(now);
         if restored {
             self.carry_open_comments_forward(session, session_id, version_number);
         }
@@ -931,6 +1178,7 @@ impl SessionStore {
         if let Err(e) = self.db.insert_revision(session_id, &revision) {
             tracing::error!(error = %e, "failed to persist restored revision");
         }
+        session.updated_at = session.updated_at.max(revision.received_at);
         session.revisions.push(revision);
         self.carry_open_comments_forward(session, session_id, version_number);
         Some(UpsertResult {
@@ -1017,10 +1265,16 @@ impl SessionStore {
                     held: false,
                     held_terminal_id: None,
                     attach_state: s.attach_state,
+                    updated_at: s.updated_at,
                 }
             })
             .collect();
-        sessions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        // Most recent activity first; creation time tiebreaks equal stamps.
+        sessions.sort_by(|a, b| {
+            b.updated_at
+                .cmp(&a.updated_at)
+                .then(b.created_at.cmp(&a.created_at))
+        });
         sessions
     }
 
@@ -1105,6 +1359,9 @@ impl SessionStore {
             author: request.author,
             agent_state: None,
             reviewer: request.reviewer,
+            external_created_at: request.external_created_at,
+            share_request_id: request.share_request_id,
+            attachments: request.attachments,
         };
 
         let latest = session.revisions.last_mut().expect("non-empty checked above");
@@ -1116,6 +1373,7 @@ impl SessionStore {
             return Err(format!("failed to persist comment: {e}"));
         }
         latest.comments.push(comment.clone());
+        session.updated_at = session.updated_at.max(comment.created_at);
         Ok(comment)
     }
 
@@ -1202,6 +1460,24 @@ impl SessionStore {
         session.session_id = new_id.to_string();
         if let Err(e) = self.db.rekey_session(old_id, new_id) {
             tracing::error!(error = %e, "failed to rekey session in db");
+        }
+        // Attachment paths embed the session id, so they move with the rows.
+        // The directory itself is moved by the caller (it needs the app handle);
+        // the two belong together — see `fsbrowse::rekey_session_attachments`.
+        if let Err(e) = self.db.rekey_attachment_paths(old_id, new_id) {
+            tracing::warn!(error = %e, "failed to rekey attachment paths");
+        }
+        for rev in &mut session.revisions {
+            for c in &mut rev.comments {
+                for a in &mut c.attachments {
+                    a.path = a
+                        .path
+                        .replace(
+                            &format!("/attachments/{old_id}/"),
+                            &format!("/attachments/{new_id}/"),
+                        );
+                }
+            }
         }
         map.insert(new_id.to_string(), session);
         true
@@ -1387,8 +1663,32 @@ impl SessionStore {
                 return;
             }
             session.status = status;
+            session.updated_at = now_millis();
             if let Err(e) = self.db.upsert_session(session) {
                 tracing::error!(error = %e, "failed to persist session status");
+            }
+            // Polis ledger: a plan approval is a decision worth recording.
+            if session.status == SessionStatus::Approved {
+                if let Err(e) = crate::ledger::record_decision(
+                    &self.db,
+                    crate::ledger::DecisionInput {
+                        kind: crate::ledger::EventKind::Approval,
+                        author: None,
+                        session_id: Some(session_id),
+                        ref_kind: "session",
+                        ref_id: session_id,
+                        payload_hash: crate::ledger::decision_payload_hash(&[
+                            ("status", "approved"),
+                            ("session", session_id),
+                        ]),
+                    },
+                ) {
+                    tracing::warn!(error = %e, "failed to record approval ledger event");
+                }
+                // Companion journal: the plan was approved.
+                let _ = self
+                    .db
+                    .append_journal("approval", Some("plan"), Some(session_id), None, None);
             }
         }
     }
@@ -1408,6 +1708,32 @@ impl SessionStore {
                     comment.status = CommentStatus::Accepted;
                     if let Err(e) = self.db.update_comment(session_id, comment) {
                         tracing::error!(error = %e, "failed to persist accept");
+                    }
+                    // Polis ledger: accepting a resolution is a decision.
+                    let ph = crate::ledger::decision_payload_hash(&[
+                        ("comment", comment_id),
+                        ("accepted_at", &now.to_string()),
+                        (
+                            "body",
+                            comment
+                                .resolution
+                                .as_ref()
+                                .map(|r| r.body.as_str())
+                                .unwrap_or(""),
+                        ),
+                    ]);
+                    if let Err(e) = crate::ledger::record_decision(
+                        &self.db,
+                        crate::ledger::DecisionInput {
+                            kind: crate::ledger::EventKind::Resolution,
+                            author: None,
+                            session_id: Some(session_id),
+                            ref_kind: "comment",
+                            ref_id: comment_id,
+                            payload_hash: ph,
+                        },
+                    ) {
+                        tracing::warn!(error = %e, "failed to record resolution ledger event");
                     }
                     return true;
                 }
@@ -1478,6 +1804,26 @@ impl SessionStore {
                     }
                     if let Err(e) = self.db.update_comment(session_id, comment) {
                         tracing::error!(error = %e, "failed to persist reopen");
+                    }
+                    // Polis ledger: reopening a resolution (optionally as a
+                    // directive) is a decision, with its note in the hash.
+                    let ph = crate::ledger::decision_payload_hash(&[
+                        ("comment", comment_id),
+                        ("note", note.unwrap_or("")),
+                        ("as_change", if as_change { "1" } else { "0" }),
+                    ]);
+                    if let Err(e) = crate::ledger::record_decision(
+                        &self.db,
+                        crate::ledger::DecisionInput {
+                            kind: crate::ledger::EventKind::Reopen,
+                            author: None,
+                            session_id: Some(session_id),
+                            ref_kind: "comment",
+                            ref_id: comment_id,
+                            payload_hash: ph,
+                        },
+                    ) {
+                        tracing::warn!(error = %e, "failed to record reopen ledger event");
                     }
                     return true;
                 }
@@ -1626,6 +1972,9 @@ mod tests {
             author: None,
             agent_state: None,
             reviewer: None,
+            external_created_at: None,
+            share_request_id: None,
+            attachments: Vec::new(),
         }
     }
 

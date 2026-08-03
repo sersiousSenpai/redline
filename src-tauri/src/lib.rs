@@ -2,33 +2,56 @@
 // Copyright 2026 Yusuf Al-Bazian
 mod agent;
 mod ai_review;
+mod auth;
+mod bookshelf;
 mod browse;
 #[cfg(target_os = "macos")]
 mod browser_popup;
+mod bundle;
+mod classmem;
+mod codehealth;
 mod claude_proc;
 mod code;
+mod companion;
+mod context;
 mod db;
+mod devmap;
 mod dictation;
 mod dictation_whisper;
+mod draft_chat;
+mod extension;
 mod feedback;
 mod fork;
 mod fsbrowse;
 mod fswatch;
 mod highlight;
 mod hook;
+mod keeper;
+mod ledger;
 mod linked;
+mod librarian;
+mod seatassign;
+/// The MCP stdio proxy's request→route→response core. `pub` so the
+/// `redline-mcp` binary (`src/bin/`) can share the exact, unit-tested logic.
+pub mod mcp;
+mod mirror;
 mod mission;
 mod parser;
 #[cfg(test)]
 mod perf_guard;
 mod pty;
+mod repoicon;
 mod resolutions;
 mod review;
 mod review_feedback;
+mod seat;
+mod shipwright;
 mod skill;
 mod state;
+mod thumbs;
 mod tts;
 mod update;
+mod userconfig;
 mod voice;
 mod worktree;
 
@@ -39,8 +62,8 @@ use std::time::Duration;
 
 use axum::{
     extract::{ConnectInfo, Path, Query, State},
-    http::StatusCode,
-    response::IntoResponse,
+    http::{header, StatusCode},
+    response::{IntoResponse, Redirect},
     routing::{get, post},
     Json, Router,
 };
@@ -72,6 +95,7 @@ const SETTING_MODE: &str = "interception_mode";
 // URLs baked into invite codes, and the owner's display name for presence.
 const SETTING_COLLAB_SIGNALING: &str = "collab_signaling";
 const SETTING_COLLAB_DISPLAY_NAME: &str = "collab_display_name";
+const SETTING_COLLAB_OWNER_SECRET: &str = "collab_owner_secret";
 const DEFAULT_COLLAB_SIGNALING: &str = "ws://127.0.0.1:4444";
 /// Seconds the Ambient decision window stays open before auto-approving.
 const AMBIENT_WINDOW_SECS: u64 = 20;
@@ -341,7 +365,7 @@ impl PendingReviews {
         }
     }
     /// Register a held review curl. A stale entry for the same review (an
-    /// earlier `/redline-review` the agent abandoned or re-ran) is released
+    /// earlier `/redline-code-review` the agent abandoned or re-ran) is released
     /// with a benign superseded message rather than left hanging.
     fn register(&self, review_id: &str) -> (oneshot::Receiver<String>, u64) {
         let mut map = self.map.lock().unwrap();
@@ -349,7 +373,7 @@ impl PendingReviews {
             tracing::warn!(review_id = %review_id, "superseding a stale held review curl");
             let _ = stale
                 .tx
-                .send("Superseded by a newer /redline-review from the same repo.".to_string());
+                .send("Superseded by a newer /redline-code-review from the same repo.".to_string());
         }
         let token = self.next_token.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
@@ -613,7 +637,9 @@ impl ClaudeProc {
 /// `ps -p <pid> -o comm=` — `None` when no such process (dead) or the output is
 /// empty. One call yields both liveness and identity (for the reuse guard),
 /// and shells out like the neighbouring `ppid_of`, so no new dependency.
-fn current_comm(pid: u32) -> Option<String> {
+/// `pub(crate)` because the Localhost dashboard needs the identical guard
+/// before it signals a dev server (`devmap::dev_server_stop`).
+pub(crate) fn current_comm(pid: u32) -> Option<String> {
     let out = std::process::Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "comm="])
         .output()
@@ -741,6 +767,12 @@ fn arm_revise_watchdog(
                         "revise watchdog: no new plan and claude not alive — feedback \
                          likely lost, marking detached"
                     );
+                    let _ = store.database().record_friction(
+                        "revise_watchdog",
+                        Some("plan"),
+                        Some(&session_id),
+                        Some("no new plan and claude not alive — feedback likely lost"),
+                    );
                     mark_session_detached(&app, &store, &session_id);
                     return;
                 }
@@ -802,6 +834,10 @@ struct AppState {
     /// mission" and "what's pinned" for the orchestrator agent. `None` when no
     /// mission is active. Kept in sync by `mission_set_active`.
     active_mission: ActiveMission,
+    /// Where the user is in the app right now (pane/surface + id), mirrored
+    /// from the frontend by `surface_set_active`. Backs `GET /v1/surface/active`
+    /// and the Companion's grounding.
+    active_surface: ActiveSurface,
 }
 
 /// The active mission's identity + goal, mirrored from the frontend (which owns
@@ -840,6 +876,86 @@ impl ActiveMission {
             .unwrap()
             .as_ref()
             .map(|i| (i.title.clone(), i.goal.clone()))
+    }
+    /// The active mission's id — the parent candidate `resolve_parent` uses for
+    /// browser-family threads created while a mission is running.
+    pub fn active_id(&self) -> Option<String> {
+        self.0.lock().unwrap().as_ref().map(|i| i.mission_id.clone())
+    }
+}
+
+/// Where the user is in the app right now, mirrored from the frontend (which
+/// owns pane/tab state) via `surface_set_active`. Read by the Companion's
+/// per-turn grounding, by `resolve_parent` when a new interaction thread is
+/// created, and by the daemon's `GET /v1/surface/active`. Same ownership model
+/// as `ActiveBrowser`/`ActiveMission`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SurfaceInfo {
+    /// `plan | drafter | browser | review | servers | terminal | welcome`.
+    /// Free-form on purpose — a new surface needs no backend change here.
+    pub kind: String,
+    /// The surface's id in its own id-space (plan session id, draft id,
+    /// browse id, review id). `None` for terminal/welcome.
+    pub id: Option<String>,
+    /// Human title: plan title, tab title, repo name.
+    pub label: Option<String>,
+    /// Secondary context: tab url, active file.
+    pub detail: Option<String>,
+    pub project_path: Option<String>,
+    pub updated_at: i64,
+}
+
+#[derive(Clone, Default)]
+pub struct ActiveSurface(Arc<StdMutex<SurfaceInfo>>);
+
+impl ActiveSurface {
+    fn new() -> Self {
+        Self::default()
+    }
+    fn set(&self, info: SurfaceInfo) {
+        if info.kind.trim().is_empty() {
+            return;
+        }
+        *self.0.lock().unwrap() = info;
+    }
+    pub fn get(&self) -> SurfaceInfo {
+        self.0.lock().unwrap().clone()
+    }
+    /// The `(kind, id)` pair `resolve_parent` matches on, when this surface
+    /// carries an id.
+    pub fn kind_and_id(&self) -> Option<(String, String)> {
+        let s = self.0.lock().unwrap();
+        s.id.as_ref()
+            .filter(|id| !id.trim().is_empty())
+            .map(|id| (s.kind.clone(), id.clone()))
+    }
+}
+
+/// Mirror the frontend's "where is the user" into the backend. Appends a
+/// `surface_switch` journal row when the surface identity actually changed
+/// (kind or id), so pure metadata refreshes (title updates) stay quiet.
+#[tauri::command]
+fn surface_set_active(
+    active: tauri::State<'_, ActiveSurface>,
+    store: tauri::State<'_, SessionStore>,
+    mut info: SurfaceInfo,
+) {
+    if info.kind.trim().is_empty() {
+        return;
+    }
+    info.updated_at = ledger::now_millis();
+    let prev = active.get();
+    let changed = prev.kind != info.kind || prev.id != info.id;
+    active.set(info.clone());
+    if changed {
+        let _ = store.database().append_journal(
+            "surface_switch",
+            Some(&info.kind),
+            info.id.as_deref(),
+            info.label.as_deref(),
+            info.detail.as_deref(),
+        );
     }
 }
 
@@ -1089,10 +1205,28 @@ async fn handle_plan(
                 from = %target, to = %session_id,
                 "rebound restore handshake to the live session id"
             );
+            // Attachment files are stored under the session id and referenced
+            // by absolute path. `rekey_session` already rewrote the paths; move
+            // the directory they now point at (that half needs the app handle).
+            fsbrowse::rekey_session_attachments(
+                &app_state.app_handle,
+                &target,
+                &session_id,
+            );
         }
     }
 
     let resolution_result = resolutions::extract_resolutions(&raw_plan);
+    if let Some(err) = resolution_result.parse_error.as_deref() {
+        // A malformed REDLINE_RESOLUTIONS block from the model: computed here
+        // on every revision and, until now, never counted anywhere.
+        let _ = app_state.store.database().record_friction(
+            "resolution_parse_error",
+            Some("plan"),
+            Some(&session_id),
+            Some(err),
+        );
+    }
     // Parse and stamp every block with a stable sidecar id; the augmented
     // markdown is what we persist so block ids survive the reparse-on-load
     // model. When a previous revision exists, rebind freshly-minted v2 ids to
@@ -1174,6 +1308,14 @@ async fn handle_plan(
         tracing::warn!(
             session_id = %session_id,
             "ask_mode_violation: Claude returned a modified plan body during an Ask round-trip"
+        );
+        // `tracing` writes to stderr, which goes nowhere when Redline launches
+        // from /Applications — so the warning above was invisible in practice.
+        let _ = app_state.store.database().record_friction(
+            "ask_mode_violation",
+            Some("plan"),
+            Some(&session_id),
+            Some("Claude returned a modified plan body during an Ask round-trip"),
         );
         Some(true)
     } else {
@@ -1414,12 +1556,266 @@ async fn handle_plan(
     Json(response)
 }
 
+/// The daemon's bind address. Loopback-only by invariant (cold-wallet posture,
+/// README.md/SPEC.md) — pinned by `daemon_binds_loopback_only`.
+const DAEMON_ADDR: &str = "127.0.0.1:7676";
+
+/// How many dated DB snapshots to retain under `backups/`.
+const LEDGER_BACKUP_KEEP: usize = 7;
+
+/// Crown-jewels backup: `VACUUM INTO` a dated snapshot of the whole DB under
+/// `<app-data>/backups/`, then prune to the newest `keep`. The ledger is
+/// append-only and hash-chained, so a corrupted `redline.db` would otherwise be
+/// unrecoverable; the mirror/export are secondary content copies, this protects
+/// the chain itself. Best-effort and self-contained — logs and returns on any
+/// error rather than propagating.
+fn snapshot_database(db: &db::Database, data_dir: &std::path::Path, keep: usize) {
+    let dir = data_dir.join("backups");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(error = %e, "could not create backups dir");
+        return;
+    }
+    // now_millis() is 13 digits until ~year 2286, so filenames sort
+    // chronologically by plain lexical order.
+    let dest = dir.join(format!("redline-{}.db", ledger::now_millis()));
+    if let Err(e) = db.snapshot_to(&dest) {
+        tracing::warn!(error = %e, "ledger DB snapshot failed");
+        return;
+    }
+    tracing::info!(path = %dest.display(), "ledger DB snapshot written");
+
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        let mut snaps: Vec<std::path::PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with("redline-") && n.ends_with(".db"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        snaps.sort();
+        if snaps.len() > keep {
+            for old in &snaps[..snaps.len() - keep] {
+                let _ = std::fs::remove_file(old);
+            }
+        }
+    }
+}
+
+/// Extract the submitted prompt text from a UserPromptSubmit payload. Empirical:
+/// claude 2.1.199 delivers it at `prompt` (verified via the hook rig; see
+/// docs/protocol-verification.md). We accept `user_input` too so a future key
+/// rename degrades gracefully rather than silently capturing empties.
+fn ingest_prompt_text(v: &serde_json::Value) -> String {
+    v.get("prompt")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| v.get("user_input").and_then(serde_json::Value::as_str))
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+/// Classify a captured prompt as belonging to a Redline-managed project or an
+/// external `claude` session. Fact-based: a session running in a directory
+/// Redline already tracks as a project is ours; anything else is external.
+fn classify_prompt_origin(db: &db::Database, cwd: Option<&str>) -> ledger::Origin {
+    if let Some(cwd) = cwd {
+        if db
+            .list_project_paths()
+            .map(|paths| paths.iter().any(|p| p == cwd))
+            .unwrap_or(false)
+        {
+            return ledger::Origin::Redline;
+        }
+    }
+    ledger::Origin::External
+}
+
+/// `POST /v1/prompts/ingest` — the UserPromptSubmit capture hook's sink. Records
+/// interactive prompts (PTY plan sessions + external sessions) into the ledger.
+/// Fail-open: any error returns 200 so the hook never blocks prompt submission.
+async fn handle_prompts_ingest(
+    State(app_state): State<AppState>,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    // 64KB cap (reject oversized payloads without parsing).
+    if body.len() > 64 * 1024 {
+        return (StatusCode::OK, Json(serde_json::json!({ "skipped": "too_large" })))
+            .into_response();
+    }
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return (StatusCode::OK, Json(serde_json::json!({ "skipped": "unparseable" })))
+            .into_response();
+    };
+    let prompt = ingest_prompt_text(&v);
+    if prompt.is_empty() {
+        return (StatusCode::OK, Json(serde_json::json!({ "skipped": "empty" }))).into_response();
+    }
+    let claude_session_id = v
+        .get("session_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let cwd = v
+        .get("cwd")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+
+    // A headless `claude -p` fires this hook too, so Redline's own spawned
+    // agents would be double-captured (Rust site + hook). The Rust site is
+    // authoritative; it registers the body before spawn, so claim-and-skip here.
+    let bh = ledger::body_hash(&prompt);
+    if ledger::claim_agent_prompt(&bh) {
+        // The draft→launched-session handoff: this hook fire is the first
+        // moment the spawned session's claude id is known. When the skipped
+        // body was a drafter launch, link the new session under its draft —
+        // the seam the whole temporal hierarchy hinges on.
+        if let Some(draft_id) = ledger::claim_drafted_prompt(&bh) {
+            if let Some(sid) = claude_session_id.as_deref().filter(|s| !s.is_empty()) {
+                let db = app_state.store.database();
+                if let Err(e) =
+                    ledger::record_session_link(&db, "session", sid, "drafter", &draft_id)
+                {
+                    tracing::warn!(error = %e, "failed to link launched session to its draft");
+                }
+            }
+        }
+        return (StatusCode::OK, Json(serde_json::json!({ "skipped": "agent_dup" })))
+            .into_response();
+    }
+
+    let db = app_state.store.database();
+    let origin = classify_prompt_origin(&db, cwd.as_deref());
+    if origin == ledger::Origin::External {
+        // External-session capture toggle (default on).
+        let capture_external = db
+            .get_setting("redline.capture.externalSessions")
+            .map(|val| val != "false")
+            .unwrap_or(true);
+        if !capture_external {
+            return (StatusCode::OK, Json(serde_json::json!({ "skipped": "external_off" })))
+                .into_response();
+        }
+    }
+    let surface = if origin == ledger::Origin::Redline {
+        "pty"
+    } else {
+        "external"
+    };
+    let input = ledger::PromptInput {
+        source: ledger::PromptSource::Hook,
+        origin,
+        surface: surface.to_string(),
+        role: None,
+        session_id: None,
+        claude_session_id,
+        mission_id: None,
+        project_path: cwd,
+        body: prompt,
+        thread: None,
+    };
+    match ledger::record_prompt(&db, input) {
+        Ok(Some(seq)) => {
+            let _ = app_state.app_handle.emit("ledger-changed", ());
+            (StatusCode::CREATED, Json(serde_json::json!({ "seq": seq }))).into_response()
+        }
+        Ok(None) => {
+            (StatusCode::OK, Json(serde_json::json!({ "skipped": "dup" }))).into_response()
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "prompt ingest failed");
+            (StatusCode::OK, Json(serde_json::json!({ "skipped": "error" }))).into_response()
+        }
+    }
+}
+
+/// Resolve the built browser-viewer directory (`dist-viewer/`). In a bundled
+/// release it rides along as a Tauri resource; in dev it sits at the repo root
+/// next to the crate. `None` when the viewer hasn't been built yet.
+fn viewer_dist_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
+    if let Ok(p) = app
+        .path()
+        .resolve("dist-viewer", tauri::path::BaseDirectory::Resource)
+    {
+        if p.join("index.html").is_file() {
+            return Some(p);
+        }
+    }
+    let dev = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../dist-viewer");
+    if dev.join("index.html").is_file() {
+        return Some(dev);
+    }
+    None
+}
+
+fn viewer_content_type(path: &std::path::Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js") | Some("mjs") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("json") | Some("map") => "application/json; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("woff2") => "font/woff2",
+        Some("woff") => "font/woff",
+        Some("png") => "image/png",
+        Some("ico") => "image/x-icon",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Serve one file from the viewer bundle, rejecting any path that isn't a
+/// plain sequence of names (no `..`, no absolute components).
+async fn serve_viewer_file(state: &AppState, rel: &str) -> axum::response::Response {
+    let Some(base) = viewer_dist_dir(&state.app_handle) else {
+        return (
+            StatusCode::NOT_FOUND,
+            "Viewer not built — run `npm run build:viewer`.",
+        )
+            .into_response();
+    };
+    let mut full = base.clone();
+    for comp in std::path::Path::new(rel).components() {
+        match comp {
+            std::path::Component::Normal(c) => full.push(c),
+            std::path::Component::RootDir | std::path::Component::CurDir => {}
+            _ => return (StatusCode::BAD_REQUEST, "bad path").into_response(),
+        }
+    }
+    match tokio::fs::read(&full).await {
+        Ok(bytes) => {
+            ([(header::CONTENT_TYPE, viewer_content_type(&full))], bytes).into_response()
+        }
+        Err(_) => (StatusCode::NOT_FOUND, "not found").into_response(),
+    }
+}
+
+async fn handle_viewer_index(State(state): State<AppState>) -> axum::response::Response {
+    serve_viewer_file(&state, "index.html").await
+}
+
+async fn handle_viewer_asset(
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+) -> axum::response::Response {
+    serve_viewer_file(&state, &path).await
+}
+
 async fn run_server(state: AppState) {
     // Keep handles for the post-bind status update before the router consumes `state`.
     let daemon_status = state.daemon_status.clone();
     let app_handle = state.app_handle.clone();
     let app = Router::new()
+        // Async-share browser viewer, served for the sender's local preview
+        // (loopback only). `/viewer` → `/viewer/` so the page's relative
+        // `./assets/...` refs resolve; `/viewer/*path` serves the bundle.
+        .route("/viewer", get(|| async { Redirect::permanent("/viewer/") }))
+        .route("/viewer/", get(handle_viewer_index))
+        .route("/viewer/*path", get(handle_viewer_asset))
         .route("/v1/plan", post(handle_plan))
+        // Polis prompt store (Phase 1): the global UserPromptSubmit capture hook
+        // POSTs its stdin payload here. Fail-open by design — never 500s the hook.
+        .route("/v1/prompts/ingest", post(handle_prompts_ingest))
         // Agent-in-doc (M4): the per-user agent's surface — read the plan's
         // block structure, post a tracked suggestion against a block id.
         .route("/v1/sessions/:session_id/plan", get(handle_get_latest_plan))
@@ -1433,6 +1829,13 @@ async fn run_server(state: AppState) {
         .route(
             "/v1/sessions/:session_id/comments",
             post(handle_suggest_feedback),
+        )
+        // …and the same content *offered* rather than written: the agent stages
+        // it mid-turn, the discussion panel shows a `＋ Add as item` chip under
+        // that reply, and only the user's tap creates the comment above.
+        .route(
+            "/v1/sessions/:session_id/comment-offers",
+            post(handle_offer_feedback),
         )
         // Out-of-band feedback delivery (Layer 1): the denied `ExitPlanMode`
         // reason is now a single calm line; the full review payload is fetched
@@ -1467,6 +1870,10 @@ async fn run_server(state: AppState) {
         // The linked agent POSTs here to run a tab's own browse agent for a
         // synthesized digest, keeping that tab's heavy thread out of its context.
         .route("/v1/linked/consult", post(handle_linked_consult))
+        // The Companion's fan-out: consult ANY surface's agent for a digest,
+        // and the agent map it starts most cross-surface tasks from.
+        .route("/v1/global/consult", post(handle_global_consult))
+        .route("/v1/global/agents", get(handle_global_agents))
         // Code access (browse agent): read-only. `/projects` is the agent's map
         // of the user's known project folders; `/git` runs a whitelisted set of
         // read-only git ops (status/branch/log/diff/show) in one of them, so the
@@ -1474,7 +1881,50 @@ async fn run_server(state: AppState) {
         // Both ride the same pre-authorized `curl` allow as `/v1/browser/*`.
         .route("/v1/code/projects", get(handle_code_projects))
         .route("/v1/code/git", get(handle_code_git))
-        // Code Review surface: the `/redline-review` skill's blocking curl.
+        // ClassMemory (Phase 2): read-only catalog access for retrieval agents
+        // (the class-router walk) + a staging-only proposals sink. All ride the
+        // same pre-authorized `curl` allow. Nothing here accepts or moves a node
+        // — POST /proposals only stages reviewable rows.
+        .route("/v1/memory/tree", get(handle_memory_tree))
+        .route("/v1/memory/node/:id", get(handle_memory_node))
+        .route("/v1/memory/prompts", get(handle_memory_prompts))
+        .route("/v1/memory/proposals", post(handle_memory_proposals))
+        // Context access (Phase 3): the Librarian agent's friction digest —
+        // ground-truth counts/staleness (backlog, held proposals, stalled
+        // reviews, bulging branches). Read-only; rides the same `curl` allow.
+        .route("/v1/context/overview", get(handle_context_overview))
+        // The Shipwright's code digest as JSON — an on-demand re-read for the
+        // Companion / voice agent / MCP surface. The Shipwright itself never
+        // depends on this: its digest is baked into the spawn prompt.
+        .route("/v1/context/codehealth", get(handle_context_codehealth))
+        // Context access (Phase 4): read-only query surface over the lake for
+        // agents (internal via curl, external via the MCP proxy). Filtered
+        // prompts, one session's full history, and aggregate stats. All bounded,
+        // injection-safe (`q` is a bound LIKE), and ride the same `curl` allow.
+        .route("/v1/context/prompts", get(handle_context_prompts))
+        .route(
+            "/v1/context/sessions/:id/history",
+            get(handle_context_session_history),
+        )
+        .route("/v1/context/stats", get(handle_context_stats))
+        .route("/v1/context/browse/search", get(handle_browse_search))
+        // Memory-by-session (spine): generic read-only thread fetch across the
+        // per-surface message tables, and the session-tree walk (a node with
+        // its parent + child digests). Companion + external MCP consumers.
+        .route("/v1/context/threads/:kind/:id", get(handle_context_thread))
+        .route("/v1/context/tree/:kind/:id", get(handle_context_tree))
+        // Where the user is right now (mirrored ActiveSurface cell) and the
+        // context-journal delta — the Companion's passive-awareness reads.
+        .route("/v1/surface/active", get(handle_surface_active))
+        .route("/v1/journal/recent", get(handle_journal_recent))
+        // Prompt Drafter: the live draft's markdown mirror (read) and the
+        // agent write-suggestion sink (tracked changes with accept/reject).
+        .route("/v1/drafter/:draft_id/doc", get(handle_drafter_doc))
+        .route(
+            "/v1/drafter/:draft_id/suggestions",
+            post(handle_draft_suggestion),
+        )
+        // Code Review surface: the `/redline-code-review` skill's blocking curl.
         // Captures the diff, opens the review pane, and HOLDS the response
         // until the reviewer submits — the plan-review hold applied to code.
         .route("/v1/reviews/start", get(handle_review_start))
@@ -1486,8 +1936,15 @@ async fn run_server(state: AppState) {
                 .post(handle_review_annotations_add)
                 .delete(handle_review_annotations_clear),
         )
+        // Control-plane auth (Shardplate Phase 2): every request is checked
+        // against the frozen v1 contract in `auth::ROUTE_TABLE` — mutating
+        // routes demand the per-boot bearer token (or a scoped extension
+        // token), hook-contract and read-only routes pass. Fails closed on
+        // routes missing from the table, so registering a route here without
+        // a contract entry is a loud 401, not a silent hole.
+        .layer(axum::middleware::from_fn(auth::require_daemon_auth))
         .with_state(state);
-    match tokio::net::TcpListener::bind("127.0.0.1:7676").await {
+    match tokio::net::TcpListener::bind(DAEMON_ADDR).await {
         Ok(listener) => {
             daemon_status.set_bound(true);
             tracing::info!("Redline daemon listening on http://127.0.0.1:7676");
@@ -1608,6 +2065,84 @@ async fn handle_suggest_feedback(
         }
         Err(e) => agent_error_response(e).into_response(),
     }
+}
+
+/// How many items one turn may offer. Two is a conversation; a list of chips
+/// under every reply is a form.
+const MAX_OFFERS_PER_TURN: i64 = 2;
+
+/// `POST /v1/sessions/:session_id/comment-offers` — stage an offered plan item.
+///
+/// This writes nothing to the plan. The block id is resolved **here**, at stage
+/// time, so a bogus id 404s the agent while it can still re-read the plan
+/// rather than becoming a chip that only fails when the user taps it. And
+/// deliberately no `refresh_tray`: nothing is pending review yet.
+async fn handle_offer_feedback(
+    State(app_state): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(req): Json<agent::OfferFeedbackRequest>,
+) -> axum::response::Response {
+    if req.body.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "body must not be empty").into_response();
+    }
+    if req.agent_id.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "agentId must not be empty").into_response();
+    }
+    if let Err(e) = agent::resolve_block_anchor(&app_state.store, &session_id, &req.block_id) {
+        return agent_error_response(e).into_response();
+    }
+
+    let db = app_state.store.database();
+    match db.count_open_offers_this_turn(&session_id) {
+        Ok(n) if n >= MAX_OFFERS_PER_TURN => {
+            return (
+                StatusCode::CONFLICT,
+                format!(
+                    "this turn has already offered {n} items — say the rest out loud instead"
+                ),
+            )
+                .into_response()
+        }
+        Err(e) => return browser_error_response(e.to_string()),
+        Ok(_) => {}
+    }
+
+    let offer = state::CommentOffer {
+        id: uuid::Uuid::new_v4().to_string(),
+        session_id: session_id.clone(),
+        // Bound to its reply by `bind_comment_offers` when that turn finishes —
+        // the offer necessarily lands first.
+        message_id: None,
+        block_id: req.block_id,
+        body: req.body.trim().to_string(),
+        label: req
+            .label
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty()),
+        agent_id: req.agent_id.trim().to_string(),
+        status: "pending".to_string(),
+        created_at: ledger::now_millis(),
+        stale: false,
+    };
+    if let Err(e) = db.insert_comment_offer(&offer) {
+        return browser_error_response(e.to_string());
+    }
+    tracing::info!(
+        session_id = %session_id,
+        offer_id = %offer.id,
+        agent = %offer.agent_id,
+        "plan item offered (not written)"
+    );
+    let _ = app_state.app_handle.emit("comment-offer", &offer);
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "id": offer.id,
+            "status": "pending",
+            "note": "offered — the user taps ＋ Add as item to create it; do not post it yourself",
+        })),
+    )
+        .into_response()
 }
 
 // --- Browse-agent daemon routes -------------------------------------------
@@ -2224,6 +2759,315 @@ async fn handle_linked_consult(
     }
 }
 
+#[derive(Deserialize)]
+struct GlobalConsultReq {
+    /// `browse | plan | mission | linked | drafter`. `voice` and `companion`
+    /// are rejected with pointed errors (see the handler).
+    surface: String,
+    /// The target's id in its surface's id-space — for `browse`, a tab
+    /// selector (number / short id / label / url substring).
+    id: String,
+    question: String,
+}
+
+/// `POST /v1/global/consult` — the Companion "checks in with a colleague" on
+/// ANY surface. Dispatches to that surface's own consult (each an inline-driven
+/// turn behind a 180s ceiling, persisting check-in rows in the colleague's own
+/// thread — except plan sessions, which run an ephemeral read-only fork and
+/// persist nothing). Outer ceiling 240s so a wedged inner consult can't hold
+/// this curl forever. Busy colleagues return a 502 the companion's skill
+/// teaches as retry-or-glance. Reachability stays a DAG by documentation: only
+/// the `companion` skill documents this route (linked documents only
+/// /v1/linked/consult → browse), so consult chains bottom out at depth 2.
+async fn handle_global_consult(
+    State(app_state): State<AppState>,
+    Json(req): Json<GlobalConsultReq>,
+) -> axum::response::Response {
+    if req.question.trim().is_empty() {
+        return browser_error_response("consult needs a question");
+    }
+    if req.id.trim().is_empty() {
+        return browser_error_response("consult needs the target's id");
+    }
+    let handle = app_state.app_handle.clone();
+    let question = req.question.clone();
+    let outer = std::time::Duration::from_secs(240);
+    let result: Result<(String, String), String> = match req.surface.as_str() {
+        "browse" => {
+            // Tab selectors resolve exactly like /v1/linked/consult.
+            let browse_id = match resolve_browse_id(&app_state, Some(req.id.clone())) {
+                Ok(id) => id,
+                Err(resp) => return resp,
+            };
+            let snapshot = resolve_label_any(&app_state, Some(req.id.clone()))
+                .ok()
+                .and_then(|label| app_state.snapshot_cache.get(&label).map(|s| s.json));
+            let label = app_state
+                .browser_tabs
+                .get()
+                .into_iter()
+                .enumerate()
+                .find(|(_, t)| t.browse_id == browse_id)
+                .map(|(i, t)| format!("tab {} — {}", i + 1, t.title))
+                .unwrap_or_else(|| "a browser tab".to_string());
+            let browse = handle.state::<browse::BrowseState>().inner().clone();
+            tokio::time::timeout(
+                outer,
+                browse.consult(handle.clone(), browse_id, question, snapshot),
+            )
+            .await
+            .map_err(|_| "the consult timed out".to_string())
+            .and_then(|r| r)
+            .map(|digest| (digest, label))
+        }
+        "plan" => {
+            let Some(session) = app_state.store.get(&req.id) else {
+                return (StatusCode::NOT_FOUND, "no such plan session").into_response();
+            };
+            let label = session.project_name.clone();
+            let cwd = session.project_path.clone();
+            let fork = handle.state::<fork::ForkState>().inner().clone();
+            tokio::time::timeout(outer, fork.consult_plan(req.id.clone(), cwd, question))
+                .await
+                .map_err(|_| "the consult timed out".to_string())
+                .and_then(|r| r)
+                .map(|digest| (digest, label))
+        }
+        "mission" => {
+            let mission = handle.state::<mission::MissionState>().inner().clone();
+            let label = app_state
+                .store
+                .database()
+                .thread_label("mission", &req.id)
+                .unwrap_or_else(|| "a mission".to_string());
+            tokio::time::timeout(outer, mission.consult(req.id.clone(), question))
+                .await
+                .map_err(|_| "the consult timed out".to_string())
+                .and_then(|r| r)
+                .map(|digest| (digest, label))
+        }
+        "linked" => {
+            let linked = handle.state::<linked::LinkedState>().inner().clone();
+            let label = app_state
+                .store
+                .database()
+                .thread_label("linked", &req.id)
+                .unwrap_or_else(|| "a linked discussion".to_string());
+            tokio::time::timeout(outer, linked.consult(req.id.clone(), question))
+                .await
+                .map_err(|_| "the consult timed out".to_string())
+                .and_then(|r| r)
+                .map(|digest| (digest, label))
+        }
+        "drafter" => {
+            let chat = handle.state::<draft_chat::DraftChatState>().inner().clone();
+            let label = app_state
+                .store
+                .database()
+                .thread_label("drafter", &req.id)
+                .unwrap_or_else(|| "a draft".to_string());
+            tokio::time::timeout(outer, chat.consult(req.id.clone(), question))
+                .await
+                .map_err(|_| "the consult timed out".to_string())
+                .and_then(|r| r)
+                .map(|digest| (digest, label))
+        }
+        "shipwright" => {
+            // The Shipwright is a persistent thread, so a consult lands as a
+            // check-in turn in its own session — it answers from its last digest
+            // and findings instead of re-deriving them. That is the whole point:
+            // the voice agent and Companion ASK it rather than rebuild its
+            // context. `id` is the repo path (or empty for the default).
+            let sess = handle.state::<ShipwrightSession>().inner().clone();
+            let repo = if req.id.trim() == "-" || req.id.trim().is_empty() {
+                std::env::current_dir()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| ".".to_string())
+            } else {
+                req.id.clone()
+            };
+            let label = format!("the Shipwright on {repo}");
+            let prior = sess.get();
+            let question = format!(
+                "A colleague is checking in. Answer from the digest and findings \
+                 you already have — do NOT re-run your survey, and do NOT return \
+                 JSON for this turn. Reply in prose, a few sentences, citing the \
+                 numbers you already cited.\n\n{question}"
+            );
+            let repo_for_run = repo.clone();
+            tokio::time::timeout(outer, async move {
+                let (text, sid) =
+                    shipwright::run_shipwright(&repo_for_run, question, prior.as_deref()).await?;
+                sess.set(sid);
+                Ok::<String, String>(text)
+            })
+            .await
+            .map_err(|_| "the consult timed out".to_string())
+            .and_then(|r| r)
+            .map(|digest| (digest, label))
+        }
+        "voice" => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "voice sessions run live and have no consult — read \
+                 /v1/context/threads/voice/<id> instead",
+            )
+                .into_response();
+        }
+        "companion" => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "the companion cannot consult itself",
+            )
+                .into_response();
+        }
+        other => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "unknown surface `{other}` — one of \
+                     browse|plan|mission|linked|drafter|shipwright"
+                ),
+            )
+                .into_response();
+        }
+    };
+    match result {
+        Ok((digest, label)) => Json(serde_json::json!({
+            "digest": digest,
+            "surface": req.surface,
+            "label": label,
+        }))
+        .into_response(),
+        Err(e) => browser_error_response(e),
+    }
+}
+
+/// `GET /v1/global/agents` — the Companion's map: every agent/thread across
+/// the app with enough identity to glance or consult. Read-only aggregation
+/// over the per-surface registries + the DB.
+async fn handle_global_agents(State(app_state): State<AppState>) -> axum::response::Response {
+    let handle = &app_state.app_handle;
+    let db = app_state.store.database();
+
+    // Plan sessions (external terminal claudes — consultable via ephemeral fork).
+    let sessions: Vec<serde_json::Value> = app_state
+        .store
+        .list()
+        .into_iter()
+        .map(|s| {
+            serde_json::json!({
+                "surface": "plan",
+                "id": s.session_id,
+                "label": s.plan_title.unwrap_or(s.project_name),
+                "status": s.status,
+                "consultable": true,
+                "busy": false,
+            })
+        })
+        .collect();
+
+    // Browser tabs (each with its own page-discussion agent).
+    let browse_state = handle.state::<browse::BrowseState>();
+    let tabs: Vec<serde_json::Value> = app_state
+        .browser_tabs
+        .get()
+        .into_iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let (count, _) = db.thread_stats("browse", &t.browse_id).unwrap_or((0, None));
+            serde_json::json!({
+                "surface": "browse",
+                "id": (i + 1).to_string(),
+                "label": format!("tab {} — {}", i + 1, t.title),
+                "detail": t.url,
+                "messageCount": count,
+                "consultable": true,
+                "busy": browse_state.is_running(&t.browse_id),
+            })
+        })
+        .collect();
+
+    // Missions / linked / drafts / companions / voice from the DB.
+    let missions: Vec<serde_json::Value> = db
+        .list_missions()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|m| {
+            serde_json::json!({
+                "surface": "mission",
+                "id": m.mission_id,
+                "label": m.title,
+                "status": m.status,
+                "consultable": true,
+                "busy": false,
+            })
+        })
+        .collect();
+    let linkeds: Vec<serde_json::Value> = db
+        .list_linked()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|l| {
+            serde_json::json!({
+                "surface": "linked",
+                "id": l.linked_id,
+                "label": l.title,
+                "status": l.status,
+                "consultable": true,
+                "busy": false,
+            })
+        })
+        .collect();
+    let reviews: Vec<serde_json::Value> = db
+        .list_code_reviews()
+        .unwrap_or_default()
+        .into_iter()
+        .take(10)
+        .map(|r| {
+            serde_json::json!({
+                "surface": "review",
+                "id": r.review_id,
+                "label": r.repo_path,
+                "detail": format!("round {}", r.round),
+                "consultable": false,
+                "busy": false,
+            })
+        })
+        .collect();
+
+    // The Shipwright: one persistent thread over the repo, not a per-item list.
+    // It appears on the map so a colleague can ask it about code health instead
+    // of re-deriving that context themselves.
+    let shipwright_findings = db
+        .list_shipwright_findings(false)
+        .map(|f| f.len() as i64)
+        .unwrap_or(0);
+    let shipwright = serde_json::json!({
+        "surface": "shipwright",
+        "id": "-",
+        "label": "the Shipwright (Redline's own code health)",
+        "detail": format!("{shipwright_findings} open finding(s)"),
+        "consultable": true,
+        "busy": false,
+    });
+
+    Json(serde_json::json!({
+        "activeSurface": app_state.active_surface.get(),
+        "journalHead": db.journal_head().unwrap_or(0),
+        "plans": sessions,
+        "browserTabs": tabs,
+        "missions": missions,
+        "linked": linkeds,
+        "reviews": reviews,
+        "shipwright": shipwright,
+        "notes": "consult browse|plan|mission|linked|drafter|shipwright via \
+                  /v1/global/consult (the shipwright's id is `-`, or a repo path); \
+                  voice threads are read-only at /v1/context/threads/voice/<id>",
+    }))
+    .into_response()
+}
+
 /// Query for `GET /v1/code/git`. `ref` is a reserved word, so it's carried as
 /// `git_ref` with a serde rename.
 #[derive(Deserialize)]
@@ -2367,6 +3211,14 @@ async fn handle_review_start(
     if let Err(e) = app_state.app_handle.emit("review-requested", event) {
         tracing::warn!(error = %e, "failed to emit review-requested");
     }
+    // Companion journal: a code review opened (round n).
+    let _ = db.append_journal(
+        "review_start",
+        Some("review"),
+        Some(&session.review_id),
+        Some(&session.repo_path),
+        Some(&format!("round {}", session.round)),
+    );
 
     let (rx, token) = app_state.pending_reviews.register(&session.review_id);
     let _guard = ReviewDetachGuard {
@@ -2417,7 +3269,7 @@ fn submit_review_feedback(
     approve_message: Option<String>,
 ) -> Result<(), String> {
     let tx = pending.take(&review_id).ok_or(
-        "no agent is waiting on this review — run /redline-review in the terminal first",
+        "no agent is waiting on this review — run /redline-code-review in the terminal first",
     )?;
     let payload = if approve {
         let msg = approve_message
@@ -2450,7 +3302,7 @@ fn submit_review_feedback(
     };
     tracing::info!(review_id = %review_id, approve, "submit_review_feedback fired");
     tx.send(payload).map_err(|_| {
-        "the review curl is no longer listening — re-run /redline-review".to_string()
+        "the review curl is no longer listening — re-run /redline-code-review".to_string()
     })
 }
 
@@ -2537,7 +3389,7 @@ async fn resolve_review_for_api(
     };
     session.ok_or_else(|| {
         "no review session for this repo — open one in Redline (or run \
-         /redline-review) first"
+         /redline-code-review) first"
             .to_string()
     })
 }
@@ -2689,6 +3541,432 @@ async fn handle_code_git(
     match code::run_git(&db, req).await {
         Ok(output) => Json(serde_json::json!({ "ok": true, "output": output })).into_response(),
         Err(e) => browser_error_response(e),
+    }
+}
+
+// --- ClassMemory routes (Phase 2) ------------------------------------------
+
+/// A tree node as returned to a retrieval agent / the pane: the node plus its
+/// total link count (leaf-count badge).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TreeNodeView {
+    #[serde(flatten)]
+    node: crate::classmem::ClassNode,
+    link_count: i64,
+}
+
+#[derive(Deserialize)]
+struct MemoryTreeQ {
+    project: Option<String>,
+    root: Option<String>,
+}
+
+/// `GET /v1/memory/tree?project=&root=` — the accepted (and proposed) class tree,
+/// flat with link counts (the caller/FE builds the hierarchy). Scoped to a single
+/// root subtree when `root=<id>` or `project=<path>` is given. Read-only.
+async fn handle_memory_tree(
+    State(app_state): State<AppState>,
+    Query(q): Query<MemoryTreeQ>,
+) -> axum::response::Response {
+    let db = app_state.store.database();
+    let all = match db.list_class_nodes_with_counts() {
+        Ok(v) => v,
+        Err(e) => return browser_error_response(e.to_string()),
+    };
+    // Resolve an optional root filter (explicit root id, or the root bound to a
+    // project path).
+    let root_id: Option<String> = if let Some(r) = q.root.as_deref().filter(|s| !s.trim().is_empty()) {
+        Some(r.trim().to_string())
+    } else if let Some(p) = q.project.as_deref().filter(|s| !s.trim().is_empty()) {
+        all.iter()
+            .find(|(n, _)| n.parent_id.is_none() && n.project_path.as_deref() == Some(p.trim()))
+            .map(|(n, _)| n.id.clone())
+    } else {
+        None
+    };
+    let views: Vec<TreeNodeView> = match &root_id {
+        Some(rid) => {
+            // Keep the root and its descendants.
+            let keep = subtree_ids(&all, rid);
+            all.into_iter()
+                .filter(|(n, _)| keep.contains(&n.id))
+                .map(|(node, link_count)| TreeNodeView { node, link_count })
+                .collect()
+        }
+        None => all
+            .into_iter()
+            .map(|(node, link_count)| TreeNodeView { node, link_count })
+            .collect(),
+    };
+    Json(serde_json::json!({ "nodes": views })).into_response()
+}
+
+/// Ids of `root` and everything beneath it.
+fn subtree_ids(all: &[(crate::classmem::ClassNode, i64)], root: &str) -> std::collections::HashSet<String> {
+    let mut keep = std::collections::HashSet::new();
+    keep.insert(root.to_string());
+    // Iterate to a fixpoint (tree is small).
+    loop {
+        let before = keep.len();
+        for (n, _) in all {
+            if let Some(p) = &n.parent_id {
+                if keep.contains(p) {
+                    keep.insert(n.id.clone());
+                }
+            }
+        }
+        if keep.len() == before {
+            break;
+        }
+    }
+    keep
+}
+
+/// A link with a resolved display label + supersession status.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LinkView {
+    #[serde(flatten)]
+    link: crate::classmem::ClassLink,
+    label: Option<String>,
+    /// The decision seq that superseded this link's target (`None` = current).
+    /// Distinct from `link.status`, which stays proposed|accepted.
+    superseded_by: Option<i64>,
+}
+
+/// Shared node-view assembly for the curl-bridge route AND the Tauri command —
+/// one shape (`{node, children, links, observations}`) so the retrieval agents
+/// and the pane can never drift. `Ok(None)` = no such node.
+fn build_node_view(
+    db: &crate::db::Database,
+    id: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    let Some(node) = db.get_class_node(id).map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    let children: Vec<_> = db
+        .list_class_nodes()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|n| n.parent_id.as_deref() == Some(id))
+        .collect();
+    let raw_links = db.list_class_links_for_node(id).map_err(|e| e.to_string())?;
+    let ledger_seq = |l: &crate::classmem::ClassLink| -> Option<i64> {
+        matches!(l.target_kind.as_str(), "prompt" | "decision" | "ledger")
+            .then(|| l.target_id.trim().parse().ok())
+            .flatten()
+    };
+    let seqs: Vec<i64> = raw_links.iter().filter_map(&ledger_seq).collect();
+    let superseded = db.supersessions_for_seqs(&seqs).unwrap_or_default();
+    let links: Vec<LinkView> = raw_links
+        .into_iter()
+        .map(|link| {
+            let label = db.link_preview(&link.target_kind, &link.target_id);
+            let superseded_by =
+                ledger_seq(&link).and_then(|seq| superseded.get(&seq).copied());
+            LinkView { link, label, superseded_by }
+        })
+        .collect();
+    let observations = db
+        .list_class_observations(id, false)
+        .map_err(|e| e.to_string())?;
+    Ok(Some(serde_json::json!({
+        "node": node,
+        "children": children,
+        "links": links,
+        "observations": observations,
+    })))
+}
+
+/// `GET /v1/memory/node/:id` — one node, its children, its links (pointers
+/// into the lake, with resolved labels + supersession status), and its
+/// observations. The retrieval agent's descend step.
+async fn handle_memory_node(
+    State(app_state): State<AppState>,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    let db = app_state.store.database();
+    match build_node_view(&db, &id) {
+        Ok(Some(view)) => Json(view).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "no such class node").into_response(),
+        Err(e) => browser_error_response(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct MemoryPromptsQ {
+    since_seq: Option<i64>,
+    limit: Option<i64>,
+}
+
+/// `GET /v1/memory/prompts?since_seq=&limit=` — the lake delta (prompts +
+/// decision events) since a seq, oldest first. The classifier's delta input;
+/// also a general context read. Bounded.
+async fn handle_memory_prompts(
+    State(app_state): State<AppState>,
+    Query(q): Query<MemoryPromptsQ>,
+) -> axum::response::Response {
+    let db = app_state.store.database();
+    let limit = q.limit.unwrap_or(200).clamp(1, classmem::MAX_DELTA_ITEMS as i64);
+    let since = q.since_seq.unwrap_or(0).max(0);
+    match db.list_lake_items_since(since, limit) {
+        Ok(items) => Json(serde_json::json!({ "items": items })).into_response(),
+        Err(e) => browser_error_response(e.to_string()),
+    }
+}
+
+/// `POST /v1/memory/proposals` {proposals:[…]} — stage a batch of classifier
+/// proposals as reviewable rows. **Staging only** — nothing is accepted or
+/// moved. Mirrors the parse the internal Organize path uses, so an external tool
+/// (or the classifier itself) can stage over the curl bridge.
+async fn handle_memory_proposals(
+    State(app_state): State<AppState>,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    if body.len() > 256_000 {
+        return (StatusCode::PAYLOAD_TOO_LARGE, "proposals payload too large").into_response();
+    }
+    let text = String::from_utf8_lossy(&body);
+    let proposals = classmem::parse_proposals(&text);
+    if proposals.is_empty() {
+        return Json(serde_json::json!({ "ok": true, "staged": classmem::StageResult::default() }))
+            .into_response();
+    }
+    let db = app_state.store.database();
+    match classmem::stage_proposals(&db, None, &proposals) {
+        Ok(staged) => {
+            let _ = app_state.app_handle.emit("classmem-changed", ());
+            Json(serde_json::json!({ "ok": true, "staged": staged })).into_response()
+        }
+        Err(e) => browser_error_response(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct ContextOverviewQ {
+    /// Optional cap on the ranked lists (in-review, bulging). Clamped 1..=50.
+    limit: Option<i64>,
+}
+
+/// `GET /v1/context/overview?limit=` — the Librarian's friction digest as JSON:
+/// lake backlog, held structural proposals, stalled in-review sessions, bulging
+/// branches, missions, source-trust coverage. Ground truth (never inferred),
+/// internally bounded. Consumed by the Librarian (baked into its prompt via
+/// `librarian.rs`, re-readable here) and the Phase-4 external MCP surface.
+async fn handle_context_overview(
+    State(app_state): State<AppState>,
+    Query(q): Query<ContextOverviewQ>,
+) -> axum::response::Response {
+    let db = app_state.store.database();
+    let limit = context::clamp_limit(q.limit);
+    let digest = context::build_digest(&db, limit);
+    Json(digest).into_response()
+}
+
+#[derive(Deserialize)]
+struct ContextPromptsQ {
+    session: Option<String>,
+    mission: Option<String>,
+    surface: Option<String>,
+    project: Option<String>,
+    since_seq: Option<i64>,
+    /// Free-text substring — bound as a LIKE parameter in the DB layer.
+    q: Option<String>,
+    limit: Option<i64>,
+    thread_kind: Option<String>,
+    thread_id: Option<String>,
+    parent_session: Option<String>,
+}
+
+/// `GET /v1/context/prompts?session=&mission=&surface=&project=&since_seq=&q=&limit=`
+/// — filtered read of the captured-prompt lake. Every filter is ANDed; `q` is a
+/// bound substring (injection-safe). Oldest-first, byte-bounded. Read-only.
+async fn handle_context_prompts(
+    State(app_state): State<AppState>,
+    Query(q): Query<ContextPromptsQ>,
+) -> axum::response::Response {
+    let db = app_state.store.database();
+    let filters = context::PromptFilters {
+        session_id: q.session,
+        mission_id: q.mission,
+        surface: q.surface,
+        project: q.project,
+        since_seq: q.since_seq,
+        substring: q.q,
+        limit: context::clamp_prompt_limit(q.limit),
+        thread_kind: q.thread_kind,
+        thread_id: q.thread_id,
+        parent_session_id: q.parent_session,
+    };
+    match context::list_prompts(&db, &filters) {
+        Ok(items) => Json(serde_json::json!({ "items": items })).into_response(),
+        Err(e) => browser_error_response(e),
+    }
+}
+
+/// `GET /v1/context/sessions/:id/history` — one plan session's revision digests,
+/// comment threads, and decision/curation ledger events. Read-only.
+async fn handle_context_session_history(
+    State(app_state): State<AppState>,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    let db = app_state.store.database();
+    match context::build_session_history(&db, &id) {
+        Some(h) => Json(h).into_response(),
+        None => (StatusCode::NOT_FOUND, "no such session").into_response(),
+    }
+}
+
+/// `GET /v1/context/stats` — aggregate counts (per day / surface / kind / class).
+/// Agent/MCP-facing only; there is deliberately no dashboard UI. Read-only.
+async fn handle_context_stats(State(app_state): State<AppState>) -> axum::response::Response {
+    let db = app_state.store.database();
+    Json(context::build_stats(&db)).into_response()
+}
+
+/// `GET /v1/surface/active` — where the user is in the app right now, mirrored
+/// from the frontend. Read by the Companion mid-conversation. Read-only.
+async fn handle_surface_active(State(app_state): State<AppState>) -> axum::response::Response {
+    Json(app_state.active_surface.get()).into_response()
+}
+
+#[derive(Deserialize)]
+struct JournalRecentQ {
+    since_seq: Option<i64>,
+    limit: Option<i64>,
+}
+
+/// `GET /v1/journal/recent?since_seq=&limit=` — the context-journal delta (what
+/// the user did across surfaces), oldest-first. The Companion's mid-conversation
+/// re-read of its "while you were away" feed. Read-only.
+async fn handle_journal_recent(
+    State(app_state): State<AppState>,
+    Query(q): Query<JournalRecentQ>,
+) -> axum::response::Response {
+    let db = app_state.store.database();
+    let limit = q.limit.unwrap_or(200).clamp(1, 500);
+    match db.list_journal_since(q.since_seq.unwrap_or(0), limit) {
+        Ok(rows) => {
+            let head = db.journal_head().unwrap_or(0);
+            Json(serde_json::json!({ "items": rows, "head": head })).into_response()
+        }
+        Err(e) => browser_error_response(e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct ContextThreadQ {
+    limit: Option<i64>,
+}
+
+/// `GET /v1/context/threads/:kind/:id?limit=` — generic read-only fetch of any
+/// surface's discussion thread (browse / linked / mission / companion / drafter
+/// / a plan session's comment threads), tail-bounded, oldest-first.
+async fn handle_context_thread(
+    State(app_state): State<AppState>,
+    Path((kind, id)): Path<(String, String)>,
+    Query(q): Query<ContextThreadQ>,
+) -> axum::response::Response {
+    let db = app_state.store.database();
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    match db.load_thread_generic(&kind, &id, limit) {
+        Ok(Some(msgs)) => {
+            // Byte-bound the response like /v1/context/prompts: cap each body,
+            // then drop leading turns once the budget is spent (tail wins).
+            let mut msgs = msgs;
+            for m in &mut msgs {
+                if m.body.chars().count() > 4000 {
+                    m.body = m.body.chars().take(4000).collect::<String>() + "…";
+                }
+            }
+            let mut total = 0usize;
+            let mut start = msgs.len();
+            for (i, m) in msgs.iter().enumerate().rev() {
+                total += 120 + m.body.len();
+                if total > context::MAX_CONTEXT_BYTES {
+                    break;
+                }
+                start = i;
+            }
+            let tail = &msgs[start..];
+            Json(serde_json::json!({
+                "kind": kind,
+                "id": id,
+                "label": db.thread_label(&kind, &id),
+                "messages": tail,
+            }))
+            .into_response()
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, "unknown thread kind").into_response(),
+        Err(e) => browser_error_response(e.to_string()),
+    }
+}
+
+/// `GET /v1/context/tree/:kind/:id` — one session-tree node with its parent and
+/// child digests (message counts + recency), the traversable spine of
+/// memory-by-session. Read-only.
+async fn handle_context_tree(
+    State(app_state): State<AppState>,
+    Path((kind, id)): Path<(String, String)>,
+) -> axum::response::Response {
+    let db = app_state.store.database();
+    let parent = db.session_tree_parent(&kind, &id).ok().flatten();
+    let children = db.session_tree_children(&kind, &id).unwrap_or_default();
+    let child_digests: Vec<serde_json::Value> = children
+        .into_iter()
+        .map(|(ck, cid, created_at)| {
+            let (count, last_ts) = db.thread_stats(&ck, &cid).unwrap_or((0, None));
+            serde_json::json!({
+                "kind": ck,
+                "id": cid,
+                "label": db.thread_label(&ck, &cid),
+                "createdAt": created_at,
+                "messageCount": count,
+                "lastTs": last_ts,
+            })
+        })
+        .collect();
+    let (count, last_ts) = db.thread_stats(&kind, &id).unwrap_or((0, None));
+    Json(serde_json::json!({
+        "node": {
+            "kind": kind,
+            "id": id,
+            "label": db.thread_label(&kind, &id),
+            "messageCount": count,
+            "lastTs": last_ts,
+        },
+        "parent": parent.map(|(pk, pid)| serde_json::json!({
+            "kind": pk,
+            "id": pid,
+            "label": db.thread_label(&pk, &pid),
+        })),
+        "children": child_digests,
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct BrowseSearchQ {
+    /// Free-text query — tokenized + quoted into a safe FTS5 MATCH in the DB.
+    q: Option<String>,
+    limit: Option<i64>,
+}
+
+/// `GET /v1/context/browse/search?q=&limit=` — Dojo P3 lexical (BM25) search over
+/// the browsing-behavior stream. High-volume, keyword-heavy browse events get
+/// fuzzy full-text recall here (plans/prompts stay on the vectorless walk).
+/// Read-only; returns `{items:[{id,ts,url,title,snippet,score}]}` best-first.
+async fn handle_browse_search(
+    State(app_state): State<AppState>,
+    Query(q): Query<BrowseSearchQ>,
+) -> axum::response::Response {
+    let db = app_state.store.database();
+    let query = q.q.unwrap_or_default();
+    let limit = q.limit.unwrap_or(20).clamp(1, 100);
+    match db.search_browse_events(&query, limit) {
+        Ok(items) => Json(serde_json::json!({ "items": items })).into_response(),
+        Err(e) => browser_error_response(e.to_string()),
     }
 }
 
@@ -3064,7 +4342,7 @@ fn host_of(url: &str) -> String {
 /// This is the security boundary — the endpoint writes fetched (and therefore
 /// attacker-influenceable) bytes, so a derived or supplied name must never
 /// escape the target directory.
-fn sanitize_basename(input: &str) -> String {
+pub(crate) fn sanitize_basename(input: &str) -> String {
     let last = input.rsplit(['/', '\\']).next().unwrap_or(input);
     let mut out: String = last.chars().filter(|c| !c.is_control()).collect();
     out = out.trim().trim_start_matches('.').trim().to_string();
@@ -3079,7 +4357,7 @@ fn sanitize_basename(input: &str) -> String {
 
 /// Pick a non-colliding path in `dir` for `name`: `name`, then `name (1).ext`,
 /// `name (2).ext`, … so a repeat download never clobbers an existing file.
-fn dedup_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+pub(crate) fn dedup_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     let chosen = dedup_name(name, |candidate| dir.join(candidate).exists());
     dir.join(chosen)
 }
@@ -3120,12 +4398,26 @@ fn browser_set_active(active: tauri::State<'_, ActiveBrowser>, label: Option<Str
 #[tauri::command]
 fn mission_set_active(
     active: tauri::State<'_, ActiveMission>,
+    store: tauri::State<'_, SessionStore>,
     mission_id: Option<String>,
     title: Option<String>,
     goal: Option<String>,
     status: Option<String>,
 ) {
-    active.set(mission_id.filter(|id| !id.trim().is_empty()).map(|id| {
+    let prev = active.active_id();
+    let next = mission_id.filter(|id| !id.trim().is_empty());
+    // Companion journal: a mission became active (identity change only —
+    // goal/title edits stay quiet).
+    if let Some(id) = next.as_ref().filter(|id| prev.as_deref() != Some(id)) {
+        let _ = store.database().append_journal(
+            "mission_active",
+            Some("browser"),
+            Some(id),
+            title.as_deref(),
+            None,
+        );
+    }
+    active.set(next.map(|id| {
         ActiveMissionInfo {
             mission_id: id,
             title: title.unwrap_or_default(),
@@ -3165,7 +4457,11 @@ async fn browser_snapshot(app: AppHandle, label: String) -> Result<String, Strin
 /// and just before a tab is backgrounded. Requires the webview to be live (it
 /// evals the page); a missing webview is a soft no-op.
 #[tauri::command(async)]
-async fn browser_cache_snapshot(app: AppHandle, label: String) -> Result<(), String> {
+async fn browser_cache_snapshot(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    label: String,
+) -> Result<(), String> {
     if app.get_webview(&label).is_none() {
         return Ok(());
     }
@@ -3174,6 +4470,48 @@ async fn browser_cache_snapshot(app: AppHandle, label: String) -> Result<(), Str
         .get_webview(&label)
         .and_then(|wv| webview_current_url(&wv))
         .unwrap_or_default();
+
+    // Dojo P2 — record this page as a browsing event in the lake (best-effort).
+    // The normalized on-screen content + a content hash feed the "Browsing
+    // Behavior" column; `record_browse_event` dedups a consecutive re-capture.
+    if let Some((title, text)) = normalized_browse_text(&json, &url) {
+        if !url.trim().is_empty() {
+            let browse_id = app
+                .state::<BrowserTabs>()
+                .get()
+                .into_iter()
+                .find(|t| t.label == label)
+                .map(|t| t.browse_id);
+            let db = store.database();
+            match ledger::record_browse_event(
+                &db,
+                ledger::BrowseEventInput {
+                    action: "navigate".to_string(),
+                    browse_id,
+                    url: url.clone(),
+                    title: (!title.is_empty()).then(|| title.clone()),
+                    text,
+                },
+            ) {
+                Ok(Some(_)) => {
+                    // Companion journal: a page the user landed on (url+title
+                    // only — the content stays in the lake, not the journal).
+                    let _ = db.append_journal(
+                        "nav",
+                        Some("browser"),
+                        None,
+                        (!title.is_empty()).then_some(title.as_str()),
+                        Some(&url),
+                    );
+                    let _ = app.emit("ledger-changed", ());
+                    let _ = app.emit("memory-changed", ());
+                }
+                Ok(None) => {} // consecutive duplicate — nothing recorded
+                Err(e) => tracing::warn!(error = %e, "failed to record browse event"),
+            }
+        }
+    }
+
     app.state::<SnapshotCache>().put(
         label,
         CachedSnapshot {
@@ -3184,6 +4522,33 @@ async fn browser_cache_snapshot(app: AppHandle, label: String) -> Result<(), Str
         },
     );
     Ok(())
+}
+
+/// Build the normalized browsing text from a `SNAPSHOT_JS` JSON blob: the page
+/// title, url, its `h1..h3` headings, and the body innerText, joined into one
+/// searchable string (hashed to the context hash and retained for P3 retrieval).
+/// Returns `(title, normalized_text)`, or `None` if the blob has no usable text.
+fn normalized_browse_text(json: &str, url: &str) -> Option<(String, String)> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let title = v.get("title").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    let body = v.get("text").and_then(|x| x.as_str()).unwrap_or("").trim();
+    let headings = v
+        .get("headings")
+        .and_then(|x| x.as_array())
+        .map(|hs| {
+            hs.iter()
+                .filter_map(|h| h.get("text").and_then(|t| t.as_str()))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+    if title.is_empty() && body.is_empty() && headings.is_empty() {
+        return None;
+    }
+    let text = format!("{title}\n{url}\n\n{headings}\n\n{body}");
+    Some((title, text))
 }
 
 /// Take (and clear) a suspended tab's saved scroll offset `[x, y]`, so the
@@ -3358,6 +4723,9 @@ fn delete_session(
 ) -> Result<bool, String> {
     let removed = delete_session_inner(&store, &pending, &session_id, force.unwrap_or(false))?;
     if removed {
+        // The comments that referenced them are gone; don't leave their files
+        // behind in app data.
+        fsbrowse::delete_session_attachments(&app, &session_id);
         let _ = app.emit(
             "session-status-changed",
             SessionEvent {
@@ -3460,6 +4828,355 @@ async fn export_revision_markdown(
     Ok(Some(path.to_string_lossy().to_string()))
 }
 
+/// Raw material the frontend wraps into an async-share `SnapshotPayload`.
+///
+/// Beyond the plan body, this now carries a *lean* projection of the plan's
+/// depth — a revision timeline, prior discussion, resolved decisions, stats,
+/// and a heading-only TOC — so the zero-install browser viewer can show "how
+/// much more Redline has" without a server. Every enrichment field is
+/// optional/skippable: old links (and links minted with the enrichment toggles
+/// off) simply omit them, and old viewers ignore what they don't know.
+///
+/// Size discipline: the payload rides in a URL `#fragment`, so we ship
+/// METADATA, not bodies — the timeline has no prior markdown, the TOC is
+/// headings only (never `bodyMarkdown`/`paragraphs`, which would re-serialize
+/// the whole plan), and discussion/decision text is truncated + capped.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlanSnapshotData {
+    /// Sidecar-augmented plan markdown — `rl:blk-` block identity rides along
+    /// so the browser viewer's annotations re-anchor by blockId at import.
+    markdown: String,
+    plan_title: Option<String>,
+    project_name: String,
+    base_version: u32,
+
+    // ── enrichment (all optional; empty collections are skipped) ──
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    revision_timeline: Vec<SnapRevisionMeta>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    discussion: Vec<SnapComment>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    decisions: Vec<SnapDecision>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stats: Option<SnapStats>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    toc: Vec<SnapTocNode>,
+}
+
+/// One revision's metadata for the viewer's timeline — no body, just enough to
+/// render "vN · when · title" and badge thread-starts.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SnapRevisionMeta {
+    version: u32,
+    created_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    thread_start: bool,
+}
+
+/// A prior comment/discussion thread, reduced + truncated for the viewer.
+/// `author` is the HUMAN reviewer name only — the agent `author` id is never
+/// forwarded to an external recipient.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SnapComment {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    block_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author: Option<String>,
+    body: String,
+    resolved: bool,
+    created_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolution: Option<String>,
+}
+
+/// A resolved decision, sourced from resolved/accepted comments (the
+/// hash-chained ledger carries no human-readable title, so it can't feed this).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SnapDecision {
+    title: String,
+    decided_at: i64,
+    disposition: &'static str,
+}
+
+/// Derived plan stats — small, confident numbers for the viewer's hero strip.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SnapStats {
+    version_count: u32,
+    section_count: u32,
+    block_count: u32,
+    word_count: u32,
+    reading_minutes: u32,
+}
+
+/// One heading in the pruned table of contents (no body — that's the point).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SnapTocNode {
+    title: String,
+    level: u8,
+    anchor_id: String,
+    block_id: String,
+}
+
+// ── enrichment caps: bound the URL-fragment size regardless of plan depth ──
+/// Most comments carried into the discussion panel.
+const SNAP_MAX_DISCUSSION: usize = 30;
+/// Most decisions in the digest.
+const SNAP_MAX_DECISIONS: usize = 8;
+/// Per-comment body truncation (chars).
+const SNAP_BODY_MAX: usize = 280;
+/// Per-resolution body truncation (chars).
+const SNAP_RESOLUTION_MAX: usize = 200;
+/// Revision title truncation (chars).
+const SNAP_TITLE_MAX: usize = 80;
+/// Reading speed for the reading-time estimate (words per minute).
+const SNAP_WORDS_PER_MINUTE: u32 = 200;
+
+/// Char-boundary-safe truncation with an ellipsis when clipped. Counts by
+/// `char`, so multi-byte text never splits mid-codepoint.
+fn snap_truncate(s: &str, max: usize) -> String {
+    let trimmed = s.trim();
+    if trimmed.chars().count() <= max {
+        return trimmed.to_string();
+    }
+    let mut out: String = trimmed.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// Count non-empty-title sections in a heading tree (matches the TOC's rule).
+fn snap_section_count(sections: &[state::Section]) -> u32 {
+    let mut n = 0u32;
+    for s in sections {
+        if !s.title.trim().is_empty() {
+            n += 1;
+        }
+        n += snap_section_count(&s.children);
+    }
+    n
+}
+
+/// Count blocks (heading + paragraph blocks) across a heading tree.
+fn snap_block_count(sections: &[state::Section]) -> u32 {
+    let mut n = 0u32;
+    for s in sections {
+        n += 1; // the heading block itself
+        n += s.paragraphs.len() as u32;
+        n += snap_block_count(&s.children);
+    }
+    n
+}
+
+/// Walk the heading tree into a flat, pruned TOC — headings with real titles
+/// only, carrying the stable ids the viewer scrolls by. Never touches bodies.
+fn snap_toc(sections: &[state::Section], out: &mut Vec<SnapTocNode>) {
+    for s in sections {
+        let title = s.title.trim();
+        if !title.is_empty() {
+            out.push(SnapTocNode {
+                title: snap_truncate(title, SNAP_TITLE_MAX),
+                level: s.level,
+                anchor_id: s.anchor_id.clone(),
+                block_id: s.block_id.clone(),
+            });
+        }
+        snap_toc(&s.children, out);
+    }
+}
+
+/// Build the raw material for an async share snapshot: the plan markdown WITH
+/// its `rl:blk-` sidecars intact — unlike `export_revision_markdown`, which
+/// strips them for human-facing export. The frontend adds the request id +
+/// per-request signing key and AES-encrypts the whole thing into an `RLS1.`
+/// token that rides a URL `#fragment` (the plan never reaches a server).
+///
+/// `include_discussion` / `include_decisions` gate the two sensitive
+/// enrichments (prior comment text + resolution rationale) at the source: when
+/// off, that data is never even assembled, so it can't leak into the encrypted
+/// fragment. The low-sensitivity enrichments (timeline / stats / TOC) always
+/// ship — they're titles and counts.
+#[tauri::command]
+fn build_plan_snapshot(
+    store: tauri::State<'_, SessionStore>,
+    session_id: String,
+    version_number: u32,
+    include_discussion: bool,
+    include_decisions: bool,
+) -> Result<PlanSnapshotData, String> {
+    let session = store
+        .get(&session_id)
+        .ok_or_else(|| format!("no session for id {session_id}"))?;
+    let revision = session
+        .revisions
+        .iter()
+        .find(|r| r.version_number == version_number)
+        .ok_or_else(|| format!("revision v{version_number} not found"))?;
+    // Title from the sidecar-stripped text; the returned markdown keeps the
+    // sidecars so viewer annotations anchor by blockId losslessly.
+    let clean = parser::strip_sidecar_lines(&revision.raw_plan_markdown);
+
+    // ── revision timeline: metadata for every revision, no bodies ──
+    let revision_timeline: Vec<SnapRevisionMeta> = session
+        .revisions
+        .iter()
+        .map(|r| {
+            let rc = parser::strip_sidecar_lines(&r.raw_plan_markdown);
+            SnapRevisionMeta {
+                version: r.version_number,
+                created_at: r.received_at,
+                title: parser::plan_title_from_markdown(&rc)
+                    .map(|t| snap_truncate(&t, SNAP_TITLE_MAX)),
+                thread_start: r.thread_start,
+            }
+        })
+        .collect();
+
+    // Comments live per-revision and carry forward; the full discussion across
+    // the plan's life is the flattened aggregate (mirrors `Session::list`).
+    let all_comments: Vec<&state::Comment> = session
+        .revisions
+        .iter()
+        .flat_map(|r| r.comments.iter())
+        .collect();
+
+    // ── discussion: reduced + truncated + capped; human `reviewer` name only ──
+    let discussion: Vec<SnapComment> = if include_discussion {
+        let mut items: Vec<&state::Comment> = all_comments.clone();
+        // Newest first, then cap — the recent thread is the most relevant.
+        items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        items
+            .into_iter()
+            .take(SNAP_MAX_DISCUSSION)
+            .map(|c| {
+                let resolved = matches!(
+                    c.status,
+                    state::CommentStatus::Resolved | state::CommentStatus::Accepted
+                );
+                SnapComment {
+                    kind: c.kind.as_str(),
+                    block_id: c.block_id.clone(),
+                    // `reviewer` is the human attribution; `author` is an agent
+                    // id and is deliberately NOT forwarded to a recipient.
+                    author: c.reviewer.clone(),
+                    body: snap_truncate(&c.body, SNAP_BODY_MAX),
+                    resolved,
+                    created_at: c.created_at,
+                    resolution: c
+                        .resolution
+                        .as_ref()
+                        .map(|r| snap_truncate(&r.body, SNAP_RESOLUTION_MAX)),
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // ── decisions: resolved/accepted comments (or promoted questions) ──
+    let decisions: Vec<SnapDecision> = if include_decisions {
+        let mut resolved: Vec<&state::Comment> = all_comments
+            .iter()
+            .copied()
+            .filter(|c| {
+                matches!(
+                    c.status,
+                    state::CommentStatus::Resolved | state::CommentStatus::Accepted
+                ) || (matches!(c.kind, state::CommentKind::Question) && c.actionable)
+            })
+            .collect();
+        resolved.sort_by(|a, b| {
+            let ak = a.resolution.as_ref().and_then(|r| r.accepted_at).unwrap_or(a.created_at);
+            let bk = b.resolution.as_ref().and_then(|r| r.accepted_at).unwrap_or(b.created_at);
+            bk.cmp(&ak)
+        });
+        resolved
+            .into_iter()
+            .take(SNAP_MAX_DECISIONS)
+            .map(|c| SnapDecision {
+                title: snap_truncate(&c.body, SNAP_TITLE_MAX),
+                decided_at: c
+                    .resolution
+                    .as_ref()
+                    .and_then(|r| r.accepted_at)
+                    .unwrap_or(c.created_at),
+                disposition: match c.status {
+                    state::CommentStatus::Accepted => "accepted",
+                    state::CommentStatus::Resolved => "resolved",
+                    _ => "decision",
+                },
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // ── stats: derived counts + reading time ──
+    let word_count = clean.split_whitespace().count() as u32;
+    let stats = Some(SnapStats {
+        version_count: session.revisions.len() as u32,
+        section_count: snap_section_count(&revision.sections),
+        block_count: snap_block_count(&revision.sections),
+        word_count,
+        reading_minutes: (word_count.div_ceil(SNAP_WORDS_PER_MINUTE)).max(1),
+    });
+
+    // ── pruned TOC ──
+    let mut toc: Vec<SnapTocNode> = Vec::new();
+    snap_toc(&revision.sections, &mut toc);
+
+    Ok(PlanSnapshotData {
+        markdown: revision.raw_plan_markdown.clone(),
+        plan_title: parser::plan_title_from_markdown(&clean),
+        project_name: session.project_name.clone(),
+        base_version: revision.version_number,
+        revision_timeline,
+        discussion,
+        decisions,
+        stats,
+        toc,
+    })
+}
+
+/// Import a plan delivered as an async-share snapshot (via the `redline://`
+/// deep link, decoded client-side) as a normal reviewable session — the
+/// recipient gets full native track-changes + discussion, not just the browser
+/// preview. This is deliberately NOT `POST /v1/plan`: no Claude process is
+/// waiting on a hook, so the plan lands straight in the store through the same
+/// `upsert_plan` primitive `handle_plan` uses. The sidecar markdown
+/// reconstructs identical `sections`/`blockId`s. Returns the new session id.
+#[tauri::command]
+fn import_shared_plan(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    markdown: String,
+    project_name: Option<String>,
+) -> Result<String, String> {
+    if markdown.trim().is_empty() {
+        return Err("shared plan is empty".into());
+    }
+    let session_id = format!("shared-{}", uuid::Uuid::new_v4());
+    // The last path component becomes the display name; pass the shared
+    // project name (or a friendly default) so the session reads sensibly.
+    let name = project_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Shared plan");
+    let sections = state::reparse_sections(&markdown);
+    store.upsert_plan(&session_id, name, markdown, sections, true, false);
+    refresh_tray(&app, &store);
+    Ok(session_id)
+}
+
 /// Save a frontend-built `.docx` export of one plan revision. The bytes are
 /// produced by the JS export adapter (the format socket lives in the
 /// frontend); this command only resolves the file name from the revision's
@@ -3511,6 +5228,84 @@ async fn export_revision_docx(
     std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
     tracing::info!(path = %path.display(), version = version_number, "exported revision docx");
     Ok(Some(path.to_string_lossy().to_string()))
+}
+
+const SETTING_OBSIDIAN_VAULT: &str = "redline.obsidianVault";
+
+/// Turn a plan title into a safe Obsidian note filename (no path separators or
+/// characters Obsidian/macOS dislike). Keeps it human-readable.
+fn obsidian_note_filename(title: &str) -> String {
+    let cleaned: String = title
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '#' | '^'
+            | '[' | ']' => ' ',
+            c if c.is_control() => ' ',
+            c => c,
+        })
+        .collect();
+    let trimmed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    let base = if trimmed.is_empty() {
+        "Redline plan".to_string()
+    } else {
+        trimmed
+    };
+    format!("{base}.md")
+}
+
+/// Save one plan revision as a note in the user's Obsidian vault. The vault
+/// folder is asked for once (native folder picker) and remembered in settings;
+/// after that a save writes straight into it. Returns the written path, or
+/// `None` if the user cancels the first-run folder pick. Same
+/// off-the-main-thread `async` reasoning as the export commands (the folder
+/// picker blocks).
+#[tauri::command]
+async fn save_revision_to_obsidian(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    session_id: String,
+    version_number: u32,
+) -> Result<Option<String>, String> {
+    let (clean, project_name) = {
+        let session = store
+            .get(&session_id)
+            .ok_or_else(|| format!("no session for id {session_id}"))?;
+        let revision = session
+            .revisions
+            .iter()
+            .find(|r| r.version_number == version_number)
+            .ok_or_else(|| format!("revision v{version_number} not found"))?;
+        (
+            parser::strip_sidecar_lines(&revision.raw_plan_markdown),
+            session.project_name.clone(),
+        )
+    };
+
+    // Resolve the vault: a remembered, still-existing folder, else ask once.
+    let remembered = store
+        .database()
+        .get_setting(SETTING_OBSIDIAN_VAULT)
+        .filter(|p| !p.trim().is_empty() && std::path::Path::new(p).is_dir());
+    let vault = match remembered {
+        Some(p) => std::path::PathBuf::from(p),
+        None => {
+            let Some(dir) = app.dialog().file().blocking_pick_folder() else {
+                return Ok(None); // user cancelled the vault pick
+            };
+            let path = dir.into_path().map_err(|e| format!("invalid folder: {e}"))?;
+            store
+                .database()
+                .set_setting(SETTING_OBSIDIAN_VAULT, &path.to_string_lossy())
+                .map_err(|e| e.to_string())?;
+            path
+        }
+    };
+
+    let name = parser::plan_title_from_markdown(&clean).unwrap_or(project_name);
+    let file_path = vault.join(obsidian_note_filename(&name));
+    std::fs::write(&file_path, clean).map_err(|e| e.to_string())?;
+    tracing::info!(path = %file_path.display(), version = version_number, "saved revision to obsidian vault");
+    Ok(Some(file_path.to_string_lossy().to_string()))
 }
 
 #[tauri::command]
@@ -3964,6 +5759,203 @@ fn set_interception_mode(app: AppHandle, mode: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Appearance preferences (theme / font / lint names) live in `app_settings`
+/// so a fork or second machine carries the user's appearance with the DB;
+/// browser localStorage remains only the pre-paint cache (index.html replays
+/// it before the bundle loads). The frontend read-through-migrates old
+/// localStorage-only values into here on startup.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UiPrefs {
+    theme: Option<String>,
+    font: Option<String>,
+    lint: Option<String>,
+    /// Workspace-nudge bookkeeping (launch-habit history + retired
+    /// suggestions) — an opaque JSON blob owned by src/lib/nudge.ts. In the
+    /// DB rather than localStorage so "fires at most once" survives a
+    /// cache clear.
+    workspace_nudge: Option<String>,
+    /// Seat Assignment run settings (`{posture, discretion}`) — an opaque JSON
+    /// blob owned by `src/lib/seatAssign.ts`, in the DB so the choice survives
+    /// reopening the dialog.
+    seat_assign_prefs: Option<String>,
+}
+
+/// `key` → `app_settings` row; the allowlist keeps this command from becoming
+/// a generic KV write surface.
+fn ui_pref_setting_key(key: &str) -> Option<&'static str> {
+    match key {
+        "theme" => Some("redline.ui.theme"),
+        "font" => Some("redline.ui.font"),
+        "lint" => Some("redline.ui.lint"),
+        "workspaceNudge" => Some("redline.ui.workspaceNudge"),
+        "seatAssignPrefs" => Some("redline.ui.seatAssignPrefs"),
+        _ => None,
+    }
+}
+
+#[tauri::command]
+fn get_ui_prefs(settings: tauri::State<'_, Settings>) -> UiPrefs {
+    UiPrefs {
+        theme: settings.db.get_setting("redline.ui.theme"),
+        font: settings.db.get_setting("redline.ui.font"),
+        lint: settings.db.get_setting("redline.ui.lint"),
+        workspace_nudge: settings.db.get_setting("redline.ui.workspaceNudge"),
+        seat_assign_prefs: settings.db.get_setting("redline.ui.seatAssignPrefs"),
+    }
+}
+
+#[tauri::command]
+fn set_ui_pref(
+    settings: tauri::State<'_, Settings>,
+    key: String,
+    value: String,
+) -> Result<(), String> {
+    let setting_key = ui_pref_setting_key(&key).ok_or_else(|| format!("unknown ui pref: {key}"))?;
+    settings
+        .db
+        .set_setting(setting_key, &value)
+        .map_err(|e| e.to_string())
+}
+
+/// Agent Seats (see `seat.rs`): the whole configured map plus the global
+/// claude-binary override, for the settings pane.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentSeatsView {
+    seats: std::collections::HashMap<String, seat::SeatConfig>,
+    known_seats: Vec<String>,
+    claude_bin: Option<String>,
+    /// A previous chart is stashed, so Revert has something to restore.
+    can_revert: bool,
+    /// What each seat does, for the settings tooltips. Served from the same
+    /// `SEAT_FACTS` the Seat Assignment agent reads, so the explanation the
+    /// user hovers and the one the agent reasons from can never disagree.
+    blurbs: Vec<seatassign::SeatBlurb>,
+}
+
+fn agent_seats_view(db: &db::Database) -> AgentSeatsView {
+    AgentSeatsView {
+        seats: seat::all_seats(),
+        known_seats: seat::KNOWN_SEATS.iter().map(|s| s.to_string()).collect(),
+        claude_bin: seat::claude_bin_override(),
+        can_revert: seat::has_snapshot(db),
+        blurbs: seatassign::seat_blurbs(),
+    }
+}
+
+#[tauri::command]
+fn get_agent_seats(settings: tauri::State<'_, Settings>) -> AgentSeatsView {
+    agent_seats_view(&settings.db)
+}
+
+#[tauri::command]
+fn set_agent_seat(
+    settings: tauri::State<'_, Settings>,
+    seat_name: String,
+    config: seat::SeatConfig,
+) -> Result<(), String> {
+    seat::set_seat(&settings.db, &seat_name, config)
+}
+
+#[tauri::command]
+fn set_claude_bin_override(
+    settings: tauri::State<'_, Settings>,
+    path: String,
+) -> Result<(), String> {
+    seat::set_claude_bin_override(&settings.db, &path)
+}
+
+// --- Seat Assignment agent (see `seatassign.rs`) --------------------------
+
+/// Run the Seat Assignment agent once and return its proposed chart. Read-only:
+/// nothing is written until the user applies a pick, so no change events fire.
+#[tauri::command(async)]
+async fn seat_assignment_agent(
+    store: tauri::State<'_, SessionStore>,
+    state: tauri::State<'_, seatassign::SeatAssignState>,
+    posture: String,
+    discretion: i64,
+) -> Result<seatassign::SeatAssignment, String> {
+    let (prompt, allowed) = {
+        let db = store.database();
+        let digest = seatassign::build_seat_digest(&db);
+        let allowed = seatassign::known_models(&digest);
+        (
+            seatassign::build_seat_prompt_from_digest(&digest, &posture, discretion),
+            allowed,
+        )
+    };
+    let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+    let started = std::time::Instant::now();
+    let outcome = seatassign::run_seat_assigner(&state, &cwd, prompt).await;
+    let elapsed = started.elapsed();
+    let text = match outcome {
+        Ok(t) => t,
+        Err(e) => {
+            seatassign::log_run(&format!("FAILED after {elapsed:?}: {e}"));
+            return Err(e);
+        }
+    };
+    let parsed = seatassign::parse_assignment(&text, &allowed);
+    seatassign::log_run(&format!(
+        "finished in {elapsed:?} — {} pick(s), summary={:?}\n--- reply ---\n{text}",
+        parsed.picks.len(),
+        parsed.summary
+    ));
+    Ok(parsed)
+}
+
+/// Stop an in-flight run. Idempotent — cancelling nothing is not an error.
+#[tauri::command]
+fn seat_assignment_cancel(state: tauri::State<'_, seatassign::SeatAssignState>) {
+    state.cancel();
+}
+
+/// Probe proposed model ids. Aliases short-circuit without spawning, so the
+/// common case costs nothing; only a custom id actually starts a process.
+#[tauri::command(async)]
+async fn seat_preflight(models: Vec<String>) -> Vec<seatassign::ModelCheck> {
+    let mut out = Vec::new();
+    for model in models {
+        out.push(seatassign::preflight_model(&model).await);
+    }
+    out
+}
+
+/// Apply picks atomically. On the first apply of a card (`snapshot_first`) the
+/// whole pre-apply map is stashed first, so Revert can undo the batch.
+#[tauri::command]
+fn apply_seat_picks(
+    settings: tauri::State<'_, Settings>,
+    picks: Vec<seatassign::SeatPick>,
+    snapshot_first: bool,
+) -> Result<AgentSeatsView, String> {
+    if snapshot_first {
+        seat::snapshot_seats(&settings.db)?;
+    }
+    let current = seat::all_seats();
+    let updates: Vec<(String, seat::SeatConfig)> = picks
+        .iter()
+        .map(|p| {
+            let base = current.get(&p.seat).cloned().unwrap_or_default();
+            (p.seat.clone(), seatassign::merge_pick(&base, p))
+        })
+        .collect();
+    seat::set_seats(&settings.db, &updates)?;
+    Ok(agent_seats_view(&settings.db))
+}
+
+/// Undo the whole batch — the answer to "Apply all" collapsing a per-row review
+/// into one click.
+#[tauri::command]
+fn revert_seat_assignment(
+    settings: tauri::State<'_, Settings>,
+) -> Result<AgentSeatsView, String> {
+    seat::restore_snapshot(&settings.db)?;
+    Ok(agent_seats_view(&settings.db))
+}
+
 /// Relay settings for live collaboration: the signaling server URLs minted
 /// into invite codes and the owner's presence display name. Stored in
 /// `app_settings` (signaling as a JSON array) so invites are prefilled.
@@ -4012,6 +6004,95 @@ fn set_relay_config(
             .map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// The owner's long-lived collaboration signing secret. Per-share HMAC keys
+/// derive from it (`HMAC(secret, requestId)`), so verifying a signed async
+/// return never requires storing per-share keys. Generated lazily on first
+/// read — 32 random bytes hex-encoded — and stable after that so returns
+/// minted against old shares keep verifying.
+#[tauri::command]
+fn get_owner_secret(settings: tauri::State<'_, Settings>) -> Result<String, String> {
+    if let Some(existing) = settings.db.get_setting(SETTING_COLLAB_OWNER_SECRET) {
+        if !existing.is_empty() {
+            return Ok(existing);
+        }
+    }
+    // Two v4 UUIDs = 32 bytes of OS randomness — no extra dependency.
+    let mut bytes = Vec::with_capacity(32);
+    bytes.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
+    bytes.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
+    let secret: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    settings
+        .db
+        .set_setting(SETTING_COLLAB_OWNER_SECRET, &secret)
+        .map_err(|e| e.to_string())?;
+    Ok(secret)
+}
+
+/// Durable Review Request registry (IV.2): shares + returns live in SQLite
+/// via the daemon's database — localStorage was per-webview and couldn't
+/// join with the comments a return produces (`comments.share_request_id`).
+#[tauri::command]
+fn record_share(
+    store: tauri::State<'_, SessionStore>,
+    share: crate::db::ShareRecord,
+) -> Result<(), String> {
+    store.database().record_share(&share).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_share(
+    store: tauri::State<'_, SessionStore>,
+    request_id: String,
+) -> Result<(), String> {
+    store.database().delete_share(&request_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_shares(
+    store: tauri::State<'_, SessionStore>,
+    session_id: String,
+) -> Result<Vec<crate::db::ShareRecord>, String> {
+    store.database().list_shares(&session_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn record_share_return(
+    store: tauri::State<'_, SessionStore>,
+    ret: crate::db::ShareReturnRecord,
+) -> Result<(), String> {
+    store
+        .database()
+        .record_share_return(&ret)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_share_returns(
+    store: tauri::State<'_, SessionStore>,
+    session_id: String,
+) -> Result<Vec<crate::db::ShareReturnRecord>, String> {
+    store
+        .database()
+        .list_share_returns(&session_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Replace the owner secret (e.g. key rotation after a suspected leak).
+/// Outstanding shared snapshots stop verifying their returns.
+#[tauri::command]
+fn set_owner_secret(
+    settings: tauri::State<'_, Settings>,
+    secret: String,
+) -> Result<(), String> {
+    if secret.trim().is_empty() {
+        return Err("owner secret cannot be empty".into());
+    }
+    settings
+        .db
+        .set_setting(SETTING_COLLAB_OWNER_SECRET, secret.trim())
+        .map_err(|e| e.to_string())
 }
 
 /// Per-session Review Request registry, stored as an opaque JSON blob the
@@ -4847,7 +6928,28 @@ fn set_source_feedback(
     settings
         .db
         .upsert_source_feedback(&fb)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    // Polis ledger: a source-trust verdict (thumbs up/down on a source) is a
+    // curation signal.
+    let ph = ledger::decision_payload_hash(&[
+        ("source_feedback", &fb.id),
+        ("domain", &fb.domain),
+        ("verdict", &fb.verdict.to_string()),
+    ]);
+    if let Err(e) = ledger::record_decision(
+        &settings.db,
+        ledger::DecisionInput {
+            kind: ledger::EventKind::SourceTrust,
+            author: None,
+            session_id: None,
+            ref_kind: "source_feedback",
+            ref_id: &fb.id,
+            payload_hash: ph,
+        },
+    ) {
+        tracing::warn!(error = %e, "failed to record source-trust ledger event");
+    }
+    Ok(())
 }
 
 /// Every thumbs verdict recorded on a tab's thread, so the sources strip can
@@ -4861,6 +6963,1189 @@ fn get_source_feedback(
         .db
         .get_source_feedback(&browse_id)
         .map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Polis ledger commands (Phase 1)
+// ---------------------------------------------------------------------------
+
+/// Most-recent-first ledger events for the Ledger pane.
+#[tauri::command]
+fn ledger_list_events(
+    store: tauri::State<'_, SessionStore>,
+    limit: Option<i64>,
+) -> Result<Vec<ledger::LedgerEventRow>, String> {
+    store
+        .database()
+        .list_ledger_events(limit.unwrap_or(1000))
+        .map_err(|e| e.to_string())
+}
+
+/// Re-walk the hash chain and report whether it verifies (and the first bad seq
+/// if not).
+#[tauri::command]
+fn ledger_verify(store: tauri::State<'_, SessionStore>) -> Result<ledger::ChainVerdict, String> {
+    store
+        .database()
+        .verify_ledger_chain()
+        .map_err(|e| e.to_string())
+}
+
+/// Fetch a stored prompt body by id (the Ledger pane's body viewer).
+#[tauri::command]
+fn ledger_prompt_body(
+    store: tauri::State<'_, SessionStore>,
+    id: i64,
+) -> Result<Option<String>, String> {
+    store.database().get_prompt_body(id).map_err(|e| e.to_string())
+}
+
+/// Read/write the "capture external claude sessions" toggle (default on).
+#[tauri::command]
+fn ledger_get_capture_external(store: tauri::State<'_, SessionStore>) -> bool {
+    store
+        .database()
+        .get_setting("redline.capture.externalSessions")
+        .map(|v| v != "false")
+        .unwrap_or(true)
+}
+
+#[tauri::command]
+fn ledger_set_capture_external(
+    store: tauri::State<'_, SessionStore>,
+    enabled: bool,
+) -> Result<(), String> {
+    store
+        .database()
+        .set_setting(
+            "redline.capture.externalSessions",
+            if enabled { "true" } else { "false" },
+        )
+        .map_err(|e| e.to_string())
+}
+
+/// Record a drafted prompt at Prompt Drafter launch. The plan session doesn't
+/// exist yet (claude hasn't spawned), so there's no claude session id here; the
+/// drafted body is registered against the agent guard so the eventual hook fire
+/// for the spawned session doesn't double-record it.
+#[tauri::command]
+fn record_drafted_prompt(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    active_mission: tauri::State<'_, ActiveMission>,
+    active_surface: tauri::State<'_, ActiveSurface>,
+    markdown: String,
+    project_path: Option<String>,
+    draft_id: Option<String>,
+) -> Result<(), String> {
+    let body = markdown.trim().to_string();
+    if body.is_empty() {
+        return Ok(());
+    }
+    let bh = ledger::body_hash(&body);
+    ledger::register_agent_prompt(&bh);
+    let db = store.database();
+    let draft_id = draft_id.filter(|d| !d.trim().is_empty());
+    let thread = draft_id.as_ref().map(|d| {
+        // Register the launch body for the draft→session handoff: the ingest
+        // hook links the spawned session under this draft when it fires.
+        ledger::register_drafted_prompt(&bh, d);
+        let surface = active_surface.kind_and_id();
+        let parent = ledger::resolve_parent(
+            None,
+            active_mission.active_id().as_deref(),
+            surface.as_ref().map(|(k, i)| (k.as_str(), i.as_str())),
+            "drafter",
+        );
+        if let Some((pk, pid)) = &parent {
+            let _ = ledger::record_session_link(&db, "drafter", d, pk, pid);
+        }
+        ledger::ThreadRef {
+            thread_kind: "drafter",
+            thread_id: d.clone(),
+            parent_session_id: parent
+                .filter(|(pk, _)| pk == "session")
+                .map(|(_, pid)| pid),
+        }
+    });
+    let input = ledger::PromptInput {
+        source: ledger::PromptSource::DrafterLaunch,
+        origin: ledger::Origin::Redline,
+        surface: "drafter".to_string(),
+        role: None,
+        session_id: None,
+        claude_session_id: None,
+        mission_id: None,
+        project_path,
+        body,
+        thread,
+    };
+    ledger::record_prompt(&db, input)?;
+    let _ = db.append_journal(
+        "drafter_launch",
+        Some("drafter"),
+        draft_id.as_deref(),
+        None,
+        None,
+    );
+    let _ = app.emit("ledger-changed", ());
+    Ok(())
+}
+
+/// Persist the drafter's document. As of the Bookshelf this writes the **real
+/// document** (`doc_json`, the TipTap fidelity source) as well as the markdown
+/// mirror agents read via `GET /v1/drafter/:id/doc`. Called on the drafter's
+/// existing 400ms persist debounce; the title is derived here (first ATX
+/// heading, else first non-blank line) so the frontend sends only the content.
+///
+/// `(async)` because it now serializes a whole TipTap document on that debounce
+/// — perf-budget rule 4 governs exactly this, and `codehealth`'s own
+/// `command_hygiene` probe would flag it otherwise.
+#[tauri::command(async)]
+fn drafter_set_doc(
+    store: tauri::State<'_, SessionStore>,
+    draft_id: String,
+    markdown: String,
+    doc_json: Option<String>,
+    project_path: Option<String>,
+) -> Result<(), String> {
+    if draft_id.trim().is_empty() {
+        return Err("missing draft id".to_string());
+    }
+    let title = draft_title_from_markdown(&markdown);
+    store
+        .database()
+        .upsert_draft(
+            &draft_id,
+            title.as_deref(),
+            project_path.as_deref(),
+            &markdown,
+            doc_json.as_deref(),
+        )
+        .map_err(|e| e.to_string())
+}
+
+/// Record a contained React render crash. `ErrorBoundary` already catches these
+/// and `console.error`s them — which lands in a devtools console nobody has
+/// open. Lightweight by design (one bounded insert), so it stays sync.
+#[tauri::command]
+fn record_render_crash(
+    store: tauri::State<'_, SessionStore>,
+    region: String,
+    message: String,
+) -> Result<(), String> {
+    let _ = store.database().record_friction(
+        "render_crash",
+        Some("ui"),
+        None,
+        Some(&format!("{region}: {message}")),
+    );
+    Ok(())
+}
+
+/// The document the Bookshelf stores: `{docJson, docMarkdown, projectPath}`.
+/// `PromptDrafter` loads from here instead of localStorage — localStorage now
+/// keeps only the *currently open* draft id, which is a UI preference.
+#[tauri::command(async)]
+fn drafter_get_doc(
+    store: tauri::State<'_, SessionStore>,
+    draft_id: String,
+) -> Result<serde_json::Value, String> {
+    if draft_id.trim().is_empty() {
+        return Err("missing draft id".to_string());
+    }
+    let row = store
+        .database()
+        .get_draft_doc(&draft_id)
+        .map_err(|e| e.to_string())?;
+    let (doc_json, doc_markdown, project_path) = row.unwrap_or((None, String::new(), None));
+    Ok(serde_json::json!({
+        "docJson": doc_json,
+        "docMarkdown": doc_markdown,
+        "projectPath": project_path,
+    }))
+}
+
+/// First ATX heading of a draft, else its first non-blank line (trimmed to a
+/// display length) — the draft's human label in trees and journals.
+pub(crate) fn draft_title_from_markdown(markdown: &str) -> Option<String> {
+    for line in markdown.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with("<!--") {
+            continue;
+        }
+        let t = t.trim_start_matches('#').trim();
+        if t.is_empty() {
+            continue;
+        }
+        let title: String = t.chars().take(80).collect();
+        return Some(title);
+    }
+    None
+}
+
+/// `GET /v1/drafter/:draft_id/doc` — the live draft's markdown mirror, for the
+/// drafter's discussion/voice/sidecar agents to re-read mid-conversation.
+async fn handle_drafter_doc(
+    State(app_state): State<AppState>,
+    Path(draft_id): Path<String>,
+) -> axum::response::Response {
+    let db = app_state.store.database();
+    match db.get_draft(&draft_id) {
+        Ok(Some((title, project_path, markdown, updated_at))) => Json(serde_json::json!({
+            "draftId": draft_id,
+            "title": title,
+            "projectPath": project_path,
+            "markdown": markdown,
+            "updatedAt": updated_at,
+        }))
+        .into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "no such draft").into_response(),
+        Err(e) => browser_error_response(e.to_string()),
+    }
+}
+
+/// Parse markdown into the plan Section tree — the drafter voice panel's
+/// Guided Walkthrough needs the same sections the plan pane gets from its
+/// revisions, but a draft has no revision to carry them.
+#[tauri::command]
+fn parse_markdown_sections(markdown: String) -> Vec<state::Section> {
+    parser::parse_plan_with_sidecars(&markdown).0
+}
+
+/// A draft's queued (pending) agent suggestions — drained by the drafter on
+/// mount so proposals made while the pane was closed render as tracked changes.
+#[tauri::command]
+fn draft_suggestions_pending(
+    store: tauri::State<'_, SessionStore>,
+    draft_id: String,
+) -> Result<Vec<state::DraftSuggestion>, String> {
+    store
+        .database()
+        .list_pending_draft_suggestions(&draft_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Resolve a suggestion after the user accepts/rejects its tracked change.
+#[tauri::command]
+fn draft_suggestion_resolve(
+    store: tauri::State<'_, SessionStore>,
+    id: String,
+    status: String,
+) -> Result<bool, String> {
+    if status != "applied" && status != "rejected" {
+        return Err("status must be applied|rejected".to_string());
+    }
+    store
+        .database()
+        .resolve_draft_suggestion(&id, &status)
+        .map_err(|e| e.to_string())
+}
+
+#[derive(Deserialize)]
+struct DraftSuggestionReq {
+    op: String,
+    #[serde(default)]
+    block_id: Option<String>,
+    #[serde(default)]
+    original: Option<String>,
+    #[serde(default)]
+    markdown: String,
+    #[serde(default)]
+    agent_id: Option<String>,
+    #[serde(default)]
+    body: Option<String>,
+    /// Set by a sidecar comment-thread agent — scopes its writes to the
+    /// comment's anchored block (a thread about one paragraph must never
+    /// rewrite the whole prompt). The main discussion agent omits it.
+    #[serde(default)]
+    comment_id: Option<String>,
+}
+
+/// `POST /v1/drafter/:draft_id/suggestions` — the drafter agents' write path.
+/// Validates against the CURRENT markdown mirror (unknown block / stale
+/// `original` → 409, the agent's re-read-and-retry signal), queues the
+/// suggestion (`pending`), and emits `drafter-suggestion` so an open drafter
+/// renders it as a tracked change immediately; a closed pane drains the queue
+/// on mount.
+async fn handle_draft_suggestion(
+    State(app_state): State<AppState>,
+    Path(draft_id): Path<String>,
+    Json(req): Json<DraftSuggestionReq>,
+) -> axum::response::Response {
+    let db = app_state.store.database();
+    let mirror = match db.get_draft(&draft_id) {
+        Ok(Some((_, _, markdown, _))) => markdown,
+        Ok(None) => return (StatusCode::NOT_FOUND, "no such draft").into_response(),
+        Err(e) => return browser_error_response(e.to_string()),
+    };
+    if let Err((code, msg)) = draft_chat::validate_suggestion(
+        &mirror,
+        &req.op,
+        req.block_id.as_deref(),
+        req.original.as_deref(),
+        &req.markdown,
+    ) {
+        let status = StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST);
+        return (status, msg).into_response();
+    }
+    // Sidecar scope: a comment-thread agent may only touch its anchored block.
+    if let Some(cid) = req.comment_id.as_deref().filter(|s| !s.trim().is_empty()) {
+        let anchored = match db.get_draft_comment(cid) {
+            Ok(Some(c)) if c.draft_id == draft_id => c.block_id,
+            Ok(_) => return (StatusCode::NOT_FOUND, "no such comment on this draft").into_response(),
+            Err(e) => return browser_error_response(e.to_string()),
+        };
+        let Some(anchored) = anchored.filter(|b| !b.trim().is_empty()) else {
+            return (
+                StatusCode::FORBIDDEN,
+                "this comment has no anchored block — discuss instead of editing",
+            )
+                .into_response();
+        };
+        let bare = |s: &str| s.trim().trim_start_matches("blk-").to_string();
+        let target = req.block_id.as_deref().map(bare);
+        if req.op == "append" || target.as_deref() != Some(bare(&anchored).as_str()) {
+            return (
+                StatusCode::FORBIDDEN,
+                format!(
+                    "a comment thread may only propose edits to its anchored block \
+                     (`{anchored}`) — replace_block / insert_after / delete_block on \
+                     that block only"
+                ),
+            )
+                .into_response();
+        }
+    }
+    let suggestion = state::DraftSuggestion {
+        id: uuid::Uuid::new_v4().to_string(),
+        draft_id: draft_id.clone(),
+        op: req.op,
+        block_id: req.block_id,
+        original: req.original,
+        markdown: req.markdown,
+        agent_id: req.agent_id,
+        body: req.body,
+        status: "pending".to_string(),
+        created_at: ledger::now_millis(),
+    };
+    if let Err(e) = db.insert_draft_suggestion(&suggestion) {
+        return browser_error_response(e.to_string());
+    }
+    let _ = app_state.app_handle.emit("drafter-suggestion", &suggestion);
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "id": suggestion.id,
+            "status": "pending",
+            "note": "queued as a tracked change — the user accepts or rejects it; re-read the doc to see the outcome",
+        })),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Polis Librarian command (Phase 3)
+// ---------------------------------------------------------------------------
+
+/// Run the on-demand Librarian agent once: build the ground-truth friction digest
+/// from the DB, bake it into the spawn prompt, run the read-only agent headless
+/// (MCP stripped, curl bridge), and parse its prioritized checklist back.
+/// Read-only — nothing is mutated, so no change events are emitted; the checklist
+/// is returned straight to the caller for rendering. Mirrors `classmem_organize`'s
+/// spawn/parse shape (cwd = HOME, like the classifier).
+#[tauri::command(async)]
+async fn librarian_agent(
+    store: tauri::State<'_, SessionStore>,
+) -> Result<librarian::LibrarianResult, String> {
+    let db = store.database();
+    let digest = context::build_digest(&db, context::LIMIT_MAX as usize);
+    let prompt = librarian::build_librarian_prompt_from_digest(&digest);
+    let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+    let (text, _session) = librarian::run_librarian(&cwd, prompt).await?;
+    Ok(librarian::parse_checklist(&text))
+}
+
+// ---------------------------------------------------------------------------
+// The Shipwright — a grounded self-improvement agent on the Redline repo
+// ---------------------------------------------------------------------------
+
+/// The Shipwright's persistent session id, so consults and L1 follow-ups land
+/// in the SAME thread as the run they're about. Unlike the one-shot Librarian,
+/// the Shipwright is a thread you can come back to — that's what lets the voice
+/// agent and Companion *ask* it rather than rebuild its context.
+#[derive(Clone, Default)]
+struct ShipwrightSession(Arc<std::sync::Mutex<Option<String>>>);
+
+impl ShipwrightSession {
+    fn get(&self) -> Option<String> {
+        self.0.lock().ok().and_then(|g| g.clone())
+    }
+    fn set(&self, sid: Option<String>) {
+        if let (Ok(mut g), Some(sid)) = (self.0.lock(), sid) {
+            *g = Some(sid);
+        }
+    }
+}
+
+/// What a Shipwright run produced, plus where it landed.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShipwrightRun {
+    summary: String,
+    findings: Vec<shipwright::Finding>,
+    /// The Bookshelf document the findings landed in. A **new** document every
+    /// run — the user's current draft is never touched.
+    draft_id: String,
+    /// The rev the digest measured, so the UI can say so without re-deriving.
+    short_rev: String,
+    /// Findings skipped because an identical `(category, summary)` already
+    /// exists — including one the user dismissed.
+    duplicates: usize,
+}
+
+/// Run the Shipwright once: build the ground-truth code digest, bake it into the
+/// spawn prompt, run the read-only agent headless against the repo, parse its
+/// findings, persist them (deduped), and land them as a **new** Bookshelf
+/// document the user trims and launches.
+///
+/// Read-only with respect to the repo at every step. The only writes are to
+/// Redline's own DB: the findings and the document they became.
+#[tauri::command(async)]
+async fn shipwright_agent(
+    store: tauri::State<'_, SessionStore>,
+    session: tauri::State<'_, ShipwrightSession>,
+    repo_path: Option<String>,
+    folder_id: Option<String>,
+) -> Result<ShipwrightRun, String> {
+    let db = store.database();
+    let repo = repo_path
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or_else(|| std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| ".".to_string()));
+    let digest = {
+        let db = db.clone();
+        let repo = repo.clone();
+        tokio::task::spawn_blocking(move || codehealth::build_code_digest(&db, &repo))
+            .await
+            .map_err(|e| e.to_string())?
+    };
+    let prompt = shipwright::build_shipwright_prompt_from_digest(&digest);
+    let prior = session.get();
+    let (text, sid) = shipwright::run_shipwright(&repo, prompt, prior.as_deref()).await?;
+    session.set(sid);
+    let result = shipwright::parse_findings(&text);
+
+    // Land the findings as a NEW document — the user's open draft is untouched.
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let draft_id = uuid::Uuid::new_v4().to_string();
+    let markdown = shipwright::findings_to_markdown(&result, &digest);
+    let title = draft_title_from_markdown(&markdown);
+    db.upsert_draft(
+        &draft_id,
+        title.as_deref(),
+        Some(&repo),
+        &markdown,
+        // No TipTap body yet: the drafter builds one from the markdown when the
+        // document is first opened. `doc_markdown` is what agents read either way.
+        None,
+    )
+    .map_err(|e| e.to_string())?;
+    if let Some(folder) = folder_id.as_deref().filter(|f| !f.trim().is_empty()) {
+        let _ = db.move_draft(&draft_id, Some(folder));
+    }
+
+    let now = ledger::now_millis();
+    let mut duplicates = 0usize;
+    for f in &result.findings {
+        let row = db::ShipwrightFinding {
+            id: uuid::Uuid::new_v4().to_string(),
+            run_id: run_id.clone(),
+            category: f.category.clone(),
+            summary: f.title.clone(),
+            evidence: Some(f.evidence.clone()),
+            proposal: Some(f.proposal.clone()),
+            guard: Some(f.guard.clone()),
+            files: serde_json::to_string(&f.files).ok(),
+            status: "pending".to_string(),
+            dismissed: false,
+            draft_id: Some(draft_id.clone()),
+            created_at: now,
+            resolved_at: None,
+        };
+        match db.insert_shipwright_finding(&row) {
+            Ok(None) => duplicates += 1,
+            Ok(Some(_)) => {}
+            Err(e) => tracing::warn!(error = %e, "failed to persist a Shipwright finding"),
+        }
+    }
+    let _ = db.append_journal(
+        "shipwright_run",
+        Some("drafter"),
+        Some(&draft_id),
+        title.as_deref(),
+        Some(&format!("{} finding(s)", result.findings.len())),
+    );
+
+    Ok(ShipwrightRun {
+        summary: result.summary,
+        findings: result.findings,
+        draft_id,
+        short_rev: digest.git.short_rev,
+        duplicates,
+    })
+}
+
+/// Every finding the Shipwright has ever produced, for the review strip.
+#[tauri::command(async)]
+fn shipwright_findings(
+    store: tauri::State<'_, SessionStore>,
+    include_dismissed: bool,
+) -> Result<Vec<db::ShipwrightFinding>, String> {
+    store
+        .database()
+        .list_shipwright_findings(include_dismissed)
+        .map_err(|e| e.to_string())
+}
+
+/// Record what the user did with a finding: `accepted` (it survived the trim
+/// into the launched document) or `dismissed` (it never comes back under the
+/// same wording). `shipped` is NOT settable here — it is detected.
+#[tauri::command(async)]
+fn shipwright_resolve(
+    store: tauri::State<'_, SessionStore>,
+    id: String,
+    status: String,
+    draft_id: Option<String>,
+) -> Result<(), String> {
+    if !matches!(status.as_str(), "accepted" | "dismissed" | "pending") {
+        return Err(format!(
+            "`{status}` is not a user verdict — `shipped` is detected from the \
+             files a later commit touched, never self-declared"
+        ));
+    }
+    store
+        .database()
+        .resolve_shipwright_finding(&id, &status, draft_id.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+/// Flip accepted findings to `shipped` when a later commit touched a file their
+/// `files` array named. **Detection, not self-declaration** — self-declared
+/// success is the one number an agent will always report favourably. Returns
+/// how many flipped.
+#[tauri::command(async)]
+async fn shipwright_detect_shipped(
+    store: tauri::State<'_, SessionStore>,
+    repo_path: String,
+) -> Result<usize, String> {
+    let db = store.database();
+    let candidates = db.shipwright_unshipped().map_err(|e| e.to_string())?;
+    if candidates.is_empty() {
+        return Ok(0);
+    }
+    // Files touched by the last 50 commits — a window wide enough to catch work
+    // that landed over a few sessions, narrow enough to stay cheap.
+    let repo = repo_path.clone();
+    let touched: std::collections::HashSet<String> = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["--no-optional-locks", "log", "-50", "--name-only", "--format="])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let mut flipped = 0;
+    for (id, files_json) in candidates {
+        let files: Vec<String> = serde_json::from_str(&files_json).unwrap_or_default();
+        if files.iter().any(|f| touched.contains(f.as_str())) {
+            db.resolve_shipwright_finding(&id, "shipped", None)
+                .map_err(|e| e.to_string())?;
+            flipped += 1;
+        }
+    }
+    Ok(flipped)
+}
+
+/// `GET /v1/context/codehealth` — the same digest as JSON, so an agent can
+/// re-read it mid-conversation. The Shipwright never *depends* on this (its
+/// digest is baked into the spawn prompt); it is for the Companion, the voice
+/// agent, and the external MCP surface.
+async fn handle_context_codehealth(
+    State(app_state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<CodeHealthQ>,
+) -> axum::response::Response {
+    let db = app_state.store.database();
+    let repo = q.repo.filter(|p| !p.trim().is_empty()).unwrap_or_else(|| {
+        std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| ".".to_string())
+    });
+    match tokio::task::spawn_blocking(move || codehealth::build_code_digest(&db, &repo)).await {
+        Ok(digest) => Json(digest).into_response(),
+        Err(e) => browser_error_response(e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct CodeHealthQ {
+    repo: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Polis context access + portability commands (Phase 4)
+// ---------------------------------------------------------------------------
+
+/// Resolve the absolute path to the co-shipped `redline-mcp` binary — it sits
+/// next to the main executable (dev: `target/<profile>/redline-mcp`; bundled:
+/// alongside the app binary). Falls back to the bare name (PATH lookup).
+fn resolve_mcp_bin() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("redline-mcp")))
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "redline-mcp".to_string())
+}
+
+/// The copyable `~/.claude.json` MCP snippet + the resolved binary path, for the
+/// settings surface. External `claude` sessions install this to query Redline's
+/// memory; internal agents never use MCP (they keep `--strict-mcp-config`).
+#[tauri::command]
+fn mcp_config_snippet() -> Result<serde_json::Value, String> {
+    let bin = resolve_mcp_bin();
+    Ok(serde_json::json!({
+        "binPath": bin,
+        "snippet": mcp::claude_config_snippet(&bin),
+    }))
+}
+
+/// Export a verifiable context bundle to a file the user picks. `scope` is one
+/// of `session|mission|class|full`; `id` is required for the first three. The
+/// bundle re-verifies from the file alone (each event self-certifies via its
+/// `entry_hash`). A session-scoped export records F6 state so the Librarian can
+/// stop flagging that plan as un-exported. Returns the saved path, or `None` if
+/// the save dialog was cancelled.
+#[tauri::command]
+async fn export_context_bundle(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    scope: String,
+    id: Option<String>,
+) -> Result<Option<String>, String> {
+    let need_id = |id: Option<String>| id.filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| format!("the `{scope}` scope needs an id"));
+    let bundle_scope = match scope.as_str() {
+        "session" => bundle::BundleScope::Session(need_id(id.clone())?),
+        "mission" => bundle::BundleScope::Mission(need_id(id.clone())?),
+        "class" => bundle::BundleScope::Class(need_id(id.clone())?),
+        "full" => bundle::BundleScope::Full,
+        other => return Err(format!("unknown bundle scope `{other}`")),
+    };
+
+    // Build the bundle in a scoped block so no DB access is held across the
+    // (blocking) save dialog.
+    let (json_bytes, file_name, head_hash) = {
+        let db = store.database();
+        let b = bundle::build_bundle(&db, &bundle_scope)?;
+        // Never ship a bundle that doesn't re-verify from itself — the whole
+        // point is a portable, independently-checkable artifact.
+        let verdict = bundle::verify_bundle(&b);
+        if !verdict.ok {
+            return Err(format!(
+                "refusing to export: the bundle failed self-verification (first bad seq {:?})",
+                verdict.first_bad_seq
+            ));
+        }
+        let head = b.head_hash.clone();
+        let name = format!("redline-context-{}.json", bundle_scope.kind());
+        let js = serde_json::to_string_pretty(&b).map_err(|e| e.to_string())?;
+        (js, name, head)
+    };
+
+    let picked = app
+        .dialog()
+        .file()
+        .add_filter("JSON bundle", &["json"])
+        .set_file_name(&file_name)
+        .blocking_save_file();
+    let Some(fp) = picked else {
+        return Ok(None); // user cancelled
+    };
+    let path = fp.into_path().map_err(|e| format!("invalid save path: {e}"))?;
+    std::fs::write(&path, json_bytes).map_err(|e| e.to_string())?;
+
+    // F6: mark a session-scoped export so the Librarian's un-exported signal
+    // clears for that plan. (Mission/class/full aren't per-plan; not recorded.)
+    if let Some(sid) = bundle_scope.session_id() {
+        let db = store.database();
+        let _ = db.record_plan_export(sid, "session", Some(&head_hash));
+        let _ = app.emit("ledger-changed", ());
+    }
+    tracing::info!(path = %path.display(), scope = %scope, "exported context bundle");
+    Ok(Some(path.to_string_lossy().to_string()))
+}
+
+/// Current mirror status for the settings surface.
+#[tauri::command]
+fn mirror_status(store: tauri::State<'_, SessionStore>) -> Result<mirror::MirrorStatus, String> {
+    Ok(mirror::status(&store.database()))
+}
+
+/// Point the mirror at a directory chosen via a native folder picker (empty ⇒
+/// off). Does a full sync so the directory immediately reflects the ledger.
+#[tauri::command]
+async fn pick_mirror_dir(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+) -> Result<Option<mirror::MirrorStatus>, String> {
+    let picked = app.dialog().file().blocking_pick_folder();
+    let Some(dir) = picked else {
+        return Ok(None); // cancelled
+    };
+    let path = dir.into_path().map_err(|e| format!("invalid folder: {e}"))?;
+    let st = mirror::set_dir(&store.database(), &path.to_string_lossy())?;
+    let _ = app.emit("mirror-changed", ());
+    Ok(Some(st))
+}
+
+/// Set (or clear, when empty) the mirror directory by path.
+#[tauri::command]
+async fn set_mirror_dir(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    dir: String,
+) -> Result<mirror::MirrorStatus, String> {
+    let st = mirror::set_dir(&store.database(), &dir)?;
+    let _ = app.emit("mirror-changed", ());
+    Ok(st)
+}
+
+/// Rebuild the configured mirror from scratch (the recovery path if it drifts).
+#[tauri::command]
+async fn mirror_rebuild(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+) -> Result<mirror::MirrorStatus, String> {
+    let st = mirror::rebuild_configured(&store.database())?;
+    let _ = app.emit("mirror-changed", ());
+    Ok(st)
+}
+
+/// Sync any new ledger events into the mirror now (also runs on a timer).
+#[tauri::command]
+async fn mirror_sync(store: tauri::State<'_, SessionStore>) -> Result<mirror::MirrorStatus, String> {
+    let db = store.database();
+    mirror::sync_if_enabled(&db);
+    Ok(mirror::status(&db))
+}
+
+/// Scaffold a **dedicated** Obsidian vault for the memory mirror (the Dojo
+/// default) and point the mirror at it. The user picks a *parent* location; we
+/// create a `Redline Memory/` subfolder there, drop a minimal `.obsidian/` so
+/// Obsidian opens it cleanly as its own vault (keeping Redline's notes out of the
+/// user's existing graph), then reuse `mirror::set_dir` — which does the initial
+/// full sync. Returns `None` if the picker was cancelled. Safe by construction:
+/// the mirror is one-way and namespace-scoped, so it never clobbers other notes.
+#[tauri::command]
+async fn create_memory_vault(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+) -> Result<Option<mirror::MirrorStatus>, String> {
+    let Some(parent) = app.dialog().file().blocking_pick_folder() else {
+        return Ok(None); // cancelled
+    };
+    let parent = parent.into_path().map_err(|e| format!("invalid folder: {e}"))?;
+    let vault = parent.join("Redline Memory");
+    // Minimal `.obsidian/` marks the folder as a vault so it opens cleanly; an
+    // empty `app.json` is enough (Obsidian fills the rest on first open).
+    let obsidian = vault.join(".obsidian");
+    std::fs::create_dir_all(&obsidian).map_err(|e| e.to_string())?;
+    let app_json = obsidian.join("app.json");
+    if !app_json.exists() {
+        std::fs::write(&app_json, "{}\n").map_err(|e| e.to_string())?;
+    }
+    let st = mirror::set_dir(&store.database(), &vault.to_string_lossy())?;
+    let _ = app.emit("mirror-changed", ());
+    Ok(Some(st))
+}
+
+// ---------------------------------------------------------------------------
+// Polis ClassMemory commands (Phase 2)
+// ---------------------------------------------------------------------------
+
+/// Run one classifier pass: seed roots (idempotent), compute the lake delta
+/// since the last completed run, spawn the read-only classifier, parse its
+/// structured-JSON proposals, and STAGE them (nothing is accepted). Returns the
+/// per-op counts + a summary for the pane.
+#[tauri::command(async)]
+async fn classmem_organize(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+) -> Result<serde_json::Value, String> {
+    let db = store.database();
+    let _ = app.emit("classmem-changed", ()); // "running" pulse
+    let outcome = classmem::organize_once(&db).await;
+    let _ = app.emit("classmem-changed", ());
+    let _ = app.emit("ledger-changed", ());
+    let _ = app.emit("memory-changed", ());
+    let o = outcome?;
+    Ok(serde_json::json!({
+        "staged": o.staged,
+        "summary": o.summary,
+        "autoApplied": o.auto_applied,
+        "seqFrom": o.seq_from,
+        "seqTo": o.seq_to,
+    }))
+}
+
+/// The one quiet surface's data source: everything the memory pill + inspector
+/// need in a single read. `live` is always true (the keeper is always running);
+/// `backlog` is un-organized ledger growth; `chainOk` is a live re-verify.
+#[tauri::command]
+fn memory_status(store: tauri::State<'_, SessionStore>) -> Result<serde_json::Value, String> {
+    let db = store.database();
+    let max_seq = db.max_ledger_seq().map_err(|e| e.to_string())?;
+    let last_to = db.last_run_seq_to().map_err(|e| e.to_string())?;
+    let run = db.latest_class_run().map_err(|e| e.to_string())?;
+    let (last_organized_ts, last_summary) = match run {
+        Some(r) if r.status == "done" => (r.finished_at, r.summary),
+        _ => (None, None),
+    };
+    let chain = db.verify_ledger_chain().map_err(|e| e.to_string())?;
+    let (compacted, reclaimed, last_compaction_ts) =
+        db.compaction_stats().map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "live": true,
+        "itemCount": max_seq,
+        "backlog": (max_seq - last_to).max(0),
+        "lastOrganizedTs": last_organized_ts,
+        "lastOrganizedSummary": last_summary,
+        "chainOk": chain.ok,
+        "compactedCount": compacted,
+        "reclaimedBytes": reclaimed,
+        "lastCompactionTs": last_compaction_ts,
+    }))
+}
+
+/// Explicit forget: release a prompt's words now (a manual compaction). The
+/// ledger keeps the fact that it happened + the original body hash. Returns the
+/// new ledger seq, or `null` if the prompt was already compacted/absent.
+#[tauri::command]
+fn memory_forget(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    prompt_id: i64,
+) -> Result<Option<i64>, String> {
+    let db = store.database();
+    let seq = db
+        .compact_prompt_body(prompt_id, "[forgotten]", "forget")
+        .map_err(|e| e.to_string())?;
+    let _ = app.emit("memory-changed", ());
+    let _ = app.emit("ledger-changed", ());
+    Ok(seq)
+}
+
+/// Roll back a curation the gardener (or a user) accepted: remove the class link
+/// and append a compensating `class_curate` event. The supervisor's override on
+/// the always-on gardener — a bad auto-file is undone without ever deleting a
+/// ledger event, so the hash chain stays green. Returns whether a link was
+/// removed (`false` if the id was already gone).
+#[tauri::command]
+fn memory_revert_link(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    link_id: i64,
+) -> Result<bool, String> {
+    let db = store.database();
+    let reverted = classmem::revert_link(&db, link_id)?;
+    if reverted {
+        let _ = app.emit("memory-changed", ());
+        let _ = app.emit("ledger-changed", ());
+        let _ = app.emit("classmem-changed", ());
+    }
+    Ok(reverted)
+}
+
+/// The class tree (flat + link counts); the FE builds the hierarchy.
+#[tauri::command]
+fn classmem_tree(store: tauri::State<'_, SessionStore>) -> Result<Vec<TreeNodeView>, String> {
+    let db = store.database();
+    let rows = db.list_class_nodes_with_counts().map_err(|e| e.to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(|(node, link_count)| TreeNodeView { node, link_count })
+        .collect())
+}
+
+/// One node with its children, (label-resolved, supersession-aware) links,
+/// and observations — the same shape the bridge route serves.
+#[tauri::command]
+fn classmem_node(
+    store: tauri::State<'_, SessionStore>,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    let db = store.database();
+    build_node_view(&db, &id)?.ok_or_else(|| "no such class node".to_string())
+}
+
+/// A citation on a collapse proposal: an exact ledger seq + a resolved snippet.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CitationView {
+    seq: i64,
+    label: Option<String>,
+}
+
+/// A structural proposal enriched for review: the subject node's title + (for a
+/// collapse) the digest's cited ledger rows.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProposalView {
+    #[serde(flatten)]
+    row: crate::classmem::ClassProposalRow,
+    node_title: Option<String>,
+    citations: Vec<CitationView>,
+}
+
+/// The pending structural proposals (promote/split/merge/collapse), enriched
+/// with the digest preview + citations the pane shows for review.
+#[tauri::command]
+fn classmem_proposals(store: tauri::State<'_, SessionStore>) -> Result<Vec<ProposalView>, String> {
+    let db = store.database();
+    let rows = db.list_class_proposals().map_err(|e| e.to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let node_title = row
+                .node_id
+                .as_deref()
+                .and_then(|id| db.get_class_node(id).ok().flatten())
+                .map(|n| n.title);
+            let citations = if row.op == "collapse" {
+                row.extra_json
+                    .as_deref()
+                    .and_then(|e| serde_json::from_str::<Vec<i64>>(e).ok())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|seq| CitationView {
+                        seq,
+                        label: db.link_preview("ledger", &seq.to_string()),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            ProposalView { row, node_title, citations }
+        })
+        .collect())
+}
+
+/// The latest classifier run (status/summary/session) for the pane header.
+#[tauri::command]
+fn classmem_latest_run(
+    store: tauri::State<'_, SessionStore>,
+) -> Result<Option<classmem::ClassRun>, String> {
+    store.database().latest_class_run().map_err(|e| e.to_string())
+}
+
+/// Whether Organize applies the classifier's work directly (default) or stages
+/// it for per-item review. Default on: no required human decision-making.
+#[tauri::command]
+fn classmem_get_auto_apply(store: tauri::State<'_, SessionStore>) -> bool {
+    store
+        .database()
+        .get_setting("redline.classmem.autoApply")
+        .map(|v| v != "false")
+        .unwrap_or(true)
+}
+
+#[tauri::command]
+fn classmem_set_auto_apply(
+    store: tauri::State<'_, SessionStore>,
+    enabled: bool,
+) -> Result<(), String> {
+    store
+        .database()
+        .set_setting(
+            "redline.classmem.autoApply",
+            if enabled { "true" } else { "false" },
+        )
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn classmem_accept_node(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    id: String,
+) -> Result<(), String> {
+    let db = store.database();
+    let flipped = db.accept_class_node(&id).map_err(|e| e.to_string())?;
+    for nid in &flipped {
+        classmem::record_curate(&db, nid, "accept", "");
+    }
+    let _ = app.emit("classmem-changed", ());
+    let _ = app.emit("ledger-changed", ());
+    Ok(())
+}
+
+#[tauri::command]
+fn classmem_reject_node(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    id: String,
+) -> Result<(), String> {
+    store.database().reject_class_node(&id).map_err(|e| e.to_string())?;
+    let _ = app.emit("classmem-changed", ());
+    Ok(())
+}
+
+#[tauri::command]
+fn classmem_accept_link(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    link_id: i64,
+) -> Result<(), String> {
+    let db = store.database();
+    if let Some((node_id, flipped)) = db.accept_class_link(link_id).map_err(|e| e.to_string())? {
+        for nid in &flipped {
+            classmem::record_curate(&db, nid, "accept", "");
+        }
+        classmem::record_curate(&db, &node_id, "accept_link", &link_id.to_string());
+        let _ = app.emit("ledger-changed", ());
+    }
+    let _ = app.emit("classmem-changed", ());
+    Ok(())
+}
+
+#[tauri::command]
+fn classmem_reject_link(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    link_id: i64,
+) -> Result<(), String> {
+    store.database().reject_class_link(link_id).map_err(|e| e.to_string())?;
+    let _ = app.emit("classmem-changed", ());
+    Ok(())
+}
+
+#[tauri::command]
+fn classmem_accept_proposal(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    id: i64,
+) -> Result<(), String> {
+    let db = store.database();
+    if let Some(applied) = db.apply_class_proposal(id).map_err(|e| e.to_string())? {
+        // A supersede records its own `supersede` ledger event inside the
+        // apply — recording a taxonomy_reorg on top would double-log it
+        // (with an empty node_id, breaking the reorg contract).
+        if applied.op != "supersede" {
+            classmem::record_reorg(&db, &applied.op, &applied.node_id, &applied.detail);
+        }
+        let _ = app.emit("ledger-changed", ());
+    }
+    let _ = app.emit("classmem-changed", ());
+    Ok(())
+}
+
+#[tauri::command]
+fn classmem_reject_proposal(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    id: i64,
+) -> Result<(), String> {
+    store.database().reject_class_proposal(id).map_err(|e| e.to_string())?;
+    let _ = app.emit("classmem-changed", ());
+    Ok(())
+}
+
+#[tauri::command]
+fn classmem_pin_node(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    id: String,
+    pinned: bool,
+) -> Result<(), String> {
+    let db = store.database();
+    db.set_class_node_pinned(&id, pinned).map_err(|e| e.to_string())?;
+    classmem::record_curate(&db, &id, "pin", if pinned { "1" } else { "0" });
+    let _ = app.emit("classmem-changed", ());
+    let _ = app.emit("ledger-changed", ());
+    Ok(())
+}
+
+/// Dismiss an observation — "never resurface this pattern". The row is kept
+/// (dismissed=1) so the keeper's dedup guard keeps holding.
+#[tauri::command]
+fn classmem_dismiss_observation(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    id: i64,
+) -> Result<(), String> {
+    let db = store.database();
+    if let Some(node_id) = db.set_observation_dismissed(id).map_err(|e| e.to_string())? {
+        classmem::record_curate(&db, &node_id, "observation_dismiss", &id.to_string());
+        let _ = app.emit("classmem-changed", ());
+        let _ = app.emit("ledger-changed", ());
+    }
+    Ok(())
+}
+
+/// Pin an observation — promote the pattern into the node's permanent context.
+#[tauri::command]
+fn classmem_pin_observation(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    id: i64,
+    pinned: bool,
+) -> Result<(), String> {
+    let db = store.database();
+    if let Some(node_id) = db.set_observation_pinned(id, pinned).map_err(|e| e.to_string())? {
+        classmem::record_curate(
+            &db,
+            &node_id,
+            "observation_pin",
+            &format!("{id}:{}", pinned as i64),
+        );
+        let _ = app.emit("classmem-changed", ());
+        let _ = app.emit("ledger-changed", ());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn classmem_rename_node(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    id: String,
+    title: String,
+) -> Result<(), String> {
+    let title = title.trim().to_string();
+    if title.is_empty() {
+        return Err("title cannot be empty".into());
+    }
+    let db = store.database();
+    db.rename_class_node(&id, &title).map_err(|e| e.to_string())?;
+    classmem::record_curate(&db, &id, "rename", &title);
+    let _ = app.emit("classmem-changed", ());
+    let _ = app.emit("ledger-changed", ());
+    Ok(())
 }
 
 /// Pop up the native browser "Settings" menu over the embedded browser (HTML
@@ -4946,6 +8231,10 @@ fn install_hook() -> Result<HookStatus, String> {
     let result = hook::install();
     if let Ok(status) = &result {
         tracing::info!(path = %status.settings_path, "installed redline hook");
+        // Install the Polis prompt-capture hook alongside the plan hook.
+        if let Err(e) = hook::install_capture() {
+            tracing::warn!(error = %e, "failed to install prompt-capture hook");
+        }
     }
     result
 }
@@ -4983,6 +8272,7 @@ fn remove_hook_via_menu(app: &AppHandle) {
                 return;
             }
             let app = app_for_confirm;
+            let _ = hook::uninstall_capture();
             match hook::uninstall() {
                 Ok(status) => {
                     tracing::info!(path = %status.settings_path, "removed redline hook");
@@ -5049,11 +8339,16 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // `redline://` deep links — the viewer's "Open in Redline" link lands a
+        // shared plan as a full native review. Handled in the frontend via the
+        // JS plugin's onOpenUrl (both cold-start and running-instance).
+        .plugin(tauri_plugin_deep_link::init())
         .invoke_handler(tauri::generate_handler![
             list_sessions,
             get_session,
             export_revision_markdown,
             export_revision_docx,
+            save_revision_to_obsidian,
             delete_session,
             add_comment,
             update_comment,
@@ -5068,8 +8363,29 @@ pub fn run() {
             attach_discussion,
             get_interception_mode,
             set_interception_mode,
+            get_ui_prefs,
+            set_ui_pref,
+            get_agent_seats,
+            set_agent_seat,
+            set_claude_bin_override,
+            seat_assignment_agent,
+            seat_assignment_cancel,
+            seat_preflight,
+            apply_seat_picks,
+            revert_seat_assignment,
+            userconfig::get_workspace,
+            userconfig::save_workspace,
             get_relay_config,
             set_relay_config,
+            get_owner_secret,
+            set_owner_secret,
+            build_plan_snapshot,
+            import_shared_plan,
+            record_share,
+            delete_share,
+            list_shares,
+            record_share_return,
+            list_share_returns,
             get_collab_requests,
             set_collab_requests,
             get_collab_share,
@@ -5094,13 +8410,17 @@ pub fn run() {
             fsbrowse::read_file_base64,
             fsbrowse::save_text_file,
             fsbrowse::ensure_dir,
+            fsbrowse::save_attachment,
+            fsbrowse::import_attachment,
             fsbrowse::home_dir,
+            repoicon::repo_icon,
             highlight::open_doc,
             highlight::doc_lines,
             highlight::highlight_diff,
             fswatch::watch_dir,
             fswatch::unwatch_dir,
             fork::fork_thread_send,
+            fork::fork_thread_status,
             fork::get_thread,
             fork::fork_thread_cancel,
             fork::fork_thread_discard,
@@ -5167,6 +8487,12 @@ pub fn run() {
             voice::voice_forget,
             voice::voice_kill_all,
             voice::voice_session_probe,
+            voice::voice_session_status,
+            voice::voice_thread,
+            voice::voice_note,
+            voice::comment_offers_pending,
+            voice::comment_offer_add,
+            voice::comment_offer_dismiss,
             tts::tts_get_settings,
             tts::tts_set_settings,
             tts::tts_synth,
@@ -5181,6 +8507,9 @@ pub fn run() {
             dictation_whisper::whisper_model_present,
             dictation_whisper::dictation_get_engine,
             dictation_whisper::dictation_set_engine,
+            devmap::dev_servers_scan,
+            devmap::dev_server_stop,
+            devmap::dev_server_set_thumb,
             browser_navigate,
             browser_eval,
             browser_close,
@@ -5194,6 +8523,49 @@ pub fn run() {
             browser_suspend,
             browser_set_active,
             browser_set_tabs,
+            thumbs::browser_take_thumbnail,
+            thumbs::thumbs_list,
+            thumbs::thumbs_prune,
+            surface_set_active,
+            drafter_set_doc,
+            drafter_get_doc,
+            record_render_crash,
+            bookshelf::bookshelf_list,
+            bookshelf::bookshelf_migrate_local,
+            bookshelf::bookshelf_new_draft,
+            bookshelf::bookshelf_rename_draft,
+            bookshelf::bookshelf_move_draft,
+            bookshelf::bookshelf_draft_impact,
+            bookshelf::bookshelf_delete_draft,
+            bookshelf::bookshelf_create_folder,
+            bookshelf::bookshelf_rename_folder,
+            bookshelf::bookshelf_move_folder,
+            bookshelf::bookshelf_folder_impact,
+            bookshelf::bookshelf_delete_folder,
+            bookshelf::draft_source_add,
+            bookshelf::draft_source_import_file,
+            bookshelf::draft_source_list,
+            bookshelf::draft_source_delete,
+            draft_chat::draft_chat_send,
+            draft_chat::get_draft_chat_thread,
+            draft_chat::draft_chat_cancel,
+            draft_chat::draft_chat_discard,
+            draft_chat::draft_chat_kill_all,
+            draft_chat::draft_comment_add,
+            draft_chat::draft_comment_list,
+            draft_chat::draft_comment_delete,
+            fork::draft_thread_send,
+            fork::draft_thread_discard,
+            companion::companion_create,
+            companion::companion_list,
+            companion::companion_get_thread,
+            companion::companion_delete,
+            companion::companion_send,
+            companion::companion_cancel,
+            companion::companion_kill_all,
+            draft_suggestions_pending,
+            draft_suggestion_resolve,
+            parse_markdown_sections,
             browser_enable_gestures,
             browser_enable_autoresize,
             browser_set_view,
@@ -5203,9 +8575,60 @@ pub fn run() {
             show_browser_settings_menu,
             set_source_feedback,
             get_source_feedback,
+            ledger_list_events,
+            ledger_verify,
+            ledger_prompt_body,
+            ledger_get_capture_external,
+            ledger_set_capture_external,
+            record_drafted_prompt,
+            classmem_organize,
+            classmem_tree,
+            classmem_node,
+            classmem_proposals,
+            classmem_latest_run,
+            classmem_get_auto_apply,
+            classmem_set_auto_apply,
+            classmem_accept_node,
+            classmem_reject_node,
+            classmem_accept_link,
+            classmem_reject_link,
+            classmem_accept_proposal,
+            classmem_reject_proposal,
+            classmem_pin_node,
+            classmem_rename_node,
+            classmem_dismiss_observation,
+            classmem_pin_observation,
+            memory_status,
+            memory_forget,
+            memory_revert_link,
             prompt_text,
+            librarian_agent,
+            shipwright_agent,
+            shipwright_findings,
+            shipwright_resolve,
+            shipwright_detect_shipped,
+            export_context_bundle,
+            mirror_status,
+            pick_mirror_dir,
+            set_mirror_dir,
+            mirror_rebuild,
+            mirror_sync,
+            create_memory_vault,
+            mcp_config_snippet,
         ])
         .setup(|app| {
+            // Register the `redline://` scheme with the OS at runtime. In a
+            // bundled release the Info.plist declaration is authoritative; this
+            // best-effort call makes the deep link work in dev too. Harmless if
+            // unsupported on the platform.
+            #[allow(unused_imports)]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                if let Err(e) = app.deep_link().register_all() {
+                    tracing::debug!(error = %e, "deep-link register_all (dev only) failed");
+                }
+            }
+
             // Silently bring an existing install's hook timeout up to date, so a
             // user who installed under the old 10-minute timeout gets the long
             // hold without re-running setup. No-op if not installed / current.
@@ -5215,6 +8638,18 @@ pub fn run() {
             // so "Restore plan session" runs its daemon fetch hands-free instead
             // of stalling on an approval prompt. No-op if not installed / present.
             hook::ensure_restore_permission();
+
+            // Install the Polis prompt-capture hook beside the ExitPlanMode hook
+            // for anyone who has already set Redline up. It travels with the main
+            // hook: capturing your prompts is core to the ledger. External-session
+            // storage is separately gated by `redline.capture.externalSessions`.
+            if hook::get_status().installed && !hook::capture_installed() {
+                if let Err(e) = hook::install_capture() {
+                    tracing::warn!(error = %e, "failed to install prompt-capture hook");
+                } else {
+                    tracing::info!("installed Polis prompt-capture hook");
+                }
+            }
 
             // Open at a generous, Safari-style fraction of whatever display the
             // window lands on, centered — a fixed pixel size feels small on a
@@ -5255,13 +8690,52 @@ pub fn run() {
                 Database::open(&db_path).expect("failed to open sqlite database"),
             );
 
+            // Polis backup: one snapshot now (so a backup always exists), then
+            // every 6h on a background thread. Also snapshots on quit.
+            {
+                let db_bak = db.clone();
+                let dir_bak = data_dir.clone();
+                snapshot_database(&db_bak, &dir_bak, LEDGER_BACKUP_KEEP);
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_secs(6 * 3600));
+                    snapshot_database(&db_bak, &dir_bak, LEDGER_BACKUP_KEEP);
+                });
+            }
+
+            // Polis portable mirror (Phase 4): a continuous, one-way markdown
+            // mirror of the ledger into the user-chosen directory. Off until a
+            // dir is set (`redline.mirrorDir`); syncs on startup, then every 2
+            // minutes. Best-effort and non-blocking — a mirror hiccup never
+            // touches the app or the chain (the ledger stays source of truth).
+            {
+                let db_mir = db.clone();
+                std::thread::spawn(move || loop {
+                    mirror::sync_if_enabled(&db_mir);
+                    std::thread::sleep(std::time::Duration::from_secs(120));
+                });
+            }
+
+            // Memory as plumbing: the background keeper. It waits for the app to
+            // go idle, then autonomously organizes the lake into the ClassMemory
+            // catalog and compacts cold prompt bodies to gists — no buttons, no
+            // configs, one quiet pill. Async (the classifier/summarizer are), so
+            // it rides the Tauri runtime, not a std thread. Best-effort: every
+            // step logs on error and never brings the loop down.
+            keeper::spawn(app.handle().clone(), db.clone());
+
             let settings = Settings::load(db.clone());
             app.manage(settings.clone());
+
+            // Agent Seats: mirror the per-seat model/effort/binary config (and
+            // the global claude-binary override) into the process-global store
+            // before any agent can spawn.
+            seat::load_from_db(&db);
 
             let claims = ClaimFlags::new();
             app.manage(claims.clone());
 
             app.manage(pty::PtyState::new());
+            app.manage(seatassign::SeatAssignState::new());
 
             app.manage(fswatch::FsWatcher::new(app.handle().clone()));
 
@@ -5299,6 +8773,17 @@ pub fn run() {
             // their browse agents via the consult route.
             let linked_state = linked::LinkedState::new(db.clone());
             app.manage(linked_state);
+
+            // Prompt Drafter discussion agent (per-draft). Same lazy-`claude`
+            // reasoning; grounds on the draft's markdown mirror and writes back
+            // via tracked suggestions.
+            let draft_chat_state = draft_chat::DraftChatState::new(db.clone());
+            app.manage(draft_chat_state);
+
+            // The Companion: one global discussion spanning every surface.
+            // Grounds each turn on the ActiveSurface mirror + journal delta.
+            let companion_state = companion::CompanionState::new(db.clone());
+            app.manage(companion_state);
 
             // Code Review surface: diff resolver + line-anchored annotation
             // store. Plain DB handle — no agent process of its own.
@@ -5343,8 +8828,19 @@ pub fn run() {
             let active_mission = ActiveMission::new();
             app.manage(active_mission.clone());
 
+            let active_surface = ActiveSurface::new();
+            app.manage(active_surface.clone());
+
+            // The Shipwright's resumable session id — one persistent thread, so
+            // an L1 follow-up or a consult check-in continues the run it's about.
+            app.manage(ShipwrightSession::default());
+
             let store = SessionStore::new(db);
             app.manage(store.clone());
+            // Friction telemetry for the two contexts that hold no `Database`
+            // (the axum auth middleware, chiefly). Installed once, right after
+            // the store exists and before the daemon starts serving.
+            db::install_friction_sink(store.database());
 
             let pending = PendingResponses::new();
             app.manage(pending.clone());
@@ -5379,8 +8875,20 @@ pub fn run() {
                 browser_tabs,
                 snapshot_cache,
                 active_mission,
+                active_surface,
             };
             tauri::async_runtime::spawn(run_server(app_state));
+
+            // Extension tokens (plugin manifest v1): mint per-boot scoped
+            // tokens for every valid manifest under ~/.redline/extensions,
+            // before any agent or extension can race the daemon. Skip-with-
+            // warning posture — a bad manifest never blocks the boot.
+            if let Some(ext_root) = extension::extensions_root() {
+                let loaded = extension::install_boot_tokens(&ext_root);
+                if !loaded.is_empty() {
+                    tracing::info!("{} extension token(s) issued", loaded.len());
+                }
+            }
 
             // Tray menu mirrors the interception mode (radio-style check items).
             let current = settings.get();
@@ -5596,6 +9104,12 @@ pub fn run() {
             // Kill any headless `claude` discussion forks on teardown so no
             // child is orphaned (PTYs SIGHUP-clean when their master closes).
             if let tauri::RunEvent::Exit = event {
+                // Polis: a final crown-jewels snapshot of the ledger DB on quit.
+                if let Some(store) = app_handle.try_state::<SessionStore>() {
+                    if let Ok(dir) = app_handle.path().app_data_dir() {
+                        snapshot_database(&store.database(), &dir, LEDGER_BACKUP_KEEP);
+                    }
+                }
                 if let Some(fork) = app_handle.try_state::<fork::ForkState>() {
                     fork.kill_all();
                 }
@@ -5610,6 +9124,12 @@ pub fn run() {
                 }
                 if let Some(linked) = app_handle.try_state::<linked::LinkedState>() {
                     linked.kill_all();
+                }
+                if let Some(chat) = app_handle.try_state::<draft_chat::DraftChatState>() {
+                    chat.kill_all();
+                }
+                if let Some(comp) = app_handle.try_state::<companion::CompanionState>() {
+                    comp.kill_all();
                 }
                 if let Some(voice) = app_handle.try_state::<voice::VoiceState>() {
                     voice.kill_all();
@@ -5631,6 +9151,62 @@ pub fn run() {
 mod tests {
     use super::*;
     use crate::db::Database;
+
+    /// Golden: the exact UserPromptSubmit payload captured from claude 2.1.199
+    /// (docs/protocol-verification.md). The submitted text is at `prompt` — NOT
+    /// `user_input` as the public docs claim. Building against `user_input`
+    /// alone would capture empties; this pins the empirical reality.
+    #[test]
+    fn ingest_reads_prompt_field_from_real_payload() {
+        let golden = serde_json::json!({
+            "session_id": "fbf661e8-3152-4f0d-bc43-e1bc07008f5a",
+            "transcript_path": "/Users/x/.claude/projects/p/s.jsonl",
+            "cwd": "/Users/x/proj",
+            "prompt_id": "37137840-65f2-43a0-b280-7a3b7ad1564f",
+            "permission_mode": "default",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "say hi in one word"
+        });
+        assert_eq!(ingest_prompt_text(&golden), "say hi in one word");
+        // Forward-compat: a hypothetical `user_input`-only payload still works.
+        let alt = serde_json::json!({ "user_input": "  spaced  " });
+        assert_eq!(ingest_prompt_text(&alt), "spaced");
+        // No text → empty (the handler skips empties).
+        assert_eq!(ingest_prompt_text(&serde_json::json!({ "prompt": "   " })), "");
+        assert_eq!(ingest_prompt_text(&serde_json::json!({})), "");
+    }
+
+    /// Snapshot enrichment truncation must be char-boundary safe (never split a
+    /// multi-byte codepoint) and only ellipsize when it actually clips.
+    #[test]
+    fn snap_truncate_is_char_boundary_safe() {
+        // Short strings pass through, trimmed, no ellipsis.
+        assert_eq!(snap_truncate("  hello  ", 80), "hello");
+        // Over-length ASCII clips to max chars (incl. the ellipsis).
+        let clipped = snap_truncate("abcdefghij", 5);
+        assert_eq!(clipped.chars().count(), 5);
+        assert!(clipped.ends_with('…'));
+        // Multi-byte text never panics and stays valid UTF-8 at the boundary.
+        let emoji = "😀😀😀😀😀😀";
+        let t = snap_truncate(emoji, 3);
+        assert_eq!(t.chars().count(), 3);
+        assert!(t.ends_with('…'));
+        // Reading-time rounds up and never reports zero.
+        assert_eq!(0u32.div_ceil(SNAP_WORDS_PER_MINUTE).max(1), 1);
+        assert_eq!(1u32.div_ceil(SNAP_WORDS_PER_MINUTE).max(1), 1);
+        assert_eq!(201u32.div_ceil(SNAP_WORDS_PER_MINUTE).max(1), 2);
+    }
+
+    /// Cold-wallet posture pin: the daemon must bind loopback only, never a
+    /// routable interface. If someone changes this, they change the invariant.
+    #[test]
+    fn daemon_binds_loopback_only() {
+        assert_eq!(DAEMON_ADDR, "127.0.0.1:7676");
+        assert!(
+            DAEMON_ADDR.starts_with("127.0.0.1:"),
+            "the daemon must bind loopback only (cold-wallet posture)"
+        );
+    }
 
     #[test]
     fn external_source_tags_are_fenced() {
@@ -6110,6 +9686,9 @@ mod tests {
                     selection: None,
                     author: None,
                     reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
+                    attachments: Vec::new(),
                 },
             )
             .unwrap();

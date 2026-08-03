@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { useEffect, useRef, useState } from "react";
+import { Copy, Pin, Target, X } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
@@ -13,6 +14,7 @@ import type {
   MissionMessage,
 } from "../types";
 import { MarkdownView } from "./MarkdownView";
+import { WorkingIndicator } from "./WorkingIndicator";
 
 interface MissionChatProps {
   mission: Mission;
@@ -249,7 +251,12 @@ export function MissionChat({
             <MessageBubble key={m.id} msg={m} onOpenLink={onOpenLink} onSynthesize={onSynthesize} />
           ))
         )}
-        {status === "streaming" && <StreamingBubble text={liveText} onOpenLink={onOpenLink} />}
+        {status === "streaming" &&
+          (liveText ? (
+            <StreamingBubble text={liveText} onOpenLink={onOpenLink} />
+          ) : (
+            <WorkingIndicator />
+          ))}
       </div>
 
       <div className="px-3 py-2 shrink-0" style={{ borderTop: "1px solid var(--color-rule)" }}>
@@ -373,7 +380,7 @@ function GoalHeader({
       className="flex items-start gap-1.5 px-3 py-2 shrink-0"
       style={{ borderBottom: "1px solid var(--color-rule)" }}
     >
-      <span style={{ fontSize: "13px", lineHeight: "16px" }}>🎯</span>
+      <Target size={14} strokeWidth={2} style={{ marginTop: "1px", flexShrink: 0 }} />
       <div className="flex flex-col min-w-0 flex-1">
         <span
           style={{ fontSize: "12px", fontWeight: 600, color: "var(--color-ink)" }}
@@ -401,9 +408,9 @@ function GoalHeader({
         onClick={onClose}
         title="Close"
         className="px-1 leading-none opacity-60 hover:opacity-100"
-        style={{ fontSize: "13px", color: "var(--color-ink-muted)" }}
+        style={{ color: "var(--color-ink-muted)" }}
       >
-        ✕
+        <X size={13} strokeWidth={2} />
       </button>
     </div>
   );
@@ -432,7 +439,9 @@ function FindingsBoard({
         style={{ fontSize: "10px", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--color-ink-muted)" }}
       >
         <span>{show ? "▾" : "▸"}</span>
-        <span>📌 Pinned findings ({findings.length})</span>
+        <span className="inline-flex items-center gap-1">
+          <Pin size={11} strokeWidth={2} /> Pinned findings ({findings.length})
+        </span>
       </button>
       {show && (
         <div
@@ -466,9 +475,9 @@ function FindingsBoard({
                     type="button"
                     onClick={() => onRemove(f.id)}
                     title="Remove this pin"
-                    style={{ fontSize: "11px", color: "var(--color-ink-muted)" }}
+                    style={{ color: "var(--color-ink-muted)", display: "inline-flex" }}
                   >
-                    ✕
+                    <X size={11} strokeWidth={2} />
                   </button>
                 </div>
               </div>
@@ -554,7 +563,13 @@ function MessageActions({
   return (
     <div className="flex items-center gap-1.5 mt-0.5 opacity-0 group-hover/msg:opacity-100 transition-opacity">
       <button type="button" onClick={copy} title="Copy this reply" style={actionStyle}>
-        {copied ? "Copied ✓" : "⧉ Copy"}
+        {copied ? (
+          "Copied ✓"
+        ) : (
+          <span className="inline-flex items-center gap-1">
+            <Copy size={10} strokeWidth={2} /> Copy
+          </span>
+        )}
       </button>
       {onSynthesize && (
         <button

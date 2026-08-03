@@ -37,43 +37,95 @@ struct EmbeddedSkill {
 /// - `linked`: how a linked discussion holds ONE conversation spanning all tabs
 ///   (no goal), re-grounds on the current tab each turn, and checks in with a
 ///   colleague (a tab's own page-discussion agent) via the consult endpoint.
-/// - `redline-review`: the code-review loop — the blocking review curl, the
+/// - `drafter`: the Prompt Drafter discussion agent — prompt-crafting
+///   collaborator persona, the live-doc re-read discipline, and the tracked
+///   write-suggestions contract (append/replace/insert/delete by block id).
+/// - `companion`: the global cross-surface Companion — the spanning-app
+///   discipline, the while-you-were-away journal feed, the global consult
+///   contract, and memory/lineage retrieval.
+/// - `redline-code-review`: the code-review loop — the blocking review curl, the
 ///   line-anchored feedback format, and the REDLINE_REVIEW_RESOLUTIONS reply.
+/// - `classmemory`: the ClassMemory classifier + retrieval contract (the lake's
+///   catalog).
+/// - `librarian`: the on-demand friction-reduction agent that stewards the
+///   prompt/context library and emits a prioritized next-actions checklist.
+/// - `sensei`: the Dojo recruit contract — how an external model grounds
+///   classes-first on the user's lake + ClassMemory (over MCP) to work like them.
 const SKILLS: &[EmbeddedSkill] = &[
     EmbeddedSkill {
-        name: "redline",
-        version: 8,
-        content: include_str!("../../skills/redline/SKILL.md"),
+        name: "redline-plan-review",
+        version: 12,
+        content: include_str!("../../skills/redline-plan-review/SKILL.md"),
     },
     EmbeddedSkill {
         name: "sidecar",
-        version: 1,
+        version: 2,
         content: include_str!("../../skills/sidecar/SKILL.md"),
     },
     EmbeddedSkill {
         name: "conversation",
-        version: 1,
+        version: 2,
         content: include_str!("../../skills/conversation/SKILL.md"),
     },
     EmbeddedSkill {
         name: "browse",
-        version: 5,
+        version: 7,
         content: include_str!("../../skills/browse/SKILL.md"),
     },
     EmbeddedSkill {
         name: "mission",
-        version: 1,
+        version: 4,
         content: include_str!("../../skills/mission/SKILL.md"),
     },
     EmbeddedSkill {
         name: "linked",
-        version: 1,
+        version: 3,
         content: include_str!("../../skills/linked/SKILL.md"),
     },
     EmbeddedSkill {
-        name: "redline-review",
+        name: "drafter",
+        version: 3,
+        content: include_str!("../../skills/drafter/SKILL.md"),
+    },
+    EmbeddedSkill {
+        name: "companion",
+        version: 4,
+        content: include_str!("../../skills/companion/SKILL.md"),
+    },
+    EmbeddedSkill {
+        name: "redline-code-review",
+        version: 3,
+        content: include_str!("../../skills/redline-code-review/SKILL.md"),
+    },
+    EmbeddedSkill {
+        name: "classmemory",
         version: 2,
-        content: include_str!("../../skills/redline-review/SKILL.md"),
+        content: include_str!("../../skills/classmemory/SKILL.md"),
+    },
+    EmbeddedSkill {
+        name: "librarian",
+        version: 2,
+        content: include_str!("../../skills/librarian/SKILL.md"),
+    },
+    EmbeddedSkill {
+        name: "shipwright",
+        version: 1,
+        content: include_str!("../../skills/shipwright/SKILL.md"),
+    },
+    EmbeddedSkill {
+        name: "seat-assignment",
+        version: 1,
+        content: include_str!("../../skills/seat-assignment/SKILL.md"),
+    },
+    EmbeddedSkill {
+        name: "context-analysis",
+        version: 2,
+        content: include_str!("../../skills/context-analysis/SKILL.md"),
+    },
+    EmbeddedSkill {
+        name: "sensei",
+        version: 1,
+        content: include_str!("../../skills/sensei/SKILL.md"),
     },
 ];
 
@@ -87,8 +139,8 @@ pub struct SkillStatus {
     /// Every shipped skill exists AND its content matches the version Redline
     /// ships. The setup modal advances only when this is true.
     pub installed: bool,
-    /// Absolute path to `~/.claude/skills/redline/SKILL.md` (always reported).
-    /// The modal shows one path; redline is the anchor users recognize.
+    /// Absolute path to `~/.claude/skills/redline-plan-review/SKILL.md` (always
+    /// reported). The modal shows one path; the plan-review skill is the anchor.
     pub skill_path: String,
     /// At least one shipped `SKILL.md` is present but its content differs from
     /// the shipped version — installing will overwrite it. The skill analogue of
@@ -205,7 +257,10 @@ mod tests {
 
     #[test]
     fn redline_skill_carries_the_resolution_contract() {
-        let redline = SKILLS.iter().find(|s| s.name == "redline").unwrap();
+        let redline = SKILLS
+            .iter()
+            .find(|s| s.name == "redline-plan-review")
+            .unwrap();
         assert!(
             redline.content.contains("REDLINE_RESOLUTIONS"),
             "redline SKILL.md is missing the resolution-block contract"
@@ -235,6 +290,188 @@ mod tests {
         // The linked skill must teach the "check in with a colleague" delegation.
         assert!(linked.content.contains("/v1/linked/consult"));
         assert!(linked.content.contains("digest"));
+    }
+
+    #[test]
+    fn classmemory_skill_teaches_ops_and_retrieval() {
+        let cm = SKILLS.iter().find(|s| s.name == "classmemory").unwrap();
+        // The classifier contract: the seven ops + proposals-only + provenance,
+        // plus the retrieval rules for supersession and observations. "seven
+        // ops" keeps the skill and the parser in lockstep — adding an op must
+        // touch both, and a revert to "six" trips this.
+        for needle in [
+            "proposals",
+            "promote",
+            "collapse",
+            "cite_seqs",
+            "ground truth",
+            "/v1/memory/tree",
+            "seven ops",
+            "supersede",
+            "old_seq",
+            "supersededBy",
+            "observations",
+        ] {
+            assert!(
+                cm.content.contains(needle),
+                "classmemory SKILL.md is missing `{needle}`"
+            );
+        }
+    }
+
+    #[test]
+    fn librarian_skill_teaches_checklist_and_priority() {
+        let lib = SKILLS.iter().find(|s| s.name == "librarian").unwrap();
+        // The friction agent's contract: the checklist output, the priority
+        // categories, on-demand-only, and the do-not-fabricate rule.
+        for needle in [
+            "checklist",
+            "held_proposal",
+            "stalled_review",
+            "unstructured_backlog",
+            "on-demand",
+            "un_exported", // F6: real Phase-4 signal, now surfaced (was deferred)
+        ] {
+            assert!(
+                lib.content.contains(needle),
+                "librarian SKILL.md is missing `{needle}`"
+            );
+        }
+    }
+
+    #[test]
+    fn shipwright_skill_teaches_the_disciplines_that_make_it_not_slop() {
+        let sw = SKILLS.iter().find(|s| s.name == "shipwright").unwrap();
+        // Each needle is a defence against the one failure mode: an agent that
+        // returns five plausible refactors every run. Losing any of them turns
+        // the Shipwright back into a generic AI code advisor.
+        for needle in [
+            "\"findings\"",
+            "At most 5 findings",   // the cap
+            "must quote a number",  // evidence is cited, not asserted
+            "guard test",           // rule+guard preferred over refactor
+            "perf-budget",          // the precedent it imitates
+            "re-word a dismissed finding", // the named dedupe escape hatch
+            "Do not claim one",     // the GUI-verification gap
+            "repurpose candidates, not deletions", // dead_wiring discipline
+            "never write to the repo",
+            "on-demand",
+        ] {
+            assert!(
+                sw.content.contains(needle),
+                "shipwright SKILL.md is missing `{needle}`"
+            );
+        }
+        // The L2 seam must stay documented and un-collapsed.
+        for needle in ["proposal", "guard", "files"] {
+            assert!(sw.content.contains(needle));
+        }
+    }
+
+    #[test]
+    fn seat_assignment_skill_teaches_the_chart_contract() {
+        let sa = SKILLS.iter().find(|s| s.name == "seat-assignment").unwrap();
+        // The output contract, the posture/discretion axes, and the two rules
+        // that keep a thirteen-seat batch safe.
+        for needle in [
+            "\"picks\"",
+            "rationale",
+            "deviates",
+            "discretion",
+            "Cost-conscious",
+            "aliases, never pinned model ids",
+            "on-demand",
+        ] {
+            assert!(
+                sa.content.contains(needle),
+                "seat-assignment SKILL.md is missing `{needle}`"
+            );
+        }
+        // Every effort level the CLI documents must be named, or the agent will
+        // never propose the ones the picker newly exposes.
+        for level in crate::seatassign::EFFORT_LEVELS {
+            assert!(
+                sa.content.contains(level),
+                "seat-assignment SKILL.md never mentions effort `{level}`"
+            );
+        }
+        // Same for the model aliases it is allowed to pick from.
+        for alias in crate::seatassign::MODEL_ALIASES {
+            assert!(
+                sa.content.contains(alias),
+                "seat-assignment SKILL.md never mentions model alias `{alias}`"
+            );
+        }
+    }
+
+    #[test]
+    fn context_analysis_skill_teaches_the_mcp_tools() {
+        let ca = SKILLS.iter().find(|s| s.name == "context-analysis").unwrap();
+        // The external-session MCP contract: the four tools + read-only + the
+        // localhost boundary.
+        for needle in [
+            "query_prompts",
+            "session_history",
+            "memory_tree",
+            "stats",
+            "read-only",
+            "127.0.0.1",
+        ] {
+            assert!(
+                ca.content.contains(needle),
+                "context-analysis SKILL.md is missing `{needle}`"
+            );
+        }
+    }
+
+    /// Extract the `<!-- CLASS-ROUTER:BEGIN -->…<!-- CLASS-ROUTER:END -->` block
+    /// from a skill body. Returns `None` if either sentinel is missing.
+    fn class_router_block(content: &str) -> Option<&str> {
+        let begin = content.find("<!-- CLASS-ROUTER:BEGIN")?;
+        let end = content.find("<!-- CLASS-ROUTER:END")?;
+        content.get(begin..end)
+    }
+
+    #[test]
+    fn sidecar_and_conversation_share_a_byte_identical_class_router() {
+        // The class-router + ClassMemory-retrieval guidance is authored ONCE and
+        // pasted into both discussion skills; this guard fails the build if they
+        // drift, so a fix to one can never silently miss the other.
+        let sidecar = SKILLS.iter().find(|s| s.name == "sidecar").unwrap();
+        let convo = SKILLS.iter().find(|s| s.name == "conversation").unwrap();
+        let a = class_router_block(sidecar.content)
+            .expect("sidecar SKILL.md is missing the CLASS-ROUTER sentinels");
+        let b = class_router_block(convo.content)
+            .expect("conversation SKILL.md is missing the CLASS-ROUTER sentinels");
+        assert!(a.len() > 500, "the shared block should be substantial");
+        assert_eq!(
+            a, b,
+            "the sidecar and conversation class-router blocks must be byte-identical"
+        );
+        // And it must actually carry the router + retrieval contract.
+        assert!(a.contains("resolve the likely class"));
+        assert!(a.contains("/v1/memory/tree"));
+        assert!(a.contains("what did I *decide*"));
+    }
+
+    #[test]
+    fn sensei_skill_teaches_the_recruit_contract() {
+        let sensei = SKILLS.iter().find(|s| s.name == "sensei").unwrap();
+        // The Dojo recruit contract: the box fields, classes-first grounding over
+        // the ClassMemory catalog, the MCP boundary, and the read-only rule.
+        for needle in [
+            "Recruit Reason",
+            "Recruit Function",
+            "classes-first",
+            "memory_tree",
+            "127.0.0.1",
+            "read-only",
+        ] {
+            assert!(
+                sensei.content.contains(needle),
+                "sensei SKILL.md is missing `{needle}`"
+            );
+        }
     }
 
     #[test]
@@ -342,4 +579,5 @@ mod tests {
         }
         let _ = fs::remove_dir_all(&root);
     }
+
 }

@@ -25,7 +25,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdout};
 
 use crate::claude_proc::{
-    bridge_args, classify_line, claude_command, resolve_claude_bin, StreamLine,
+    bridge_args, classify_line, mission_context_block, resolve_claude_bin,
+    StreamLine,
 };
 use crate::db::Database;
 use crate::state::{now_millis, BrowseMessage};
@@ -153,16 +154,23 @@ impl BrowseState {
              concise. Their question:\n\n{}",
             question.trim()
         );
+        // The consult already runs under the linked agent's mission-framed
+        // question, so it needs no separate mission block of its own.
         let prompt = match &prior_session {
-            None => build_first_turn_prompt(snapshot.as_deref(), &framed, false, None),
+            None => build_first_turn_prompt(snapshot.as_deref(), &framed, false, None, None),
             Some(_) => framed.clone(),
         };
 
-        let args = bridge_args(prompt, prior_session.as_deref());
+        // A consult is an internal map-reduce delegation, not a user prompt, so
+        // it earns no ledger event — but it still spawns an agent that would trip
+        // the global hook, so suppress that duplicate.
+        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+
+        let args = bridge_args("browse", prompt, prior_session.as_deref());
         let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
 
         let claude_bin = self.claude_bin().await?;
-        let mut cmd = claude_command(&claude_bin);
+        let mut cmd = crate::claude_proc::claude_command_for_seat("browse", &claude_bin);
         let mut child = cmd
             .current_dir(&cwd)
             .args(&args)
@@ -206,6 +214,12 @@ impl BrowseState {
                 if let Some(mut p) = self.procs.lock().unwrap().remove(&browse_id) {
                     let _ = p.child.start_kill();
                 }
+                let _ = self.db.record_friction(
+                    "turn_timeout",
+                    Some("browse"),
+                    Some(&browse_id),
+                    Some("180s consult ceiling"),
+                );
                 let why = "the colleague took too long to respond".to_string();
                 finish_error(&app, &self.db, &browse_id, &why);
                 return Err(why);
@@ -356,11 +370,13 @@ fn build_first_turn_prompt(
     user_text: &str,
     tandem: bool,
     prefs: Option<&str>,
+    mission: Option<(&str, &str)>,
 ) -> String {
     let mut p = String::from(
         "You are helping the user with the web page open in Redline's embedded \
          browser. You can both discuss the page and drive the browser tab.\n\n",
     );
+    p.push_str(&mission_context_block(mission));
     if let Some(snap) = snapshot {
         if !snap.trim().is_empty() {
             p.push_str("Here is a snapshot of the page the user is currently viewing:\n\n");
@@ -371,7 +387,11 @@ fn build_first_turn_prompt(
     p.push_str(
         "You can act on the live browser tab by calling these local endpoints \
          with curl (already permitted — no approval needed). Put the URL \
-         immediately after `-s`:\n\n\
+         immediately after `-s`. Write routes need the bearer token: add \
+         `--variable %REDLINE_DAEMON_TOKEN= --expand-header \"Authorization: \
+         Bearer {{REDLINE_DAEMON_TOKEN}}\"` after the URL, which imports it \
+         straight from the environment — never write `$REDLINE_DAEMON_TOKEN` \
+         into the command yourself (requires curl >= 8.3):\n\n\
          - See the page as it is right now (url, title, selection, text, \
          headings, links):\n  \
          curl -s http://127.0.0.1:7676/v1/browser/snapshot\n\
@@ -383,25 +403,35 @@ fn build_first_turn_prompt(
          curl -s http://127.0.0.1:7676/v1/browser/tabs\n\
          - Open a URL in a NEW tab and show it (leaves the user's other tabs \
          open; the new tab becomes the active one you then act on):\n  \
-         curl -s http://127.0.0.1:7676/v1/browser/open -X POST \
+         curl -s http://127.0.0.1:7676/v1/browser/open \
+         --variable %REDLINE_DAEMON_TOKEN= \
+         --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" -X POST \
          -H 'Content-Type: application/json' -d '{\"url\":\"https://example.com\"}'\n\
          - Switch the user INTO an existing tab (bring it to the foreground and \
          move them into its conversation) — use when they want to BE in that \
          tab, after you've checked it with ?tab=/thread:\n  \
-         curl -s 'http://127.0.0.1:7676/v1/browser/focus?tab=<n>' -X POST\n\
+         curl -s 'http://127.0.0.1:7676/v1/browser/focus?tab=<n>' \
+         --variable %REDLINE_DAEMON_TOKEN= \
+         --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" -X POST\n\
          - Read another tab's discussion history (what was already discussed \
          there — a cheap way to \"check in\" with that tab without re-deriving \
          it):\n  \
          curl -s 'http://127.0.0.1:7676/v1/browser/thread?tab=<n>'\n\
          - Navigate the tab to a URL:\n  \
-         curl -s http://127.0.0.1:7676/v1/browser/navigate -X POST \
+         curl -s http://127.0.0.1:7676/v1/browser/navigate \
+         --variable %REDLINE_DAEMON_TOKEN= \
+         --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" -X POST \
          -H 'Content-Type: application/json' -d '{\"url\":\"https://example.com\"}'\n\
          - Click the first element matching a CSS selector:\n  \
-         curl -s http://127.0.0.1:7676/v1/browser/click -X POST \
+         curl -s http://127.0.0.1:7676/v1/browser/click \
+         --variable %REDLINE_DAEMON_TOKEN= \
+         --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" -X POST \
          -H 'Content-Type: application/json' -d '{\"selector\":\"a.next\"}'\n\
          - Extract structured data with a scrape schema (fields of type text / \
          html / attr / list with itemSelector+itemFields):\n  \
-         curl -s http://127.0.0.1:7676/v1/browser/query -X POST \
+         curl -s http://127.0.0.1:7676/v1/browser/query \
+         --variable %REDLINE_DAEMON_TOKEN= \
+         --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" -X POST \
          -H 'Content-Type: application/json' \
          -d '{\"version\":1,\"name\":\"links\",\"fields\":[{\"name\":\"links\",\
          \"type\":\"list\",\"itemSelector\":\"a[href]\",\"itemFields\":[{\"name\":\
@@ -411,7 +441,9 @@ fn build_first_turn_prompt(
          them the saved path the route returns. Omit `url` to save the page \
          they're viewing; pass `url` to save a specific linked file; pass \
          `dialog:true` to let them choose the location:\n  \
-         curl -s http://127.0.0.1:7676/v1/browser/download -X POST \
+         curl -s http://127.0.0.1:7676/v1/browser/download \
+         --variable %REDLINE_DAEMON_TOKEN= \
+         --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" -X POST \
          -H 'Content-Type: application/json' -d '{}'\n\n\
          IMPORTANT: this `/download` route is the ONLY way you can save a file. \
          `curl -o`, `wget`, redirecting to a file, and any other Bash command are \
@@ -502,6 +534,8 @@ fn build_first_turn_prompt(
 #[tauri::command]
 pub async fn browse_send(
     browse: tauri::State<'_, BrowseState>,
+    active_mission: tauri::State<'_, crate::ActiveMission>,
+    active_surface: tauri::State<'_, crate::ActiveSurface>,
     app: AppHandle,
     browse_id: String,
     text: String,
@@ -542,6 +576,9 @@ pub async fn browse_send(
     // mode the first turn also carries the learned source-preference line so the
     // agent biases its page picks toward domains the user has thumbed up.
     let tandem = tandem.unwrap_or(false);
+    // When this tab lives inside an active mission, bake the goal in so the
+    // per-tab agent orients its help to what the user is researching.
+    let mission = active_mission.active_goal();
     let prompt = match &prior_session {
         None => {
             let prefs = if tandem {
@@ -549,10 +586,51 @@ pub async fn browse_send(
             } else {
                 None
             };
-            build_first_turn_prompt(snapshot.as_deref(), &text, tandem, prefs.as_deref())
+            build_first_turn_prompt(
+                snapshot.as_deref(),
+                &text,
+                tandem,
+                prefs.as_deref(),
+                mission.as_ref().map(|(t, g)| (t.as_str(), g.as_str())),
+            )
         }
         Some(_) => text.clone(),
     };
+
+    // Polis ledger: record the first-turn page-discussion prompt WITH its
+    // thread provenance (this tab's browse_id + resolved parent), and link the
+    // new thread into the session tree; keep every agent turn out of the
+    // global-hook capture stream.
+    if prior_session.is_none() {
+        let surface = active_surface.kind_and_id();
+        let parent = crate::ledger::resolve_parent(
+            None,
+            active_mission.active_id().as_deref(),
+            surface.as_ref().map(|(k, i)| (k.as_str(), i.as_str())),
+            "browse",
+        );
+        if let Some((pk, pid)) = &parent {
+            let _ = crate::ledger::record_session_link(&browse.db, "browse", &browse_id, pk, pid);
+        }
+        crate::ledger::record_agent_prompt(
+            &browse.db,
+            crate::ledger::PromptSource::RustFirstTurn,
+            "browse",
+            &prompt,
+            cwd.clone(),
+            None,
+            None,
+            Some(crate::ledger::ThreadRef {
+                thread_kind: "browse",
+                thread_id: browse_id.clone(),
+                parent_session_id: parent
+                    .filter(|(pk, _)| pk == "session")
+                    .map(|(_, pid)| pid),
+            }),
+        );
+    } else {
+        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+    }
 
     // The agent gets Bash so it can curl the browser endpoints. `--tools` only
     // makes a tool *available*; headless `-p` then auto-denies anything not in
@@ -587,6 +665,7 @@ pub async fn browse_send(
         "Bash(curl -s \"http://127.0.0.1:7676/*)".to_string(),
         "--strict-mcp-config".to_string(),
     ];
+    args.extend(crate::seat::flag_args("browse"));
     if let Some(sid) = &prior_session {
         args.push("--resume".to_string());
         args.push(sid.clone());
@@ -611,7 +690,7 @@ pub async fn browse_send(
         .unwrap_or_else(|| "/".to_string());
 
     let claude_bin = browse.claude_bin().await?;
-    let mut cmd = claude_command(&claude_bin);
+    let mut cmd = crate::claude_proc::claude_command_for_seat("browse", &claude_bin);
     let mut child = cmd
         .current_dir(&cwd)
         .args(&args)
@@ -822,6 +901,8 @@ async fn read_browse(
         if let Err(e) = db.insert_browse_message(&msg) {
             tracing::warn!(error = %e, "failed to persist assistant message");
         }
+        // Companion journal: this tab's agent completed a turn.
+        let _ = db.append_journal("agent_turn", Some("browse"), Some(&browse_id), None, None);
         let _ = app.emit(
             "browse-done",
             BrowseDone {
@@ -853,7 +934,7 @@ async fn read_browse(
 /// on the next attempt — clearing it there would throw away a healthy
 /// conversation over a momentary blip. (Empirically: the sessions that produced
 /// `error_during_execution` here were only ~60–70K tokens and resume cleanly.)
-fn is_context_overflow(error: &str) -> bool {
+pub(crate) fn is_context_overflow(error: &str) -> bool {
     let e = error.to_lowercase();
     e.contains("prompt is too long")
         || e.contains("context length")
@@ -867,7 +948,7 @@ fn is_context_overflow(error: &str) -> bool {
 /// `result`, plus overload/capacity/timeout wording). The session is healthy;
 /// retrying in a moment usually works. Account-level limits are transient-ish
 /// too (they reset), so they also land here rather than triggering a reset.
-fn is_transient(error: &str) -> bool {
+pub(crate) fn is_transient(error: &str) -> bool {
     let e = error.to_lowercase();
     e.contains("error_during_execution")
         || e.contains("overloaded")
@@ -895,12 +976,26 @@ fn describe_turn_error(db: &Database, browse_id: &str, error: &str) -> String {
         if let Err(e) = db.clear_browse_session(browse_id) {
             tracing::warn!(error = %e, "failed to clear over-limit browse session");
         }
+        // The doc comment above has always named "the common 'kept failing'
+        // case"; now there is a counter behind it.
+        let _ = db.record_friction(
+            "context_overflow",
+            Some("browse"),
+            Some(browse_id),
+            Some(error),
+        );
         return "This discussion outgrew the model's context window, so the turn \
                 failed. I've reset its context — send your message again and I'll \
                 start fresh on this page (the replies above are kept)."
             .to_string();
     }
     if is_transient(error) {
+        let _ = db.record_friction(
+            "transient_fail",
+            Some("browse"),
+            Some(browse_id),
+            Some(error),
+        );
         return "The model hit a temporary error on this turn (not something you \
                 did) — send your message again in a moment. Your conversation is \
                 intact."
@@ -942,9 +1037,12 @@ mod tests {
             "What is this page about?",
             false,
             None,
+            None,
         );
         assert!(p.contains("https://example.com"));
         assert!(p.contains("What is this page about?"));
+        // With no active mission, no mission block is injected.
+        assert!(!p.contains("A research MISSION is currently active"));
         // Tool docs must always be present.
         assert!(p.contains("/v1/browser/snapshot"));
         assert!(p.contains("/v1/browser/navigate"));
@@ -969,7 +1067,7 @@ mod tests {
 
     #[test]
     fn first_turn_prompt_without_snapshot_still_documents_tools() {
-        let p = build_first_turn_prompt(None, "open hacker news", false, None);
+        let p = build_first_turn_prompt(None, "open hacker news", false, None, None);
         assert!(p.contains("open hacker news"));
         assert!(p.contains("/v1/browser/navigate"));
         // No empty snapshot section header.
@@ -977,6 +1075,24 @@ mod tests {
         // Non-tandem prompts carry no tandem instructions or sources contract.
         assert!(!p.contains("TANDEM AGENT MODE"));
         assert!(!p.contains("rl-sources"));
+    }
+
+    #[test]
+    fn first_turn_prompt_embeds_active_mission_goal() {
+        let p = build_first_turn_prompt(
+            None,
+            "How does this page help?",
+            false,
+            None,
+            Some(("Data-breach page", "Draft my firm's data-breach practice page")),
+        );
+        // The goal + mission title are baked in so the per-tab agent orients to it.
+        assert!(p.contains("A research MISSION is currently active"));
+        assert!(p.contains("Data-breach page"));
+        assert!(p.contains("Draft my firm's data-breach practice page"));
+        // And the re-read routes are documented for a mid-conversation change.
+        assert!(p.contains("/v1/mission/active"));
+        assert!(p.contains("/v1/mission/findings"));
     }
 
     #[test]
@@ -1016,6 +1132,7 @@ mod tests {
             "what is a DAG?",
             true,
             Some("Learned: tends to PREFER wikipedia.org."),
+            None,
         );
         assert!(p.contains("TANDEM AGENT MODE is ON"));
         assert!(p.contains("rl-sources"));

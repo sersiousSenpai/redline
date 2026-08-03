@@ -20,7 +20,7 @@ use tauri::Emitter;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
 
-use crate::claude_proc::{classify_line, claude_command, resolve_claude_bin, StreamLine};
+use crate::claude_proc::{classify_line, resolve_claude_bin, StreamLine};
 use crate::db::Database;
 use crate::review::{self, IncomingFinding};
 
@@ -122,7 +122,7 @@ impl AiReviewState {
 /// prompt arrives on
 /// stdin (the rendered diff can exceed comfortable argv size).
 fn ai_review_args() -> Vec<String> {
-    [
+    let mut args: Vec<String> = [
         "-p",
         "--output-format",
         "stream-json",
@@ -139,7 +139,9 @@ fn ai_review_args() -> Vec<String> {
     ]
     .into_iter()
     .map(str::to_string)
-    .collect()
+    .collect();
+    args.extend(crate::seat::flag_args("ai_review"));
+    args
 }
 
 /// Render the parsed diff with per-side line numbers — the same coordinates
@@ -280,7 +282,7 @@ pub async fn ai_review_start(
 
     let prompt = build_prompt(&session.repo_path, session.round, &diff);
     let bin = state.claude_bin().await?;
-    let mut cmd = claude_command(&bin);
+    let mut cmd = crate::claude_proc::claude_command_for_seat("ai_review", &bin);
     let mut child = cmd
         .current_dir(&session.repo_path)
         .args(ai_review_args())
@@ -358,6 +360,18 @@ pub async fn ai_review_start(
                             let _ = p.start_kill();
                         }
                         stalled = true;
+                        // Fire-and-forget: a wedged agent is friction the app
+                        // computes and used to throw away.
+                        let _ = db.record_friction(
+                            "stall_kill",
+                            Some("review"),
+                            Some(&rid),
+                            Some(&format!(
+                                "silent for {}s (ceiling {}s)",
+                                silent.as_secs(),
+                                STALL_CEILING.as_secs()
+                            )),
+                        );
                     }
                 }
             }

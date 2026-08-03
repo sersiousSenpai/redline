@@ -171,6 +171,199 @@ pub fn save_text_file(path: String, content: String) -> Result<String, String> {
     Ok(p.to_string_lossy().into_owned())
 }
 
+// --- Comment attachments ----------------------------------------------------
+// Files a reviewer attaches to feedback ("make it look like this" + a
+// screenshot). They are COPIED into app data at capture time rather than
+// referenced where they landed: submit can happen minutes or hours later, and a
+// source the user has since moved, renamed, or emptied from the trash would
+// break the payload silently — at exactly the moment Claude tries to read it.
+// A paste has no source path at all (it is bytes on the clipboard), so it must
+// be written somewhere regardless.
+
+/// Attachments live at `<app_data_dir>/attachments/<session_id>/<name>`,
+/// mirroring the existing `briefs/<session-id>/` layout.
+const ATTACHMENTS_DIR: &str = "attachments";
+
+/// Cap on a single attachment. Matches the image-read cap: big enough for any
+/// screenshot or mock, small enough that a stray multi-hundred-MB file can't
+/// quietly fill the app-data directory.
+const MAX_ATTACHMENT_BYTES: u64 = 16 * 1024 * 1024;
+
+/// A stored attachment, in exactly the shape the comment record keeps.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedAttachment {
+    pub path: String,
+    pub name: String,
+    pub mime: String,
+    pub bytes: u64,
+}
+
+/// Best-effort content type from the extension. Only used for the UI chip and
+/// as a hint in the payload, so an unknown type degrades to the generic
+/// `application/octet-stream` rather than failing the capture.
+fn mime_for(name: &str) -> &'static str {
+    let ext = name
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "heic" => "image/heic",
+        "pdf" => "application/pdf",
+        "txt" | "log" => "text/plain",
+        "md" => "text/markdown",
+        "json" => "application/json",
+        "csv" => "text/csv",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Resolve (and create) this session's attachment directory.
+///
+/// `session_id` is sanitized to a bare basename before it becomes a path
+/// component: it reaches here from the frontend, and a `../` in it would
+/// otherwise escape the app-data root.
+fn attachment_dir(
+    app: &tauri::AppHandle,
+    session_id: &str,
+) -> Result<std::path::PathBuf, String> {
+    use tauri::Manager;
+    let sid = crate::sanitize_basename(session_id);
+    if sid.is_empty() {
+        return Err("invalid session id".to_string());
+    }
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("could not resolve the app data directory: {e}"))?
+        .join(ATTACHMENTS_DIR)
+        .join(sid);
+    fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    Ok(dir)
+}
+
+/// Turn a proposed filename into a safe, non-colliding one inside `dir`.
+/// `sanitize_basename` is the security boundary (it strips every path
+/// separator, so nothing can land outside `dir`); `dedup_path` keeps a second
+/// "Screenshot.png" from clobbering the first.
+fn attachment_path(dir: &std::path::Path, filename: &str) -> std::path::PathBuf {
+    let name = crate::sanitize_basename(filename);
+    let name = if name.is_empty() {
+        "attachment".to_string()
+    } else {
+        name
+    };
+    crate::dedup_path(dir, &name)
+}
+
+fn describe(path: &std::path::Path, bytes: u64) -> SavedAttachment {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "attachment".to_string());
+    SavedAttachment {
+        mime: mime_for(&name).to_string(),
+        path: path.to_string_lossy().into_owned(),
+        name,
+        bytes,
+    }
+}
+
+/// Store pasted bytes as an attachment. The clipboard path: there is no source
+/// file to copy, only base64 from a `File` the composer read.
+#[tauri::command(async)]
+pub fn save_attachment(
+    app: tauri::AppHandle,
+    session_id: String,
+    filename: String,
+    base64_data: String,
+) -> Result<SavedAttachment, String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64_data.as_bytes())
+        .map_err(|e| format!("could not decode the pasted file: {e}"))?;
+    if bytes.len() as u64 > MAX_ATTACHMENT_BYTES {
+        return Err(format!(
+            "that file is larger than the {} MB attachment limit",
+            MAX_ATTACHMENT_BYTES / (1024 * 1024)
+        ));
+    }
+    let dir = attachment_dir(&app, &session_id)?;
+    let path = attachment_path(&dir, &filename);
+    fs::write(&path, &bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(describe(&path, bytes.len() as u64))
+}
+
+/// Copy a dropped file into this session's attachment directory. The drag path:
+/// the OS hands us a real absolute source path (see `TerminalView`'s
+/// `onDragDropEvent` precedent).
+#[tauri::command(async)]
+pub fn import_attachment(
+    app: tauri::AppHandle,
+    session_id: String,
+    src_path: String,
+) -> Result<SavedAttachment, String> {
+    let src = Path::new(&src_path);
+    let meta = fs::metadata(src).map_err(|e| format!("{src_path}: {e}"))?;
+    if meta.is_dir() {
+        return Err("folders can't be attached — pick a file".to_string());
+    }
+    let size = meta.len();
+    if size > MAX_ATTACHMENT_BYTES {
+        return Err(format!(
+            "that file is larger than the {} MB attachment limit",
+            MAX_ATTACHMENT_BYTES / (1024 * 1024)
+        ));
+    }
+    let dir = attachment_dir(&app, &session_id)?;
+    // The source basename is untrusted: it can carry separators or `..` on a
+    // hostile/odd filesystem, so it goes through the same sanitizer as a pasted
+    // name rather than being joined as-is.
+    let path = attachment_path(&dir, &src_path);
+    fs::copy(src, &path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(describe(&path, size))
+}
+
+/// Remove a session's whole attachment directory. Called when the session is
+/// deleted, so its files don't outlive the comments that referenced them.
+/// Best-effort: a missing directory is success.
+pub fn delete_session_attachments(app: &tauri::AppHandle, session_id: &str) {
+    let Ok(dir) = attachment_dir(app, session_id) else {
+        return;
+    };
+    if let Err(e) = fs::remove_dir_all(&dir) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(error = %e, dir = %dir.display(), "failed to delete session attachments");
+        }
+    }
+}
+
+/// Move a session's attachment directory when its id changes (`rekey_session`).
+/// Without this, comments carried onto the live id would point at a directory
+/// named after the dead one. The stored `path` strings are rewritten in step by
+/// `Database::rekey_attachment_paths` — the two must always be called together.
+pub fn rekey_session_attachments(app: &tauri::AppHandle, old_id: &str, new_id: &str) {
+    let (Ok(old_dir), Ok(new_dir)) = (attachment_dir(app, old_id), attachment_dir(app, new_id))
+    else {
+        return;
+    };
+    if old_dir == new_dir {
+        return;
+    }
+    // `attachment_dir` just created `new_dir`; a rename onto an existing empty
+    // directory is fine on macOS/Linux, and any failure is non-fatal (the old
+    // paths keep working — they simply live under the previous id).
+    if let Err(e) = fs::rename(&old_dir, &new_dir) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(error = %e, "failed to move session attachments on rekey");
+        }
+    }
+}
+
 /// Create a directory (and any missing parents), returning its absolute path.
 /// Lets the clipping flow ensure `<vault>/<clippings-subdir>` exists before
 /// listing it for filename de-duplication.
@@ -208,6 +401,63 @@ mod tests {
             path: format!("/root/{name}"),
             is_dir,
         }
+    }
+
+    #[test]
+    fn attachment_path_is_confined_to_its_directory() {
+        // `attachment_path` is the security boundary for both capture routes:
+        // the filename comes from a dropped file or a paste, and a name
+        // carrying separators must never place the copy outside `dir`.
+        let dir = std::path::Path::new("/data/attachments/s1");
+        for hostile in [
+            "../../etc/passwd",
+            "/etc/passwd",
+            r"..\..\windows\system32\evil.exe",
+            "/abs/path/ui-mock.png",
+        ] {
+            let p = attachment_path(dir, hostile);
+            assert_eq!(
+                p.parent(),
+                Some(dir),
+                "{hostile} escaped the attachment directory"
+            );
+            assert!(!p.to_string_lossy().contains(".."));
+        }
+        // A lone `..` has no usable basename at all — it must not become a
+        // directory component either.
+        assert_eq!(
+            attachment_path(dir, "..").file_name().unwrap(),
+            "attachment"
+        );
+        // An ordinary name passes through untouched.
+        assert_eq!(
+            attachment_path(dir, "ui-mock.png").file_name().unwrap(),
+            "ui-mock.png"
+        );
+    }
+
+    #[test]
+    fn mime_is_derived_from_the_extension() {
+        assert_eq!(mime_for("shot.PNG"), "image/png");
+        assert_eq!(mime_for("photo.jpeg"), "image/jpeg");
+        assert_eq!(mime_for("notes.md"), "text/markdown");
+        // Unknown / extension-less degrades rather than failing the capture.
+        assert_eq!(mime_for("archive.xyz"), "application/octet-stream");
+        assert_eq!(mime_for("Makefile"), "application/octet-stream");
+    }
+
+    #[test]
+    fn describe_reports_the_stored_name_not_the_requested_one() {
+        // De-duplication renames the file on disk; the chip must show what was
+        // actually written, or "remove" and the payload would disagree.
+        let d = describe(
+            std::path::Path::new("/data/attachments/s1/ui-mock (1).png"),
+            2048,
+        );
+        assert_eq!(d.name, "ui-mock (1).png");
+        assert_eq!(d.mime, "image/png");
+        assert_eq!(d.bytes, 2048);
+        assert_eq!(d.path, "/data/attachments/s1/ui-mock (1).png");
     }
 
     #[test]

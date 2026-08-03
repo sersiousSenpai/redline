@@ -22,12 +22,7 @@ export type FontName =
   | "american-typewriter"
   | "menlo"
   | "sf-mono"
-  | "courier-new"
-  | "chalkboard-se"
-  | "marker-felt"
-  | "noteworthy"
-  | "bradley-hand"
-  | "snell-roundhand";
+  | "courier-new";
 
 export interface FontEntry {
   name: FontName;
@@ -111,32 +106,22 @@ export const FONTS: FontEntry[] = [
     label: "Courier New",
     stack: '"Courier New", Courier, monospace',
   },
-  {
-    name: "chalkboard-se",
-    label: "Chalkboard SE",
-    stack: '"Chalkboard SE", "Comic Sans MS", sans-serif',
-  },
-  {
-    name: "marker-felt",
-    label: "Marker Felt",
-    stack: '"Marker Felt", "Comic Sans MS", cursive',
-  },
-  { name: "noteworthy", label: "Noteworthy", stack: "Noteworthy, cursive" },
-  {
-    name: "bradley-hand",
-    label: "Bradley Hand",
-    stack: '"Bradley Hand", cursive',
-  },
-  {
-    name: "snell-roundhand",
-    label: "Snell Roundhand",
-    stack: '"Snell Roundhand", cursive',
-  },
 ];
+// The five handwriting/novelty faces (Chalkboard SE, Marker Felt, Noteworthy,
+// Bradley Hand, Snell Roundhand) were pruned from the built-ins; a saved pick
+// of one falls back to San Francisco via getFont's default.
 
 // First-launch default: San Francisco. `readStoredFont()` only consults this
 // when the user has no saved choice yet, so existing installs keep their pick.
 export const DEFAULT_FONT: FontName = "san-francisco";
+
+// A theme's "natural companion" face. Picking such a theme *recommends* this
+// font — but only when the user hasn't chosen their own yet (see App's
+// onThemeChange). It never overrides an explicit font pick, so the font stays
+// fully independent of the color theme. Terminal reads best in monospace.
+export const SUGGESTED_FONT_FOR_THEME: Partial<Record<string, FontName>> = {
+  terminal: "sf-mono",
+};
 
 const BY_NAME = new Map(FONTS.map((f) => [f.name, f]));
 

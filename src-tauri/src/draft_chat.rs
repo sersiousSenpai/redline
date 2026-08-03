@@ -1,0 +1,913 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Yusuf Al-Bazian
+//! The Prompt Drafter's discussion agent: a headless `claude` session, one per
+//! draft, that helps the user CRAFT the prompt they're authoring — and can
+//! write into the document itself by posting tracked suggestions through
+//! `POST /v1/drafter/:id/suggestions` (rendered by the drafter as accept/reject
+//! changes; see `validate_suggestion` for the contract the daemon enforces).
+//!
+//! Mirrors `browse.rs` (keyed registry, fresh process per turn via
+//! `bridge_args`, DB-persisted resumable session id, `draft-chat-*` events),
+//! but grounds on the draft's live markdown mirror instead of a DOM snapshot:
+//! the first turn embeds the draft; every follow-up carries a doc-hash header,
+//! and when the hash moved since the agent's last turn the header says so and
+//! tells it to re-read `/v1/drafter/:id/doc` before answering.
+
+use std::collections::HashMap;
+use std::process::Stdio;
+use std::sync::{Arc, Mutex, OnceLock};
+
+use serde::Serialize;
+use serde_json::Value;
+use tauri::{AppHandle, Emitter};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::{Child, ChildStderr, ChildStdout};
+
+use crate::browse::{is_context_overflow, is_transient};
+use crate::claude_proc::{
+    bridge_args, classify_line, mission_context_block, resolve_claude_bin,
+    StreamLine,
+};
+use crate::db::Database;
+use crate::state::{now_millis, DraftChatMessage};
+
+struct DraftChatProc {
+    child: Child,
+}
+
+type DraftChatRegistry = Arc<Mutex<HashMap<String, DraftChatProc>>>;
+
+/// Registry of running draft-chat turns, keyed by `draft_id`. Cloned into
+/// managed Tauri state; the mutex is only held for tiny critical sections,
+/// never across `.await`.
+#[derive(Clone)]
+pub struct DraftChatState {
+    procs: DraftChatRegistry,
+    db: Arc<Database>,
+    claude_bin: Arc<OnceLock<String>>,
+}
+
+impl DraftChatState {
+    pub fn new(db: Arc<Database>) -> Self {
+        Self {
+            procs: Arc::new(Mutex::new(HashMap::new())),
+            db,
+            claude_bin: Arc::new(OnceLock::new()),
+        }
+    }
+
+    async fn claude_bin(&self) -> Result<String, String> {
+        let cell = self.claude_bin.clone();
+        tokio::task::spawn_blocking(move || cell.get_or_init(resolve_claude_bin).clone())
+            .await
+            .map_err(|e| format!("failed to resolve the `claude` CLI: {e}"))
+    }
+
+    /// Whether a turn is streaming for this draft's discussion. Consumed by the
+    /// Companion's agent map + consult dispatch (Phase E).
+    #[allow(dead_code)]
+    pub fn is_running(&self, draft_id: &str) -> bool {
+        self.procs.lock().unwrap().contains_key(draft_id)
+    }
+
+    /// Kill every running draft-chat turn. Backs app teardown.
+    pub fn kill_all(&self) {
+        let drained: Vec<DraftChatProc> = {
+            let mut guard = self.procs.lock().unwrap();
+            guard.drain().map(|(_, p)| p).collect()
+        };
+        for mut proc in drained {
+            let _ = proc.child.start_kill();
+        }
+    }
+
+    /// "Check in with a colleague" for the Companion's `/v1/global/consult`:
+    /// run THIS draft's discussion agent to completion with a synthesis-framed
+    /// question and return only its digest. Mirrors `BrowseState::consult`.
+    pub async fn consult(&self, draft_id: String, question: String) -> Result<String, String> {
+        if question.trim().is_empty() {
+            return Err("nothing to ask the colleague".to_string());
+        }
+        {
+            let guard = self.procs.lock().unwrap();
+            if guard.contains_key(&draft_id) {
+                return Err("the draft agent is busy — try again in a moment".to_string());
+            }
+        }
+        let (title, project_path, markdown, _) = self
+            .db
+            .get_draft(&draft_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "no such draft".to_string())?;
+        let prior_session = self.db.get_draft_chat_session(&draft_id);
+
+        let check_in = DraftChatMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            draft_id: draft_id.clone(),
+            role: "user".to_string(),
+            body: format!("🧭 Companion checking in — {}", question.trim()),
+            status: "complete".to_string(),
+            created_at: now_millis(),
+        };
+        if let Err(e) = self.db.insert_draft_chat_message(&check_in) {
+            tracing::warn!(error = %e, "failed to persist consult check-in");
+        }
+
+        let framed = format!(
+            "The user's COMPANION — their global cross-surface discussion — is \
+             checking in with you about THIS draft. Synthesize what matters here \
+             for their question as a tight DIGEST (not a transcript, not a fresh \
+             reply to the user, and post NO suggestions for this). Be concise. \
+             Their question:\n\n{}",
+            question.trim()
+        );
+        let prompt = match &prior_session {
+            None => build_first_turn_prompt(
+                &draft_id,
+                title.as_deref(),
+                project_path.as_deref(),
+                &markdown,
+                &framed,
+                None,
+            ),
+            Some(_) => framed.clone(),
+        };
+        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+
+        let args = bridge_args("drafter", prompt, prior_session.as_deref());
+        let cwd = project_path
+            .filter(|p| !p.trim().is_empty())
+            .or_else(|| std::env::var("HOME").ok())
+            .unwrap_or_else(|| "/".to_string());
+        let claude_bin = self.claude_bin().await?;
+        let mut cmd = crate::claude_proc::claude_command_for_seat("drafter", &claude_bin);
+        let mut child = cmd
+            .current_dir(&cwd)
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| format!("failed to spawn claude: {e}"))?;
+        let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
+        let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
+        {
+            self.procs
+                .lock()
+                .unwrap()
+                .insert(draft_id.clone(), DraftChatProc { child });
+        }
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(180),
+            crate::claude_proc::collect_turn(stdout, stderr),
+        )
+        .await;
+        let proc = { self.procs.lock().unwrap().remove(&draft_id) };
+        let outcome = match outcome {
+            Ok(o) => o,
+            Err(_) => {
+                if let Some(mut p) = proc {
+                    let _ = p.child.start_kill();
+                }
+                let _ = self.db.record_friction(
+                    "turn_timeout",
+                    Some("drafter"),
+                    Some(&draft_id),
+                    Some("180s turn ceiling"),
+                );
+                return Err("the colleague took too long to respond".to_string());
+            }
+        };
+        if let Some(mut p) = proc {
+            let _ = p.child.wait().await;
+        }
+        if let Some(err) = outcome.errored {
+            return Err(err);
+        }
+        let Some(text) = outcome.final_text.filter(|t| !t.trim().is_empty()) else {
+            return Err("the colleague produced no reply".to_string());
+        };
+        if let Some(sid) = &outcome.session {
+            let _ = self.db.set_draft_chat_session(&draft_id, sid);
+        }
+        let reply = DraftChatMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            draft_id: draft_id.clone(),
+            role: "assistant".to_string(),
+            body: text.clone(),
+            status: "complete".to_string(),
+            created_at: now_millis(),
+        };
+        if let Err(e) = self.db.insert_draft_chat_message(&reply) {
+            tracing::warn!(error = %e, "failed to persist consult reply");
+        }
+        Ok(text)
+    }
+}
+
+// --- Prompt builders ---------------------------------------------------------
+
+/// The write contract the agent is taught, verbatim in both the first-turn
+/// prompt and `skills/drafter/SKILL.md`. Kept as one constant so prompt and
+/// docs can't drift.
+fn suggestions_contract(draft_id: &str) -> String {
+    format!(
+        "WRITING INTO THE DOCUMENT — you can draft and edit the prompt directly. \
+         Post a suggestion (already permitted — no approval needed). This write \
+         route needs the bearer token, which curl imports straight from the \
+         environment with the two flags shown — never write \
+         `$REDLINE_DAEMON_TOKEN` into the command yourself (requires curl \
+         >= 8.3):\n\
+         ```\n\
+         curl -s http://127.0.0.1:7676/v1/drafter/{draft_id}/suggestions \\\n\
+           --variable %REDLINE_DAEMON_TOKEN= \\\n\
+           --expand-header \"Authorization: Bearer {{{{REDLINE_DAEMON_TOKEN}}}}\" \\\n\
+           -X POST \\\n\
+           -H 'Content-Type: application/json' \\\n\
+           -d '{{\"op\":\"append\",\"markdown\":\"<new content>\",\"agentId\":\"draft-agent\",\"body\":\"<one-line why>\"}}'\n\
+         ```\n\
+         Ops:\n\
+         - `append` — add new content at the end. Into an EMPTY draft it applies \
+           directly (this is how you draft a prompt from scratch); otherwise it \
+           lands as a tracked suggestion.\n\
+         - `replace_block` — rewrite one block: pass `blockId` (from the \
+           `<!-- rl:blk-… -->` markers in the doc markdown) AND `original` (the \
+           block's markdown exactly as you read it — the staleness guard).\n\
+         - `insert_after` — new block(s) after `blockId`.\n\
+         - `delete_block` — remove `blockId` (pass `original` too).\n\
+         Every block-addressed op renders in the document as a tracked change the \
+         user accepts or rejects — never assume an edit landed; re-read the doc to \
+         see the outcome. A 409 means the block changed under you or carries an \
+         open suggestion: re-read the doc and retry against current content."
+    )
+}
+
+fn doc_route_block(draft_id: &str) -> String {
+    format!(
+        "THE DOCUMENT — the draft lives at (already permitted — no approval needed):\n  \
+         curl -s http://127.0.0.1:7676/v1/drafter/{draft_id}/doc\n\
+         It returns the live markdown (with `<!-- rl:blk-… -->` block-identity \
+         markers — ignore them when quoting, use them to address edits). The user \
+         edits continuously; re-read whenever you need current text."
+    )
+}
+
+/// First turn: role + the embedded draft + doc route + write contract + skill.
+#[allow(clippy::too_many_arguments)]
+fn build_first_turn_prompt(
+    draft_id: &str,
+    title: Option<&str>,
+    project_path: Option<&str>,
+    draft_markdown: &str,
+    user_text: &str,
+    mission: Option<(&str, &str)>,
+) -> String {
+    let mut p = String::new();
+    p.push_str(
+        "You are the discussion agent for a document in Redline's Prompt Drafter — \
+         a Word-style editor where the user is AUTHORING A PROMPT to launch into a \
+         fresh Claude Code planning session. You are their prompt-crafting \
+         collaborator: sharpen intent, surface missing constraints and context, \
+         propose structure, and (when asked, or when a draft is clearly wanted) \
+         write into the document yourself via the suggestions endpoint below.\n\n\
+         Follow your `drafter` skill if you have it.\n\n",
+    );
+    if let Some(t) = title.filter(|t| !t.trim().is_empty()) {
+        p.push_str(&format!("Draft: {t}\n"));
+    }
+    if let Some(proj) = project_path.filter(|s| !s.trim().is_empty()) {
+        p.push_str(&format!(
+            "The prompt will launch a plan session in: {proj}\n\
+             You may Read/Grep/Glob that project to ground your advice in the real code.\n"
+        ));
+    }
+    p.push('\n');
+    p.push_str(&mission_context_block(mission));
+    p.push_str(&doc_route_block(draft_id));
+    p.push_str("\n\n");
+    p.push_str(&suggestions_contract(draft_id));
+    p.push_str("\n\n");
+    p.push_str(
+        "FORMATTING — your replies render through Redline's markdown pipeline \
+         (tables, fenced code, mermaid). Never emit raw HTML.\n\n",
+    );
+    let body = draft_markdown.trim();
+    if body.is_empty() {
+        p.push_str("--- CURRENT DRAFT ---\n(the document is empty)\n--- END DRAFT ---\n\n");
+    } else {
+        p.push_str(&format!("--- CURRENT DRAFT ---\n{body}\n--- END DRAFT ---\n\n"));
+    }
+    p.push_str(&format!("The user says:\n\n{user_text}"));
+    p
+}
+
+/// Follow-up turn: a one-line doc-state header. When the doc hash moved since
+/// the agent's last turn, say so and instruct a re-read (the linked-discussion
+/// re-grounding idiom applied to the doc instead of the tab).
+fn build_followup_prompt(draft_id: &str, doc_changed: bool, user_text: &str) -> String {
+    if doc_changed {
+        format!(
+            "[The draft has CHANGED since your last turn — re-read it before \
+             answering: curl -s http://127.0.0.1:7676/v1/drafter/{draft_id}/doc]\n\n{user_text}"
+        )
+    } else {
+        format!("[The draft is unchanged since your last turn.]\n\n{user_text}")
+    }
+}
+
+// --- Suggestion validation ----------------------------------------------------
+
+/// The write ops the suggestions endpoint accepts.
+pub const SUGGESTION_OPS: [&str; 4] = ["append", "replace_block", "insert_after", "delete_block"];
+
+/// Validate a suggestion against the draft's CURRENT markdown mirror. Returns
+/// `Err((status, message))` with 400 for a malformed request and 409 for a
+/// staleness conflict (unknown block / `original` no longer present) — the
+/// agent's re-read-and-retry signal.
+pub fn validate_suggestion(
+    mirror_markdown: &str,
+    op: &str,
+    block_id: Option<&str>,
+    original: Option<&str>,
+    markdown: &str,
+) -> Result<(), (u16, String)> {
+    if !SUGGESTION_OPS.contains(&op) {
+        return Err((400, format!("unknown op `{op}`")));
+    }
+    if op != "delete_block" && markdown.trim().is_empty() {
+        return Err((400, "empty markdown".to_string()));
+    }
+    if op == "append" {
+        return Ok(());
+    }
+    let Some(bid) = block_id.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Err((400, format!("`{op}` requires blockId")));
+    };
+    // The mirror is serialized with sidecars, so a live block appears as
+    // `<!-- rl:blk-XXXX -->`. Accept the id with or without the `blk-` prefix.
+    let bare = bid.trim_start_matches("blk-");
+    let marker = format!("rl:blk-{bare}");
+    if !mirror_markdown.contains(&marker) {
+        return Err((
+            409,
+            format!("block `{bid}` is not in the current draft — re-read the doc and retry"),
+        ));
+    }
+    if let Some(orig) = original.map(str::trim).filter(|s| !s.is_empty()) {
+        if !mirror_markdown.contains(orig) {
+            return Err((
+                409,
+                "the block changed since you read it — re-read the doc and retry".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+// --- Events -------------------------------------------------------------------
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DraftChatDelta {
+    draft_id: String,
+    text: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DraftChatDone {
+    draft_id: String,
+    message_id: String,
+    body: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DraftChatError {
+    draft_id: String,
+    error: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DraftChatCancelled {
+    draft_id: String,
+}
+
+// --- Commands -------------------------------------------------------------
+
+/// Send a turn to a draft's discussion agent. Flushes the caller-supplied live
+/// markdown into the mirror first (so the agent never reads a stale debounce),
+/// then spawns: first turn embeds the draft; follow-ups carry the doc-changed
+/// header. Streaming happens via `draft-chat-*` events.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn draft_chat_send(
+    chat: tauri::State<'_, DraftChatState>,
+    active_mission: tauri::State<'_, crate::ActiveMission>,
+    app: AppHandle,
+    draft_id: String,
+    text: String,
+    draft_markdown: String,
+    project_path: Option<String>,
+    cwd: Option<String>,
+) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Err("empty message".to_string());
+    }
+    {
+        let guard = chat.procs.lock().unwrap();
+        if guard.contains_key(&draft_id) {
+            return Err("the draft agent is still replying".to_string());
+        }
+    }
+
+    // Server-side mirror flush: the agent reads the DB mirror mid-turn, so it
+    // must reflect exactly what the user sees at send time.
+    let title = crate::draft_title_from_markdown(&draft_markdown);
+    chat.db
+        .upsert_draft(
+            &draft_id,
+            title.as_deref(),
+            project_path.as_deref(),
+            &draft_markdown,
+            // Mirror only — never the document. The frontend owns `doc_json`.
+            None,
+        )
+        .map_err(|e| format!("failed to mirror the draft: {e}"))?;
+
+    let prior_session = chat.db.get_draft_chat_session(&draft_id);
+    let doc_hash = crate::ledger::body_hash(&draft_markdown);
+    let doc_changed = chat
+        .db
+        .get_draft_chat_doc_hash(&draft_id)
+        .map(|h| h != doc_hash)
+        .unwrap_or(true);
+
+    let user_msg = DraftChatMessage {
+        id: uuid::Uuid::new_v4().to_string(),
+        draft_id: draft_id.clone(),
+        role: "user".to_string(),
+        body: text.clone(),
+        status: "complete".to_string(),
+        created_at: now_millis(),
+    };
+    chat.db
+        .insert_draft_chat_message(&user_msg)
+        .map_err(|e| format!("failed to persist message: {e}"))?;
+
+    let mission = active_mission.active_goal();
+    let prompt = match &prior_session {
+        None => build_first_turn_prompt(
+            &draft_id,
+            title.as_deref(),
+            project_path.as_deref(),
+            &draft_markdown,
+            &text,
+            mission.as_ref().map(|(t, g)| (t.as_str(), g.as_str())),
+        ),
+        Some(_) => build_followup_prompt(&draft_id, doc_changed, &text),
+    };
+
+    // Polis ledger: first turn with thread provenance; the chat thread hangs
+    // under its draft in the session tree.
+    if prior_session.is_none() {
+        let _ = crate::ledger::record_session_link(
+            &chat.db,
+            "drafter_chat",
+            &draft_id,
+            "drafter",
+            &draft_id,
+        );
+        crate::ledger::record_agent_prompt(
+            &chat.db,
+            crate::ledger::PromptSource::RustFirstTurn,
+            "drafter_chat",
+            &prompt,
+            project_path.clone(),
+            None,
+            None,
+            Some(crate::ledger::ThreadRef {
+                thread_kind: "drafter_chat",
+                thread_id: draft_id.clone(),
+                parent_session_id: None,
+            }),
+        );
+    } else {
+        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+    }
+
+    // The agent has now been pointed at the current doc (embedded or told to
+    // re-read); record the hash it will see.
+    let _ = chat.db.set_draft_chat_doc_hash(&draft_id, &doc_hash);
+
+    let args = bridge_args("drafter", prompt, prior_session.as_deref());
+    let cwd = cwd
+        .or(project_path)
+        .filter(|c| !c.trim().is_empty())
+        .or_else(|| std::env::var("HOME").ok())
+        .unwrap_or_else(|| "/".to_string());
+
+    let claude_bin = chat.claude_bin().await?;
+    let mut cmd = crate::claude_proc::claude_command_for_seat("drafter", &claude_bin);
+    let mut child = cmd
+        .current_dir(&cwd)
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                format!(
+                    "could not find the `claude` CLI (looked for `{claude_bin}`). \
+                     Install Claude Code, or launch Redline from a terminal \
+                     so it inherits your shell's PATH."
+                )
+            } else {
+                format!("failed to spawn claude: {e}")
+            }
+        })?;
+    let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
+    let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
+
+    {
+        chat.procs
+            .lock()
+            .unwrap()
+            .insert(draft_id.clone(), DraftChatProc { child });
+    }
+
+    tauri::async_runtime::spawn(read_draft_chat(
+        app,
+        chat.db.clone(),
+        chat.procs.clone(),
+        draft_id,
+        stdout,
+        stderr,
+    ));
+    Ok(())
+}
+
+/// A draft's persisted discussion thread, oldest-first.
+#[tauri::command]
+pub fn get_draft_chat_thread(
+    chat: tauri::State<'_, DraftChatState>,
+    draft_id: String,
+) -> Result<Vec<DraftChatMessage>, String> {
+    chat.db
+        .load_draft_chat_thread(&draft_id)
+        .map_err(|e| format!("failed to load thread: {e}"))
+}
+
+/// Cancel the in-flight turn for a draft (the reader emits `draft-chat-cancelled`).
+#[tauri::command]
+pub fn draft_chat_cancel(
+    chat: tauri::State<'_, DraftChatState>,
+    draft_id: String,
+) -> Result<(), String> {
+    let proc = { chat.procs.lock().unwrap().remove(&draft_id) };
+    if let Some(mut proc) = proc {
+        let _ = proc.child.start_kill();
+    }
+    Ok(())
+}
+
+/// Forget a draft's discussion: kill any in-flight turn, drop the thread rows
+/// and the resumable session. Explicit draft delete only — "New draft" keeps
+/// old rows as queryable history.
+#[tauri::command]
+pub fn draft_chat_discard(
+    chat: tauri::State<'_, DraftChatState>,
+    draft_id: String,
+) -> Result<(), String> {
+    let proc = { chat.procs.lock().unwrap().remove(&draft_id) };
+    if let Some(mut proc) = proc {
+        let _ = proc.child.start_kill();
+    }
+    chat.db
+        .delete_draft_chat(&draft_id)
+        .map_err(|e| format!("failed to discard draft chat: {e}"))
+}
+
+#[tauri::command]
+pub fn draft_chat_kill_all(chat: tauri::State<'_, DraftChatState>) {
+    chat.kill_all();
+}
+
+// --- Draft comments (the sidecar) -------------------------------------------
+
+/// Add a comment anchored to a draft block (the drafter sidecar).
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub fn draft_comment_add(
+    chat: tauri::State<'_, DraftChatState>,
+    draft_id: String,
+    body: String,
+    block_id: Option<String>,
+    sel_char_start: Option<i64>,
+    sel_char_end: Option<i64>,
+    sel_quoted_text: Option<String>,
+) -> Result<crate::state::DraftComment, String> {
+    if body.trim().is_empty() {
+        return Err("empty comment".to_string());
+    }
+    let c = crate::state::DraftComment {
+        id: format!("dc-{}", uuid::Uuid::new_v4()),
+        draft_id,
+        block_id: block_id.filter(|s| !s.trim().is_empty()),
+        sel_char_start,
+        sel_char_end,
+        sel_quoted_text: sel_quoted_text.filter(|s| !s.trim().is_empty()),
+        body: body.trim().to_string(),
+        author: None,
+        created_at: now_millis(),
+        fork_session_id: None,
+    };
+    chat.db
+        .insert_draft_comment(&c)
+        .map_err(|e| format!("failed to add comment: {e}"))?;
+    Ok(c)
+}
+
+/// A draft's comments, oldest-first.
+#[tauri::command]
+pub fn draft_comment_list(
+    chat: tauri::State<'_, DraftChatState>,
+    draft_id: String,
+) -> Result<Vec<crate::state::DraftComment>, String> {
+    chat.db
+        .list_draft_comments(&draft_id)
+        .map_err(|e| format!("failed to list comments: {e}"))
+}
+
+/// Delete a draft comment and its discussion thread.
+#[tauri::command]
+pub fn draft_comment_delete(
+    chat: tauri::State<'_, DraftChatState>,
+    fork: tauri::State<'_, crate::fork::ForkState>,
+    draft_id: String,
+    comment_id: String,
+) -> Result<(), String> {
+    // Kill any in-flight discussion turn before the rows go.
+    crate::fork::draft_thread_discard(fork, draft_id.clone(), comment_id.clone())?;
+    chat.db
+        .delete_draft_comment(&draft_id, &comment_id)
+        .map_err(|e| format!("failed to delete comment: {e}"))
+}
+
+// --- Reader -----------------------------------------------------------------
+
+async fn read_draft_chat(
+    app: AppHandle,
+    db: Arc<Database>,
+    procs: DraftChatRegistry,
+    draft_id: String,
+    stdout: ChildStdout,
+    stderr: ChildStderr,
+) {
+    let mut lines = BufReader::new(stdout).lines();
+    let mut stderr_lines = BufReader::new(stderr).lines();
+    let mut session: Option<String> = None;
+    let mut final_text: Option<String> = None;
+    let mut errored: Option<String> = None;
+    let mut saw_json = false;
+
+    while let Ok(Some(line)) = lines.next_line().await {
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        saw_json = true;
+        match classify_line(&v) {
+            StreamLine::Init(sid) => session = Some(sid),
+            StreamLine::Delta(text) => {
+                let _ = app.emit(
+                    "draft-chat-delta",
+                    DraftChatDelta {
+                        draft_id: draft_id.clone(),
+                        text,
+                    },
+                );
+            }
+            StreamLine::Final { text, session_id } => {
+                if session_id.is_some() {
+                    session = session_id;
+                }
+                final_text = Some(text);
+            }
+            StreamLine::Failed(msg) => errored = Some(msg),
+            StreamLine::Ignore => {}
+        }
+    }
+    let mut stderr_text = String::new();
+    while let Ok(Some(line)) = stderr_lines.next_line().await {
+        stderr_text.push_str(&line);
+        stderr_text.push('\n');
+    }
+
+    let proc = { procs.lock().unwrap().remove(&draft_id) };
+    let cancelled = proc.is_none() && final_text.is_none();
+    let exit_ok = match proc {
+        Some(mut p) => p.child.wait().await.map(|s| s.success()).unwrap_or(false),
+        None => false,
+    };
+
+    if cancelled {
+        let _ = app.emit("draft-chat-cancelled", DraftChatCancelled { draft_id });
+        return;
+    }
+    if let Some(err) = errored {
+        let why = describe_turn_error(&db, &draft_id, &err);
+        finish_error(&app, &db, &draft_id, &why);
+        return;
+    }
+    if let Some(text) = final_text {
+        if text.trim().is_empty() {
+            finish_error(&app, &db, &draft_id, "claude produced an empty reply");
+            return;
+        }
+        if let Some(sid) = &session {
+            if let Err(e) = db.set_draft_chat_session(&draft_id, sid) {
+                tracing::warn!(error = %e, "failed to persist draft chat session id");
+            }
+        }
+        let msg = DraftChatMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            draft_id: draft_id.clone(),
+            role: "assistant".to_string(),
+            body: text.clone(),
+            status: "complete".to_string(),
+            created_at: now_millis(),
+        };
+        if let Err(e) = db.insert_draft_chat_message(&msg) {
+            tracing::warn!(error = %e, "failed to persist assistant message");
+        }
+        // Companion journal: the draft agent completed a turn.
+        let _ = db.append_journal("agent_turn", Some("drafter"), Some(&draft_id), None, None);
+        let _ = app.emit(
+            "draft-chat-done",
+            DraftChatDone {
+                draft_id,
+                message_id: msg.id,
+                body: text,
+            },
+        );
+        return;
+    }
+
+    let why = if !exit_ok && !stderr_text.trim().is_empty() {
+        let detail: String = stderr_text.trim().chars().take(500).collect();
+        format!("claude exited abnormally: {detail}")
+    } else if !saw_json {
+        "claude produced no parseable output".to_string()
+    } else {
+        "claude ended without producing a reply".to_string()
+    };
+    finish_error(&app, &db, &draft_id, &why);
+}
+
+/// Same recovery policy as the browse agent: explicit context overflow resets
+/// the resumable session (the next turn re-embeds the draft); transient API
+/// errors keep it and ask for a retry.
+fn describe_turn_error(db: &Database, draft_id: &str, error: &str) -> String {
+    if is_context_overflow(error) {
+        if let Err(e) = db.clear_draft_chat_session(draft_id) {
+            tracing::warn!(error = %e, "failed to clear over-limit draft chat session");
+        }
+        return "This discussion outgrew the model's context window, so the turn \
+                failed. I've reset its context — send your message again and I'll \
+                start fresh on this draft (the replies above are kept)."
+            .to_string();
+    }
+    if is_transient(error) {
+        return "The model hit a momentary error on that turn. The discussion is \
+                fine — send your message again in a moment."
+            .to_string();
+    }
+    error.to_string()
+}
+
+fn finish_error(app: &AppHandle, db: &Database, draft_id: &str, why: &str) {
+    let msg = DraftChatMessage {
+        id: uuid::Uuid::new_v4().to_string(),
+        draft_id: draft_id.to_string(),
+        role: "assistant".to_string(),
+        body: why.to_string(),
+        status: "error".to_string(),
+        created_at: now_millis(),
+    };
+    if let Err(e) = db.insert_draft_chat_message(&msg) {
+        tracing::warn!(error = %e, "failed to persist error message");
+    }
+    let _ = app.emit(
+        "draft-chat-error",
+        DraftChatError {
+            draft_id: draft_id.to_string(),
+            error: why.to_string(),
+        },
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_turn_embeds_draft_doc_route_and_write_contract() {
+        let p = build_first_turn_prompt(
+            "d-1",
+            Some("Auth plan prompt"),
+            Some("/repo/x"),
+            "# Goal\n\nShip auth.",
+            "help me tighten this",
+            None,
+        );
+        assert!(p.contains("Prompt Drafter"));
+        assert!(p.contains("Draft: Auth plan prompt"));
+        assert!(p.contains("/repo/x"));
+        assert!(p.contains("/v1/drafter/d-1/doc"));
+        assert!(p.contains("/v1/drafter/d-1/suggestions"));
+        assert!(p.contains("replace_block"));
+        assert!(p.contains("--- CURRENT DRAFT ---"));
+        assert!(p.contains("Ship auth."));
+        assert!(p.contains("help me tighten this"));
+        assert!(p.contains("`drafter` skill"));
+        // The suggestions POST authenticates via curl's own variable import
+        // (a `format!` string — braces are quadrupled in source).
+        assert!(p.contains("--variable %REDLINE_DAEMON_TOKEN="));
+        assert!(p.contains("--expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\""));
+        assert!(!p.contains("Bearer $REDLINE_DAEMON_TOKEN"));
+    }
+
+    #[test]
+    fn first_turn_marks_an_empty_draft() {
+        let p = build_first_turn_prompt("d-1", None, None, "   ", "draft me a prompt for X", None);
+        assert!(p.contains("(the document is empty)"));
+    }
+
+    #[test]
+    fn followup_flags_a_changed_doc_with_the_reread_route() {
+        let changed = build_followup_prompt("d-1", true, "and now?");
+        assert!(changed.contains("has CHANGED"));
+        assert!(changed.contains("/v1/drafter/d-1/doc"));
+        assert!(changed.ends_with("and now?"));
+        let same = build_followup_prompt("d-1", false, "and now?");
+        assert!(same.contains("unchanged"));
+        assert!(!same.contains("has CHANGED"));
+    }
+
+    #[test]
+    fn validate_suggestion_contract() {
+        let mirror = "<!-- rl:blk-abc123 -->\n# Goal\n\nShip auth.\n";
+        // append needs no block.
+        assert!(validate_suggestion(mirror, "append", None, None, "more").is_ok());
+        // unknown op → 400.
+        assert_eq!(
+            validate_suggestion(mirror, "rewrite", None, None, "x").unwrap_err().0,
+            400
+        );
+        // block ops need blockId → 400.
+        assert_eq!(
+            validate_suggestion(mirror, "replace_block", None, None, "x").unwrap_err().0,
+            400
+        );
+        // unknown block → 409 (re-read and retry).
+        assert_eq!(
+            validate_suggestion(mirror, "replace_block", Some("blk-zzz"), None, "x")
+                .unwrap_err()
+                .0,
+            409
+        );
+        // known block, with or without the blk- prefix → ok.
+        assert!(validate_suggestion(mirror, "replace_block", Some("blk-abc123"), None, "x").is_ok());
+        assert!(validate_suggestion(mirror, "insert_after", Some("abc123"), None, "x").is_ok());
+        // stale original → 409.
+        assert_eq!(
+            validate_suggestion(mirror, "replace_block", Some("abc123"), Some("old text"), "x")
+                .unwrap_err()
+                .0,
+            409
+        );
+        // fresh original → ok.
+        assert!(validate_suggestion(
+            mirror,
+            "replace_block",
+            Some("abc123"),
+            Some("Ship auth."),
+            "x"
+        )
+        .is_ok());
+        // empty markdown only allowed for delete.
+        assert_eq!(
+            validate_suggestion(mirror, "append", None, None, "  ").unwrap_err().0,
+            400
+        );
+        assert!(
+            validate_suggestion(mirror, "delete_block", Some("abc123"), Some("Ship auth."), "")
+                .is_ok()
+        );
+    }
+}

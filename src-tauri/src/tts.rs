@@ -758,6 +758,7 @@ async fn ensure_uv(tts: &TtsState, app: &AppHandle) -> Result<PathBuf, String> {
     tokio::fs::copy(&extracted, &uv)
         .await
         .map_err(|e| format!("installing the voice toolchain failed: {e}"))?;
+    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         if let Ok(meta) = std::fs::metadata(&uv) {

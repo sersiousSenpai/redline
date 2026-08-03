@@ -377,6 +377,27 @@ claude -p "<prompt>" --resume <fork_session_id> \
 > below record the original 2026-05-21 verification with the `Read,Grep,Glob`
 > set; only the web tools were added since.
 
+> **Update 2026-07-03 (Polis Phase 3 — conscious fork-invariant loosening):**
+> the discussion forks now also carry `Bash`, scoped by `--allowedTools` to the
+> localhost daemon `curl` bridge in the same three quoting variants
+> `claude_proc::bridge_args` uses:
+> `Bash(curl -s http://127.0.0.1:7676/*)` (plain / single-quoted / double-quoted
+> URL). This is the forks' **ClassMemory retrieval surface** — the class-router
+> in the `sidecar` / `conversation` skills walks `/v1/memory/*` to ground a reply
+> in the user's own captured decisions/research. It is a deliberate widening of
+> the read-only-no-`Bash` guarantee above, and it is **narrow**: the allow is a
+> literal prefix confined to `http://127.0.0.1:7676/`, so headless `-p`
+> auto-denies any other `Bash` invocation (no file writes, no arbitrary commands,
+> no other host). `Edit`/`Write`/`ExitPlanMode` stay excluded from `--tools`, and
+> `--strict-mcp-config` still strips MCP. All three fork spawn sites
+> (`fork_thread_send`, `review_thread_send`, `review_question_send`) share one
+> builder — `fork::discussion_fork_args` — so the surface can't drift, and the
+> unit test `discussion_fork_args_grant_only_the_scoped_localhost_curl_allow`
+> asserts the allow-list is *exactly* the two web tools + the three scoped curl
+> variants and nothing broader (no bare `Bash`, no other curl host). The
+> `--tools` built-in bullet below reads `Read,Grep,Glob` from the original run;
+> `Bash` (curl-scoped) and the web tools have been added since.
+
 - [x] **`--fork-session` mints a new session id.** The first turn resumed `d8111931-…`; the `system/init` event reported a *different* `session_id` (`5cd5f058-…`). `result.session_id` matched `init`.
 - [x] **The resumed transcript is untouched.** The main session's `.jsonl` was byte- and mtime-identical before and after the fork.
 - [x] **Follow-up `--resume <fork_id>` (no `--fork-session`) keeps the same id** and carries prior-turn context (the follow-up correctly recalled what the first turn discussed). First turn forks; follow-ups plain-resume.
@@ -450,3 +471,46 @@ After running all experiments, the answers determine:
 ## Accumulated findings
 
 (Write a short prose summary here once you've completed the experiments. This is what gets folded back into SPEC.md.)
+
+---
+
+## Experiment (UserPromptSubmit) — prompt-capture hook contract (2026-07-03, claude 2.1.199)
+
+**Goal:** confirm the event name + payload shape the Polis prompt store (Phase 1)
+captures, before building the ingest pipeline on it.
+
+**Method:** installed a command-type `UserPromptSubmit` hook in an isolated
+project (`--settings` file, real `~/.claude` untouched) that dumps its stdin,
+then ran `claude -p "say hi in one word"` from that directory.
+
+**Captured payload (verbatim):**
+
+```json
+{"session_id":"fbf661e8-3152-4f0d-bc43-e1bc07008f5a",
+ "transcript_path":"/…/<session>.jsonl",
+ "cwd":"/…/hooktest",
+ "prompt_id":"37137840-65f2-43a0-b280-7a3b7ad1564f",
+ "permission_mode":"default",
+ "hook_event_name":"UserPromptSubmit",
+ "prompt":"say hi in one word"}
+```
+
+**Findings:**
+
+- [x] **The submitted text is at top-level `prompt`.** The public docs
+  (code.claude.com/docs/en/hooks) say `user_input`; the installed binary
+  disagrees. **Empirical wins** — building against `user_input` alone would have
+  silently captured empty prompts. `handle_prompts_ingest` reads `prompt` and
+  falls back to `user_input` for forward-compat. Pinned by the golden test
+  `ingest_reads_prompt_field_from_real_payload`.
+- [x] **Fires in headless `-p`, not just interactive.** Consequence: Redline's
+  own spawned agents (fork/browse/mission/linked, all headless `-p`) trip this
+  global hook too. The Rust construction sites are authoritative (they know the
+  surface/mission as fact); each registers the exact prompt body with a
+  process-global guard *before* spawn, and the ingest handler claims-and-skips
+  that body — race-free because registration precedes the spawn.
+- [x] `session_id` is the claude session id; `cwd` gives the project (used to
+  classify `origin=redline` vs `external`); `prompt_id` is a per-turn UUID.
+- [x] Command-type hook, stdin JSON, `exit 0` passes through unchanged. Redline
+  installs it as a `curl … --max-time 1 … ; exit 0` one-liner (fail-open: a
+  closed/slow daemon never delays or blocks prompt submission).

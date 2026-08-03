@@ -46,3 +46,26 @@ describe("getFont", () => {
     expect(getFont("does-not-exist")).toBe(FONTS[0]);
   });
 });
+
+describe("pruned novelty faces", () => {
+  const pruned = [
+    "chalkboard-se",
+    "marker-felt",
+    "noteworthy",
+    "bradley-hand",
+    "snell-roundhand",
+  ];
+
+  it("are absent from the built-in list", () => {
+    for (const name of pruned) {
+      expect(FONTS.some((f) => f.name === name)).toBe(false);
+    }
+  });
+
+  it("fall back to San Francisco when saved from an old install", () => {
+    for (const name of pruned) {
+      expect(isFontName(name)).toBe(false);
+      expect(getFont(name).name).toBe(DEFAULT_FONT);
+    }
+  });
+});

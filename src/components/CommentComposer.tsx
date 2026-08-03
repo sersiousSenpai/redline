@@ -7,10 +7,15 @@ import type {
   NewCommentRequest,
 } from "../types";
 import { useAutoGrow } from "../hooks/useAutoGrow";
+import { useAttachmentCapture } from "../hooks/useAttachmentCapture";
 import { AnchorPill } from "./AnchorPill";
+import { AttachmentChips } from "./AttachmentChips";
 
 interface CommentComposerProps {
   type: CommentType;
+  /** The session this comment belongs to — scopes where attachments are
+   *  copied (`<app_data_dir>/attachments/<session_id>/`). */
+  sessionId: string;
   anchorId: string;
   selectedText: string;
   /** Block-relative character range of the selection at the moment compose
@@ -62,6 +67,7 @@ function growStyle(minEm: number): React.CSSProperties {
 
 export function CommentComposer({
   type,
+  sessionId,
   anchorId,
   selectedText,
   charStart,
@@ -82,6 +88,9 @@ export function CommentComposer({
   // and a `maxHeight` cap keeps a huge selection from swallowing the pane.
   const revisedRef = useAutoGrow<HTMLTextAreaElement>(revised);
   const bodyRef = useAutoGrow<HTMLTextAreaElement>(body);
+  // Drag a screenshot onto the composer, or ⌘V one in: "make it look like
+  // this" is the feedback this unlocks.
+  const files = useAttachmentCapture(sessionId);
   // A cross-out: the composer was opened pre-set to delete the span.
   const isCrossOut = presetRevised === "";
 
@@ -110,6 +119,10 @@ export function CommentComposer({
         charEnd > charStart
           ? { charStart, charEnd, quotedText: selectedText, subBlockId }
           : undefined;
+      // Omitted entirely when empty, so a comment without files serializes
+      // exactly as it did before attachments existed.
+      const attachments =
+        files.attachments.length > 0 ? files.attachments : undefined;
       const req: NewCommentRequest =
         type === "edit"
           ? {
@@ -118,10 +131,18 @@ export function CommentComposer({
               body: body.trim() || "(edit)",
               edit: { original: selectedText, revised: revised.trim() },
               selection,
+              attachments,
             }
           : type === "feedback"
-            ? { type, anchorId, scope, body: body.trim(), selection }
-            : { type, anchorId, body: body.trim(), selection };
+            ? {
+                type,
+                anchorId,
+                scope,
+                body: body.trim(),
+                selection,
+                attachments,
+              }
+            : { type, anchorId, body: body.trim(), selection, attachments };
       await onSubmit(req);
     } finally {
       setSaving(false);
@@ -140,10 +161,16 @@ export function CommentComposer({
 
   return (
     <div
+      // The drop hit-test measures against this element: Tauri's drag event is
+      // webview-global, so every composer must decide for itself whether a drop
+      // landed on it (see useAttachmentCapture).
+      ref={files.hostRef}
       className="rounded-md border p-3"
       style={{
         borderColor: TYPE_COLORS[type],
         background: "var(--color-bg-elevated)",
+        outline: files.dragOver ? "2px dashed var(--color-info)" : undefined,
+        outlineOffset: "2px",
       }}
       onKeyDown={onKeyDown}
     >
@@ -205,6 +232,7 @@ export function CommentComposer({
             ref={bodyRef}
             value={body}
             onChange={(e) => setBody(e.target.value)}
+            onPaste={files.onPaste}
             placeholder="Optional context for the editor"
             className="w-full rounded-sm border px-2 py-1"
             style={{
@@ -236,6 +264,7 @@ export function CommentComposer({
             ref={bodyRef}
             value={body}
             onChange={(e) => setBody(e.target.value)}
+            onPaste={files.onPaste}
             placeholder="What's the feedback?"
             className="w-full rounded-sm border px-2 py-1"
             style={{
@@ -254,6 +283,7 @@ export function CommentComposer({
             ref={bodyRef}
             value={body}
             onChange={(e) => setBody(e.target.value)}
+            onPaste={files.onPaste}
             placeholder="What do you want to ask?"
             className="w-full rounded-sm border px-2 py-1"
             style={{
@@ -266,11 +296,55 @@ export function CommentComposer({
         </div>
       )}
 
+      {/* Attachments. The chips only appear once something is captured, so an
+          ordinary text comment looks exactly as it always did; the hint line
+          replaces them while empty so the affordance is still discoverable. */}
+      {files.attachments.length > 0 ? (
+        <AttachmentChips attachments={files.attachments} onRemove={files.remove} />
+      ) : (
+        files.dragOver && (
+          <div
+            className="rounded-sm border border-dashed mt-2 px-2 py-3 text-center"
+            style={{
+              borderColor: "var(--color-info)",
+              color: "var(--color-info)",
+              fontSize: "11px",
+            }}
+          >
+            Drop to attach
+          </div>
+        )
+      )}
+      {files.busy && (
+        <div
+          className="mt-1"
+          style={{ fontSize: "11px", color: "var(--color-ink-muted)" }}
+        >
+          Attaching…
+        </div>
+      )}
+      {files.error && (
+        <div
+          className="mt-1 flex items-start gap-2"
+          style={{ fontSize: "11px", color: "var(--color-warning)" }}
+        >
+          <span className="flex-1">{files.error}</span>
+          <button
+            type="button"
+            onClick={files.dismissError}
+            style={{ cursor: "pointer" }}
+            aria-label="Dismiss attachment error"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       <div
         className="flex items-center justify-between mt-2"
         style={{ fontSize: "11px", color: "var(--color-ink-muted)" }}
       >
-        <span>⌘+Enter to save · Esc to cancel</span>
+        <span>⌘+Enter to save · Esc to cancel · drop or ⌘V a file</span>
         <button
           type="button"
           onClick={submit}

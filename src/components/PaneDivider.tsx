@@ -1,5 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+
+/** Horizontal nudge (px) applied to the collapse caret so a *collapsed* pane's
+ *  pill isn't shaved at the window edge.
+ *
+ *  The 18px-wide pill is centred on a 6px divider, so it overhangs 6px each
+ *  side. That's invisible mid-window, but a collapsed pane's divider sits
+ *  against the window edge: the outer overhang is clipped by the row's
+ *  overflow-hidden and the inner overhang is painted over by the adjacent
+ *  column (a later positioned sibling). Both rounded ends get shaved and the
+ *  caret reads as a square. Shifting inward by exactly the overhang lands the
+ *  whole pill inside the viewport — a leading pane's divider hugs the left edge
+ *  (so shift right), a trailing pane's hugs the right (so shift left).
+ *  Horizontal dividers span the full width and never hug an edge, so they are
+ *  left alone. */
+export function collapsedCaretNudge(
+  collapsed: boolean,
+  orientation: "vertical" | "horizontal",
+  side: "leading" | "trailing",
+  overhang = 6,
+): number {
+  if (!collapsed || orientation === "horizontal") return 0;
+  return side === "leading" ? overhang : -overhang;
+}
+
 interface PaneDividerProps {
   collapsed: boolean;
   dragging: boolean;
@@ -85,6 +109,12 @@ export function PaneDivider({
   // width. As a real DOM element painted above the document column, it also
   // helps the cursor switch over the adjacent native scrollbar gutter.
   const overhang = 6;
+  const collapsedNudge = collapsedCaretNudge(
+    collapsed,
+    orientation,
+    side,
+    overhang,
+  );
   return (
     <div
       className="relative shrink-0"
@@ -102,7 +132,25 @@ export function PaneDivider({
       />
       {/* Widened transparent grab/cursor zone. */}
       <div
-        onPointerDown={dragDisabled ? undefined : onPointerDown}
+        onPointerDown={
+          dragDisabled
+            ? undefined
+            : (e) => {
+                // Capture the pointer for the whole gesture: a fast drag that
+                // outruns the 6px bar (or crosses the native browser webview)
+                // keeps tracking, and nothing else can steal it mid-flight.
+                // `touchAction: none` stops the OS reading it as a pan.
+                try {
+                  (e.currentTarget as HTMLElement).setPointerCapture(
+                    e.pointerId,
+                  );
+                } catch {
+                  /* capture unsupported / pointer already gone — drag still
+                     works off the window listeners */
+                }
+                onPointerDown(e);
+              }
+        }
         title={dragDisabled ? undefined : `Drag to resize ${label}`}
         style={{
           position: "absolute",
@@ -110,6 +158,7 @@ export function PaneDivider({
             ? { left: 0, right: 0, top: -overhang, bottom: -overhang }
             : { top: 0, bottom: 0, left: -overhang, right: -overhang }),
           cursor: dragDisabled ? "default" : resizeCursor,
+          touchAction: "none",
         }}
       />
       {!hideChevron && (
@@ -122,7 +171,9 @@ export function PaneDivider({
         style={{
           top: "50%",
           left: "50%",
-          transform: "translate(-50%, -50%)",
+          transform: collapsedNudge
+            ? `translate(calc(-50% + ${collapsedNudge}px), -50%)`
+            : "translate(-50%, -50%)",
           width: horizontal ? "34px" : "18px",
           height: horizontal ? "18px" : "34px",
           fontSize: "11px",
@@ -131,6 +182,9 @@ export function PaneDivider({
           color: "var(--color-ink-muted)",
           border: "1px solid var(--color-rule)",
           cursor: "pointer",
+          // Above the adjacent column in every state. The curtain-edge divider
+          // wrappers sit at 26, so 27 keeps the caret on top of those too.
+          zIndex: 27,
         }}
       >
         <span

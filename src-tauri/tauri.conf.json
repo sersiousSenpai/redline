@@ -6,8 +6,15 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build && npm run build:viewer",
     "frontendDist": "../dist"
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["redline"]
+      }
+    }
   },
   "app": {
     "windows": [
@@ -30,6 +37,9 @@
   "bundle": {
     "active": true,
     "targets": ["app"],
+    "resources": {
+      "../dist-viewer": "dist-viewer"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

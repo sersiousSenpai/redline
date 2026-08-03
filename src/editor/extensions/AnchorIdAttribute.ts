@@ -22,6 +22,10 @@ export const AnchorIdAttribute = Extension.create({
         attributes: {
           anchorId: {
             default: null,
+            // Mirrors blockId: an Enter-split must NOT copy the anchor onto
+            // the new block — a duplicated id draws duplicate gutter labels
+            // and mis-anchors selection capture until the next re-stamp.
+            keepOnSplit: false,
             parseHTML: (el) => el.getAttribute("data-anchor-id"),
             renderHTML: (attrs) =>
               attrs.anchorId ? { "data-anchor-id": attrs.anchorId } : {},

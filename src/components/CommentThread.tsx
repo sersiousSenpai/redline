@@ -6,13 +6,20 @@ import { listen } from "@tauri-apps/api/event";
 import { useAdjustDiscussionZoom } from "./DiscussionViewContext";
 import type {
   Comment,
+  CommentAttachment,
   ForkCancelledEvent,
   ForkDeltaEvent,
   ForkDoneEvent,
   ForkErrorEvent,
   ThreadMessage,
 } from "../types";
+import { useAttachmentCapture } from "../hooks/useAttachmentCapture";
+// The rider note a transcript produces — also used to detect that an attached
+// rider is stale (the discussion continued after attaching).
+import { transcriptNote } from "../lib/attachmentNote";
+import { AttachmentChips } from "./AttachmentChips";
 import { MarkdownView } from "./MarkdownView";
+import { WorkingIndicator } from "./WorkingIndicator";
 
 interface CommentThreadProps {
   /** The review session id — keys the fork backend with the comment id. */
@@ -71,6 +78,9 @@ export const CommentThread = memo(function CommentThread({
   const [enlarged, setEnlarged] = useState(true);
   const [loaded, setLoaded] = useState(false);
   const [draft, setDraft] = useState("");
+  // When the current wait began (set on send) — drives the WorkingIndicator's
+  // elapsed counter through the dead air before the first delta.
+  const [workStartedAt, setWorkStartedAt] = useState<number | null>(null);
   // When the reviewer manually collapses an expanded thread, suppress the
   // streaming auto-expand until the next send — otherwise a long Claude reply
   // keeps re-opening a thread they're deliberately trying to set aside.
@@ -103,6 +113,21 @@ export const CommentThread = memo(function CommentThread({
       .catch(() => {
         if (alive) setLoaded(true);
       });
+
+    // Streaming state is component-local, but the fork registry survives a
+    // session switch — seed from it so a remount mid-turn shows the spinner
+    // (and elapsed counter) again instead of a silently "idle" thread. The
+    // fork-* listeners below take over from the next event on.
+    void invoke<{ streaming: boolean; startedAt: number | null }>(
+      "fork_thread_status",
+      { scopeId: sessionId, itemId: commentId },
+    )
+      .then((s) => {
+        if (!alive || !s.streaming) return;
+        setStatus("streaming");
+        setWorkStartedAt(s.startedAt ?? Date.now());
+      })
+      .catch(() => {});
 
     const mine = (p: { sessionId: string; commentId: string }) =>
       p.sessionId === sessionId && p.commentId === commentId;
@@ -170,7 +195,7 @@ export const CommentThread = memo(function CommentThread({
     };
   }, [sessionId, commentId]);
 
-  function send(text: string) {
+  function send(text: string, attachments: CommentAttachment[] = []) {
     const trimmed = text.trim();
     if (!trimmed || status === "streaming") return;
     // Optimistic user turn — the backend also persists it.
@@ -184,10 +209,12 @@ export const CommentThread = memo(function CommentThread({
         body: trimmed,
         status: "complete",
         createdAt: Date.now(),
+        attachments: attachments.length > 0 ? attachments : undefined,
       },
     ]);
     setLiveText("");
     setStatus("streaming");
+    setWorkStartedAt(Date.now());
     // A fresh send re-grants the auto-expand-on-delta behavior — the user
     // just asked something, so they want to see the reply unfold.
     userCollapsedRef.current = false;
@@ -196,6 +223,9 @@ export const CommentThread = memo(function CommentThread({
       sessionId,
       commentId,
       text: trimmed,
+      // The fork has `Read`, so naming the paths is all it needs to look at
+      // what the reviewer just dropped in.
+      attachments: attachments.length > 0 ? attachments : null,
     }).catch((err) => {
       setStatus("error");
       setMessages((m) => [
@@ -217,14 +247,6 @@ export const CommentThread = memo(function CommentThread({
     void invoke("fork_thread_cancel", { sessionId, commentId }).catch(() => {});
   }
 
-  // The rider note a transcript would produce — also used to detect that the
-  // attached rider is stale (discussion continued after attaching).
-  function transcriptNote(transcript: ThreadMessage[]): string {
-    const body = transcript
-      .map((m) => `${m.role === "user" ? "Reviewer" : "Claude"}: ${m.body.trim()}`)
-      .join("\n\n");
-    return `Following a discussion with Claude:\n\n${body}`;
-  }
 
   // Route a read-only discussion into the main revise loop: attach the
   // transcript to the comment as its rider note, so the next Submit carries
@@ -386,17 +408,19 @@ export const CommentThread = memo(function CommentThread({
           >
             · {visible.length}
           </span>
-          {status === "streaming" && (
-            <span
-              className="normal-case"
-              style={{ color: "var(--color-ink-muted)", fontWeight: 400 }}
-            >
-              — streaming…
+          {/* Collapsed only — an expanded thread shows the body spinner
+              (with the elapsed counter) instead, never both at once. */}
+          {status === "streaming" && !expanded && (
+            <span className="normal-case" style={{ fontWeight: 400 }}>
+              <WorkingIndicator
+                compact
+                label={liveText ? "Streaming" : "Thinking"}
+              />
             </span>
           )}
           {/* The attached/sent flag lives on the discussion itself — the rider
-              IS this transcript, so there's nothing else to show. Visible
-              collapsed or expanded. */}
+              IS this transcript, so there's nothing else to show. The flag
+              stays visible collapsed or expanded. */}
           {riderAttached && (
             <span style={{ color: "var(--color-warning)" }}>
               {comment.actionable
@@ -478,15 +502,21 @@ export const CommentThread = memo(function CommentThread({
             {visible.map((m) => (
               <MessageBubble key={m.id} msg={m} />
             ))}
-            {status === "streaming" && <StreamingBubble text={liveText} />}
+            {status === "streaming" &&
+              (liveText ? (
+                <StreamingBubble text={liveText} />
+              ) : (
+                <WorkingIndicator startedAt={workStartedAt ?? undefined} />
+              ))}
           </div>
 
           <Composer
+            sessionId={sessionId}
             draft={draft}
             setDraft={setDraft}
             streaming={status === "streaming"}
-            onSend={() => {
-              send(draft);
+            onSend={(attachments) => {
+              send(draft, attachments);
               setDraft("");
             }}
             onStop={cancel}
@@ -612,6 +642,11 @@ function MessageBubble({ msg }: { msg: ThreadMessage }) {
       ) : (
         <MarkdownView body={msg.body} compact rich />
       )}
+      {/* What the reviewer attached to this turn — read-only in the
+          transcript; the fork was given the paths to read. */}
+      {msg.attachments && msg.attachments.length > 0 && (
+        <AttachmentChips attachments={msg.attachments} />
+      )}
     </div>
   );
 }
@@ -651,18 +686,28 @@ function StreamingBubble({ text }: { text: string }) {
 }
 
 function Composer({
+  sessionId,
   draft,
   setDraft,
   streaming,
   onSend,
   onStop,
 }: {
+  /** Scopes where a dropped/pasted file is copied. */
+  sessionId: string;
   draft: string;
   setDraft: (s: string) => void;
   streaming: boolean;
-  onSend: () => void;
+  /** Receives whatever files were captured for this turn; the parent clears
+   *  the draft and this clears its own chips. */
+  onSend: (attachments: CommentAttachment[]) => void;
   onStop: () => void;
 }) {
+  const files = useAttachmentCapture(sessionId);
+  const submit = () => {
+    onSend(files.attachments);
+    files.clear();
+  };
   // Auto-grow to fit content — no cap, no scrollbar. Recomputed on input and
   // whenever `draft` changes — the latter catches the parent's clear-on-send so
   // the box snaps back to its 2-row baseline.
@@ -675,7 +720,19 @@ function Composer({
   };
   useEffect(autosize, [draft]);
   return (
-    <div className="flex items-end gap-1.5">
+    <div ref={files.hostRef}>
+      {/* Same capture as the main composer: Tauri swallows HTML5 drops, so the
+          webview-level event does the work and each host hit-tests itself. */}
+      <AttachmentChips attachments={files.attachments} onRemove={files.remove} />
+      {files.error && (
+        <div
+          className="mb-1"
+          style={{ fontSize: "11px", color: "var(--color-warning)" }}
+        >
+          {files.error}
+        </div>
+      )}
+      <div className="flex items-end gap-1.5">
       <textarea
         ref={taRef}
         value={draft}
@@ -683,13 +740,14 @@ function Composer({
           setDraft(e.target.value);
           autosize();
         }}
+        onPaste={files.onPaste}
         onKeyDown={(e) => {
           if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
-            if (!streaming) onSend();
+            if (!streaming) submit();
           }
         }}
-        placeholder="Ask a follow-up…"
+        placeholder={files.dragOver ? "Drop to attach…" : "Ask a follow-up…"}
         rows={2}
         disabled={streaming}
         className="flex-1 rounded px-2 py-1"
@@ -721,7 +779,7 @@ function Composer({
       ) : (
         <button
           type="button"
-          onClick={onSend}
+          onClick={submit}
           disabled={!draft.trim()}
           className="rounded px-2 py-1 font-medium"
           style={{
@@ -734,6 +792,7 @@ function Composer({
           Send
         </button>
       )}
+      </div>
     </div>
   );
 }

@@ -1,6 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
+
+import { rafCoalesce } from "../lib/raf";
+import {
+  ArrowLeft,
+  ArrowRight,
+  ChevronDown,
+  Link2,
+  MessageSquare,
+  Palette,
+  Plus,
+  Settings,
+  Star,
+  Target,
+  X,
+} from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Window } from "@tauri-apps/api/window";
@@ -9,11 +24,13 @@ import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
 import { usePersistedState } from "../theme/usePersistedState";
 import { resolveOmniboxInput } from "../lib/omnibox";
 import type {
+  BinaryFile,
   BrowseFocusTabEvent,
   BrowseOpenTabEvent,
   BrowseWakeTabEvent,
   Mission,
 } from "../types";
+import { onResizeSession } from "../lib/resizeSession";
 import { SplitPane } from "./SplitPane";
 import { BrowserChat } from "./BrowserChat";
 import { MissionChat } from "./MissionChat";
@@ -63,7 +80,11 @@ export const clampChatRatio = (r: number): number =>
 // The embedded WKWebView's default user-agent omits the "Safari" token, so
 // sites (Google included) serve a legacy/basic layout. Presenting a current
 // Safari UA makes them serve the modern experience the engine can render.
-const SAFARI_UA =
+// Exported because the Localhost dashboard's thumbnail webview must present the
+// SAME identity as a real tab — a dev server's landing page served a legacy
+// layout would be captured as one, and the screenshot would not match what the
+// user sees when they click Open.
+export const SAFARI_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15";
 
 // Native webviews are expensive OS resources, and React StrictMode mounts →
@@ -219,6 +240,13 @@ interface BrowserPaneProps {
   /** Seed the Prompt Drafter with a synthesized mission brief (markdown → Tiptap
    *  doc), so the user shapes the real document and ships it to Claude Code. */
   onSynthesizeToDrafter?: (markdown: string) => void;
+  /** A request from elsewhere in the app to open a URL in a tab (today: "Open"
+   *  on a Localhost dashboard card). Deliberately a PROP and not a Tauri event
+   *  like `browse-open-tab`: this pane mounts only when the browser surface is
+   *  selected, so an event emitted at the moment of selection would fire before
+   *  the listener subscribes and be lost. `nonce` makes a repeat request for the
+   *  SAME url still count as a new one. */
+  openRequest?: { url: string; nonce: number } | null;
   /** Opaque token that changes whenever a SURROUNDING App pane toggles (comment
    *  pane, sidebar, doc-split orientation/visibility). These reflow the slot
    *  without a drag — and a `ResizeObserver` on the slot doesn't reliably catch
@@ -235,13 +263,14 @@ const hostnameOf = (u: string): string => {
   }
 };
 
-export function BrowserPane({
+function BrowserPaneBase({
   onClose,
   visible = true,
   projectDir = null,
   onSendToRedline,
   onSendToDrafter,
   onSynthesizeToDrafter,
+  openRequest = null,
   layoutKey,
 }: BrowserPaneProps) {
   const slotRef = useRef<HTMLDivElement | null>(null);
@@ -297,6 +326,11 @@ export function BrowserPane({
   // even when its webview is later suspended or gone. Fired on navigation and
   // when a tab is backgrounded.
   const snapTimersRef = useRef<Map<string, number>>(new Map());
+  // A picture of each tab, for the resize stand-in below. Kept as data URLs
+  // keyed by tab id, refreshed on the same settle the DOM snapshot uses.
+  const [tabShots, setTabShots] = useState<Map<string, string>>(
+    () => new Map(),
+  );
   const scheduleCacheSnapshot = useCallback((id: string, delay = 800) => {
     const timers = snapTimersRef.current;
     const prev = timers.get(id);
@@ -305,9 +339,37 @@ export function BrowserPane({
       id,
       window.setTimeout(() => {
         timers.delete(id);
-        void invoke("browser_cache_snapshot", {
-          label: `browser-${id}`,
-        }).catch(() => {});
+        const label = `browser-${id}`;
+        void invoke("browser_cache_snapshot", { label }).catch(() => {});
+        // Piggyback a picture on the same settle. Only the tab that is
+        // actually on screen: WebKit snapshots a hidden view blank, and a
+        // blank stand-in is worse than none. Deliberately here rather than at
+        // drag start — a capture then would be exactly the hitch we're
+        // removing, so a drag uses whatever picture already exists.
+        if (id !== activeIdRef.current || !visibleRef.current) return;
+        const el = slotRef.current;
+        const width = Math.round(el?.getBoundingClientRect().width ?? 0);
+        if (width < 64) return;
+        void (async () => {
+          try {
+            const shot = await invoke<{ path: string }>(
+              "browser_take_thumbnail",
+              { label, key: `tab-${id}`, width },
+            );
+            const file = await invoke<BinaryFile>("read_file_base64", {
+              path: shot.path,
+            });
+            if (!file.data) return;
+            const url = `data:image/png;base64,${file.data}`;
+            setTabShots((prev) => {
+              const next = new Map(prev);
+              next.set(id, url);
+              return next;
+            });
+          } catch {
+            /* no picture for this tab — the drag falls back to blank */
+          }
+        })();
       }, delay),
     );
   }, []);
@@ -401,6 +463,9 @@ export function BrowserPane({
   const [chatRatio, setChatRatio] = usePersistedState<number>(
     "redline.browser.chatRatio",
     0.62,
+    // The chat divider commits a ratio per frame while dragging; batch the
+    // localStorage writes so the drag stays main-thread-cheap.
+    { debounceMs: 250 },
   );
   // While dragging the chat divider, hide the native webview so it doesn't
   // swallow the pointer (same rule App uses for its document/browser split).
@@ -472,6 +537,14 @@ export function BrowserPane({
     !missionMenuOpen;
   const visibleRef = useRef(effectiveVisible);
   visibleRef.current = effectiveVisible;
+
+  // True for the length of any drag anywhere in the app. The native webview
+  // cannot ride a drag — it is a sibling OS view that always paints above the
+  // main webview and steals the pointer at the OS level, so DOM pointer capture
+  // can't save it and it must hide. What it must NOT do is leave a blank
+  // rectangle: for the duration, the tab's last picture stands in.
+  const [resizing, setResizing] = useState(false);
+  useEffect(() => onResizeSession(setResizing), []);
 
   // Persist the tab list (url/title/browseId) so a tab's discussion thread
   // reattaches after reload, and mirror it into the backend so the browse
@@ -1069,6 +1142,16 @@ export function BrowserPane({
     if ((e.target as HTMLElement).closest("button")) return;
     tabDragRef.current = { id, startX: e.clientX, moved: false };
     dragOverIdRef.current = null;
+    // `elementFromPoint` forces layout and `setDragOverId` re-renders the
+    // strip — both were running at raw pointer rate. One drop-target
+    // resolution per frame is all the highlight can show anyway.
+    const hitTest = rafCoalesce((x: number, y: number, selfId: string) => {
+      const el = document.elementFromPoint(x, y) as HTMLElement | null;
+      const over = el?.closest("[data-tab-id]") as HTMLElement | null;
+      const overId = over?.getAttribute("data-tab-id") ?? null;
+      dragOverIdRef.current = overId;
+      setDragOverId(overId ?? selfId);
+    });
     const onMove = (ev: PointerEvent) => {
       const st = tabDragRef.current;
       if (!st) return;
@@ -1078,15 +1161,12 @@ export function BrowserPane({
         setTabDragging(true);
         setDragOverId(st.id);
       }
-      const el = document.elementFromPoint(ev.clientX, ev.clientY) as
-        | HTMLElement
-        | null;
-      const over = el?.closest("[data-tab-id]") as HTMLElement | null;
-      const overId = over?.getAttribute("data-tab-id") ?? null;
-      dragOverIdRef.current = overId;
-      setDragOverId(overId ?? st.id);
+      hitTest(ev.clientX, ev.clientY, st.id);
     };
     const onUp = () => {
+      // Resolve the final drop target before reading it below, so a release
+      // inside the same frame as the last move still lands on the right tab.
+      hitTest.flush();
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       const st = tabDragRef.current;
@@ -1454,6 +1534,16 @@ export function BrowserPane({
     };
   }, []);
 
+  // An in-app request to open a URL (Localhost dashboard "Open"). Keyed on the
+  // nonce so the same URL asked for twice opens twice, and so a re-render with
+  // an unchanged request doesn't re-open anything.
+  const lastOpenNonceRef = useRef(0);
+  useEffect(() => {
+    if (!openRequest || openRequest.nonce === lastOpenNonceRef.current) return;
+    lastOpenNonceRef.current = openRequest.nonce;
+    openTabRef.current(openRequest.url, {});
+  }, [openRequest]);
+
   // The browse agent switches the user into an existing tab by emitting
   // `browse-focus-tab`. selectTab foregrounds it AND moves the discussion into
   // its thread — a full switch, exactly like clicking the tab.
@@ -1590,6 +1680,9 @@ export function BrowserPane({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tandem]);
 
+  // Lucide icons render at size 14 inside these (stroke currentColor, so the
+  // active-state tinting keeps working); inline-flex centers icon and text
+  // buttons alike.
   const chromeBtn: React.CSSProperties = {
     fontSize: "13px",
     lineHeight: 1,
@@ -1599,6 +1692,9 @@ export function BrowserPane({
     color: "var(--color-ink)",
     borderRadius: "4px",
     cursor: "pointer",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
   };
 
   return (
@@ -1689,9 +1785,11 @@ export function BrowserPane({
                   border: "none",
                   cursor: "pointer",
                   flexShrink: 0,
+                  display: "inline-flex",
+                  alignItems: "center",
                 }}
               >
-                ✕
+                <X size={12} strokeWidth={2} />
               </button>
             </div>
           );
@@ -1706,13 +1804,14 @@ export function BrowserPane({
             ...chromeBtn,
             border: "none",
             background: "transparent",
-            fontSize: "16px",
             flexShrink: 0,
+            display: "inline-flex",
+            alignItems: "center",
             opacity: tabs.length >= MAX_TABS ? 0.4 : 1,
             cursor: tabs.length >= MAX_TABS ? "default" : "pointer",
           }}
         >
-          +
+          <Plus size={15} strokeWidth={2} />
         </button>
       </div>
 
@@ -1732,7 +1831,7 @@ export function BrowserPane({
           aria-label="Back"
           onClick={() => evalActive("history.back()")}
         >
-          ◀
+          <ArrowLeft size={14} strokeWidth={2} />
         </button>
         <button
           type="button"
@@ -1741,7 +1840,7 @@ export function BrowserPane({
           aria-label="Forward"
           onClick={() => evalActive("history.forward()")}
         >
-          ▶
+          <ArrowRight size={14} strokeWidth={2} />
         </button>
         <form
           className="flex-1 flex gap-2"
@@ -1787,7 +1886,11 @@ export function BrowserPane({
           aria-haspopup="menu"
           onClick={openBookmarksMenu}
         >
-          {isBookmarked ? "★" : "☆"}
+          <Star
+            size={14}
+            strokeWidth={2}
+            fill={isBookmarked ? "currentColor" : "none"}
+          />
         </button>
         <button
           type="button"
@@ -1800,7 +1903,7 @@ export function BrowserPane({
           aria-haspopup="menu"
           onClick={openViewMenu}
         >
-          🎨
+          <Palette size={14} strokeWidth={2} />
         </button>
         <button
           type="button"
@@ -1813,7 +1916,7 @@ export function BrowserPane({
           aria-haspopup="menu"
           onClick={openSettingsMenu}
         >
-          ⚙️
+          <Settings size={14} strokeWidth={2} />
         </button>
         {/* 🎯 and the missions ▾ menu read as ONE control: a single bordered
             chip with two borderless segments split by a hairline, so there's no
@@ -1835,9 +1938,10 @@ export function BrowserPane({
               border: "none",
               background: "transparent",
               cursor: "pointer",
-              fontSize: "13px",
               lineHeight: 1,
               padding: "3px 6px",
+              display: "inline-flex",
+              alignItems: "center",
               // Fully rounded when it's the lone segment; left-rounded when the
               // ▾ menu sits beside it.
               borderRadius: missionShowMenu ? "3px 0 0 3px" : "3px",
@@ -1859,7 +1963,7 @@ export function BrowserPane({
               }
             }}
           >
-            🎯
+            <Target size={14} strokeWidth={2} />
           </button>
           {/* The ▾ missions menu (switch / resume / archive / start another)
               only earns its place once a mission exists to manage; with none,
@@ -1873,9 +1977,10 @@ export function BrowserPane({
                   border: "none",
                   background: "transparent",
                   cursor: "pointer",
-                  fontSize: "8px",
                   lineHeight: 1,
-                  padding: "0 5px",
+                  padding: "0 4px",
+                  display: "inline-flex",
+                  alignItems: "center",
                   borderRadius: "0 3px 3px 0",
                   color: mission.activeMission ? "var(--color-info)" : "var(--color-ink-muted)",
                 }}
@@ -1884,7 +1989,7 @@ export function BrowserPane({
                 aria-haspopup="menu"
                 onClick={() => setMissionMenuOpen((x) => !x)}
               >
-                ▾
+                <ChevronDown size={11} strokeWidth={2} />
               </button>
             </>
           )}
@@ -1952,7 +2057,7 @@ export function BrowserPane({
             }
           }}
         >
-          💬
+          <MessageSquare size={14} strokeWidth={2} />
         </button>
         <button
           type="button"
@@ -1975,7 +2080,7 @@ export function BrowserPane({
             }
           }}
         >
-          🔗
+          <Link2 size={14} strokeWidth={2} />
         </button>
         <button
           type="button"
@@ -1984,7 +2089,7 @@ export function BrowserPane({
           aria-label="Close browser"
           onClick={onClose}
         >
-          ✕
+          <X size={14} strokeWidth={2} />
         </button>
       </div>
         </>
@@ -1995,6 +2100,13 @@ export function BrowserPane({
           webview shares the pane with the chat (the webview tracks the slot's
           rect, so it resizes automatically). */}
       {(() => {
+        // The stand-in. Shown only while the real webview is actually hidden,
+        // so it can never sit under a live page. `cover` + a top-left origin
+        // means it clips as the slot changes shape instead of distorting —
+        // the page appears to be masked by the drag, which is what a page
+        // being resized looks like. No fresh capture is taken here; if this
+        // tab has no picture yet the pane is blank exactly as before.
+        const shot = resizing && !effectiveVisible ? tabShots.get(activeId) : undefined;
         const slot = (
           <div
             ref={slotRef}
@@ -2010,7 +2122,25 @@ export function BrowserPane({
                   }
                 : { background: "var(--color-paper)" }
             }
-          />
+          >
+            {shot && (
+              <img
+                src={shot}
+                alt=""
+                aria-hidden
+                draggable={false}
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  width: "100%",
+                  height: "100%",
+                  objectFit: "cover",
+                  objectPosition: "top left",
+                  pointerEvents: "none",
+                }}
+              />
+            )}
+          </div>
         );
         // Fullscreen takes over the whole pane — no chat split, just the slot.
         if (browserFullscreen || !chatOpen) return slot;
@@ -2158,6 +2288,9 @@ function DiscussionSwitcher({
     color: active ? "var(--color-on-accent)" : "var(--color-ink-muted)",
     cursor: "pointer",
     whiteSpace: "nowrap",
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "4px",
   });
   return (
     <div
@@ -2165,13 +2298,14 @@ function DiscussionSwitcher({
       style={{ borderBottom: "1px solid var(--color-rule)", background: "var(--color-bg-elevated)" }}
     >
       <button type="button" style={pill(tab === "page")} onClick={() => setTab("page")}>
-        💬 This page
+        <MessageSquare size={11} strokeWidth={2} /> This page
       </button>
       <button type="button" style={pill(tab === "mission")} onClick={() => setTab("mission")}>
-        🎯 Mission{hasMission && pinCount > 0 ? ` · ${pinCount}` : ""}
+        <Target size={11} strokeWidth={2} /> Mission
+        {hasMission && pinCount > 0 ? ` · ${pinCount}` : ""}
       </button>
       <button type="button" style={pill(tab === "linked")} onClick={() => setTab("linked")}>
-        🔗 Linked
+        <Link2 size={11} strokeWidth={2} /> Linked
       </button>
     </div>
   );
@@ -2181,7 +2315,7 @@ function DiscussionSwitcher({
 function LinkedEmptyState({ onStart }: { onStart: () => void }) {
   return (
     <div className="flex flex-col items-center justify-center h-full gap-3 px-6 text-center">
-      <span style={{ fontSize: "28px" }}>🔗</span>
+      <Link2 size={28} strokeWidth={1.5} style={{ color: "var(--color-ink-muted)" }} />
       <p style={{ fontSize: "12px", color: "var(--color-ink-muted)", lineHeight: 1.5 }}>
         A linked discussion is one conversation that follows you across every tab.
         Switch tabs and keep talking — it carries the thread and checks in with a
@@ -2193,7 +2327,7 @@ function LinkedEmptyState({ onStart }: { onStart: () => void }) {
         className="rounded px-3 py-1.5 font-medium"
         style={{ fontSize: "12px", background: "var(--color-info)", color: "var(--color-on-accent)" }}
       >
-        Start a linked discussion 🔗
+        Start a linked discussion
       </button>
     </div>
   );
@@ -2203,7 +2337,7 @@ function LinkedEmptyState({ onStart }: { onStart: () => void }) {
 function MissionEmptyState({ onStart }: { onStart: () => void }) {
   return (
     <div className="flex flex-col items-center justify-center h-full gap-3 px-6 text-center">
-      <span style={{ fontSize: "28px" }}>🎯</span>
+      <Target size={28} strokeWidth={1.5} style={{ color: "var(--color-ink-muted)" }} />
       <p style={{ fontSize: "12px", color: "var(--color-ink-muted)", lineHeight: 1.5 }}>
         A mission gives your browsing one goal. An orchestrator watches every tab,
         gathers what you pin, and helps you synthesize it toward that goal.
@@ -2214,7 +2348,7 @@ function MissionEmptyState({ onStart }: { onStart: () => void }) {
         className="rounded px-3 py-1.5 font-medium"
         style={{ fontSize: "12px", background: "var(--color-info)", color: "var(--color-on-accent)" }}
       >
-        Start a mission 🎯
+        Start a mission
       </button>
     </div>
   );
@@ -2323,3 +2457,7 @@ function MissionMenu({
     </>
   );
 }
+
+/** Memoized: one of the center-pane surfaces that used to reconcile on
+ *  every frame of a divider drag. */
+export const BrowserPane = memo(BrowserPaneBase);

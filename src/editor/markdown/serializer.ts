@@ -2,6 +2,7 @@
 // Copyright 2026 Yusuf Al-Bazian
 import type { Node as PMNode } from "@tiptap/pm/model";
 
+import { orderedMarker } from "../listMarkers";
 import { sidecarComment } from "./sidecar";
 
 export interface SerializeOptions {
@@ -20,51 +21,16 @@ export function planDocToMarkdown(
   doc: PMNode,
   opts: SerializeOptions = { sidecars: false },
 ): string {
-  const footnotes = collectFootnotes(doc);
-  footnoteOrdinals = footnotes.map;
-  try {
-    const parts: string[] = [];
-    doc.forEach((block) => {
-      const body = serializeBlock(block, "");
-      if (opts.sidecars && block.attrs && block.attrs.blockId) {
-        parts.push(`${sidecarComment(block.attrs.blockId)}\n${body}`);
-      } else {
-        parts.push(body);
-      }
-    });
-    let out = parts.join("\n\n") + "\n";
-    // Footnote definitions trail the document as a pandoc/GFM block.
-    if (footnotes.texts.length) {
-      const defs = footnotes.texts
-        .map((t, i) => `[^${i + 1}]: ${t}`)
-        .join("\n");
-      out += `\n${defs}\n`;
-    }
-    return out;
-  } finally {
-    footnoteOrdinals = null;
-  }
-}
-
-// Footnote references need a document-global ordinal and a trailing definitions
-// block, neither of which the recursive per-block walk can see. A pre-pass maps
-// each footnote node (by identity — stable within one synchronous serialize
-// pass) to its 1-based ordinal; `serializeInline` reads it to emit `[^n]`.
-let footnoteOrdinals: Map<PMNode, number> | null = null;
-
-function collectFootnotes(root: PMNode): {
-  map: Map<PMNode, number>;
-  texts: string[];
-} {
-  const map = new Map<PMNode, number>();
-  const texts: string[] = [];
-  root.descendants((n) => {
-    if (n.type.name === "footnote") {
-      map.set(n, texts.length + 1);
-      texts.push((n.attrs.text as string) || "");
+  const parts: string[] = [];
+  doc.forEach((block) => {
+    const body = serializeBlock(block, "");
+    if (opts.sidecars && block.attrs && block.attrs.blockId) {
+      parts.push(`${sidecarComment(block.attrs.blockId)}\n${body}`);
+    } else {
+      parts.push(body);
     }
   });
-  return { map, texts };
+  return parts.join("\n\n") + "\n";
 }
 
 /** Clean markdown for one block (no sidecar) — the value that maps to an
@@ -153,68 +119,6 @@ function serializeList(
   return lines.join("\n");
 }
 
-// The visible marker (with trailing space) for one ordered-list item, matching
-// the on-screen `list-style`. A null/`decimal` style keeps the canonical `1. `
-// form so plan documents — which never carry `listStyle` — serialize exactly as
-// before. Non-decimal styles emit their faithful glyph so the authored outline
-// (Roman numerals, letters, parenthetical markers) survives into the prompt.
-function orderedMarker(style: string | null, value: number): string {
-  if (!style || style === "decimal") return `${value}. `;
-  const sym = orderedSymbol(style, value);
-  if (style.endsWith("-parenthetical")) return `(${sym}) `;
-  if (style.endsWith("-paren")) return `${sym}) `;
-  return `${sym}. `;
-}
-
-function orderedSymbol(style: string, value: number): string {
-  if (style.startsWith("lower-alpha")) return toAlpha(value);
-  if (style.startsWith("upper-alpha")) return toAlpha(value).toUpperCase();
-  if (style.startsWith("lower-roman")) return toRoman(value);
-  if (style.startsWith("upper-roman")) return toRoman(value).toUpperCase();
-  if (style.startsWith("lower-greek")) return toGreek(value);
-  if (style.startsWith("decimal-leading-zero"))
-    return value < 10 ? `0${value}` : `${value}`;
-  return `${value}`;
-}
-
-// 1 → "a", 26 → "z", 27 → "aa" (bijective base-26), mirroring CSS `lower-alpha`.
-function toAlpha(n: number): string {
-  if (n <= 0) return `${n}`;
-  let s = "";
-  let x = n;
-  while (x > 0) {
-    const rem = (x - 1) % 26;
-    s = String.fromCharCode(97 + rem) + s;
-    x = Math.floor((x - 1) / 26);
-  }
-  return s;
-}
-
-const ROMAN: [number, string][] = [
-  [1000, "m"], [900, "cm"], [500, "d"], [400, "cd"], [100, "c"], [90, "xc"],
-  [50, "l"], [40, "xl"], [10, "x"], [9, "ix"], [5, "v"], [4, "iv"], [1, "i"],
-];
-
-function toRoman(n: number): string {
-  if (n <= 0) return `${n}`;
-  let r = "";
-  let x = n;
-  for (const [v, s] of ROMAN) {
-    while (x >= v) {
-      r += s;
-      x -= v;
-    }
-  }
-  return r;
-}
-
-// The 24-letter lowercase Greek alphabet, matching CSS `lower-greek`. Past ω it
-// falls back to the number (CSS would continue αα… — a rare, acceptable drift).
-const GREEK = "αβγδεζηθικλμνξοπρστυφχψω";
-function toGreek(n: number): string {
-  return n >= 1 && n <= GREEK.length ? GREEK[n - 1] : `${n}`;
-}
-
 function serializeTable(table: PMNode): string {
   const rows: string[][] = [];
   table.forEach((row) => {
@@ -248,11 +152,6 @@ function serializeInline(node: PMNode): string {
     if (child.type.name === "hardBreak") {
       flush();
       out += "\\\n";
-      return;
-    }
-    if (child.type.name === "footnote") {
-      flush();
-      out += `[^${footnoteOrdinals?.get(child) ?? 1}]`;
       return;
     }
     if (child.isText) {

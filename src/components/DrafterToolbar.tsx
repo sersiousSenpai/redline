@@ -20,17 +20,18 @@ import {
   Link as LinkIcon,
   List,
   ListOrdered,
+  MessageSquare,
   Minus,
   MoveVertical,
   Redo2,
   Strikethrough,
-  Superscript,
   Table as TableIcon,
   Underline as UnderlineIcon,
   Undo2,
 } from "lucide-react";
 
 import { FONTS } from "../theme/fonts";
+import { applyLink } from "../editor/drafterInserts";
 
 // A persistent Word-style formatting ribbon for the Prompt Drafter. Every
 // control drives the live Tiptap editor through `editor.chain().focus()…` and
@@ -42,6 +43,10 @@ import { FONTS } from "../theme/fonts";
 
 interface DrafterToolbarProps {
   editor: Editor | null;
+  /** The comment sidecar toggle (moved here from the old fat footer). */
+  sidecarOpen?: boolean;
+  onToggleSidecar?: () => void;
+  commentCount?: number;
 }
 
 const ICON = 16;
@@ -212,6 +217,83 @@ function MenuRow({
   );
 }
 
+// An anchored popover holding a single text input — the ribbon's replacement
+// for window.prompt, which WKWebView implements as a silent null. Unlike
+// RibbonMenu the panel must NOT suppress mousedown: the input has to take
+// focus. ProseMirror keeps the selection while the editor is blurred, and the
+// commit path re-focuses it.
+function RibbonInputPopover({
+  title,
+  placeholder,
+  initialValue,
+  onCommit,
+  onClose,
+}: {
+  title: string;
+  placeholder: string;
+  initialValue: string;
+  onCommit: (value: string) => void;
+  onClose: () => void;
+}) {
+  const [value, setValue] = useState(initialValue);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node))
+        onClose();
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [onClose]);
+
+  return (
+    <div
+      ref={rootRef}
+      role="dialog"
+      aria-label={title}
+      className="rl-ribbon-pop"
+      style={{ minWidth: "240px", padding: "8px" }}
+    >
+      <div
+        style={{
+          fontSize: "11px",
+          color: "var(--color-ink-muted)",
+          marginBottom: "6px",
+        }}
+      >
+        {title}
+      </div>
+      <input
+        ref={inputRef}
+        type="text"
+        value={value}
+        placeholder={placeholder}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => {
+          e.stopPropagation();
+          if (e.key === "Enter") {
+            e.preventDefault();
+            onCommit(value);
+            onClose();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            onClose();
+          }
+        }}
+        className="rl-search-input"
+        style={{ width: "100%" }}
+      />
+    </div>
+  );
+}
+
 // Standard font-color palette. Absolute colors (not theme tokens): font color
 // is an explicit author choice, like Word's swatches. "Automatic" clears it.
 const TEXT_COLORS = [
@@ -284,6 +366,7 @@ const ORDERED_STYLE_GROUPS: {
     styles: [
       { key: "decimal", preview: "1. 2. 3." },
       { key: "decimal-paren", preview: "1) 2) 3)" },
+      { key: "decimal-parenthetical", preview: "(1) (2) (3)" },
       { key: "decimal-leading-zero", preview: "01. 02. 03." },
     ],
   },
@@ -384,38 +467,24 @@ const LINE_SPACINGS: { label: string; value: string }[] = [
   { label: "Double", value: "2" },
 ];
 
-export function DrafterToolbar({ editor }: DrafterToolbarProps) {
+export function DrafterToolbar({
+  editor,
+  sidecarOpen = false,
+  onToggleSidecar,
+  commentCount = 0,
+}: DrafterToolbarProps) {
   const disabled = !editor;
 
-  const setLink = () => {
+  // The link input popover, with its prefill. Commits through applyLink.
+  const [inputPop, setInputPop] = useState<null | {
+    kind: "link";
+    initial: string;
+  }>(null);
+
+  const openLinkPop = () => {
     if (!editor) return;
     const prev = editor.getAttributes("link").href as string | undefined;
-    const url = window.prompt("Link URL", prev ?? "https://");
-    if (url === null) return; // cancelled
-    if (url === "") {
-      editor.chain().focus().extendMarkRange("link").unsetLink().run();
-      return;
-    }
-    editor
-      .chain()
-      .focus()
-      .extendMarkRange("link")
-      .setLink({ href: url })
-      .run();
-  };
-
-  // Insert a new footnote, or edit the one currently selected. Uses
-  // window.prompt like the link control — no extra popover to manage.
-  const footnote = () => {
-    if (!editor) return;
-    const editing = editor.isActive("footnote");
-    const prev = editing
-      ? (editor.getAttributes("footnote").text as string | undefined)
-      : "";
-    const text = window.prompt("Footnote text", prev ?? "");
-    if (text === null) return; // cancelled
-    if (editing) editor.chain().focus().updateFootnote(text).run();
-    else editor.chain().focus().insertFootnote(text).run();
+    setInputPop({ kind: "link", initial: prev ?? "https://" });
   };
 
   // Live reflections of the current selection for the dropdown labels.
@@ -971,24 +1040,25 @@ export function DrafterToolbar({ editor }: DrafterToolbarProps) {
             </>
           )}
         </RibbonMenu>
-        <ToolButton
-          title="Link"
-          disabled={disabled}
-          active={editor?.isActive("link")}
-          onClick={setLink}
-        >
-          <LinkIcon size={ICON} strokeWidth={STROKE} />
-        </ToolButton>
-        <ToolButton
-          title={
-            editor?.isActive("footnote") ? "Edit footnote" : "Insert footnote"
-          }
-          disabled={disabled}
-          active={editor?.isActive("footnote")}
-          onClick={footnote}
-        >
-          <Superscript size={ICON} strokeWidth={STROKE} />
-        </ToolButton>
+        <div style={{ position: "relative" }}>
+          <ToolButton
+            title="Link"
+            disabled={disabled}
+            active={editor?.isActive("link")}
+            onClick={openLinkPop}
+          >
+            <LinkIcon size={ICON} strokeWidth={STROKE} />
+          </ToolButton>
+          {inputPop?.kind === "link" && (
+            <RibbonInputPopover
+              title="Link URL — empty removes the link"
+              placeholder="https://"
+              initialValue={inputPop.initial}
+              onCommit={(url) => editor && applyLink(editor, url)}
+              onClose={() => setInputPop(null)}
+            />
+          )}
+        </div>
         <ToolButton
           title="Horizontal divider"
           disabled={disabled}
@@ -1010,6 +1080,45 @@ export function DrafterToolbar({ editor }: DrafterToolbarProps) {
           <Eraser size={ICON} strokeWidth={STROKE} />
         </ToolButton>
       </Group>
+
+      {/* Comments — the sidecar toggle, with a count badge when any exist. */}
+      {onToggleSidecar && (
+        <Group>
+          <ToolButton
+            title={
+              sidecarOpen
+                ? "Close the comment sidecar"
+                : "Comments anchored to this draft"
+            }
+            active={sidecarOpen}
+            onClick={onToggleSidecar}
+            style={{ position: "relative" }}
+          >
+            <MessageSquare size={ICON} strokeWidth={STROKE} />
+            {commentCount > 0 && (
+              <span
+                aria-hidden
+                style={{
+                  position: "absolute",
+                  top: "1px",
+                  right: "1px",
+                  minWidth: "13px",
+                  height: "13px",
+                  padding: "0 3px",
+                  borderRadius: "7px",
+                  fontSize: "9px",
+                  lineHeight: "13px",
+                  fontWeight: 600,
+                  background: "var(--color-info)",
+                  color: "var(--color-on-accent)",
+                }}
+              >
+                {commentCount > 99 ? "99+" : commentCount}
+              </span>
+            )}
+          </ToolButton>
+        </Group>
+      )}
     </div>
   );
 }

@@ -6,6 +6,10 @@ authors = ["Yusuf Al-Bazian"]
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/sersiousSenpai/redline"
+# Two binaries now ship: the Tauri app (`redline`, from src/main.rs) and the
+# `redline-mcp` stdio proxy (src/bin/). `cargo run` / `tauri dev` invoke cargo
+# without `--bin`, so name the app as the default to keep them unambiguous.
+default-run = "redline"
 
 [lib]
 name = "redline_lib"
@@ -34,6 +38,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 pulldown-cmark = "0.10"
 rusqlite = { version = "0.31", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
+# SHA-256 for the append-only prompt/decision ledger's hash chain
+# (entry_hash = sha256(prev_hash ‖ canonical-json(event))). Not previously a dep.
+sha2 = "0.10"
 similar = "2"
 portable-pty = "0.8"
 base64 = "0.22"
@@ -56,11 +63,15 @@ two-face = { version = "0.5", default-features = false, features = ["syntect-def
 # HTTP client for the voice agent's premium (cloud) TTS — the synth call is made
 # from Rust so the user's API key never enters the webview and there's no browser
 # CORS. Default TLS (Security.framework on macOS), JSON bodies.
-reqwest = { version = "0.13.4", features = ["json"] }
+# `blocking` is used by the `redline-mcp` stdio proxy binary (src/bin/), which
+# forwards MCP tool calls to the localhost daemon over synchronous GETs — a
+# simple stdin→HTTP→stdout loop needs no async runtime.
+reqwest = { version = "0.13.4", features = ["json", "blocking"] }
 # Resample the microphone's hardware-rate PCM (44.1/48 kHz) down to the 16 kHz
 # mono Whisper expects. Pure Rust (no C build); used by the batch Whisper
 # dictation backend to prepare the accumulated utterance before inference.
 rubato = "0.16"
+tauri-plugin-deep-link = "2.4.9"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Local Whisper (whisper.cpp) speech-to-text as the higher-quality, pluggable
@@ -93,10 +104,15 @@ objc2-foundation = "0.3.2" # NSString/NSLocale/NSError bridging
 # (OAuth/SSO popup) support: our own `WKUIDelegate` returns a real WebKit-created
 # child webview from `createWebView…` — the only way `window.opener`,
 # `window.close()`, and `.closed` work — and hosts it in a floating `NSWindow`.
-# Feature lists mirror wry 0.55's exactly (same crate versions already resolved
-# in the tree), so Cargo feature-unification adds no extra build and every class
-# our delegate touches is guaranteed present. Without this, WebKit routes those
-# requests to wry's UI delegate, which has no new-window handler and drops them.
+# The feature lists are wry 0.55's (same crate versions already resolved in the
+# tree, so Cargo feature-unification adds no extra build and every class the
+# delegate touches is guaranteed present) PLUS the few `thumbs.rs` needs for the
+# Localhost dashboard's screenshots — `WKSnapshotConfiguration` to ask WebKit for
+# a downscaled snapshot, and the NSImage/NSImageRep/NSBitmapImageRep trio to
+# encode the result as PNG. Both additions are purely additive: they pull only
+# objc2-foundation features already switched on, so the build cost is unchanged.
+# Without the wry-matching baseline, WebKit routes new-window requests to wry's
+# UI delegate, which has no new-window handler and drops them.
 objc2-web-kit = { version = "0.3.2", default-features = false, features = [
     "std", "objc2-core-foundation", "objc2-app-kit", "block2",
     "WKWebView", "WKWebViewConfiguration", "WKWebsiteDataStore", "WKDownload",
@@ -106,10 +122,16 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = [
     "WKOpenPanelParameters", "WKFrameInfo", "WKSecurityOrigin", "WKScriptMessage",
     "WKNavigationAction", "WKWebpagePreferences", "WKNavigationResponse",
     "WKUserScript", "WKHTTPCookieStore", "WKWindowFeatures",
+    "WKSnapshotConfiguration",
 ] }
+# NSImage arrives transitively via objc2-web-kit's `objc2-app-kit` feature, but
+# name it explicitly — `NSImageRep` is what gates the `representationUsingType:
+# properties:` impl block we call, and a feature we depend on shouldn't be
+# somebody else's implementation detail.
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "std", "objc2-core-foundation", "NSApplication", "NSButton", "NSControl",
     "NSEvent", "NSWindow", "NSView", "NSPasteboard", "NSPanel", "NSResponder",
     "NSOpenPanel", "NSSavePanel", "NSMenu", "NSGraphics", "NSScreen",
+    "NSImage", "NSImageRep", "NSBitmapImageRep",
 ] }
 

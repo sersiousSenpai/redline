@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 
 import type { RevisionSummary, SessionSummary } from "../types";
 import type { JoinedSessionInfo } from "../collab/useJoinedSession";
@@ -33,6 +33,11 @@ interface SessionSidebarProps {
   /** Which revision is currently displayed in the pane for the active
    *  session. `null` means the latest. Used to highlight the row. */
   viewedVersionNumber: number | null;
+  /** Sessions whose newly-intercepted plan the reviewer hasn't looked at yet.
+   *  An intercept normally pulls the plan straight into the foreground; when a
+   *  live discussion suppresses that (see App's `plan-received` handler), this
+   *  pulsing dot is what keeps the arrival discoverable. Cleared on select. */
+  unseenIds?: ReadonlySet<string>;
 }
 
 const STATUS_COLORS: Record<SessionSummary["status"], string> = {
@@ -55,7 +60,7 @@ function formatTime(ms: number): string {
   });
 }
 
-export function SessionSidebar({
+function SessionSidebarBase({
   sessions,
   activeId,
   pendingCounts,
@@ -67,6 +72,7 @@ export function SessionSidebar({
   onExport,
   onSelectRevision,
   viewedVersionNumber,
+  unseenIds,
 }: SessionSidebarProps) {
   // Which sessions are expanded to show their revision tree. The active
   // session auto-expands so its history is visible the moment it's selected.
@@ -134,6 +140,7 @@ export function SessionSidebar({
               active={s.sessionId === activeId}
               expanded={expanded.has(s.sessionId)}
               pending={pendingCounts[s.sessionId] ?? 0}
+              unseen={unseenIds?.has(s.sessionId) ?? false}
               viewedVersionNumber={
                 s.sessionId === activeId ? viewedVersionNumber : null
               }
@@ -258,6 +265,7 @@ function SessionRow({
   active,
   expanded,
   pending,
+  unseen = false,
   viewedVersionNumber,
   onClick,
   onToggleExpand,
@@ -269,6 +277,8 @@ function SessionRow({
   active: boolean;
   expanded: boolean;
   pending: number;
+  /** A plan arrived for this session but the reviewer was never taken to it. */
+  unseen?: boolean;
   /** Which revision the active pane is viewing — only relevant on the active
    *  session row, used to highlight the corresponding RevisionRow. */
   viewedVersionNumber: number | null;
@@ -284,28 +294,33 @@ function SessionRow({
     session.revisions,
     session.latestVersion,
   );
+  // Only multi-revision sessions get a disclosure affordance — a single
+  // revision has no tree to reveal, so the row stays flat.
+  const expandable = session.revisions.length > 1;
 
   return (
     <li className="relative group">
       {/* Disclosure chevron — toggles the revision tree without selecting. */}
-      <button
-        type="button"
-        aria-label={expanded ? "Collapse revisions" : "Expand revisions"}
-        title={expanded ? "Hide revisions" : "Show revisions"}
-        onClick={(e) => {
-          e.stopPropagation();
-          onToggleExpand();
-        }}
-        className="absolute left-1 top-2 z-10 px-1"
-        style={{
-          color: "var(--color-ink-muted)",
-          fontSize: "10px",
-          lineHeight: 1.6,
-          cursor: "pointer",
-        }}
-      >
-        {expanded ? "▾" : "▸"}
-      </button>
+      {expandable && (
+        <button
+          type="button"
+          aria-label={expanded ? "Collapse revisions" : "Expand revisions"}
+          title={expanded ? "Hide revisions" : "Show revisions"}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleExpand();
+          }}
+          className="absolute left-1 top-2 z-10 px-1"
+          style={{
+            color: "var(--color-ink-muted)",
+            fontSize: "10px",
+            lineHeight: 1.6,
+            cursor: "pointer",
+          }}
+        >
+          {expanded ? "▾" : "▸"}
+        </button>
+      )}
       {confirming ? (
         <div
           className="absolute right-3 top-2 z-10 flex items-center gap-1"
@@ -434,6 +449,21 @@ function SessionRow({
           className="flex items-center gap-2"
           style={{ fontSize: "10px", color: "var(--color-ink-muted)" }}
         >
+          {/* A plan landed here while the reviewer was mid-discussion
+              elsewhere, so nothing pulled them over. Reuses the app's existing
+              pulse keyframes (reduced-motion aware). */}
+          {unseen && (
+            <span
+              className="rl-pulse rounded-full shrink-0"
+              title="A new plan was intercepted for this session"
+              aria-label="New plan intercepted"
+              style={{
+                width: "6px",
+                height: "6px",
+                background: "var(--color-info)",
+              }}
+            />
+          )}
           <span
             style={{
               color: STATUS_COLORS[session.status],
@@ -478,7 +508,7 @@ function SessionRow({
           )}
         </div>
       </button>
-      {expanded && (
+      {expandable && expanded && (
         <ul className="border-b" style={{ borderColor: "var(--color-rule)" }}>
           {session.revisions.map((r, idx) => {
             const info = display.get(r.versionNumber);
@@ -622,3 +652,7 @@ function RevisionRow({
     </li>
   );
 }
+
+/** Memoized: the sidebar reconciles the whole session list, and a sidebar
+ *  drag changes only its width. */
+export const SessionSidebar = memo(SessionSidebarBase);

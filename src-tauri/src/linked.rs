@@ -29,7 +29,10 @@ use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdout};
 
-use crate::claude_proc::{bridge_args, classify_line, claude_command, resolve_claude_bin, StreamLine};
+use crate::claude_proc::{
+    bridge_args, classify_line, mission_context_block, resolve_claude_bin,
+    StreamLine,
+};
 use crate::db::Database;
 use crate::state::{now_millis, Linked, LinkedMessage};
 
@@ -78,6 +81,128 @@ impl LinkedState {
         for mut proc in drained {
             let _ = proc.child.start_kill();
         }
+    }
+
+    /// "Check in with a colleague" for the Companion's `/v1/global/consult`:
+    /// run THIS linked discussion to completion with a synthesis-framed
+    /// question and return only its digest. Mirrors `BrowseState::consult`;
+    /// check-in + digest rows land in the linked thread (untabbed — the
+    /// visit isn't tied to any browser tab).
+    pub async fn consult(&self, linked_id: String, question: String) -> Result<String, String> {
+        if question.trim().is_empty() {
+            return Err("nothing to ask the colleague".to_string());
+        }
+        {
+            let guard = self.procs.lock().unwrap();
+            if guard.contains_key(&linked_id) {
+                return Err(
+                    "the linked discussion is busy — try again in a moment".to_string(),
+                );
+            }
+        }
+        let prior_session = self.db.get_linked_session(&linked_id);
+
+        let check_in = LinkedMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            linked_id: linked_id.clone(),
+            role: "user".to_string(),
+            body: format!("🧭 Companion checking in — {}", question.trim()),
+            status: "complete".to_string(),
+            tab_browse_id: None,
+            tab_n: None,
+            tab_title: None,
+            tab_url: None,
+            created_at: now_millis(),
+        };
+        if let Err(e) = self.db.insert_linked_message(&check_in) {
+            tracing::warn!(error = %e, "failed to persist consult check-in");
+        }
+
+        let framed = format!(
+            "The user's COMPANION — their global cross-surface discussion — is \
+             checking in with you about THIS linked discussion. Synthesize what \
+             matters here for their question as a tight DIGEST (not a \
+             transcript, not a fresh reply to the user). Be concise. Their \
+             question:\n\n{}",
+            question.trim()
+        );
+        let prompt = match &prior_session {
+            None => build_first_turn_prompt(&TabContext::default(), None, &framed, None),
+            Some(_) => framed.clone(),
+        };
+        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+
+        let args = bridge_args("linked", prompt, prior_session.as_deref());
+        let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+        let claude_bin = self.claude_bin().await?;
+        let mut cmd = crate::claude_proc::claude_command_for_seat("linked", &claude_bin);
+        let mut child = cmd
+            .current_dir(&cwd)
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| format!("failed to spawn claude: {e}"))?;
+        let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
+        let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
+        {
+            self.procs
+                .lock()
+                .unwrap()
+                .insert(linked_id.clone(), LinkedProc { child });
+        }
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(180),
+            crate::claude_proc::collect_turn(stdout, stderr),
+        )
+        .await;
+        let proc = { self.procs.lock().unwrap().remove(&linked_id) };
+        let outcome = match outcome {
+            Ok(o) => o,
+            Err(_) => {
+                if let Some(mut p) = proc {
+                    let _ = p.child.start_kill();
+                }
+                let _ = self.db.record_friction(
+                    "turn_timeout",
+                    Some("linked"),
+                    Some(&linked_id),
+                    Some("180s turn ceiling"),
+                );
+                return Err("the colleague took too long to respond".to_string());
+            }
+        };
+        if let Some(mut p) = proc {
+            let _ = p.child.wait().await;
+        }
+        if let Some(err) = outcome.errored {
+            return Err(err);
+        }
+        let Some(text) = outcome.final_text.filter(|t| !t.trim().is_empty()) else {
+            return Err("the colleague produced no reply".to_string());
+        };
+        if let Some(sid) = &outcome.session {
+            let _ = self.db.set_linked_session(&linked_id, sid);
+        }
+        let reply = LinkedMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            linked_id: linked_id.clone(),
+            role: "assistant".to_string(),
+            body: text.clone(),
+            status: "complete".to_string(),
+            tab_browse_id: None,
+            tab_n: None,
+            tab_title: None,
+            tab_url: None,
+            created_at: now_millis(),
+        };
+        if let Err(e) = self.db.insert_linked_message(&reply) {
+            tracing::warn!(error = %e, "failed to persist consult reply");
+        }
+        Ok(text)
     }
 }
 
@@ -145,7 +270,12 @@ impl TabContext {
 /// live snapshot for grounding, the cross-tab read routes, the CONSULT mechanism
 /// (how to check in with a colleague), and the user's message. Follow-up turns
 /// re-ground on the current tab (`build_followup_prompt`) since it changes.
-fn build_first_turn_prompt(tab: &TabContext, snapshot: Option<&str>, user_text: &str) -> String {
+fn build_first_turn_prompt(
+    tab: &TabContext,
+    snapshot: Option<&str>,
+    user_text: &str,
+    mission: Option<(&str, &str)>,
+) -> String {
     let mut p = String::from(
         "You are ONE continuous discussion that follows the user across the tabs \
          of Redline's embedded browser. Unlike a page discussion (bound to one \
@@ -154,6 +284,9 @@ fn build_first_turn_prompt(tab: &TabContext, snapshot: Option<&str>, user_text: 
          currently on; weave the thread across tabs as they move, referring back \
          to what you saw on earlier tabs by number and title.\n\n",
     );
+    // A linked discussion has no goal of its OWN, but it can still run inside an
+    // active mission — when it does, orient the spanning conversation to that goal.
+    p.push_str(&mission_context_block(mission));
     p.push_str(&format!(
         "The user is currently on {}.\n\n",
         tab.describe()
@@ -168,7 +301,11 @@ fn build_first_turn_prompt(tab: &TabContext, snapshot: Option<&str>, user_text: 
     p.push_str(
         "You can see and read across every open tab by calling these local \
          endpoints with curl (already permitted — no approval needed). Put the \
-         URL immediately after `-s`:\n\n\
+         URL immediately after `-s`. Write routes need the bearer token: add \
+         `--variable %REDLINE_DAEMON_TOKEN= --expand-header \"Authorization: \
+         Bearer {{REDLINE_DAEMON_TOKEN}}\"` after the URL, which imports it \
+         straight from the environment — never write `$REDLINE_DAEMON_TOKEN` \
+         into the command yourself (requires curl >= 8.3):\n\n\
          - List every open tab — your map of the user's browse. Each has a number \
          `n` (its position in the tab strip, what the USER sees), plus url, \
          title, and which is active:\n  \
@@ -180,10 +317,14 @@ fn build_first_turn_prompt(tab: &TabContext, snapshot: Option<&str>, user_text: 
          thread):\n  \
          curl -s 'http://127.0.0.1:7676/v1/browser/thread?tab=<n>'\n\
          - Open a URL in a NEW tab (leaves the user's tabs open):\n  \
-         curl -s http://127.0.0.1:7676/v1/browser/open -X POST \
+         curl -s http://127.0.0.1:7676/v1/browser/open \
+         --variable %REDLINE_DAEMON_TOKEN= \
+         --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" -X POST \
          -H 'Content-Type: application/json' -d '{\"url\":\"https://example.com\"}'\n\
          - Switch the user INTO a tab (only when they want to BE there):\n  \
-         curl -s 'http://127.0.0.1:7676/v1/browser/focus?tab=<n>' -X POST\n\n\
+         curl -s 'http://127.0.0.1:7676/v1/browser/focus?tab=<n>' \
+         --variable %REDLINE_DAEMON_TOKEN= \
+         --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" -X POST\n\n\
          Reading a tab by `?tab=<n>` is like glancing at a neighbour's screen — it \
          does NOT move the user's current tab. Tab numbers are positional and \
          shift as tabs open/close, so re-read /tabs for the current mapping each \
@@ -193,7 +334,9 @@ fn build_first_turn_prompt(tab: &TabContext, snapshot: Option<&str>, user_text: 
          don't re-derive it yourself — that tab has its OWN page-discussion agent \
          holding its full thread. Ask it to synthesize, and only its digest comes \
          back to you (you stay light). Call:\n  \
-         curl -s http://127.0.0.1:7676/v1/linked/consult -X POST \
+         curl -s http://127.0.0.1:7676/v1/linked/consult \
+         --variable %REDLINE_DAEMON_TOKEN= \
+         --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" -X POST \
          -H 'Content-Type: application/json' \
          -d '{\"tab\":\"<n>\",\"question\":\"<what you need synthesized from that tab>\"}'\n\
          The response is JSON {\"digest\":\"...\",\"n\":<n>,\"title\":\"...\"}. Fold the \
@@ -348,6 +491,8 @@ pub fn linked_delete(
 #[tauri::command]
 pub async fn linked_send(
     linked: tauri::State<'_, LinkedState>,
+    active_mission: tauri::State<'_, crate::ActiveMission>,
+    active_surface: tauri::State<'_, crate::ActiveSurface>,
     app: AppHandle,
     linked_id: String,
     text: String,
@@ -398,13 +543,56 @@ pub async fn linked_send(
         .map_err(|e| format!("failed to persist message: {e}"))?;
 
     // First turn embeds the role + snapshot + routes + consult docs; follow-ups
-    // re-ground on the current tab (which changed since the last turn).
+    // re-ground on the current tab (which changed since the last turn). When a
+    // mission is active, the first turn also bakes in its goal.
+    let mission = active_mission.active_goal();
     let prompt = match &prior_session {
-        None => build_first_turn_prompt(&tab, snapshot.as_deref(), &text),
+        None => build_first_turn_prompt(
+            &tab,
+            snapshot.as_deref(),
+            &text,
+            mission.as_ref().map(|(t, g)| (t.as_str(), g.as_str())),
+        ),
         Some(_) => build_followup_prompt(&tab, snapshot.as_deref(), &text),
     };
 
-    let args = bridge_args(prompt, prior_session.as_deref());
+    // Polis ledger: record the first-turn linked-discussion prompt WITH its
+    // thread provenance + session-tree link (a linked discussion created while
+    // a mission is active hangs under that mission; else root — tab-level
+    // parents would be wrong for a spanning thread); keep every agent turn out
+    // of the global-hook capture stream.
+    if prior_session.is_none() {
+        let surface = active_surface.kind_and_id();
+        let parent = crate::ledger::resolve_parent(
+            None,
+            active_mission.active_id().as_deref(),
+            surface.as_ref().map(|(k, i)| (k.as_str(), i.as_str())),
+            "linked",
+        );
+        if let Some((pk, pid)) = &parent {
+            let _ = crate::ledger::record_session_link(&linked.db, "linked", &linked_id, pk, pid);
+        }
+        crate::ledger::record_agent_prompt(
+            &linked.db,
+            crate::ledger::PromptSource::RustFirstTurn,
+            "linked",
+            &prompt,
+            cwd.clone(),
+            None,
+            None,
+            Some(crate::ledger::ThreadRef {
+                thread_kind: "linked",
+                thread_id: linked_id.clone(),
+                parent_session_id: parent
+                    .filter(|(pk, _)| pk == "session")
+                    .map(|(_, pid)| pid),
+            }),
+        );
+    } else {
+        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+    }
+
+    let args = bridge_args("linked", prompt, prior_session.as_deref());
 
     let cwd = cwd
         .filter(|c| !c.trim().is_empty())
@@ -412,7 +600,7 @@ pub async fn linked_send(
         .unwrap_or_else(|| "/".to_string());
 
     let claude_bin = linked.claude_bin().await?;
-    let mut cmd = claude_command(&claude_bin);
+    let mut cmd = crate::claude_proc::claude_command_for_seat("linked", &claude_bin);
     let mut child = cmd
         .current_dir(&cwd)
         .args(&args)
@@ -589,6 +777,8 @@ async fn read_linked(
         if let Err(e) = db.insert_linked_message(&msg) {
             tracing::warn!(error = %e, "failed to persist assistant message");
         }
+        // Companion journal: the linked discussion completed a turn.
+        let _ = db.append_journal("agent_turn", Some("linked"), Some(&linked_id), None, None);
         let _ = app.emit(
             "linked-done",
             LinkedDone {
@@ -672,10 +862,13 @@ mod tests {
             &tab(2, "Example", "https://example.com"),
             Some(r#"{"url":"https://example.com","title":"Example"}"#),
             "Compare this with the last tab.",
+            None,
         );
         // Current tab + user text present.
         assert!(p.contains("tab 2 — Example (https://example.com)"));
         assert!(p.contains("Compare this with the last tab."));
+        // With no active mission, no mission block is injected.
+        assert!(!p.contains("A research MISSION is currently active"));
         // Snapshot woven in.
         assert!(p.contains("\"title\":\"Example\""));
         // The consult mechanism + cross-tab read routes are documented.
@@ -705,11 +898,27 @@ mod tests {
 
     #[test]
     fn first_turn_without_snapshot_still_documents_consult() {
-        let p = build_first_turn_prompt(&tab(1, "", ""), None, "hi");
+        let p = build_first_turn_prompt(&tab(1, "", ""), None, "hi", None);
         assert!(p.contains("hi"));
         assert!(p.contains("/v1/linked/consult"));
         assert!(p.contains("The user is currently on tab 1."));
         // No empty snapshot header when there's no snapshot.
         assert!(!p.contains("snapshot of that tab right now"));
+    }
+
+    #[test]
+    fn first_turn_prompt_embeds_active_mission_goal() {
+        let p = build_first_turn_prompt(
+            &tab(1, "Example", "https://example.com"),
+            None,
+            "Find the best sources for me.",
+            Some(("Data-breach page", "Draft my firm's data-breach practice page")),
+        );
+        // The mission goal is baked into the spanning conversation.
+        assert!(p.contains("A research MISSION is currently active"));
+        assert!(p.contains("Draft my firm's data-breach practice page"));
+        assert!(p.contains("/v1/mission/active"));
+        // The spanning-conversation framing is still present.
+        assert!(p.contains("follows the user across the tabs"));
     }
 }

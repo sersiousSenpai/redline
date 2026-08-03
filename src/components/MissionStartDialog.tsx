@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { useState } from "react";
+import { Target } from "lucide-react";
 
 interface MissionStartDialogProps {
   onStart: (title: string, goal: string) => void;
@@ -32,7 +33,7 @@ export function MissionStartDialog({ onStart, onCancel }: MissionStartDialogProp
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-2">
-          <span style={{ fontSize: "16px" }}>🎯</span>
+          <Target size={16} strokeWidth={2} style={{ color: "var(--color-ink)" }} />
           <span style={{ fontSize: "14px", fontWeight: 600, color: "var(--color-ink)" }}>
             Start a mission
           </span>
@@ -109,7 +110,7 @@ export function MissionStartDialog({ onStart, onCancel }: MissionStartDialogProp
               cursor: canStart ? "pointer" : "default",
             }}
           >
-            Start mission 🎯
+            Start mission
           </button>
         </div>
       </div>

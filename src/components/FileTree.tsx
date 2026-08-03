@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useCallback, useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 import type { DirEntry } from "../types";
@@ -18,7 +18,7 @@ interface FileTreeProps {
 // A VSCode-style file explorer rooted at one project folder. Each directory
 // lazy-loads its children the first time it's expanded (one `list_dir` per
 // level), so opening a huge repo never walks the whole tree up front.
-export function FileTree({ root, activeFile, onOpenFile }: FileTreeProps) {
+function FileTreeBase({ root, activeFile, onOpenFile }: FileTreeProps) {
   // Warm the code-viewer chunk the moment the explorer is shown, so the first
   // file click never waits on the JS chunk (which would stack a Suspense flash
   // on top of CodeView's own loader — the "double flash").
@@ -200,3 +200,7 @@ function Indented({ depth, muted, italic, children }: IndentedProps) {
     </div>
   );
 }
+
+/** Memoized: the tree reconciles every open folder, and a sidebar drag
+ *  changes only its width. */
+export const FileTree = memo(FileTreeBase);

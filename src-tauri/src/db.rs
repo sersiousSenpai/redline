@@ -2,16 +2,17 @@
 // Copyright 2026 Yusuf Al-Bazian
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::state::{
-    reparse_sections, AttachState, BrowseMessage, CodeReviewSession, Comment, CommentKind,
+    reparse_sections, AttachState, BrowseMessage, CodeReviewSession, Comment, CommentAttachment,
+    CommentKind, CommentOffer,
     CommentScope, CommentSelection, CommentStatus, EditPayload, Linked, LinkedMessage, Mission,
     MissionFinding, MissionMessage, Resolution, ReviewAnnotation, ReviewQuestion,
     ReviewSession, Revision, RoundHistoryEntry, SessionStatus, SourceFeedback, StructuralPayload,
-    ThreadMessage,
+    ThreadMessage, VoiceMessage,
 };
 
 /// Reduce a URL to a bare host for feedback aggregation: strip scheme, any path/
@@ -37,6 +38,318 @@ fn reopen_history_to_json(history: &[RoundHistoryEntry]) -> Option<String> {
         return None;
     }
     serde_json::to_string(history).ok()
+}
+
+/// Serialize a comment's (or thread turn's) attachment metadata. Same rule as
+/// `reopen_history_to_json`: no attachments stores NULL, so every pre-feature
+/// row and every comment without a file keeps a clean column.
+fn attachments_to_json(attachments: &[CommentAttachment]) -> Option<String> {
+    if attachments.is_empty() {
+        return None;
+    }
+    serde_json::to_string(attachments).ok()
+}
+
+/// Read attachment metadata back. A NULL, or JSON this build can't parse,
+/// degrades to "no attachments" rather than failing the whole row — losing a
+/// chip is recoverable; losing the comment is not.
+fn attachments_from_json(json: Option<String>) -> Vec<CommentAttachment> {
+    json.as_deref()
+        .and_then(|s| serde_json::from_str::<Vec<CommentAttachment>>(s).ok())
+        .unwrap_or_default()
+}
+
+/// One lexical hit from the browse-events FTS index (Dojo P3). `score` is the
+/// BM25 relevance (SQLite returns it negative-lower-is-better; we sort ascending
+/// and pass it through). `snippet` shows the matched span with `[...]` markers.
+/// One minted Review Request share link (owner-local, non-secret metadata —
+/// the encryption key only ever rides the link fragment).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareRecord {
+    pub request_id: String,
+    pub session_id: String,
+    pub reviewer_name: String,
+    #[serde(default)]
+    pub note: String,
+    pub base_version: u32,
+    pub created_at: i64,
+}
+
+/// One imported return. `landed_version` is where the comments re-anchored at
+/// import (the then-current revision) — navigation targets it, never the
+/// share's base_version.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareReturnRecord {
+    pub id: String,
+    pub request_id: String,
+    pub session_id: String,
+    pub reviewer_name: String,
+    pub imported_at: i64,
+    pub landed_version: u32,
+    pub placed: u32,
+    pub orphans: u32,
+    #[serde(default)]
+    pub comment_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowseHit {
+    pub id: i64,
+    pub ts: i64,
+    pub url: String,
+    pub title: Option<String>,
+    pub snippet: String,
+    pub score: f64,
+}
+
+/// Turn a raw user query into a safe FTS5 MATCH string: split on whitespace,
+/// keep tokens with at least one alphanumeric, escape embedded quotes, wrap each
+/// as a quoted phrase, and OR them for keyword recall. Quoting neutralizes FTS5
+/// operators (`*`, `-`, `:`, `NEAR`, parens), so an injection-shaped query can
+/// only ever match literally. Returns `None` when nothing searchable survives,
+/// so the caller returns no hits instead of a syntax error.
+fn sanitize_fts_query(q: &str) -> Option<String> {
+    let terms: Vec<String> = q
+        .split_whitespace()
+        .filter(|t| t.chars().any(char::is_alphanumeric))
+        .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+        .collect();
+    if terms.is_empty() {
+        None
+    } else {
+        Some(terms.join(" OR "))
+    }
+}
+
+/// One context-journal row — a meaningful app activity the Companion folds into
+/// its "while you were away" delta (surface switch, revision, nav, pin, …).
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JournalRow {
+    pub id: i64,
+    pub ts: i64,
+    pub kind: String,
+    pub surface_kind: Option<String>,
+    pub surface_id: Option<String>,
+    pub label: Option<String>,
+    pub detail: Option<String>,
+}
+
+/// One remembered dev server — a `(project_path, port)` pair we have seen
+/// listening at least once. Rows outlive the process, so the Localhost surface
+/// can offer "run it again" for a server that is no longer up.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DevServerRow {
+    pub id: i64,
+    pub project_path: String,
+    pub project_name: String,
+    pub port: u16,
+    pub url: String,
+    pub stack: String,
+    pub run_command: String,
+    pub last_seen_at: i64,
+    pub thumb_path: Option<String>,
+}
+
+/// One turn from a generic thread read (`/v1/context/threads/:kind/:id`).
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenericThreadMsg {
+    pub role: String,
+    pub body: String,
+    pub created_at: i64,
+}
+
+/// One Agent Seat's observed workload, from `Database::seat_activity` —
+/// the behavioural half of the Seat Assignment agent's digest.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeatActivity {
+    pub seat: String,
+    /// Agent turns inside the caller's window (the digest uses 30 days).
+    pub turns_window: i64,
+    pub turns_total: i64,
+    /// Epoch millis of the seat's most recent turn; `None` = never ran.
+    pub last_ts: Option<i64>,
+}
+
+/// One shelf item: a document, with the counts the shelf list renders. The
+/// document body itself (`doc_json`) is deliberately absent — the list must
+/// stay cheap however many documents accumulate.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BookshelfDraft {
+    pub draft_id: String,
+    pub title: Option<String>,
+    pub project_path: Option<String>,
+    pub folder_id: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub source_count: i64,
+    /// Whether the document body has ever been written. A row created only by
+    /// the markdown mirror (or a pre-Bookshelf draft awaiting migration) has
+    /// none, and the shelf shouldn't pretend otherwise.
+    pub has_doc: bool,
+}
+
+/// One folder in the shelf's adjacency list. `parent_id = None` is the root.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BookshelfFolder {
+    pub folder_id: String,
+    pub parent_id: Option<String>,
+    pub name: String,
+    pub created_at: i64,
+}
+
+/// One source attached to a document (a captured page, a mission finding, a
+/// URL, an uploaded file, a digest). Always hangs off a document, never a
+/// folder.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftSource {
+    pub id: String,
+    pub draft_id: String,
+    pub kind: String,
+    pub ref_id: Option<String>,
+    pub url: Option<String>,
+    pub title: Option<String>,
+    pub excerpt: Option<String>,
+    pub file_path: Option<String>,
+    pub created_at: i64,
+}
+
+/// What a `delete_draft` / `delete_folder` would actually destroy, so the
+/// confirm dialog can name it. These two commands are the only Bookshelf
+/// commands that aren't idempotent and they cascade with no undo.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteImpact {
+    pub drafts: i64,
+    pub folders: i64,
+    pub comments: i64,
+    pub pending_suggestions: i64,
+    pub sources: i64,
+    pub chat_messages: i64,
+}
+
+/// Process-global friction sink, installed once at boot.
+///
+/// Most call sites already hold a `Database`. Two don't and can't reasonably be
+/// given one: the axum auth middleware (`auth::require_daemon_auth` is a pure
+/// function over the route table plus thin glue) and anything reached from a
+/// context with no Tauri state. They record through here instead.
+static FRICTION_SINK: std::sync::OnceLock<Arc<Database>> = std::sync::OnceLock::new();
+
+/// Install the sink. Idempotent — a second call is ignored, so tests that build
+/// their own `Database` can't hijack the running app's.
+pub fn install_friction_sink(db: Arc<Database>) {
+    let _ = FRICTION_SINK.set(db);
+}
+
+/// Record friction from a context with no `Database` in hand. Silently does
+/// nothing before the sink is installed, which is the correct behaviour for
+/// telemetry: never block, never fail, never panic a caller's path.
+pub fn note_friction(kind: &str, surface: Option<&str>, session_id: Option<&str>, detail: Option<&str>) {
+    if let Some(db) = FRICTION_SINK.get() {
+        let _ = db.record_friction(kind, surface, session_id, detail);
+    }
+}
+
+/// One `friction_events` kind, aggregated: how often it fired in the window and
+/// when it last did. The digest ranks by both — 14 overflows in three days is a
+/// different signal from 14 spread over three months.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrictionCount {
+    pub kind: String,
+    pub count: i64,
+    pub last_ts: i64,
+    /// The most recent `detail`, truncated at write time. Illustrative only.
+    pub last_detail: Option<String>,
+}
+
+/// One thing the Shipwright found, and what you did with it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShipwrightFinding {
+    pub id: String,
+    pub run_id: String,
+    pub category: String,
+    pub summary: String,
+    pub evidence: Option<String>,
+    pub proposal: Option<String>,
+    pub guard: Option<String>,
+    /// JSON array of repo-relative paths. Shipped-detection reads this.
+    pub files: Option<String>,
+    pub status: String,
+    pub dismissed: bool,
+    pub draft_id: Option<String>,
+    pub created_at: i64,
+    pub resolved_at: Option<i64>,
+}
+
+/// How the Shipwright has actually been doing, per category — accept-rate and
+/// dismiss-rate straight off `shipwright_findings`, so the next digest carries
+/// its own track record instead of the agent asserting one.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CategoryScore {
+    pub category: String,
+    pub total: i64,
+    pub accepted: i64,
+    pub dismissed: i64,
+    pub shipped: i64,
+}
+
+/// Every folder in `root`'s subtree, `root` included. Walked breadth-first over
+/// the adjacency edges, with a visited set so a pre-existing cycle (a DB written
+/// by an older build, say) terminates instead of hanging. Pure.
+pub fn folder_subtree(edges: &[(String, Option<String>)], root: &str) -> Vec<String> {
+    let mut out = vec![root.to_string()];
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    seen.insert(root.to_string());
+    let mut i = 0;
+    while i < out.len() {
+        let parent = out[i].clone();
+        i += 1;
+        for (id, p) in edges {
+            if p.as_deref() == Some(parent.as_str()) && seen.insert(id.clone()) {
+                out.push(id.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Why a folder move must be refused, or `None` if it's legal. The load-bearing
+/// case is reparenting a folder **into its own subtree**: adjacency has no
+/// structural guard against it, and the resulting cycle would silently orphan
+/// the whole subtree from the root walk. Pure, so the rule is tested directly.
+pub fn folder_move_rejection(
+    edges: &[(String, Option<String>)],
+    folder_id: &str,
+    new_parent: Option<&str>,
+) -> Option<String> {
+    let Some(parent) = new_parent else {
+        return None; // the shelf root is always a legal destination
+    };
+    if parent == folder_id {
+        return Some("a folder can't be its own parent".to_string());
+    }
+    if !edges.iter().any(|(id, _)| id == parent) {
+        return Some(format!("no such folder `{parent}`"));
+    }
+    if folder_subtree(edges, folder_id)
+        .iter()
+        .any(|id| id == parent)
+    {
+        return Some("can't move a folder into its own subtree".to_string());
+    }
+    None
 }
 
 pub struct Database {
@@ -152,6 +465,47 @@ impl Database {
                 session_id TEXT PRIMARY KEY,
                 fork_session_id TEXT NOT NULL
             );
+
+            -- The *visible* half of that memory: the discussion panel's
+            -- transcript. `voice_sessions` above keeps the agent's recollection
+            -- across restarts; without this table the screen did not match it —
+            -- the panel held its lines in component state, so an incoming plan,
+            -- a session switch, or a relaunch wiped the thread the user was
+            -- reading. Keyed by the same voice key `voice.rs` uses (a plan
+            -- session id, or `drafter:<draft_id>`). Written from Rust so a
+            -- reply lands even while the panel is unmounted.
+            CREATE TABLE IF NOT EXISTS voice_messages (
+                id TEXT PRIMARY KEY,
+                session_key TEXT NOT NULL,
+                role TEXT NOT NULL,
+                text TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_voice_messages
+                ON voice_messages (session_key, created_at);
+
+            -- Offered (not yet written) plan action items. The voice agent
+            -- stages one mid-turn when it proposes a concrete change; the panel
+            -- renders it as a `＋ Add as item` chip under the reply it came
+            -- from, and only the user's tap creates the real comment. Nothing
+            -- here is visible on the plan. `message_id` is filled in once the
+            -- reply is persisted (see `bind_comment_offers`) — the offer's curl
+            -- necessarily precedes its own turn's `result` line.
+            CREATE TABLE IF NOT EXISTS comment_offers (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                message_id TEXT,
+                block_id TEXT NOT NULL,
+                body TEXT NOT NULL,
+                label TEXT,
+                agent_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_comment_offers
+                ON comment_offers (session_id, status, created_at);
 
             -- Research Missions: an orchestrator that holds one shared goal
             -- across the whole browser pane, a tier above the per-tab browse
@@ -308,6 +662,474 @@ impl Database {
                 created_at INTEGER NOT NULL,
                 PRIMARY KEY (review_id, id)
             );
+
+            -- Polis data lake: the raw, complete prompt store. One row per
+            -- captured prompt (hook / drafter / rust-firstturn / voice). Bodies
+            -- live here (ledger-owned) so a session delete can never orphan the
+            -- hash chain. Dedup on (body_hash, claude_session_id).
+            CREATE TABLE IF NOT EXISTS prompts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                origin TEXT NOT NULL DEFAULT 'redline',
+                surface TEXT NOT NULL,
+                role TEXT,
+                session_id TEXT,
+                claude_session_id TEXT,
+                mission_id TEXT,
+                project_path TEXT,
+                body TEXT NOT NULL,
+                body_hash TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_prompts_dedup
+                ON prompts (body_hash, claude_session_id);
+
+            -- Polis ledger: append-only, hash-chained, author-attributed record
+            -- of prompts, plan revisions, decisions and curation signals.
+            -- entry_hash = sha256(prev_hash ‖ canonical-json(event)); genesis
+            -- prev = 64 zeros. Decision kinds reference an existing row by
+            -- (ref_kind, ref_id) + payload_hash rather than a deletable FK, so
+            -- deleting the referenced session can't break the chain.
+            CREATE TABLE IF NOT EXISTS ledger_events (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                author TEXT NOT NULL,
+                prompt_id INTEGER,
+                session_id TEXT,
+                version_number INTEGER,
+                ref_kind TEXT,
+                ref_id TEXT,
+                payload_hash TEXT NOT NULL,
+                prev_hash TEXT NOT NULL,
+                entry_hash TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_ledger_kind ON ledger_events (kind);
+            CREATE INDEX IF NOT EXISTS idx_ledger_ref ON ledger_events (ref_kind, ref_id);
+
+            -- Polis ClassMemory (Phase 2): an agent-classified, human-curated,
+            -- vectorless class CATALOG *over* the lake. Nodes only ever hold
+            -- POINTERS (class_links) into the ledger/prompt store — reorganizing
+            -- the tree never touches or re-copies underlying data. A class is
+            -- just a root node (parent_id NULL); depth is emergent (no level
+            -- enum). A `digest` node's `summary` is the agent-written gist of a
+            -- collapsed cold branch, with class_links back to the exact ledger
+            -- rows it cites. Every node/link carries status{proposed,accepted}:
+            -- nothing enters or moves without a user accept.
+            CREATE TABLE IF NOT EXISTS class_nodes (
+                id TEXT PRIMARY KEY,
+                parent_id TEXT,               -- NULL = a root (a class)
+                kind TEXT NOT NULL DEFAULT 'node',   -- node | digest
+                title TEXT NOT NULL,
+                summary TEXT,                 -- digest gist; NULL for plain nodes
+                project_path TEXT,            -- optional binding on any node
+                ip_name TEXT,                 -- whose plan it was (provenance)
+                status TEXT NOT NULL DEFAULT 'proposed',  -- proposed | accepted
+                pinned INTEGER NOT NULL DEFAULT 0,        -- anti-decay marker
+                curated_by TEXT,              -- 'classifier' | author on accept
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_class_nodes_parent ON class_nodes (parent_id);
+            CREATE INDEX IF NOT EXISTS idx_class_nodes_status ON class_nodes (status);
+
+            -- Pointers from a class node into the lake. target_kind is one of
+            -- prompt|session|revision|mission|decision|browse_event; target_id is
+            -- that row's id (prompt id / session id / ledger seq / mission id /
+            -- browse_events id). Reorganizing the tree re-parents nodes; links
+            -- ride along untouched.
+            CREATE TABLE IF NOT EXISTS class_links (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                node_id TEXT NOT NULL,
+                target_kind TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                note TEXT,
+                status TEXT NOT NULL DEFAULT 'proposed',  -- proposed | accepted
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_class_links_node ON class_links (node_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_class_links_dedup
+                ON class_links (node_id, target_kind, target_id);
+
+            -- Structural reorg proposals (promote/split/merge/collapse) that
+            -- can't be expressed as a single node's status. Additive proposals
+            -- (file/create) stage directly as proposed class_nodes/class_links;
+            -- these operate on EXISTING accepted nodes, so they queue here for
+            -- review. Accept applies the op to the tree + writes a taxonomy_reorg
+            -- ledger event, then drops the row; reject just drops it.
+            CREATE TABLE IF NOT EXISTS class_proposals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER,
+                op TEXT NOT NULL,             -- promote | split | merge | collapse
+                node_id TEXT,                 -- primary subject node
+                parent_id TEXT,               -- new parent (promote) / merge target parent
+                title TEXT,                   -- merge target / collapse digest title
+                summary TEXT,                 -- collapse digest gist
+                extra_json TEXT,              -- op-specific payload (split parts, merge ids, cite seqs)
+                rationale TEXT,               -- agent's stated why (size/recency/coherence)
+                status TEXT NOT NULL DEFAULT 'proposed',
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_class_proposals_status ON class_proposals (status);
+
+            -- One classifier pass over the lake delta. Bounds the seq window it
+            -- consumed so the next run is delta-based, and records the claude
+            -- session id + a short summary for the pane.
+            CREATE TABLE IF NOT EXISTS class_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at INTEGER NOT NULL,
+                finished_at INTEGER,
+                status TEXT NOT NULL,         -- running | done | error
+                seq_from INTEGER,
+                seq_to INTEGER,
+                claude_session_id TEXT,
+                summary TEXT
+            );
+
+            -- Supersession index: decision old_seq was replaced by new_seq.
+            -- Plain and NEVER hashed — the tamper-evident fact is the
+            -- `supersede` ledger event (event_seq); this table is only the fast
+            -- "is seq X superseded?" lookup so retrieval never re-parses
+            -- payloads. PRIMARY KEY(old_seq) enforces "superseded at most
+            -- once" — a later supersession targets the current chain head.
+            CREATE TABLE IF NOT EXISTS supersessions (
+                old_seq INTEGER PRIMARY KEY,  -- the superseded decision event
+                new_seq INTEGER NOT NULL,     -- the superseding decision event
+                event_seq INTEGER NOT NULL,   -- the supersede ledger event
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_supersessions_new
+                ON supersessions (new_seq);
+
+            -- Agent-written pattern observations over a node's lake items
+            -- (recurrence / trend / co-occurrence). Derived, never ground
+            -- truth: the classifier must never file by one. cite_seqs is a
+            -- non-empty JSON array of the exact ledger seqs the pattern was
+            -- derived from — an uncited observation is rejected upstream.
+            -- Rows retire when their node's subtree collapses/merges away;
+            -- the `observation` ledger events remain as history.
+            CREATE TABLE IF NOT EXISTS class_observations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                node_id TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                cite_seqs TEXT NOT NULL,      -- JSON array of ledger seqs
+                created_seq INTEGER,          -- the observation ledger event seq
+                pinned INTEGER NOT NULL DEFAULT 0,
+                dismissed INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_class_observations_node
+                ON class_observations (node_id, dismissed);
+
+            -- Polis Phase 4: which sessions have been exported as a portable
+            -- context bundle. This is the state that finally backs the
+            -- Librarian's deferred F6 "un-exported approved plan" friction signal
+            -- (Spike 3a parked it pending Phase 4). One row per (session, scope)
+            -- export; `head_hash` records the ledger head the bundle pinned, so a
+            -- later chain-growth can distinguish "exported at head X" if we ever
+            -- want staleness. UNIQUE keeps re-exports idempotent on the signal.
+            CREATE TABLE IF NOT EXISTS plan_exports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                scope TEXT NOT NULL,          -- session | mission | class | full
+                head_hash TEXT,
+                exported_at INTEGER NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_plan_exports_session
+                ON plan_exports (session_id, scope);
+
+            -- Polis P2 (Dojo "Browsing Behavior"): the pages the user landed on,
+            -- with the normalized on-screen content that was there + a content
+            -- context-hash. Ledger-owned body store: a `browse_event` ledger row
+            -- references a row here by (ref_kind='browse_event', ref_id=id) +
+            -- payload_hash = context_hash, exactly like a decision event, so a
+            -- session delete can never orphan the chain. `text` (title + url +
+            -- headings + body) is retained so later lexical retrieval (P3 FTS5)
+            -- has something to index; `context_hash` groups every event that
+            -- touched the same content across sessions/tabs.
+            CREATE TABLE IF NOT EXISTS browse_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts INTEGER NOT NULL,
+                action TEXT NOT NULL,          -- 'navigate' (a page the user landed on)
+                browse_id TEXT,               -- the tab's discussion-thread key
+                url TEXT NOT NULL,
+                title TEXT,
+                text TEXT NOT NULL,           -- normalized page content (for P3 FTS)
+                context_hash TEXT NOT NULL    -- body_hash over `text`
+            );
+            CREATE INDEX IF NOT EXISTS idx_browse_events_hash ON browse_events (context_hash);
+            CREATE INDEX IF NOT EXISTS idx_browse_events_tab ON browse_events (browse_id);
+
+            -- Dojo P3: a lexical (BM25) full-text index over browse events only.
+            -- Browsing is high-volume and keyword-heavy, so lexical recall beats
+            -- dense vectors as the first cut — and FTS5 ships with SQLite, so
+            -- there is no new dependency, no embedding model, and retrieval stays
+            -- auditable (you can see which terms matched). Plans/prompts keep the
+            -- vectorless ClassMemory walk; only this noisy stream gets fuzzy
+            -- lexical search. External-content table over `browse_events`, kept in
+            -- sync by an AFTER INSERT trigger (browse_events is insert-only).
+            CREATE VIRTUAL TABLE IF NOT EXISTS browse_events_fts USING fts5(
+                title, url, text,
+                content='browse_events',
+                content_rowid='id'
+            );
+            CREATE TRIGGER IF NOT EXISTS browse_events_ai AFTER INSERT ON browse_events BEGIN
+                INSERT INTO browse_events_fts (rowid, title, url, text)
+                VALUES (new.id, new.title, new.url, new.text);
+            END;
+
+            -- Memory-by-session: the readable parent/child relation across the
+            -- app's disjoint thread id-spaces. A child (browse tab thread,
+            -- linked discussion, mission, voice session, draft, review, …)
+            -- hangs under a parent session or mission. Referenced by id, never
+            -- FK-cascaded, so deletes can't orphan the ledger; each accepted
+            -- row is committed to the chain by a `session_link` ledger event.
+            CREATE TABLE IF NOT EXISTS session_tree (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                child_kind TEXT NOT NULL,
+                child_id TEXT NOT NULL,
+                parent_kind TEXT NOT NULL,
+                parent_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_session_tree_child
+                ON session_tree (child_kind, child_id);
+            CREATE INDEX IF NOT EXISTS idx_session_tree_parent
+                ON session_tree (parent_kind, parent_id);
+
+            -- Companion passive awareness: an append-only journal of meaningful
+            -- app activity (surface switches, revisions, verdicts, navs, pins,
+            -- launches, agent turns). NOT part of the tamper-evident record —
+            -- a bounded working set (pruned on insert) the Companion reads as
+            -- its "while you were away" delta.
+            CREATE TABLE IF NOT EXISTS context_journal (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                surface_kind TEXT,
+                surface_id TEXT,
+                label TEXT,
+                detail TEXT
+            );
+
+            -- Companion (global cross-surface discussion agent): the spanning
+            -- conversation's resumable claude session id + per-turn surface
+            -- tags, mirroring linked_sessions/linked_messages. last_journal_seq
+            -- is the high-water mark of journal rows already folded into the
+            -- conversation.
+            CREATE TABLE IF NOT EXISTS companion_sessions (
+                companion_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                claude_session_id TEXT,
+                last_journal_seq INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS companion_messages (
+                id TEXT PRIMARY KEY,
+                companion_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                body TEXT NOT NULL,
+                status TEXT NOT NULL,
+                surface_kind TEXT,
+                surface_id TEXT,
+                surface_label TEXT,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_companion_messages
+                ON companion_messages (companion_id, created_at);
+
+            -- Prompt Drafter durable identity, and as of the Bookshelf the
+            -- **primary storage** for the document itself. `doc_json` is the
+            -- TipTap fidelity source (it used to live in localStorage, where a
+            -- cache clear wiped it); `doc_markdown` stays exactly what it was —
+            -- the derived, agent-readable mirror behind /v1/drafter/:id/doc.
+            -- Alongside: the draft's discussion thread, comment sidecar, queued
+            -- agent suggestions, and its attached sources.
+            CREATE TABLE IF NOT EXISTS drafts (
+                draft_id TEXT PRIMARY KEY,
+                title TEXT,
+                project_path TEXT,
+                doc_markdown TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            -- The shelf's folder tree, as an **adjacency list**: move and rename
+            -- are a single row update, where materialized paths would be
+            -- O(subtree) for no gain at this size. Building the tree from
+            -- adjacency is the house pattern (ClassMemoryPane's buildTree,
+            -- lib/reviewTree.ts). A move must walk parents first — reparenting a
+            -- folder into its own subtree is rejected (`would_cycle`).
+            CREATE TABLE IF NOT EXISTS bookshelf_folders (
+                folder_id TEXT PRIMARY KEY,
+                parent_id TEXT,                 -- NULL = shelf root
+                name TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_bookshelf_folders_parent
+                ON bookshelf_folders (parent_id, name);
+
+            -- Sources attach to a DOCUMENT, never to a folder. Folders hold
+            -- documents only: a dropped PDF attaches *to* the document it
+            -- informs, so every shelf item stays reviewable, agent-attached and
+            -- launch-into-plan. Allowing loose files would forfeit all three.
+            CREATE TABLE IF NOT EXISTS draft_sources (
+                id TEXT PRIMARY KEY,
+                draft_id TEXT NOT NULL,
+                kind TEXT NOT NULL,      -- browse_event | mission_finding | url | file | digest
+                ref_id TEXT,             -- browse_events rowid / mission_findings id
+                url TEXT, title TEXT, excerpt TEXT,
+                file_path TEXT,          -- relative to <app_data_dir>/bookshelf/<draft_id>/
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_draft_sources
+                ON draft_sources (draft_id, created_at);
+
+            -- The app's own failures. Each of these was already *computed* at
+            -- runtime and thrown away — no row, no counter, and the tracing
+            -- subscriber writes to stderr, which goes nowhere when Redline is
+            -- launched from /Applications. This is TELEMETRY, deliberately NOT
+            -- hash-chained into the ledger: the ledger records decisions, and a
+            -- stall-kill is not a decision. Local-only (docs/local-only-audit).
+            CREATE TABLE IF NOT EXISTS friction_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                surface TEXT, session_id TEXT, detail TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_friction_events
+                ON friction_events (kind, ts);
+
+            -- What the Shipwright found, and what you did with it. The plan
+            -- mines your corrections of the agent, so it must also record your
+            -- corrections of IT — that is what makes run five smarter than run
+            -- one. Dedupe follows class_observations exactly: on
+            -- (category, summary) REGARDLESS of `dismissed`, so a dismissed
+            -- finding never resurfaces under the same wording.
+            --
+            -- `shipped` is DETECTED, not self-declared: a later commit touching
+            -- a file this finding's `files` array named flips it. Self-declared
+            -- success is the one number an agent will always report favourably.
+            CREATE TABLE IF NOT EXISTS shipwright_findings (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                category TEXT NOT NULL,
+                summary TEXT NOT NULL,          -- dedupe key with category
+                evidence TEXT, proposal TEXT, guard TEXT,
+                files TEXT,                     -- JSON array; shipped-detection reads this
+                status TEXT NOT NULL DEFAULT 'pending',   -- pending|accepted|dismissed|shipped
+                dismissed INTEGER NOT NULL DEFAULT 0,
+                draft_id TEXT, created_at INTEGER NOT NULL, resolved_at INTEGER
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_shipwright_dedupe
+                ON shipwright_findings (category, summary);
+
+            CREATE TABLE IF NOT EXISTS draft_chat_threads (
+                draft_id TEXT PRIMARY KEY,
+                claude_session_id TEXT,
+                last_doc_hash TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS draft_chat_messages (
+                id TEXT PRIMARY KEY,
+                draft_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                body TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_draft_chat_messages
+                ON draft_chat_messages (draft_id, created_at);
+
+            CREATE TABLE IF NOT EXISTS draft_comments (
+                id TEXT PRIMARY KEY,
+                draft_id TEXT NOT NULL,
+                block_id TEXT,
+                sel_char_start INTEGER,
+                sel_char_end INTEGER,
+                sel_quoted_text TEXT,
+                body TEXT NOT NULL,
+                author TEXT,
+                created_at INTEGER NOT NULL,
+                fork_session_id TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_draft_comments
+                ON draft_comments (draft_id, created_at);
+
+            -- Agent write-suggestions against a draft, queued so a proposal
+            -- made while the drafter pane is closed is drained on mount rather
+            -- than dropped. status: pending | applied | rejected.
+            CREATE TABLE IF NOT EXISTS draft_suggestions (
+                id TEXT PRIMARY KEY,
+                draft_id TEXT NOT NULL,
+                op TEXT NOT NULL,
+                block_id TEXT,
+                original TEXT,
+                markdown TEXT NOT NULL,
+                agent_id TEXT,
+                body TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_draft_suggestions
+                ON draft_suggestions (draft_id, status, created_at);
+
+            -- Review Request registry: one row per minted share link. Durable
+            -- (replaces the per-webview localStorage list) and joinable with
+            -- the comments a return produces (comments.share_request_id).
+            CREATE TABLE IF NOT EXISTS shares (
+                request_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                reviewer_name TEXT NOT NULL,
+                note TEXT NOT NULL DEFAULT '',
+                base_version INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_shares_session ON shares (session_id);
+
+            -- One row per imported return. landed_version is the revision the
+            -- comments actually re-anchored onto at import time (the CURRENT
+            -- revision then) — navigation must target it, not base_version.
+            CREATE TABLE IF NOT EXISTS share_returns (
+                id TEXT PRIMARY KEY,
+                request_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                reviewer_name TEXT NOT NULL,
+                imported_at INTEGER NOT NULL,
+                landed_version INTEGER NOT NULL,
+                placed INTEGER NOT NULL,
+                orphans INTEGER NOT NULL,
+                comment_ids TEXT NOT NULL DEFAULT '[]'
+            );
+            CREATE INDEX IF NOT EXISTS idx_share_returns_session
+                ON share_returns (session_id, imported_at);
+
+            -- Localhost dashboard: one row per dev server we have ever seen
+            -- listening out of a known project. The key is (project_path, port)
+            -- — "the same server" as a card. Keying on the run command instead
+            -- would fragment the row every time a lockfile churn changed the
+            -- package manager; keying on the project alone would merge a repo's
+            -- web and api servers into one card.
+            CREATE TABLE IF NOT EXISTS dev_servers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_path TEXT NOT NULL,
+                project_name TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                url TEXT NOT NULL,
+                stack TEXT NOT NULL DEFAULT '',
+                run_command TEXT NOT NULL DEFAULT '',
+                last_pid INTEGER,
+                last_args TEXT,
+                first_seen_at INTEGER NOT NULL,
+                last_seen_at INTEGER NOT NULL,
+                thumb_path TEXT,
+                UNIQUE (project_path, port)
+            );
+            CREATE INDEX IF NOT EXISTS idx_dev_servers_seen
+                ON dev_servers (last_seen_at DESC);
             "#,
         )?;
         // Best-effort additive migrations (errors on existing columns are ignored)
@@ -344,6 +1166,44 @@ impl Database {
             "ALTER TABLE review_annotations ADD COLUMN source TEXT NOT NULL DEFAULT 'user'",
             [],
         );
+
+        // Memory-as-plumbing: cold-prompt compaction. When the background keeper
+        // gists a cold body, `gist` holds the summary (NULL = warm/full body),
+        // `compacted_at` stamps it, and `original_bytes` records what was
+        // reclaimed. `body_hash` is NEVER touched — it stays the ORIGINAL (the
+        // tamper-evident fact the ledger commits to, and the dedup key), so the
+        // chain and every bundle stay verifiable after the words are released.
+        let _ = conn.execute("ALTER TABLE prompts ADD COLUMN gist TEXT", []);
+        let _ = conn.execute("ALTER TABLE prompts ADD COLUMN compacted_at INTEGER", []);
+        let _ = conn.execute("ALTER TABLE prompts ADD COLUMN original_bytes INTEGER", []);
+
+        // Memory-by-session provenance: which interaction thread a prompt
+        // belongs to (browse_id / linked_id / draft_id / …) and the parent plan
+        // session that thread hangs under. Non-hashed (only prompt_id +
+        // body_hash enter the chained event), so purely additive and
+        // chain-safe — the gist/compacted_at precedent.
+        let _ = conn.execute("ALTER TABLE prompts ADD COLUMN thread_kind TEXT", []);
+        let _ = conn.execute("ALTER TABLE prompts ADD COLUMN thread_id TEXT", []);
+        let _ = conn.execute("ALTER TABLE prompts ADD COLUMN parent_session_id TEXT", []);
+
+        // Dojo P3: backfill the browse-events FTS index for the upgrade path where
+        // `browse_events` already had rows (a P2-only build) before the FTS table
+        // + trigger existed — the trigger only fires on new inserts. Guarded so
+        // the common case (empty or already-indexed) is a cheap no-op.
+        {
+            let ev_ct: i64 = conn
+                .query_row("SELECT COUNT(*) FROM browse_events", [], |r| r.get(0))
+                .unwrap_or(0);
+            let fts_ct: i64 = conn
+                .query_row("SELECT COUNT(*) FROM browse_events_fts", [], |r| r.get(0))
+                .unwrap_or(0);
+            if ev_ct > 0 && fts_ct == 0 {
+                let _ = conn.execute(
+                    "INSERT INTO browse_events_fts(browse_events_fts) VALUES('rebuild')",
+                    [],
+                );
+            }
+        }
 
         // Migration: comment ids are session-scoped (`c-001` restarts per
         // session), but legacy databases declared `id TEXT PRIMARY KEY`
@@ -479,6 +1339,26 @@ impl Database {
         // comment came from ("John Doe"). NULL for every owner-originated
         // comment and every pre-collab row. Distinct from `author` (agent id).
         let _ = conn.execute("ALTER TABLE comments ADD COLUMN reviewer TEXT", []);
+        // Review Request return provenance: when the external reviewer wrote
+        // the comment (their clock) and which share (request_id) it arrived
+        // on. NULL for every owner-originated comment and every legacy row.
+        let _ = conn.execute(
+            "ALTER TABLE comments ADD COLUMN external_created_at INTEGER",
+            [],
+        );
+        let _ = conn.execute("ALTER TABLE comments ADD COLUMN share_request_id TEXT", []);
+        // Files the reviewer attached to a comment: JSON `[{path, name, mime,
+        // bytes}]`, same additive shape as `reopen_history`. The column holds
+        // METADATA only — the files themselves live under
+        // `<app_data_dir>/attachments/<session_id>/`. NULL for every comment
+        // without one.
+        let _ = conn.execute("ALTER TABLE comments ADD COLUMN attachments TEXT", []);
+        // The same, per sidecar-discussion turn: a reviewer can drop an image
+        // into a follow-up inside a comment's Discuss thread.
+        let _ = conn.execute(
+            "ALTER TABLE thread_messages ADD COLUMN attachments TEXT",
+            [],
+        );
         // Persisted attach state: lets detachment survive app restarts and be
         // visible for background sessions (the live `held` flag is recomputed
         // from in-memory senders and tells nothing after a crash).
@@ -486,7 +1366,52 @@ impl Database {
             "ALTER TABLE sessions ADD COLUMN attach_state TEXT NOT NULL DEFAULT 'idle'",
             [],
         );
+        // Last-activity timestamp: the sidebar orders sessions by it. Bumped
+        // on every revision/comment/thread message/status change. Legacy rows
+        // (updated_at = 0) are backfilled from their latest revision — the
+        // best recency proxy already on disk. Both statements are idempotent.
+        let _ = conn.execute(
+            "ALTER TABLE sessions ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute(
+            "UPDATE sessions SET updated_at = MAX(
+                created_at,
+                COALESCE((SELECT MAX(received_at) FROM revisions r
+                          WHERE r.session_id = sessions.session_id), created_at)
+             ) WHERE updated_at = 0",
+            [],
+        );
+        // Bookshelf: the document's fidelity source moves off localStorage and
+        // into the DB, and every document gains a shelf location. Both additive,
+        // both nullable — an existing draft keeps its markdown mirror and is
+        // backfilled with its TipTap JSON by the one-time frontend migration
+        // (only the webview can read localStorage).
+        let _ = conn.execute("ALTER TABLE drafts ADD COLUMN doc_json TEXT", []);
+        let _ = conn.execute("ALTER TABLE drafts ADD COLUMN folder_id TEXT", []);
         Ok(())
+    }
+
+    /// Bump a session's last-activity timestamp. Takes the already-locked
+    /// connection (the `Mutex` is not reentrant — never call `self.conn.lock()`
+    /// here). `MAX` keeps the value monotonic under out-of-order events.
+    fn touch_session(conn: &Connection, session_id: &str, at: i64) {
+        let _ = conn.execute(
+            "UPDATE sessions SET updated_at = MAX(updated_at, ?1) WHERE session_id = ?2",
+            params![at, session_id],
+        );
+    }
+
+    /// Test-only: force a session's `updated_at` back to 0 to simulate a row
+    /// written by a pre-`updated_at` build (the migration backfill's target).
+    #[cfg(test)]
+    pub(crate) fn zero_updated_at(&self, session_id: &str) {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET updated_at = 0 WHERE session_id = ?1",
+            params![session_id],
+        )
+        .unwrap();
     }
 
     pub fn get_setting(&self, key: &str) -> Option<String> {
@@ -512,13 +1437,14 @@ impl Database {
     pub fn upsert_session(&self, session: &ReviewSession) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO sessions (session_id, project_path, project_name, created_at, status, attach_state)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO sessions (session_id, project_path, project_name, created_at, status, attach_state, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(session_id) DO UPDATE SET
                 project_path = excluded.project_path,
                 project_name = excluded.project_name,
                 status = excluded.status,
-                attach_state = excluded.attach_state",
+                attach_state = excluded.attach_state,
+                updated_at = MAX(sessions.updated_at, excluded.updated_at)",
             params![
                 session.session_id,
                 session.project_path,
@@ -526,6 +1452,7 @@ impl Database {
                 session.created_at,
                 session_status_str(session.status),
                 session.attach_state.as_str(),
+                session.updated_at,
             ],
         )?;
         Ok(())
@@ -554,7 +1481,3794 @@ impl Database {
                 revision.restored as i64,
             ],
         )?;
+        Self::touch_session(&conn, session_id, revision.received_at);
         Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Polis ledger (Phase 1): prompt store + hash chain
+    // ------------------------------------------------------------------
+
+    /// Insert a prompt row, deduped on (body_hash, claude_session_id). Returns
+    /// the new row id, or `None` if an identical prompt was already stored.
+    pub fn insert_prompt(&self, p: &crate::ledger::PromptRow) -> rusqlite::Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "INSERT INTO prompts
+                (ts, source, origin, surface, role, session_id, claude_session_id,
+                 mission_id, project_path, body, body_hash,
+                 thread_kind, thread_id, parent_session_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+             ON CONFLICT(body_hash, claude_session_id) DO NOTHING",
+            params![
+                p.ts,
+                p.source,
+                p.origin,
+                p.surface,
+                p.role,
+                p.session_id,
+                p.claude_session_id,
+                p.mission_id,
+                p.project_path,
+                p.body,
+                p.body_hash,
+                p.thread_kind,
+                p.thread_id,
+                p.parent_session_id,
+            ],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        Ok(Some(conn.last_insert_rowid()))
+    }
+
+    /// Insert a browsing event into the ledger-owned `browse_events` store.
+    /// Dedups a *consecutive* re-capture of the same content in the same tab (the
+    /// snapshot fires on navigation AND just before a tab is backgrounded, so one
+    /// page can be captured twice) — returns `None` then. The same `context_hash`
+    /// recurring later (after visiting other pages, or in another tab) is kept, so
+    /// content-identity grouping across the corpus stays intact. Returns the new
+    /// row id on insert.
+    pub fn insert_browse_event(
+        &self,
+        r: &crate::ledger::BrowseEventRow,
+    ) -> rusqlite::Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        let last: Option<String> = conn
+            .query_row(
+                "SELECT context_hash FROM browse_events
+                 WHERE browse_id IS ?1 ORDER BY id DESC LIMIT 1",
+                params![r.browse_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if last.as_deref() == Some(r.context_hash) {
+            return Ok(None);
+        }
+        conn.execute(
+            "INSERT INTO browse_events (ts, action, browse_id, url, title, text, context_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![r.ts, r.action, r.browse_id, r.url, r.title, r.text, r.context_hash],
+        )?;
+        Ok(Some(conn.last_insert_rowid()))
+    }
+
+    /// Lexical (BM25) search over browse-event content — the Dojo P3 retrieval
+    /// path for the noisy, keyword-heavy browsing stream (plans/prompts keep the
+    /// vectorless walk). Ranks by FTS5 `bm25`, best first, and returns a matched
+    /// snippet per hit. A query that sanitizes to nothing yields no hits.
+    pub fn search_browse_events(&self, query: &str, limit: i64) -> rusqlite::Result<Vec<BrowseHit>> {
+        let Some(match_q) = sanitize_fts_query(query) else {
+            return Ok(Vec::new());
+        };
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT be.id, be.ts, be.url, be.title,
+                    snippet(browse_events_fts, 2, '[', ']', '…', 12),
+                    bm25(browse_events_fts)
+             FROM browse_events_fts
+             JOIN browse_events be ON be.id = browse_events_fts.rowid
+             WHERE browse_events_fts MATCH ?1
+             ORDER BY bm25(browse_events_fts)
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![match_q, limit.max(1)], |r| {
+            Ok(BrowseHit {
+                id: r.get(0)?,
+                ts: r.get(1)?,
+                url: r.get(2)?,
+                title: r.get(3)?,
+                snippet: r.get(4)?,
+                score: r.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Fetch a browse event's `(url, title, text, context_hash)` by id — the read
+    /// side of the `browse_events` store, for the bundle/mirror joins that will
+    /// carry browse-event bodies (exercised by tests today).
+    #[allow(dead_code)]
+    pub fn get_browse_event(
+        &self,
+        id: i64,
+    ) -> rusqlite::Result<Option<(String, Option<String>, String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT url, title, text, context_hash FROM browse_events WHERE id = ?1",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()
+    }
+
+    /// Fetch a stored prompt body by id. When the row has been compacted, the
+    /// gist stands in for the released body — so every reader (the ledger pane
+    /// viewer, the bundle join, the mirror, the context routes) transparently
+    /// sees the gist and no caller has to special-case compaction.
+    pub fn get_prompt_body(&self, id: i64) -> rusqlite::Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COALESCE(gist, body) FROM prompts WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .optional()
+    }
+
+    /// Compact a cold prompt: swap its stored body for `gist` and emit a
+    /// `compaction` ledger event proving the swap. The original `body_hash`
+    /// stays untouched (the tamper-evident fact + dedup key), so
+    /// `verify_ledger_chain` and `verify_bundle` remain green — they are
+    /// body-blind. Idempotent via the `gist IS NULL` guard: a re-compaction of
+    /// an already-compacted row is a no-op returning `Ok(None)`. On success
+    /// returns the new ledger seq. `reason` distinguishes an automatic gist
+    /// (`"cold"`) from an explicit forget (`"forget"`).
+    pub fn compact_prompt_body(
+        &self,
+        prompt_id: i64,
+        gist: &str,
+        reason: &str,
+    ) -> rusqlite::Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        // Read the original body + hash under the same lock, then swap — all
+        // atomic with the ledger append below so the chain can't race.
+        let row: Option<(String, String)> = conn
+            .query_row(
+                "SELECT body, body_hash FROM prompts WHERE id = ?1 AND gist IS NULL",
+                params![prompt_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((body, body_hash)) = row else {
+            return Ok(None); // no such warm prompt (already compacted, or gone)
+        };
+        let original_bytes = body.len() as i64;
+        let ts = crate::ledger::now_millis();
+        conn.execute(
+            "UPDATE prompts
+                SET gist = ?2, body = '', compacted_at = ?3, original_bytes = ?4
+             WHERE id = ?1 AND gist IS NULL",
+            params![prompt_id, gist, ts, original_bytes],
+        )?;
+        // The compaction event references the prompt and pins the ORIGINAL body
+        // hash + the gist hash + the reason, so "what was forgotten" is provable
+        // even if the prompt row is later purged.
+        let gist_hash = crate::ledger::body_hash(gist);
+        let ph = crate::ledger::decision_payload_hash(&[
+            ("original_body_hash", &body_hash),
+            ("gist_hash", &gist_hash),
+            ("reason", reason),
+        ]);
+        let author = crate::ledger::local_author();
+        let pid_str = prompt_id.to_string();
+        let ev = Self::append_ledger_event_locked(
+            &conn,
+            &crate::ledger::LedgerAppend {
+                kind: crate::ledger::EventKind::Compaction.as_str(),
+                author: &author,
+                ts,
+                prompt_id: Some(prompt_id),
+                session_id: None,
+                version_number: None,
+                ref_kind: Some("prompt"),
+                ref_id: Some(pid_str.as_str()),
+                payload_hash: &ph,
+            },
+        )?;
+        Ok(Some(ev.seq))
+    }
+
+    /// Compaction candidates: warm prompts (`gist IS NULL`) at least `size_floor`
+    /// bytes, each paired with an ACCEPTED class node it is linked into. A prompt
+    /// links into a node by ledger seq (`class_links.target_id` = the prompt
+    /// event's seq), so we resolve seq → `prompt_id` here. Returns
+    /// `(prompt_id, byte_len, node_id)` rows — the keeper groups them by prompt
+    /// and applies the cold/pinned/size interlocks in pure code. A prompt not yet
+    /// classified into any node produces no rows (only classified-and-cold data
+    /// is ever gisted).
+    pub fn list_compaction_candidates(
+        &self,
+        size_floor: i64,
+    ) -> rusqlite::Result<Vec<(i64, i64, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT p.id, LENGTH(CAST(p.body AS BLOB)) AS bytes, l.node_id
+             FROM prompts p
+             JOIN ledger_events le ON le.prompt_id = p.id AND le.kind = 'prompt'
+             JOIN class_links l
+               ON l.target_kind = 'prompt'
+              AND CAST(l.target_id AS INTEGER) = le.seq
+              AND l.status = 'accepted'
+             WHERE p.gist IS NULL
+               AND LENGTH(CAST(p.body AS BLOB)) >= ?1",
+        )?;
+        let rows = stmt.query_map(params![size_floor], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?))
+        })?;
+        rows.collect()
+    }
+
+    /// Fetch the full (uncompacted) bodies for a set of prompt ids — the input
+    /// the keeper's summarizer (and its deterministic fallback) gist from. Only
+    /// warm rows are returned; an already-compacted id is silently skipped.
+    pub fn get_prompt_bodies(&self, ids: &[i64]) -> rusqlite::Result<Vec<(i64, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut out = Vec::with_capacity(ids.len());
+        let mut stmt =
+            conn.prepare("SELECT body FROM prompts WHERE id = ?1 AND gist IS NULL")?;
+        for &id in ids {
+            let body: Option<String> = stmt
+                .query_row(params![id], |r| r.get(0))
+                .optional()?;
+            if let Some(b) = body {
+                out.push((id, b));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Aggregate compaction stats for the memory pill/inspector:
+    /// `(compacted_count, reclaimed_bytes, newest_compacted_at?)`.
+    pub fn compaction_stats(&self) -> rusqlite::Result<(i64, i64, Option<i64>)> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(original_bytes), 0),
+                    MAX(compacted_at)
+             FROM prompts WHERE gist IS NOT NULL",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+    }
+
+    // -----------------------------------------------------------------------
+    // Memory-by-session: session tree + context journal
+    // -----------------------------------------------------------------------
+
+    /// Insert a session-tree relation. A child has at most one parent (UNIQUE
+    /// on `(child_kind, child_id)` — first write wins); returns the new row id,
+    /// or `None` when the child is already linked.
+    pub fn insert_session_link(
+        &self,
+        child_kind: &str,
+        child_id: &str,
+        parent_kind: &str,
+        parent_id: &str,
+        created_at: i64,
+    ) -> rusqlite::Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "INSERT INTO session_tree (child_kind, child_id, parent_kind, parent_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(child_kind, child_id) DO NOTHING",
+            params![child_kind, child_id, parent_kind, parent_id, created_at],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        Ok(Some(conn.last_insert_rowid()))
+    }
+
+    /// A child's parent, if linked: `(parent_kind, parent_id)`.
+    pub fn session_tree_parent(
+        &self,
+        child_kind: &str,
+        child_id: &str,
+    ) -> rusqlite::Result<Option<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT parent_kind, parent_id FROM session_tree
+             WHERE child_kind = ?1 AND child_id = ?2",
+            params![child_kind, child_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+    }
+
+    /// A parent's children, oldest-first: `(child_kind, child_id, created_at)`.
+    pub fn session_tree_children(
+        &self,
+        parent_kind: &str,
+        parent_id: &str,
+    ) -> rusqlite::Result<Vec<(String, String, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT child_kind, child_id, created_at FROM session_tree
+             WHERE parent_kind = ?1 AND parent_id = ?2 ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![parent_kind, parent_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        rows.collect()
+    }
+
+    /// Append a context-journal row (the Companion's passive-awareness feed),
+    /// pruning the working set on insert: keep the newest `JOURNAL_KEEP_ROWS`
+    /// and nothing older than `JOURNAL_KEEP_MS`. Best-effort at call sites.
+    pub fn append_journal(
+        &self,
+        kind: &str,
+        surface_kind: Option<&str>,
+        surface_id: Option<&str>,
+        label: Option<&str>,
+        detail: Option<&str>,
+    ) -> rusqlite::Result<i64> {
+        const JOURNAL_KEEP_ROWS: i64 = 2000;
+        const JOURNAL_KEEP_MS: i64 = 14 * 24 * 60 * 60 * 1000;
+        let now = crate::ledger::now_millis();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO context_journal (ts, kind, surface_kind, surface_id, label, detail)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![now, kind, surface_kind, surface_id, label, detail],
+        )?;
+        let id = conn.last_insert_rowid();
+        let _ = conn.execute(
+            "DELETE FROM context_journal
+             WHERE id <= ?1 - ?2 OR ts < ?3 - ?4",
+            params![id, JOURNAL_KEEP_ROWS, now, JOURNAL_KEEP_MS],
+        );
+        Ok(id)
+    }
+
+    /// Journal rows strictly after `since_id`, oldest-first, capped at `limit` —
+    /// the Companion's "while you were away" delta.
+    pub fn list_journal_since(
+        &self,
+        since_id: i64,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<JournalRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, ts, kind, surface_kind, surface_id, label, detail
+             FROM context_journal WHERE id > ?1 ORDER BY id ASC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![since_id.max(0), limit.max(1)], |r| {
+            Ok(JournalRow {
+                id: r.get(0)?,
+                ts: r.get(1)?,
+                kind: r.get(2)?,
+                surface_kind: r.get(3)?,
+                surface_id: r.get(4)?,
+                label: r.get(5)?,
+                detail: r.get(6)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// The newest journal row id (0 when empty) — the seq a reader can resume
+    /// its delta from.
+    pub fn journal_head(&self) -> rusqlite::Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM context_journal",
+            [],
+            |r| r.get(0),
+        )
+    }
+
+    // -----------------------------------------------------------------------
+    // Companion: the global cross-surface discussion
+    // -----------------------------------------------------------------------
+
+    pub fn insert_companion(&self, c: &crate::state::Companion) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO companion_sessions
+                (companion_id, title, status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![c.companion_id, c.title, c.status, c.created_at, c.updated_at],
+        )?;
+        Ok(())
+    }
+
+    /// All companion sessions, most recently active first.
+    pub fn list_companions(&self) -> rusqlite::Result<Vec<crate::state::Companion>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT companion_id, title, status, created_at, updated_at
+             FROM companion_sessions ORDER BY updated_at DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(crate::state::Companion {
+                companion_id: r.get(0)?,
+                title: r.get(1)?,
+                status: r.get(2)?,
+                created_at: r.get(3)?,
+                updated_at: r.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn delete_companion(&self, companion_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM companion_messages WHERE companion_id = ?1",
+            params![companion_id],
+        )?;
+        conn.execute(
+            "DELETE FROM companion_sessions WHERE companion_id = ?1",
+            params![companion_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_companion_session(&self, companion_id: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT claude_session_id FROM companion_sessions WHERE companion_id = ?1",
+            params![companion_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+    }
+
+    pub fn set_companion_session(
+        &self,
+        companion_id: &str,
+        claude_session_id: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE companion_sessions SET claude_session_id = ?2 WHERE companion_id = ?1",
+            params![companion_id, claude_session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Forget an over-limit companion session so the next turn starts fresh.
+    pub fn clear_companion_session(&self, companion_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE companion_sessions SET claude_session_id = NULL WHERE companion_id = ?1",
+            params![companion_id],
+        )?;
+        Ok(())
+    }
+
+    /// The journal high-water mark this companion has already absorbed.
+    pub fn get_companion_journal_seq(&self, companion_id: &str) -> i64 {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT last_journal_seq FROM companion_sessions WHERE companion_id = ?1",
+            params![companion_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0)
+    }
+
+    pub fn set_companion_journal_seq(
+        &self,
+        companion_id: &str,
+        seq: i64,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE companion_sessions SET last_journal_seq = MAX(last_journal_seq, ?2)
+             WHERE companion_id = ?1",
+            params![companion_id, seq],
+        )?;
+        Ok(())
+    }
+
+    pub fn insert_companion_message(
+        &self,
+        msg: &crate::state::CompanionMessage,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO companion_messages
+                (id, companion_id, role, body, status, surface_kind, surface_id,
+                 surface_label, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                msg.id,
+                msg.companion_id,
+                msg.role,
+                msg.body,
+                msg.status,
+                msg.surface_kind,
+                msg.surface_id,
+                msg.surface_label,
+                msg.created_at
+            ],
+        )?;
+        Self::touch_companion_locked(&conn, &msg.companion_id, msg.created_at);
+        Ok(())
+    }
+
+    fn touch_companion_locked(conn: &Connection, companion_id: &str, at: i64) {
+        let _ = conn.execute(
+            "UPDATE companion_sessions SET updated_at = MAX(updated_at, ?2)
+             WHERE companion_id = ?1",
+            params![companion_id, at],
+        );
+    }
+
+    pub fn load_companion_thread(
+        &self,
+        companion_id: &str,
+    ) -> rusqlite::Result<Vec<crate::state::CompanionMessage>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, companion_id, role, body, status, surface_kind, surface_id,
+                    surface_label, created_at
+             FROM companion_messages WHERE companion_id = ?1
+             ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![companion_id], |r| {
+            Ok(crate::state::CompanionMessage {
+                id: r.get(0)?,
+                companion_id: r.get(1)?,
+                role: r.get(2)?,
+                body: r.get(3)?,
+                status: r.get(4)?,
+                surface_kind: r.get(5)?,
+                surface_id: r.get(6)?,
+                surface_label: r.get(7)?,
+                created_at: r.get(8)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // Prompt Drafter / Bookshelf: the document itself, plus its shelf location
+    // -----------------------------------------------------------------------
+
+    /// Upsert a draft. `doc_json` is the TipTap **fidelity source** — the real
+    /// document, which the Bookshelf now owns; `doc_markdown` is the derived,
+    /// agent-readable mirror behind `/v1/drafter/:id/doc`.
+    ///
+    /// `doc_json = None` means "mirror only, don't touch the document" — the
+    /// server-side flush in `draft_chat` passes it, and `COALESCE` keeps the
+    /// stored JSON intact. A markdown-only writer must never be able to blank
+    /// the only copy of the document.
+    pub fn upsert_draft(
+        &self,
+        draft_id: &str,
+        title: Option<&str>,
+        project_path: Option<&str>,
+        doc_markdown: &str,
+        doc_json: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        let now = crate::ledger::now_millis();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO drafts (draft_id, title, project_path, doc_markdown, doc_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+             ON CONFLICT(draft_id) DO UPDATE SET
+                title = excluded.title,
+                project_path = excluded.project_path,
+                doc_markdown = excluded.doc_markdown,
+                doc_json = COALESCE(excluded.doc_json, drafts.doc_json),
+                updated_at = excluded.updated_at",
+            params![draft_id, title, project_path, doc_markdown, doc_json, now],
+        )?;
+        Ok(())
+    }
+
+    /// A draft's `(title, project_path, doc_markdown, updated_at)`.
+    pub fn get_draft(
+        &self,
+        draft_id: &str,
+    ) -> rusqlite::Result<Option<(Option<String>, Option<String>, String, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT title, project_path, doc_markdown, updated_at
+             FROM drafts WHERE draft_id = ?1",
+            params![draft_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()
+    }
+
+    /// The document itself: `(doc_json, doc_markdown, project_path)`. `doc_json`
+    /// is `None` for a row that has only ever been mirrored — the drafter then
+    /// opens blank rather than inventing a body.
+    pub fn get_draft_doc(
+        &self,
+        draft_id: &str,
+    ) -> rusqlite::Result<Option<(Option<String>, String, Option<String>)>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT doc_json, doc_markdown, project_path FROM drafts WHERE draft_id = ?1",
+            params![draft_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+    }
+
+    // --- Bookshelf: documents ---
+
+    /// Every shelf document, most-recently-updated first.
+    pub fn list_drafts(&self) -> rusqlite::Result<Vec<BookshelfDraft>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT d.draft_id, d.title, d.project_path, d.folder_id, d.created_at, d.updated_at,
+                    (SELECT COUNT(*) FROM draft_sources s WHERE s.draft_id = d.draft_id),
+                    (d.doc_json IS NOT NULL AND d.doc_json <> '')
+             FROM drafts d ORDER BY d.updated_at DESC, d.draft_id ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(BookshelfDraft {
+                draft_id: r.get(0)?,
+                title: r.get(1)?,
+                project_path: r.get(2)?,
+                folder_id: r.get(3)?,
+                created_at: r.get(4)?,
+                updated_at: r.get(5)?,
+                source_count: r.get(6)?,
+                has_doc: r.get::<_, i64>(7)? != 0,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Rename a document. The title is normally derived from the markdown's
+    /// first heading; this is the explicit override the shelf offers.
+    pub fn rename_draft(&self, draft_id: &str, title: &str) -> rusqlite::Result<()> {
+        let now = crate::ledger::now_millis();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE drafts SET title = ?2, updated_at = ?3 WHERE draft_id = ?1",
+            params![draft_id, title, now],
+        )?;
+        Ok(())
+    }
+
+    /// Move a document to a folder (`None` = shelf root). A single row update —
+    /// the whole reason the tree is an adjacency list.
+    pub fn move_draft(&self, draft_id: &str, folder_id: Option<&str>) -> rusqlite::Result<()> {
+        let now = crate::ledger::now_millis();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE drafts SET folder_id = ?2, updated_at = ?3 WHERE draft_id = ?1",
+            params![draft_id, folder_id, now],
+        )?;
+        Ok(())
+    }
+
+    /// What deleting this document destroys — for the confirm dialog.
+    pub fn draft_delete_impact(&self, draft_id: &str) -> rusqlite::Result<DeleteImpact> {
+        let conn = self.conn.lock().unwrap();
+        Self::draft_impact_locked(&conn, draft_id)
+    }
+
+    fn draft_impact_locked(conn: &Connection, draft_id: &str) -> rusqlite::Result<DeleteImpact> {
+        let count = |sql: &str| -> rusqlite::Result<i64> {
+            conn.query_row(sql, params![draft_id], |r| r.get(0))
+        };
+        Ok(DeleteImpact {
+            drafts: count("SELECT COUNT(*) FROM drafts WHERE draft_id = ?1")?,
+            folders: 0,
+            comments: count("SELECT COUNT(*) FROM draft_comments WHERE draft_id = ?1")?,
+            pending_suggestions: count(
+                "SELECT COUNT(*) FROM draft_suggestions WHERE draft_id = ?1 AND status = 'pending'",
+            )?,
+            sources: count("SELECT COUNT(*) FROM draft_sources WHERE draft_id = ?1")?,
+            chat_messages: count("SELECT COUNT(*) FROM draft_chat_messages WHERE draft_id = ?1")?,
+        })
+    }
+
+    /// Delete a document and everything hanging off it — the chat thread, its
+    /// comments, its queued suggestions, its sources. There is no undo, and as
+    /// of the Bookshelf this destroys the only copy of the document, which is
+    /// why the caller gates it behind a typed-title confirm.
+    pub fn delete_draft(&self, draft_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        Self::delete_draft_locked(&conn, draft_id)
+    }
+
+    fn delete_draft_locked(conn: &Connection, draft_id: &str) -> rusqlite::Result<()> {
+        for sql in [
+            "DELETE FROM draft_sources WHERE draft_id = ?1",
+            "DELETE FROM draft_suggestions WHERE draft_id = ?1",
+            "DELETE FROM draft_comments WHERE draft_id = ?1",
+            "DELETE FROM draft_chat_messages WHERE draft_id = ?1",
+            "DELETE FROM draft_chat_threads WHERE draft_id = ?1",
+            "DELETE FROM drafts WHERE draft_id = ?1",
+        ] {
+            conn.execute(sql, params![draft_id])?;
+        }
+        Ok(())
+    }
+
+    // --- Bookshelf: folders ---
+
+    /// Every folder, parent-then-name ordered (the tree is built client-side by
+    /// the same `buildTree` pattern the memory and review trees use).
+    pub fn list_folders(&self) -> rusqlite::Result<Vec<BookshelfFolder>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT folder_id, parent_id, name, created_at FROM bookshelf_folders
+             ORDER BY parent_id IS NOT NULL, parent_id, name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(BookshelfFolder {
+                folder_id: r.get(0)?,
+                parent_id: r.get(1)?,
+                name: r.get(2)?,
+                created_at: r.get(3)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn create_folder(
+        &self,
+        folder_id: &str,
+        parent_id: Option<&str>,
+        name: &str,
+    ) -> rusqlite::Result<()> {
+        let now = crate::ledger::now_millis();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO bookshelf_folders (folder_id, parent_id, name, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![folder_id, parent_id, name, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn rename_folder(&self, folder_id: &str, name: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE bookshelf_folders SET name = ?2 WHERE folder_id = ?1",
+            params![folder_id, name],
+        )?;
+        Ok(())
+    }
+
+    /// Reparent a folder (`None` = shelf root). **Rejects a move into the
+    /// folder's own subtree** — the adjacency list has no structural guard
+    /// against a cycle, and a cycle would orphan the whole subtree from the
+    /// root walk. Returns `Err` with a readable reason so the UI can show it.
+    pub fn move_folder(
+        &self,
+        folder_id: &str,
+        new_parent: Option<&str>,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().unwrap();
+        let edges = Self::folder_edges_locked(&conn).map_err(|e| e.to_string())?;
+        if let Some(reason) = folder_move_rejection(&edges, folder_id, new_parent) {
+            return Err(reason);
+        }
+        conn.execute(
+            "UPDATE bookshelf_folders SET parent_id = ?2 WHERE folder_id = ?1",
+            params![folder_id, new_parent],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// `(folder_id, parent_id)` for every folder — the adjacency edges the
+    /// cycle guard walks.
+    fn folder_edges_locked(conn: &Connection) -> rusqlite::Result<Vec<(String, Option<String>)>> {
+        let mut stmt = conn.prepare("SELECT folder_id, parent_id FROM bookshelf_folders")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
+    }
+
+    /// What deleting this folder destroys, counting its whole subtree.
+    pub fn folder_delete_impact(&self, folder_id: &str) -> rusqlite::Result<DeleteImpact> {
+        let conn = self.conn.lock().unwrap();
+        let edges = Self::folder_edges_locked(&conn)?;
+        let subtree = folder_subtree(&edges, folder_id);
+        let mut impact = DeleteImpact {
+            folders: subtree.len() as i64,
+            ..Default::default()
+        };
+        for fid in &subtree {
+            let mut stmt = conn.prepare("SELECT draft_id FROM drafts WHERE folder_id = ?1")?;
+            let ids: Vec<String> = stmt
+                .query_map(params![fid], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            drop(stmt);
+            for id in ids {
+                let d = Self::draft_impact_locked(&conn, &id)?;
+                impact.drafts += d.drafts;
+                impact.comments += d.comments;
+                impact.pending_suggestions += d.pending_suggestions;
+                impact.sources += d.sources;
+                impact.chat_messages += d.chat_messages;
+            }
+        }
+        Ok(impact)
+    }
+
+    /// Delete a folder, its subtree, and every document inside — with the same
+    /// cascade `delete_draft` performs. No undo; gated by a typed-title confirm.
+    /// Returns the ids of the documents that went, so the caller can remove
+    /// their source directories too.
+    pub fn delete_folder(&self, folder_id: &str) -> rusqlite::Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let edges = Self::folder_edges_locked(&conn)?;
+        let subtree = folder_subtree(&edges, folder_id);
+        let mut deleted: Vec<String> = Vec::new();
+        for fid in &subtree {
+            let mut stmt = conn.prepare("SELECT draft_id FROM drafts WHERE folder_id = ?1")?;
+            let ids: Vec<String> = stmt
+                .query_map(params![fid], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            drop(stmt);
+            for id in ids {
+                Self::delete_draft_locked(&conn, &id)?;
+                deleted.push(id);
+            }
+            conn.execute(
+                "DELETE FROM bookshelf_folders WHERE folder_id = ?1",
+                params![fid],
+            )?;
+        }
+        Ok(deleted)
+    }
+
+    // --- Bookshelf: sources (attached to a document, never to a folder) ---
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_draft_source(
+        &self,
+        id: &str,
+        draft_id: &str,
+        kind: &str,
+        ref_id: Option<&str>,
+        url: Option<&str>,
+        title: Option<&str>,
+        excerpt: Option<&str>,
+        file_path: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        let now = crate::ledger::now_millis();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO draft_sources
+                (id, draft_id, kind, ref_id, url, title, excerpt, file_path, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![id, draft_id, kind, ref_id, url, title, excerpt, file_path, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_draft_sources(&self, draft_id: &str) -> rusqlite::Result<Vec<DraftSource>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, draft_id, kind, ref_id, url, title, excerpt, file_path, created_at
+             FROM draft_sources WHERE draft_id = ?1 ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![draft_id], |r| {
+            Ok(DraftSource {
+                id: r.get(0)?,
+                draft_id: r.get(1)?,
+                kind: r.get(2)?,
+                ref_id: r.get(3)?,
+                url: r.get(4)?,
+                title: r.get(5)?,
+                excerpt: r.get(6)?,
+                file_path: r.get(7)?,
+                created_at: r.get(8)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Delete one source row, returning its `file_path` so the caller can
+    /// remove the backing file under `<app_data_dir>/bookshelf/<draft_id>/`.
+    pub fn delete_draft_source(&self, id: &str) -> rusqlite::Result<Option<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let row: Option<(String, Option<String>)> = conn
+            .query_row(
+                "SELECT draft_id, file_path FROM draft_sources WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        conn.execute("DELETE FROM draft_sources WHERE id = ?1", params![id])?;
+        Ok(row.and_then(|(draft_id, file)| file.map(|f| (draft_id, f))))
+    }
+
+    // -----------------------------------------------------------------------
+    // Friction telemetry + the Shipwright's own outcomes
+    // -----------------------------------------------------------------------
+
+    /// Append a friction event, pruning the table in the same statement as the
+    /// insert — modelled directly on `append_journal`'s prune-on-insert, so
+    /// there is no sweeper task and no unbounded growth. 90 days is long enough
+    /// that a digest can say "14 overflows in the last three days" against a
+    /// real baseline.
+    ///
+    /// Call sites use `let _ = …`: this is fire-and-forget by contract and must
+    /// never block or fail the path it observes.
+    pub fn record_friction(
+        &self,
+        kind: &str,
+        surface: Option<&str>,
+        session_id: Option<&str>,
+        detail: Option<&str>,
+    ) -> rusqlite::Result<i64> {
+        const FRICTION_KEEP_ROWS: i64 = 5000;
+        const FRICTION_KEEP_MS: i64 = 90 * 24 * 60 * 60 * 1000;
+        /// `detail` is free-form error text from a model or a subprocess —
+        /// capped here so one pathological message can't dominate the table.
+        const MAX_DETAIL: usize = 500;
+        let detail = detail.map(|d| {
+            if d.len() <= MAX_DETAIL {
+                d.to_string()
+            } else {
+                d.chars().take(MAX_DETAIL).collect()
+            }
+        });
+        let now = crate::ledger::now_millis();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO friction_events (ts, kind, surface, session_id, detail)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![now, kind, surface, session_id, detail],
+        )?;
+        let id = conn.last_insert_rowid();
+        let _ = conn.execute(
+            "DELETE FROM friction_events
+             WHERE id <= ?1 - ?2 OR ts < ?3 - ?4",
+            params![id, FRICTION_KEEP_ROWS, now, FRICTION_KEEP_MS],
+        );
+        Ok(id)
+    }
+
+    /// Friction kinds inside `window_ms`, most-frequent first.
+    pub fn friction_summary(&self, window_ms: i64) -> rusqlite::Result<Vec<FrictionCount>> {
+        let cutoff = crate::ledger::now_millis() - window_ms.max(0);
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT kind, COUNT(*), MAX(ts),
+                    (SELECT detail FROM friction_events f2
+                     WHERE f2.kind = f1.kind AND f2.ts >= ?1
+                     ORDER BY f2.ts DESC LIMIT 1)
+             FROM friction_events f1 WHERE ts >= ?1
+             GROUP BY kind ORDER BY COUNT(*) DESC, MAX(ts) DESC",
+        )?;
+        let rows = stmt.query_map(params![cutoff], |r| {
+            Ok(FrictionCount {
+                kind: r.get(0)?,
+                count: r.get(1)?,
+                last_ts: r.get(2)?,
+                last_detail: r.get(3)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Insert one finding, deduping on `(category, summary)` **regardless of
+    /// `dismissed`** — the property (copied from `insert_class_observation`)
+    /// that makes a dismissed finding never resurface under the same wording.
+    /// Returns `None` when the finding was a duplicate and nothing was written.
+    pub fn insert_shipwright_finding(
+        &self,
+        f: &ShipwrightFinding,
+    ) -> rusqlite::Result<Option<String>> {
+        if f.summary.trim().is_empty() || f.category.trim().is_empty() {
+            return Ok(None);
+        }
+        let conn = self.conn.lock().unwrap();
+        let dup: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM shipwright_findings WHERE category = ?1 AND summary = ?2",
+            params![f.category, f.summary],
+            |r| r.get(0),
+        )?;
+        if dup > 0 {
+            return Ok(None);
+        }
+        conn.execute(
+            "INSERT INTO shipwright_findings
+                (id, run_id, category, summary, evidence, proposal, guard, files,
+                 status, dismissed, draft_id, created_at, resolved_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', 0, ?9, ?10, NULL)",
+            params![
+                f.id,
+                f.run_id,
+                f.category,
+                f.summary,
+                f.evidence,
+                f.proposal,
+                f.guard,
+                f.files,
+                f.draft_id,
+                f.created_at,
+            ],
+        )?;
+        Ok(Some(f.id.clone()))
+    }
+
+    /// Findings, newest first. `include_dismissed = false` is what the digest
+    /// carries as "open"; the dismissed *summaries* go in separately so the
+    /// agent is told not to re-word them.
+    pub fn list_shipwright_findings(
+        &self,
+        include_dismissed: bool,
+    ) -> rusqlite::Result<Vec<ShipwrightFinding>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = if include_dismissed {
+            "SELECT id, run_id, category, summary, evidence, proposal, guard, files,
+                    status, dismissed, draft_id, created_at, resolved_at
+             FROM shipwright_findings ORDER BY created_at DESC, id ASC"
+        } else {
+            "SELECT id, run_id, category, summary, evidence, proposal, guard, files,
+                    status, dismissed, draft_id, created_at, resolved_at
+             FROM shipwright_findings WHERE dismissed = 0
+             ORDER BY created_at DESC, id ASC"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map([], |r| {
+            Ok(ShipwrightFinding {
+                id: r.get(0)?,
+                run_id: r.get(1)?,
+                category: r.get(2)?,
+                summary: r.get(3)?,
+                evidence: r.get(4)?,
+                proposal: r.get(5)?,
+                guard: r.get(6)?,
+                files: r.get(7)?,
+                status: r.get(8)?,
+                dismissed: r.get::<_, i64>(9)? != 0,
+                draft_id: r.get(10)?,
+                created_at: r.get(11)?,
+                resolved_at: r.get(12)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Record what you did with a finding. `accepted` is set when it survives
+    /// your trim into the launched document; `dismissed` also sets the flag the
+    /// dedupe reads, which is what makes a dismissal stick.
+    pub fn resolve_shipwright_finding(
+        &self,
+        id: &str,
+        status: &str,
+        draft_id: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        let now = crate::ledger::now_millis();
+        let dismissed = i64::from(status == "dismissed");
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE shipwright_findings
+             SET status = ?2,
+                 dismissed = MAX(dismissed, ?3),
+                 draft_id = COALESCE(?4, draft_id),
+                 resolved_at = ?5
+             WHERE id = ?1",
+            params![id, status, dismissed, draft_id, now],
+        )?;
+        Ok(())
+    }
+
+    /// Accepted findings that haven't shipped yet, as `(id, files_json)` — the
+    /// input to shipped-**detection**. The caller compares each `files` entry
+    /// against the paths a later commit touched; nothing here is self-declared.
+    pub fn shipwright_unshipped(&self) -> rusqlite::Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, COALESCE(files, '[]') FROM shipwright_findings
+             WHERE status = 'accepted'",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
+    }
+
+    /// Accept/dismiss/ship rates per category — the agent's own track record.
+    pub fn shipwright_scores(&self) -> rusqlite::Result<Vec<CategoryScore>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT category, COUNT(*),
+                    SUM(status IN ('accepted','shipped')),
+                    SUM(dismissed),
+                    SUM(status = 'shipped')
+             FROM shipwright_findings GROUP BY category ORDER BY COUNT(*) DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(CategoryScore {
+                category: r.get(0)?,
+                total: r.get(1)?,
+                accepted: r.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                dismissed: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                shipped: r.get::<_, Option<i64>>(4)?.unwrap_or(0),
+            })
+        })?;
+        rows.collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // Recorded correction (the Shipwright's Tier A) — scoped to one repo
+    // -----------------------------------------------------------------------
+    //
+    // Everything here already existed on disk and nobody mined it. It is a
+    // labeled corpus of "the agent got this wrong and I corrected it," in the
+    // user's own words, with round counts — and it needs no schema change to
+    // read. It is also the highest-signal input the Shipwright has: a 4-round
+    // reopen is evidence of real pain, where a long file is only a hypothesis.
+
+    /// Comments reopened at least once on this repo's sessions, most rounds
+    /// first: `(session_id, rounds, body, reopen_note)`. `rounds` counts the
+    /// entries in `reopen_history` — N entries means "we went N rounds on this
+    /// one point".
+    pub fn reopen_rounds_for_repo(
+        &self,
+        project_path: &str,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<(String, i64, String, Option<String>)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT c.session_id, c.reopen_history, c.body, c.reopen_note
+             FROM comments c JOIN sessions s ON s.session_id = c.session_id
+             WHERE s.project_path = ?1 AND c.reopen_history IS NOT NULL
+             ORDER BY c.created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![project_path], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+            ))
+        })?;
+        let mut out: Vec<(String, i64, String, Option<String>)> = Vec::new();
+        for row in rows {
+            let (session_id, history, body, note) = row?;
+            let rounds = history
+                .as_deref()
+                .and_then(|h| serde_json::from_str::<serde_json::Value>(h).ok())
+                .and_then(|v| v.as_array().map(|a| a.len() as i64))
+                .unwrap_or(0);
+            if rounds > 0 {
+                out.push((session_id, rounds, body, note));
+            }
+        }
+        out.sort_by(|a, b| b.1.cmp(&a.1));
+        out.truncate(limit.max(0) as usize);
+        Ok(out)
+    }
+
+    /// Verbatim before/after pairs where the user rewrote the agent's prose on
+    /// this repo: `(session_id, original, revised)`, newest first.
+    pub fn edit_pairs_for_repo(
+        &self,
+        project_path: &str,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<(String, String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT c.session_id, c.edit_original, c.edit_revised
+             FROM comments c JOIN sessions s ON s.session_id = c.session_id
+             WHERE s.project_path = ?1
+               AND c.edit_original IS NOT NULL AND c.edit_revised IS NOT NULL
+               AND c.edit_original <> c.edit_revised
+             ORDER BY c.created_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![project_path, limit], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        rows.collect()
+    }
+
+    /// Code reviews on this repo that took more than one round:
+    /// `(review_id, round, source)`, most rounds first.
+    pub fn review_rounds_for_repo(
+        &self,
+        repo_path: &str,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<(String, i64, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT review_id, round, source FROM review_sessions
+             WHERE repo_path = ?1 AND round > 1
+             ORDER BY round DESC, created_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![repo_path, limit], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        rows.collect()
+    }
+
+    /// Re-anchoring success on returned review requests for this repo:
+    /// `(placed, orphans)` summed across every return.
+    pub fn share_anchoring_for_repo(&self, project_path: &str) -> rusqlite::Result<(i64, i64)> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COALESCE(SUM(r.placed), 0), COALESCE(SUM(r.orphans), 0)
+             FROM share_returns r JOIN sessions s ON s.session_id = r.session_id
+             WHERE s.project_path = ?1",
+            params![project_path],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+    }
+
+    /// Agent write-suggestions the user rejected: `(count, most_recent_op)`.
+    /// Not repo-scoped — drafts carry a `project_path` only when one was picked.
+    pub fn rejected_suggestion_summary(
+        &self,
+        project_path: &str,
+    ) -> rusqlite::Result<Vec<(String, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT g.op, COUNT(*) FROM draft_suggestions g
+             JOIN drafts d ON d.draft_id = g.draft_id
+             WHERE g.status = 'rejected' AND d.project_path = ?1
+             GROUP BY g.op ORDER BY COUNT(*) DESC",
+        )?;
+        let rows = stmt.query_map(params![project_path], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
+    }
+
+    /// Approved plans on this repo whose code never went through a review:
+    /// `(session_id, project_name, created_at)`. The Tier D "a plan shipped
+    /// without its code being reviewed" signal.
+    pub fn approved_unreviewed_for_repo(
+        &self,
+        project_path: &str,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<(String, String, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT s.session_id, s.project_name, s.created_at
+             FROM sessions s
+             WHERE s.project_path = ?1 AND s.status = 'approved'
+               AND NOT EXISTS (
+                   SELECT 1 FROM review_sessions v
+                   WHERE v.repo_path = s.project_path AND v.created_at >= s.created_at
+               )
+             ORDER BY s.created_at ASC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![project_path, limit], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        rows.collect()
+    }
+
+    /// Persist a draft-chat turn (terminal row; streaming is frontend-only).
+    pub fn insert_draft_chat_message(
+        &self,
+        msg: &crate::state::DraftChatMessage,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO draft_chat_messages (id, draft_id, role, body, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                msg.id,
+                msg.draft_id,
+                msg.role,
+                msg.body,
+                msg.status,
+                msg.created_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// A draft's discussion history, oldest-first.
+    pub fn load_draft_chat_thread(
+        &self,
+        draft_id: &str,
+    ) -> rusqlite::Result<Vec<crate::state::DraftChatMessage>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, draft_id, role, body, status, created_at
+             FROM draft_chat_messages WHERE draft_id = ?1 ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![draft_id], |r| {
+            Ok(crate::state::DraftChatMessage {
+                id: r.get(0)?,
+                draft_id: r.get(1)?,
+                role: r.get(2)?,
+                body: r.get(3)?,
+                status: r.get(4)?,
+                created_at: r.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// The draft chat's resumable claude session id, if any.
+    pub fn get_draft_chat_session(&self, draft_id: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT claude_session_id FROM draft_chat_threads WHERE draft_id = ?1",
+            params![draft_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+    }
+
+    pub fn set_draft_chat_session(
+        &self,
+        draft_id: &str,
+        claude_session_id: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO draft_chat_threads (draft_id, claude_session_id)
+             VALUES (?1, ?2)
+             ON CONFLICT(draft_id) DO UPDATE SET claude_session_id = excluded.claude_session_id",
+            params![draft_id, claude_session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Forget an over-limit draft-chat session so the next turn starts fresh.
+    pub fn clear_draft_chat_session(&self, draft_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE draft_chat_threads SET claude_session_id = NULL WHERE draft_id = ?1",
+            params![draft_id],
+        )?;
+        Ok(())
+    }
+
+    /// The doc hash the draft's agent last saw (drives the "the draft has
+    /// changed — re-read it" follow-up header).
+    pub fn get_draft_chat_doc_hash(&self, draft_id: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT last_doc_hash FROM draft_chat_threads WHERE draft_id = ?1",
+            params![draft_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+    }
+
+    pub fn set_draft_chat_doc_hash(&self, draft_id: &str, hash: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO draft_chat_threads (draft_id, last_doc_hash)
+             VALUES (?1, ?2)
+             ON CONFLICT(draft_id) DO UPDATE SET last_doc_hash = excluded.last_doc_hash",
+            params![draft_id, hash],
+        )?;
+        Ok(())
+    }
+
+    /// Drop a draft's discussion thread + resumable session (explicit draft
+    /// delete only — "New draft" keeps history).
+    pub fn delete_draft_chat(&self, draft_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM draft_chat_messages WHERE draft_id = ?1",
+            params![draft_id],
+        )?;
+        conn.execute(
+            "DELETE FROM draft_chat_threads WHERE draft_id = ?1",
+            params![draft_id],
+        )?;
+        Ok(())
+    }
+
+    /// Insert a draft comment (the drafter sidecar).
+    pub fn insert_draft_comment(&self, c: &crate::state::DraftComment) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO draft_comments
+                (id, draft_id, block_id, sel_char_start, sel_char_end, sel_quoted_text,
+                 body, author, created_at, fork_session_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                c.id,
+                c.draft_id,
+                c.block_id,
+                c.sel_char_start,
+                c.sel_char_end,
+                c.sel_quoted_text,
+                c.body,
+                c.author,
+                c.created_at,
+                c.fork_session_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// A draft's comments, oldest-first.
+    pub fn list_draft_comments(
+        &self,
+        draft_id: &str,
+    ) -> rusqlite::Result<Vec<crate::state::DraftComment>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, draft_id, block_id, sel_char_start, sel_char_end, sel_quoted_text,
+                    body, author, created_at, fork_session_id
+             FROM draft_comments WHERE draft_id = ?1 ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![draft_id], |r| {
+            Ok(crate::state::DraftComment {
+                id: r.get(0)?,
+                draft_id: r.get(1)?,
+                block_id: r.get(2)?,
+                sel_char_start: r.get(3)?,
+                sel_char_end: r.get(4)?,
+                sel_quoted_text: r.get(5)?,
+                body: r.get(6)?,
+                author: r.get(7)?,
+                created_at: r.get(8)?,
+                fork_session_id: r.get(9)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// One draft comment by id (scope checks + fork grounding).
+    pub fn get_draft_comment(
+        &self,
+        id: &str,
+    ) -> rusqlite::Result<Option<crate::state::DraftComment>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, draft_id, block_id, sel_char_start, sel_char_end, sel_quoted_text,
+                    body, author, created_at, fork_session_id
+             FROM draft_comments WHERE id = ?1",
+            params![id],
+            |r| {
+                Ok(crate::state::DraftComment {
+                    id: r.get(0)?,
+                    draft_id: r.get(1)?,
+                    block_id: r.get(2)?,
+                    sel_char_start: r.get(3)?,
+                    sel_char_end: r.get(4)?,
+                    sel_quoted_text: r.get(5)?,
+                    body: r.get(6)?,
+                    author: r.get(7)?,
+                    created_at: r.get(8)?,
+                    fork_session_id: r.get(9)?,
+                })
+            },
+        )
+        .optional()
+    }
+
+    /// Delete a draft comment + its discussion thread rows.
+    pub fn delete_draft_comment(&self, draft_id: &str, id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM draft_comments WHERE id = ?1", params![id])?;
+        conn.execute(
+            "DELETE FROM thread_messages WHERE session_id = ?1 AND comment_id = ?2",
+            params![draft_id, id],
+        )?;
+        Ok(())
+    }
+
+    /// The draft comment's resumable discussion-fork session id.
+    pub fn get_draft_comment_fork_session(&self, id: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT fork_session_id FROM draft_comments WHERE id = ?1",
+            params![id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+    }
+
+    pub fn set_draft_comment_fork_session(
+        &self,
+        id: &str,
+        fork_session_id: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE draft_comments SET fork_session_id = ?2 WHERE id = ?1",
+            params![id, fork_session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Queue an agent write-suggestion (status `pending`).
+    pub fn insert_draft_suggestion(
+        &self,
+        s: &crate::state::DraftSuggestion,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO draft_suggestions
+                (id, draft_id, op, block_id, original, markdown, agent_id, body, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                s.id,
+                s.draft_id,
+                s.op,
+                s.block_id,
+                s.original,
+                s.markdown,
+                s.agent_id,
+                s.body,
+                s.status,
+                s.created_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// A draft's pending suggestions, oldest-first — drained by the drafter on
+    /// mount so proposals made while the pane was closed aren't lost.
+    pub fn list_pending_draft_suggestions(
+        &self,
+        draft_id: &str,
+    ) -> rusqlite::Result<Vec<crate::state::DraftSuggestion>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, draft_id, op, block_id, original, markdown, agent_id, body, status, created_at
+             FROM draft_suggestions
+             WHERE draft_id = ?1 AND status = 'pending'
+             ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![draft_id], |r| {
+            Ok(crate::state::DraftSuggestion {
+                id: r.get(0)?,
+                draft_id: r.get(1)?,
+                op: r.get(2)?,
+                block_id: r.get(3)?,
+                original: r.get(4)?,
+                markdown: r.get(5)?,
+                agent_id: r.get(6)?,
+                body: r.get(7)?,
+                status: r.get(8)?,
+                created_at: r.get(9)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Resolve a suggestion: `applied` or `rejected`. Returns whether a pending
+    /// row was actually transitioned.
+    pub fn resolve_draft_suggestion(&self, id: &str, status: &str) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE draft_suggestions SET status = ?2
+             WHERE id = ?1 AND status = 'pending'",
+            params![id, status],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Resolve a thread kind to its `(table, key column)`. The one place the
+    /// generic thread routes map the app's disjoint id-spaces; `session`/`fork`
+    /// reads a plan session's comment threads.
+    fn thread_table(kind: &str) -> Option<(&'static str, &'static str)> {
+        match kind {
+            "browse" => Some(("browse_messages", "browse_id")),
+            "linked" => Some(("linked_messages", "linked_id")),
+            "mission" => Some(("mission_messages", "mission_id")),
+            "companion" => Some(("companion_messages", "companion_id")),
+            "drafter" | "drafter_chat" => Some(("draft_chat_messages", "draft_id")),
+            "session" | "fork" => Some(("thread_messages", "session_id")),
+            _ => None,
+        }
+    }
+
+    /// Generic read-only thread fetch across the per-surface `*_messages`
+    /// tables — the tail `limit` turns, oldest-first. `None` for an unknown
+    /// kind (the route 404s). Table/column names come from the fixed
+    /// `thread_table` map, never from the caller.
+    pub fn load_thread_generic(
+        &self,
+        kind: &str,
+        id: &str,
+        limit: i64,
+    ) -> rusqlite::Result<Option<Vec<GenericThreadMsg>>> {
+        let Some((table, key)) = Self::thread_table(kind) else {
+            return Ok(None);
+        };
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT role, body, created_at FROM {table}
+             WHERE {key} = ?1 ORDER BY created_at DESC, id DESC LIMIT ?2"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![id, limit.max(1)], |r| {
+            Ok(GenericThreadMsg {
+                role: r.get(0)?,
+                body: r.get(1)?,
+                created_at: r.get(2)?,
+            })
+        })?;
+        let mut msgs: Vec<GenericThreadMsg> = rows.collect::<Result<_, _>>()?;
+        msgs.reverse(); // oldest-first
+        Ok(Some(msgs))
+    }
+
+    /// Message count + newest timestamp for a thread, for the tree route's
+    /// child digests. `(0, None)` for an unknown kind or empty thread.
+    pub fn thread_stats(&self, kind: &str, id: &str) -> rusqlite::Result<(i64, Option<i64>)> {
+        let Some((table, key)) = Self::thread_table(kind) else {
+            return Ok((0, None));
+        };
+        let conn = self.conn.lock().unwrap();
+        let sql = format!("SELECT COUNT(*), MAX(created_at) FROM {table} WHERE {key} = ?1");
+        conn.query_row(&sql, params![id], |r| Ok((r.get(0)?, r.get(1)?)))
+    }
+
+    /// Best-effort human label for a thread id (a linked/mission/companion/draft
+    /// title; plan sessions resolve through `sessions.project_name`).
+    pub fn thread_label(&self, kind: &str, id: &str) -> Option<String> {
+        let (sql, key) = match kind {
+            "linked" => ("SELECT title FROM linked_sessions WHERE linked_id = ?1", id),
+            "mission" => ("SELECT title FROM missions WHERE mission_id = ?1", id),
+            "companion" => (
+                "SELECT title FROM companion_sessions WHERE companion_id = ?1",
+                id,
+            ),
+            "drafter" | "drafter_chat" => ("SELECT title FROM drafts WHERE draft_id = ?1", id),
+            "session" => (
+                "SELECT project_name FROM sessions WHERE session_id = ?1",
+                id,
+            ),
+            _ => return None,
+        };
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(sql, params![key], |r| r.get::<_, Option<String>>(0))
+            .ok()
+            .flatten()
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 4 — context access + portability (routes / export / mirror)
+    // -----------------------------------------------------------------------
+
+    /// Filtered prompt query backing `GET /v1/context/prompts`. Every optional
+    /// filter is ANDed; the free-text `substring` is bound (never string-
+    /// interpolated) so an injection-shaped `q` can only ever LIKE-match, not
+    /// alter the SQL. Oldest-first, capped at `limit`.
+    pub fn list_context_prompts(
+        &self,
+        f: &crate::context::PromptFilters,
+    ) -> rusqlite::Result<Vec<crate::classmem::LakeItem>> {
+        let conn = self.conn.lock().unwrap();
+        // Build a parameterized WHERE; each clause pushes a bound value so no
+        // caller string ever reaches the SQL text.
+        let mut sql = String::from(
+            "SELECT le.seq, le.ts, le.kind, le.ref_kind, le.ref_id, le.session_id,
+                    p.surface, p.origin, p.role, p.mission_id, p.project_path, p.body,
+                    p.thread_kind, p.thread_id, p.parent_session_id
+             FROM prompts p
+             JOIN ledger_events le ON le.prompt_id = p.id
+             WHERE 1 = 1",
+        );
+        let mut binds: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(s) = f.session_id.as_deref().filter(|s| !s.is_empty()) {
+            sql.push_str(" AND p.session_id = ?");
+            binds.push(Box::new(s.to_string()));
+        }
+        if let Some(m) = f.mission_id.as_deref().filter(|s| !s.is_empty()) {
+            sql.push_str(" AND p.mission_id = ?");
+            binds.push(Box::new(m.to_string()));
+        }
+        if let Some(s) = f.surface.as_deref().filter(|s| !s.is_empty()) {
+            sql.push_str(" AND p.surface = ?");
+            binds.push(Box::new(s.to_string()));
+        }
+        if let Some(t) = f.thread_kind.as_deref().filter(|s| !s.is_empty()) {
+            sql.push_str(" AND p.thread_kind = ?");
+            binds.push(Box::new(t.to_string()));
+        }
+        if let Some(t) = f.thread_id.as_deref().filter(|s| !s.is_empty()) {
+            sql.push_str(" AND p.thread_id = ?");
+            binds.push(Box::new(t.to_string()));
+        }
+        if let Some(p) = f.parent_session_id.as_deref().filter(|s| !s.is_empty()) {
+            sql.push_str(" AND p.parent_session_id = ?");
+            binds.push(Box::new(p.to_string()));
+        }
+        if let Some(p) = f.project.as_deref().filter(|s| !s.is_empty()) {
+            sql.push_str(" AND p.project_path = ?");
+            binds.push(Box::new(p.to_string()));
+        }
+        if let Some(seq) = f.since_seq {
+            sql.push_str(" AND le.seq > ?");
+            binds.push(Box::new(seq.max(0)));
+        }
+        if let Some(q) = f.substring.as_deref().filter(|s| !s.is_empty()) {
+            // Escape LIKE metacharacters so the query text is matched literally.
+            let escaped = q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+            sql.push_str(" AND p.body LIKE ? ESCAPE '\\'");
+            binds.push(Box::new(format!("%{escaped}%")));
+        }
+        sql.push_str(" ORDER BY le.seq ASC LIMIT ?");
+        binds.push(Box::new(f.limit.max(1)));
+
+        let mut stmt = conn.prepare(&sql)?;
+        let refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(refs.as_slice(), |r| {
+            let body: Option<String> = r.get(11)?;
+            Ok(crate::classmem::LakeItem {
+                seq: r.get(0)?,
+                ts: r.get(1)?,
+                kind: r.get(2)?,
+                ref_kind: r.get(3)?,
+                ref_id: r.get(4)?,
+                session_id: r.get(5)?,
+                surface: r.get(6)?,
+                origin: r.get(7)?,
+                role: r.get(8)?,
+                mission_id: r.get(9)?,
+                project_path: r.get(10)?,
+                body: body.map(|b| {
+                    if b.chars().count() > 4000 {
+                        b.chars().take(4000).collect::<String>() + "…"
+                    } else {
+                        b
+                    }
+                }),
+                thread_kind: r.get(12)?,
+                thread_id: r.get(13)?,
+                parent_session_id: r.get(14)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// All ledger events tied to a session (`session_id` column match),
+    /// oldest-first — the decision-event spine of `GET /v1/context/sessions/:id/
+    /// history`. Prompt, revision, and decision events all carry `session_id`.
+    pub fn list_session_events(
+        &self,
+        session_id: &str,
+    ) -> rusqlite::Result<Vec<crate::ledger::LedgerEventRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT seq, ts, kind, author, prompt_id, session_id, version_number,
+                    ref_kind, ref_id, payload_hash, prev_hash, entry_hash
+             FROM ledger_events WHERE session_id = ?1 ORDER BY seq ASC",
+        )?;
+        let rows = stmt.query_map(params![session_id], Self::row_to_ledger_event)?;
+        rows.collect()
+    }
+
+    /// Every ledger event, oldest-first, optionally after `since_seq` — the
+    /// ordered spine an export bundle / mirror walks. `limit` caps a huge
+    /// history. Ascending (unlike `list_ledger_events`, which is newest-first
+    /// for the pane).
+    pub fn list_ledger_events_asc(
+        &self,
+        since_seq: i64,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<crate::ledger::LedgerEventRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT seq, ts, kind, author, prompt_id, session_id, version_number,
+                    ref_kind, ref_id, payload_hash, prev_hash, entry_hash
+             FROM ledger_events WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![since_seq.max(0), limit.max(0)], Self::row_to_ledger_event)?;
+        rows.collect()
+    }
+
+    /// Shared row→`LedgerEventRow` mapper (the column order every ledger SELECT
+    /// above uses), so the three readers can't drift.
+    fn row_to_ledger_event(r: &rusqlite::Row) -> rusqlite::Result<crate::ledger::LedgerEventRow> {
+        Ok(crate::ledger::LedgerEventRow {
+            seq: r.get(0)?,
+            ts: r.get(1)?,
+            kind: r.get(2)?,
+            author: r.get(3)?,
+            prompt_id: r.get(4)?,
+            session_id: r.get(5)?,
+            version_number: r.get(6)?,
+            ref_kind: r.get(7)?,
+            ref_id: r.get(8)?,
+            payload_hash: r.get(9)?,
+            prev_hash: r.get(10)?,
+            entry_hash: r.get(11)?,
+        })
+    }
+
+    /// Prompt ids captured under a mission — the mission-scope filter for export
+    /// bundles (ledger_events has no `mission_id`; the prompt row carries it).
+    pub fn mission_prompt_ids(&self, mission_id: &str) -> rusqlite::Result<Vec<i64>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT id FROM prompts WHERE mission_id = ?1")?;
+        let rows = stmt.query_map(params![mission_id], |r| r.get::<_, i64>(0))?;
+        rows.collect()
+    }
+
+    /// The raw markdown of one revision (the body a `revision` ledger event
+    /// references but does not own) — for snapshotting into a mirror note /
+    /// export bundle at write time.
+    pub fn revision_markdown(
+        &self,
+        session_id: &str,
+        version_number: i64,
+    ) -> rusqlite::Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT raw_plan_markdown FROM revisions WHERE session_id = ?1 AND version_number = ?2",
+            params![session_id, version_number],
+            |r| r.get(0),
+        )
+        .optional()
+    }
+
+    /// Enriched ledger events (ascending, after `since_seq`) for the portable
+    /// mirror: each event joined to its prompt provenance + full body. Revision
+    /// bodies (`revisions.raw_plan_markdown`) are joined by the mirror writer,
+    /// not here (a `revision` event has no `prompt_id`).
+    pub fn list_mirror_events(
+        &self,
+        since_seq: i64,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<crate::mirror::MirrorRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT le.seq, le.ts, le.kind, le.author, le.prompt_id, le.session_id,
+                    le.version_number, le.ref_kind, le.ref_id, le.payload_hash,
+                    le.prev_hash, le.entry_hash,
+                    p.surface, p.origin, p.role, p.mission_id, p.project_path, p.body,
+                    p.thread_kind, p.thread_id, p.parent_session_id
+             FROM ledger_events le
+             LEFT JOIN prompts p ON le.prompt_id = p.id
+             WHERE le.seq > ?1 ORDER BY le.seq ASC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![since_seq.max(0), limit.max(0)], |r| {
+            Ok(crate::mirror::MirrorRow {
+                event: crate::ledger::LedgerEventRow {
+                    seq: r.get(0)?,
+                    ts: r.get(1)?,
+                    kind: r.get(2)?,
+                    author: r.get(3)?,
+                    prompt_id: r.get(4)?,
+                    session_id: r.get(5)?,
+                    version_number: r.get(6)?,
+                    ref_kind: r.get(7)?,
+                    ref_id: r.get(8)?,
+                    payload_hash: r.get(9)?,
+                    prev_hash: r.get(10)?,
+                    entry_hash: r.get(11)?,
+                },
+                surface: r.get(12)?,
+                origin: r.get(13)?,
+                role: r.get(14)?,
+                mission_id: r.get(15)?,
+                project_path: r.get(16)?,
+                body: r.get(17)?,
+                thread_kind: r.get(18)?,
+                thread_id: r.get(19)?,
+                parent_session_id: r.get(20)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Prompt counts grouped by UTC day (`YYYY-MM-DD`), oldest day first —
+    /// `/v1/context/stats` day histogram.
+    pub fn prompt_counts_by_day(&self) -> rusqlite::Result<Vec<(String, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT strftime('%Y-%m-%d', ts / 1000, 'unixepoch') AS day, COUNT(*)
+             FROM prompts GROUP BY day ORDER BY day ASC",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        rows.collect()
+    }
+
+    /// Prompt counts grouped by capture surface — `/v1/context/stats`.
+    pub fn prompt_counts_by_surface(&self) -> rusqlite::Result<Vec<(String, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT surface, COUNT(*) FROM prompts GROUP BY surface ORDER BY COUNT(*) DESC",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        rows.collect()
+    }
+
+    /// Ledger event counts grouped by kind — `/v1/context/stats`.
+    pub fn event_counts_by_kind(&self) -> rusqlite::Result<Vec<(String, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT kind, COUNT(*) FROM ledger_events GROUP BY kind ORDER BY COUNT(*) DESC",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        rows.collect()
+    }
+
+    /// Accepted-class-node counts per root class (title → linked-item count
+    /// rolled over the whole subtree) — the "class" axis of `/v1/context/stats`.
+    /// Roots only; a repo-less lake yields just `~general`.
+    pub fn class_link_counts_by_root(&self) -> rusqlite::Result<Vec<(String, i64)>> {
+        let nodes = self.list_class_nodes_with_counts()?;
+        // Map node → (parent, title, own link count).
+        let mut parent: std::collections::HashMap<String, Option<String>> = std::collections::HashMap::new();
+        let mut title: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut own: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        for (n, c) in &nodes {
+            parent.insert(n.id.clone(), n.parent_id.clone());
+            title.insert(n.id.clone(), n.title.clone());
+            own.insert(n.id.clone(), *c);
+        }
+        // Roll each node's own count up to its root.
+        let root_of = |mut id: String| -> Option<String> {
+            for _ in 0..64 {
+                match parent.get(&id) {
+                    Some(Some(p)) => id = p.clone(),
+                    Some(None) => return Some(id),
+                    None => return None,
+                }
+            }
+            None
+        };
+        let mut totals: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        for (id, c) in &own {
+            if let Some(root) = root_of(id.clone()) {
+                *totals.entry(root).or_insert(0) += *c;
+            }
+        }
+        let mut out: Vec<(String, i64)> = totals
+            .into_iter()
+            .map(|(root, c)| (title.get(&root).cloned().unwrap_or(root), c))
+            .collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        Ok(out)
+    }
+
+    /// One Agent Seat's observed workload: agent turns inside the recent
+    /// window, all-time turns, and when the seat last produced anything.
+    /// Feeds the Seat Assignment agent's ground-truth digest (`seatassign.rs`).
+    pub fn seat_activity(&self, since_ts: i64) -> Vec<SeatActivity> {
+        // (seat, FROM clause, timestamp column, extra predicate, distinct-on).
+        // Every per-surface message table shares `(role, created_at)`, so the
+        // shape is mostly uniform; `distinct_on` is for sources where one run
+        // writes many rows and counting rows would overstate the seat.
+        //
+        // Seats deliberately absent report zero, which the digest states
+        // explicitly:
+        //   * `librarian` / `seatassign` — neither persists its runs.
+        //   * `keeper` — `compaction` ledger events are written **per prompt**
+        //     (up to 40 per pass), and the deterministic fallback writes them
+        //     even when the summarizer agent never spawned. Counting them would
+        //     report hundreds of "turns" for an agent that may never have run,
+        //     inside a block labelled GROUND TRUTH. No per-run record exists,
+        //     so the honest answer is to report nothing and say so.
+        const SOURCES: &[(&str, &str, &str, &str, &str)] = &[
+            ("companion", "companion_messages", "created_at", "role = 'assistant'", ""),
+            ("browse", "browse_messages", "created_at", "role = 'assistant'", ""),
+            ("linked", "linked_messages", "created_at", "role = 'assistant'", ""),
+            ("mission", "mission_messages", "created_at", "role = 'assistant'", ""),
+            ("voice", "voice_messages", "created_at", "role = 'assistant'", ""),
+            ("drafter", "draft_chat_messages", "created_at", "role = 'assistant'", ""),
+            // Plan sidecar threads and Drafter comment threads BOTH write to
+            // `thread_messages`; the only thing separating them is whether the
+            // `comment_id` resolves to a `draft_comments` row.
+            (
+                "fork_plan",
+                "thread_messages tm LEFT JOIN draft_comments dc ON dc.id = tm.comment_id",
+                "tm.created_at",
+                "tm.role = 'assistant' AND dc.id IS NULL",
+                "",
+            ),
+            (
+                "fork_drafter",
+                "thread_messages tm JOIN draft_comments dc ON dc.id = tm.comment_id",
+                "tm.created_at",
+                "tm.role = 'assistant'",
+                "",
+            ),
+            ("fork_review", "review_questions", "created_at", "1", ""),
+            // AI review is opt-in per review, so `review_sessions` would count
+            // every code review the user *opened* — including the ones they
+            // never pointed the agent at. Its findings are the only real trace:
+            // one run writes many annotations, hence DISTINCT.
+            (
+                "ai_review",
+                "review_annotations",
+                "created_at",
+                "source = 'ai'",
+                "review_id",
+            ),
+            ("classifier", "class_runs", "started_at", "1", ""),
+        ];
+        let conn = self.conn.lock().unwrap();
+        SOURCES
+            .iter()
+            .map(|(seat, from, ts, pred, distinct_on)| {
+                let (window_expr, total_expr) = if distinct_on.is_empty() {
+                    (
+                        format!("COALESCE(SUM(CASE WHEN {ts} >= ?1 THEN 1 ELSE 0 END), 0)"),
+                        "COUNT(*)".to_string(),
+                    )
+                } else {
+                    (
+                        format!(
+                            "COUNT(DISTINCT CASE WHEN {ts} >= ?1 THEN {distinct_on} END)"
+                        ),
+                        format!("COUNT(DISTINCT {distinct_on})"),
+                    )
+                };
+                // Best-effort per seat, exactly as `context::build_digest` is:
+                // a table this build doesn't have yields zero, never an error
+                // that sinks the whole digest.
+                let (turns_window, turns_total, last_ts) = conn
+                    .query_row(
+                        &format!(
+                            "SELECT {window_expr}, {total_expr}, MAX({ts})
+                             FROM {from} WHERE {pred}"
+                        ),
+                        params![since_ts],
+                        |r| {
+                            Ok((
+                                r.get::<_, i64>(0)?,
+                                r.get::<_, i64>(1)?,
+                                r.get::<_, Option<i64>>(2)?,
+                            ))
+                        },
+                    )
+                    .unwrap_or((0, 0, None));
+                SeatActivity {
+                    seat: (*seat).to_string(),
+                    turns_window,
+                    turns_total,
+                    last_ts,
+                }
+            })
+            .collect()
+    }
+
+    /// Prompt body-length distribution per capture surface — the cheapest
+    /// available proxy for "how hard is the thinking on this surface". Returns
+    /// `(surface, count, median_bytes, p90_bytes)`, heaviest surface first.
+    pub fn prompt_length_by_surface(&self) -> rusqlite::Result<Vec<(String, i64, i64, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        // Percentiles without a window function: rank rows per surface and pick
+        // the row at the requested fraction. `prompts` is small enough that the
+        // ordering cost is irrelevant, and this stays portable across the
+        // bundled SQLite build.
+        let mut stmt = conn.prepare(
+            "SELECT surface, LENGTH(body) AS len FROM prompts ORDER BY surface, len ASC",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut by_surface: std::collections::HashMap<String, Vec<i64>> =
+            std::collections::HashMap::new();
+        for row in rows {
+            let (surface, len) = row?;
+            by_surface.entry(surface).or_default().push(len);
+        }
+        let pick = |sorted: &[i64], frac: f64| -> i64 {
+            if sorted.is_empty() {
+                return 0;
+            }
+            let idx = ((sorted.len() as f64 - 1.0) * frac).round() as usize;
+            sorted[idx.min(sorted.len() - 1)]
+        };
+        let mut out: Vec<(String, i64, i64, i64)> = by_surface
+            .into_iter()
+            .map(|(surface, lens)| {
+                let n = lens.len() as i64;
+                (surface, n, pick(&lens, 0.5), pick(&lens, 0.9))
+            })
+            .collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        Ok(out)
+    }
+
+    /// Record that a session was exported as a portable bundle (backs the
+    /// Librarian's F6 signal). Idempotent per `(session_id, scope)` — a
+    /// re-export refreshes `head_hash`/`exported_at`.
+    pub fn record_plan_export(
+        &self,
+        session_id: &str,
+        scope: &str,
+        head_hash: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO plan_exports (session_id, scope, head_hash, exported_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(session_id, scope) DO UPDATE SET
+                head_hash = excluded.head_hash,
+                exported_at = excluded.exported_at",
+            params![session_id, scope, head_hash, crate::ledger::now_millis()],
+        )?;
+        Ok(())
+    }
+
+    /// Approved sessions that have never been exported as a bundle — the
+    /// Librarian's deferred F6 "un-exported approved plan" friction, now real.
+    /// Returns `(session_id, project_name, approved_at)`, oldest first.
+    pub fn un_exported_approved_sessions(&self) -> rusqlite::Result<Vec<(String, String, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT s.session_id, s.project_name, s.created_at
+             FROM sessions s
+             WHERE s.status = 'approved'
+               AND NOT EXISTS (
+                   SELECT 1 FROM plan_exports e
+                   WHERE e.session_id = s.session_id
+               )
+             ORDER BY s.created_at ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
+        })?;
+        rows.collect()
+    }
+
+    /// Append an event to the hash chain. Reads the current head under the write
+    /// lock, computes `entry_hash = sha256(prev_hash ‖ canonical(event))`, and
+    /// inserts with an explicit monotonic `seq` — all atomic under the single
+    /// `Mutex<Connection>` writer, so the chain can't race.
+    pub fn append_ledger_event(
+        &self,
+        a: &crate::ledger::LedgerAppend,
+    ) -> rusqlite::Result<crate::ledger::LedgerEventRow> {
+        let conn = self.conn.lock().unwrap();
+        Self::append_ledger_event_locked(&conn, a)
+    }
+
+    /// The append core, callable with an already-held connection lock so a
+    /// caller that mutates a row and appends its proof event (e.g.
+    /// `compact_prompt_body`) does both atomically without re-locking.
+    fn append_ledger_event_locked(
+        conn: &rusqlite::Connection,
+        a: &crate::ledger::LedgerAppend,
+    ) -> rusqlite::Result<crate::ledger::LedgerEventRow> {
+        let head: Option<(i64, String)> = conn
+            .query_row(
+                "SELECT seq, entry_hash FROM ledger_events ORDER BY seq DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let (prev_seq, prev_hash) = head.unwrap_or((0, crate::ledger::GENESIS_PREV.to_string()));
+        let seq = prev_seq + 1;
+        let canon = crate::ledger::CanonicalEvent {
+            seq,
+            ts: a.ts,
+            kind: a.kind,
+            author: a.author,
+            prompt_id: a.prompt_id,
+            session_id: a.session_id,
+            version_number: a.version_number,
+            ref_kind: a.ref_kind,
+            ref_id: a.ref_id,
+            payload_hash: a.payload_hash,
+        };
+        let entry_hash = crate::ledger::compute_entry_hash(&prev_hash, &canon);
+        conn.execute(
+            "INSERT INTO ledger_events
+                (seq, ts, kind, author, prompt_id, session_id, version_number,
+                 ref_kind, ref_id, payload_hash, prev_hash, entry_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                seq,
+                a.ts,
+                a.kind,
+                a.author,
+                a.prompt_id,
+                a.session_id,
+                a.version_number,
+                a.ref_kind,
+                a.ref_id,
+                a.payload_hash,
+                prev_hash,
+                entry_hash,
+            ],
+        )?;
+        Ok(crate::ledger::LedgerEventRow {
+            seq,
+            ts: a.ts,
+            kind: a.kind.to_string(),
+            author: a.author.to_string(),
+            prompt_id: a.prompt_id,
+            session_id: a.session_id.map(str::to_string),
+            version_number: a.version_number,
+            ref_kind: a.ref_kind.map(str::to_string),
+            ref_id: a.ref_id.map(str::to_string),
+            payload_hash: a.payload_hash.to_string(),
+            prev_hash,
+            entry_hash,
+        })
+    }
+
+    /// Most-recent-first ledger events, capped at `limit`.
+    pub fn list_ledger_events(
+        &self,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<crate::ledger::LedgerEventRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT seq, ts, kind, author, prompt_id, session_id, version_number,
+                    ref_kind, ref_id, payload_hash, prev_hash, entry_hash
+             FROM ledger_events ORDER BY seq DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit], |r| {
+            Ok(crate::ledger::LedgerEventRow {
+                seq: r.get(0)?,
+                ts: r.get(1)?,
+                kind: r.get(2)?,
+                author: r.get(3)?,
+                prompt_id: r.get(4)?,
+                session_id: r.get(5)?,
+                version_number: r.get(6)?,
+                ref_kind: r.get(7)?,
+                ref_id: r.get(8)?,
+                payload_hash: r.get(9)?,
+                prev_hash: r.get(10)?,
+                entry_hash: r.get(11)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// True if a revision event for this (session, version) already exists with
+    /// the same payload hash — the idempotency guard for the revision path.
+    pub fn revision_event_exists(
+        &self,
+        session_id: &str,
+        version_number: i64,
+        payload_hash: &str,
+    ) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM ledger_events
+             WHERE kind = 'revision' AND session_id = ?1
+               AND version_number = ?2 AND payload_hash = ?3",
+            params![session_id, version_number, payload_hash],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// True if an identical decision event already exists — idempotency guard
+    /// for the decision path.
+    pub fn decision_event_exists(
+        &self,
+        kind: &str,
+        ref_kind: &str,
+        ref_id: &str,
+        payload_hash: &str,
+    ) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM ledger_events
+             WHERE kind = ?1 AND ref_kind = ?2 AND ref_id = ?3 AND payload_hash = ?4",
+            params![kind, ref_kind, ref_id, payload_hash],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Re-walk the whole chain, recomputing each `entry_hash` from stored fields
+    /// and checking `prev_hash` linkage. Reports the first seq that fails.
+    pub fn verify_ledger_chain(&self) -> rusqlite::Result<crate::ledger::ChainVerdict> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT seq, ts, kind, author, prompt_id, session_id, version_number,
+                    ref_kind, ref_id, payload_hash, prev_hash, entry_hash
+             FROM ledger_events ORDER BY seq ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(crate::ledger::LedgerEventRow {
+                seq: r.get(0)?,
+                ts: r.get(1)?,
+                kind: r.get(2)?,
+                author: r.get(3)?,
+                prompt_id: r.get(4)?,
+                session_id: r.get(5)?,
+                version_number: r.get(6)?,
+                ref_kind: r.get(7)?,
+                ref_id: r.get(8)?,
+                payload_hash: r.get(9)?,
+                prev_hash: r.get(10)?,
+                entry_hash: r.get(11)?,
+            })
+        })?;
+
+        let mut prev = crate::ledger::GENESIS_PREV.to_string();
+        let mut checked = 0i64;
+        let mut head = None;
+        for row in rows {
+            let e = row?;
+            // Linkage: this row must commit to its actual predecessor.
+            if e.prev_hash != prev {
+                return Ok(crate::ledger::ChainVerdict {
+                    ok: false,
+                    checked,
+                    first_bad_seq: Some(e.seq),
+                    head_hash: None,
+                });
+            }
+            let canon = crate::ledger::CanonicalEvent {
+                seq: e.seq,
+                ts: e.ts,
+                kind: &e.kind,
+                author: &e.author,
+                prompt_id: e.prompt_id,
+                session_id: e.session_id.as_deref(),
+                version_number: e.version_number,
+                ref_kind: e.ref_kind.as_deref(),
+                ref_id: e.ref_id.as_deref(),
+                payload_hash: &e.payload_hash,
+            };
+            let recomputed = crate::ledger::compute_entry_hash(&e.prev_hash, &canon);
+            if recomputed != e.entry_hash {
+                return Ok(crate::ledger::ChainVerdict {
+                    ok: false,
+                    checked,
+                    first_bad_seq: Some(e.seq),
+                    head_hash: None,
+                });
+            }
+            prev = e.entry_hash.clone();
+            head = Some(e.entry_hash);
+            checked += 1;
+        }
+        Ok(crate::ledger::ChainVerdict {
+            ok: true,
+            checked,
+            first_bad_seq: None,
+            head_hash: head,
+        })
+    }
+
+    /// Snapshot the whole database to `dest` via `VACUUM INTO` (a consistent
+    /// copy even while the app runs). The crown-jewels backup that protects the
+    /// chain itself; mirror/export are secondary content copies.
+    pub fn snapshot_to(&self, dest: &Path) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        // VACUUM INTO requires the destination not already exist.
+        let _ = std::fs::remove_file(dest);
+        conn.execute("VACUUM INTO ?1", params![dest.to_string_lossy()])?;
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Polis ClassMemory (Phase 2): the catalog over the lake
+    // ------------------------------------------------------------------
+
+    /// Seed one proposed root per (id, title, project_path), idempotent — a root
+    /// that already exists (by id) is left untouched, so re-seeding never
+    /// re-proposes an already-accepted class. Returns how many were newly seeded.
+    pub fn seed_class_roots(
+        &self,
+        rows: &[(String, String, Option<String>)],
+    ) -> rusqlite::Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let now = crate::ledger::now_millis();
+        let mut seeded = 0;
+        for (id, title, project) in rows {
+            let changed = conn.execute(
+                "INSERT INTO class_nodes
+                    (id, parent_id, kind, title, summary, project_path, ip_name,
+                     status, pinned, curated_by, created_at, updated_at)
+                 VALUES (?1, NULL, 'node', ?2, NULL, ?3, NULL, 'proposed', 0,
+                         'classifier', ?4, ?4)
+                 ON CONFLICT(id) DO NOTHING",
+                params![id, title, project, now],
+            )?;
+            seeded += changed;
+        }
+        Ok(seeded)
+    }
+
+    fn row_to_class_node(r: &rusqlite::Row) -> rusqlite::Result<crate::classmem::ClassNode> {
+        Ok(crate::classmem::ClassNode {
+            id: r.get(0)?,
+            parent_id: r.get(1)?,
+            kind: r.get(2)?,
+            title: r.get(3)?,
+            summary: r.get(4)?,
+            project_path: r.get(5)?,
+            ip_name: r.get(6)?,
+            status: r.get(7)?,
+            pinned: r.get::<_, i64>(8)? != 0,
+            curated_by: r.get(9)?,
+            created_at: r.get(10)?,
+            updated_at: r.get(11)?,
+        })
+    }
+
+    /// Every class node (proposed + accepted), for tree building in Rust.
+    pub fn list_class_nodes(&self) -> rusqlite::Result<Vec<crate::classmem::ClassNode>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, parent_id, kind, title, summary, project_path, ip_name,
+                    status, pinned, curated_by, created_at, updated_at
+             FROM class_nodes ORDER BY title ASC",
+        )?;
+        let rows = stmt.query_map([], Self::row_to_class_node)?;
+        rows.collect()
+    }
+
+    pub fn get_class_node(&self, id: &str) -> rusqlite::Result<Option<crate::classmem::ClassNode>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, parent_id, kind, title, summary, project_path, ip_name,
+                    status, pinned, curated_by, created_at, updated_at
+             FROM class_nodes WHERE id = ?1",
+            params![id],
+            Self::row_to_class_node,
+        )
+        .optional()
+    }
+
+    /// The links on one node (accepted + proposed).
+    pub fn list_class_links_for_node(
+        &self,
+        node_id: &str,
+    ) -> rusqlite::Result<Vec<crate::classmem::ClassLink>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, node_id, target_kind, target_id, note, status, created_at
+             FROM class_links WHERE node_id = ?1 ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(params![node_id], |r| {
+            Ok(crate::classmem::ClassLink {
+                id: r.get(0)?,
+                node_id: r.get(1)?,
+                target_kind: r.get(2)?,
+                target_id: r.get(3)?,
+                note: r.get(4)?,
+                status: r.get(5)?,
+                created_at: r.get(6)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Stage one parsed proposal as reviewable rows (never accepts). Additive
+    /// proposals become `proposed` nodes/links; structural ones queue in
+    /// `class_proposals`. See `classmem` for the accept path.
+    pub fn stage_proposal(
+        &self,
+        run_id: Option<i64>,
+        p: &crate::classmem::Proposal,
+    ) -> rusqlite::Result<crate::classmem::StagedOutcome> {
+        use crate::classmem::{Proposal, StagedOutcome};
+        let conn = self.conn.lock().unwrap();
+        let now = crate::ledger::now_millis();
+        let exists = |id: &str| -> rusqlite::Result<bool> {
+            let n: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM class_nodes WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )?;
+            Ok(n > 0)
+        };
+        match p {
+            Proposal::Create { parent_id, title, .. } => {
+                if !exists(parent_id)? {
+                    return Ok(StagedOutcome::Skipped);
+                }
+                // Don't re-propose an identical child.
+                let dup: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM class_nodes WHERE parent_id = ?1 AND title = ?2",
+                    params![parent_id, title],
+                    |r| r.get(0),
+                )?;
+                if dup > 0 {
+                    return Ok(StagedOutcome::Skipped);
+                }
+                let id = crate::classmem::new_node_id();
+                conn.execute(
+                    "INSERT INTO class_nodes
+                        (id, parent_id, kind, title, summary, project_path, ip_name,
+                         status, pinned, curated_by, created_at, updated_at)
+                     VALUES (?1, ?2, 'node', ?3, NULL, NULL, NULL, 'proposed', 0,
+                             'classifier', ?4, ?4)",
+                    params![id, parent_id, title, now],
+                )?;
+                Ok(StagedOutcome::Node)
+            }
+            Proposal::File {
+                parent_id,
+                sub_class,
+                target_kind,
+                target_id,
+                note,
+                ..
+            } => {
+                if !exists(parent_id)? {
+                    return Ok(StagedOutcome::Skipped);
+                }
+                let mut created_node = false;
+                // Resolve (or stage) the node the link attaches to.
+                let target_node = match sub_class {
+                    Some(sc) if !sc.trim().is_empty() => {
+                        let existing: Option<String> = conn
+                            .query_row(
+                                "SELECT id FROM class_nodes WHERE parent_id = ?1 AND title = ?2 LIMIT 1",
+                                params![parent_id, sc.trim()],
+                                |r| r.get(0),
+                            )
+                            .optional()?;
+                        match existing {
+                            Some(id) => id,
+                            None => {
+                                let id = crate::classmem::new_node_id();
+                                conn.execute(
+                                    "INSERT INTO class_nodes
+                                        (id, parent_id, kind, title, summary, project_path,
+                                         ip_name, status, pinned, curated_by, created_at, updated_at)
+                                     VALUES (?1, ?2, 'node', ?3, NULL, NULL, NULL, 'proposed', 0,
+                                             'classifier', ?4, ?4)",
+                                    params![id, parent_id, sc.trim(), now],
+                                )?;
+                                created_node = true;
+                                id
+                            }
+                        }
+                    }
+                    _ => parent_id.clone(),
+                };
+                let changed = conn.execute(
+                    "INSERT INTO class_links
+                        (node_id, target_kind, target_id, note, status, created_at)
+                     VALUES (?1, ?2, ?3, ?4, 'proposed', ?5)
+                     ON CONFLICT(node_id, target_kind, target_id) DO NOTHING",
+                    params![target_node, target_kind, target_id, note, now],
+                )?;
+                if changed == 0 && !created_node {
+                    return Ok(StagedOutcome::Skipped);
+                }
+                Ok(StagedOutcome::Link { created_node })
+            }
+            Proposal::Promote { node_id, new_parent_id, rationale } => {
+                if !exists(node_id)? {
+                    return Ok(StagedOutcome::Skipped);
+                }
+                self.insert_structural_locked(
+                    &conn, run_id, "promote", Some(node_id), new_parent_id.as_deref(),
+                    None, None, None, rationale.as_deref(), now,
+                )?;
+                Ok(StagedOutcome::Structural)
+            }
+            Proposal::Split { node_id, into, rationale } => {
+                if !exists(node_id)? {
+                    return Ok(StagedOutcome::Skipped);
+                }
+                let extra = serde_json::to_string(into).unwrap_or_else(|_| "[]".into());
+                self.insert_structural_locked(
+                    &conn, run_id, "split", Some(node_id), None, None, None,
+                    Some(&extra), rationale.as_deref(), now,
+                )?;
+                Ok(StagedOutcome::Structural)
+            }
+            Proposal::Merge { node_ids, title, parent_id, rationale } => {
+                // Every referenced node must exist.
+                for id in node_ids {
+                    if !exists(id)? {
+                        return Ok(StagedOutcome::Skipped);
+                    }
+                }
+                let extra = serde_json::to_string(node_ids).unwrap_or_else(|_| "[]".into());
+                self.insert_structural_locked(
+                    &conn, run_id, "merge", node_ids.first().map(String::as_str),
+                    parent_id.as_deref(), title.as_deref(), None,
+                    Some(&extra), rationale.as_deref(), now,
+                )?;
+                Ok(StagedOutcome::Structural)
+            }
+            Proposal::Collapse { node_id, summary, cite_seqs, rationale } => {
+                if !exists(node_id)? {
+                    return Ok(StagedOutcome::Skipped);
+                }
+                let extra = serde_json::to_string(cite_seqs).unwrap_or_else(|_| "[]".into());
+                self.insert_structural_locked(
+                    &conn, run_id, "collapse", Some(node_id), None, None,
+                    Some(summary), Some(&extra), rationale.as_deref(), now,
+                )?;
+                Ok(StagedOutcome::Structural)
+            }
+            Proposal::Supersede { old_seq, new_seq, rationale } => {
+                // Light stage-time screen so garbage never reaches the review
+                // strip: both seqs must exist and be decision events, old
+                // before new. The full guardrails (head-of-chain redirect,
+                // at-most-once) run at apply.
+                if old_seq >= new_seq {
+                    return Ok(StagedOutcome::Skipped);
+                }
+                for seq in [old_seq, new_seq] {
+                    let kind: Option<String> = conn
+                        .query_row(
+                            "SELECT kind FROM ledger_events WHERE seq = ?1",
+                            params![seq],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    match kind {
+                        Some(k) if crate::classmem::DECISION_KINDS.contains(&k.as_str()) => {}
+                        _ => return Ok(StagedOutcome::Skipped),
+                    }
+                }
+                // Don't re-stage an identical pending supersession.
+                let extra = serde_json::json!({ "old_seq": old_seq, "new_seq": new_seq })
+                    .to_string();
+                let dup: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM class_proposals
+                     WHERE op = 'supersede' AND status = 'proposed' AND extra_json = ?1",
+                    params![extra],
+                    |r| r.get(0),
+                )?;
+                if dup > 0 {
+                    return Ok(StagedOutcome::Skipped);
+                }
+                self.insert_structural_locked(
+                    &conn, run_id, "supersede", None, None, None, None,
+                    Some(&extra), rationale.as_deref(), now,
+                )?;
+                Ok(StagedOutcome::Structural)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_structural_locked(
+        &self,
+        conn: &rusqlite::Connection,
+        run_id: Option<i64>,
+        op: &str,
+        node_id: Option<&str>,
+        parent_id: Option<&str>,
+        title: Option<&str>,
+        summary: Option<&str>,
+        extra_json: Option<&str>,
+        rationale: Option<&str>,
+        now: i64,
+    ) -> rusqlite::Result<()> {
+        conn.execute(
+            "INSERT INTO class_proposals
+                (run_id, op, node_id, parent_id, title, summary, extra_json,
+                 rationale, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'proposed', ?9)",
+            params![run_id, op, node_id, parent_id, title, summary, extra_json, rationale, now],
+        )?;
+        Ok(())
+    }
+
+    /// Accept a proposed node and any proposed ancestors (so no accepted node is
+    /// ever orphaned under a proposed parent). Returns the ids newly flipped to
+    /// accepted (for ledger events). Idempotent on already-accepted nodes.
+    pub fn accept_class_node(&self, id: &str) -> rusqlite::Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        Self::accept_node_chain(&conn, id)
+    }
+
+    fn accept_node_chain(conn: &rusqlite::Connection, id: &str) -> rusqlite::Result<Vec<String>> {
+        let now = crate::ledger::now_millis();
+        let mut flipped = Vec::new();
+        let mut cur = Some(id.to_string());
+        let mut guard = 0;
+        while let Some(nid) = cur {
+            guard += 1;
+            if guard > 32 {
+                break;
+            }
+            let row: Option<(Option<String>, String)> = conn
+                .query_row(
+                    "SELECT parent_id, status FROM class_nodes WHERE id = ?1",
+                    params![nid],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let Some((parent, status)) = row else { break };
+            if status == "proposed" {
+                conn.execute(
+                    "UPDATE class_nodes SET status = 'accepted', curated_by = ?2, updated_at = ?3 WHERE id = ?1",
+                    params![nid, crate::ledger::local_author(), now],
+                )?;
+                flipped.push(nid.clone());
+            }
+            cur = parent;
+        }
+        Ok(flipped)
+    }
+
+    /// Accept EVERY currently-proposed node and link in one shot — the
+    /// auto-organize path (Organize applies the classifier's work directly
+    /// rather than gating it behind per-item review). Returns the node ids that
+    /// were flipped, so the caller can emit their `class_curate` ledger events.
+    /// Structural proposals are applied separately (see `apply_class_proposal`).
+    pub fn accept_all_pending(&self) -> rusqlite::Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let now = crate::ledger::now_millis();
+        let author = crate::ledger::local_author();
+        let mut stmt = conn.prepare("SELECT id FROM class_nodes WHERE status = 'proposed'")?;
+        let ids: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        drop(stmt);
+        conn.execute(
+            "UPDATE class_nodes SET status = 'accepted', curated_by = ?1, updated_at = ?2
+             WHERE status = 'proposed'",
+            params![author, now],
+        )?;
+        conn.execute(
+            "UPDATE class_links SET status = 'accepted' WHERE status = 'proposed'",
+            [],
+        )?;
+        Ok(ids)
+    }
+
+    /// Accept a proposed link, ensuring its node (and ancestors) are accepted.
+    /// Returns (node_id, newly-accepted ancestor node ids).
+    pub fn accept_class_link(&self, link_id: i64) -> rusqlite::Result<Option<(String, Vec<String>)>> {
+        let conn = self.conn.lock().unwrap();
+        let node_id: Option<String> = conn
+            .query_row(
+                "SELECT node_id FROM class_links WHERE id = ?1",
+                params![link_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(node_id) = node_id else { return Ok(None) };
+        conn.execute(
+            "UPDATE class_links SET status = 'accepted' WHERE id = ?1",
+            params![link_id],
+        )?;
+        let flipped = Self::accept_node_chain(&conn, &node_id)?;
+        Ok(Some((node_id, flipped)))
+    }
+
+    /// Delete a single class link (a pointer into the lake) by id, returning its
+    /// `(node_id, target_kind, target_id)` so the caller can record a compensating
+    /// ledger event. Removing a pointer never touches lake data or the ledger, so
+    /// this is the safe inverse of an accepted `file`: the append-only chain stays
+    /// intact and the reversal is recorded as a new `class_curate` event rather
+    /// than by rewriting history. `None` if no such link.
+    pub fn delete_class_link(
+        &self,
+        link_id: i64,
+    ) -> rusqlite::Result<Option<(String, String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let row: Option<(String, String, String)> = conn
+            .query_row(
+                "SELECT node_id, target_kind, target_id FROM class_links WHERE id = ?1",
+                params![link_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        if row.is_some() {
+            conn.execute("DELETE FROM class_links WHERE id = ?1", params![link_id])?;
+        }
+        Ok(row)
+    }
+
+    /// Reject (delete) a node and its whole proposed/accepted subtree + links.
+    /// Used to reject a proposed node; also the cleanup primitive for merges.
+    pub fn reject_class_node(&self, id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        Self::delete_node_subtree(&conn, id)
+    }
+
+    fn delete_node_subtree(conn: &rusqlite::Connection, id: &str) -> rusqlite::Result<()> {
+        // Gather the subtree (BFS) so we delete children before/with the root.
+        let mut stack = vec![id.to_string()];
+        let mut all = Vec::new();
+        let mut guard = 0;
+        while let Some(nid) = stack.pop() {
+            guard += 1;
+            if guard > 10_000 {
+                break;
+            }
+            all.push(nid.clone());
+            let mut stmt =
+                conn.prepare("SELECT id FROM class_nodes WHERE parent_id = ?1")?;
+            let kids: Vec<String> = stmt
+                .query_map(params![nid], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            stack.extend(kids);
+        }
+        for nid in &all {
+            conn.execute("DELETE FROM class_links WHERE node_id = ?1", params![nid])?;
+            // Observations retire with their node (collapse/merge/reject) —
+            // they are re-derived, and their `observation` ledger events
+            // remain as the tamper-evident history.
+            conn.execute(
+                "DELETE FROM class_observations WHERE node_id = ?1",
+                params![nid],
+            )?;
+            conn.execute("DELETE FROM class_nodes WHERE id = ?1", params![nid])?;
+        }
+        Ok(())
+    }
+
+    pub fn reject_class_link(&self, link_id: i64) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM class_links WHERE id = ?1", params![link_id])?;
+        Ok(())
+    }
+
+    pub fn set_class_node_pinned(&self, id: &str, pinned: bool) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE class_nodes SET pinned = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, pinned as i64, crate::ledger::now_millis()],
+        )?;
+        Ok(())
+    }
+
+    pub fn rename_class_node(&self, id: &str, title: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE class_nodes SET title = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, title, crate::ledger::now_millis()],
+        )?;
+        Ok(())
+    }
+
+    fn row_to_proposal(r: &rusqlite::Row) -> rusqlite::Result<crate::classmem::ClassProposalRow> {
+        Ok(crate::classmem::ClassProposalRow {
+            id: r.get(0)?,
+            run_id: r.get(1)?,
+            op: r.get(2)?,
+            node_id: r.get(3)?,
+            parent_id: r.get(4)?,
+            title: r.get(5)?,
+            summary: r.get(6)?,
+            extra_json: r.get(7)?,
+            rationale: r.get(8)?,
+            status: r.get(9)?,
+            created_at: r.get(10)?,
+        })
+    }
+
+    /// The pending structural proposals (promote/split/merge/collapse).
+    pub fn list_class_proposals(&self) -> rusqlite::Result<Vec<crate::classmem::ClassProposalRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, run_id, op, node_id, parent_id, title, summary, extra_json,
+                    rationale, status, created_at
+             FROM class_proposals WHERE status = 'proposed' ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map([], Self::row_to_proposal)?;
+        rows.collect()
+    }
+
+    pub fn get_class_proposal(
+        &self,
+        id: i64,
+    ) -> rusqlite::Result<Option<crate::classmem::ClassProposalRow>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, run_id, op, node_id, parent_id, title, summary, extra_json,
+                    rationale, status, created_at
+             FROM class_proposals WHERE id = ?1",
+            params![id],
+            Self::row_to_proposal,
+        )
+        .optional()
+    }
+
+    pub fn reject_class_proposal(&self, id: i64) -> rusqlite::Result<()> {
+        {
+            let conn = self.conn.lock().unwrap();
+            // Reject just drops the row — so without this, every rejection of a
+            // classifier proposal left no trace at all of the agent having been
+            // wrong. Read the op first, while the row still exists.
+            let op: Option<String> = conn
+                .query_row(
+                    "SELECT op FROM class_proposals WHERE id = ?1",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            conn.execute("DELETE FROM class_proposals WHERE id = ?1", params![id])?;
+            drop(conn);
+            let _ = self.record_friction(
+                "proposal_rejected",
+                Some("memory"),
+                None,
+                op.as_deref(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Apply (accept) a structural proposal: mutate the accepted tree and drop
+    /// the proposal row. Returns the facts for the `taxonomy_reorg` ledger event.
+    /// Promotion re-parents preserving id/links/pins/subtree; collapse creates a
+    /// digest node citing exact ledger seqs and removes the cold subtree.
+    pub fn apply_class_proposal(
+        &self,
+        id: i64,
+    ) -> rusqlite::Result<Option<crate::classmem::AppliedReorg>> {
+        let p = match self.get_class_proposal(id)? {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let conn = self.conn.lock().unwrap();
+        let now = crate::ledger::now_millis();
+        let detail: String = match p.op.as_str() {
+            "promote" => {
+                let node = p.node_id.clone().unwrap_or_default();
+                // new_parent may be NULL → promote to a root.
+                conn.execute(
+                    "UPDATE class_nodes SET parent_id = ?2, updated_at = ?3 WHERE id = ?1",
+                    params![node, p.parent_id, now],
+                )?;
+                format!("→ parent {}", p.parent_id.as_deref().unwrap_or("(root)"))
+            }
+            "collapse" => {
+                let node = p.node_id.clone().unwrap_or_default();
+                // Hard guard (covers the manual path too): pins are an absolute
+                // anti-decay veto — never collapse a pinned branch. Drop the
+                // proposal as a no-op; unpin first to collapse.
+                if Self::subtree_pinned(&conn, &node)? {
+                    self.drop_proposal_locked(&conn, id)?;
+                    return Ok(None);
+                }
+                // Parent + title of the cold branch, for the digest placement.
+                let (parent, title): (Option<String>, String) = conn.query_row(
+                    "SELECT parent_id, title FROM class_nodes WHERE id = ?1",
+                    params![node],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                let digest_id = crate::classmem::new_node_id();
+                let digest_title = p.title.clone().unwrap_or_else(|| format!("{title} (digest)"));
+                conn.execute(
+                    "INSERT INTO class_nodes
+                        (id, parent_id, kind, title, summary, project_path, ip_name,
+                         status, pinned, curated_by, created_at, updated_at)
+                     VALUES (?1, ?2, 'digest', ?3, ?4, NULL, NULL, 'accepted', 0,
+                             ?5, ?6, ?6)",
+                    params![digest_id, parent, digest_title, p.summary, crate::ledger::local_author(), now],
+                )?;
+                // Citation links to the exact ledger seqs.
+                if let Some(extra) = &p.extra_json {
+                    if let Ok(seqs) = serde_json::from_str::<Vec<i64>>(extra) {
+                        for seq in &seqs {
+                            conn.execute(
+                                "INSERT INTO class_links
+                                    (node_id, target_kind, target_id, note, status, created_at)
+                                 VALUES (?1, 'ledger', ?2, NULL, 'accepted', ?3)
+                                 ON CONFLICT(node_id, target_kind, target_id) DO NOTHING",
+                                params![digest_id, seq.to_string(), now],
+                            )?;
+                        }
+                    }
+                }
+                // Remove the cold subtree (its sourcing now lives in the digest's
+                // citations, one hop away).
+                Self::delete_node_subtree(&conn, &node)?;
+                format!("digest {digest_id}")
+            }
+            "merge" => {
+                let ids: Vec<String> = p
+                    .extra_json
+                    .as_deref()
+                    .and_then(|e| serde_json::from_str(e).ok())
+                    .unwrap_or_default();
+                if ids.is_empty() {
+                    self.drop_proposal_locked(&conn, id)?;
+                    return Ok(None);
+                }
+                let target = ids[0].clone();
+                if let Some(t) = &p.title {
+                    conn.execute(
+                        "UPDATE class_nodes SET title = ?2, updated_at = ?3 WHERE id = ?1",
+                        params![target, t, now],
+                    )?;
+                }
+                if let Some(parent) = &p.parent_id {
+                    conn.execute(
+                        "UPDATE class_nodes SET parent_id = ?2, updated_at = ?3 WHERE id = ?1",
+                        params![target, parent, now],
+                    )?;
+                }
+                for other in ids.iter().skip(1) {
+                    // Move links and children onto the target, then delete it.
+                    conn.execute(
+                        "UPDATE OR IGNORE class_links SET node_id = ?2 WHERE node_id = ?1",
+                        params![other, target],
+                    )?;
+                    conn.execute(
+                        "DELETE FROM class_links WHERE node_id = ?1",
+                        params![other],
+                    )?;
+                    // Merged-away nodes retire their observations (re-derived;
+                    // ledger `observation` events remain as history).
+                    conn.execute(
+                        "DELETE FROM class_observations WHERE node_id = ?1",
+                        params![other],
+                    )?;
+                    conn.execute(
+                        "UPDATE class_nodes SET parent_id = ?2, updated_at = ?3 WHERE parent_id = ?1",
+                        params![other, target, now],
+                    )?;
+                    conn.execute("DELETE FROM class_nodes WHERE id = ?1", params![other])?;
+                }
+                format!("merged {} into {target}", ids.len())
+            }
+            "split" => {
+                let node = p.node_id.clone().unwrap_or_default();
+                let parent: Option<String> = conn.query_row(
+                    "SELECT parent_id FROM class_nodes WHERE id = ?1",
+                    params![node],
+                    |r| r.get(0),
+                )?;
+                let parts: Vec<crate::classmem::SplitPart> = p
+                    .extra_json
+                    .as_deref()
+                    .and_then(|e| serde_json::from_str(e).ok())
+                    .unwrap_or_default();
+                let mut made = 0;
+                for part in &parts {
+                    let nid = crate::classmem::new_node_id();
+                    conn.execute(
+                        "INSERT INTO class_nodes
+                            (id, parent_id, kind, title, summary, project_path, ip_name,
+                             status, pinned, curated_by, created_at, updated_at)
+                         VALUES (?1, ?2, 'node', ?3, NULL, NULL, NULL, 'accepted', 0,
+                                 ?4, ?5, ?5)",
+                        params![nid, parent, part.title, crate::ledger::local_author(), now],
+                    )?;
+                    for lid in &part.link_ids {
+                        conn.execute(
+                            "UPDATE OR IGNORE class_links SET node_id = ?2 WHERE id = ?1 AND node_id = ?3",
+                            params![lid, nid, node],
+                        )?;
+                    }
+                    made += 1;
+                }
+                format!("split into {made}")
+            }
+            "supersede" => {
+                let (old_seq, new_seq) = match p
+                    .extra_json
+                    .as_deref()
+                    .and_then(|e| serde_json::from_str::<serde_json::Value>(e).ok())
+                    .and_then(|v| {
+                        Some((v.get("old_seq")?.as_i64()?, v.get("new_seq")?.as_i64()?))
+                    }) {
+                    Some(pair) => pair,
+                    None => {
+                        // Malformed payload — drop, never retry forever.
+                        self.drop_proposal_locked(&conn, id)?;
+                        return Ok(None);
+                    }
+                };
+                let rationale = p.rationale.clone().unwrap_or_default();
+                match Self::apply_supersession_locked(&conn, old_seq, new_seq, &rationale)? {
+                    crate::classmem::SupersessionOutcome::Applied {
+                        effective_old,
+                        new_seq,
+                        ..
+                    } => {
+                        // The supersede ledger event was appended inside
+                        // apply_supersession_locked — callers must NOT also
+                        // record a taxonomy_reorg for this op.
+                        format!("#{effective_old} → #{new_seq}")
+                    }
+                    crate::classmem::SupersessionOutcome::Rejected(msg) => {
+                        tracing::info!(target: "redline::classmem", old_seq, new_seq, %msg,
+                            "supersede proposal rejected at apply");
+                        self.drop_proposal_locked(&conn, id)?;
+                        return Ok(None);
+                    }
+                }
+            }
+            _ => {
+                self.drop_proposal_locked(&conn, id)?;
+                return Ok(None);
+            }
+        };
+        self.drop_proposal_locked(&conn, id)?;
+        Ok(Some(crate::classmem::AppliedReorg {
+            op: p.op,
+            node_id: p.node_id.unwrap_or_default(),
+            detail,
+        }))
+    }
+
+    fn drop_proposal_locked(&self, conn: &rusqlite::Connection, id: i64) -> rusqlite::Result<()> {
+        conn.execute("DELETE FROM class_proposals WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    // --- supersession (temporal validity over decisions) ---
+
+    /// Validate + record "decision new_seq supersedes decision old_seq":
+    /// append the `supersede` ledger event and insert the queryable
+    /// `supersessions` index row, atomically under one lock. Never deletes —
+    /// the old decision stays in the lake with a status, and a pin on it does
+    /// NOT veto (nothing is destroyed; the UI surfaces it instead).
+    /// Production goes through `apply_class_proposal` (which calls the locked
+    /// core under its own lock); this locking wrapper exists for tests.
+    #[cfg(test)]
+    pub fn apply_supersession(
+        &self,
+        old_seq: i64,
+        new_seq: i64,
+        rationale: &str,
+    ) -> rusqlite::Result<crate::classmem::SupersessionOutcome> {
+        let conn = self.conn.lock().unwrap();
+        Self::apply_supersession_locked(&conn, old_seq, new_seq, rationale)
+    }
+
+    /// The core, callable with an already-held lock (`apply_class_proposal`
+    /// holds it across the op match).
+    fn apply_supersession_locked(
+        conn: &rusqlite::Connection,
+        old_seq: i64,
+        new_seq: i64,
+        rationale: &str,
+    ) -> rusqlite::Result<crate::classmem::SupersessionOutcome> {
+        use crate::classmem::SupersessionOutcome as Out;
+        let kind_of = |seq: i64| -> rusqlite::Result<Option<String>> {
+            conn.query_row(
+                "SELECT kind FROM ledger_events WHERE seq = ?1",
+                params![seq],
+                |r| r.get(0),
+            )
+            .optional()
+        };
+        // Only decisions are claims that can be replaced; prompts/revisions
+        // are history and are never superseded.
+        for seq in [old_seq, new_seq] {
+            match kind_of(seq)? {
+                None => return Ok(Out::Rejected(format!("no ledger event #{seq}"))),
+                Some(k) if !crate::classmem::DECISION_KINDS.contains(&k.as_str()) => {
+                    return Ok(Out::Rejected(format!(
+                        "#{seq} is a {k} event, not a decision"
+                    )));
+                }
+                Some(_) => {}
+            }
+        }
+        // "Superseded at most once": if old_seq was already superseded, this
+        // op redirects to the current head of its chain.
+        let mut effective_old = old_seq;
+        let mut hops = 0;
+        while let Some(next) = conn
+            .query_row(
+                "SELECT new_seq FROM supersessions WHERE old_seq = ?1",
+                params![effective_old],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+        {
+            effective_old = next;
+            hops += 1;
+            if hops > 64 {
+                return Ok(Out::Rejected("supersession chain too deep".into()));
+            }
+        }
+        if effective_old == new_seq {
+            // Covers the idempotent duplicate: A→B proposed again lands here.
+            return Ok(Out::Rejected(format!("#{new_seq} is already the chain head")));
+        }
+        // Every stored edge strictly increases seq, so requiring old < new
+        // makes cycles structurally impossible — this check IS the cycle
+        // rejection (the hop guard above is defense in depth).
+        if effective_old >= new_seq {
+            return Ok(Out::Rejected(format!(
+                "superseding decision #{new_seq} must come after #{effective_old}"
+            )));
+        }
+        // Field order is frozen — it is the payload-hash identity.
+        let new_str = new_seq.to_string();
+        let ph = crate::ledger::decision_payload_hash(&[
+            ("superseded_by", &new_str),
+            ("rationale", rationale),
+        ]);
+        let author = crate::ledger::local_author();
+        let old_str = effective_old.to_string();
+        let ev = Self::append_ledger_event_locked(
+            conn,
+            &crate::ledger::LedgerAppend {
+                kind: crate::ledger::EventKind::Supersede.as_str(),
+                author: &author,
+                ts: crate::ledger::now_millis(),
+                prompt_id: None,
+                session_id: None,
+                version_number: None,
+                ref_kind: Some("ledger_event"),
+                ref_id: Some(old_str.as_str()),
+                payload_hash: &ph,
+            },
+        )?;
+        conn.execute(
+            "INSERT INTO supersessions (old_seq, new_seq, event_seq, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![effective_old, new_seq, ev.seq, ev.ts],
+        )?;
+        Ok(Out::Applied {
+            effective_old,
+            new_seq,
+            event_seq: ev.seq,
+        })
+    }
+
+    /// old_seq → new_seq for the given seqs — backs the per-link
+    /// `supersededBy` annotation in the node view. (As-of queries later fall
+    /// out of the same table by filtering `event_seq <= asof`.)
+    pub fn supersessions_for_seqs(
+        &self,
+        seqs: &[i64],
+    ) -> rusqlite::Result<std::collections::HashMap<i64, i64>> {
+        let conn = self.conn.lock().unwrap();
+        let mut out = std::collections::HashMap::new();
+        let mut stmt =
+            conn.prepare("SELECT new_seq FROM supersessions WHERE old_seq = ?1")?;
+        for &seq in seqs {
+            if let Some(new_seq) = stmt
+                .query_row(params![seq], |r| r.get::<_, i64>(0))
+                .optional()?
+            {
+                out.insert(seq, new_seq);
+            }
+        }
+        Ok(out)
+    }
+
+    // --- class observations (agent-derived patterns) ---
+
+    /// Insert an observation + append its `observation` ledger event,
+    /// atomically. Dedup on (node_id, summary) regardless of `dismissed` —
+    /// a dismissed pattern never resurfaces under the same wording. Returns
+    /// the new row id, `None` when skipped. Empty cite_seqs is rejected here
+    /// too (defense in depth behind the strict parser).
+    pub fn insert_class_observation(
+        &self,
+        node_id: &str,
+        summary: &str,
+        cite_seqs: &[i64],
+    ) -> rusqlite::Result<Option<i64>> {
+        if cite_seqs.is_empty() || summary.trim().is_empty() {
+            return Ok(None);
+        }
+        let conn = self.conn.lock().unwrap();
+        let node_exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM class_nodes WHERE id = ?1",
+            params![node_id],
+            |r| r.get(0),
+        )?;
+        if node_exists == 0 {
+            return Ok(None);
+        }
+        let dup: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM class_observations WHERE node_id = ?1 AND summary = ?2",
+            params![node_id, summary],
+            |r| r.get(0),
+        )?;
+        if dup > 0 {
+            return Ok(None);
+        }
+        let cites = serde_json::to_string(cite_seqs).unwrap_or_else(|_| "[]".into());
+        let now = crate::ledger::now_millis();
+        conn.execute(
+            "INSERT INTO class_observations
+                (node_id, summary, cite_seqs, created_seq, pinned, dismissed, created_at)
+             VALUES (?1, ?2, ?3, NULL, 0, 0, ?4)",
+            params![node_id, summary, cites, now],
+        )?;
+        let row_id = conn.last_insert_rowid();
+        // Field order is frozen — it is the payload-hash identity.
+        let ph = crate::ledger::decision_payload_hash(&[
+            ("node", node_id),
+            ("summary", summary),
+            ("cites", &cites),
+        ]);
+        let author = crate::ledger::local_author();
+        let ev = Self::append_ledger_event_locked(
+            &conn,
+            &crate::ledger::LedgerAppend {
+                kind: crate::ledger::EventKind::Observation.as_str(),
+                author: &author,
+                ts: now,
+                prompt_id: None,
+                session_id: None,
+                version_number: None,
+                ref_kind: Some("class_node"),
+                ref_id: Some(node_id),
+                payload_hash: &ph,
+            },
+        )?;
+        conn.execute(
+            "UPDATE class_observations SET created_seq = ?2 WHERE id = ?1",
+            params![row_id, ev.seq],
+        )?;
+        Ok(Some(row_id))
+    }
+
+    pub fn list_class_observations(
+        &self,
+        node_id: &str,
+        include_dismissed: bool,
+    ) -> rusqlite::Result<Vec<crate::classmem::ClassObservation>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, node_id, summary, cite_seqs, created_seq, pinned, dismissed, created_at
+             FROM class_observations
+             WHERE node_id = ?1 AND (?2 OR dismissed = 0)
+             ORDER BY pinned DESC, created_at DESC, id DESC",
+        )?;
+        let rows = stmt.query_map(params![node_id, include_dismissed], |r| {
+            Ok(crate::classmem::ClassObservation {
+                id: r.get(0)?,
+                node_id: r.get(1)?,
+                summary: r.get(2)?,
+                cite_seqs: serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or_default(),
+                created_seq: r.get(4)?,
+                pinned: r.get::<_, i64>(5)? != 0,
+                dismissed: r.get::<_, i64>(6)? != 0,
+                created_at: r.get(7)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Newest (non-dismissed) observation timestamp per node — the keeper's
+    /// freshness gate: a node whose newest observation postdates its last
+    /// activity has nothing new to mine.
+    pub fn newest_observation_per_node(
+        &self,
+    ) -> rusqlite::Result<std::collections::HashMap<String, i64>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT node_id, MAX(created_at) FROM class_observations
+             WHERE dismissed = 0 GROUP BY node_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        rows.collect()
+    }
+
+    /// Dismiss = "never resurface this pattern". Returns the node id so the
+    /// caller can record the `class_curate` event. The row is kept (not
+    /// deleted) so the dedup guard keeps holding.
+    pub fn set_observation_dismissed(&self, id: i64) -> rusqlite::Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let node: Option<String> = conn
+            .query_row(
+                "SELECT node_id FROM class_observations WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if node.is_some() {
+            conn.execute(
+                "UPDATE class_observations SET dismissed = 1, pinned = 0 WHERE id = ?1",
+                params![id],
+            )?;
+        }
+        Ok(node)
+    }
+
+    /// Pin = promote into the node's permanent context (floats first in the
+    /// pane and in retrieval). Returns the node id for the curate event.
+    pub fn set_observation_pinned(
+        &self,
+        id: i64,
+        pinned: bool,
+    ) -> rusqlite::Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let node: Option<String> = conn
+            .query_row(
+                "SELECT node_id FROM class_observations WHERE id = ?1 AND dismissed = 0",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if node.is_some() {
+            conn.execute(
+                "UPDATE class_observations SET pinned = ?2 WHERE id = ?1",
+                params![id, pinned as i64],
+            )?;
+        }
+        Ok(node)
+    }
+
+    /// The corpus for the keeper's observation pass: a node's ledger-resolvable
+    /// links as `(seq, kind, ts, snippet)`, newest first. Snippet is the prompt
+    /// body head (or its gist once compacted); bodyless decision events yield
+    /// `None` and are rendered by kind alone.
+    pub fn node_link_items(
+        &self,
+        node_id: &str,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<(i64, String, i64, Option<String>)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT le.seq, le.kind, le.ts,
+                    COALESCE(NULLIF(substr(p.body, 1, 240), ''), p.gist)
+             FROM class_links l
+             JOIN ledger_events le ON CAST(l.target_id AS INTEGER) = le.seq
+             LEFT JOIN prompts p ON p.id = le.prompt_id
+             WHERE l.node_id = ?1
+               AND l.target_kind IN ('prompt', 'decision', 'ledger')
+               AND l.status = 'accepted'
+             ORDER BY le.ts DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![node_id, limit], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, Option<String>>(3)?,
+            ))
+        })?;
+        rows.collect()
+    }
+
+    // --- class runs + lake delta ---
+
+    /// The maximum ledger seq (the delta ceiling for a classifier run). 0 if the
+    /// chain is empty.
+    pub fn max_ledger_seq(&self) -> rusqlite::Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT COALESCE(MAX(seq), 0) FROM ledger_events", [], |r| r.get(0))
+    }
+
+    /// The seq the last completed classifier run consumed up to — the delta
+    /// floor for the next run. 0 when no run has completed.
+    pub fn last_run_seq_to(&self) -> rusqlite::Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COALESCE(MAX(seq_to), 0) FROM class_runs WHERE status = 'done'",
+            [],
+            |r| r.get(0),
+        )
+    }
+
+    /// Friction rows for the Orchestration digest: every `in_review` session with
+    /// its unresolved-comment count (comments whose resolution was never accepted)
+    /// and `created_at`, oldest first. Returns `(session_id, project_name,
+    /// created_at, unresolved_count)`. Pure read; the orchestrator ranks these.
+    pub fn in_review_friction(&self) -> rusqlite::Result<Vec<(String, String, i64, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT s.session_id, s.project_name, s.created_at,
+                (SELECT COUNT(*) FROM comments c
+                   WHERE c.session_id = s.session_id
+                     AND c.resolution_accepted_at IS NULL) AS unresolved
+             FROM sessions s
+             WHERE s.status = 'in_review'
+             ORDER BY s.created_at ASC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn insert_class_run(&self, seq_from: i64, seq_to: i64) -> rusqlite::Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO class_runs (started_at, status, seq_from, seq_to)
+             VALUES (?1, 'running', ?2, ?3)",
+            params![crate::ledger::now_millis(), seq_from, seq_to],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn finish_class_run(
+        &self,
+        id: i64,
+        status: &str,
+        claude_session_id: Option<&str>,
+        summary: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE class_runs SET status = ?2, finished_at = ?3, claude_session_id = ?4, summary = ?5
+             WHERE id = ?1",
+            params![id, status, crate::ledger::now_millis(), claude_session_id, summary],
+        )?;
+        Ok(())
+    }
+
+    pub fn latest_class_run(&self) -> rusqlite::Result<Option<crate::classmem::ClassRun>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, started_at, finished_at, status, seq_from, seq_to, claude_session_id, summary
+             FROM class_runs ORDER BY id DESC LIMIT 1",
+            [],
+            |r| {
+                Ok(crate::classmem::ClassRun {
+                    id: r.get(0)?,
+                    started_at: r.get(1)?,
+                    finished_at: r.get(2)?,
+                    status: r.get(3)?,
+                    seq_from: r.get(4)?,
+                    seq_to: r.get(5)?,
+                    claude_session_id: r.get(6)?,
+                    summary: r.get(7)?,
+                })
+            },
+        )
+        .optional()
+    }
+
+    /// Lake items (prompts + decision events) with `seq > since_seq`, oldest
+    /// first — the classifier's delta input and the `/v1/memory/prompts` route.
+    /// Bodies are truncated to keep the vector light.
+    pub fn list_lake_items_since(
+        &self,
+        since_seq: i64,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<crate::classmem::LakeItem>> {
+        let conn = self.conn.lock().unwrap();
+        // Surface browse-event content too (they carry no prompt row): a
+        // `browse_event` ledger row joins `browse_events` by ref_id, so the
+        // classifier sees the page text (as `body`) under a synthetic
+        // `browse_event` surface and can file it under a class like any prompt.
+        let mut stmt = conn.prepare(
+            "SELECT le.seq, le.ts, le.kind, le.ref_kind, le.ref_id, le.session_id,
+                    COALESCE(p.surface, CASE WHEN le.ref_kind = 'browse_event'
+                                             THEN 'browse_event' END),
+                    p.origin, p.role, p.mission_id, p.project_path,
+                    COALESCE(p.body, be.text),
+                    p.thread_kind, p.thread_id, p.parent_session_id
+             FROM ledger_events le
+             LEFT JOIN prompts p ON le.prompt_id = p.id
+             LEFT JOIN browse_events be
+                    ON le.ref_kind = 'browse_event' AND le.ref_id = CAST(be.id AS TEXT)
+             WHERE le.seq > ?1
+             ORDER BY le.seq ASC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![since_seq, limit], |r| {
+            let body: Option<String> = r.get(11)?;
+            Ok(crate::classmem::LakeItem {
+                seq: r.get(0)?,
+                ts: r.get(1)?,
+                kind: r.get(2)?,
+                ref_kind: r.get(3)?,
+                ref_id: r.get(4)?,
+                session_id: r.get(5)?,
+                surface: r.get(6)?,
+                origin: r.get(7)?,
+                role: r.get(8)?,
+                mission_id: r.get(9)?,
+                project_path: r.get(10)?,
+                body: body.map(|b| {
+                    if b.chars().count() > 4000 {
+                        b.chars().take(4000).collect::<String>() + "…"
+                    } else {
+                        b
+                    }
+                }),
+                thread_kind: r.get(12)?,
+                thread_id: r.get(13)?,
+                parent_session_id: r.get(14)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Every node plus its total link count (one query, no N+1) — backs the tree
+    /// view's leaf-count badges.
+    pub fn list_class_nodes_with_counts(
+        &self,
+    ) -> rusqlite::Result<Vec<(crate::classmem::ClassNode, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT n.id, n.parent_id, n.kind, n.title, n.summary, n.project_path,
+                    n.ip_name, n.status, n.pinned, n.curated_by, n.created_at, n.updated_at,
+                    (SELECT COUNT(*) FROM class_links l WHERE l.node_id = n.id) AS link_count
+             FROM class_nodes n ORDER BY n.title ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((Self::row_to_class_node(r)?, r.get::<_, i64>(12)?))
+        })?;
+        rows.collect()
+    }
+
+    /// Per-node DIRECT link activity: `node_id → (link_count, newest_ts?)`. The
+    /// timestamp is the max `ledger_events.ts` among the node's own links that
+    /// resolve to a ledger seq (prompt/decision/ledger). Rolled up into subtree
+    /// stats by `classmem::subtree_stats` — the temporal facts that give "cold"
+    /// a scope.
+    pub fn node_direct_link_activity(
+        &self,
+    ) -> rusqlite::Result<std::collections::HashMap<String, (i64, Option<i64>)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT l.node_id, COUNT(*),
+                    MAX(CASE WHEN l.target_kind IN ('prompt','decision','ledger')
+                        THEN (SELECT le.ts FROM ledger_events le
+                              WHERE le.seq = CAST(l.target_id AS INTEGER))
+                        ELSE NULL END)
+             FROM class_links l GROUP BY l.node_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<i64>>(2)?))
+        })?;
+        let mut map = std::collections::HashMap::new();
+        for row in rows {
+            let (id, count, ts) = row?;
+            map.insert(id, (count, ts));
+        }
+        Ok(map)
+    }
+
+    /// The lake's temporal envelope (oldest/newest ledger ts) — the reference
+    /// frame coldness is measured against (never wall-clock).
+    pub fn lake_envelope(&self) -> rusqlite::Result<crate::classmem::LakeEnvelope> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COALESCE(MIN(ts), 0), COALESCE(MAX(ts), 0) FROM ledger_events",
+            [],
+            |r| {
+                Ok(crate::classmem::LakeEnvelope {
+                    oldest: r.get(0)?,
+                    newest: r.get(1)?,
+                })
+            },
+        )
+    }
+
+    fn subtree_pinned(conn: &rusqlite::Connection, id: &str) -> rusqlite::Result<bool> {
+        let mut stack = vec![id.to_string()];
+        let mut guard = 0;
+        while let Some(nid) = stack.pop() {
+            guard += 1;
+            if guard > 10_000 {
+                break;
+            }
+            let pinned: Option<i64> = conn
+                .query_row("SELECT pinned FROM class_nodes WHERE id = ?1", params![nid], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            if pinned == Some(1) {
+                return Ok(true);
+            }
+            let mut stmt = conn.prepare("SELECT id FROM class_nodes WHERE parent_id = ?1")?;
+            let kids: Vec<String> = stmt
+                .query_map(params![nid], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            stack.extend(kids);
+        }
+        Ok(false)
+    }
+
+    /// True if a node or any descendant is pinned — the anti-decay veto the
+    /// collapse guard consults. Production code calls `Self::subtree_pinned`
+    /// under an already-held lock; this locking wrapper exists for tests.
+    #[cfg(test)]
+    pub fn subtree_has_pin(&self, id: &str) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Self::subtree_pinned(&conn, id)
+    }
+
+    /// A short human label for a link target (best-effort). Prompt/decision/
+    /// ledger targets carry a numeric ledger seq — resolve it to the prompt body
+    /// snippet or the event kind. Other kinds render from the id alone.
+    pub fn link_preview(&self, target_kind: &str, target_id: &str) -> Option<String> {
+        if !matches!(target_kind, "prompt" | "decision" | "ledger") {
+            return None;
+        }
+        let seq: i64 = target_id.trim().parse().ok()?;
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT le.kind, p.body
+             FROM ledger_events le LEFT JOIN prompts p ON le.prompt_id = p.id
+             WHERE le.seq = ?1",
+            params![seq],
+            |r| {
+                let kind: String = r.get(0)?;
+                let body: Option<String> = r.get(1)?;
+                Ok(match body {
+                    Some(b) => {
+                        let one = b.replace('\n', " ");
+                        let snip: String = one.chars().take(120).collect();
+                        snip
+                    }
+                    None => format!("[{kind} event]"),
+                })
+            },
+        )
+        .optional()
+        .ok()
+        .flatten()
+    }
+
+    /// Best-effort evidence bundle for one decision event — what the supersede
+    /// verifier agent reads to adjudicate "does the newer decision genuinely
+    /// replace the older one?". Resolves the referenced comment body, review
+    /// annotation, and/or the session's plan heading when available; a decision
+    /// whose referents were deleted still yields its ledger facts.
+    pub fn decision_event_context(&self, seq: i64) -> rusqlite::Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let row: Option<(String, i64, Option<String>, Option<String>, Option<String>)> = conn
+            .query_row(
+                "SELECT kind, ts, session_id, ref_kind, ref_id
+                 FROM ledger_events WHERE seq = ?1",
+                params![seq],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .optional()?;
+        let Some((kind, ts, session_id, ref_kind, ref_id)) = row else {
+            return Ok(None);
+        };
+        let snip = |s: &str| -> String {
+            let one = s.replace('\n', " ");
+            let cut: String = one.chars().take(200).collect();
+            if one.chars().count() > 200 { format!("{cut}…") } else { cut }
+        };
+        let mut out = format!("event #{seq} kind={kind} ts={ts}");
+        match (ref_kind.as_deref(), ref_id.as_deref()) {
+            (Some("comment"), Some(cid)) => {
+                let c: Option<(String, String)> = conn
+                    .query_row(
+                        "SELECT body, status FROM comments WHERE id = ?1 LIMIT 1",
+                        params![cid],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?;
+                if let Some((body, status)) = c {
+                    out.push_str(&format!(" | comment[{status}]: {}", snip(&body)));
+                }
+            }
+            (Some("review_annotation"), Some(aid)) => {
+                let a: Option<(String, String, Option<String>)> = conn
+                    .query_row(
+                        "SELECT body, status, resolution
+                         FROM review_annotations WHERE id = ?1 LIMIT 1",
+                        params![aid],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )
+                    .optional()?;
+                if let Some((body, status, resolution)) = a {
+                    out.push_str(&format!(" | annotation[{status}]: {}", snip(&body)));
+                    if let Some(res) = resolution.as_deref().filter(|s| !s.is_empty()) {
+                        out.push_str(&format!(" | resolution: {}", snip(res)));
+                    }
+                }
+            }
+            _ => {}
+        }
+        if let Some(sid) = session_id.as_deref().filter(|s| !s.is_empty()) {
+            let plan: Option<String> = conn
+                .query_row(
+                    "SELECT raw_plan_markdown FROM revisions
+                     WHERE session_id = ?1 ORDER BY version_number DESC LIMIT 1",
+                    params![sid],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(md) = plan {
+                let heading = md
+                    .lines()
+                    .find(|l| l.trim_start().starts_with('#'))
+                    .unwrap_or_default()
+                    .trim();
+                if !heading.is_empty() {
+                    out.push_str(&format!(" | plan: {}", snip(heading)));
+                }
+            }
+        }
+        Ok(Some(out))
     }
 
     pub fn insert_comment(
@@ -595,8 +5309,9 @@ impl Database {
                 block_id, structural_json,
                 sel_char_start, sel_char_end, sel_quoted_text,
                 sel_sub_block_id, reopen_note, reopen_history, actionable,
-                author, agent_state, reviewer
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
+                author, agent_state, reviewer,
+                external_created_at, share_request_id, attachments
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)",
             params![
                 comment.id,
                 session_id,
@@ -624,8 +5339,12 @@ impl Database {
                 comment.author,
                 comment.agent_state,
                 comment.reviewer,
+                comment.external_created_at,
+                comment.share_request_id,
+                attachments_to_json(&comment.attachments),
             ],
         )?;
+        Self::touch_session(&conn, session_id, comment.created_at);
         Ok(())
     }
 
@@ -675,8 +5394,11 @@ impl Database {
                 actionable = ?17,
                 author = ?18,
                 agent_state = ?19,
-                reviewer = ?20
-             WHERE session_id = ?21 AND id = ?22",
+                reviewer = ?20,
+                external_created_at = ?21,
+                share_request_id = ?22,
+                attachments = ?23
+             WHERE session_id = ?24 AND id = ?25",
             params![
                 comment.scope.map(|s| s.as_str()),
                 comment.body,
@@ -698,11 +5420,112 @@ impl Database {
                 comment.author,
                 comment.agent_state,
                 comment.reviewer,
+                comment.external_created_at,
+                comment.share_request_id,
+                attachments_to_json(&comment.attachments),
                 session_id,
                 comment.id,
             ],
         )?;
         Ok(())
+    }
+
+    /// Record a minted share link (idempotent on request_id — a re-record
+    /// from the localStorage migration overwrites with identical data).
+    pub fn record_share(&self, share: &ShareRecord) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO shares (
+                request_id, session_id, reviewer_name, note, base_version, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                share.request_id,
+                share.session_id,
+                share.reviewer_name,
+                share.note,
+                share.base_version,
+                share.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Forget a share. Its returns (and their imported comments) stay — they
+    /// are the session's history, not the link's.
+    pub fn delete_share(&self, request_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM shares WHERE request_id = ?1", params![request_id])?;
+        Ok(())
+    }
+
+    pub fn list_shares(&self, session_id: &str) -> rusqlite::Result<Vec<ShareRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT request_id, session_id, reviewer_name, note, base_version, created_at
+             FROM shares WHERE session_id = ?1 ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![session_id], |row| {
+            Ok(ShareRecord {
+                request_id: row.get(0)?,
+                session_id: row.get(1)?,
+                reviewer_name: row.get(2)?,
+                note: row.get(3)?,
+                base_version: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn record_share_return(&self, ret: &ShareReturnRecord) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let comment_ids_json =
+            serde_json::to_string(&ret.comment_ids).unwrap_or_else(|_| "[]".to_string());
+        conn.execute(
+            "INSERT OR REPLACE INTO share_returns (
+                id, request_id, session_id, reviewer_name, imported_at,
+                landed_version, placed, orphans, comment_ids
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                ret.id,
+                ret.request_id,
+                ret.session_id,
+                ret.reviewer_name,
+                ret.imported_at,
+                ret.landed_version,
+                ret.placed,
+                ret.orphans,
+                comment_ids_json,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_share_returns(
+        &self,
+        session_id: &str,
+    ) -> rusqlite::Result<Vec<ShareReturnRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, request_id, session_id, reviewer_name, imported_at,
+                    landed_version, placed, orphans, comment_ids
+             FROM share_returns WHERE session_id = ?1 ORDER BY imported_at DESC",
+        )?;
+        let rows = stmt.query_map(params![session_id], |row| {
+            let comment_ids_json: String = row.get(8)?;
+            Ok(ShareReturnRecord {
+                id: row.get(0)?,
+                request_id: row.get(1)?,
+                session_id: row.get(2)?,
+                reviewer_name: row.get(3)?,
+                imported_at: row.get(4)?,
+                landed_version: row.get(5)?,
+                placed: row.get(6)?,
+                orphans: row.get(7)?,
+                comment_ids: serde_json::from_str(&comment_ids_json).unwrap_or_default(),
+            })
+        })?;
+        rows.collect()
     }
 
     /// Targeted attach-state write — callable from the detach drop-guard with
@@ -717,6 +5540,7 @@ impl Database {
             "UPDATE sessions SET attach_state = ?1 WHERE session_id = ?2",
             params![state, session_id],
         )?;
+        Self::touch_session(&conn, session_id, crate::state::now_millis());
         Ok(())
     }
 
@@ -800,6 +5624,30 @@ impl Database {
         tx.commit()
     }
 
+    /// Rewrite stored attachment paths after a session was re-keyed.
+    ///
+    /// Attachment `path`s are absolute and embed the session id
+    /// (`…/attachments/<session_id>/<file>`), so moving the directory without
+    /// this leaves every comment pointing at a directory that no longer exists
+    /// — and the failure would only surface later, when Claude tried to read
+    /// the file named in a payload. Runs AFTER `rekey_session`, so the rows
+    /// already carry the new id.
+    pub fn rekey_attachment_paths(&self, old_id: &str, new_id: &str) -> rusqlite::Result<()> {
+        let from = format!("/attachments/{old_id}/");
+        let to = format!("/attachments/{new_id}/");
+        let conn = self.conn.lock().unwrap();
+        for table in ["comments", "thread_messages"] {
+            conn.execute(
+                &format!(
+                    "UPDATE {table} SET attachments = REPLACE(attachments, ?1, ?2)
+                     WHERE session_id = ?3 AND attachments IS NOT NULL"
+                ),
+                params![from, to, new_id],
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn delete_session(&self, session_id: &str) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -812,6 +5660,13 @@ impl Database {
         )?;
         conn.execute(
             "DELETE FROM revisions WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        // Staged (never-written) offers go with the session that produced them.
+        // NOTE: `voice_messages` / `voice_sessions` are *not* cleared here —
+        // pre-existing, and out of scope for this change.
+        conn.execute(
+            "DELETE FROM comment_offers WHERE session_id = ?1",
             params![session_id],
         )?;
         conn.execute(
@@ -830,8 +5685,9 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO thread_messages
-                (id, session_id, comment_id, role, body, status, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                (id, session_id, comment_id, role, body, status, created_at,
+                 attachments)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 msg.id,
                 msg.session_id,
@@ -840,8 +5696,10 @@ impl Database {
                 msg.body,
                 msg.status,
                 msg.created_at,
+                attachments_to_json(&msg.attachments),
             ],
         )?;
+        Self::touch_session(&conn, &msg.session_id, msg.created_at);
         Ok(())
     }
 
@@ -852,7 +5710,8 @@ impl Database {
     ) -> rusqlite::Result<Vec<ThreadMessage>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, session_id, comment_id, role, body, status, created_at
+            "SELECT id, session_id, comment_id, role, body, status, created_at,
+                    attachments
              FROM thread_messages
              WHERE session_id = ?1 AND comment_id = ?2
              ORDER BY created_at, id",
@@ -866,6 +5725,7 @@ impl Database {
                 body: row.get(4)?,
                 status: row.get(5)?,
                 created_at: row.get(6)?,
+                attachments: attachments_from_json(row.get(7)?),
             })
         })?;
         rows.collect()
@@ -1500,6 +6360,129 @@ impl Database {
         rows.collect()
     }
 
+    // --- localhost dashboard (dev servers) -----------------------------------
+
+    /// Record that this `(project_path, port)` is (or just was) serving. On
+    /// conflict the volatile facts refresh — but NEVER `first_seen_at` (the
+    /// "known since" fact) and NEVER `thumb_path` (a fresh scan must not blank
+    /// a card's screenshot; only `set_dev_server_thumb` writes it).
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_dev_server(
+        &self,
+        project_path: &str,
+        project_name: &str,
+        port: u16,
+        url: &str,
+        stack: &str,
+        run_command: &str,
+        last_pid: Option<u32>,
+        last_args: Option<&str>,
+        now: i64,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO dev_servers
+                 (project_path, project_name, port, url, stack, run_command,
+                  last_pid, last_args, first_seen_at, last_seen_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+             ON CONFLICT (project_path, port) DO UPDATE SET
+                 project_name = excluded.project_name,
+                 url          = excluded.url,
+                 stack        = excluded.stack,
+                 run_command  = excluded.run_command,
+                 last_pid     = excluded.last_pid,
+                 last_args    = excluded.last_args,
+                 last_seen_at = excluded.last_seen_at",
+            params![
+                project_path,
+                project_name,
+                port as i64,
+                url,
+                stack,
+                run_command,
+                last_pid.map(|p| p as i64),
+                last_args,
+                now,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Remembered dev servers, most-recently-seen first. Rows are returned
+    /// verbatim — the caller filters out the ones that are live right now and
+    /// the ones whose project directory has since disappeared.
+    pub fn list_dev_servers(&self, limit: i64) -> rusqlite::Result<Vec<DevServerRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, project_path, project_name, port, url, stack, run_command,
+                    last_seen_at, thumb_path
+             FROM dev_servers
+             ORDER BY last_seen_at DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit], |row| {
+            Ok(DevServerRow {
+                id: row.get(0)?,
+                project_path: row.get(1)?,
+                project_name: row.get(2)?,
+                port: row.get::<_, i64>(3)? as u16,
+                url: row.get(4)?,
+                stack: row.get(5)?,
+                run_command: row.get(6)?,
+                last_seen_at: row.get(7)?,
+                thumb_path: row.get(8)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Drop all but the `keep` most-recently-seen rows. Deliberately a COUNT
+    /// prune and not an existence prune: an unmounted volume or a repo that is
+    /// briefly moved must not destroy its history.
+    pub fn prune_dev_servers(&self, keep: i64) -> rusqlite::Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM dev_servers WHERE id NOT IN (
+                 SELECT id FROM dev_servers ORDER BY last_seen_at DESC LIMIT ?1
+             )",
+            params![keep],
+        )
+    }
+
+    /// `first_seen_at` is deliberately not part of `DevServerRow` (nothing in
+    /// the UI shows it) — but the invariant that an upsert never rewrites it is
+    /// worth a test, so tests can read it directly.
+    #[cfg(test)]
+    pub fn dev_server_first_seen(&self, id: i64) -> rusqlite::Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT first_seen_at FROM dev_servers WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+    }
+
+    /// Attach a freshly-captured thumbnail to a row — the only writer of
+    /// `thumb_path`. Keyed on `(project_path, port)` rather than the row id
+    /// because that pair IS a card's identity everywhere else in this feature;
+    /// keying on the id would mean carrying one through the capture pipeline for
+    /// no other reason. A capture for a row that has since been pruned is a
+    /// silent no-op.
+    pub fn set_dev_server_thumb(
+        &self,
+        project_path: &str,
+        port: u16,
+        path: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE dev_servers SET thumb_path = ?3
+             WHERE project_path = ?1 AND port = ?2",
+            params![project_path, port as i64, path],
+        )?;
+        Ok(())
+    }
+
     // --- code-review surface -------------------------------------------------
 
     const REVIEW_SESSION_COLS: &'static str =
@@ -1569,7 +6552,7 @@ impl Database {
     }
 
     /// The most recent review session for a repo — how a re-run of
-    /// `/redline-review` in the same repo continues the SAME review (next
+    /// `/redline-code-review` in the same repo continues the SAME review (next
     /// round) instead of minting a parallel one.
     pub fn latest_code_review_for_repo(&self, repo_path: &str) -> Option<CodeReviewSession> {
         let conn = self.conn.lock().unwrap();
@@ -1946,12 +6929,212 @@ impl Database {
         Ok(())
     }
 
+    // --- Voice-agent transcript (the visible half of that memory) -----------
+    // Mirrors the browse-thread helpers, keyed by the same voice key. See
+    // `VoiceMessage` for why these rows exist at all.
+
+    pub fn insert_voice_message(&self, msg: &VoiceMessage) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO voice_messages (id, session_key, role, text, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![msg.id, msg.session_key, msg.role, msg.text, msg.created_at],
+        )?;
+        Ok(())
+    }
+
+    /// A voice key's transcript, oldest-first — the order the panel replays it
+    /// in. Ties on `created_at` break by `rowid` (insertion order): a "you" line
+    /// and the marker that follows it can land in the same millisecond, and a
+    /// uuid tiebreak would invert them.
+    pub fn list_voice_messages(&self, session_key: &str) -> rusqlite::Result<Vec<VoiceMessage>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, session_key, role, text, created_at
+             FROM voice_messages
+             WHERE session_key = ?1
+             ORDER BY created_at, rowid",
+        )?;
+        let rows = stmt.query_map(params![session_key], |row| {
+            Ok(VoiceMessage {
+                id: row.get(0)?,
+                session_key: row.get(1)?,
+                role: row.get(2)?,
+                text: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Wipe a voice key's visible transcript. Paired with
+    /// `clear_voice_fork_session` by `voice_forget`, so "forget" is a true
+    /// reset: neither the agent's recollection nor the screen survives it.
+    pub fn clear_voice_messages(&self, session_key: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM voice_messages WHERE session_key = ?1",
+            params![session_key],
+        )?;
+        Ok(())
+    }
+
+    // --- Offered plan items (staged, not written) ---------------------------
+    // See `CommentOffer`. Rows here are proposals: nothing reaches the plan
+    // until `claim_comment_offer` wins and `add_feedback_from_offer` writes the
+    // comment.
+
+    /// `stale` is not a column — it is computed against the current plan by
+    /// `comment_offers_pending`, so every row reads back as fresh.
+    fn map_comment_offer(row: &rusqlite::Row<'_>) -> rusqlite::Result<CommentOffer> {
+        Ok(CommentOffer {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            message_id: row.get(2)?,
+            block_id: row.get(3)?,
+            body: row.get(4)?,
+            label: row.get(5)?,
+            agent_id: row.get(6)?,
+            status: row.get(7)?,
+            created_at: row.get(8)?,
+            stale: false,
+        })
+    }
+
+    pub fn insert_comment_offer(&self, offer: &CommentOffer) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO comment_offers
+                (id, session_id, message_id, block_id, body, label, agent_id, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                offer.id,
+                offer.session_id,
+                offer.message_id,
+                offer.block_id,
+                offer.body,
+                offer.label,
+                offer.agent_id,
+                offer.status,
+                offer.created_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_comment_offer(&self, id: &str) -> rusqlite::Result<Option<CommentOffer>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, session_id, message_id, block_id, body, label, agent_id, status, created_at
+             FROM comment_offers WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![id], Self::map_comment_offer)?;
+        rows.next().transpose()
+    }
+
+    /// A session's still-open offers, oldest-first. Same `created_at, rowid`
+    /// tiebreak as `list_voice_messages`: two offers staged in one turn can land
+    /// in the same millisecond, and a uuid tiebreak would invert them.
+    pub fn list_open_comment_offers(&self, session_id: &str) -> rusqlite::Result<Vec<CommentOffer>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, session_id, message_id, block_id, body, label, agent_id, status, created_at
+             FROM comment_offers
+             WHERE session_id = ?1 AND status = 'pending'
+             ORDER BY created_at, rowid",
+        )?;
+        let rows = stmt.query_map(params![session_id], Self::map_comment_offer)?;
+        rows.collect()
+    }
+
+    /// Attach this turn's still-unbound offers to the reply they came from.
+    ///
+    /// The floor is the newest persisted `"you"` line: `voice_send` writes it
+    /// immediately after the stdin write, therefore strictly before the child
+    /// can issue any curl. So everything staged at or after it belongs to the
+    /// turn that just finished — no per-turn counter on `VoiceProc` needed.
+    /// Returns how many rows were bound.
+    pub fn bind_comment_offers(
+        &self,
+        session_id: &str,
+        message_id: &str,
+    ) -> rusqlite::Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE comment_offers SET message_id = ?2
+              WHERE session_id = ?1 AND message_id IS NULL AND status = 'pending'
+                AND created_at >= (SELECT COALESCE(MAX(created_at), 0) FROM voice_messages
+                                    WHERE session_key = ?1 AND role = 'you')",
+            params![session_id, message_id],
+        )
+    }
+
+    /// How many offers this turn has already staged — the server-side cap. Same
+    /// `"you"`-line floor as `bind_comment_offers`.
+    pub fn count_open_offers_this_turn(&self, session_id: &str) -> rusqlite::Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM comment_offers
+              WHERE session_id = ?1 AND message_id IS NULL AND status = 'pending'
+                AND created_at >= (SELECT COALESCE(MAX(created_at), 0) FROM voice_messages
+                                    WHERE session_key = ?1 AND role = 'you')",
+            params![session_id],
+            |r| r.get(0),
+        )
+    }
+
+    /// Take ownership of an offer before writing its comment. A compare-and-set:
+    /// only the first caller sees `true`, which is what makes a double-tap
+    /// (or a tap racing a dismiss) land exactly one comment.
+    pub fn claim_comment_offer(&self, id: &str) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE comment_offers SET status = 'added' WHERE id = ?1 AND status = 'pending'",
+            params![id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Undo a claim whose write then failed, so the chip survives a transient
+    /// error instead of vanishing with nothing to show for it.
+    pub fn release_comment_offer(&self, id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE comment_offers SET status = 'pending' WHERE id = ?1 AND status = 'added'",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    /// Resolve an offer without writing it (`dismissed`). Returns whether a
+    /// pending row was actually transitioned — mirrors `resolve_draft_suggestion`.
+    pub fn resolve_comment_offer(&self, id: &str, status: &str) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE comment_offers SET status = ?2 WHERE id = ?1 AND status = 'pending'",
+            params![id, status],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Wipe a session's offers. Paired with `clear_voice_messages` by
+    /// `voice_forget` — a chip outliving the conversation it came from would be
+    /// an offer with no visible provenance.
+    pub fn clear_comment_offers(&self, session_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM comment_offers WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        Ok(())
+    }
+
     pub fn load_all(&self) -> rusqlite::Result<HashMap<String, ReviewSession>> {
         let conn = self.conn.lock().unwrap();
         let mut sessions: HashMap<String, ReviewSession> = HashMap::new();
 
         let mut stmt = conn.prepare(
-            "SELECT session_id, project_path, project_name, created_at, status, attach_state FROM sessions",
+            "SELECT session_id, project_path, project_name, created_at, status, attach_state, updated_at FROM sessions",
         )?;
         let rows = stmt.query_map([], |row| {
             let status_str: String = row.get(4)?;
@@ -1964,6 +7147,7 @@ impl Database {
                 revisions: Vec::new(),
                 status: session_status_from(&status_str),
                 attach_state: AttachState::from_str(&attach_str).unwrap_or(AttachState::Idle),
+                updated_at: row.get(6)?,
             })
         })?;
         for row in rows {
@@ -2010,7 +7194,8 @@ impl Database {
                     block_id, structural_json,
                     sel_char_start, sel_char_end, sel_quoted_text,
                     sel_sub_block_id, reopen_note, reopen_history, actionable,
-                    author, agent_state, reviewer
+                    author, agent_state, reviewer,
+                    external_created_at, share_request_id, attachments
              FROM comments
              ORDER BY session_id, version_number, created_at",
         )?;
@@ -2066,6 +7251,9 @@ impl Database {
             let author: Option<String> = row.get(23)?;
             let agent_state: Option<String> = row.get(24)?;
             let reviewer: Option<String> = row.get(25)?;
+            let external_created_at: Option<i64> = row.get(26)?;
+            let share_request_id: Option<String> = row.get(27)?;
+            let attachments = attachments_from_json(row.get(28)?);
             Ok((
                 row.get::<_, String>(1)?, // session_id
                 row.get::<_, u32>(2)?,    // version_number
@@ -2088,6 +7276,9 @@ impl Database {
                     author,
                     agent_state,
                     reviewer,
+                    external_created_at,
+                    share_request_id,
+                    attachments,
                 },
             ))
         })?;
@@ -2133,6 +7324,1187 @@ mod tests {
     fn make_store() -> SessionStore {
         let db = Arc::new(Database::open_in_memory().unwrap());
         SessionStore::new(db)
+    }
+
+    fn prompt_row<'a>(body: &'a str, bh: &'a str, sid: Option<&'a str>) -> crate::ledger::PromptRow<'a> {
+        crate::ledger::PromptRow {
+            ts: 1000,
+            source: "hook",
+            origin: "redline",
+            surface: "pty",
+            role: None,
+            session_id: None,
+            claude_session_id: sid,
+            mission_id: None,
+            project_path: Some("/proj"),
+            body,
+            body_hash: bh,
+            thread_kind: None,
+            thread_id: None,
+            parent_session_id: None,
+        }
+    }
+
+    fn append<'a>(db: &Database, kind: &'a str, ph: &'a str) -> crate::ledger::LedgerEventRow {
+        db.append_ledger_event(&crate::ledger::LedgerAppend {
+            kind,
+            author: "tester",
+            ts: 1000,
+            prompt_id: None,
+            session_id: Some("s"),
+            version_number: None,
+            ref_kind: Some("session"),
+            ref_id: Some("s"),
+            payload_hash: ph,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn ledger_chain_builds_and_verifies() {
+        let db = Database::open_in_memory().unwrap();
+        let e1 = append(&db, "prompt", "h1");
+        let e2 = append(&db, "approval", "h2");
+        let e3 = append(&db, "revision", "h3");
+        // seq is monotonic, and each row commits to its predecessor's hash.
+        assert_eq!((e1.seq, e2.seq, e3.seq), (1, 2, 3));
+        assert_eq!(e1.prev_hash, crate::ledger::GENESIS_PREV);
+        assert_eq!(e2.prev_hash, e1.entry_hash);
+        assert_eq!(e3.prev_hash, e2.entry_hash);
+
+        let v = db.verify_ledger_chain().unwrap();
+        assert!(v.ok);
+        assert_eq!(v.checked, 3);
+        assert_eq!(v.first_bad_seq, None);
+        assert_eq!(v.head_hash.as_deref(), Some(e3.entry_hash.as_str()));
+    }
+
+    // --- ClassMemory (Phase 2) --------------------------------------------
+
+    use crate::classmem::{Proposal, SplitPart};
+
+    fn accepted_node(db: &Database, id: &str, parent: Option<&str>, title: &str) {
+        let now = crate::ledger::now_millis();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO class_nodes
+                (id, parent_id, kind, title, summary, project_path, ip_name,
+                 status, pinned, curated_by, created_at, updated_at)
+             VALUES (?1, ?2, 'node', ?3, NULL, NULL, NULL, 'accepted', 0, 'user', ?4, ?4)",
+            params![id, parent, title, now],
+        )
+        .unwrap();
+    }
+
+    fn add_link(db: &Database, node: &str, kind: &str, target: &str) -> i64 {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO class_links (node_id, target_kind, target_id, note, status, created_at)
+             VALUES (?1, ?2, ?3, NULL, 'accepted', 1000)",
+            params![node, kind, target],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    // --- Supersession + observations (temporal validity / patterns) --------
+
+    use crate::classmem::SupersessionOutcome;
+
+    fn assert_rejected(out: SupersessionOutcome) -> String {
+        match out {
+            SupersessionOutcome::Rejected(msg) => msg,
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn supersession_guardrails() {
+        let db = Database::open_in_memory().unwrap();
+        let _p = append(&db, "prompt", "h1"); // seq 1 — not a decision
+        let r1 = append(&db, "resolution", "h2"); // seq 2
+        let a1 = append(&db, "approval", "h3"); // seq 3
+        let r2 = append(&db, "review_verdict", "h4"); // seq 4
+
+        // Non-decision kinds are never superseded (either side).
+        assert_rejected(db.apply_supersession(1, r1.seq, "").unwrap());
+        assert_rejected(db.apply_supersession(r1.seq, 1, "").unwrap());
+        // Unknown seqs reject.
+        assert_rejected(db.apply_supersession(r1.seq, 999, "").unwrap());
+        // Old must precede new.
+        assert_rejected(db.apply_supersession(a1.seq, r1.seq, "").unwrap());
+
+        // Happy path: r1 → a1.
+        match db.apply_supersession(r1.seq, a1.seq, "reversed").unwrap() {
+            SupersessionOutcome::Applied { effective_old, new_seq, event_seq } => {
+                assert_eq!((effective_old, new_seq), (r1.seq, a1.seq));
+                // The supersede event landed on the chain, referencing old.
+                let ev = db
+                    .list_ledger_events(1)
+                    .unwrap()
+                    .into_iter()
+                    .next()
+                    .unwrap();
+                assert_eq!(ev.seq, event_seq);
+                assert_eq!(ev.kind, "supersede");
+                assert_eq!(ev.ref_kind.as_deref(), Some("ledger_event"));
+                assert_eq!(ev.ref_id.as_deref(), Some(r1.seq.to_string().as_str()));
+            }
+            other => panic!("expected Applied, got {other:?}"),
+        }
+
+        // "At most once": superseding r1 again redirects to the chain head
+        // (a1), so r1 → r2 records a1 → r2, not a second edge from r1.
+        match db.apply_supersession(r1.seq, r2.seq, "newer again").unwrap() {
+            SupersessionOutcome::Applied { effective_old, new_seq, .. } => {
+                assert_eq!((effective_old, new_seq), (a1.seq, r2.seq));
+            }
+            other => panic!("expected Applied, got {other:?}"),
+        }
+        // The idempotent duplicate lands on "already the head" and rejects.
+        assert_rejected(db.apply_supersession(r1.seq, r2.seq, "").unwrap());
+
+        // The index answers both hops.
+        let map = db.supersessions_for_seqs(&[r1.seq, a1.seq, r2.seq]).unwrap();
+        assert_eq!(map.get(&r1.seq), Some(&a1.seq));
+        assert_eq!(map.get(&a1.seq), Some(&r2.seq));
+        assert_eq!(map.get(&r2.seq), None);
+    }
+
+    #[test]
+    fn supersede_and_observation_keep_chain_green() {
+        // The hash-invariant tripwire: the two new event kinds coexist with
+        // the old ones on one chain, and verification stays green — proof
+        // that CanonicalEvent was untouched.
+        let db = Database::open_in_memory().unwrap();
+        append(&db, "prompt", "h1");
+        let r = append(&db, "resolution", "h2");
+        let a = append(&db, "approval", "h3");
+        match db.apply_supersession(r.seq, a.seq, "why").unwrap() {
+            SupersessionOutcome::Applied { .. } => {}
+            other => panic!("expected Applied, got {other:?}"),
+        }
+        accepted_node(&db, "cn-x", None, "X");
+        assert!(db
+            .insert_class_observation("cn-x", "a pattern", &[1, 2])
+            .unwrap()
+            .is_some());
+        let v = db.verify_ledger_chain().unwrap();
+        assert!(v.ok, "chain must stay green: {v:?}");
+        assert_eq!(v.checked, 5); // 3 seeds + supersede + observation
+    }
+
+    #[test]
+    fn insert_class_observation_sets_created_seq_and_dedups() {
+        let db = Database::open_in_memory().unwrap();
+        accepted_node(&db, "cn-x", None, "X");
+
+        // Uncited / empty-summary / unknown-node inserts are rejected.
+        assert!(db.insert_class_observation("cn-x", "s", &[]).unwrap().is_none());
+        assert!(db.insert_class_observation("cn-x", "  ", &[1]).unwrap().is_none());
+        assert!(db.insert_class_observation("ghost", "s", &[1]).unwrap().is_none());
+
+        let id = db
+            .insert_class_observation("cn-x", "deploys follow auth changes", &[4, 9])
+            .unwrap()
+            .expect("first insert lands");
+        let obs = db.list_class_observations("cn-x", false).unwrap();
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].id, id);
+        assert_eq!(obs[0].cite_seqs, vec![4, 9]);
+        // The row points at its own `observation` ledger event.
+        let seq = obs[0].created_seq.expect("created_seq backfilled");
+        let ev = db.list_ledger_events(10).unwrap();
+        let ev = ev.iter().find(|e| e.seq == seq).unwrap();
+        assert_eq!(ev.kind, "observation");
+        assert_eq!(ev.ref_id.as_deref(), Some("cn-x"));
+
+        // Identical summary dedups — including after a dismiss, so a
+        // dismissed pattern never resurfaces under the same wording.
+        assert!(db
+            .insert_class_observation("cn-x", "deploys follow auth changes", &[4])
+            .unwrap()
+            .is_none());
+        let node = db.set_observation_dismissed(id).unwrap();
+        assert_eq!(node.as_deref(), Some("cn-x"));
+        assert!(db.list_class_observations("cn-x", false).unwrap().is_empty());
+        assert_eq!(db.list_class_observations("cn-x", true).unwrap().len(), 1);
+        assert!(db
+            .insert_class_observation("cn-x", "deploys follow auth changes", &[4, 9])
+            .unwrap()
+            .is_none());
+        // A dismissed observation can't be pinned.
+        assert!(db.set_observation_pinned(id, true).unwrap().is_none());
+    }
+
+    #[test]
+    fn collapse_retires_subtree_observations_but_keeps_their_events() {
+        let db = Database::open_in_memory().unwrap();
+        accepted_node(&db, "cn-root", None, "root");
+        accepted_node(&db, "cn-cold", Some("cn-root"), "cold branch");
+        append(&db, "prompt", "h1");
+        db.insert_class_observation("cn-cold", "some pattern", &[1])
+            .unwrap()
+            .expect("observation lands");
+
+        // Stage + apply a collapse of the branch.
+        let staged = db
+            .stage_proposal(
+                None,
+                &Proposal::Collapse {
+                    node_id: "cn-cold".into(),
+                    summary: "digest".into(),
+                    cite_seqs: vec![1],
+                    rationale: None,
+                },
+            )
+            .unwrap();
+        assert!(matches!(staged, crate::classmem::StagedOutcome::Structural));
+        let pid = db.list_class_proposals().unwrap()[0].id;
+        assert!(db.apply_class_proposal(pid).unwrap().is_some());
+
+        // The rows retired with the branch…
+        assert!(db.list_class_observations("cn-cold", true).unwrap().is_empty());
+        // …but the tamper-evident history remains and the chain stays green.
+        assert!(db
+            .list_ledger_events(10)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "observation"));
+        assert!(db.verify_ledger_chain().unwrap().ok);
+    }
+
+    #[test]
+    fn supersede_proposal_stages_and_applies_through_the_review_machinery() {
+        let db = Database::open_in_memory().unwrap();
+        append(&db, "prompt", "h1");
+        let r = append(&db, "resolution", "h2");
+        let a = append(&db, "approval", "h3");
+
+        // Stage-time screen: non-decision or unknown seqs are skipped.
+        let skipped = db
+            .stage_proposal(None, &Proposal::Supersede { old_seq: 1, new_seq: a.seq, rationale: None })
+            .unwrap();
+        assert!(matches!(skipped, crate::classmem::StagedOutcome::Skipped));
+
+        let staged = db
+            .stage_proposal(
+                None,
+                &Proposal::Supersede { old_seq: r.seq, new_seq: a.seq, rationale: Some("why".into()) },
+            )
+            .unwrap();
+        assert!(matches!(staged, crate::classmem::StagedOutcome::Structural));
+        // Identical pending proposal doesn't re-stage.
+        let dup = db
+            .stage_proposal(
+                None,
+                &Proposal::Supersede { old_seq: r.seq, new_seq: a.seq, rationale: Some("again".into()) },
+            )
+            .unwrap();
+        assert!(matches!(dup, crate::classmem::StagedOutcome::Skipped));
+
+        let props = db.list_class_proposals().unwrap();
+        assert_eq!(props.len(), 1);
+        assert_eq!(props[0].op, "supersede");
+        let applied = db.apply_class_proposal(props[0].id).unwrap().expect("applies");
+        assert_eq!(applied.op, "supersede");
+        assert_eq!(applied.detail, format!("#{} → #{}", r.seq, a.seq));
+        assert!(db.list_class_proposals().unwrap().is_empty());
+        assert_eq!(
+            db.supersessions_for_seqs(&[r.seq]).unwrap().get(&r.seq),
+            Some(&a.seq)
+        );
+        assert!(db.verify_ledger_chain().unwrap().ok);
+    }
+
+    fn count_reorg_events(db: &Database) -> i64 {
+        let conn = db.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM ledger_events WHERE kind = 'taxonomy_reorg'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn class_tables_exist_and_seed_is_idempotent() {
+        let db = Database::open_in_memory().unwrap();
+        let rows = crate::classmem::seed_root_rows(&[
+            "/x/redline".to_string(),
+            "/x/muslimlegalconnect".to_string(),
+        ]);
+        assert_eq!(db.seed_class_roots(&rows).unwrap(), 3); // 2 repos + ~general
+        assert_eq!(db.seed_class_roots(&rows).unwrap(), 0); // idempotent
+        let nodes = db.list_class_nodes().unwrap();
+        assert_eq!(nodes.len(), 3);
+        assert!(nodes.iter().all(|n| n.status == "proposed" && n.parent_id.is_none()));
+    }
+
+    #[test]
+    fn stage_create_then_accept_writes_curate_event_and_is_idempotent() {
+        let db = Database::open_in_memory().unwrap();
+        accepted_node(&db, "root-r", None, "redline");
+        let out = db
+            .stage_proposal(
+                None,
+                &Proposal::Create {
+                    parent_id: "root-r".into(),
+                    title: "Loop Engineering".into(),
+                    rationale: None,
+                },
+            )
+            .unwrap();
+        assert!(matches!(out, crate::classmem::StagedOutcome::Node));
+        let staged = db.list_class_nodes().unwrap();
+        let node = staged.iter().find(|n| n.title == "Loop Engineering").unwrap();
+        assert_eq!(node.status, "proposed");
+
+        // Accept → accepted + exactly one class_curate ledger event.
+        let flipped = db.accept_class_node(&node.id).unwrap();
+        assert_eq!(flipped, vec![node.id.clone()]);
+        for nid in &flipped {
+            crate::classmem::record_curate(&db, nid, "accept", "");
+        }
+        assert_eq!(db.get_class_node(&node.id).unwrap().unwrap().status, "accepted");
+        // Re-accept flips nothing (idempotent — no duplicate flip).
+        assert!(db.accept_class_node(&node.id).unwrap().is_empty());
+        let n: i64 = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM ledger_events WHERE kind = 'class_curate'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn browse_event_records_dedups_and_keeps_chain_green() {
+        let db = Database::open_in_memory().unwrap();
+        let ev = |browse_id: &str, text: &str| crate::ledger::BrowseEventInput {
+            action: "navigate".into(),
+            browse_id: Some(browse_id.into()),
+            url: "https://example.com".into(),
+            title: Some("Example".into()),
+            text: text.into(),
+        };
+        // First page records → a browse_event ledger row + a browse_events row.
+        assert!(crate::ledger::record_browse_event(&db, ev("t1", "page one")).unwrap().is_some());
+        // Same content back-to-back in the same tab is deduped (nothing written).
+        assert!(crate::ledger::record_browse_event(&db, ev("t1", "page one")).unwrap().is_none());
+        // A different page in the same tab records.
+        assert!(crate::ledger::record_browse_event(&db, ev("t1", "page two")).unwrap().is_some());
+        // The SAME content in a DIFFERENT tab records (content-identity grouping,
+        // not global dedup).
+        assert!(crate::ledger::record_browse_event(&db, ev("t2", "page one")).unwrap().is_some());
+
+        // The event references its browse_events row; text + hash round-trip.
+        let (url, title, text, chash) = db.get_browse_event(1).unwrap().unwrap();
+        assert_eq!(url, "https://example.com");
+        assert_eq!(title.as_deref(), Some("Example"));
+        assert_eq!(text, "page one");
+        assert_eq!(chash, crate::ledger::body_hash("page one"));
+
+        // Two distinct pages under 't1' + one under 't2' == 3 stored events.
+        let n: i64 = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row("SELECT COUNT(*) FROM browse_events", [], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(n, 3);
+
+        // The hash chain still verifies with browse_event rows in it.
+        assert!(db.verify_ledger_chain().unwrap().ok);
+
+        // The classifier delta surfaces the page text as `body` under a synthetic
+        // `browse_event` surface, so the classifier can file it under a class.
+        let items = db.list_lake_items_since(0, 100).unwrap();
+        let be = items.iter().find(|i| i.kind == "browse_event").unwrap();
+        assert_eq!(be.surface.as_deref(), Some("browse_event"));
+        assert_eq!(be.body.as_deref(), Some("page one"));
+        assert_eq!(be.ref_kind.as_deref(), Some("browse_event"));
+    }
+
+    #[test]
+    fn revert_link_removes_pointer_appends_compensating_event_and_keeps_chain_green() {
+        let db = Database::open_in_memory().unwrap();
+        // An accepted class with an accepted link — the gardener's "file" outcome.
+        accepted_node(&db, "root-r", None, "redline");
+        let link_id = add_link(&db, "root-r", "prompt", "42");
+        // Record the accept as a curate event, like the gardener does.
+        crate::classmem::record_curate(&db, "root-r", "organize", "");
+        assert!(db.verify_ledger_chain().unwrap().ok);
+
+        // Revert → the pointer is gone, but the ledger only GREW (a compensating
+        // 'revert' class_curate event), so the chain still verifies.
+        assert!(crate::classmem::revert_link(&db, link_id).unwrap());
+        assert!(db.list_class_links_for_node("root-r").unwrap().is_empty());
+        assert!(db.verify_ledger_chain().unwrap().ok);
+
+        // Two class_curate events exist: the original accept + the revert.
+        let n: i64 = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM ledger_events WHERE kind = 'class_curate'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(n, 2);
+
+        // Reverting a link that no longer exists is a no-op (false), no new event.
+        assert!(!crate::classmem::revert_link(&db, link_id).unwrap());
+    }
+
+    #[test]
+    fn session_link_records_tree_row_and_event_and_keeps_chain_green() {
+        let db = Database::open_in_memory().unwrap();
+        append(&db, "prompt", "h1"); // pre-existing history
+
+        // First link: tree row + a session_link ledger event, chain stays green.
+        let seq = crate::ledger::record_session_link(&db, "browse", "tab-1", "session", "s9")
+            .unwrap();
+        assert!(seq.is_some());
+        assert_eq!(
+            db.session_tree_parent("browse", "tab-1").unwrap(),
+            Some(("session".to_string(), "s9".to_string()))
+        );
+        let verdict = db.verify_ledger_chain().unwrap();
+        assert!(verdict.ok, "chain must verify with a session_link event in it");
+
+        // Idempotent: a child has one parent; re-linking is a no-op (no event).
+        let again =
+            crate::ledger::record_session_link(&db, "browse", "tab-1", "mission", "m1").unwrap();
+        assert!(again.is_none());
+        assert_eq!(
+            db.session_tree_parent("browse", "tab-1").unwrap(),
+            Some(("session".to_string(), "s9".to_string())),
+            "first write wins"
+        );
+
+        // Children walk from the parent side.
+        crate::ledger::record_session_link(&db, "voice", "s9", "session", "s9").unwrap();
+        let kids = db.session_tree_children("session", "s9").unwrap();
+        assert_eq!(kids.len(), 2);
+        assert!(db.verify_ledger_chain().unwrap().ok);
+
+        // Blank ids record nothing.
+        assert!(crate::ledger::record_session_link(&db, "browse", " ", "session", "s9")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn journal_appends_lists_and_prunes() {
+        let db = Database::open_in_memory().unwrap();
+        let first = db
+            .append_journal("surface_switch", Some("plan"), Some("s1"), Some("My plan"), None)
+            .unwrap();
+        db.append_journal("nav", Some("browser"), None, Some("Example"), Some("https://x"))
+            .unwrap();
+        let head = db.journal_head().unwrap();
+        assert!(head > first);
+
+        // Delta read: strictly after `since`, oldest-first.
+        let delta = db.list_journal_since(first, 100).unwrap();
+        assert_eq!(delta.len(), 1);
+        assert_eq!(delta[0].kind, "nav");
+        assert_eq!(delta[0].detail.as_deref(), Some("https://x"));
+
+        // Prune: rows older than the 2000-row window are dropped on insert.
+        for i in 0..2005 {
+            db.append_journal("agent_turn", Some("browse"), Some(&format!("t{i}")), None, None)
+                .unwrap();
+        }
+        let n: i64 = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row("SELECT COUNT(*) FROM context_journal", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert!(n <= 2000, "journal working set stays bounded, got {n}");
+    }
+
+    #[test]
+    fn friction_events_prune_on_insert_and_summarize_by_kind() {
+        let db = Database::open_in_memory().unwrap();
+        db.record_friction("stall_kill", Some("review"), Some("r1"), Some("180s"))
+            .unwrap();
+        for _ in 0..3 {
+            db.record_friction("context_overflow", Some("browse"), Some("b1"), Some("too long"))
+                .unwrap();
+        }
+        let summary = db.friction_summary(90 * 24 * 60 * 60 * 1000).unwrap();
+        // Most-frequent first, so the digest ranks without re-sorting.
+        assert_eq!(summary[0].kind, "context_overflow");
+        assert_eq!(summary[0].count, 3);
+        assert_eq!(summary[0].last_detail.as_deref(), Some("too long"));
+        assert_eq!(summary[1].kind, "stall_kill");
+
+        // `detail` is capped so one pathological error can't dominate the table.
+        db.record_friction("transient_fail", None, None, Some(&"x".repeat(5000)))
+            .unwrap();
+        let long = db
+            .friction_summary(i64::MAX / 2)
+            .unwrap()
+            .into_iter()
+            .find(|f| f.kind == "transient_fail")
+            .unwrap();
+        assert_eq!(long.last_detail.unwrap().len(), 500);
+
+        // Prune-on-insert: the working set stays bounded past the row cap.
+        for i in 0..5010 {
+            db.record_friction("turn_timeout", None, Some(&format!("t{i}")), None)
+                .unwrap();
+        }
+        let n: i64 = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row("SELECT COUNT(*) FROM friction_events", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert!(n <= 5000, "friction working set stays bounded, got {n}");
+    }
+
+    #[test]
+    fn a_window_older_than_every_row_summarizes_to_nothing() {
+        let db = Database::open_in_memory().unwrap();
+        db.record_friction("stall_kill", None, None, None).unwrap();
+        // A zero-length window excludes everything written before "now".
+        assert!(db.friction_summary(0).unwrap().len() <= 1);
+    }
+
+    #[test]
+    fn shipwright_dedupe_ignores_dismissed_so_a_dismissal_sticks() {
+        let db = Database::open_in_memory().unwrap();
+        let f = |id: &str, summary: &str| ShipwrightFinding {
+            id: id.to_string(),
+            run_id: "run-1".to_string(),
+            category: "ci_coverage".to_string(),
+            summary: summary.to_string(),
+            evidence: Some("457 Rust tests, 0 workflows".to_string()),
+            proposal: None,
+            guard: None,
+            files: Some(r#"[".github/workflows/ci.yml"]"#.to_string()),
+            status: "pending".to_string(),
+            dismissed: false,
+            draft_id: None,
+            created_at: 1,
+            resolved_at: None,
+        };
+        assert!(db.insert_shipwright_finding(&f("a", "No test workflow")).unwrap().is_some());
+        // Same (category, summary) → skipped, even before any dismissal.
+        assert!(db.insert_shipwright_finding(&f("b", "No test workflow")).unwrap().is_none());
+
+        db.resolve_shipwright_finding("a", "dismissed", None).unwrap();
+        // …and still skipped afterwards: a dismissed finding never resurfaces
+        // under the same wording. This is the property the whole loop rests on.
+        assert!(db.insert_shipwright_finding(&f("c", "No test workflow")).unwrap().is_none());
+        assert!(db.list_shipwright_findings(false).unwrap().is_empty());
+        assert_eq!(db.list_shipwright_findings(true).unwrap().len(), 1);
+
+        // A genuinely new summary still lands.
+        assert!(db.insert_shipwright_finding(&f("d", "No typecheck script")).unwrap().is_some());
+    }
+
+    #[test]
+    fn shipped_is_detected_from_files_not_self_declared() {
+        let db = Database::open_in_memory().unwrap();
+        let f = ShipwrightFinding {
+            id: "f1".to_string(),
+            run_id: "run-1".to_string(),
+            category: "command_hygiene".to_string(),
+            summary: "drafter_set_doc is sync".to_string(),
+            evidence: None,
+            proposal: None,
+            guard: None,
+            files: Some(r#"["src-tauri/src/lib.rs"]"#.to_string()),
+            status: "pending".to_string(),
+            dismissed: false,
+            draft_id: None,
+            created_at: 1,
+            resolved_at: None,
+        };
+        db.insert_shipwright_finding(&f).unwrap();
+        // Pending findings aren't candidates — only accepted ones.
+        assert!(db.shipwright_unshipped().unwrap().is_empty());
+
+        db.resolve_shipwright_finding("f1", "accepted", Some("d1")).unwrap();
+        let unshipped = db.shipwright_unshipped().unwrap();
+        assert_eq!(unshipped.len(), 1);
+        assert!(unshipped[0].1.contains("lib.rs"));
+
+        db.resolve_shipwright_finding("f1", "shipped", None).unwrap();
+        assert!(db.shipwright_unshipped().unwrap().is_empty());
+        let scores = db.shipwright_scores().unwrap();
+        assert_eq!(scores[0].category, "command_hygiene");
+        assert_eq!(scores[0].shipped, 1);
+        assert_eq!(scores[0].accepted, 1, "shipped still counts as accepted");
+        assert_eq!(scores[0].dismissed, 0);
+
+        // The draft binding survives a later status change (COALESCE, not clobber).
+        let rows = db.list_shipwright_findings(true).unwrap();
+        assert_eq!(rows[0].draft_id.as_deref(), Some("d1"));
+    }
+
+    #[test]
+    fn prompt_thread_provenance_round_trips_into_lake_items() {
+        let db = Database::open_in_memory().unwrap();
+        crate::ledger::record_prompt(
+            &db,
+            crate::ledger::PromptInput {
+                source: crate::ledger::PromptSource::RustFirstTurn,
+                origin: crate::ledger::Origin::Redline,
+                surface: "browse".to_string(),
+                role: None,
+                session_id: None,
+                claude_session_id: None,
+                mission_id: None,
+                project_path: None,
+                body: "discuss this page".to_string(),
+                thread: Some(crate::ledger::ThreadRef {
+                    thread_kind: "browse",
+                    thread_id: "tab-1".to_string(),
+                    parent_session_id: Some("s9".to_string()),
+                }),
+            },
+        )
+        .unwrap();
+        let items = db.list_lake_items_since(0, 10).unwrap();
+        let it = items.iter().find(|i| i.kind == "prompt").unwrap();
+        assert_eq!(it.thread_kind.as_deref(), Some("browse"));
+        assert_eq!(it.thread_id.as_deref(), Some("tab-1"));
+        assert_eq!(it.parent_session_id.as_deref(), Some("s9"));
+        // The chain is body-blind to the new columns: still green.
+        assert!(db.verify_ledger_chain().unwrap().ok);
+    }
+
+    #[test]
+    fn generic_thread_reader_maps_kinds_and_rejects_unknown() {
+        let db = Database::open_in_memory().unwrap();
+        db.insert_browse_message(&BrowseMessage {
+            id: "b1".into(),
+            browse_id: "tab-1".into(),
+            role: "user".into(),
+            body: "hello".into(),
+            status: "complete".into(),
+            created_at: 10,
+        })
+        .unwrap();
+        db.insert_browse_message(&BrowseMessage {
+            id: "b2".into(),
+            browse_id: "tab-1".into(),
+            role: "assistant".into(),
+            body: "hi".into(),
+            status: "complete".into(),
+            created_at: 20,
+        })
+        .unwrap();
+        let msgs = db.load_thread_generic("browse", "tab-1", 50).unwrap().unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, "user", "oldest-first");
+        let (count, last) = db.thread_stats("browse", "tab-1").unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(last, Some(20));
+        assert!(db.load_thread_generic("nope", "x", 10).unwrap().is_none());
+    }
+
+    #[test]
+    fn browse_events_fts_ranks_keyword_hits_and_is_injection_safe() {
+        let db = Database::open_in_memory().unwrap();
+        let page = |url: &str, title: &str, text: &str| crate::ledger::BrowseEventInput {
+            action: "navigate".into(),
+            browse_id: Some("t1".into()),
+            url: url.into(),
+            title: Some(title.into()),
+            text: text.into(),
+        };
+        crate::ledger::record_browse_event(
+            &db,
+            page("https://a.example", "Clerk auth", "Clerk provides authentication for Next.js apps"),
+        )
+        .unwrap();
+        crate::ledger::record_browse_event(
+            &db,
+            page("https://b.example", "Postgres tuning", "vacuum and autovacuum settings for large tables"),
+        )
+        .unwrap();
+
+        // A keyword search returns the matching page, not the other.
+        let hits = db.search_browse_events("authentication", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].url, "https://a.example");
+        assert!(hits[0].snippet.contains('[') && hits[0].snippet.contains(']'));
+
+        // Multi-term OR recall: matches either page, ranked.
+        let hits = db.search_browse_events("vacuum authentication", 10).unwrap();
+        assert_eq!(hits.len(), 2);
+
+        // An FTS-operator-shaped query can't error out — it matches literally
+        // (no such literal here) and simply returns nothing.
+        assert!(db.search_browse_events("\"unterminated OR (", 10).unwrap().is_empty());
+        // A query with no searchable tokens yields no hits (not an error).
+        assert!(db.search_browse_events("   *  ", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn accepting_a_link_accepts_its_ancestor_chain() {
+        let db = Database::open_in_memory().unwrap();
+        accepted_node(&db, "root-r", None, "redline");
+        // file with a new sub_class → stages a proposed sub-node + a proposed link.
+        let out = db
+            .stage_proposal(
+                None,
+                &Proposal::File {
+                    parent_id: "root-r".into(),
+                    sub_class: Some("Loop Engineering".into()),
+                    target_kind: "prompt".into(),
+                    target_id: "42".into(),
+                    note: None,
+                    rationale: None,
+                },
+            )
+            .unwrap();
+        assert!(matches!(out, crate::classmem::StagedOutcome::Link { created_node: true }));
+        let sub = db
+            .list_class_nodes()
+            .unwrap()
+            .into_iter()
+            .find(|n| n.title == "Loop Engineering")
+            .unwrap();
+        assert_eq!(sub.status, "proposed");
+        let link = db.list_class_links_for_node(&sub.id).unwrap().remove(0);
+        assert_eq!(link.status, "proposed");
+
+        // Accepting the link accepts the (proposed) sub-node too.
+        let (node_id, flipped) = db.accept_class_link(link.id).unwrap().unwrap();
+        assert_eq!(node_id, sub.id);
+        assert_eq!(flipped, vec![sub.id.clone()]);
+        assert_eq!(db.get_class_node(&sub.id).unwrap().unwrap().status, "accepted");
+        assert_eq!(
+            db.list_class_links_for_node(&sub.id).unwrap()[0].status,
+            "accepted"
+        );
+    }
+
+    #[test]
+    fn reject_node_deletes_its_subtree_and_links() {
+        let db = Database::open_in_memory().unwrap();
+        accepted_node(&db, "root-r", None, "redline");
+        accepted_node(&db, "topic", Some("root-r"), "Topic");
+        accepted_node(&db, "sub", Some("topic"), "Sub");
+        add_link(&db, "sub", "prompt", "7");
+        db.reject_class_node("topic").unwrap();
+        assert!(db.get_class_node("topic").unwrap().is_none());
+        assert!(db.get_class_node("sub").unwrap().is_none());
+        assert!(db.list_class_links_for_node("sub").unwrap().is_empty());
+        assert!(db.get_class_node("root-r").unwrap().is_some()); // root untouched
+    }
+
+    #[test]
+    fn promotion_preserves_id_links_pins_and_subtree_and_writes_reorg() {
+        let db = Database::open_in_memory().unwrap();
+        accepted_node(&db, "root-a", None, "A");
+        accepted_node(&db, "root-b", None, "B");
+        accepted_node(&db, "grown", Some("root-a"), "Grown Topic");
+        accepted_node(&db, "child", Some("grown"), "Child");
+        let link_id = add_link(&db, "grown", "prompt", "99");
+        db.set_class_node_pinned("grown", true).unwrap();
+
+        // Stage + apply a promote of `grown` from root-a to root-b.
+        db.stage_proposal(
+            None,
+            &Proposal::Promote {
+                node_id: "grown".into(),
+                new_parent_id: Some("root-b".into()),
+                rationale: Some("earns its own class".into()),
+            },
+        )
+        .unwrap();
+        let prop = db.list_class_proposals().unwrap().remove(0);
+        let applied = db.apply_class_proposal(prop.id).unwrap().unwrap();
+        crate::classmem::record_reorg(&db, &applied.op, &applied.node_id, &applied.detail);
+
+        let g = db.get_class_node("grown").unwrap().unwrap();
+        assert_eq!(g.id, "grown"); // id preserved
+        assert_eq!(g.parent_id.as_deref(), Some("root-b")); // re-parented
+        assert!(g.pinned); // pin preserved
+        // links preserved (same id)
+        let links = db.list_class_links_for_node("grown").unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].id, link_id);
+        // subtree preserved
+        assert_eq!(
+            db.get_class_node("child").unwrap().unwrap().parent_id.as_deref(),
+            Some("grown")
+        );
+        // proposal consumed + a reorg ledger event written
+        assert!(db.list_class_proposals().unwrap().is_empty());
+        assert_eq!(count_reorg_events(&db), 1);
+    }
+
+    #[test]
+    fn collapse_creates_digest_with_citations_and_removes_cold_branch() {
+        let db = Database::open_in_memory().unwrap();
+        accepted_node(&db, "root-r", None, "redline");
+        accepted_node(&db, "cold", Some("root-r"), "Old Research");
+        add_link(&db, "cold", "prompt", "10");
+        // Two real ledger rows to cite (so link_preview can resolve them later).
+        append(&db, "prompt", "h10");
+        append(&db, "approval", "h11");
+
+        db.stage_proposal(
+            None,
+            &Proposal::Collapse {
+                node_id: "cold".into(),
+                summary: "Explored X; parked, no position taken.".into(),
+                cite_seqs: vec![1, 2],
+                rationale: Some("cold, unpinned".into()),
+            },
+        )
+        .unwrap();
+        let prop = db.list_class_proposals().unwrap().remove(0);
+        let applied = db.apply_class_proposal(prop.id).unwrap().unwrap();
+        crate::classmem::record_reorg(&db, &applied.op, &applied.node_id, &applied.detail);
+
+        // Original cold branch is gone.
+        assert!(db.get_class_node("cold").unwrap().is_none());
+        // A digest node exists under the root with the summary + citation links.
+        let digest = db
+            .list_class_nodes()
+            .unwrap()
+            .into_iter()
+            .find(|n| n.kind == "digest")
+            .unwrap();
+        assert_eq!(digest.parent_id.as_deref(), Some("root-r"));
+        assert_eq!(digest.summary.as_deref(), Some("Explored X; parked, no position taken."));
+        let cites = db.list_class_links_for_node(&digest.id).unwrap();
+        assert_eq!(cites.len(), 2);
+        assert!(cites.iter().all(|l| l.target_kind == "ledger"));
+        assert_eq!(count_reorg_events(&db), 1);
+    }
+
+    #[test]
+    fn collapse_refuses_a_pinned_branch() {
+        let db = Database::open_in_memory().unwrap();
+        accepted_node(&db, "root-r", None, "redline");
+        accepted_node(&db, "cold", Some("root-r"), "Pinned Topic");
+        add_link(&db, "cold", "prompt", "1");
+        db.set_class_node_pinned("cold", true).unwrap();
+        assert!(db.subtree_has_pin("cold").unwrap());
+
+        db.stage_proposal(
+            None,
+            &Proposal::Collapse {
+                node_id: "cold".into(),
+                summary: "should not happen".into(),
+                cite_seqs: vec![1],
+                rationale: None,
+            },
+        )
+        .unwrap();
+        let prop = db.list_class_proposals().unwrap().remove(0);
+        // Pins veto collapse — the op is a no-op and the branch survives intact.
+        assert!(db.apply_class_proposal(prop.id).unwrap().is_none());
+        assert!(db.get_class_node("cold").unwrap().is_some());
+        assert!(db.list_class_nodes().unwrap().iter().all(|n| n.kind != "digest"));
+    }
+
+    #[test]
+    fn activity_and_envelope_feed_coldness() {
+        let db = Database::open_in_memory().unwrap();
+        accepted_node(&db, "root-r", None, "redline");
+        // Two ledger rows at distinct ts, linked under the node.
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO ledger_events (seq, ts, kind, author, payload_hash, prev_hash, entry_hash)
+                 VALUES (1, 100, 'prompt', 't', 'p', 'x', 'y'), (2, 900, 'approval', 't', 'p2', 'y', 'z')",
+                [],
+            )
+            .unwrap();
+        }
+        add_link(&db, "root-r", "prompt", "1");
+        add_link(&db, "root-r", "decision", "2");
+        let direct = db.node_direct_link_activity().unwrap();
+        let (count, last) = direct.get("root-r").copied().unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(last, Some(900)); // newest linked ledger ts
+        let env = db.lake_envelope().unwrap();
+        assert_eq!((env.oldest, env.newest), (100, 900));
+    }
+
+    #[test]
+    fn compaction_swaps_body_for_gist_but_keeps_chain_and_hash() {
+        let db = Database::open_in_memory().unwrap();
+        let seq = crate::ledger::record_prompt(
+            &db,
+            crate::ledger::PromptInput {
+                source: crate::ledger::PromptSource::Hook,
+                origin: crate::ledger::Origin::Redline,
+                surface: "pty_plan".into(),
+                role: None,
+                session_id: Some("s1".into()),
+                claude_session_id: Some("cs1".into()),
+                mission_id: None,
+                project_path: None,
+                body: "a long cold prompt body destined to be compacted to a gist".into(),
+                thread: None,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        let ev = db.list_ledger_events(10).unwrap();
+        let prompt_ev = ev.iter().find(|e| e.seq == seq).unwrap();
+        let pid = prompt_ev.prompt_id.unwrap();
+        let orig_hash = prompt_ev.payload_hash.clone(); // == prompts.body_hash
+
+        // Chain is intact before.
+        assert!(db.verify_ledger_chain().unwrap().ok);
+
+        // Compact it → a new ledger seq is returned.
+        let cseq = db.compact_prompt_body(pid, "gist: a cold prompt", "cold").unwrap();
+        assert!(cseq.is_some());
+
+        // The body now reads as the gist for every consumer.
+        assert_eq!(
+            db.get_prompt_body(pid).unwrap().as_deref(),
+            Some("gist: a cold prompt")
+        );
+
+        // The chain STILL verifies — verification is body-blind.
+        assert!(
+            db.verify_ledger_chain().unwrap().ok,
+            "chain survives a body swap"
+        );
+
+        // A `compaction` event referencing the prompt exists…
+        let ev2 = db.list_ledger_events(10).unwrap();
+        assert!(ev2
+            .iter()
+            .any(|e| e.kind == "compaction" && e.prompt_id == Some(pid)));
+
+        // …and the ORIGINAL body_hash (dedup key + tamper-evident fact) is untouched.
+        let bh: String = {
+            let c = db.conn.lock().unwrap();
+            c.query_row(
+                "SELECT body_hash FROM prompts WHERE id = ?1",
+                params![pid],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(bh, orig_hash, "body_hash is never rewritten");
+
+        // Idempotent: compacting again is a no-op.
+        assert!(db.compact_prompt_body(pid, "again", "cold").unwrap().is_none());
+    }
+
+    #[test]
+    fn merge_folds_links_and_children_into_the_target() {
+        let db = Database::open_in_memory().unwrap();
+        accepted_node(&db, "root-r", None, "redline");
+        accepted_node(&db, "auth1", Some("root-r"), "Auth");
+        accepted_node(&db, "auth2", Some("root-r"), "Authentication");
+        accepted_node(&db, "auth2child", Some("auth2"), "Clerk");
+        add_link(&db, "auth1", "prompt", "1");
+        add_link(&db, "auth2", "prompt", "2");
+
+        db.stage_proposal(
+            None,
+            &Proposal::Merge {
+                node_ids: vec!["auth1".into(), "auth2".into()],
+                title: Some("Auth".into()),
+                parent_id: None,
+                rationale: None,
+            },
+        )
+        .unwrap();
+        let prop = db.list_class_proposals().unwrap().remove(0);
+        db.apply_class_proposal(prop.id).unwrap().unwrap();
+
+        // auth2 is gone; its link + child moved onto auth1.
+        assert!(db.get_class_node("auth2").unwrap().is_none());
+        assert_eq!(db.list_class_links_for_node("auth1").unwrap().len(), 2);
+        assert_eq!(
+            db.get_class_node("auth2child").unwrap().unwrap().parent_id.as_deref(),
+            Some("auth1")
+        );
+    }
+
+    #[test]
+    fn split_moves_named_links_into_new_sibling_nodes() {
+        let db = Database::open_in_memory().unwrap();
+        accepted_node(&db, "root-r", None, "redline");
+        accepted_node(&db, "mixed", Some("root-r"), "Mixed");
+        let l1 = add_link(&db, "mixed", "prompt", "1");
+        let l2 = add_link(&db, "mixed", "prompt", "2");
+
+        db.stage_proposal(
+            None,
+            &Proposal::Split {
+                node_id: "mixed".into(),
+                into: vec![
+                    SplitPart { title: "Clerk".into(), link_ids: vec![l1] },
+                    SplitPart { title: "Sessions".into(), link_ids: vec![l2] },
+                ],
+                rationale: None,
+            },
+        )
+        .unwrap();
+        let prop = db.list_class_proposals().unwrap().remove(0);
+        db.apply_class_proposal(prop.id).unwrap().unwrap();
+
+        let clerk = db
+            .list_class_nodes()
+            .unwrap()
+            .into_iter()
+            .find(|n| n.title == "Clerk")
+            .unwrap();
+        assert_eq!(clerk.parent_id.as_deref(), Some("root-r")); // sibling of `mixed`
+        assert_eq!(db.list_class_links_for_node(&clerk.id).unwrap()[0].id, l1);
+    }
+
+    #[test]
+    fn accept_all_pending_applies_the_whole_staged_batch() {
+        let db = Database::open_in_memory().unwrap();
+        accepted_node(&db, "root-r", None, "redline");
+        // Stage a create + a file (proposed node + proposed link).
+        db.stage_proposal(
+            None,
+            &Proposal::Create { parent_id: "root-r".into(), title: "Loop".into(), rationale: None },
+        )
+        .unwrap();
+        db.stage_proposal(
+            None,
+            &Proposal::File {
+                parent_id: "root-r".into(),
+                sub_class: Some("Collab".into()),
+                target_kind: "prompt".into(),
+                target_id: "5".into(),
+                note: None,
+                rationale: None,
+            },
+        )
+        .unwrap();
+        // Before: two proposed nodes.
+        assert_eq!(
+            db.list_class_nodes().unwrap().iter().filter(|n| n.status == "proposed").count(),
+            2
+        );
+        // Auto-organize flips everything to accepted in one shot.
+        let flipped = db.accept_all_pending().unwrap();
+        assert_eq!(flipped.len(), 2);
+        assert!(db.list_class_nodes().unwrap().iter().all(|n| n.status == "accepted"));
+        let collab = db
+            .list_class_nodes()
+            .unwrap()
+            .into_iter()
+            .find(|n| n.title == "Collab")
+            .unwrap();
+        assert_eq!(db.list_class_links_for_node(&collab.id).unwrap()[0].status, "accepted");
+        // Idempotent: nothing left to flip.
+        assert!(db.accept_all_pending().unwrap().is_empty());
+    }
+
+    #[test]
+    fn lake_items_since_returns_delta_with_bodies() {
+        let db = Database::open_in_memory().unwrap();
+        // A prompt event (with a body) + a decision event (references a row).
+        let pid = db.insert_prompt(&prompt_row("hello world", "bh1", Some("sess"))).unwrap().unwrap();
+        db.append_ledger_event(&crate::ledger::LedgerAppend {
+            kind: "prompt",
+            author: "t",
+            ts: 1,
+            prompt_id: Some(pid),
+            session_id: None,
+            version_number: None,
+            ref_kind: None,
+            ref_id: None,
+            payload_hash: "bh1",
+        })
+        .unwrap();
+        append(&db, "approval", "ap1");
+        let items = db.list_lake_items_since(0, 10).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].body.as_deref(), Some("hello world"));
+        assert!(items[1].body.is_none()); // decision event has no stored body
+        // since_seq filters.
+        assert_eq!(db.list_lake_items_since(1, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn ledger_tamper_is_detected_at_first_bad_seq() {
+        let db = Database::open_in_memory().unwrap();
+        append(&db, "prompt", "h1");
+        append(&db, "approval", "h2");
+        append(&db, "revision", "h3");
+        // Mutate a hashed field on seq 2 directly, as a tamperer would.
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("UPDATE ledger_events SET author = 'mallory' WHERE seq = 2", [])
+                .unwrap();
+        }
+        let v = db.verify_ledger_chain().unwrap();
+        assert!(!v.ok);
+        assert_eq!(v.first_bad_seq, Some(2));
+        assert_eq!(v.checked, 1, "verification stops at the first bad seq");
+    }
+
+    #[test]
+    fn prompt_insert_dedups_on_body_and_session() {
+        let db = Database::open_in_memory().unwrap();
+        // Same body + same claude session → deduped.
+        assert!(db.insert_prompt(&prompt_row("hi", "bh1", Some("cs1"))).unwrap().is_some());
+        assert!(db.insert_prompt(&prompt_row("hi", "bh1", Some("cs1"))).unwrap().is_none());
+        // Same body, different session → distinct.
+        assert!(db.insert_prompt(&prompt_row("hi", "bh1", Some("cs2"))).unwrap().is_some());
+        // NULL sessions are treated as distinct (multiple allowed).
+        assert!(db.insert_prompt(&prompt_row("hi", "bh1", None)).unwrap().is_some());
+        assert!(db.insert_prompt(&prompt_row("hi", "bh1", None)).unwrap().is_some());
+    }
+
+    #[test]
+    fn revision_and_decision_events_are_idempotent() {
+        let db = Database::open_in_memory().unwrap();
+        assert!(crate::ledger::record_revision_event(&db, "s1", 1, "plan body").unwrap().is_some());
+        // Same (session, version, payload) → skipped.
+        assert!(crate::ledger::record_revision_event(&db, "s1", 1, "plan body").unwrap().is_none());
+        // Changed body at same version → recorded.
+        assert!(crate::ledger::record_revision_event(&db, "s1", 1, "edited").unwrap().is_some());
+
+        let dec = |ph: &str| crate::ledger::DecisionInput {
+            kind: crate::ledger::EventKind::Approval,
+            author: Some("me".to_string()),
+            session_id: Some("s1"),
+            ref_kind: "session",
+            ref_id: "s1",
+            payload_hash: ph.to_string(),
+        };
+        assert!(crate::ledger::record_decision(&db, dec("p")).unwrap().is_some());
+        assert!(crate::ledger::record_decision(&db, dec("p")).unwrap().is_none());
+        assert!(db.verify_ledger_chain().unwrap().ok);
+    }
+
+    #[test]
+    fn snapshot_round_trips_and_verifies() {
+        let dir = std::env::temp_dir().join(format!("redline-ledger-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("live.db");
+        {
+            let db = Database::open(&src).unwrap();
+            append(&db, "prompt", "h1");
+            append(&db, "approval", "h2");
+            let dest = dir.join("snap.db");
+            db.snapshot_to(&dest).unwrap();
+            // Reopen the snapshot independently → chain still verifies green.
+            let snap = Database::open(&dest).unwrap();
+            let v = snap.verify_ledger_chain().unwrap();
+            assert!(v.ok);
+            assert_eq!(v.checked, 2);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2407,6 +8779,9 @@ mod tests {
             selection: None,
             author: None,
             reviewer: None,
+            external_created_at: None,
+            share_request_id: None,
+            attachments: Vec::new(),
         };
         // Normal mint starts the c-NNN sequence.
         let a = store.add_comment("s", req(None)).unwrap();
@@ -2448,6 +8823,9 @@ mod tests {
             selection: None,
             author: None,
             reviewer: None,
+            external_created_at: None,
+            share_request_id: None,
+            attachments: Vec::new(),
         };
         // A submitted comment (stays on v1), a reopened one and a draft (carried).
         let settled = store.add_comment("s", comment("settled")).unwrap();
@@ -2511,12 +8889,22 @@ mod tests {
                     selection: None,
                     author: None,
                     reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
+                    attachments: Vec::new(),
                 },
             )
             .expect("add comment");
         store.upsert_plan("keep", "/tmp/k", md.to_string(), reparse_sections(md), true, false);
+        // A staged offer against each — the doomed one must not outlive its plan.
+        db.insert_comment_offer(&mk_offer("o-doomed", "doomed", 100))
+            .unwrap();
+        db.insert_comment_offer(&mk_offer("o-keep", "keep", 100))
+            .unwrap();
 
         assert!(store.delete_session("doomed"));
+        assert!(db.list_open_comment_offers("doomed").unwrap().is_empty());
+        assert_eq!(db.list_open_comment_offers("keep").unwrap().len(), 1);
         assert!(!store.has_session("doomed"));
         assert!(store.get("doomed").is_none());
         assert!(store.has_session("keep")); // unrelated session untouched
@@ -2551,6 +8939,9 @@ mod tests {
                     selection: None,
                     author: None,
                     reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
+                    attachments: Vec::new(),
                 },
             )
             .expect("add comment");
@@ -2620,6 +9011,9 @@ mod tests {
                     selection: None,
                     author: None,
                     reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
+                    attachments: Vec::new(),
                 },
             )
             .expect("add comment");
@@ -2653,6 +9047,9 @@ mod tests {
             selection: None,
             author: None,
             reviewer: None,
+            external_created_at: None,
+            share_request_id: None,
+            attachments: Vec::new(),
         };
         let c1 = store.add_comment("sess-1", req).expect("add");
         assert_eq!(c1.id, "c-001");
@@ -2671,6 +9068,9 @@ mod tests {
             selection: None,
             author: None,
             reviewer: None,
+            external_created_at: None,
+            share_request_id: None,
+            attachments: Vec::new(),
         };
         let c2 = store.add_comment("sess-1", req2).expect("add 2");
         assert_eq!(c2.id, "c-002");
@@ -2708,6 +9108,9 @@ mod tests {
                     selection: None,
                     author: Some("claude-code".to_string()),
                     reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
+                    attachments: Vec::new(),
                 },
             )
             .expect("add agent comment");
@@ -2729,6 +9132,9 @@ mod tests {
                     selection: None,
                     author: None,
                     reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
+                    attachments: Vec::new(),
                 },
             )
             .expect("add user comment");
@@ -2770,6 +9176,9 @@ mod tests {
             selection: None,
             author: None,
             reviewer: reviewer.map(|s| s.to_string()),
+            external_created_at: None,
+            share_request_id: None,
+            attachments: Vec::new(),
         };
         let imported = store
             .add_comment("sess-r", mk(Some("John Doe")))
@@ -2787,6 +9196,199 @@ mod tests {
         assert!(s.revisions[0].comments[1].reviewer.is_none());
     }
 
+    // Return provenance: `external_created_at` + `share_request_id` survive
+    // insert → reload and stay None for owner-originated comments.
+    #[test]
+    fn comment_attachments_round_trip_and_survive_a_rekey() {
+        use crate::state::{CommentAttachment, CommentKind};
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let store = SessionStore::new(db.clone());
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("old-sid", "/tmp/p", md.to_string(), reparse_sections(md), true, false);
+        let att = CommentAttachment {
+            path: "/data/attachments/old-sid/ui-mock.png".to_string(),
+            name: "ui-mock.png".to_string(),
+            mime: "image/png".to_string(),
+            bytes: 4096,
+        };
+        let with_files = store
+            .add_comment(
+                "old-sid",
+                NewCommentRequest {
+                    id: None,
+                    kind: CommentKind::Feedback,
+                    scope: None,
+                    anchor_id: "A".to_string(),
+                    block_id: Some("blk-1".to_string()),
+                    structural: None,
+                    body: "make it look like this".to_string(),
+                    edit: None,
+                    selection: None,
+                    author: None,
+                    reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
+                    attachments: vec![att.clone()],
+                },
+            )
+            .expect("add comment with an attachment");
+        assert_eq!(with_files.attachments, vec![att.clone()]);
+
+        // A comment with no files stores NULL, not "[]" — the pre-attachment
+        // shape is preserved exactly.
+        let plain = store
+            .add_comment(
+                "old-sid",
+                NewCommentRequest {
+                    id: None,
+                    kind: CommentKind::Feedback,
+                    scope: None,
+                    anchor_id: "A".to_string(),
+                    block_id: Some("blk-1".to_string()),
+                    structural: None,
+                    body: "just words".to_string(),
+                    edit: None,
+                    selection: None,
+                    author: None,
+                    reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
+                    attachments: Vec::new(),
+                },
+            )
+            .expect("add plain comment");
+        assert!(plain.attachments.is_empty());
+
+        // Survives a reload (the column round-trips).
+        let reloaded = SessionStore::new(db.clone());
+        let s = reloaded.get("old-sid").expect("session");
+        let rc = s.revisions[0]
+            .comments
+            .iter()
+            .find(|c| c.id == with_files.id)
+            .expect("comment");
+        assert_eq!(rc.attachments, vec![att]);
+
+        // A restore handshake re-keys the session; the stored paths must follow
+        // the directory, or the payload would name a file that isn't there.
+        assert!(reloaded.rekey_session("old-sid", "new-sid"));
+        let moved = reloaded.get("new-sid").expect("rekeyed session");
+        let mc = moved.revisions[0]
+            .comments
+            .iter()
+            .find(|c| c.id == with_files.id)
+            .expect("comment");
+        assert_eq!(
+            mc.attachments[0].path,
+            "/data/attachments/new-sid/ui-mock.png",
+            "in-memory path follows the rekey"
+        );
+        let after = SessionStore::new(db);
+        let dc = after.get("new-sid").expect("session after reload");
+        assert_eq!(
+            dc.revisions[0]
+                .comments
+                .iter()
+                .find(|c| c.id == with_files.id)
+                .expect("comment")
+                .attachments[0]
+                .path,
+            "/data/attachments/new-sid/ui-mock.png",
+            "the persisted path follows it too"
+        );
+    }
+
+    #[test]
+    fn return_provenance_round_trips() {
+        use crate::state::CommentKind;
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let store = SessionStore::new(db.clone());
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("sess-p", "/tmp/p", md.to_string(), reparse_sections(md), true, false);
+        let mk = |prov: bool| NewCommentRequest {
+            id: None,
+            kind: CommentKind::Feedback,
+            scope: None,
+            anchor_id: "A".to_string(),
+            block_id: Some("blk-1".to_string()),
+            structural: None,
+            body: "from a return".to_string(),
+            edit: None,
+            selection: None,
+            author: None,
+            reviewer: prov.then(|| "John Doe".to_string()),
+            external_created_at: prov.then_some(1_700_000_100_000),
+            share_request_id: prov.then(|| "req-abc123".to_string()),
+            attachments: Vec::new(),
+        };
+        let imported = store
+            .add_comment("sess-p", mk(true))
+            .expect("add imported comment");
+        assert_eq!(imported.external_created_at, Some(1_700_000_100_000));
+        assert_eq!(imported.share_request_id.as_deref(), Some("req-abc123"));
+        let own = store.add_comment("sess-p", mk(false)).expect("add own comment");
+        assert!(own.external_created_at.is_none());
+        assert!(own.share_request_id.is_none());
+
+        let reloaded = SessionStore::new(db);
+        let s = reloaded.get("sess-p").expect("session");
+        let rc = &s.revisions[0].comments[0];
+        assert_eq!(rc.external_created_at, Some(1_700_000_100_000));
+        assert_eq!(rc.share_request_id.as_deref(), Some("req-abc123"));
+        let ro = &s.revisions[0].comments[1];
+        assert!(ro.external_created_at.is_none());
+        assert!(ro.share_request_id.is_none());
+    }
+
+    // Shares/returns registry (IV.2): record → list round-trips, session
+    // scoping holds, and deleting a share leaves its returns intact.
+    #[test]
+    fn shares_and_returns_registry_round_trips() {
+        let db = Database::open_in_memory().unwrap();
+        let share = |req: &str, sess: &str, at: i64| ShareRecord {
+            request_id: req.to_string(),
+            session_id: sess.to_string(),
+            reviewer_name: "Jordan".to_string(),
+            note: "please look at §2".to_string(),
+            base_version: 3,
+            created_at: at,
+        };
+        db.record_share(&share("req-1", "sess-a", 100)).unwrap();
+        db.record_share(&share("req-2", "sess-a", 200)).unwrap();
+        db.record_share(&share("req-3", "sess-b", 300)).unwrap();
+
+        let listed = db.list_shares("sess-a").unwrap();
+        assert_eq!(listed.len(), 2);
+        // Newest first.
+        assert_eq!(listed[0].request_id, "req-2");
+        assert_eq!(listed[1].request_id, "req-1");
+        assert_eq!(listed[1].note, "please look at §2");
+        assert_eq!(listed[1].base_version, 3);
+
+        let ret = ShareReturnRecord {
+            id: "ret-1".to_string(),
+            request_id: "req-1".to_string(),
+            session_id: "sess-a".to_string(),
+            reviewer_name: "Jordan".to_string(),
+            imported_at: 400,
+            landed_version: 5,
+            placed: 2,
+            orphans: 1,
+            comment_ids: vec!["c-004".to_string(), "c-005".to_string()],
+        };
+        db.record_share_return(&ret).unwrap();
+        let returns = db.list_share_returns("sess-a").unwrap();
+        assert_eq!(returns.len(), 1);
+        assert_eq!(returns[0].landed_version, 5);
+        assert_eq!(returns[0].comment_ids, vec!["c-004", "c-005"]);
+        assert!(db.list_share_returns("sess-b").unwrap().is_empty());
+
+        // Forgetting the share keeps the imported history.
+        db.delete_share("req-1").unwrap();
+        assert_eq!(db.list_shares("sess-a").unwrap().len(), 1);
+        assert_eq!(db.list_share_returns("sess-a").unwrap().len(), 1);
+    }
+
     #[test]
     fn thread_messages_round_trip_and_ordering() {
         let db = Database::open_in_memory().unwrap();
@@ -2798,6 +9400,7 @@ mod tests {
             body: body.to_string(),
             status: "complete".to_string(),
             created_at: at,
+            attachments: Vec::new(),
         };
         // Inserted out of order — load_thread must return them by created_at.
         db.insert_thread_message(&mk("m2", "assistant", "second", 200))
@@ -2854,6 +9457,153 @@ mod tests {
     }
 
     #[test]
+    fn voice_messages_round_trip_and_are_scoped_per_key() {
+        let db = Database::open_in_memory().unwrap();
+        let mk = |id: &str, key: &str, role: &str, text: &str, at: i64| VoiceMessage {
+            id: id.to_string(),
+            session_key: key.to_string(),
+            role: role.to_string(),
+            text: text.to_string(),
+            created_at: at,
+        };
+        assert!(db.list_voice_messages("plan-1").unwrap().is_empty());
+
+        // Inserted out of order — the read must come back oldest-first, which is
+        // the order the panel replays them in.
+        db.insert_voice_message(&mk("v2", "plan-1", "agent", "second", 200))
+            .unwrap();
+        db.insert_voice_message(&mk("v1", "plan-1", "you", "first", 100))
+            .unwrap();
+        db.insert_voice_message(&mk("v3", "plan-1", "note", "▶ Read the plan", 300))
+            .unwrap();
+        // A different voice key (here a drafter session) must not leak in.
+        db.insert_voice_message(&mk("v4", "drafter:d-9", "you", "other", 150))
+            .unwrap();
+
+        let thread = db.list_voice_messages("plan-1").unwrap();
+        assert_eq!(
+            thread.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["v1", "v2", "v3"],
+        );
+        assert_eq!(thread[0].role, "you");
+        assert_eq!(thread[0].text, "first");
+        assert_eq!(thread[2].role, "note", "markers are part of the transcript");
+        assert_eq!(db.list_voice_messages("drafter:d-9").unwrap().len(), 1);
+
+        // "Forget" is a true reset for this key only.
+        db.clear_voice_messages("plan-1").unwrap();
+        assert!(db.list_voice_messages("plan-1").unwrap().is_empty());
+        assert_eq!(db.list_voice_messages("drafter:d-9").unwrap().len(), 1);
+    }
+
+    fn mk_offer(id: &str, session: &str, at: i64) -> CommentOffer {
+        CommentOffer {
+            id: id.to_string(),
+            session_id: session.to_string(),
+            message_id: None,
+            block_id: "rl:blk-abc".to_string(),
+            body: "Make the retry budget configurable".to_string(),
+            label: Some("Configurable retry budget".to_string()),
+            agent_id: "voice".to_string(),
+            status: "pending".to_string(),
+            created_at: at,
+            stale: false,
+        }
+    }
+
+    #[test]
+    fn comment_offers_round_trip_and_are_scoped_per_session() {
+        let db = Database::open_in_memory().unwrap();
+        assert!(db.list_open_comment_offers("plan-1").unwrap().is_empty());
+
+        db.insert_comment_offer(&mk_offer("o2", "plan-1", 200)).unwrap();
+        db.insert_comment_offer(&mk_offer("o1", "plan-1", 100)).unwrap();
+        db.insert_comment_offer(&mk_offer("o3", "plan-2", 150)).unwrap();
+
+        let open = db.list_open_comment_offers("plan-1").unwrap();
+        assert_eq!(
+            open.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
+            vec!["o1", "o2"],
+            "oldest-first, and another session's offers never leak in",
+        );
+        assert_eq!(open[0].label.as_deref(), Some("Configurable retry budget"));
+        assert!(open[0].message_id.is_none(), "unbound until the reply lands");
+        assert!(!open[0].stale, "staleness is computed on read, never stored");
+
+        let one = db.get_comment_offer("o1").unwrap().unwrap();
+        assert_eq!(one.body, "Make the retry budget configurable");
+        assert!(db.get_comment_offer("nope").unwrap().is_none());
+
+        // Dismissal takes a row out of the open list without deleting it.
+        assert!(db.resolve_comment_offer("o2", "dismissed").unwrap());
+        assert!(
+            !db.resolve_comment_offer("o2", "dismissed").unwrap(),
+            "only a pending row transitions",
+        );
+        assert_eq!(db.list_open_comment_offers("plan-1").unwrap().len(), 1);
+
+        // Scoped wipe, for `voice_forget`.
+        db.clear_comment_offers("plan-1").unwrap();
+        assert!(db.list_open_comment_offers("plan-1").unwrap().is_empty());
+        assert_eq!(db.list_open_comment_offers("plan-2").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn bind_comment_offers_respects_the_you_line_floor() {
+        let db = Database::open_in_memory().unwrap();
+        let you = |id: &str, at: i64| VoiceMessage {
+            id: id.to_string(),
+            session_key: "plan-1".to_string(),
+            role: "you".to_string(),
+            text: "…".to_string(),
+            created_at: at,
+        };
+        // Turn 1 asked at t=100 and staged an offer; turn 2 asked at t=300.
+        db.insert_voice_message(&you("y1", 100)).unwrap();
+        db.insert_comment_offer(&mk_offer("old", "plan-1", 150)).unwrap();
+        db.insert_voice_message(&you("y2", 300)).unwrap();
+        db.insert_comment_offer(&mk_offer("new", "plan-1", 350)).unwrap();
+
+        assert_eq!(db.count_open_offers_this_turn("plan-1").unwrap(), 1);
+        assert_eq!(db.bind_comment_offers("plan-1", "msg-2").unwrap(), 1);
+        assert_eq!(
+            db.get_comment_offer("new").unwrap().unwrap().message_id.as_deref(),
+            Some("msg-2"),
+        );
+        assert!(
+            db.get_comment_offer("old").unwrap().unwrap().message_id.is_none(),
+            "a turn that errored out leaves its offer loose, not mis-attributed",
+        );
+        // Already-bound rows are skipped by the next turn's bind.
+        db.insert_voice_message(&you("y3", 500)).unwrap();
+        assert_eq!(db.bind_comment_offers("plan-1", "msg-3").unwrap(), 0);
+        assert_eq!(
+            db.get_comment_offer("new").unwrap().unwrap().message_id.as_deref(),
+            Some("msg-2"),
+        );
+        // Bound rows also stop counting against the per-turn cap.
+        assert_eq!(db.count_open_offers_this_turn("plan-1").unwrap(), 0);
+    }
+
+    #[test]
+    fn claiming_an_offer_is_a_compare_and_set() {
+        let db = Database::open_in_memory().unwrap();
+        db.insert_comment_offer(&mk_offer("o1", "plan-1", 100)).unwrap();
+
+        assert!(db.claim_comment_offer("o1").unwrap());
+        assert!(
+            !db.claim_comment_offer("o1").unwrap(),
+            "a double-tap must not write two comments",
+        );
+        assert!(db.list_open_comment_offers("plan-1").unwrap().is_empty());
+
+        // A failed write puts the chip back.
+        db.release_comment_offer("o1").unwrap();
+        assert_eq!(db.list_open_comment_offers("plan-1").unwrap().len(), 1);
+        assert!(db.claim_comment_offer("o1").unwrap());
+    }
+
+    #[test]
     fn deleting_comment_cascades_its_thread() {
         let store = make_store();
         let md = "# Plan\n\nBody.\n";
@@ -2870,6 +9620,9 @@ mod tests {
             selection: None,
             author: None,
             reviewer: None,
+            external_created_at: None,
+            share_request_id: None,
+            attachments: Vec::new(),
         };
         store.add_comment("s1", mk_q()).expect("add comment");
         let db = store.database();
@@ -2881,6 +9634,7 @@ mod tests {
             body: "old answer".to_string(),
             status: "complete".to_string(),
             created_at: 100,
+            attachments: Vec::new(),
         })
         .unwrap();
 
@@ -2914,6 +9668,9 @@ mod tests {
                     selection: None,
                     author: None,
                     reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
+                    attachments: Vec::new(),
                 },
             )
             .expect("add comment");
@@ -2962,6 +9719,9 @@ mod tests {
                         selection: None,
                         author: None,
                         reviewer: None,
+                        external_created_at: None,
+                        share_request_id: None,
+                        attachments: Vec::new(),
                     },
                 )
                 .expect("add comment");
@@ -3052,6 +9812,9 @@ mod tests {
                     selection: None,
                     author: None,
                     reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
+                    attachments: Vec::new(),
                 },
             )
             .expect("add comment");
@@ -3116,6 +9879,9 @@ mod tests {
                 selection: None,
                 author: None,
                 reviewer: None,
+                external_created_at: None,
+                share_request_id: None,
+                attachments: Vec::new(),
             },
         )
         .expect("add comment");
@@ -3133,6 +9899,9 @@ mod tests {
                 selection: None,
                 author: None,
                 reviewer: None,
+                external_created_at: None,
+                share_request_id: None,
+                attachments: Vec::new(),
             },
         )
         .expect("add comment");
@@ -3287,6 +10056,9 @@ Restructured detail body.
                     selection: None,
                     author: None,
                     reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
+                    attachments: Vec::new(),
                 },
             )
             .expect("add q1");
@@ -3305,6 +10077,9 @@ Restructured detail body.
                     selection: None,
                     author: None,
                     reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
+                    attachments: Vec::new(),
                 },
             )
             .expect("add q2");
@@ -3420,6 +10195,9 @@ body.
                     selection: None,
                     author: None,
                     reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
+                    attachments: Vec::new(),
                 },
             )
             .expect("add comment");
@@ -3463,6 +10241,9 @@ body.
                     selection: None,
                     author: None,
                     reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
+                    attachments: Vec::new(),
                 },
             )
             .expect("add");
@@ -3531,6 +10312,9 @@ body.
                     selection: None,
                     author: None,
                     reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
+                    attachments: Vec::new(),
                 },
             )
             .expect("add structural");
@@ -3579,6 +10363,9 @@ body.
             selection: None,
             author: None,
             reviewer: None,
+            external_created_at: None,
+            share_request_id: None,
+            attachments: Vec::new(),
         };
 
         let a = store
@@ -3724,6 +10511,9 @@ body.
                     selection: None,
                     author: None,
                     reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
+                    attachments: Vec::new(),
                 },
             )
             .expect("fresh session c-001 persists");
@@ -3741,5 +10531,277 @@ body.
         );
 
         let _ = std::fs::remove_file(&tmpfile);
+    }
+
+    // --- Session recency (updated_at) ----------------------------------
+
+    #[test]
+    fn migration_backfills_legacy_updated_at() {
+        use crate::state::{AttachState, ReviewSession, SessionStatus};
+        let db = Database::open_in_memory().unwrap();
+        let mk = |id: &str, created: i64| ReviewSession {
+            session_id: id.to_string(),
+            project_path: "/repo".to_string(),
+            project_name: "repo".to_string(),
+            created_at: created,
+            revisions: Vec::new(),
+            status: SessionStatus::InReview,
+            attach_state: AttachState::Idle,
+            updated_at: 0,
+        };
+        db.upsert_session(&mk("with-rev", 500)).unwrap();
+        db.insert_revision(
+            "with-rev",
+            &crate::state::Revision {
+                version_number: 1,
+                received_at: 700,
+                raw_plan_markdown: "# P".to_string(),
+                sections: Vec::new(),
+                comments: Vec::new(),
+                thread_start: true,
+                restored: false,
+            },
+        )
+        .unwrap();
+        db.upsert_session(&mk("bare", 300)).unwrap();
+        // Simulate rows written by a pre-updated_at build…
+        db.zero_updated_at("with-rev");
+        db.zero_updated_at("bare");
+        // …and re-run the idempotent migration: only 0-rows are backfilled.
+        db.migrate().unwrap();
+        let all = db.load_all().unwrap();
+        assert_eq!(all["with-rev"].updated_at, 700); // latest revision time
+        assert_eq!(all["bare"].updated_at, 300); // falls back to created_at
+    }
+
+    #[test]
+    fn thread_message_bumps_session_recency_ordering() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let store = SessionStore::new(db.clone());
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("a", "/tmp/a", md.to_string(), reparse_sections(md), true, false);
+        store.upsert_plan("b", "/tmp/b", md.to_string(), reparse_sections(md), true, false);
+        // Discussion activity lands on the DB directly (fork threads write
+        // through Database, not the store); a strictly later stamp must float
+        // "a" above "b" after a restart-shaped reload.
+        let later = crate::state::now_millis() + 10_000;
+        db.insert_thread_message(&ThreadMessage {
+            id: "m1".to_string(),
+            session_id: "a".to_string(),
+            comment_id: "c-001".to_string(),
+            role: "user".to_string(),
+            body: "hi".to_string(),
+            status: "complete".to_string(),
+            created_at: later,
+            attachments: Vec::new(),
+        })
+        .unwrap();
+        let reloaded = SessionStore::new(db.clone());
+        let list = reloaded.list();
+        assert_eq!(list[0].session_id, "a");
+        assert_eq!(list[0].updated_at, later);
+    }
+
+    #[test]
+    fn comment_bumps_in_memory_updated_at() {
+        use crate::state::CommentKind;
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let store = SessionStore::new(db);
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("s", "/tmp/s", md.to_string(), reparse_sections(md), true, false);
+        let before = store.get("s").unwrap().updated_at;
+        let c = store
+            .add_comment(
+                "s",
+                NewCommentRequest {
+                    id: None,
+                    kind: CommentKind::Feedback,
+                    scope: None,
+                    anchor_id: "A".to_string(),
+                    block_id: None,
+                    structural: None,
+                    body: "b".to_string(),
+                    edit: None,
+                    selection: None,
+                    author: None,
+                    reviewer: None,
+                    external_created_at: None,
+                    share_request_id: None,
+                    attachments: Vec::new(),
+                },
+            )
+            .unwrap();
+        let after = store.get("s").unwrap().updated_at;
+        assert!(after >= before);
+        assert!(after >= c.created_at);
+    }
+
+    // --- Agent Seat activity (Seat Assignment digest) -------------------
+
+    #[test]
+    fn seat_activity_counts_assistant_turns_in_and_out_of_window() {
+        let db = Database::open_in_memory().unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            let mut msg = |table: &str, id: &str, owner: &str, role: &str, ts: i64| {
+                conn.execute(
+                    &format!(
+                        "INSERT INTO {table} (id, {owner_col}, role, body, status, created_at)
+                         VALUES (?1, ?2, ?3, 'x', 'done', ?4)",
+                        owner_col = owner
+                    ),
+                    params![id, "o1", role, ts],
+                )
+                .unwrap();
+            };
+            // Two assistant turns inside the window, one outside, one user turn
+            // that must never count.
+            msg("browse_messages", "b1", "browse_id", "assistant", 5_000);
+            msg("browse_messages", "b2", "browse_id", "assistant", 6_000);
+            msg("browse_messages", "b3", "browse_id", "assistant", 100);
+            msg("browse_messages", "b4", "browse_id", "user", 5_500);
+            msg("mission_messages", "m1", "mission_id", "assistant", 7_000);
+        }
+        let acts = db.seat_activity(1_000);
+        let by = |seat: &str| {
+            acts.iter()
+                .find(|a| a.seat == seat)
+                .unwrap_or_else(|| panic!("no {seat} row"))
+                .clone()
+        };
+        let browse = by("browse");
+        assert_eq!(browse.turns_window, 2, "only in-window assistant turns");
+        assert_eq!(browse.turns_total, 3, "all-time excludes the user turn");
+        assert_eq!(browse.last_ts, Some(6_000));
+        assert_eq!(by("mission").turns_total, 1);
+        // A seat with no rows reports zero rather than vanishing — the digest
+        // needs the explicit "never ran" signal.
+        let voice = by("voice");
+        assert_eq!((voice.turns_window, voice.turns_total), (0, 0));
+        assert_eq!(voice.last_ts, None);
+    }
+
+    #[test]
+    fn seat_activity_splits_plan_threads_from_drafter_comment_threads() {
+        let db = Database::open_in_memory().unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            // A drafter comment thread: its comment_id resolves to draft_comments.
+            conn.execute(
+                "INSERT INTO draft_comments (id, draft_id, body, created_at)
+                 VALUES ('dc1', 'd1', 'note', 100)",
+                [],
+            )
+            .unwrap();
+            let mut tm = |id: &str, comment: &str, ts: i64| {
+                conn.execute(
+                    "INSERT INTO thread_messages
+                       (id, session_id, comment_id, role, body, status, created_at)
+                     VALUES (?1, 's1', ?2, 'assistant', 'x', 'done', ?3)",
+                    params![id, comment, ts],
+                )
+                .unwrap();
+            };
+            tm("t1", "dc1", 5_000); // drafter comment thread
+            tm("t2", "plan-c1", 5_000); // plan sidecar thread
+            tm("t3", "plan-c2", 5_000);
+        }
+        let acts = db.seat_activity(1_000);
+        let count = |seat: &str| acts.iter().find(|a| a.seat == seat).unwrap().turns_total;
+        assert_eq!(count("fork_drafter"), 1);
+        assert_eq!(count("fork_plan"), 2, "unmatched comment_ids are plan threads");
+    }
+
+    #[test]
+    fn ai_review_activity_counts_agent_runs_not_reviews_the_user_opened() {
+        let db = Database::open_in_memory().unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            // Three code reviews opened by hand…
+            for i in 0..3 {
+                conn.execute(
+                    "INSERT INTO review_sessions (review_id, repo_path, source, round, created_at)
+                     VALUES (?1, '/repo', 'diff', 1, 5000)",
+                    params![format!("r{i}")],
+                )
+                .unwrap();
+            }
+            // …but the AI reviewer only ever ran on one of them, writing four
+            // findings. Counting rows would say 4; counting reviews says 1.
+            let mut ann = |id: &str, review: &str, source: &str, ts: i64| {
+                conn.execute(
+                    "INSERT INTO review_annotations
+                       (id, review_id, round, file_path, side, start_line, end_line,
+                        kind, body, quoted_text, status, created_at, source)
+                     VALUES (?1, ?2, 1, 'a.rs', 'new', 1, 1, 'comment', 'b', 'q', 'open', ?3, ?4)",
+                    params![id, review, ts, source],
+                )
+                .unwrap();
+            };
+            ann("a1", "r0", "ai", 5_000);
+            ann("a2", "r0", "ai", 5_100);
+            ann("a3", "r0", "ai", 5_200);
+            ann("a4", "r0", "ai", 5_300);
+            // A human comment on another review must never count as an AI run.
+            ann("a5", "r1", "user", 5_400);
+        }
+        let acts = db.seat_activity(1_000);
+        let ai = acts.iter().find(|a| a.seat == "ai_review").unwrap();
+        assert_eq!(ai.turns_total, 1, "one AI run, not four findings or three reviews");
+        assert_eq!(ai.turns_window, 1);
+        assert_eq!(ai.last_ts, Some(5_300));
+    }
+
+    #[test]
+    fn keeper_is_not_inferred_from_per_prompt_compaction_events() {
+        let db = Database::open_in_memory().unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            // Compaction events are written one per prompt — and the
+            // deterministic fallback writes them even when no agent spawned.
+            for i in 0..40 {
+                conn.execute(
+                    "INSERT INTO ledger_events
+                       (seq, ts, kind, author, payload_hash, prev_hash, entry_hash)
+                     VALUES (?1, 5000, 'compaction', 'redline', 'p', 'x', ?2)",
+                    params![i + 1, format!("h{i}")],
+                )
+                .unwrap();
+            }
+        }
+        // The seat must NOT claim 40 turns for an agent that may never have run.
+        assert!(
+            !db.seat_activity(1_000).iter().any(|a| a.seat == "keeper"),
+            "keeper has no per-run record, so it must report nothing at all"
+        );
+    }
+
+    #[test]
+    fn prompt_length_by_surface_reports_median_and_p90() {
+        let db = Database::open_in_memory().unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            for (i, len) in [10usize, 20, 30, 40, 100].iter().enumerate() {
+                conn.execute(
+                    "INSERT INTO prompts (ts, source, origin, surface, role, body, body_hash)
+                     VALUES (1, 'hook', 'internal', 'browse', 'user', ?1, ?2)",
+                    params!["x".repeat(*len), format!("h{i}")],
+                )
+                .unwrap();
+            }
+            conn.execute(
+                "INSERT INTO prompts (ts, source, origin, surface, role, body, body_hash)
+                 VALUES (1, 'hook', 'internal', 'plan', 'user', 'xxx', 'hplan')",
+                [],
+            )
+            .unwrap();
+        }
+        let rows = db.prompt_length_by_surface().unwrap();
+        // Heaviest surface first.
+        assert_eq!(rows[0].0, "browse");
+        assert_eq!(rows[0].1, 5);
+        assert_eq!(rows[0].2, 30, "median of 10/20/30/40/100");
+        assert_eq!(rows[0].3, 100, "p90 lands on the long tail");
+        assert_eq!(rows[1].0, "plan");
     }
 }

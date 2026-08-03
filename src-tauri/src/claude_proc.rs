@@ -28,6 +28,20 @@ use tokio::process::Command;
 ///    first probe.
 /// 3. Fall back to the bare name (correct when launched from a terminal).
 pub fn resolve_claude_bin() -> String {
+    // 0. Explicit overrides beat every probe: the REDLINE_CLAUDE_BIN env var,
+    //    then the settings-surface path (seat::claude_bin_override). Both are
+    //    returned as-given — a wrong path fails loudly at spawn, which beats
+    //    silently probing past a user's explicit choice.
+    if let Some(path) = std::env::var(crate::seat::ENV_CLAUDE_BIN)
+        .ok()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+    {
+        return path;
+    }
+    if let Some(path) = crate::seat::claude_bin_override() {
+        return path;
+    }
     if let Some(path) = known_install_locations().into_iter().find(|p| p.is_file()) {
         return path.to_string_lossy().into_owned();
     }
@@ -74,24 +88,44 @@ fn known_install_locations() -> Vec<PathBuf> {
 /// A `tokio::process::Command` for `claude_bin` with PATH prepended with the
 /// binary's own directory. A Dock-launched app passes a minimal PATH to
 /// children; an `#!/usr/bin/env node` shebang (npm installs) needs the `node`
-/// that lives alongside `claude` to be findable.
+/// that lives alongside `claude` to be findable. Every spawn also carries the
+/// per-boot daemon token in the environment — that's how an agent's curl to a
+/// protected `/v1` route authenticates. curl imports the variable itself
+/// (`--variable %REDLINE_DAEMON_TOKEN= --expand-header "Authorization: Bearer
+/// {{REDLINE_DAEMON_TOKEN}}"`, curl >= 8.3) rather than letting the shell
+/// expand it, which the agent bash sandbox would reject; the flags sit after
+/// the URL so the pre-authorized allow-prefix rules still match. See `auth.rs`.
 pub fn claude_command(claude_bin: &str) -> Command {
     let mut cmd = Command::new(claude_bin);
     if let Some(bin_dir) = Path::new(claude_bin).parent().filter(|p| p.is_dir()) {
         let inherited = std::env::var("PATH").unwrap_or_default();
         cmd.env("PATH", format!("{}:{inherited}", bin_dir.display()));
     }
+    cmd.env(crate::auth::ENV_DAEMON_TOKEN, crate::auth::daemon_token());
     cmd
+}
+
+/// `claude_command` with the seat's binary override applied: the seat's own
+/// `binaryPath`, else the global settings override, else the caller's cached
+/// `resolve_claude_bin()` result. Checked at every spawn (not just at cache
+/// time) so a settings change takes effect without a relaunch.
+pub fn claude_command_for_seat(seat: &str, default_bin: &str) -> Command {
+    match crate::seat::binary_for(seat) {
+        Some(bin) => claude_command(&bin),
+        None => claude_command(default_bin),
+    }
 }
 
 /// The standard arg vector for a headless *browser-bridge* `claude` turn:
 /// stream-json with partial messages, the Read/Grep/Glob/WebFetch/WebSearch/Bash
 /// tool surface, and the localhost curl allow (three quoting variants — see
 /// `browse.rs` for why all three prefix rules are required), with MCP stripped.
-/// Appends `--resume <sid>` when resuming a prior session. Shared by the browse
+/// `seat` tags the spawn with its Agent Seat, appending any configured
+/// `--model`/`--effort`/`--fallback-model` flags (see `seat.rs`). Appends
+/// `--resume <sid>` when resuming a prior session. Shared by the browse
 /// consult path and the linked-discussion agent so the tool surface can't drift
 /// between them. `browse_send`/`mission_send` keep their own inline copies.
-pub fn bridge_args(prompt: String, prior_session: Option<&str>) -> Vec<String> {
+pub fn bridge_args(seat: &str, prompt: String, prior_session: Option<&str>) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "-p".to_string(),
         prompt,
@@ -111,11 +145,110 @@ pub fn bridge_args(prompt: String, prior_session: Option<&str>) -> Vec<String> {
         "Bash(curl -s \"http://127.0.0.1:7676/*)".to_string(),
         "--strict-mcp-config".to_string(),
     ];
+    args.extend(crate::seat::flag_args(seat));
     if let Some(sid) = prior_session {
         args.push("--resume".to_string());
         args.push(sid.to_string());
     }
     args
+}
+
+/// A first-turn prompt fragment that makes a browse or linked agent aware of the
+/// active research **mission**, when one is running. Both the per-tab page
+/// discussion and the linked (spanning) discussion can run inside a mission
+/// workspace, but neither is told what the user is researching — so they answer
+/// blind to the goal. This bakes the goal in so they orient their help toward it.
+/// The mission orchestrator (`mission.rs`) embeds the goal natively and needs
+/// none of this. Returns an empty string when no mission is active or the goal is
+/// blank, so callers can push it unconditionally.
+pub fn mission_context_block(mission: Option<(&str, &str)>) -> String {
+    let Some((title, goal)) = mission else {
+        return String::new();
+    };
+    let goal = goal.trim();
+    if goal.is_empty() {
+        return String::new();
+    }
+    let mut p = String::from(
+        "A research MISSION is currently active — the user is working toward one \
+         goal across their browser tabs, and this discussion is part of that \
+         research. Keep your help oriented to the mission's goal.\n\n",
+    );
+    let title = title.trim();
+    if !title.is_empty() {
+        p.push_str(&format!("Mission: {title}\n"));
+    }
+    p.push_str("The mission's goal, in the user's words:\n\n");
+    for line in goal.lines() {
+        p.push_str("> ");
+        p.push_str(line);
+        p.push('\n');
+    }
+    p.push_str(
+        "\nThe user may refine the goal or pin more findings as they browse, so \
+         re-read the current mission and its pins whenever you need them (already \
+         permitted — no approval needed):\n  \
+         curl -s http://127.0.0.1:7676/v1/mission/active\n  \
+         curl -s http://127.0.0.1:7676/v1/mission/findings\n\n",
+    );
+    p
+}
+
+/// The terminal outcome of one headless turn, collected silently (no UI
+/// events) — the consult path's stream driver. Used by the Companion's
+/// `/v1/global/consult` fan-out, where the digest is returned inline to a
+/// blocking curl rather than streamed to a pane.
+pub struct TurnOutcome {
+    pub session: Option<String>,
+    pub final_text: Option<String>,
+    pub errored: Option<String>,
+    pub saw_json: bool,
+    pub stderr_text: String,
+}
+
+/// Drain a spawned `claude`'s stdout/stderr to completion and classify the
+/// result. stderr is drained concurrently so a full pipe can't block the child.
+pub async fn collect_turn(
+    stdout: tokio::process::ChildStdout,
+    stderr: tokio::process::ChildStderr,
+) -> TurnOutcome {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let stderr_task = tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        let mut text = String::new();
+        while let Ok(Some(line)) = lines.next_line().await {
+            text.push_str(&line);
+            text.push('\n');
+        }
+        text
+    });
+    let mut lines = BufReader::new(stdout).lines();
+    let mut out = TurnOutcome {
+        session: None,
+        final_text: None,
+        errored: None,
+        saw_json: false,
+        stderr_text: String::new(),
+    };
+    while let Ok(Some(line)) = lines.next_line().await {
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        out.saw_json = true;
+        match classify_line(&v) {
+            StreamLine::Init(sid) => out.session = Some(sid),
+            StreamLine::Final { text, session_id } => {
+                if session_id.is_some() {
+                    out.session = session_id;
+                }
+                out.final_text = Some(text);
+            }
+            StreamLine::Failed(msg) => out.errored = Some(msg),
+            StreamLine::Delta(_) | StreamLine::Ignore => {}
+        }
+    }
+    out.stderr_text = stderr_task.await.unwrap_or_default();
+    out
 }
 
 /// What one `--output-format stream-json` line means to a process reader.
@@ -200,6 +333,57 @@ mod tests {
 
     fn parse(line: &str) -> StreamLine {
         classify_line(&serde_json::from_str::<Value>(line).unwrap())
+    }
+
+    #[test]
+    fn mission_context_block_empty_without_active_mission() {
+        assert_eq!(mission_context_block(None), "");
+        // A blank goal is treated as no mission.
+        assert_eq!(mission_context_block(Some(("Title", "   "))), "");
+    }
+
+    #[test]
+    fn mission_context_block_embeds_goal_and_reread_routes() {
+        let b = mission_context_block(Some(("Breach page", "Draft my breach page")));
+        assert!(b.contains("A research MISSION is currently active"));
+        assert!(b.contains("Mission: Breach page"));
+        assert!(b.contains("Draft my breach page"));
+        // Re-read routes so a mid-conversation goal/pin change stays reachable.
+        assert!(b.contains("/v1/mission/active"));
+        assert!(b.contains("/v1/mission/findings"));
+    }
+
+    #[test]
+    fn bridge_args_unconfigured_seat_adds_no_flags() {
+        let args = bridge_args("companion", "hi".to_string(), None);
+        assert!(!args.iter().any(|a| a == "--model"));
+        assert!(!args.iter().any(|a| a == "--effort"));
+        assert!(!args.iter().any(|a| a == "--fallback-model"));
+    }
+
+    #[test]
+    fn bridge_args_carry_the_seats_model_and_effort_before_resume() {
+        // The seat store is process-global and `seat::tests` clears it
+        // wholesale, so hold the shared guard while configuring + asserting.
+        let _guard = crate::seat::store_guard();
+        crate::seat::set_seat_for_test(
+            "voice",
+            Some(crate::seat::SeatConfig {
+                model: Some("sonnet".to_string()),
+                effort: Some("medium".to_string()),
+                ..Default::default()
+            }),
+        );
+        let args = bridge_args("voice", "hi".to_string(), Some("sid-1"));
+        let model_idx = args.iter().position(|a| a == "--model").unwrap();
+        assert_eq!(args[model_idx + 1], "sonnet");
+        let effort_idx = args.iter().position(|a| a == "--effort").unwrap();
+        assert_eq!(args[effort_idx + 1], "medium");
+        // The resume tail must stay terminal (flags precede it).
+        let resume_idx = args.iter().position(|a| a == "--resume").unwrap();
+        assert!(model_idx < resume_idx && effort_idx < resume_idx);
+        assert_eq!(args[resume_idx + 1], "sid-1");
+        crate::seat::set_seat_for_test("voice", None);
     }
 
     #[test]

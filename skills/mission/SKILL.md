@@ -10,7 +10,7 @@ description: >-
   Redline's markdown pipeline (tables, mermaid, fenced code, callouts), and you
   finish by synthesizing a Drafter-ready brief. Covers gathering discipline,
   weaving pins, and synthesis formatting.
-version: 1
+version: 4
 ---
 
 # Redline mission orchestrator
@@ -53,7 +53,12 @@ handle for every `?tab=` selector, and how you name tabs to the user.
   title, selection, text, headings, links — without moving the user's focus.
 - **Go look yourself** — `/v1/browser/open {url}` opens a fresh tab to inspect
   something the user hasn't; `/v1/browser/focus?tab=<n>` switches the user *into*
-  a tab (only when they want to *be* there).
+  a tab (only when they want to *be* there). These write routes need the bearer
+  token. Never write `$REDLINE_DAEMON_TOKEN` into the command yourself — the bash
+  sandbox rejects any command containing shell expansion before it runs. Have
+  curl import the variable instead, with these two flags after the URL (needs
+  curl ≥ 8.3):
+  `--variable %REDLINE_DAEMON_TOKEN= --expand-header "Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}"`.
 - **The web** — you have **WebSearch** and **WebFetch** (no permission prompt).
   Use them to verify a claim or fill a gap, rather than driving the user's tabs to
   a search engine.
@@ -69,6 +74,20 @@ Every reply orients to the mission's goal. When the user asks something open
 ("how am I doing?", "what's missing?"), answer *against the goal*: what the pins
 and tabs already cover, and what the goal still needs. Re-fetch the goal with
 `/v1/mission/active` if you need to restate it.
+
+### The user's own memory (ClassMemory)
+
+Beyond the live tabs and pins, the user has a **ClassMemory** catalog over
+everything they've prompted, decided, and researched in Redline — an emergent class
+tree over the hash-chained lake. When the goal touches something they've worked on
+before ("did I already research this vendor?", "what did I decide about auth for
+muslimlegalconnect?"), read it through the same local bridge (already permitted, no
+approval): `curl -s http://127.0.0.1:7676/v1/memory/tree` (scope with
+`?project=<path>` or `?root=<id>`), then
+`curl -s http://127.0.0.1:7676/v1/memory/node/<id>` to descend to a topic and read
+its links — decision events answer "what did I decide", `prompt` links with
+`surface=browse/mission` answer "what did I research". Fold any relevant prior
+finding into the mission so you don't re-derive research the user already has.
 
 ## Weaving: lead, then the structure that earns its place
 

@@ -5,6 +5,7 @@ import { Fragment, type Node as PMNode } from "@tiptap/pm/model";
 
 import type { Comment } from "../types";
 import { isProseEditComment } from "./changeLedger";
+import { reconstructWholeBlockEdit } from "./returnEditReconstruct";
 import { diffWords } from "./wordDiff";
 import { planMarkdownToDoc, serializeBlockToMarkdown } from "./markdown";
 import {
@@ -81,8 +82,14 @@ export function materializeSuggestions(
     author: string;
     plain: boolean;
   }[] = [];
+  // One materialized edit per block: a second edit's replaceWith would land
+  // on unmapped positions (corruption). Later comments stay card-only until
+  // the first is resolved; each still carries its own whole-block edit, so
+  // nothing is lost on submit.
+  const taken = new Set<string>();
   for (const c of comments) {
     if (!isProseEditComment(c) || !c.blockId || !c.edit) continue;
+    if (taken.has(c.blockId)) continue;
     const at = findBlock(editor, c.blockId);
     if (!at) continue;
     const base = seed.get(c.blockId);
@@ -91,15 +98,31 @@ export function materializeSuggestions(
     // equal to the published seed) may receive an import.
     if (hasPendingSuggestions(at.node)) continue;
     if (serializeBlockToMarkdown(at.node) !== base) continue;
-    if (c.edit.revised === base) continue; // nothing to propose
+    let revised = c.edit.revised;
+    if (c.edit.original !== base) {
+      // Snippet-shaped edit — a share-viewer return persisted before import
+      // normalization (edit.original is the reviewer's selected words, not
+      // the block). Diffing the whole block against a snippet would strike
+      // the entire paragraph, so heal it to whole-block here; when the
+      // snippet can't be located, the proposal stays card-only (highlight +
+      // preview), never a false paragraph-wide strike.
+      const healed =
+        c.selection && c.edit.original === c.selection.quotedText
+          ? reconstructWholeBlockEdit(base, c.selection, c.edit)
+          : null;
+      if (!healed) continue;
+      revised = healed.revised;
+    }
+    if (revised === base) continue; // nothing to propose
     const from = at.pos;
     const to = at.pos + at.node.nodeSize;
     if (caretInside(editor, from, to)) continue;
+    taken.add(c.blockId);
     targets.push({
       from,
       to,
       id: c.blockId,
-      revised: c.edit.revised,
+      revised,
       author: c.author ?? USER_AUTHOR,
       // An agent suggestion the reviewer already accepted in place: on
       // re-hydration (lost Y.Doc copy) the block must read as the settled

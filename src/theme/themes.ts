@@ -15,6 +15,7 @@ export type ThemeName =
   | "silveraerogel"
   | "solidcolors"
   | "grass"
+  | "terminal"
   | "redline";
 
 /** The 16 ANSI palette slots xterm accepts as theme overrides. */
@@ -49,8 +50,9 @@ export interface ThemeEntry {
 
 // macOS Terminal.app's built-in profiles, as bg / fg / blue / yellow / green.
 // The remaining tokens are derived in derive.ts. The "studio" entry must match
-// the @theme defaults in styles.css so first paint is correct before JS runs
-// (Studio is the runtime default; the rest are user choices).
+// the @theme defaults in styles.css so CSS-only paint is correct before JS
+// runs; the runtime first-launch default is Terminal (DEFAULT_THEME below,
+// mirrored by index.html's first-launch fallback colors).
 export const THEMES: ThemeEntry[] = [
   // Studio — Redline's flagship dark mood. OKLCH-tuned accents (blue/yellow/
   // green) sit in the same harmonic family; selection is the warm "redline"
@@ -165,6 +167,32 @@ export const THEMES: ThemeEntry[] = [
     base: { bg: "#ecdcdd", fg: "#381b2b", blue: "#897ad9", yellow: "#d99a2c", green: "#4f9e57", selection: "#ff4f97" },
   },
   {
+    // Terminal — a cool "cyberdeck" mood: a deep blue-black page, an electric
+    // cyan body ink, and a neon-magenta selection so commented spans and
+    // v-badges glow. Distinct from Homebrew (warm neon green on pure black) and
+    // Pro (flat white on black) — this one leans duotone cyan/magenta, the
+    // classic futuristic-terminal palette. Pairs with a monospace face
+    // (see fonts.ts / DEFAULT_FONT_FOR_THEME) for the full "techie" read.
+    name: "terminal",
+    label: "Terminal",
+    base: {
+      bg: "#0a0e16",        // deep blue-black page
+      fg: "#d6e1ef",        // cool near-white ink
+      blue: "#35c8f0",      // electric cyan — info / edit
+      yellow: "#e6c84f",    // amber — warning / feedback
+      green: "#5de6a8",     // mint — success / question
+      selection: "#ff2e97", // neon magenta — commented spans & v-badges
+    },
+    // The stock dim grey vanishes on the blue-black page; lift the dim slots to
+    // a cool slate and pin `black` to a deeper ink so background fills stay back.
+    ansi: {
+      black: "#050810",
+      brightBlack: "#3b4a63",
+      blue: "#35c8f0",
+      brightBlue: "#7fdcff",
+    },
+  },
+  {
     // Redline — the brand theme: redline.dev's red on a warm near-black. The
     // signature red-orange (#e8553d) stays the selection accent so commented
     // spans and v-badges read as "redline" marks; the body ink is a brighter
@@ -186,7 +214,9 @@ export const THEMES: ThemeEntry[] = [
 
 // First-launch default. `readStoredTheme()` only consults this when the user
 // has no saved choice yet, so existing installs keep their picked theme.
-export const DEFAULT_THEME: ThemeName = "studio";
+// Terminal is the out-of-the-box look (the "techie" first impression); its
+// pre-JS fallback colors are mirrored in index.html's bootstrap.
+export const DEFAULT_THEME: ThemeName = "terminal";
 
 const BY_NAME = new Map(THEMES.map((t) => [t.name, t]));
 

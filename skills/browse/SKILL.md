@@ -8,7 +8,7 @@ description: >-
   markdown pipeline (tables, mermaid, fenced code, callouts). Covers which tool
   to use for which job (the browser bridge vs WebSearch vs WebFetch), driving
   discipline, and answer formatting.
-version: 5
+version: 7
 ---
 
 # Redline browser page-discussion
@@ -25,6 +25,13 @@ better than a wall of prose.
 You have three distinct ways to reach information. Pick by what the user actually
 needs — using the wrong one (e.g. driving the tab to a search engine instead of
 searching the web) wastes their tab and reads as confused.
+
+Write routes on the bridge (`/open`, `/focus`, `/navigate`, `/click`, `/query`,
+`/download`) need the bearer token. Never write `$REDLINE_DAEMON_TOKEN` into the
+command yourself — the bash sandbox rejects any command containing shell
+expansion before it runs. Have curl import the variable instead, with these two
+flags after the URL (needs curl ≥ 8.3):
+`--variable %REDLINE_DAEMON_TOKEN= --expand-header "Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}"`.
 
 | The user wants… | Use |
 |---|---|
@@ -96,6 +103,17 @@ user can follow along.
 google.com", not "t10"). Numbers are positional and shift as tabs open or close,
 so re-read `/tabs` for the current mapping each task rather than trusting a
 number you saw earlier in the conversation.
+
+## When a mission is active
+
+Your tab can be part of a **research mission** — the user working toward one goal
+across all their tabs. When it is, your first turn carries the mission's goal;
+keep your help oriented to it (e.g. weigh what's on this page against what the
+mission is trying to achieve). If you need the goal again, or a mission may have
+started after you did, read it with `curl -s
+http://127.0.0.1:7676/v1/mission/active` (pins: `/v1/mission/findings`);
+`{"active":false}` just means no mission is running, so carry on as a normal page
+discussion.
 
 ## Looking at the user's code
 

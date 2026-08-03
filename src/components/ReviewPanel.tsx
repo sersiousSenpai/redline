@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 import type {
@@ -49,7 +49,7 @@ interface ReviewPanelProps {
   onClose: () => void;
 }
 
-export default function ReviewPanel({ review, projectOptions, onClose }: ReviewPanelProps) {
+function ReviewPanel({ review, projectOptions, onClose }: ReviewPanelProps) {
   const {
     activeReviewId,
     review: session,
@@ -848,3 +848,7 @@ function Empty({ children }: { children: React.ReactNode }) {
     </div>
   );
 }
+
+/** Memoized: the diff surface reconciles every hunk of every file, and a
+ *  divider drag changes only its box. */
+export default memo(ReviewPanel);

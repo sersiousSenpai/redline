@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
@@ -22,6 +22,11 @@ import {
   markdownToSpeakable,
   flattenSections,
 } from "../lib/markdownToSpeakable";
+import {
+  groupOffers,
+  offerChipLabel,
+  type CommentOffer,
+} from "../lib/commentOffers";
 import { VoiceSettings, type TtsEngine } from "./VoiceSettings";
 import { PulseLogo, type PulseState } from "./PulseLogo";
 
@@ -32,6 +37,8 @@ interface VoiceDeltaEvent {
 interface VoiceDoneEvent {
   sessionId: string;
   body: string;
+  /** The persisted transcript row — what a just-staged offer binds to. */
+  messageId: string | null;
 }
 interface VoiceErrorEvent {
   sessionId: string;
@@ -55,14 +62,172 @@ interface DictationErrEvent {
 interface TranscriptLine {
   role: "you" | "agent" | "note";
   text: string;
+  /** The persisted `voice_messages` row id, when this line has one. Locally
+   *  appended `you`/`note` lines don't — which is exactly why the rehydrate
+   *  merge below still needs its text-based fallback key. */
+  id?: string;
+}
+
+/** One persisted transcript line, as `voice_thread` returns it. */
+interface VoiceMessage {
+  id: string;
+  sessionKey: string;
+  role: string;
+  text: string;
+  createdAt: number;
+}
+
+/** Live status of the warm child, from `voice_session_status`. */
+interface VoiceStatus {
+  up: boolean;
+  inFlight: boolean;
+}
+
+const TRANSCRIPT_ROLES = new Set(["you", "agent", "note"]);
+
+/** Narrow a persisted row back to a transcript line. An unrecognized role
+ *  (a row from a newer build) renders as a plain note rather than vanishing. */
+function toTranscriptLine(m: VoiceMessage): TranscriptLine {
+  return {
+    role: TRANSCRIPT_ROLES.has(m.role)
+      ? (m.role as TranscriptLine["role"])
+      : "note",
+    text: m.text,
+    id: m.id,
+  };
+}
+
+const lineKey = (l: TranscriptLine) => `${l.role} ${l.text}`;
+
+/** The offer row under a reply: what would be added, and one tap to add it.
+ *  Nothing here has touched the plan yet — the muted line is the exact body the
+ *  feedback comment would carry, so the tap is never a surprise. */
+function OfferRow({
+  offers,
+  busy,
+  errors,
+  onAdd,
+  onDismiss,
+}: {
+  offers: CommentOffer[];
+  busy: Record<string, boolean>;
+  errors: Record<string, string>;
+  onAdd: (o: CommentOffer) => void;
+  onDismiss: (o: CommentOffer) => void;
+}) {
+  if (offers.length === 0) return null;
+  return (
+    <div className="mb-2 flex flex-col gap-1.5">
+      {offers.map((o) => {
+        const disabled = !!busy[o.id] || !!o.stale;
+        return (
+          <div key={o.id} className="flex flex-col gap-1">
+            <span
+              style={{
+                color: "var(--color-ink-muted, #888)",
+                fontSize: "0.9em",
+              }}
+              title={o.body}
+            >
+              “{offerChipLabel(o)}”
+            </span>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={() => onAdd(o)}
+                title={
+                  o.stale
+                    ? "The plan changed under this item"
+                    : `Add to the plan: ${o.body}`
+                }
+                className="rounded-full px-2.5 py-1"
+                style={{
+                  fontSize: "12px",
+                  fontWeight: 600,
+                  border: "1px solid var(--color-rule)",
+                  background: "var(--color-anchor-bg)",
+                  color: "var(--color-anchor-text)",
+                  cursor: disabled ? "default" : "pointer",
+                  opacity: disabled ? 0.5 : 1,
+                }}
+              >
+                ＋ Add as item
+              </button>
+              <button
+                type="button"
+                onClick={() => onDismiss(o)}
+                title="Dismiss"
+                aria-label="Dismiss offered item"
+                className="rounded-full px-2 py-1"
+                style={{
+                  fontSize: "11px",
+                  border: "1px solid var(--color-rule)",
+                  background: "transparent",
+                  color: "var(--color-ink-muted, #888)",
+                  cursor: "pointer",
+                }}
+              >
+                ✕
+              </button>
+            </div>
+            {(errors[o.id] || o.stale) && (
+              <span
+                style={{
+                  color: "var(--color-danger, #c0392b)",
+                  fontSize: "0.9em",
+                }}
+              >
+                {errors[o.id] ??
+                  "The plan changed under this item — ask again and I'll re-anchor it."}
+              </span>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Deferred `voice_session_stop` timers, keyed by voice key and held at MODULE
+ *  scope on purpose.
+ *
+ *  A StrictMode mount→cleanup→mount reuses one component instance, so an
+ *  instance ref sufficed to cancel the teardown. A *genuine* unmount→remount is
+ *  not covered: when a revision lands, the pane clears its session and this
+ *  panel is conditionally unmounted for the length of the load, then a brand-new
+ *  instance mounts with a fresh ref — which cannot cancel its predecessor's
+ *  timer. That timer went on to kill the warm child the new panel had just
+ *  adopted, leaving it stuck on "Warming up…" for no visible reason. Keyed
+ *  outside the component, any instance can cancel the pending stop for its own
+ *  session. */
+const pendingStops = new Map<string, ReturnType<typeof setTimeout>>();
+
+function cancelPendingStop(sessionId: string) {
+  const t = pendingStops.get(sessionId);
+  if (t !== undefined) {
+    clearTimeout(t);
+    pendingStops.delete(sessionId);
+  }
 }
 
 interface VoicePanelProps {
+  /** The voice key: a plan session id, or `drafter:<draft_id>` for a Prompt
+   *  Drafter session (the backend derives the kind from the key shape). */
   sessionId: string;
-  /** Latest revision's raw plan markdown (sidecars included). */
+  /** The document under discussion (plan revision or draft), sidecars included. */
   markdown: string;
   /** Section tree — drives the structure-aware read and the walkthrough. */
   sections: Section[];
+  /** Working dir for a drafter session (plan sessions resolve their own from
+   *  the SessionStore). */
+  cwd?: string | null;
+  /** Reports whether a discussion is actually going on here — a non-empty
+   *  transcript, or a turn in flight. The host uses it to decide whether an
+   *  incoming plan may steal focus: interrupting a live conversation to jump to
+   *  another session is the one case where the intercept's auto-switch is
+   *  wrong. Mirrors `TerminalTabs`' `onActivityChange`. */
+  onActivityChange?: (active: boolean) => void;
   onClose: () => void;
 }
 
@@ -77,10 +242,12 @@ function explainPrompt(title: string, body: string): string {
   );
 }
 
-export function VoicePanel({
+function VoicePanelBase({
   sessionId,
   markdown,
   sections,
+  cwd,
+  onActivityChange,
   onClose,
 }: VoicePanelProps) {
   const [speechState, setSpeechState] = useState<SpeechState>("idle");
@@ -94,12 +261,14 @@ export function VoicePanel({
   // session on every revision change.
   const markdownRef = useRef(markdown);
   markdownRef.current = markdown;
-  // Pending (deferred) session teardown, so a StrictMode/dev mount→cleanup→mount
-  // doesn't close the warm child's stdin and kill a healthy session.
-  const pendingStopRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
   const [streaming, setStreaming] = useState("");
+  // Staged, not-yet-written plan items the agent offered this conversation, plus
+  // per-offer in-flight/error state for the chip row.
+  const [offers, setOffers] = useState<CommentOffer[]>([]);
+  const [offerBusy, setOfferBusy] = useState<Record<string, boolean>>({});
+  const [offerErrors, setOfferErrors] = useState<Record<string, string>>({});
   // The last thing spoken aloud — lets the idle transport button offer "▶ Start"
   // to replay it (so Stop toggles to Start rather than staying Stop).
   const [lastSpoken, setLastSpoken] = useState("");
@@ -212,6 +381,10 @@ export function VoicePanel({
     if (lastSynthErrRef.current === msg) return;
     lastSynthErrRef.current = msg;
     const short = msg.length > 200 ? `${msg.slice(0, 200)}…` : msg;
+    // Deliberately NOT persisted (unlike the other transcript lines): this is a
+    // diagnostic about the audio session that's live right now, not part of the
+    // conversation. Replaying "🔇 Voice synthesis failed" on every reopen — long
+    // after a key was fixed — would just be a stale alarm.
     setTranscript((t) => [
       ...t,
       { role: "note", text: `🔇 Voice synthesis failed — ${short}` },
@@ -268,13 +441,10 @@ export function VoicePanel({
   // Verbatim never needs it, but opening the panel signals intent to discuss.
   useEffect(() => {
     let alive = true;
-    // Cancel any deferred teardown from a just-unmounted pass (StrictMode in dev
-    // mounts→cleans up→mounts; without this the cleanup would kill the session
-    // we're about to reuse).
-    if (pendingStopRef.current) {
-      clearTimeout(pendingStopRef.current);
-      pendingStopRef.current = null;
-    }
+    // Cancel any deferred teardown left by a just-unmounted pass — a StrictMode
+    // mount→cleanup→mount in dev, or the real unmount→remount of a load gap.
+    // Without this the cleanup would kill the session we're about to reuse.
+    cancelPendingStop(sessionId);
     // Spawn the warm child and mark it ready once spawned. (A fresh `claude
     // --input-format stream-json` doesn't emit `init` until its first turn, so
     // we can't wait on `voice-ready` to show Ready — but `voice-exit` /
@@ -283,9 +453,55 @@ export function VoicePanel({
     void invoke("voice_session_start", {
       sessionId,
       planMarkdown: markdownRef.current,
+      cwd: cwd ?? null,
     })
       .then(() => alive && setSessionUp(true))
       .catch((e) => alive && setError(String(e)));
+    // Rehydrate what was on screen. The agent's own memory has always survived
+    // a session switch or a restart (its forked session id is in the DB); the
+    // transcript lived only in this component's state, so the panel came back
+    // blank next to an agent that remembered everything. These rows are the
+    // matching half — written from Rust, so they include replies that landed
+    // while the panel was unmounted.
+    void invoke<VoiceMessage[]>("voice_thread", { sessionId })
+      .then((rows) => {
+        if (!alive) return;
+        const history = rows.map(toTranscriptLine);
+        setTranscript((local) => {
+          // The common case: nothing has happened since mount.
+          if (local.length === 0) return history;
+          // A turn completed while this fetch was in flight — its line is both
+          // in `history` (Rust persists before it emits) and already on screen.
+          // Keep the live lines, put the rest of the history in front. Prefer
+          // id equality where both sides have one (a repeated question is not a
+          // duplicate); the text key still covers locally-appended `you`/`note`
+          // lines, which never carry an id.
+          const seenIds = new Set(
+            local.map((l) => l.id).filter((id): id is string => !!id),
+          );
+          const seen = new Set(local.map(lineKey));
+          const already = (h: TranscriptLine) =>
+            (h.id !== undefined && seenIds.has(h.id)) || seen.has(lineKey(h));
+          return [...history.filter((h) => !already(h)), ...local];
+        });
+      })
+      .catch(() => {
+        /* best-effort: an unreadable transcript starts the panel empty */
+      });
+    // A turn may still be streaming from before the unmount (a plan arrived
+    // mid-reply). Restore the spinner and re-arm the event gate, so the reply
+    // lands in this mount instead of looking idle and then appearing from
+    // nowhere on the next reopen.
+    void invoke<VoiceStatus>("voice_session_status", { sessionId })
+      .then((s) => {
+        if (!alive) return;
+        if (s.up) setSessionUp(true);
+        if (s.inFlight) {
+          turnLiveRef.current = true;
+          setThinking(true);
+        }
+      })
+      .catch(() => {});
     // If the warm child never reports `init` (no `voice-ready`), don't sit on
     // "Warming up…" forever — probe the child and surface what it printed so a
     // stuck/failed spawn is actionable instead of a silent dead-end.
@@ -336,31 +552,52 @@ export function VoicePanel({
       // Defer teardown (memory persists in the DB → resumes on reopen). A real
       // close lets this fire; a quick StrictMode/remount cancels it on re-entry,
       // so a healthy warm child isn't killed by its own stdin closing.
-      pendingStopRef.current = setTimeout(() => {
-        void invoke("voice_session_stop", { sessionId }).catch(() => {});
-        void invoke("dictation_kill_all").catch(() => {});
-      }, 300);
+      // Unforced: the backend leaves a streaming turn alone, so a plan arriving
+      // mid-reply no longer throws away the answer the user is waiting for.
+      pendingStops.set(
+        sessionId,
+        setTimeout(() => {
+          pendingStops.delete(sessionId);
+          void invoke("voice_session_stop", { sessionId }).catch(() => {});
+          void invoke("dictation_kill_all").catch(() => {});
+        }, 300),
+      );
     };
   }, [sessionId]);
 
   // Send one turn to the warm session, self-healing if it died: a
   // "voice session not started" means the child is gone, so restart it once and
   // retry. Any other error (or a second failure) propagates to the caller.
+  // `label` is what this turn LOOKS like in the transcript when that differs
+  // from what's sent (the canned starters send a long prompt but read as
+  // "▶ Summarize the plan"). The backend persists the line, so it needs the
+  // display text.
   const sendToSession = useCallback(
-    async (text: string) => {
+    async (text: string, label?: string) => {
       // This turn is now live: accept its streamed events until it completes,
       // errors, or the user interrupts it.
       turnLiveRef.current = true;
       try {
-        await invoke("voice_send", { sessionId, text });
+        await invoke("voice_send", { sessionId, text, label: label ?? null });
       } catch (e) {
         if (!String(e).includes("not started")) throw e;
         await invoke("voice_session_start", {
           sessionId,
           planMarkdown: markdownRef.current,
+          cwd: cwd ?? null,
         });
-        await invoke("voice_send", { sessionId, text });
+        await invoke("voice_send", { sessionId, text, label: label ?? null });
       }
+    },
+    [sessionId],
+  );
+
+  // Persist a transcript line the panel produced with no backend turn behind it
+  // (the "▶ Read the plan" marker, the feedback-capture acknowledgment), so a
+  // rehydrated transcript matches what was on screen. Best-effort.
+  const persistNote = useCallback(
+    (role: TranscriptLine["role"], text: string) => {
+      void invoke("voice_note", { sessionId, role, text }).catch(() => {});
     },
     [sessionId],
   );
@@ -379,16 +616,15 @@ export function VoicePanel({
       streamingRef.current = "";
       discardSpeechRef.current = false; // speak this new section's explanation
       queueRef.current?.primeTurn(); // start speaking at the first clause
-      setTranscript((t) => [
-        ...t,
-        { role: "you", text: `▶ ${seg.title || `Section ${index + 1}`}` },
-      ]);
-      void sendToSession(explainPrompt(seg.title, seg.bodyMarkdown)).catch(
-        (e) => {
-          setThinking(false);
-          setError(String(e));
-        },
-      );
+      const label = `▶ ${seg.title || `Section ${index + 1}`}`;
+      setTranscript((t) => [...t, { role: "you", text: label }]);
+      void sendToSession(
+        explainPrompt(seg.title, seg.bodyMarkdown),
+        label,
+      ).catch((e) => {
+        setThinking(false);
+        setError(String(e));
+      });
     },
     [segments, sendToSession],
   );
@@ -435,10 +671,22 @@ export function VoicePanel({
           turnLiveRef.current = false;
           if (!discardSpeechRef.current) queueRef.current?.flush();
           const body = e.payload.body || streamingRef.current;
+          const messageId = e.payload.messageId ?? undefined;
           streamingRef.current = "";
           setStreaming("");
           setThinking(false);
-          setTranscript((t) => [...t, { role: "agent", text: body }]);
+          setTranscript((t) => [
+            ...t,
+            { role: "agent", text: body, id: messageId },
+          ]);
+          // Rust bound this turn's offers to the row it just wrote; do the same
+          // locally so chips staged mid-turn snap under this reply immediately
+          // instead of waiting for a remount to re-read them.
+          if (messageId) {
+            setOffers((list) =>
+              list.map((o) => (o.messageId ? o : { ...o, messageId })),
+            );
+          }
           if (!discardSpeechRef.current) setLastSpoken(body);
         }),
       );
@@ -474,10 +722,13 @@ export function VoicePanel({
         // just the in-conversation acknowledgment. Best-effort attribution.
         await listen<{ sessionId: string }>("comments-changed", (e) => {
           if (e.payload.sessionId !== sessionId) return;
-          setTranscript((t) => [
-            ...t,
-            { role: "note", text: "📝 Captured as feedback on the plan." },
-          ]);
+          const note = "📝 Captured as feedback on the plan.";
+          setTranscript((t) => [...t, { role: "note", text: note }]);
+          void invoke("voice_note", {
+            sessionId,
+            role: "note",
+            text: note,
+          }).catch(() => {});
         }),
       );
     };
@@ -487,6 +738,71 @@ export function VoicePanel({
       for (const u of unlisteners) u();
     };
   }, [sessionId]);
+
+  // Offered plan items — the `＋ Add as item` chips. Drain what's already
+  // staged (a chip that landed while this panel was closed), then take live
+  // ones off the event. The DB drain is authoritative: it also decides which
+  // offers are `stale`, so a remount self-heals any local drift.
+  useEffect(() => {
+    let alive = true;
+    setOffers([]);
+    setOfferErrors({});
+    void invoke<CommentOffer[]>("comment_offers_pending", { sessionId })
+      .then((rows) => {
+        if (!alive) return;
+        setOffers((list) => {
+          const seen = new Set(list.map((o) => o.id));
+          return [...list, ...rows.filter((r) => !seen.has(r.id))];
+        });
+      })
+      .catch(() => {
+        /* best-effort: no chips is a fine degraded state */
+      });
+    const p = listen<CommentOffer>("comment-offer", (e) => {
+      if (!alive || e.payload.sessionId !== sessionId) return;
+      setOffers((list) =>
+        list.some((o) => o.id === e.payload.id) ? list : [...list, e.payload],
+      );
+    });
+    return () => {
+      alive = false;
+      void p.then((un) => un());
+    };
+  }, [sessionId]);
+
+  // Tap: create the real feedback comment. The comment pane update rides
+  // `comments-changed` through App, and its auto-focus on a `voice` comment is
+  // the visible confirmation — so on success the chip simply goes away.
+  const addOffer = useCallback((offer: CommentOffer) => {
+    setOfferBusy((b) => ({ ...b, [offer.id]: true }));
+    setOfferErrors(({ [offer.id]: _drop, ...rest }) => rest);
+    void invoke("comment_offer_add", { offerId: offer.id })
+      .then(() => {
+        setOffers((list) => list.filter((o) => o.id !== offer.id));
+      })
+      .catch((e) => {
+        const raw = String(e);
+        setOfferErrors((errs) => ({
+          ...errs,
+          [offer.id]: /no block .* in the latest revision/.test(raw)
+            ? "The plan changed under this item — ask again and I'll re-anchor it."
+            : raw,
+        }));
+      })
+      .finally(() => {
+        setOfferBusy(({ [offer.id]: _drop, ...rest }) => rest);
+      });
+  }, []);
+
+  const dismissOffer = useCallback((offer: CommentOffer) => {
+    setOffers((list) => list.filter((o) => o.id !== offer.id));
+    void invoke("comment_offer_dismiss", { offerId: offer.id }).catch(() => {});
+  }, []);
+
+  const groupedOffers = useMemo(
+    () => groupOffers(transcript, offers),
+    [transcript, offers],
+  );
 
   const stopSpeaking = useCallback(() => {
     // Stop what's playing AND stop feeding the queue — otherwise the reply that's
@@ -512,12 +828,15 @@ export function VoicePanel({
     streamingRef.current = "";
     if (!hadLiveTurn || interruptingRef.current) return;
     interruptingRef.current = true;
-    void invoke("voice_session_stop", { sessionId })
+    // `force`: this is the one stop that MUST cut a streaming turn — the user
+    // pressed stop, and discarding the in-flight reply is the whole point.
+    void invoke("voice_session_stop", { sessionId, force: true })
       .catch(() => {})
       .finally(() => {
         void invoke("voice_session_start", {
           sessionId,
           planMarkdown: markdownRef.current,
+          cwd: cwd ?? null,
         }).catch(() => {});
       });
     // Keep swallowing the killed child's exit/error past its stdout EOF, then
@@ -548,7 +867,7 @@ export function VoicePanel({
       discardSpeechRef.current = false; // speak the reply to this new turn
       queueRef.current?.primeTurn(); // start speaking at the first clause
       setTranscript((t) => [...t, { role: "you", text: youLabel }]);
-      void sendToSession(text).catch((e) => {
+      void sendToSession(text, youLabel).catch((e) => {
         turnLiveRef.current = false;
         setThinking(false);
         setError(String(e));
@@ -556,6 +875,18 @@ export function VoicePanel({
     },
     [sendToSession],
   );
+
+  // Typed turn (the chat half of the panel): same warm session, same
+  // transcript, same spoken reply — just entered without the mic. Typing
+  // mid-speech barges in like voice does.
+  const [typed, setTyped] = useState("");
+  const sendTyped = useCallback(() => {
+    const t = typed.trim();
+    if (!t || thinking) return;
+    setTyped("");
+    queueRef.current?.cancel();
+    sendTurn(t, t);
+  }, [typed, thinking, sendTurn]);
 
   // Send a *dictated* turn: polish the raw transcript through the AI cleanup
   // pass first (the Wispr-style layer), then hand it to `sendTurn`. Best-effort
@@ -823,11 +1154,13 @@ export function VoicePanel({
       setError("Nothing to read — the plan is empty.");
       return;
     }
+    // Local TTS only — no backend turn, so the marker is persisted directly.
     setTranscript((t) => [...t, { role: "you", text: "▶ Read the plan" }]);
+    persistNote("you", "▶ Read the plan");
     setLastSpoken(speakable);
     queueRef.current?.enqueue(speakable);
     queueRef.current?.flush();
-  }, []);
+  }, [persistNote]);
 
   const summarize = useCallback(() => {
     setWalkActive(false);
@@ -840,10 +1173,22 @@ export function VoicePanel({
     advanceWalk(0);
   }, [advanceWalk]);
 
+  // Report "a discussion is live here" to the host (see `onActivityChange`).
+  // Reported on unmount as false, so a closed panel never keeps suppressing the
+  // auto-switch.
+  const discussionLive = transcript.length > 0 || thinking;
+  useEffect(() => {
+    onActivityChange?.(discussionLive);
+  }, [discussionLive, onActivityChange]);
+  useEffect(
+    () => () => onActivityChange?.(false),
+    [onActivityChange],
+  );
+
   const busy = thinking;
-  // Drives the spinning-logo pulse in the header: fast fractal spin while
-  // thinking, a steady beat while speaking, a slow receptive spin while the mic
-  // is open, still otherwise.
+  // Drives the spinning-logo pulse in the header: a steady working spin while
+  // thinking or speaking, a slow receptive spin while the mic is open, still
+  // otherwise.
   const voicePulse: PulseState = thinking
     ? "thinking"
     : speechState === "speaking"
@@ -862,14 +1207,16 @@ export function VoicePanel({
         : { label: sessionUp ? "Ready" : "Warming up…", color: "var(--color-ink-muted, #888)" };
 
   return (
+    // A docked column, not a drawer: the panel fills the width its host dock
+    // was given (App owns that, so a drag never has to round-trip through this
+    // component's render — which fires on every streamed voice delta). Hence no
+    // width, no z-index and no drop shadow here; the border-left is the same
+    // seam the discussion sidecar uses.
     <div
-      className="absolute right-0 top-0 bottom-0 flex flex-col"
+      className="flex-1 min-w-0 flex flex-col"
       style={{
-        width: "min(380px, 92%)",
         background: "var(--color-bg-elevated)",
         borderLeft: "1px solid var(--color-rule)",
-        boxShadow: "-8px 0 24px rgba(0,0,0,0.16)",
-        zIndex: 30,
       }}
       data-tour="voice"
     >
@@ -1059,7 +1406,7 @@ export function VoicePanel({
             {transcript.map((line, i) =>
               line.role === "note" ? (
                 <div
-                  key={i}
+                  key={line.id ?? `i-${i}`}
                   className="mb-2"
                   style={{
                     color: "var(--color-ink-muted, #888)",
@@ -1070,19 +1417,31 @@ export function VoicePanel({
                   {line.text}
                 </div>
               ) : (
-                <div key={i} className="mb-2">
-                  <span
-                    style={{
-                      fontWeight: 600,
-                      color:
-                        line.role === "you"
-                          ? "var(--color-anchor-text)"
-                          : "var(--color-ink)",
-                    }}
-                  >
-                    {line.role === "you" ? "You" : "Claude"}:
-                  </span>{" "}
-                  <span style={{ color: "var(--color-ink)" }}>{line.text}</span>
+                <div key={line.id ?? `i-${i}`}>
+                  <div className="mb-2">
+                    <span
+                      style={{
+                        fontWeight: 600,
+                        color:
+                          line.role === "you"
+                            ? "var(--color-anchor-text)"
+                            : "var(--color-ink)",
+                      }}
+                    >
+                      {line.role === "you" ? "You" : "Claude"}:
+                    </span>{" "}
+                    <span style={{ color: "var(--color-ink)" }}>{line.text}</span>
+                  </div>
+                  {/* What this reply offered to add, if anything. */}
+                  <OfferRow
+                    offers={
+                      (line.id && groupedOffers.byMessage.get(line.id)) || []
+                    }
+                    busy={offerBusy}
+                    errors={offerErrors}
+                    onAdd={addOffer}
+                    onDismiss={dismissOffer}
+                  />
                 </div>
               ),
             )}
@@ -1094,6 +1453,16 @@ export function VoicePanel({
                 <span style={{ color: "var(--color-ink)" }}>{streaming}</span>
               </div>
             )}
+            {/* Offers not yet bound to a reply — under the one still streaming,
+                or at the tail once it has landed. Either way they stay tappable
+                rather than waiting on the join. */}
+            <OfferRow
+              offers={groupedOffers.loose}
+              busy={offerBusy}
+              errors={offerErrors}
+              onAdd={addOffer}
+              onDismiss={dismissOffer}
+            />
             {error && (
               <p style={{ color: "var(--color-danger, #c0392b)", marginTop: "8px" }}>
                 {error}
@@ -1211,6 +1580,55 @@ export function VoicePanel({
                 {partial || "Listening…"}
               </p>
             )}
+
+            {/* Typed turn — chat into the same conversation when you don't
+                want to talk. Enter sends; the reply is spoken as usual. */}
+            <form
+              className="flex items-center gap-1.5"
+              onSubmit={(e) => {
+                e.preventDefault();
+                sendTyped();
+              }}
+            >
+              <input
+                value={typed}
+                onChange={(e) => setTyped(e.target.value)}
+                placeholder="Or type instead…"
+                aria-label="Type a message to the voice agent"
+                spellCheck={false}
+                className="flex-1 rounded-md px-2.5 py-1.5"
+                style={{
+                  fontSize: "12.5px",
+                  border: "1px solid var(--color-rule)",
+                  background: "var(--color-paper)",
+                  color: "var(--color-ink)",
+                  outline: "none",
+                  minWidth: 0,
+                }}
+              />
+              <button
+                type="submit"
+                disabled={busy || !typed.trim()}
+                title="Send (Enter)"
+                className="rounded-md px-2.5 py-1.5"
+                style={{
+                  fontSize: "12px",
+                  fontWeight: 600,
+                  border: "1px solid var(--color-rule)",
+                  background:
+                    busy || !typed.trim()
+                      ? "transparent"
+                      : "var(--color-anchor-bg)",
+                  color:
+                    busy || !typed.trim()
+                      ? "var(--color-ink-muted)"
+                      : "var(--color-anchor-text)",
+                  cursor: busy || !typed.trim() ? "default" : "pointer",
+                }}
+              >
+                Send
+              </button>
+            </form>
 
             {/* Walkthrough controls — only while a guided walk is running. It
                 waits here for "Next section" instead of auto-running. */}
@@ -1386,3 +1804,7 @@ const transportBtn: React.CSSProperties = {
   color: "var(--color-ink)",
   cursor: "pointer",
 };
+
+/** Memoized: one of the center-pane surfaces that used to reconcile on
+ *  every frame of a divider drag. */
+export const VoicePanel = memo(VoicePanelBase);

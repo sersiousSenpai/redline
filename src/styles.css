@@ -527,6 +527,11 @@ body {
   system: extends decimal;
   suffix: ") ";
 }
+@counter-style rl-decimal-parenthetical {
+  system: extends decimal;
+  prefix: "(";
+  suffix: ") ";
+}
 @counter-style rl-lower-alpha-paren {
   system: extends lower-alpha;
   suffix: ") ";
@@ -559,24 +564,6 @@ body {
   suffix: " ";
 }
 
-/* Footnote references (Footnote extension): a superscript marker whose number
-   is drawn by a CSS counter so refs renumber automatically on any edit. */
-.rl-prose {
-  counter-reset: rl-footnote;
-}
-.rl-footnote {
-  counter-increment: rl-footnote;
-  cursor: pointer;
-  color: var(--color-info);
-  font-weight: 600;
-}
-.rl-footnote::before {
-  content: "[" counter(rl-footnote) "]";
-}
-.rl-footnote.ProseMirror-selectednode::before {
-  background: color-mix(in srgb, var(--color-info) 22%, transparent);
-  border-radius: 3px;
-}
 .rl-prose strong {
   font-weight: 600;
 }
@@ -761,11 +748,16 @@ body {
    ~64px of left padding so the gutter has room. Code blocks opt out (their
    own NodeView wrapper uses `overflow: hidden` for the rounded card, which
    would clip the pseudo-element).
+
+   Direct-child combinator on purpose: only TOP-LEVEL blocks get a label. A
+   nested block that still carries a stale id (see DraftBlockIds' clearing
+   pass) would otherwise draw its own label at `left: -56px` of its own
+   indented box — landing on top of the list marker and the ancestor's label.
 */
-.rl-prose [data-anchor-id] {
+.rl-prose > [data-anchor-id] {
   position: relative;
 }
-.rl-prose [data-anchor-id]::before {
+.rl-prose > [data-anchor-id]::before {
   content: attr(data-anchor-id);
   position: absolute;
   left: -56px;
@@ -785,14 +777,14 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.rl-prose [data-anchor-id]:hover::before,
-.rl-prose .rl-has-comments[data-anchor-id]::before {
+.rl-prose > [data-anchor-id]:hover::before,
+.rl-prose > .rl-has-comments[data-anchor-id]::before {
   opacity: 0.85;
   color: var(--color-commented-bar);
 }
 /* The "this block has open comments" dot. Sits in the same gutter so the
    eye scans a single column for both signals. */
-.rl-prose .rl-has-comments[data-anchor-id]::after {
+.rl-prose > .rl-has-comments[data-anchor-id]::after {
   content: "";
   position: absolute;
   left: -12px;
@@ -806,8 +798,8 @@ body {
 /* Code blocks render via a NodeView with a rounded card + overflow: hidden;
    the gutter pseudo-elements would be clipped. The anchor still exists in
    the DOM for selection/hit-testing — just no marginalia. */
-.rl-prose .rl-codeblock[data-anchor-id]::before,
-.rl-prose .rl-codeblock[data-anchor-id]::after {
+.rl-prose > .rl-codeblock[data-anchor-id]::before,
+.rl-prose > .rl-codeblock[data-anchor-id]::after {
   display: none;
 }
 
@@ -1201,6 +1193,43 @@ p.rl-block-modified {
   box-shadow: inset 0 0 0 1px var(--color-warning);
 }
 
+/* ── Plaintext "linting" — IDE-style token coloring ───────────────────────
+   The LintDecorations ProseMirror plugin tags tokens in the plan document with
+   `rl-lint rl-lint--<kind>` spans; these rules color them per the active lint
+   theme, keyed on <html data-lint>. Scoped to `.rl-prose` so only the document
+   text is affected, never the app chrome. When linting is off the plugin emits
+   no spans at all, so there's no "off" rule to write. Adding a new lint theme =
+   add a `:root[data-lint="<name>"]` block here + an entry in theme/lint.ts. */
+
+/* Cyberpunk — a neon duotone syntax glow (cyan / magenta / amber / mint) with a
+   faint bloom, echoing the "Synthwave / Cyberpunk" editor themes. Tuned for the
+   dark page the Terminal color theme provides, but harmless on any background. */
+:root[data-lint="cyberpunk"] .rl-prose .rl-lint {
+  /* A hair of extra weight makes tokens read as "code" against prose. */
+  font-weight: 500;
+}
+:root[data-lint="cyberpunk"] .rl-prose .rl-lint--num {
+  color: #ffd23f;
+  text-shadow: 0 0 6px color-mix(in srgb, #ffd23f 55%, transparent);
+}
+:root[data-lint="cyberpunk"] .rl-prose .rl-lint--str {
+  color: #5de6a8;
+  text-shadow: 0 0 6px color-mix(in srgb, #5de6a8 50%, transparent);
+}
+:root[data-lint="cyberpunk"] .rl-prose .rl-lint--kw {
+  color: #ff2e97;
+  font-weight: 700;
+  text-shadow: 0 0 8px color-mix(in srgb, #ff2e97 55%, transparent);
+}
+:root[data-lint="cyberpunk"] .rl-prose .rl-lint--url {
+  color: #00e5ff;
+  text-shadow: 0 0 7px color-mix(in srgb, #00e5ff 55%, transparent);
+}
+:root[data-lint="cyberpunk"] .rl-prose .rl-lint--punct {
+  color: #7fdcff;
+  text-shadow: 0 0 5px color-mix(in srgb, #7fdcff 45%, transparent);
+}
+
 /* ── Phase 1: rich code-block & mermaid presentation ──────────────────────
    Rendered by the CodeBlockView React NodeView. The `codeBlock` ProseMirror
    node is unchanged — this is presentation only. */
@@ -1445,7 +1474,10 @@ p.rl-block-modified {
    surrounding prose typography. */
 .rl-code-view {
   margin: 0;
-  padding: 16px 20px;
+  /* Horizontal inset comes from the per-row gutter cell + each code span's
+     0 16px padding (CodeView.tsx), mirroring the editor's gutter + .cm-line
+     padding — no padding here or the columns would drift apart. */
+  padding: 16px 0;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12.5px;
   line-height: 1.55;
@@ -1489,6 +1521,12 @@ p.rl-block-modified {
 .rl-code-view .hljs-template-variable,
 .rl-code-view .hljs-meta {
   color: var(--color-hl-variable);
+}
+/* syntect's `meta.tag` (angle brackets and intra-tag glue) stays ink, same as
+   lezer's unstyled angleBracket in the editor — pinned so the agreement can't
+   drift if a global hljs sheet ever appears. */
+.rl-code-view .hljs-tag {
+  color: var(--color-ink);
 }
 .rl-code-view .hljs-deletion {
   color: var(--color-hl-deletion);
@@ -1817,52 +1855,92 @@ p.rl-block-modified {
   }
 }
 
+/* One-shot acknowledgement flash on the element a focus gesture scrolled to
+   (comment highlight or fallback block). Info-tinted background that fades;
+   `forwards` holds the transparent end state until the JS timer removes the
+   class, so there's no end-of-animation snap. */
+@keyframes rl-focus-flash-kf {
+  0% { background-color: color-mix(in srgb, var(--color-info) 28%, transparent); }
+  100% { background-color: transparent; }
+}
+.rl-focus-flash {
+  animation: rl-focus-flash-kf 1.2s ease-out forwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rl-focus-flash {
+    animation: none;
+    outline: 2px solid var(--color-info);
+    outline-offset: 2px;
+  }
+}
+
 /* ── Conversation-mode pulse (PulseLogo) ─────────────────────────────────
-   The Redline strike-line blooms into a spinning fractal whose speed tracks
-   the fork's state: idle → still (just the strike), thinking/waiting → fast
-   fractal spin, streaming → a slower breathing beat. The extra blades only
-   surface while active, so an idle indicator reads as the plain logo. */
+   The Redline strike-line simply spins, at a speed that tracks the fork's
+   state: idle → still (the plain mark), listening → a slow receptive spin,
+   thinking/waiting and streaming → a steady working spin. */
 @keyframes rl-blades-spin {
   to {
     transform: rotate(360deg);
-  }
-}
-@keyframes rl-blades-beat {
-  0%,
-  100% {
-    transform: rotate(0deg) scale(1);
-  }
-  50% {
-    transform: rotate(20deg) scale(1.06);
   }
 }
 .rl-pulse-blades {
   transform-box: fill-box;
   transform-origin: center;
 }
-.rl-blade-extra {
-  transition: opacity 0.4s ease;
-}
-/* Idle: no spin, and the fractal blades fold away — just the strike-line. */
-.rl-pulse-blades[data-state="idle"] .rl-blade-extra {
-  opacity: 0 !important;
-}
-/* Listening (mic open): a slow, receptive spin, blades softly bloomed. */
+/* Listening (mic open): a slow, receptive spin. */
 .rl-pulse-blades[data-state="listening"] {
   animation: rl-blades-spin 2.4s linear infinite;
 }
-/* Thinking / waiting: fast fractal spin, blades fully bloomed. */
-.rl-pulse-blades[data-state="thinking"] {
-  animation: rl-blades-spin 0.7s linear infinite;
-}
-/* Streaming: a slower breathing beat while a reply flows. */
+/* Thinking / waiting and streaming: a steady working spin. */
+.rl-pulse-blades[data-state="thinking"],
 .rl-pulse-blades[data-state="streaming"] {
-  animation: rl-blades-beat 1.4s ease-in-out infinite;
+  animation: rl-blades-spin 1.2s linear infinite;
 }
 @media (prefers-reduced-motion: reduce) {
   .rl-pulse-blades[data-state="listening"],
   .rl-pulse-blades[data-state="thinking"],
   .rl-pulse-blades[data-state="streaming"] {
+    animation: none;
+  }
+}
+
+/* ── WorkingIndicator (shared "agent is working" cue) ────────────────────
+   A left-to-right shimmer over the label plus three staggered trailing dots.
+   The shimmer paints the text itself (background-clip: text) so it works on
+   any theme's muted-ink color without hardcoding a hue. */
+.rl-working-label {
+  background: linear-gradient(
+    90deg,
+    var(--color-ink-muted) 0%,
+    var(--color-ink) 50%,
+    var(--color-ink-muted) 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: rl-working-shimmer 1.8s linear infinite;
+}
+@keyframes rl-working-shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+.rl-working-dots span {
+  animation: rl-working-dot 1.2s ease-in-out infinite;
+}
+.rl-working-dots span:nth-child(2) { animation-delay: 0.2s; }
+.rl-working-dots span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes rl-working-dot {
+  0%, 100% { opacity: 0.25; }
+  50% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rl-working-label {
+    animation: none;
+    background: none;
+    color: var(--color-ink-muted);
+  }
+  .rl-working-dots span {
     animation: none;
   }
 }
@@ -1882,6 +1960,74 @@ p.rl-block-modified {
 }
 .rl-menu-item[aria-selected="true"]:hover {
   background: color-mix(in srgb, var(--color-ink) 8%, var(--color-anchor-bg));
+}
+/* Quick-open repo bubbles in the terminal tab bar. Resting state is nearly
+   invisible chrome; hover lifts one into an accent pill so the strip reads as
+   "somewhere to click" only when you go looking for it. */
+.rl-repo-bubble {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  padding: 0 9px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: color-mix(in srgb, var(--color-ink) 6%, transparent);
+  color: var(--color-ink-muted);
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease,
+    transform 140ms cubic-bezier(0.2, 0, 0, 1),
+    box-shadow 140ms ease;
+}
+.rl-repo-bubble:hover {
+  background: color-mix(in srgb, var(--color-info) 16%, transparent);
+  border-color: color-mix(in srgb, var(--color-info) 50%, transparent);
+  color: var(--color-ink);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+}
+.rl-repo-bubble:active {
+  transform: translateY(0) scale(0.97);
+  box-shadow: none;
+}
+.rl-repo-bubble:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-info) 70%, transparent);
+  outline-offset: 1px;
+}
+/* Its popover is up: hold the hover look so the bubble stays visually tied to
+   the panel hanging below it. */
+.rl-repo-bubble[aria-expanded="true"] {
+  background: color-mix(in srgb, var(--color-info) 16%, transparent);
+  border-color: color-mix(in srgb, var(--color-info) 50%, transparent);
+  color: var(--color-ink);
+}
+/* Instance-count dot — dim until you reach for it. */
+.rl-repo-bubble-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.5;
+  transition: opacity 140ms ease;
+}
+.rl-repo-bubble:hover .rl-repo-bubble-dot {
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rl-repo-bubble,
+  .rl-repo-bubble-dot {
+    transition: none;
+  }
+  .rl-repo-bubble:hover,
+  .rl-repo-bubble:active {
+    transform: none;
+  }
 }
 /* Settings rows (checkbox labels) whose resting background is transparent. */
 .rl-hover-wash:hover {
@@ -2212,6 +2358,57 @@ p.rl-block-modified {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 14px;
+}
+/* The Localhost dashboard's card grid. `auto-fill` rather than `auto-fit` on
+   purpose: auto-fit collapses empty tracks, so two servers would stretch into
+   two enormous half-window cards. auto-fill keeps the column rhythm and lets
+   the row simply end. */
+.rl-server-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 14px;
+}
+/* The capture shimmer. It lives on the OUTER padding ring of the thumb box, so
+   it stays visible while the native webview covers the inner box — the frame is
+   the only part of the card the DOM still owns mid-capture. */
+.rl-thumb-capturing {
+  background: conic-gradient(
+    from var(--rl-thumb-sweep, 0deg),
+    transparent 0deg,
+    var(--color-info) 40deg,
+    transparent 120deg,
+    transparent 360deg
+  );
+  animation: rl-thumb-sweep 1.4s linear infinite;
+}
+@property --rl-thumb-sweep {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+@keyframes rl-thumb-sweep {
+  to {
+    --rl-thumb-sweep: 360deg;
+  }
+}
+/* The retake button is a hover affordance — present but unobtrusive until the
+   pointer is on the card. */
+.rl-thumb-refresh {
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.rl-server-grid > *:hover .rl-thumb-refresh,
+.rl-thumb-refresh:focus-visible {
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rl-thumb-capturing {
+    animation: none;
+    background: var(--color-info);
+  }
+  .rl-thumb-refresh {
+    transition: none;
+  }
 }
 .rl-shortcut-group-title {
   font-size: 11px;
@@ -2777,4 +2974,169 @@ p.rl-block-modified {
 }
 @media (prefers-reduced-motion: reduce) {
   .rl-live-dot { animation: none; }
+}
+
+/* Table-of-contents rail: a quiet hover so entries feel clickable without
+   competing with the active-heading accent bar. */
+.rl-toc-item:hover {
+  background: color-mix(in srgb, var(--color-ink) 8%, transparent);
+}
+
+/* ── Terminal theme FX ──────────────────────────────────────────────────────
+   A whisper-quiet "cyberdeck" texture, active only under the Terminal theme.
+   Pure CSS (static gradients, no canvas / rAF): a faint blueprint grid, a
+   subtle horizontal scanline, and a cyan glow bleeding down from the top. Kept
+   at very low opacity so it reads as surface texture, never as a veil over the
+   document — the overlay is pointer-events:none and sits behind interactive
+   chrome via a fixed full-viewport layer at the back of the stacking context. */
+:root[data-theme="terminal"] body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image:
+    /* cyan glow from the top edge */
+    radial-gradient(
+      120% 60% at 50% -10%,
+      color-mix(in srgb, var(--color-info) 10%, transparent),
+      transparent 60%
+    ),
+    /* horizontal scanlines */
+    repeating-linear-gradient(
+      to bottom,
+      rgba(255, 255, 255, 0.018) 0px,
+      rgba(255, 255, 255, 0.018) 1px,
+      transparent 1px,
+      transparent 3px
+    ),
+    /* blueprint grid */
+    linear-gradient(
+      to right,
+      color-mix(in srgb, var(--color-info) 6%, transparent) 1px,
+      transparent 1px
+    ),
+    linear-gradient(
+      to bottom,
+      color-mix(in srgb, var(--color-info) 6%, transparent) 1px,
+      transparent 1px
+    );
+  background-size: 100% 100%, 100% 3px, 44px 44px, 44px 44px;
+}
+/* Keep the app's own layers above the texture. #root establishes a stacking
+   context so all real UI paints over the fixed ::before layer. */
+:root[data-theme="terminal"] #root {
+  position: relative;
+  z-index: 1;
+}
+
+/* ── Live resizing ─────────────────────────────────────────────────────────
+   A drag frame writes geometry straight onto the handful of elements that use
+   it (see `applyLiveLayout` in App.tsx) — never a custom property on a shared
+   ancestor, which would invalidate style for that ancestor's whole subtree on
+   every frame. What lives here is only what a single inline value can't say:
+   the discrete curtain state, and suppressing transitions mid-drag. */
+
+/* Drawer-reveal clips. Normally they clip the over-wide aside inside them; in
+   curtain state they let it spill OVER the document column, painted above. */
+.rl-sidebar-clip,
+.rl-pane-clip {
+  overflow: hidden;
+  /* Matches the overflow above, so this is free — and it stops a side pane's
+     width change from invalidating layout across the rest of the row. */
+  contain: layout paint;
+}
+.rl-sidebar-clip[data-rl-curtain],
+.rl-pane-clip[data-rl-curtain] {
+  overflow: visible;
+  position: relative;
+  z-index: 25;
+  /* Containment must lift with the clip: `contain: paint` would clip the
+     spilled curtain right back inside the flow width. */
+  contain: none;
+}
+/* The curtain's own drop shadow — what makes it read as painted over the doc
+   rather than beside it. */
+.rl-sidebar-clip[data-rl-curtain] .rl-sidebar-aside {
+  background: var(--color-paper);
+  box-shadow: 8px 0 24px rgba(0, 0, 0, 0.18);
+}
+.rl-pane-clip[data-rl-curtain] .rl-pane-aside {
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.18);
+}
+
+/* The document column is the DOM-heaviest thing that changes size, and it
+   already clips its own overflow — so containing it is free and keeps a pane
+   drag from invalidating layout across the editor.
+   The terminal dock is deliberately NOT contained: paint containment around a
+   WebGL canvas risks changing how it is composited, and the dock's own
+   overflow:hidden already bounds it. */
+.rl-doc-column {
+  contain: layout paint;
+}
+
+/* The post-release settle transitions must never fight a live drag: a width
+   animating toward last frame's value while the pointer is already elsewhere
+   is exactly the lag "smooth" means the absence of. */
+html[data-rl-resizing] [data-rl-pane] {
+  transition: none !important;
+}
+
+/* Controls that float in the document's margins yield when the text column
+   grows out to meet them. useTextClearance measures and flips the attribute;
+   these rules are the yielding.
+
+   Both stay animated during a pane drag, unlike the rule above: that one guards
+   values chasing a moving pointer, and these targets are binary — there is
+   nothing for them to lag behind. */
+
+/* The Discuss pill hinges up into a thin vertical tab against the pane edge —
+   ~110px of gutter given back for ~30px — icon on top, the word reading
+   downward. A rigid rotation about a pivot DiscussPill computes from the pill's
+   measured size (see its onMeasure); the pivot sits outside the box, which is
+   what lets one rotation carry the flat pill onto the standing one without a
+   composed translate sweeping it outside the pane's `contain: paint` box. */
+.rl-discuss-pill {
+  transition: transform 220ms cubic-bezier(0.2, 0, 0, 1);
+}
+.rl-discuss-pill[data-rl-stowed="1"] {
+  transform: rotate(90deg);
+}
+
+/* The Contents button sheds its label and is left as the bare ☰ it already
+   carries. max-width rather than display:none so the label slides away instead
+   of blinking out; the button keeps its padding, so what remains is a square
+   burger. The measurement caches the button's EXPANDED width — measuring the
+   burger would read "there's room now" and flip it straight back. */
+.rl-toc-btn {
+  gap: 6px;
+  transition: gap 180ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.rl-toc-btn-label {
+  display: inline-block;
+  overflow: hidden;
+  white-space: nowrap;
+  /* Measured onto the button so the slide starts moving immediately. A fixed
+     ceiling would spend the first third of the transition travelling from a
+     guess down to the label's real width, with nothing visibly happening. The
+     fallback only has to cover the frame before the first measurement. */
+  max-width: var(--rl-toc-label-w, 6rem);
+  transition:
+    max-width 180ms cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 120ms ease;
+}
+.rl-toc-btn[data-rl-burger="1"] {
+  gap: 0;
+}
+.rl-toc-btn[data-rl-burger="1"] .rl-toc-btn-label {
+  max-width: 0;
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rl-discuss-pill,
+  .rl-toc-btn,
+  .rl-toc-btn-label {
+    transition: none;
+  }
 }

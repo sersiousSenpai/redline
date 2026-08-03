@@ -30,7 +30,7 @@ pub const DISMISS_MESSAGE: &str =
 
 /// Reply when the server-side cap expires before the reviewer submits.
 pub const CAP_EXPIRED_MESSAGE: &str =
-    "The reviewer is still working through the code review. Re-run /redline-review \
+    "The reviewer is still working through the code review. Re-run /redline-code-review \
      when they're ready, or continue and ask them.";
 
 /// Conventional-comment labels the payload will carry. Serializer-side
@@ -164,7 +164,7 @@ pub fn serialize_review_payload(
     out.push_str("}\n\n");
     out.push_str(
         "Every ANNOTATION_ID above MUST appear as a key. Do not skip any. \
-         The user will re-run /redline-review to verify your fixes as the next \
+         The user will re-run /redline-code-review to verify your fixes as the next \
          review round.\n",
     );
     out
@@ -299,7 +299,7 @@ mod tests {
         a
     }
 
-    /// The payload byte-shape is a contract with the `/redline-review` skill —
+    /// The payload byte-shape is a contract with the `/redline-code-review` skill —
     /// golden-tested exactly like the plan-review payloads. Regenerate with:
     /// `UPDATE_GOLDEN=1 cargo test golden_review_feedback` and diff-review it.
     #[test]

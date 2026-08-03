@@ -1,10 +1,87 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
+
+import { rafCoalesce } from "../lib/raf";
+import type { RepoBubble } from "../lib/repoBubbles";
+import type { TabIcon } from "../lib/repoIcon";
+import { markImage } from "../lib/repoMarkImage";
+import { ErrorBoundary } from "./ErrorBoundary";
+import { RepoBubbles } from "./RepoBubbles";
 
 interface Tab {
   id: string;
   title: string;
+  /** This terminal's `claude` is held awaiting review and the tab isn't on
+   *  screen — the in-pane intercept strip can't be seen, so the tab carries a
+   *  small marker instead. */
+  held?: boolean;
+  /** The repo this terminal is in, as a logo or a monogram. */
+  icon?: TabIcon;
+  /** Set only when the resolved repo root disagrees with the label — `cd src`
+   *  inside redline — so the tooltip can explain why the mark and the words
+   *  say different things. */
+  repoRoot?: string;
+}
+
+/** The 14 px mark in front of a tab's label: the repo's own logo when it ships
+ *  one, otherwise the Julia set generated from its name (see `repoIcon.ts`).
+ *
+ *  The generated mark is not an error path — most repos ship no logo — so it
+ *  gets the same footprint and visual weight as a real one. It is also
+ *  deliberately theme-independent: a self-contained lit tile reads correctly
+ *  under every cycling theme without per-theme tuning.
+ *
+ *  `draggable={false}` matters: the tab strip reorders on raw pointer events,
+ *  and a native image drag starting inside the row would hijack the gesture. */
+function TabIconMark({ icon }: { icon: TabIcon }) {
+  // Keyed by src rather than a bare boolean so a tab that resolves to a
+  // different repo gets a fresh attempt instead of inheriting a stale failure.
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  const box = {
+    width: "14px",
+    height: "14px",
+    borderRadius: "3px",
+    flexShrink: 0,
+  } as const;
+
+  const logo = icon.src !== null && failedSrc !== icon.src ? icon.src : null;
+  const src = logo ?? markImage(icon.mark);
+  if (src !== null) {
+    return (
+      <img
+        src={src}
+        alt=""
+        aria-hidden
+        draggable={false}
+        onError={logo === null ? undefined : () => setFailedSrc(logo)}
+        // A logo is someone else's artwork and must not be cropped; the
+        // generated tile is square by construction and fills the box exactly.
+        style={{ ...box, objectFit: logo === null ? "cover" : "contain" }}
+      />
+    );
+  }
+  // No canvas at all — a flat chip in the mark's own hue still tells two tabs
+  // apart, which is the whole job.
+  return <span aria-hidden style={{ ...box, background: icon.tint }} />;
+}
+
+/** Resolve a drag commit against the CURRENT tab list — which may have
+ *  changed mid-drag (a shell exited and its tab closed, a new tab appeared).
+ *  The dragged tab is identified by id, never by its captured start index: a
+ *  stale index would reorder (or splice out) the wrong tab, and the wrong
+ *  tab's PTY is a killed session. Returns the {from, to} move to commit, or
+ *  null when nothing should happen (tab vanished, or already at rest). */
+export function resolveReorder(
+  tabIds: string[],
+  dragId: string,
+  target: number,
+): { from: number; to: number } | null {
+  const from = tabIds.indexOf(dragId);
+  if (from === -1) return null;
+  const to = Math.max(0, Math.min(tabIds.length - 1, target));
+  if (from === to) return null;
+  return { from, to };
 }
 
 interface TerminalTabBarProps {
@@ -33,6 +110,13 @@ interface TerminalTabBarProps {
   onToggleFullscreen: () => void;
   /** Commit a reorder: remove the tab at `from`, reinsert it at `to`. */
   onReorder: (from: number, to: number) => void;
+  /** Recent repos with their already-open terminals, for the quick-open strip
+   *  that fills the gap between the tabs and the actions. Empty disables it. */
+  repoBubbles?: readonly RepoBubble[];
+  /** Open a new terminal in this repo, with Claude launching in it. */
+  onOpenRepo?: (path: string) => void;
+  /** Focus an existing terminal (a bubble popover row). */
+  onFocusTerminal?: (id: string) => void;
 }
 
 interface DragState {
@@ -53,7 +137,7 @@ const DRAG_THRESHOLD = 4;
 // (not HTML5 DnD — Tauri's webview hijacks native drag for OS file drops): the
 // dragged tab follows the pointer while the others slide to make room, then
 // the new order commits on release.
-export function TerminalTabBar({
+function TerminalTabBarBase({
   tabs,
   activeId,
   fullscreen,
@@ -68,6 +152,9 @@ export function TerminalTabBar({
   onToggleSplit,
   onToggleFullscreen,
   onReorder,
+  repoBubbles,
+  onOpenRepo,
+  onFocusTerminal,
 }: TerminalTabBarProps) {
   const dragRef = useRef<DragState | null>(null);
   const tabEls = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -80,6 +167,19 @@ export function TerminalTabBar({
     target: number;
     started: boolean;
   }>({ id: null, dx: 0, target: -1, started: false });
+  // The drag's live truth. `drag` state exists only to paint it, and painting
+  // is worth doing at most once per frame — but the release must commit
+  // against the newest values, not whatever the last flushed frame rendered.
+  const liveDrag = useRef({ dx: 0, target: -1, started: false });
+  const paintDrag = useMemo(
+    () =>
+      rafCoalesce((id: string) => {
+        const l = liveDrag.current;
+        setDrag({ id, dx: l.dx, target: l.target, started: l.started });
+      }),
+    [],
+  );
+  useEffect(() => () => paintDrag.cancel(), [paintDrag]);
 
   const onPointerDown = (e: React.PointerEvent, id: string, index: number) => {
     // Left button only; the × close button opts out via data-noDrag.
@@ -105,6 +205,7 @@ export function TerminalTabBar({
       widths,
       lefts,
     };
+    liveDrag.current = { dx: 0, target: index, started: false };
     setDrag({ id, dx: 0, target: index, started: false });
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
   };
@@ -113,37 +214,62 @@ export function TerminalTabBar({
     const d = dragRef.current;
     if (!d) return;
     const dx = e.clientX - d.pointerStartX;
-    const started =
-      drag.started || Math.abs(dx) > DRAG_THRESHOLD;
+    const started = liveDrag.current.started || Math.abs(dx) > DRAG_THRESHOLD;
     if (!started) return;
 
-    // Center of the dragged tab in its travel, in bar-local coords.
+    // Center of the dragged tab in its travel, in bar-local coords. Geometry
+    // lookups are `?? 0`-guarded — the tab list can change mid-drag, leaving
+    // the captured widths/lefts arrays short.
     const draggedCenter =
-      d.lefts[d.originIndex] + d.widths[d.originIndex] / 2 + dx;
+      (d.lefts[d.originIndex] ?? 0) + (d.widths[d.originIndex] ?? 0) / 2 + dx;
 
     let target = d.originIndex;
     for (let i = 0; i < tabs.length; i++) {
       if (i === d.originIndex) continue;
-      const mid = d.lefts[i] + d.widths[i] / 2;
+      const mid = (d.lefts[i] ?? 0) + (d.widths[i] ?? 0) / 2;
       if (i > d.originIndex && draggedCenter > mid) target = Math.max(target, i);
       if (i < d.originIndex && draggedCenter < mid) target = Math.min(target, i);
     }
 
-    setDrag({ id: d.id, dx, target, started: true });
+    liveDrag.current = { dx, target, started: true };
+    paintDrag(d.id);
   };
 
   const endDrag = () => {
+    paintDrag.cancel();
     const d = dragRef.current;
-    if (d && drag.started && drag.target !== d.originIndex) {
-      onReorder(d.originIndex, drag.target);
+    const live = liveDrag.current;
+    if (d && live.started) {
+      // Resolve against the current tabs by id (see resolveReorder) — never
+      // trust the index captured at drag start. Read from `liveDrag`, not
+      // `drag`: a release in the same frame as the last move would otherwise
+      // commit the previous frame's target.
+      const r = resolveReorder(
+        tabs.map((t) => t.id),
+        d.id,
+        live.target,
+      );
+      if (r) onReorder(r.from, r.to);
     }
     dragRef.current = null;
+    liveDrag.current = { dx: 0, target: -1, started: false };
     setDrag({ id: null, dx: 0, target: -1, started: false });
   };
 
+  // If the dragged tab vanishes mid-drag (its shell exited and the tab
+  // closed), cancel the drag rather than committing against a ghost.
+  useEffect(() => {
+    if (drag.id && !tabs.some((t) => t.id === drag.id)) {
+      paintDrag.cancel();
+      dragRef.current = null;
+      liveDrag.current = { dx: 0, target: -1, started: false };
+      setDrag({ id: null, dx: 0, target: -1, started: false });
+    }
+  }, [tabs, drag.id, paintDrag]);
+
   const draggedWidth =
     dragRef.current && drag.id
-      ? dragRef.current.widths[dragRef.current.originIndex]
+      ? (dragRef.current.widths[dragRef.current.originIndex] ?? 0)
       : 0;
 
   return (
@@ -158,9 +284,14 @@ export function TerminalTabBar({
     >
       {/* The tab list scrolls horizontally when it overflows so the action
           cluster is never pushed off the edge. min-w-0 lets this flex child
-          shrink below its content width (the precondition for overflow), and
-          flex-1 lets it claim the space the actions don't. */}
-      <div className="flex items-stretch flex-1 min-w-0 overflow-x-auto rl-thin-scroll-x">
+          shrink below its content width (the precondition for overflow).
+          `flex: 0 1 auto` (rather than the old flex-1) keeps it at its content
+          width and lets the repo strip beside it take the leftover — it still
+          shrinks, and gets its scroll back, once the tabs fill the bar. */}
+      <div
+        className="flex items-stretch min-w-0 overflow-x-auto rl-thin-scroll-x"
+        style={{ flex: "0 1 auto" }}
+      >
       {tabs.map((t, i) => {
         const active = t.id === activeId;
         const isDragged = drag.started && t.id === drag.id;
@@ -192,7 +323,13 @@ export function TerminalTabBar({
               else e.stopPropagation();
             }}
             onPointerCancel={endDrag}
-            title={t.title}
+            title={[
+              t.title,
+              t.repoRoot ? `in ${t.repoRoot}` : null,
+              t.held ? "plan intercepted by redline" : null,
+            ]
+              .filter(Boolean)
+              .join(" — ")}
             className="flex items-center gap-1 px-3 shrink-0 cursor-pointer select-none"
             style={{
               color: active ? "var(--color-ink)" : "var(--color-ink-muted)",
@@ -218,6 +355,20 @@ export function TerminalTabBar({
                 : undefined,
             }}
           >
+            {t.held && (
+              // Same red as the in-pane intercept strip, so the two read as
+              // one signal.
+              <span
+                aria-hidden
+                className="shrink-0 rounded-full"
+                style={{
+                  width: "6px",
+                  height: "6px",
+                  background: "#e8553d",
+                }}
+              />
+            )}
+            {t.icon && <TabIconMark icon={t.icon} />}
             <span
               className="truncate"
               style={{ maxWidth: "140px" }}
@@ -250,6 +401,23 @@ export function TerminalTabBar({
         );
       })}
       </div>
+      {/* Quick-open repos, in the gap the tabs don't use. `flex: 1 1 0` inside
+          RepoBubbles means the strip claims only genuinely free space: it fills
+          a near-empty bar and collapses to nothing as tabs accumulate. Only the
+          strip carrying the actions shows it, so a split dock doesn't show the
+          row twice. Its own boundary — a crash in the measurement or popover
+          code silently drops the bubbles instead of taking the tab strip with
+          it. */}
+      {showActions && repoBubbles && repoBubbles.length > 0 && (
+        <ErrorBoundary fallback={() => null}>
+          <RepoBubbles
+            bubbles={repoBubbles}
+            split={split}
+            onOpenRepo={onOpenRepo ?? (() => {})}
+            onFocusTerminal={onFocusTerminal ?? (() => {})}
+          />
+        </ErrorBoundary>
+      )}
       {showActions && (
       <div className="flex items-center gap-1 px-2 shrink-0">
         <button
@@ -355,3 +523,7 @@ export function TerminalTabBar({
     </div>
   );
 }
+
+/** Memoized: the strip re-renders on every dock drag commit otherwise, once
+ *  per pane in a split. */
+export const TerminalTabBar = memo(TerminalTabBarBase);

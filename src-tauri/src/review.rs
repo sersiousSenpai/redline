@@ -726,7 +726,7 @@ pub(crate) fn parse_source_tag(tag: &str) -> Result<DiffSource, String> {
 /// Open (or continue) the review session for a repo: the newest existing
 /// session is re-targeted to the requested source and returned with its
 /// annotations intact; a repo with no session gets a fresh round-1 row. The
-/// blocking daemon route (P4) shares this so a `/redline-review` re-run and
+/// blocking daemon route (P4) shares this so a `/redline-code-review` re-run and
 /// the read-only pane land on the SAME review — that continuity is what the
 /// round/re-anchor model rides on.
 pub fn open_or_continue_review(
@@ -1041,7 +1041,7 @@ pub fn review_sessions_list(
 }
 
 /// Delete a review session outright (annotations, viewed marks, rounds) —
-/// the "start over" affordance. The next `/redline-review` in that repo
+/// the "start over" affordance. The next `/redline-code-review` in that repo
 /// mints a fresh round-1 session.
 #[tauri::command]
 pub fn review_delete(
@@ -1088,6 +1088,40 @@ pub fn review_annotation_update(
         .db
         .update_review_annotation(&annotation)
         .map_err(|e| e.to_string())?;
+    // Polis ledger: a reviewer verdict (an annotation carrying a resolution) is
+    // a decision worth recording.
+    if let Some(res) = annotation
+        .resolution
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        let ph = crate::ledger::decision_payload_hash(&[
+            ("annotation", &annotation.id),
+            ("status", &annotation.status),
+            ("resolution", res),
+        ]);
+        if let Err(e) = crate::ledger::record_decision(
+            &state.db,
+            crate::ledger::DecisionInput {
+                kind: crate::ledger::EventKind::ReviewVerdict,
+                author: None,
+                session_id: Some(&annotation.review_id),
+                ref_kind: "review_annotation",
+                ref_id: &annotation.id,
+                payload_hash: ph,
+            },
+        ) {
+            tracing::warn!(error = %e, "failed to record review verdict ledger event");
+        }
+        // Companion journal: a review verdict landed.
+        let _ = state.db.append_journal(
+            "review_verdict",
+            Some("review"),
+            Some(&annotation.review_id),
+            Some(&annotation.status),
+            None,
+        );
+    }
     emit_changed(&app, &annotation.review_id);
     Ok(())
 }
@@ -1688,7 +1722,7 @@ diff --git a/src/main.rs b/src/main.rs
     }
 
     async fn temp_repo() -> TempRepo {
-        let dir = std::env::temp_dir().join(format!("redline-review-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("redline-code-review-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let td = TempRepo(dir);
         let d = td.path();

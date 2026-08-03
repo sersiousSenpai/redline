@@ -97,4 +97,4 @@ REDLINE_REVIEW_RESOLUTIONS
   "rc-001": "<what you did for this annotation>"
 }
 
-Every ANNOTATION_ID above MUST appear as a key. Do not skip any. The user will re-run /redline-review to verify your fixes as the next review round.
+Every ANNOTATION_ID above MUST appear as a key. Do not skip any. The user will re-run /redline-code-review to verify your fixes as the next review round.

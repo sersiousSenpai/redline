@@ -2,7 +2,7 @@
 // Copyright 2026 Yusuf Al-Bazian
 import { useEffect, useRef, useState } from "react";
 import { THEMES } from "../theme/themes";
-import type { ThemeName } from "../theme/themes";
+import type { ThemeEntry, ThemeName } from "../theme/themes";
 import { useMenuOverlay } from "./menuOverlay";
 
 interface ThemePickerProps {
@@ -40,12 +40,13 @@ export function ThemePicker({ theme, onThemeChange }: ThemePickerProps) {
   // Hide the native browser webview while this menu is up (see useMenuOverlay).
   useMenuOverlay(open);
 
-  // Display order: the brand theme leads the list; the rest keep their
-  // declared order. THEMES[0] stays the fallback elsewhere, so we only
-  // reorder for presentation here.
+  // Display order: Terminal (the first-launch default) leads, Studio second,
+  // then the brand theme; the rest keep their declared order. THEMES[0] stays
+  // the fallback elsewhere, so we only reorder for presentation here.
+  const pinned: ThemeName[] = ["terminal", "studio", "redline"];
   const ordered = [
-    ...THEMES.filter((t) => t.name === "redline"),
-    ...THEMES.filter((t) => t.name !== "redline"),
+    ...pinned.map((name) => THEMES.find((t) => t.name === name)!),
+    ...THEMES.filter((t) => !pinned.includes(t.name)),
   ];
 
   // Close on outside click or Escape.
@@ -66,6 +67,44 @@ export function ThemePicker({ theme, onThemeChange }: ThemePickerProps) {
       document.removeEventListener("keydown", onKey);
     };
   }, [open]);
+
+  const renderOption = (t: ThemeEntry) => {
+    const selected = t.name === theme;
+    return (
+      <button
+        key={t.name}
+        type="button"
+        role="option"
+        aria-selected={selected}
+        onClick={() => {
+          if (!selected) onThemeChange(t.name);
+          setOpen(false);
+        }}
+        className="rl-menu-item w-full text-left px-3 py-2 flex items-center gap-2"
+        style={{
+          cursor: "pointer",
+          borderBottom: "1px solid var(--color-rule)",
+        }}
+      >
+        <Swatch bg={t.base.bg} fg={t.base.fg} />
+        <span
+          className="font-sans"
+          style={{
+            fontSize: "12px",
+            fontWeight: 600,
+            color: "var(--color-ink)",
+            flex: 1,
+            minWidth: 0,
+          }}
+        >
+          {t.label}
+        </span>
+        {selected && (
+          <span style={{ color: "var(--color-info)", fontSize: "11px" }}>✓</span>
+        )}
+      </button>
+    );
+  };
 
   return (
     <div ref={rootRef} data-tour="theme" className="relative">
@@ -105,47 +144,7 @@ export function ThemePicker({ theme, onThemeChange }: ThemePickerProps) {
             boxShadow: "0 8px 24px rgba(0,0,0,0.28)",
           }}
         >
-          {ordered.map((t) => {
-            const selected = t.name === theme;
-            return (
-              <button
-                key={t.name}
-                type="button"
-                role="option"
-                aria-selected={selected}
-                onClick={() => {
-                  if (!selected) onThemeChange(t.name);
-                  setOpen(false);
-                }}
-                className="rl-menu-item w-full text-left px-3 py-2 flex items-center gap-2"
-                style={{
-                  cursor: "pointer",
-                  borderBottom: "1px solid var(--color-rule)",
-                }}
-              >
-                <Swatch bg={t.base.bg} fg={t.base.fg} />
-                <span
-                  className="font-sans"
-                  style={{
-                    fontSize: "12px",
-                    fontWeight: 600,
-                    color: "var(--color-ink)",
-                    flex: 1,
-                    minWidth: 0,
-                  }}
-                >
-                  {t.label}
-                </span>
-                {selected && (
-                  <span
-                    style={{ color: "var(--color-info)", fontSize: "11px" }}
-                  >
-                    ✓
-                  </span>
-                )}
-              </button>
-            );
-          })}
+          {ordered.map((t) => renderOption(t))}
         </div>
       )}
     </div>

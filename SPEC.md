@@ -229,6 +229,7 @@ routes back the agent-in-document feature (§6.6):
 | `GET` | `/v1/sessions/:session_id/plan` | The published plan + a flat block index, so an agent can anchor to real `blk-` IDs |
 | `POST` | `/v1/sessions/:session_id/suggestions` | Post a tracked `edit` suggestion (rejected with a conflict if the target block no longer matches the supplied original) |
 | `POST` | `/v1/sessions/:session_id/comments` | Post a feedback comment |
+| `POST` | `/v1/sessions/:session_id/comment-offers` | *Offer* a feedback comment without writing it — the discussion panel renders a `＋ Add as item` chip under the reply, and only the user's tap creates the comment (max 2 per turn) |
 | `GET` | `/v1/sessions/:session_id/feedback` | Read back the assembled feedback |
 
 ### 3.6 Versioning

@@ -17,21 +17,31 @@ import { FontSize } from "./FontSize";
 import { LineHeight } from "./LineHeight";
 import { Indent } from "./Indent";
 import { ListStyle } from "./ListStyle";
-import { Footnote } from "./Footnote";
 import { SearchHighlight } from "./SearchHighlight";
 import { TableControls } from "./TableControls";
 import { TableAlign } from "./TableAlign";
 import { TrailingNode } from "./TrailingNode";
+import { BlockIdAttribute } from "./BlockIdAttribute";
+import { AnchorIdAttribute } from "./AnchorIdAttribute";
+import { DraftBlockIds } from "./DraftBlockIds";
+import { InsertionMark, DeletionMark } from "./TrackChanges";
+import { CommentHighlights } from "./CommentHighlights";
 
 /**
  * Extension set for the standalone Prompt Drafter — a Word-style document
  * editor used to author a prompt before launching a Claude Code plan session.
  *
- * Deliberately decoupled from `planExtensions`: the drafter is a throwaway
- * authoring surface with no review semantics, so it drops everything tied to
- * track-changes and the plan-review pipeline — Collaboration (Yjs CRDT),
- * BlockId/AnchorId attributes, the Insertion/Deletion marks, TrackChangesInput,
- * and the rich code-block NodeView (StarterKit's plain code block suffices).
+ * Deliberately decoupled from `planExtensions`: the drafter has no review
+ * pipeline, so it drops Collaboration (Yjs CRDT), TrackChangesInput (user
+ * keystrokes are plain edits, not proposals), and the rich code-block NodeView
+ * (StarterKit's plain code block suffices).
+ *
+ * What it now SHARES with the plan editor is agent-facing identity + tracked
+ * suggestions: BlockId/AnchorId attributes (ids self-minted by DraftBlockIds —
+ * there's no Rust parser round-trip to mint them), the Insertion/Deletion
+ * marks (agent write-suggestions render as pending tracked changes with
+ * accept/reject — see `../drafterSuggestions.ts`), and CommentHighlights (the
+ * draft comment sidecar anchors selections exactly like plan comments).
  *
  * What it keeps is the everyday Word toolset: headings, bold/italic/strike,
  * lists, blockquote, code/code block, hr, undo/redo (StarterKit), tables, plus
@@ -78,9 +88,6 @@ export function drafterExtensions(): Extensions {
     // parenthetical, …). Unlike the visual aids above, `listStyle` is semantic
     // and DOES serialize — the emitted marker matches what's on screen.
     ListStyle,
-    // Footnote references (superscript, CSS-auto-numbered). Also semantic: they
-    // serialize to markdown `[^n]` + a trailing definitions block.
-    Footnote,
     // Tables. Unlike the formatting aids above, tables DO serialize to markdown,
     // so they carry real structure into the sent prompt. `resizable` gives the
     // Word-like column drag handles.
@@ -100,5 +107,17 @@ export function drafterExtensions(): Extensions {
     // Always keep a trailing empty paragraph so the caret can land below a
     // divider/table/code block at the end of the document.
     TrailingNode,
+    // Agent-facing block identity: `blockId`/`anchorId` attributes rendered to
+    // the DOM (selection capture + suggestion addressing), with ids
+    // self-minted by DraftBlockIds since no Rust parse ever stamps a draft.
+    BlockIdAttribute,
+    AnchorIdAttribute,
+    DraftBlockIds,
+    // Tracked-change marks for agent write-suggestions (accept/reject). The
+    // drafter's own keystrokes stay plain edits — no TrackChangesInput here.
+    InsertionMark,
+    DeletionMark,
+    // Selection-anchored comment highlights for the draft sidecar.
+    CommentHighlights,
   ];
 }

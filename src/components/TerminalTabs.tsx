@@ -2,9 +2,11 @@
 // Copyright 2026 Yusuf Al-Bazian
 import {
   forwardRef,
+  memo,
   useCallback,
   useEffect,
   useImperativeHandle,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -13,6 +15,17 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { homeDir } from "@tauri-apps/api/path";
 import { usePersistedState } from "../theme/usePersistedState";
+import {
+  bumpMru,
+  groupTerminals,
+  orderRepos,
+  type TerminalRef,
+} from "../lib/repoBubbles";
+import { workSignal } from "../lib/termTitle";
+import { iconFor } from "../lib/repoIcon";
+import { useRepoIcons } from "../hooks/useRepoIcons";
+import type { ProjectOption } from "./ProjectPicker";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { TerminalTabBar } from "./TerminalTabBar";
 import { TerminalView, enqueuePtyOp } from "./TerminalView";
 import { TerminalSplitDivider } from "./TerminalSplitDivider";
@@ -37,6 +50,54 @@ interface TerminalTabsProps {
    *  the reviewer is currently watching. Best-effort: a "wrong" tab is still
    *  strictly better than the alternative of no inject at all. */
   onActiveTabChange?: (id: string) => void;
+  /** Dock terminals whose `claude` is currently held awaiting review. Each such
+   *  tab gets its own "plan intercepted by redline" strip inside its pane, so a
+   *  split dock shows the truth per pane rather than one dock-wide band. */
+  heldTerminalIds?: ReadonlySet<string>;
+  /** What each held terminal is stopped on, by tab id — the plan's title. The
+   *  repo popover names it, so a row says which piece of work that terminal is,
+   *  not just where it is. */
+  heldPlanTitles?: ReadonlyMap<string, string>;
+  /** Recent repo directories for the tab bar's quick-open bubbles. The same
+   *  list the drafter's launch picker uses — review sessions by recency, then
+   *  open folder workspaces. */
+  projectOptions?: readonly ProjectOption[];
+}
+
+/** How many repos the bubble strip will consider (what actually renders is
+ *  whatever fits) and how deep the click-order memory runs. */
+const MAX_BUBBLES = 12;
+
+/** The intercept strip. Text can't be injected into the held PTY, so this fakes
+ *  one line of terminal output: terminal bg + mono font + matching padding so
+ *  it sits on the glyph grid and reads as native output. Click-through, so the
+ *  shell underneath stays usable. Pinned to the bottom of whichever pane hosts
+ *  the held terminal — the tab wrapper is `position: absolute`, so it is the
+ *  containing block. */
+function InterceptStrip() {
+  return (
+    <div
+      aria-hidden
+      style={{
+        position: "absolute",
+        left: 0,
+        right: 0,
+        bottom: 0,
+        zIndex: 20,
+        pointerEvents: "none",
+        background: "var(--color-paper)",
+        fontFamily: "var(--font-mono)",
+        fontSize: 13,
+        lineHeight: "18px",
+        padding: "2px 8px",
+        color: "#e8553d",
+        whiteSpace: "pre",
+        overflow: "hidden",
+      }}
+    >
+      {"── plan intercepted by redline ──"}
+    </div>
+  );
 }
 
 /** Imperative handle so the host (App) can drive tab selection — used by the
@@ -55,6 +116,40 @@ function normPath(p: string): string {
   return p.replace(/\/+$/, "") || "/";
 }
 
+/** The directory a tab's label and repo mark describe — its live cwd,
+ *  normalized — or null when that's `$HOME` or `/`.
+ *
+ *  A bare shell in either isn't in a project, so it gets the "zsh" label and no
+ *  repo lookup at all: `$HOME` has no `.git`, so resolving it would hand the tab
+ *  a monogram for the user's own account name. */
+function tabProjectDir(
+  dir: string | null | undefined,
+  homePath: string | null,
+): string | null {
+  if (!dir) return null;
+  const n = normPath(dir);
+  if (n === "/" || (homePath !== null && n === homePath)) return null;
+  return n;
+}
+
+/** A tab's label: the basename of its project directory, or "zsh". */
+function tabBaseLabel(dir: string | null): string {
+  return dir === null ? "zsh" : dir.slice(dir.lastIndexOf("/") + 1) || "zsh";
+}
+
+/** `/Users/me/redline` → `~/redline`, so a tooltip stays readable. */
+function tildeify(path: string, homePath: string | null): string {
+  if (homePath && (path === homePath || path.startsWith(`${homePath}/`))) {
+    return `~${path.slice(homePath.length)}`;
+  }
+  return path;
+}
+
+/** Elements positioned by the inner split's ratio, tagged so the divider's
+ *  live path can find and move them directly (see `applySplitRatio`). */
+const SPLIT_A = "data-rl-split-a";
+const SPLIT_B = "data-rl-split-b";
+
 // Owns the set of terminal tabs and their lifecycle. Every tab's
 // <TerminalView> stays mounted (shells + scrollback persist); only the tabs
 // shown in a pane are `visible`. The dock can show one pane or be split into
@@ -67,7 +162,10 @@ function normPath(p: string): string {
 // close/reorder/cd, like iTerm2 / Terminal.app / VS Code.
 // New tabs open in $HOME by default; the "here" action opens in the focused
 // terminal's live working directory instead.
-export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
+// Memoized: a dock drag's one release commit (and any unrelated App state
+// change) must not walk the whole terminal fleet's tree.
+export const TerminalTabs = memo(
+  forwardRef<TerminalTabsHandle, TerminalTabsProps>(
   function TerminalTabs(
     {
       theme,
@@ -77,6 +175,9 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
       onActivityChange,
       collapsed,
       onActiveTabChange,
+      heldTerminalIds,
+      heldPlanTitles,
+      projectOptions,
     }: TerminalTabsProps,
     ref,
   ) {
@@ -92,6 +193,15 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
   const [splitRatio, setSplitRatio] = usePersistedState(
     "redline.terminalPane.splitRatio",
     0.5,
+    // The divider commits a ratio per frame during a drag; batch the
+    // localStorage writes so the drag stays main-thread-cheap.
+    { debounceMs: 250 },
+  );
+  // Click order for the repo bubbles: the repo you opened a terminal in last
+  // leads the strip, ahead of the host's own recency order.
+  const [recentDirs, setRecentDirs] = usePersistedState<string[]>(
+    "redline.terminalPane.recentDirs",
+    [],
   );
   const [unseen, setUnseen] = useState<Set<string>>(() => new Set());
   // Set when a window-close is intercepted because a terminal has moved off its
@@ -101,6 +211,22 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
   const split = paneB !== null;
   const focusedId = focusedPane === "B" && paneB ? paneB : paneA;
   const paneContainerRef = useRef<HTMLDivElement | null>(null);
+  // The dock root. The inner divider's live path reaches the elements it
+  // positions through here.
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  // Move everything the split ratio positions, without a render. Called once
+  // per frame by TerminalSplitDivider, and once more at rest.
+  const applySplitRatio = useCallback((r: number) => {
+    const root = rootRef.current;
+    if (!root) return;
+    const pct = `${r * 100}%`;
+    root
+      .querySelectorAll<HTMLElement>(`[${SPLIT_A}]`)
+      .forEach((el) => (el.style.width = pct));
+    root
+      .querySelectorAll<HTMLElement>(`[${SPLIT_B}]`)
+      .forEach((el) => (el.style.left = pct));
+  }, []);
 
   // Drop `id` from the unseen set (it's now on screen / chosen).
   const clearUnseen = (id: string) =>
@@ -400,6 +526,23 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
     // Keep the tab around so the user sees "[process exited]"; they close it.
   }, []);
 
+  // Last window title each terminal announced (OSC 0/2) — "what is running in
+  // here", for the repo popover. Stable identity, and it bails when the title
+  // is unchanged, so a shell that rewrites the same title on every prompt costs
+  // no render. Titles only arrive for tabs xterm has actually parsed: a hidden
+  // tab's bytes are stashed unparsed, so its title lands when it's next shown.
+  const [termTitles, setTermTitles] = useState<Map<string, string>>(
+    () => new Map(),
+  );
+  const handleTitle = useCallback((id: string, title: string) => {
+    setTermTitles((prev) => {
+      if (prev.get(id) === title) return prev;
+      const next = new Map(prev);
+      next.set(id, title);
+      return next;
+    });
+  }, []);
+
   // One stable callback per split role — avoids minting a fresh onPaneFocus for
   // every tab on each render.
   const focusPaneA = useCallback(() => setFocusedPane("A"), []);
@@ -487,57 +630,231 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
     };
   }, [paneA, paneB]);
 
+  // The project directory behind each tab's label, in tab order. Hoisted out of
+  // the bar-building memo below because the repo marks need it one step
+  // earlier — `useRepoIcons` resolves per directory, and a hook can't be called
+  // from inside a `useMemo` callback.
+  const tabDirs = useMemo(
+    () => tabs.map((t) => tabProjectDir(liveCwds.get(t.id) ?? t.cwd, homePath)),
+    [tabs, liveCwds, homePath],
+  );
+  // Cached per directory for the session, so this is a map read per render and
+  // not an `invoke`.
+  const repoIcons = useRepoIcons(tabDirs);
+
   // Project-aware labels: basename of the tab's live cwd ($HOME / root →
   // "zsh"), numbered per project in tab order — "redline 1, redline 2, zsh 1".
-  // Derived at render, so close/reorder/cd all renumber automatically.
-  const tabBaseLabel = (t: Tab): string => {
-    const dir = liveCwds.get(t.id) ?? t.cwd;
-    if (!dir) return "zsh";
-    const n = normPath(dir);
-    if (n === "/" || (homePath !== null && n === homePath)) return "zsh";
-    return n.slice(n.lastIndexOf("/") + 1) || "zsh";
+  // Derived at render, so close/reorder/cd all renumber automatically. Each
+  // also carries its repo's mark, which is anchored to the repo rather than the
+  // directory: `cd src` inside redline flips the label to "src" and keeps the
+  // redline logo.
+  //
+  // Memoized over exactly the inputs above: the strip and the bubbles are
+  // props of memoized children, and rebuilding these arrays on every render
+  // would hand them fresh identities and defeat that.
+  const { barTabs, repoBubbles } = useMemo(() => {
+    const labelCounts = new Map<string, number>();
+    // Built in the same pass as the bar's tabs so the bubbles' popover rows
+    // carry exactly the label the tab strip shows — one numbering, one source.
+    const terminalRefs: TerminalRef[] = [];
+    const nextTabs = tabs.map((t, i) => {
+      const projectDir = tabDirs[i] ?? null;
+      const label = tabBaseLabel(projectDir);
+      const n = (labelCounts.get(label) ?? 0) + 1;
+      labelCounts.set(label, n);
+      // A held terminal that IS on screen already carries its own strip; flag
+      // only the ones you can't see, so a background hold is still discoverable.
+      const onScreen = !collapsed && (t.id === paneA || t.id === paneB);
+      const title = `${label} ${n}`;
+      const dir = liveCwds.get(t.id) ?? t.cwd;
+      terminalRefs.push({
+        id: t.id,
+        dir,
+        label: title,
+        // What this one is *working on*: the plan it's holding for review, else
+        // whatever it announced as its window title — minus the cwd echoes
+        // every shell writes, which the row's location line already says.
+        work:
+          workSignal(heldPlanTitles?.get(t.id), termTitles.get(t.id), dir)
+            ?.text ?? null,
+        held: heldTerminalIds?.has(t.id) ?? false,
+        unseen: unseen.has(t.id),
+        // Same "really visible" test as the held marker: with the dock
+        // collapsed a pane's tab isn't on screen, so the popover shouldn't
+        // claim it is.
+        pane: !onScreen ? null : t.id === paneA ? "A" : "B",
+      });
+      const resolved =
+        projectDir === null ? undefined : repoIcons.get(projectDir);
+      // The mark says which repo, the label says which folder. Surface the
+      // resolved root in the tooltip only when the two disagree — otherwise it
+      // would just repeat the label back at you.
+      const repoName = resolved?.name ?? "";
+      return {
+        id: t.id,
+        title,
+        held: !onScreen && (heldTerminalIds?.has(t.id) ?? false),
+        icon: iconFor(resolved, label),
+        repoRoot:
+          resolved && repoName && repoName !== label
+            ? tildeify(resolved.root, homePath)
+            : undefined,
+      };
+    });
+    // Recent repos, each carrying the terminals already open in it.
+    return {
+      barTabs: nextTabs,
+      repoBubbles: groupTerminals(
+        orderRepos(projectOptions ?? [], recentDirs, homePath, MAX_BUBBLES),
+        terminalRefs,
+        homePath,
+      ),
+    };
+  }, [
+    tabs,
+    tabDirs,
+    repoIcons,
+    liveCwds,
+    homePath,
+    collapsed,
+    paneA,
+    paneB,
+    heldTerminalIds,
+    heldPlanTitles,
+    termTitles,
+    unseen,
+    projectOptions,
+    recentDirs,
+  ]);
+
+  // Clicking a bubble always opens a *new* terminal there (picking an existing
+  // one is what the popover is for), lands `claude` in it, and bumps the repo
+  // to the front of the strip. The point of the bubble is the whole errand —
+  // "work on that repo" — not a bare shell you then have to launch from; it is
+  // the "here + Claude" action aimed at a repo instead of the focused tab, so
+  // it uses the same spawn → 900ms → write pattern (let the shell's rc files
+  // settle before the command lands). Every effect lives in the handler, never
+  // in a setTabs updater — StrictMode double-invokes those (see closeTab).
+  const openRepoTerminal = (path: string) => {
+    setRecentDirs((prev) => bumpMru(prev, path, MAX_BUBBLES));
+    const id = addTab(path);
+    window.setTimeout(() => {
+      void invoke("pty_write", { id, data: "claude --permission-mode plan\r" });
+    }, 900);
   };
-  const labelCounts = new Map<string, number>();
-  const barTabs = tabs.map((t) => {
-    const label = tabBaseLabel(t);
-    const n = (labelCounts.get(label) ?? 0) + 1;
-    labelCounts.set(label, n);
-    return { id: t.id, title: `${label} ${n}` };
-  });
 
   // Position each tab's wrapper by its pane role using CSS only — never by
   // moving it to a different JSX parent, which would unmount/remount the
   // TerminalView and kill its PTY. Hidden tabs stack full-bleed (their own
   // display:none keeps them off screen).
+  //
+  // Resting geometry. The live drag overwrites `width`/`left` on the tagged
+  // elements directly (see `applySplitRatio`), so dragging the inner divider
+  // re-lays out the panes and both tab strips without a single React render,
+  // and no TerminalView is reconciled mid-drag.
+  const pctA = `${splitRatio * 100}%`;
   const wrapperStyle = (role: "A" | "B" | null): CSSProperties => {
     const base: CSSProperties = { position: "absolute", top: 0, bottom: 0 };
     if (!split || role === null) return { ...base, left: 0, right: 0 };
-    if (role === "A") return { ...base, left: 0, width: `${splitRatio * 100}%` };
-    return { ...base, left: `${splitRatio * 100}%`, right: 0 };
+    if (role === "A") return { ...base, left: 0, width: pctA };
+    return { ...base, left: pctA, right: 0 };
   };
+  /** Tag a pane wrapper so the live path can position it. */
+  const splitAttrs = (role: "A" | "B" | null) =>
+    !split || role === null ? {} : role === "A" ? { [SPLIT_A]: "" } : { [SPLIT_B]: "" };
 
   // Shared action-button wiring, reused by whichever strip carries the actions.
-  const barActions = {
+  //
+  // The handlers close over live state, so they change identity on every
+  // render — which would defeat TerminalTabBar's memo entirely. They're routed
+  // through a ref instead, leaving this object dependent only on the VALUES the
+  // bar actually renders from.
+  const handlersRef = useRef({
+    addTab,
+    addTabHere,
+    addTabHereClaude,
+    toggleSplit,
+    onFullscreenChange,
     fullscreen,
-    split,
-    onNew: () => addTab(null),
-    onNewHere: addTabHere,
-    onNewHereClaude: addTabHereClaude,
-    onToggleSplit: toggleSplit,
-    onToggleFullscreen: () => onFullscreenChange(!fullscreen),
-    onClose: closeTab,
-    onReorder: reorderTabs,
+    closeTab,
+    reorderTabs,
+    openRepoTerminal,
+    selectTab,
+  });
+  handlersRef.current = {
+    addTab,
+    addTabHere,
+    addTabHereClaude,
+    toggleSplit,
+    onFullscreenChange,
+    fullscreen,
+    closeTab,
+    reorderTabs,
+    openRepoTerminal,
+    selectTab,
   };
+  const stableHandlers = useMemo(
+    () => ({
+      onNew: () => handlersRef.current.addTab(null),
+      onNewHere: () => handlersRef.current.addTabHere(),
+      onNewHereClaude: () => handlersRef.current.addTabHereClaude(),
+      onToggleSplit: () => handlersRef.current.toggleSplit(),
+      onToggleFullscreen: () =>
+        handlersRef.current.onFullscreenChange(!handlersRef.current.fullscreen),
+      onClose: (id: string) => handlersRef.current.closeTab(id),
+      onReorder: (from: number, to: number) =>
+        handlersRef.current.reorderTabs(from, to),
+      onOpenRepo: (path: string) => handlersRef.current.openRepoTerminal(path),
+      onFocusTerminal: (id: string) => handlersRef.current.selectTab(id),
+    }),
+    [],
+  );
+  const barActions = useMemo(
+    () => ({ fullscreen, split, repoBubbles, ...stableHandlers }),
+    [fullscreen, split, repoBubbles, stableHandlers],
+  );
 
   return (
-    <div data-tour="terminal" className="flex flex-col h-full">
+    <div
+      data-tour="terminal"
+      className="flex flex-col h-full"
+      ref={rootRef}
+    >
+      {/* The strip and the divider are the risky render regions (drag math);
+          they get their own boundaries so a crash there can never unmount the
+          TerminalViews below — unmounting a TerminalView kills its PTY. */}
+      <ErrorBoundary
+        region="terminal tab bar"
+        fallback={(_err, reset) => (
+          <div
+            className="flex items-center gap-2 px-3 shrink-0"
+            style={{
+              height: "30px",
+              borderBottom: "1px solid var(--color-rule)",
+              background: "var(--color-bg-elevated)",
+              color: "var(--color-ink-muted)",
+              fontSize: "12px",
+            }}
+          >
+            <span>Tab bar hit a rendering error — terminals are unaffected.</span>
+            <button
+              type="button"
+              onClick={reset}
+              style={{ textDecoration: "underline", cursor: "pointer" }}
+            >
+              Reload tab bar
+            </button>
+          </div>
+        )}
+      >
       {split && paneB ? (
         // One tab strip per pane, aligned over its pane so a split session's
         // tab indicator sits above the pane it's actually running in.
         <div className="flex items-stretch shrink-0">
           <div
+            {...{ [SPLIT_A]: "" }}
             style={{
-              width: `${splitRatio * 100}%`,
+              width: pctA,
               borderRight: "1px solid var(--color-rule)",
             }}
           >
@@ -570,12 +887,17 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
           onSelect={selectTab}
         />
       )}
+      </ErrorBoundary>
       <div ref={paneContainerRef} className="flex-1 relative">
         {tabs.map((t) => {
           const role: "A" | "B" | null =
             t.id === paneA ? "A" : t.id === paneB ? "B" : null;
           return (
-            <div key={t.id} style={wrapperStyle(role)}>
+            <div
+              key={t.id}
+              {...splitAttrs(role)}
+              style={wrapperStyle(role)}
+            >
               <TerminalView
                 id={t.id}
                 cwd={t.cwd}
@@ -583,26 +905,39 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
                 visible={role !== null && !collapsed}
                 onActivity={handleActivity}
                 onExit={handleExit}
+                onTitle={handleTitle}
                 onPaneFocus={
                   role === "A" ? focusPaneA : role === "B" ? focusPaneB : undefined
                 }
               />
+              {role !== null &&
+                !collapsed &&
+                heldTerminalIds?.has(t.id) && <InterceptStrip />}
             </div>
           );
         })}
         {split && (
-          <TerminalSplitDivider
-            ratio={splitRatio}
-            onRatioChange={setSplitRatio}
-            containerRef={paneContainerRef}
-          />
+          // Null fallback: a crashed divider just disappears (toggle the
+          // split off/on to get it back); the panes keep their shells.
+          <ErrorBoundary fallback={() => null}>
+            <TerminalSplitDivider
+              ratio={splitRatio}
+              onRatioChange={setSplitRatio}
+              containerRef={paneContainerRef}
+              onLiveRatio={applySplitRatio}
+            />
+          </ErrorBoundary>
         )}
       </div>
       {showCloseConfirm && (
         <CloseConfirmModal
           onConfirm={() => {
-            // destroy() bypasses the onCloseRequested guard we set above.
-            void getCurrentWindow().destroy();
+            // destroy() bypasses the onCloseRequested guard we set above —
+            // and normal unmount teardown with it, so kill the shells first
+            // rather than leaving orphans to outlive the window.
+            void invoke("pty_kill_all")
+              .catch(() => {})
+              .finally(() => void getCurrentWindow().destroy());
           }}
           onCancel={() => setShowCloseConfirm(false)}
         />
@@ -610,4 +945,5 @@ export const TerminalTabs = forwardRef<TerminalTabsHandle, TerminalTabsProps>(
     </div>
   );
   },
+  ),
 );

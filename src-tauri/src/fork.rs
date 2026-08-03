@@ -20,13 +20,15 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::Serialize;
 use serde_json::Value;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdout};
 
-use crate::claude_proc::{classify_line, claude_command, resolve_claude_bin, StreamLine};
+use crate::claude_proc::{classify_line, resolve_claude_bin, StreamLine};
 use crate::db::Database;
-use crate::state::{now_millis, CommentKind, ReviewAnnotation, SessionStore, ThreadMessage};
+use crate::state::{
+    now_millis, CommentAttachment, CommentKind, ReviewAnnotation, SessionStore, ThreadMessage,
+};
 
 /// Where a thread's resumable fork-session id is persisted: plan comments
 /// store it on their `comments` row; review annotations on their
@@ -38,6 +40,9 @@ enum ThreadTarget {
     PlanComment,
     ReviewAnnotation,
     ReviewQuestion,
+    /// A Prompt Drafter sidecar thread — keys on `(draft_id, comment_id)`,
+    /// fork session persisted on the `draft_comments` row.
+    DraftComment,
 }
 
 /// Composite registry key. Comment ids are session-scoped (`c-001` restarts
@@ -52,6 +57,10 @@ fn fork_key(session_id: &str, comment_id: &str) -> String {
 /// needed — the registry owns the whole `Child`.
 struct ForkProc {
     child: Child,
+    /// Unix-ms when this turn was registered — surfaced by
+    /// `fork_thread_status` so a remounted thread can restore its elapsed
+    /// counter after a session switch.
+    started_at: i64,
 }
 
 type ForkRegistry = Arc<Mutex<HashMap<String, ForkProc>>>;
@@ -78,6 +87,107 @@ impl ForkState {
             db,
             claude_bin: Arc::new(OnceLock::new()),
         }
+    }
+
+    /// "Check in with a colleague" targeting a PLAN SESSION, for the
+    /// Companion's `/v1/global/consult`. Plan sessions are external terminal
+    /// claudes Redline must never disturb — so each consult runs an EPHEMERAL
+    /// read-only fork (`--resume <session_id> --fork-session`, the same trick
+    /// discussion threads use), returns the digest, and persists nothing: the
+    /// fork session id is thrown away, and there is no natural thread to write
+    /// check-in rows into (the exchange lives in the Companion's own thread).
+    pub async fn consult_plan(
+        &self,
+        session_id: String,
+        cwd: String,
+        question: String,
+    ) -> Result<String, String> {
+        if question.trim().is_empty() {
+            return Err("nothing to ask the colleague".to_string());
+        }
+        let key = format!("consult\u{0}{session_id}");
+        {
+            let guard = self.procs.lock().unwrap();
+            if guard.contains_key(&key) {
+                return Err(
+                    "that plan session is already being consulted — try again in a moment"
+                        .to_string(),
+                );
+            }
+        }
+        let framed = format!(
+            "You are an ephemeral read-only fork of this planning session. The \
+             user's COMPANION — their global cross-surface discussion — is \
+             checking in about THIS plan and its conversation so far. Synthesize \
+             what matters for their question as a tight DIGEST (not a transcript, \
+             not a new plan; never call ExitPlanMode). Be concise. Their \
+             question:\n\n{}",
+            question.trim()
+        );
+        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&framed));
+
+        let mut args: Vec<String> = discussion_fork_args("fork_plan", framed);
+        args.push("--resume".to_string());
+        args.push(session_id.clone());
+        args.push("--fork-session".to_string());
+
+        let claude_bin = self.claude_bin().await?;
+        let mut cmd = crate::claude_proc::claude_command_for_seat("fork_plan", &claude_bin);
+        let mut child = cmd
+            .current_dir(&cwd)
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| format!("failed to spawn claude: {e}"))?;
+        let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
+        let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
+        {
+            self.procs
+                .lock()
+                .unwrap()
+                .insert(
+                key.clone(),
+                ForkProc {
+                    child,
+                    started_at: now_millis(),
+                },
+            );
+        }
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(180),
+            crate::claude_proc::collect_turn(stdout, stderr),
+        )
+        .await;
+        let proc = { self.procs.lock().unwrap().remove(&key) };
+        let outcome = match outcome {
+            Ok(o) => o,
+            Err(_) => {
+                if let Some(mut p) = proc {
+                    let _ = p.child.start_kill();
+                }
+                let _ = self.db.record_friction(
+                    "turn_timeout",
+                    Some("fork"),
+                    Some(&key),
+                    Some("180s turn ceiling"),
+                );
+                return Err("the colleague took too long to respond".to_string());
+            }
+        };
+        if let Some(mut p) = proc {
+            let _ = p.child.wait().await;
+        }
+        if let Some(err) = outcome.errored {
+            return Err(err);
+        }
+        outcome
+            .final_text
+            .filter(|t| !t.trim().is_empty())
+            .ok_or_else(|| "the colleague produced no reply".to_string())
     }
 
     /// The resolved `claude` path, computing it on first call. Runs on the
@@ -147,12 +257,31 @@ struct ForkCancelled {
 /// plan section in view, read-only, and without re-triggering plan mode.
 /// Follow-up turns send the reviewer's text verbatim (the fork already carries
 /// the discussion context).
+/// Tell the fork about files the reviewer attached. Absolute local paths are the
+/// whole transport — this fork has `Read`, so naming them is enough. Returns an
+/// empty string when there are none, so the prompt stays byte-identical to the
+/// pre-attachment contract for every discussion without a file.
+fn attachments_block(attachments: &[CommentAttachment]) -> String {
+    if attachments.is_empty() {
+        return String::new();
+    }
+    let mut p = String::from(
+        "\nThey attached these files. Read them with the Read tool before \
+         answering — they are local paths:\n",
+    );
+    for a in attachments {
+        p.push_str(&format!("- {} ({})\n", a.path, a.mime));
+    }
+    p
+}
+
 fn build_first_turn_prompt(
     is_question: bool,
     anchor_id: &str,
     quoted: Option<&str>,
     opening: &str,
     prior_resolution: Option<&str>,
+    attachments: &[CommentAttachment],
 ) -> String {
     let mut p = String::from(
         "You are discussing a plan you produced earlier in this session with \
@@ -195,6 +324,7 @@ fn build_first_turn_prompt(
             }
         }
     }
+    p.push_str(&attachments_block(attachments));
     p.push_str(
         "\nFollow the `sidecar` skill for how to structure this reply: lead with \
          the answer, then add a table, mermaid diagram, or callout only when it \
@@ -205,6 +335,57 @@ fn build_first_turn_prompt(
          answer.",
     );
     p
+}
+
+// --- Spawn args -------------------------------------------------------------
+
+/// Base spawn args for a read-only **discussion fork** (the sidecar / code-review
+/// discussion modality). The tool surface is the read-only
+/// `Read,Grep,Glob,WebFetch,WebSearch` set PLUS `Bash` scoped — via
+/// `--allowedTools` — to the localhost daemon's `curl` bridge, in the same three
+/// quoting variants `claude_proc::bridge_args` uses. That scoped `curl` allow is
+/// the discussion fork's **ClassMemory retrieval surface**: the class-router in
+/// the `sidecar` / `conversation` skills walks `/v1/memory/*` to answer
+/// "what did I decide / research about X" against the user's own catalog.
+///
+/// This is a **conscious loosening** of the former read-only-no-`Bash` fork
+/// invariant (Phase 3 of the Polis program). The allow is a literal prefix
+/// confined to `http://127.0.0.1:7676/` — headless `-p` auto-denies any `Bash`
+/// invocation that doesn't match it — so a fork still cannot write files, run
+/// arbitrary commands, or reach any host but the local daemon. `Edit`/`Write`/
+/// `ExitPlanMode` stay out of `--tools`, and `--strict-mcp-config` still strips
+/// MCP. See `docs/protocol-verification.md` Experiment (i).
+///
+/// All fork spawn sites share this one builder so the tool surface can't
+/// drift between them; each caller appends its own `--resume [--fork-session]`
+/// tail. `prompt` is moved into the returned vector (arg position after `-p`).
+/// `seat` is the fork's Agent Seat category (`fork_plan` / `fork_review` /
+/// `fork_drafter`) — unconfigured categories add no flags, so the thread
+/// inherits its parent surface exactly (see `seat.rs`).
+fn discussion_fork_args(seat: &str, prompt: String) -> Vec<String> {
+    let mut args = vec![
+        "-p".to_string(),
+        prompt,
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--include-partial-messages".to_string(),
+        "--verbose".to_string(),
+        "--permission-mode".to_string(),
+        "default".to_string(),
+        "--tools".to_string(),
+        "Read,Grep,Glob,WebFetch,WebSearch,Bash".to_string(),
+        "--allowedTools".to_string(),
+        "WebSearch".to_string(),
+        "WebFetch".to_string(),
+        // The ONLY Bash allow: the localhost daemon curl bridge, three quotings
+        // (plain / single- / double-quoted URL) — identical to `bridge_args`.
+        "Bash(curl -s http://127.0.0.1:7676/*)".to_string(),
+        "Bash(curl -s 'http://127.0.0.1:7676/*)".to_string(),
+        "Bash(curl -s \"http://127.0.0.1:7676/*)".to_string(),
+        "--strict-mcp-config".to_string(),
+    ];
+    args.extend(crate::seat::flag_args(seat));
+    args
 }
 
 // --- Commands --------------------------------------------------------------
@@ -223,10 +404,13 @@ pub async fn fork_thread_send(
     session_id: String,
     comment_id: String,
     text: String,
+    // Files the reviewer dropped into this follow-up composer.
+    attachments: Option<Vec<CommentAttachment>>,
 ) -> Result<(), String> {
     if text.trim().is_empty() {
         return Err("empty message".to_string());
     }
+    let turn_attachments = attachments.unwrap_or_default();
     let key = fork_key(&session_id, &comment_id);
 
     // Reject a second concurrent turn for the same comment.
@@ -260,49 +444,73 @@ pub async fn fork_thread_send(
         body: text.clone(),
         status: "complete".to_string(),
         created_at: now_millis(),
+        attachments: turn_attachments.clone(),
     };
     fork.db
         .insert_thread_message(&user_msg)
         .map_err(|e| format!("failed to persist message: {e}"))?;
+    // The DB row is already touched by insert_thread_message; keep the
+    // in-memory store's activity stamp in step so the sidebar reorders.
+    store.touch(&session_id);
 
     // Build the turn prompt — wrapped on the first turn, verbatim after. The
     // first turn uses `text` (the frontend's seed) so the persisted user row
     // and the prompt stay identical.
     let prompt = match &prior_fork {
-        None => build_first_turn_prompt(
-            matches!(comment.kind, CommentKind::Question),
-            &comment.anchor_id,
-            comment.selection.as_ref().map(|s| s.quoted_text.as_str()),
-            &text,
-            comment.resolution.as_ref().map(|r| r.body.as_str()),
-        ),
-        Some(_) => text.clone(),
+        None => {
+            // Turn one sees everything already attached to the comment as well
+            // as anything dropped into this opening message.
+            let mut all = comment.attachments.clone();
+            all.extend(turn_attachments.iter().cloned());
+            build_first_turn_prompt(
+                matches!(comment.kind, CommentKind::Question),
+                &comment.anchor_id,
+                comment.selection.as_ref().map(|s| s.quoted_text.as_str()),
+                &text,
+                comment.resolution.as_ref().map(|r| r.body.as_str()),
+                &all,
+            )
+        }
+        // Follow-ups go verbatim, so a file dropped into one has to announce
+        // itself — otherwise the fork never learns the path exists.
+        Some(_) => format!("{text}{}", attachments_block(&turn_attachments)),
     };
 
-    // Read-only fork: built-in tools limited to Read/Grep/Glob plus the web
-    // tools (WebFetch/WebSearch) so the discussion can ground answers in external
-    // docs. `--allowedTools` is required for the web tools to actually run:
-    // headless `-p` auto-denies anything not allow-listed (Read/Grep/Glob are
-    // auto-approved). The web tools have no repo or plan side effects, so the
-    // read-only guarantee holds: Edit/Write/Bash/ExitPlanMode stay excluded and
-    // MCP is stripped. Never plan mode. See docs/protocol-verification.md
-    // Experiment (i).
-    let mut args: Vec<String> = vec![
-        "-p".to_string(),
-        prompt,
-        "--output-format".to_string(),
-        "stream-json".to_string(),
-        "--include-partial-messages".to_string(),
-        "--verbose".to_string(),
-        "--permission-mode".to_string(),
-        "default".to_string(),
-        "--tools".to_string(),
-        "Read,Grep,Glob,WebFetch,WebSearch".to_string(),
-        "--allowedTools".to_string(),
-        "WebSearch".to_string(),
-        "WebFetch".to_string(),
-        "--strict-mcp-config".to_string(),
-    ];
+    // Polis ledger: record the first-turn discussion prompt with its true
+    // surface + thread provenance (the parent is this comment's plan session —
+    // explicit, never inferred); keep every agent turn out of the global-hook
+    // capture stream.
+    if prior_fork.is_none() {
+        let _ = crate::ledger::record_session_link(
+            &fork.db,
+            "fork",
+            &comment_id,
+            "session",
+            &session_id,
+        );
+        crate::ledger::record_agent_prompt(
+            &fork.db,
+            crate::ledger::PromptSource::RustFirstTurn,
+            "fork",
+            &prompt,
+            Some(cwd.clone()),
+            Some(session_id.clone()),
+            None,
+            Some(crate::ledger::ThreadRef {
+                thread_kind: "fork",
+                thread_id: comment_id.clone(),
+                parent_session_id: Some(session_id.clone()),
+            }),
+        );
+    } else {
+        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+    }
+
+    // Read-only discussion fork: the Read/Grep/Glob + web tool surface plus the
+    // scoped localhost-daemon `curl` allow (the ClassMemory retrieval surface).
+    // Edit/Write/ExitPlanMode stay excluded and MCP is stripped; never plan mode.
+    // See `discussion_fork_args` and docs/protocol-verification.md Experiment (i).
+    let mut args: Vec<String> = discussion_fork_args("fork_plan", prompt);
     match &prior_fork {
         None => {
             args.push("--resume".to_string());
@@ -319,7 +527,7 @@ pub async fn fork_thread_send(
     // `claude_command` prepends the binary's own dir to PATH so an
     // `#!/usr/bin/env node` shebang (npm installs) finds its `node`.
     let claude_bin = fork.claude_bin().await?;
-    let mut cmd = claude_command(&claude_bin);
+    let mut cmd = crate::claude_proc::claude_command_for_seat("fork_plan", &claude_bin);
     let mut child = cmd
         .current_dir(&cwd)
         .args(&args)
@@ -347,7 +555,13 @@ pub async fn fork_thread_send(
         fork.procs
             .lock()
             .unwrap()
-            .insert(key.clone(), ForkProc { child });
+            .insert(
+                key.clone(),
+                ForkProc {
+                    child,
+                    started_at: now_millis(),
+                },
+            );
     }
     tauri::async_runtime::spawn(read_fork(
         app,
@@ -478,6 +692,7 @@ pub async fn review_thread_send(
         body: text.clone(),
         status: "complete".to_string(),
         created_at: now_millis(),
+        attachments: Vec::new(),
     };
     fork.db
         .insert_thread_message(&user_msg)
@@ -488,23 +703,35 @@ pub async fn review_thread_send(
         Some(_) => text.clone(),
     };
 
-    // Same read-only tool fence as plan threads (see fork_thread_send).
-    let mut args: Vec<String> = vec![
-        "-p".to_string(),
-        prompt,
-        "--output-format".to_string(),
-        "stream-json".to_string(),
-        "--include-partial-messages".to_string(),
-        "--verbose".to_string(),
-        "--permission-mode".to_string(),
-        "default".to_string(),
-        "--tools".to_string(),
-        "Read,Grep,Glob,WebFetch,WebSearch".to_string(),
-        "--allowedTools".to_string(),
-        "WebSearch".to_string(),
-        "WebFetch".to_string(),
-        "--strict-mcp-config".to_string(),
-    ];
+    if prior_fork.is_none() {
+        let _ = crate::ledger::record_session_link(
+            &fork.db,
+            "review_thread",
+            &annotation_id,
+            "review",
+            &review_id,
+        );
+        crate::ledger::record_agent_prompt(
+            &fork.db,
+            crate::ledger::PromptSource::RustFirstTurn,
+            "review_fork",
+            &prompt,
+            Some(cwd.clone()),
+            Some(review_id.clone()),
+            None,
+            Some(crate::ledger::ThreadRef {
+                thread_kind: "review_thread",
+                thread_id: annotation_id.clone(),
+                parent_session_id: Some(review_id.clone()),
+            }),
+        );
+    } else {
+        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+    }
+
+    // Same read-only discussion-fork tool surface as plan threads (scoped curl
+    // allow included — see `discussion_fork_args`).
+    let mut args: Vec<String> = discussion_fork_args("fork_review", prompt);
     // First turn: fresh session (no --resume). Follow-ups resume it.
     if let Some(fork_sid) = &prior_fork {
         args.push("--resume".to_string());
@@ -512,7 +739,7 @@ pub async fn review_thread_send(
     }
 
     let claude_bin = fork.claude_bin().await?;
-    let mut cmd = claude_command(&claude_bin);
+    let mut cmd = crate::claude_proc::claude_command_for_seat("fork_review", &claude_bin);
     let mut child = cmd
         .current_dir(&cwd)
         .args(&args)
@@ -539,7 +766,13 @@ pub async fn review_thread_send(
         fork.procs
             .lock()
             .unwrap()
-            .insert(key.clone(), ForkProc { child });
+            .insert(
+                key.clone(),
+                ForkProc {
+                    child,
+                    started_at: now_millis(),
+                },
+            );
     }
     tauri::async_runtime::spawn(read_fork(
         app,
@@ -637,6 +870,7 @@ pub async fn review_question_send(
         body: text.clone(),
         status: "complete".to_string(),
         created_at: now_millis(),
+        attachments: Vec::new(),
     };
     fork.db
         .insert_thread_message(&user_msg)
@@ -647,30 +881,42 @@ pub async fn review_question_send(
         Some(_) => text.clone(),
     };
 
-    // Same read-only tool fence as the annotation threads.
-    let mut args: Vec<String> = vec![
-        "-p".to_string(),
-        prompt,
-        "--output-format".to_string(),
-        "stream-json".to_string(),
-        "--include-partial-messages".to_string(),
-        "--verbose".to_string(),
-        "--permission-mode".to_string(),
-        "default".to_string(),
-        "--tools".to_string(),
-        "Read,Grep,Glob,WebFetch,WebSearch".to_string(),
-        "--allowedTools".to_string(),
-        "WebSearch".to_string(),
-        "WebFetch".to_string(),
-        "--strict-mcp-config".to_string(),
-    ];
+    if prior_fork.is_none() {
+        let _ = crate::ledger::record_session_link(
+            &fork.db,
+            "review_question",
+            &question_id,
+            "review",
+            &review_id,
+        );
+        crate::ledger::record_agent_prompt(
+            &fork.db,
+            crate::ledger::PromptSource::RustFirstTurn,
+            "review_question",
+            &prompt,
+            Some(cwd.clone()),
+            Some(review_id.clone()),
+            None,
+            Some(crate::ledger::ThreadRef {
+                thread_kind: "review_question",
+                thread_id: question_id.clone(),
+                parent_session_id: Some(review_id.clone()),
+            }),
+        );
+    } else {
+        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+    }
+
+    // Same read-only discussion-fork tool surface as the annotation threads
+    // (scoped curl allow included — see `discussion_fork_args`).
+    let mut args: Vec<String> = discussion_fork_args("fork_review", prompt);
     if let Some(fork_sid) = &prior_fork {
         args.push("--resume".to_string());
         args.push(fork_sid.clone());
     }
 
     let claude_bin = fork.claude_bin().await?;
-    let mut cmd = claude_command(&claude_bin);
+    let mut cmd = crate::claude_proc::claude_command_for_seat("fork_review", &claude_bin);
     let mut child = cmd
         .current_dir(&cwd)
         .args(&args)
@@ -687,7 +933,13 @@ pub async fn review_question_send(
         fork.procs
             .lock()
             .unwrap()
-            .insert(key.clone(), ForkProc { child });
+            .insert(
+                key.clone(),
+                ForkProc {
+                    child,
+                    started_at: now_millis(),
+                },
+            );
     }
     tauri::async_runtime::spawn(read_fork(
         app,
@@ -725,6 +977,235 @@ pub fn review_thread_discard(
     Ok(())
 }
 
+/// First-turn grounding for a Prompt Drafter sidecar thread: the anchored
+/// block + quoted selection + the live-doc route + the block-SCOPED write
+/// contract (this thread may only propose edits to its own block).
+fn build_draft_first_turn_prompt(
+    draft_id: &str,
+    comment: &crate::state::DraftComment,
+    opening: &str,
+) -> String {
+    let mut p = String::from(
+        "You are discussing one part of a document in Redline's Prompt Drafter — \
+         a PROMPT the user is authoring to launch a fresh Claude Code planning \
+         session. They anchored a comment to a block of the draft and opened \
+         this thread about it.\n\n",
+    );
+    if let Some(bid) = comment.block_id.as_deref().filter(|s| !s.is_empty()) {
+        p.push_str(&format!("The anchored block id: `{bid}`\n"));
+    }
+    if let Some(q) = comment
+        .sel_quoted_text
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        p.push_str("The text they selected:\n");
+        for line in q.lines() {
+            p.push_str("> ");
+            p.push_str(line);
+            p.push('\n');
+        }
+    }
+    p.push_str(&format!(
+        "\nThe live draft (the user edits it continuously — re-read before \
+         answering about wording; already permitted, no approval needed):\n  \
+         curl -s http://127.0.0.1:7676/v1/drafter/{draft_id}/doc\n\n\
+         You may propose an edit to YOUR anchored block only — post a tracked \
+         suggestion (rendered with accept/reject) with `commentId` set so the \
+         daemon can scope-check it. This write route needs the bearer token: add \
+         the two `--variable`/`--expand-header` flags shown after the URL, which \
+         import it straight from the environment — never write \
+         `$REDLINE_DAEMON_TOKEN` into the command yourself (requires curl \
+         >= 8.3):\n  \
+         curl -s http://127.0.0.1:7676/v1/drafter/{draft_id}/suggestions \
+         --variable %REDLINE_DAEMON_TOKEN= \
+         --expand-header \"Authorization: Bearer {{{{REDLINE_DAEMON_TOKEN}}}}\" -X POST \
+         -H 'Content-Type: application/json' -d '{{\"op\":\"replace_block\",\
+\"blockId\":\"<your block>\",\"original\":\"<its markdown as you read it>\",\
+\"markdown\":\"<your rewrite>\",\"commentId\":\"{comment_id}\",\
+\"agentId\":\"draft-thread\"}}'\n\
+         Ops allowed for you: `replace_block`, `insert_after`, `delete_block` — \
+         all against your anchored block. A 409 means the block changed or \
+         already carries an open suggestion: re-read the doc and retry. \
+         \"Discuss this paragraph\" must never rewrite the whole prompt.\n\n",
+        comment_id = comment.id,
+    ));
+    p.push_str("Their message:\n");
+    for line in opening.lines() {
+        p.push_str("> ");
+        p.push_str(line);
+        p.push('\n');
+    }
+    p.push_str(
+        "\nFollow the `sidecar` skill for how to structure the reply: lead with \
+         the answer, then add a table, mermaid diagram, or callout only when it \
+         adds signal. Respond in markdown — no raw HTML. Outside the scoped \
+         suggestion endpoint above you are read-only: do not edit files, do not \
+         produce a plan, and never call ExitPlanMode.",
+    );
+    p
+}
+
+/// Send a turn to a draft comment's discussion agent. Mirrors
+/// `review_thread_send` (fresh session on the first turn — a draft has no plan
+/// session to fork — resumed thereafter); messages persist in `thread_messages`
+/// keyed `(draft_id, comment_id)`.
+#[tauri::command]
+pub async fn draft_thread_send(
+    fork: tauri::State<'_, ForkState>,
+    app: AppHandle,
+    draft_id: String,
+    comment_id: String,
+    text: String,
+) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Err("empty message".to_string());
+    }
+    let key = fork_key(&draft_id, &comment_id);
+    {
+        let guard = fork.procs.lock().unwrap();
+        if guard.contains_key(&key) {
+            return Err("a reply is still streaming for this comment".to_string());
+        }
+    }
+
+    let comment = fork
+        .db
+        .get_draft_comment(&comment_id)
+        .map_err(|e| e.to_string())?
+        .filter(|c| c.draft_id == draft_id)
+        .ok_or_else(|| format!("no comment {comment_id} on draft {draft_id}"))?;
+    let cwd = fork
+        .db
+        .get_draft(&draft_id)
+        .ok()
+        .flatten()
+        .and_then(|(_, project, _, _)| project)
+        .filter(|p| !p.trim().is_empty())
+        .or_else(|| std::env::var("HOME").ok())
+        .unwrap_or_else(|| "/".to_string());
+    let prior_fork = fork.db.get_draft_comment_fork_session(&comment_id);
+
+    let user_msg = ThreadMessage {
+        id: uuid::Uuid::new_v4().to_string(),
+        session_id: draft_id.clone(),
+        comment_id: comment_id.clone(),
+        role: "user".to_string(),
+        body: text.clone(),
+        status: "complete".to_string(),
+        created_at: now_millis(),
+        attachments: Vec::new(),
+    };
+    fork.db
+        .insert_thread_message(&user_msg)
+        .map_err(|e| format!("failed to persist message: {e}"))?;
+
+    let prompt = match &prior_fork {
+        None => build_draft_first_turn_prompt(&draft_id, &comment, &text),
+        Some(_) => text.clone(),
+    };
+
+    if prior_fork.is_none() {
+        let _ = crate::ledger::record_session_link(
+            &fork.db,
+            "drafter_fork",
+            &comment_id,
+            "drafter",
+            &draft_id,
+        );
+        crate::ledger::record_agent_prompt(
+            &fork.db,
+            crate::ledger::PromptSource::RustFirstTurn,
+            "drafter_fork",
+            &prompt,
+            Some(cwd.clone()),
+            None,
+            None,
+            Some(crate::ledger::ThreadRef {
+                thread_kind: "drafter_fork",
+                thread_id: comment_id.clone(),
+                parent_session_id: None,
+            }),
+        );
+    } else {
+        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+    }
+
+    let mut args: Vec<String> = discussion_fork_args("fork_drafter", prompt);
+    if let Some(fork_sid) = &prior_fork {
+        args.push("--resume".to_string());
+        args.push(fork_sid.clone());
+    }
+
+    let claude_bin = fork.claude_bin().await?;
+    let mut cmd = crate::claude_proc::claude_command_for_seat("fork_drafter", &claude_bin);
+    let mut child = cmd
+        .current_dir(&cwd)
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                format!(
+                    "could not find the `claude` CLI (looked for `{claude_bin}`). \
+                     Install Claude Code, or launch Redline from a terminal \
+                     so it inherits your shell's PATH."
+                )
+            } else {
+                format!("failed to spawn claude: {e}")
+            }
+        })?;
+    let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
+    let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
+
+    {
+        fork.procs
+            .lock()
+            .unwrap()
+            .insert(
+                key.clone(),
+                ForkProc {
+                    child,
+                    started_at: now_millis(),
+                },
+            );
+    }
+    tauri::async_runtime::spawn(read_fork(
+        app,
+        fork.db.clone(),
+        fork.procs.clone(),
+        key,
+        draft_id,
+        comment_id,
+        ThreadTarget::DraftComment,
+        stdout,
+        stderr,
+    ));
+    Ok(())
+}
+
+/// Discard a draft comment's whole thread: kill any in-flight turn, delete its
+/// messages, clear the resume session. The comment stays.
+#[tauri::command]
+pub fn draft_thread_discard(
+    fork: tauri::State<'_, ForkState>,
+    draft_id: String,
+    comment_id: String,
+) -> Result<(), String> {
+    let key = fork_key(&draft_id, &comment_id);
+    let proc = { fork.procs.lock().unwrap().remove(&key) };
+    if let Some(mut proc) = proc {
+        let _ = proc.child.start_kill();
+    }
+    fork.db
+        .delete_thread(&draft_id, &comment_id)
+        .map_err(|e| format!("failed to delete thread: {e}"))?;
+    Ok(())
+}
+
 /// Load a comment's persisted discussion turns, oldest first.
 #[tauri::command]
 pub fn get_thread(
@@ -735,6 +1216,46 @@ pub fn get_thread(
     fork.db
         .load_thread(&session_id, &comment_id)
         .map_err(|e| format!("failed to load thread: {e}"))
+}
+
+/// Snapshot of whether a thread has a turn in flight right now.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForkThreadStatus {
+    pub streaming: bool,
+    pub started_at: Option<i64>,
+}
+
+/// Core lookup shared by the command and its test.
+fn thread_status_in(procs: &ForkRegistry, scope_id: &str, item_id: &str) -> ForkThreadStatus {
+    let guard = procs.lock().unwrap();
+    match guard.get(&fork_key(scope_id, item_id)) {
+        Some(p) => ForkThreadStatus {
+            streaming: true,
+            started_at: Some(p.started_at),
+        },
+        None => ForkThreadStatus {
+            streaming: false,
+            started_at: None,
+        },
+    }
+}
+
+/// Whether a discussion thread has a turn streaming right now, and since
+/// when. Generic over all four fork families — plan comments, review
+/// annotations, review questions, drafter comments — because they share one
+/// registry keyed by `fork_key(scope, item)`. Streaming state is otherwise
+/// component-local in the frontend: switching sessions unmounts the thread,
+/// and a remount would look idle mid-turn (silent thinking stretches emit no
+/// deltas) until the send path rejected with "a reply is still streaming".
+/// The thread components seed from this on mount instead.
+#[tauri::command]
+pub fn fork_thread_status(
+    fork: tauri::State<'_, ForkState>,
+    scope_id: String,
+    item_id: String,
+) -> ForkThreadStatus {
+    thread_status_in(&fork.procs, &scope_id, &item_id)
 }
 
 /// Kill the in-flight turn for a comment, if any. `read_fork` then sees the
@@ -907,6 +1428,9 @@ async fn read_fork(
                 ThreadTarget::ReviewQuestion => {
                     db.set_review_question_fork_session(&session_id, &comment_id, fork_sid)
                 }
+                ThreadTarget::DraftComment => {
+                    db.set_draft_comment_fork_session(&comment_id, fork_sid)
+                }
             };
             if let Err(e) = persisted {
                 tracing::warn!(error = %e, "failed to persist fork_session_id");
@@ -920,10 +1444,15 @@ async fn read_fork(
             body: text.clone(),
             status: "complete".to_string(),
             created_at: now_millis(),
+            attachments: Vec::new(),
         };
         if let Err(e) = db.insert_thread_message(&msg) {
             tracing::warn!(error = %e, "failed to persist assistant message");
         }
+        // Companion journal: a discussion-thread fork completed a turn.
+        let _ = db.append_journal("agent_turn", Some("fork"), Some(&comment_id), None, None);
+        // No-op for review/question threads, whose ids aren't plan sessions.
+        app.state::<SessionStore>().touch(&session_id);
         let _ = app.emit(
             "fork-done",
             ForkDone {
@@ -965,6 +1494,7 @@ fn finish_error(
         body: error.to_string(),
         status: "error".to_string(),
         created_at: now_millis(),
+        attachments: Vec::new(),
     };
     if let Err(e) = db.insert_thread_message(&msg) {
         tracing::warn!(error = %e, "failed to persist error thread message");
@@ -985,11 +1515,152 @@ mod tests {
 
     // stream-json line classification is covered by `claude_proc`'s own tests.
 
+    /// The draft-thread write contract authenticates via curl's own variable
+    /// import. It is built from a `format!` string, so the literal braces are
+    /// quadrupled in source; the wrong escape level renders `{TOKEN}` and the
+    /// suggestion silently 401s at runtime with nothing to see in the UI.
+    #[test]
+    fn draft_thread_prompt_imports_the_token_with_curl_not_the_shell() {
+        let comment = crate::state::DraftComment {
+            id: "c-1".to_string(),
+            draft_id: "d-9".to_string(),
+            block_id: Some("rl:blk-abc".to_string()),
+            sel_char_start: None,
+            sel_char_end: None,
+            sel_quoted_text: Some("the selected line".to_string()),
+            body: "tighten this".to_string(),
+            author: None,
+            created_at: 0,
+            fork_session_id: None,
+        };
+        let p = build_draft_first_turn_prompt("d-9", &comment, "what about X?");
+
+        // The URL stays immediately after `-s` so the command-prefix allow
+        // rules still match, with the auth flags after it.
+        assert!(p.contains("curl -s http://127.0.0.1:7676/v1/drafter/d-9/suggestions"));
+        assert!(p.contains(
+            "--variable %REDLINE_DAEMON_TOKEN= \
+             --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\""
+        ));
+        // Shell expansion never survives the agent bash sandbox.
+        assert!(!p.contains("Bearer $REDLINE_DAEMON_TOKEN"));
+        // The scoping payload still round-trips its `format!` args.
+        assert!(p.contains("\"commentId\":\"c-1\""));
+    }
+
+    /// The Phase-3 fork loosening must grant EXACTLY the scoped localhost-daemon
+    /// curl allow and nothing broader: no bare `Bash` allow, no other curl host,
+    /// and no write/plan tools in the tool set. This is the guard on the
+    /// consciously-widened read-only fork invariant.
+    #[test]
+    fn discussion_fork_args_grant_only_the_scoped_localhost_curl_allow() {
+        let args = discussion_fork_args("fork_plan", "the prompt".to_string());
+
+        // `-p <prompt>` leads; MCP is stripped; never plan mode.
+        assert_eq!(args[0], "-p");
+        assert_eq!(args[1], "the prompt");
+        assert!(args.iter().any(|a| a == "--strict-mcp-config"));
+        assert!(!args.iter().any(|a| a == "plan"), "must never be plan mode");
+
+        // The `--tools` set: Bash is present (for curl) but no write/plan tools.
+        let tools_idx = args.iter().position(|a| a == "--tools").unwrap();
+        let tools = &args[tools_idx + 1];
+        assert_eq!(tools, "Read,Grep,Glob,WebFetch,WebSearch,Bash");
+        for forbidden in ["Edit", "Write", "ExitPlanMode", "NotebookEdit", "Task"] {
+            assert!(
+                !tools.split(',').any(|t| t == forbidden),
+                "`{forbidden}` must not be in the discussion-fork tool set"
+            );
+        }
+
+        // The `--allowedTools` values run from just after the flag to the next
+        // flag (`--strict-mcp-config`). It must be EXACTLY the two web tools plus
+        // the three scoped-curl quoting variants — nothing else.
+        let allow_idx = args.iter().position(|a| a == "--allowedTools").unwrap();
+        let allow: Vec<&str> = args[allow_idx + 1..]
+            .iter()
+            .take_while(|a| !a.starts_with("--"))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            allow,
+            vec![
+                "WebSearch",
+                "WebFetch",
+                "Bash(curl -s http://127.0.0.1:7676/*)",
+                "Bash(curl -s 'http://127.0.0.1:7676/*)",
+                "Bash(curl -s \"http://127.0.0.1:7676/*)",
+            ],
+            "the allow-list must be exactly the web tools + the three scoped curl variants"
+        );
+
+        // No bare `Bash` allow (that would permit arbitrary commands), and every
+        // Bash allow targets ONLY the localhost daemon.
+        for a in &allow {
+            if a.starts_with("Bash(") {
+                assert!(
+                    a.contains("curl -s http://127.0.0.1:7676/")
+                        || a.contains("curl -s 'http://127.0.0.1:7676/")
+                        || a.contains("curl -s \"http://127.0.0.1:7676/"),
+                    "Bash allow `{a}` must be scoped to the localhost daemon"
+                );
+            }
+        }
+        assert!(
+            !allow.iter().any(|a| *a == "Bash"),
+            "a bare `Bash` allow would defeat the scoping — it must never appear"
+        );
+    }
+
     #[test]
     fn fork_key_is_session_scoped() {
         // The same comment id in different sessions must not collide.
         assert_ne!(fork_key("s1", "c-001"), fork_key("s2", "c-001"));
         assert_eq!(fork_key("s1", "c-001"), fork_key("s1", "c-001"));
+    }
+
+    #[test]
+    fn thread_status_streams_while_registered_and_idles_after_removal() {
+        // The status command is what lets a remounted thread rediscover an
+        // in-flight turn after a session switch — it must mirror the registry
+        // exactly: streaming (with the start stamp) while the entry exists,
+        // idle the moment it's removed.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let procs: ForkRegistry = Arc::new(Mutex::new(HashMap::new()));
+            let idle = thread_status_in(&procs, "scope-1", "item-1");
+            assert!(!idle.streaming);
+            assert_eq!(idle.started_at, None);
+
+            let child = tokio::process::Command::new("sleep")
+                .arg("30")
+                .kill_on_drop(true)
+                .spawn()
+                .expect("spawn sleep");
+            let key = fork_key("scope-1", "item-1");
+            procs.lock().unwrap().insert(
+                key.clone(),
+                ForkProc {
+                    child,
+                    started_at: 1234,
+                },
+            );
+
+            let live = thread_status_in(&procs, "scope-1", "item-1");
+            assert!(live.streaming);
+            assert_eq!(live.started_at, Some(1234));
+            // Scoping holds: the same item id in another scope reads idle.
+            assert!(!thread_status_in(&procs, "scope-2", "item-1").streaming);
+
+            let mut p = procs.lock().unwrap().remove(&key).unwrap();
+            let _ = p.child.start_kill();
+            let done = thread_status_in(&procs, "scope-1", "item-1");
+            assert!(!done.streaming);
+            assert_eq!(done.started_at, None);
+        });
     }
 
     #[test]
@@ -1000,6 +1671,7 @@ mod tests {
             Some("the detail section"),
             "Why this order?",
             None,
+            &[],
         );
         assert!(p.contains("Why this order?"));
         assert!(p.contains("the detail section"));
@@ -1012,7 +1684,7 @@ mod tests {
 
     #[test]
     fn first_turn_prompt_without_selection_uses_anchor_only() {
-        let p = build_first_turn_prompt(false, "B", None, "Reconsider this.", None);
+        let p = build_first_turn_prompt(false, "B", None, "Reconsider this.", None, &[]);
         assert!(p.contains("§B"));
         assert!(p.contains("left a comment"));
         assert!(p.contains("Reconsider this."));
@@ -1091,6 +1763,7 @@ mod tests {
             None,
             "But what about retries?",
             Some("I added exponential backoff in §A."),
+            &[],
         );
         assert!(p.contains("You previously resolved this comment with:"));
         assert!(p.contains("exponential backoff"));

@@ -29,11 +29,17 @@
              in sync with applyTheme.ts (FONT_STACK_KEY = "redline.fontStack"). */
           var f = localStorage.getItem("redline.fontStack");
           if (f) el.style.setProperty("--font-sans", f);
+          /* Replay the plaintext-lint theme as the data-lint attribute so the
+             editor's token coloring is right on first paint, kept in sync with
+             applyTheme.ts (LINT_KEY = "redline.lint"). */
+          var lint = localStorage.getItem("redline.lint");
+          if (lint) el.setAttribute("data-lint", lint);
           if (!raw) {
-            /* First-ever launch: match the Studio (default) @theme so the first
-               paint is dark, never white. */
-            el.style.backgroundColor = "#1a1a1f";
-            el.style.color = "#fafafa";
+            /* First-ever launch: match the Terminal (default) theme so the
+               first paint is its blue-black, never white. Kept in sync with
+               THEMES' terminal entry (themes.ts). */
+            el.style.backgroundColor = "#0a0e16";
+            el.style.color = "#d6e1ef";
           }
         } catch (e) {
           /* localStorage unavailable — fall through to stylesheet defaults */

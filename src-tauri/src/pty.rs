@@ -19,8 +19,8 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
@@ -43,6 +43,16 @@ const FLOW_HIGH_WATER: usize = 256 * 1024;
 /// child. If no ACK arrives within this window, read one more chunk anyway — a
 /// slow trickle (~one read per interval), not a flood.
 const FLOW_STALL_VALVE: Duration = Duration::from_millis(200);
+
+/// Lock a mutex, recovering from poisoning. A panic on any thread that held a
+/// PTY lock poisons that mutex; propagating the poison (the old `.unwrap()`)
+/// panicked whoever locked it next — on the Tauri main thread that's process
+/// teardown, which kills every shell at once. The data these mutexes guard
+/// (registry maps, byte buffers, counters) stays coherent mid-operation, so
+/// recovering the guard is always safe.
+fn lock_ok<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Accumulates PTY reads so a burst of many small reads flushes as one buffer
 /// instead of one IPC message per read. The whole point of the batching pump;
@@ -84,7 +94,7 @@ impl Pump {
         })
     }
     fn push(&self, bytes: &[u8]) {
-        self.buf.lock().unwrap().push(bytes);
+        lock_ok(&self.buf).push(bytes);
         self.cond.notify_one();
     }
     fn close(&self) {
@@ -120,25 +130,28 @@ impl Flow {
     }
     /// Account bytes just sent to the frontend.
     fn on_sent(&self, n: usize) {
-        self.inner.lock().unwrap().unacked += n;
+        lock_ok(&self.inner).unacked += n;
     }
     /// Frontend reports `n` bytes written into xterm — release that much credit.
     fn ack(&self, n: usize) {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = lock_ok(&self.inner);
         g.unacked = g.unacked.saturating_sub(n);
         self.cond.notify_all();
     }
     /// Unblock any parked reader (terminal killed / shell exited).
     fn close(&self) {
-        self.inner.lock().unwrap().closed = true;
+        lock_ok(&self.inner).closed = true;
         self.cond.notify_all();
     }
     /// Block while the renderer is more than `FLOW_HIGH_WATER` behind. Returns on
     /// ACK progress, on close, or after `FLOW_STALL_VALVE` (safety valve).
     fn wait_until_drained(&self) {
-        let mut g = self.inner.lock().unwrap();
+        let mut g = lock_ok(&self.inner);
         while g.unacked > FLOW_HIGH_WATER && !g.closed {
-            let (ng, res) = self.cond.wait_timeout(g, FLOW_STALL_VALVE).unwrap();
+            let (ng, res) = self
+                .cond
+                .wait_timeout(g, FLOW_STALL_VALVE)
+                .unwrap_or_else(|e| e.into_inner());
             g = ng;
             if res.timed_out() {
                 break;
@@ -173,6 +186,17 @@ struct PtySession {
 /// Monotonic spawn-generation counter (see `PtySession::generation`).
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
+/// Unix-ms of the most recent output from ANY live terminal — the "is a shell
+/// actively producing output" signal the background memory keeper consults to
+/// stay off the user's hot path. Bumped on every PTY read; 0 = no output yet.
+static LAST_PTY_OUTPUT_MS: AtomicI64 = AtomicI64::new(0);
+
+/// The most recent PTY-output timestamp (unix ms), or 0 if a terminal has never
+/// produced output this run. Read by `keeper::is_idle`.
+pub fn last_pty_output_ms() -> i64 {
+    LAST_PTY_OUTPUT_MS.load(Ordering::Relaxed)
+}
+
 /// Registry of live PTYs keyed by the frontend-assigned terminal id. The outer
 /// mutex guards only the map structure (insert/remove/lookup, microsecond
 /// criticals). Each session has its own inner mutex for write/resize I/O — so
@@ -191,7 +215,12 @@ struct PtyExit {
     id: String,
 }
 
-#[tauri::command]
+// Spawn/kill/resize/cwd run `#[tauri::command(async)]` (off the main IPC
+// thread): spawn forks a process, cwd shells out to `lsof` every poll tick,
+// and none of them need main-thread ordering. `pty_write`/`pty_ack` stay sync
+// on purpose — main-thread invocation order is what guarantees keystroke byte
+// order. The JS side (`enqueuePtyOp`) already fences spawn/kill/resize per id.
+#[tauri::command(async)]
 pub fn pty_spawn(
     app: AppHandle,
     state: tauri::State<'_, PtyState>,
@@ -201,7 +230,7 @@ pub fn pty_spawn(
     rows: u16,
     on_output: Channel<Response>,
 ) -> Result<(), String> {
-    let mut guard = state.0.lock().unwrap();
+    let mut guard = lock_ok(&state.0);
     if guard.contains_key(&id) {
         // Already running for this id — treat spawn as idempotent so a
         // component remount doesn't fork a second shell.
@@ -231,6 +260,11 @@ pub fn pty_spawn(
         cmd.cwd(dir);
     }
     cmd.env("TERM", "xterm-256color");
+    // Redline-spawned terminals are trusted children: a claude session (or
+    // any tool) running in a dock terminal authenticates to the daemon's
+    // protected /v1 routes with this per-boot token. Truly external
+    // terminals never see it — that asymmetry IS the auth model.
+    cmd.env(crate::auth::ENV_DAEMON_TOKEN, crate::auth::daemon_token());
 
     let mut child = pair
         .slave
@@ -279,7 +313,12 @@ pub fn pty_spawn(
             flow_for_reader.wait_until_drained();
             match reader.read(&mut buf) {
                 Ok(0) => break,
-                Ok(n) => pump_for_reader.push(&buf[..n]),
+                Ok(n) => {
+                    // Mark live-terminal activity so the memory keeper defers
+                    // while a shell is actively producing output.
+                    LAST_PTY_OUTPUT_MS.store(crate::ledger::now_millis(), Ordering::Relaxed);
+                    pump_for_reader.push(&buf[..n]);
+                }
                 Err(_) => break,
             }
         }
@@ -296,9 +335,9 @@ pub fn pty_spawn(
             // Park until there's data (or the reader closed) — an idle terminal
             // uses no CPU.
             {
-                let mut b = pump.buf.lock().unwrap();
+                let mut b = lock_ok(&pump.buf);
                 while b.is_empty() && !pump.closed.load(Ordering::Acquire) {
-                    b = pump.cond.wait(b).unwrap();
+                    b = pump.cond.wait(b).unwrap_or_else(|e| e.into_inner());
                 }
                 if b.is_empty() {
                     break; // closed and fully drained
@@ -307,7 +346,7 @@ pub fn pty_spawn(
             // Let the rest of a burst land before draining, so it ships as one
             // large message rather than many small ones.
             std::thread::sleep(COALESCE_WINDOW);
-            let chunk = pump.buf.lock().unwrap().take();
+            let chunk = lock_ok(&pump.buf).take();
             if chunk.is_empty() {
                 if pump.closed.load(Ordering::Acquire) {
                     break;
@@ -342,12 +381,21 @@ pub fn pty_spawn(
     std::thread::spawn(move || {
         let _ = child.wait();
         if let Some(state) = app.try_state::<PtyState>() {
-            let mut map = state.0.lock().unwrap();
-            let is_mine = map
+            // Never lock a session while holding the registry lock (that
+            // inverts the lock order used everywhere else). Snapshot the
+            // entry's Arc, drop the registry lock, check the generation, then
+            // re-take the registry lock and only remove if the SAME Arc is
+            // still installed — the id may have been re-registered in the gap.
+            let candidate = lock_ok(&state.0).get(&id_for_reaper).cloned();
+            let Some(candidate) = candidate else { return };
+            if lock_ok(&candidate).generation != generation {
+                return;
+            }
+            let mut map = lock_ok(&state.0);
+            if map
                 .get(&id_for_reaper)
-                .map(|s| s.lock().unwrap().generation == generation)
-                .unwrap_or(false);
-            if is_mine {
+                .is_some_and(|cur| Arc::ptr_eq(cur, &candidate))
+            {
                 map.remove(&id_for_reaper);
             }
         }
@@ -359,7 +407,7 @@ pub fn pty_spawn(
 /// Pull a session out of the registry without holding the outer lock across
 /// any I/O — the entire point of the per-session split.
 fn session_of(state: &PtyState, id: &str) -> Option<Arc<Mutex<PtySession>>> {
-    state.0.lock().unwrap().get(id).cloned()
+    lock_ok(&state.0).get(id).cloned()
 }
 
 #[tauri::command]
@@ -381,7 +429,7 @@ pub fn pty_write_bytes(state: &PtyState, id: &str, bytes: &[u8]) -> Result<(), S
     let Some(session) = session_of(state, id) else {
         return Ok(());
     };
-    let mut s = session.lock().unwrap();
+    let mut s = lock_ok(&session);
     s.writer
         .write_all(bytes)
         .map_err(|e| format!("pty write failed: {e}"))?;
@@ -389,7 +437,7 @@ pub fn pty_write_bytes(state: &PtyState, id: &str, bytes: &[u8]) -> Result<(), S
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pty_resize(
     state: tauri::State<'_, PtyState>,
     id: String,
@@ -397,7 +445,7 @@ pub fn pty_resize(
     rows: u16,
 ) -> Result<(), String> {
     let session = session_of(&state, &id).ok_or("no terminal running")?;
-    let s = session.lock().unwrap();
+    let s = lock_ok(&session);
     s.master
         .resize(PtySize {
             rows: rows.max(1),
@@ -415,18 +463,18 @@ pub fn pty_resize(
 #[tauri::command]
 pub fn pty_ack(state: tauri::State<'_, PtyState>, id: String, n: usize) {
     if let Some(session) = session_of(&state, &id) {
-        let flow = session.lock().unwrap().flow.clone();
+        let flow = lock_ok(&session).flow.clone();
         flow.ack(n);
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pty_kill(state: tauri::State<'_, PtyState>, id: String) -> Result<(), String> {
     // Remove from the registry (outer lock only), then kill the underlying
     // child outside any lock.
-    let session = { state.0.lock().unwrap().remove(&id) };
+    let session = { lock_ok(&state.0).remove(&id) };
     if let Some(session) = session {
-        let mut s = session.lock().unwrap();
+        let mut s = lock_ok(&session);
         s.expected_exit.store(true, Ordering::SeqCst); // suppress pty-exit
         s.flow.close(); // unpark the reader if it's gated on flow control
         let _ = s.killer.kill();
@@ -467,9 +515,16 @@ pub fn client_pid_and_terminal_for_port(
 
 /// Snapshot of live shell pids → their terminal tab ids.
 fn shell_pid_to_terminal(state: &PtyState) -> HashMap<u32, String> {
-    let map = state.0.lock().unwrap();
-    map.iter()
-        .filter_map(|(id, s)| s.lock().unwrap().pid.map(|pid| (pid, id.clone())))
+    // Snapshot the Arcs under the registry lock, then read each session's pid
+    // with the registry lock DROPPED — inner-while-outer locking here inverted
+    // the order every other path uses and could deadlock the whole dock.
+    let sessions: Vec<(String, Arc<Mutex<PtySession>>)> = lock_ok(&state.0)
+        .iter()
+        .map(|(id, s)| (id.clone(), s.clone()))
+        .collect();
+    sessions
+        .into_iter()
+        .filter_map(|(id, s)| lock_ok(&s).pid.map(|pid| (pid, id)))
         .collect()
 }
 
@@ -525,10 +580,10 @@ fn ppid_of(pid: u32) -> Option<u32> {
 /// The live working directory of a terminal's shell — so "open a terminal
 /// here" can follow wherever the user `cd`'d. macOS/Linux: ask `lsof` for the
 /// shell pid's `cwd` fd. Returns `None` if it can't be determined.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pty_cwd(state: tauri::State<'_, PtyState>, id: String) -> Option<String> {
     let session = session_of(&state, &id)?;
-    let pid = session.lock().unwrap().pid?;
+    let pid = lock_ok(&session).pid?;
     let output = std::process::Command::new("lsof")
         .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
         .output()
@@ -612,6 +667,25 @@ mod tests {
     }
 
     #[test]
+    fn lock_ok_recovers_a_poisoned_mutex() {
+        // A panic on a thread holding a PTY lock poisons the mutex; every
+        // later locker used to propagate that panic — on the Tauri main
+        // thread that meant process teardown and every shell dying at once.
+        // lock_ok must hand back the guard with the data intact instead.
+        let m = Arc::new(Mutex::new(7u32));
+        let m2 = m.clone();
+        let _ = std::thread::spawn(move || {
+            let _g = m2.lock().unwrap();
+            panic!("poison the lock");
+        })
+        .join();
+        assert!(m.lock().is_err(), "precondition: mutex must be poisoned");
+        assert_eq!(*lock_ok(&m), 7);
+        *lock_ok(&m) += 1;
+        assert_eq!(*lock_ok(&m), 8);
+    }
+
+    #[test]
     fn flow_gate_does_not_block_below_high_water() {
         // Under the high-water mark the reader must never park — interactive
         // output can't wait on an ACK that only comes after it's displayed.
@@ -621,16 +695,16 @@ mod tests {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn pty_kill_all(state: tauri::State<'_, PtyState>) -> Result<(), String> {
     // Drain the map (outer lock only), then kill each child outside the lock
     // so one stuck killer can't block the others.
     let drained: Vec<Arc<Mutex<PtySession>>> = {
-        let mut guard = state.0.lock().unwrap();
+        let mut guard = lock_ok(&state.0);
         guard.drain().map(|(_, v)| v).collect()
     };
     for session in drained {
-        let mut s = session.lock().unwrap();
+        let mut s = lock_ok(&session);
         s.expected_exit.store(true, Ordering::SeqCst); // suppress pty-exit
         s.flow.close();
         let _ = s.killer.kill();
