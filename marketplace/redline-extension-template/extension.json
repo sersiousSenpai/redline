@@ -1,0 +1,9 @@
+{
+  "name": "plan-greeter",
+  "version": "0.1.0",
+  "kind": "wasm",
+  "module": "extension.wasm",
+  "api_version": 1,
+  "scopes": ["plan.comment"],
+  "events": ["plan.received"]
+}

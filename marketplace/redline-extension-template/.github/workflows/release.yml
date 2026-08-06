@@ -1,0 +1,62 @@
+name: release
+# Tag `v<semver>` (matching Cargo.toml's version) to build the artifact,
+# draft a GitHub release carrying extension.wasm, and print the
+# ready-to-paste redline-extensions index entry in the job summary.
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Test (native, MockHost)
+        run: cargo test
+      - name: Build wasm
+        run: |
+          cargo build --release --target wasm32-unknown-unknown
+          NAME=$(sed -n 's/^name = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          cp "target/wasm32-unknown-unknown/release/${NAME//-/_}.wasm" extension.wasm
+      - name: Draft release with artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" extension.wasm --draft --title "${GITHUB_REF_NAME}"
+      - name: Print index entry
+        run: |
+          NAME=$(sed -n 's/^name = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          VERSION="${GITHUB_REF_NAME#v}"
+          SHA256=$(sha256sum extension.wasm | cut -d' ' -f1)
+          SIZE=$(stat -c%s extension.wasm)
+          SCOPES=$(node -p 'JSON.stringify(JSON.parse(require("fs").readFileSync("extension.json","utf8")).scopes)')
+          EVENTS=$(node -p 'JSON.stringify(JSON.parse(require("fs").readFileSync("extension.json","utf8")).events)')
+          {
+            echo '### Ready-to-paste `redline-extensions` index entry'
+            echo '```json'
+            cat <<ENTRY
+    {
+      "name": "${NAME}",
+      "version": "${VERSION}",
+      "publisher": "${GITHUB_REPOSITORY_OWNER}",
+      "repo": "https://github.com/${GITHUB_REPOSITORY}",
+      "artifact": {
+        "url": "https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/extension.wasm",
+        "sha256": "${SHA256}",
+        "size": ${SIZE}
+      },
+      "scopes": ${SCOPES},
+      "events": ${EVENTS},
+      "api_version": 1,
+      "license": "Apache-2.0",
+      "min_redline": "0.1.0",
+      "description": "…one line…",
+      "changelog": "https://github.com/${GITHUB_REPOSITORY}/releases"
+    }
+ENTRY
+            echo '```'
+            echo 'Publish the draft release, then open a PR adding this entry to redline-extensions/index.json.'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,6 @@
+# Build products — the release workflow (or ./build.sh) regenerates them.
+/target/
+/extension.wasm
+# Staged-in-redline only: the path dep would churn this; the extracted
+# template repo commits its own lockfile.
+Cargo.lock

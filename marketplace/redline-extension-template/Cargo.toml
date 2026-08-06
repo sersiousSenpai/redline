@@ -1,0 +1,28 @@
+# A Redline WASM extension. Rename the package (and the folder, and the
+# `name` in extension.json — all three must match) to your extension's name.
+[package]
+name = "plan-greeter"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+# Extensions are core-wasm dynamic libraries (`wasm32-unknown-unknown`).
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Staged path dep while this template lives inside the redline repo; flips
+# to the published crates.io version (same version line as the ABI's
+# api_version) when the template repo is extracted at marketplace launch:
+#   redline-extension-sdk = "1"
+redline-extension-sdk = { path = "../../src-tauri/crates/redline-extension-sdk" }
+serde_json = "1"
+
+# Standalone package — deliberately NOT a member of the app workspace (the
+# app never builds guest code; the release workflow builds it for wasm).
+[workspace]
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

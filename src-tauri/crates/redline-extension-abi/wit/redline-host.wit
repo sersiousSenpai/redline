@@ -1,0 +1,72 @@
+// Redline extension host — canonical IDL (ABI v1).
+//
+// This file is the interface's source of truth and its migration path to the
+// component model. ABI v1 is deliberately NOT component-model wasm: guests are
+// plain core-wasm modules (`wasm32-unknown-unknown`) and every record below
+// crosses the boundary as UTF-8 JSON in guest linear memory (pointer + length
+// pairs, buffers allocated via the guest's `rl-alloc`). No WASI: extensions
+// get no filesystem, network, environment, or clock — timestamps ride inside
+// event payloads as `ts-ms`.
+//
+// Core-wasm surface implementing this interface (see `redline-extension-abi`):
+//
+//   guest exports:
+//     rl_api_version() -> i32                                  api-version
+//     rl_alloc(len: i32) -> i32                                buffer alloc
+//     rl_free(ptr: i32, len: i32)                              buffer free
+//     rl_init() -> i32                                         init (0 = ok)
+//     rl_on_event(name_ptr, name_len, payload_ptr, payload_len) -> i32
+//   host imports (module "redline"):
+//     host_call(req_ptr: i32, req_len: i32) -> i64             packed ptr/len
+//     host_log(level: i32, msg_ptr: i32, msg_len: i32)
+//
+package redline:host@1.0.0;
+
+interface host {
+    /// One authorized call into Redline's local control plane. The request is
+    /// dispatched through the daemon's real router with the extension's
+    /// per-boot bearer token attached by the host — the token itself never
+    /// enters guest memory. Authorization is the same fail-closed
+    /// ROUTE_TABLE/scope decision an external HTTP client gets.
+    record host-call-request {
+        /// HTTP method: "GET", "POST", or "DELETE".
+        method: string,
+        /// Concrete route path, e.g. "/v1/browser/tabs".
+        path: string,
+        /// Request body as serialized JSON, if the route takes one.
+        body: option<string>,
+    }
+
+    record host-call-response {
+        /// HTTP status code (401 for scope denials, exactly as over HTTP).
+        status: u16,
+        /// Response body, usually JSON.
+        body: string,
+    }
+
+    host-call: func(req: host-call-request) -> host-call-response;
+
+    /// Log a line into Redline's tracing output. Levels: 0 debug, 1 info,
+    /// 2 warn, 3 error.
+    host-log: func(level: u32, message: string);
+}
+
+interface guest {
+    /// Must return the ABI major version the module was built against
+    /// (currently 1). A mismatch skips the module with a warning.
+    rl-api-version: func() -> u32;
+
+    /// Called once after instantiation, before any event. Non-zero return
+    /// counts as a strike.
+    rl-init: func() -> u32;
+
+    /// One event delivery: the event name (e.g. "plan.received") and its
+    /// payload as serialized JSON. Sequential per extension — the next event
+    /// waits for this one. Non-zero return counts as a strike.
+    rl-on-event: func(name: string, payload: string) -> u32;
+}
+
+world redline-extension {
+    import host;
+    export guest;
+}

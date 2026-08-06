@@ -1,0 +1,15 @@
+[package]
+name = "redline-extension-abi"
+version = "0.1.0"
+description = "ABI v1 for Redline WASM extensions: the WIT IDL, event payload types, host-call types, and scope/event name constants. The single source of truth shared by the Redline host and the extension SDK."
+authors = ["Yusuf Al-Bazian"]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/sersiousSenpai/redline"
+
+# Deliberately tiny: serde only. This crate must never depend on the app (or
+# on wasmi, axum, tauri…) — it is the neutral vocabulary both sides compile
+# against, and it publishes to crates.io with the first marketplace release.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

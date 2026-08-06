@@ -1,0 +1,15 @@
+[package]
+name = "redline-extension-sdk"
+version = "0.1.0"
+description = "SDK for writing Redline WASM extensions: the Extension trait, the export! macro wiring ABI v1's core-wasm surface, typed scope-grouped host-call helpers, and a MockHost for plain-Rust unit tests."
+authors = ["Yusuf Al-Bazian"]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/sersiousSenpai/redline"
+
+# What extension authors depend on. Depends on the ABI crate (never on the
+# app); publishes to crates.io in lockstep with `api_version`.
+[dependencies]
+redline-extension-abi = { path = "../redline-extension-abi", version = "0.1.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
