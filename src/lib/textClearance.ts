@@ -38,3 +38,37 @@ export function nextCollapsed(
   const gap = textLeft - ctrlRight;
   return prev ? gap < EXPAND_GAP : gap < COLLAPSE_GAP;
 }
+
+/** The Discuss pill's three poses, widest first: the flat pill, the rotated
+ *  vertical tab, and the bare icon circle. Generalizes the two-state collapse
+ *  to a stage ladder — same thresholds, same anti-flap band. */
+export type ClearanceStage = "full" | "stowed" | "icon";
+
+/** Widest → narrowest; the ladder walks this order. */
+export const STAGE_ORDER: readonly ClearanceStage[] = ["full", "stowed", "icon"];
+
+/** Widest stage whose right edge clears `deskLeft`; steps back up only at
+ *  EXPAND_GAP.
+ *
+ *  `rightEdge` maps each stage to its right edge in the same coordinate space
+ *  as `deskLeft` (viewport px), computed from constants + the control's
+ *  EXPANDED metrics — never from live layout of a collapsed pose, which would
+ *  feed the collapse back into the decision. A stage at or above the current
+ *  one (wider) must clear by EXPAND_GAP to be taken; holding the current
+ *  stage or stepping down needs only COLLAPSE_GAP — the same hysteresis
+ *  `nextCollapsed` has, per rung. */
+export function nextStage(
+  prev: ClearanceStage,
+  deskLeft: number,
+  rightEdge: Record<ClearanceStage, number>,
+): ClearanceStage {
+  const prevIdx = STAGE_ORDER.indexOf(prev);
+  for (let i = 0; i < STAGE_ORDER.length; i++) {
+    const stage = STAGE_ORDER[i];
+    const gap = deskLeft - rightEdge[stage];
+    const need = i < prevIdx ? EXPAND_GAP : COLLAPSE_GAP;
+    if (gap >= need) return stage;
+  }
+  // Nothing clears — the narrowest pose is the only honest one left.
+  return STAGE_ORDER[STAGE_ORDER.length - 1];
+}

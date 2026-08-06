@@ -3,11 +3,14 @@
 import { describe, it, expect } from "vitest";
 import {
   buildTree,
+  countDescendants,
+  proposalSubject,
   sortObservations,
   supersedeLabel,
   type ClassNode,
   type Observation,
-} from "./ClassMemoryPane";
+  type ProposalView,
+} from "./classTree";
 
 function node(partial: Partial<ClassNode> & { id: string }): ClassNode {
   return {
@@ -106,5 +109,53 @@ describe("sortObservations", () => {
     const sorted = sortObservations(input);
     expect(sorted.map((o) => o.id)).toEqual([1]);
     expect(input).toHaveLength(2);
+  });
+});
+
+describe("countDescendants", () => {
+  it("counts the whole subtree, not just direct children", () => {
+    const tree = buildTree([
+      node({ id: "root" }),
+      node({ id: "a", parentId: "root" }),
+      node({ id: "b", parentId: "root" }),
+      node({ id: "a1", parentId: "a" }),
+    ]);
+    expect(countDescendants(tree[0])).toBe(3);
+    expect(countDescendants(tree[0].children.find((c) => c.id === "a")!)).toBe(1);
+    expect(countDescendants(tree[0].children.find((c) => c.id === "b")!)).toBe(0);
+  });
+});
+
+describe("proposalSubject", () => {
+  function prop(partial: Partial<ProposalView> & { id: number; op: string }): ProposalView {
+    return {
+      nodeId: null,
+      parentId: null,
+      title: null,
+      summary: null,
+      extraJson: null,
+      rationale: null,
+      status: "proposed",
+      createdAt: 0,
+      nodeTitle: null,
+      citations: [],
+      ...partial,
+    };
+  }
+
+  it("prefers the subject node's resolved title", () => {
+    const p = prop({ id: 1, op: "collapse", nodeTitle: "Loop Engineering", title: "ignored" });
+    expect(proposalSubject(p)).toBe("Loop Engineering");
+  });
+
+  it("falls back to the proposed title, then the supersede seq pair", () => {
+    expect(proposalSubject(prop({ id: 2, op: "promote", title: "New topic" }))).toBe("New topic");
+    expect(
+      proposalSubject(prop({ id: 3, op: "supersede", extraJson: '{"old_seq":5,"new_seq":12}' })),
+    ).toBe("#5 → #12");
+  });
+
+  it("never renders blank — the row id is the last resort", () => {
+    expect(proposalSubject(prop({ id: 4, op: "merge" }))).toBe("proposal #4");
   });
 });

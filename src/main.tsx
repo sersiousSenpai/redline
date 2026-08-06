@@ -13,12 +13,49 @@ import {
   readStoredLint,
   readStoredTheme,
 } from "./theme/applyTheme";
+import {
+  BOOT_ATTR,
+  BOOT_FAILSAFE_MS,
+  BOOT_PLAYED_KEY,
+  shouldArm,
+} from "./lib/boot";
 
 // Apply the persisted theme + font + lint before first paint to avoid a flash
 // of the default theme/typeface on launch.
 applyTheme(readStoredTheme());
 applyFont(readStoredFont());
 applyLint(readStoredLint());
+
+// Doors-open boot (A2): stamp the closed frame before React mounts, so the
+// first frame the hidden window ever paints is the gathered plates —
+// useBootChoreography parts them after the reveal. Real launches only (the
+// sessionStorage flag survives reloads and HMR remounts in this tab) and
+// never under reduced motion. The module-scope timer is the dead-man switch:
+// if React never mounts, the attribute comes off and the native 2 s fallback
+// show reveals today's static layout — strand-proof with no React involved.
+let bootPlayed = true;
+try {
+  bootPlayed = sessionStorage.getItem(BOOT_PLAYED_KEY) === "1";
+} catch {
+  // Storage unavailable — treat as played; the boot is pure polish.
+}
+if (
+  shouldArm({
+    reducedMotion: window.matchMedia("(prefers-reduced-motion: reduce)")
+      .matches,
+    alreadyPlayed: bootPlayed,
+  })
+) {
+  document.documentElement.setAttribute(BOOT_ATTR, "closed");
+  try {
+    sessionStorage.setItem(BOOT_PLAYED_KEY, "1");
+  } catch {
+    // Same storage; unreachable when the read above succeeded.
+  }
+  window.setTimeout(() => {
+    document.documentElement.removeAttribute(BOOT_ATTR);
+  }, BOOT_FAILSAFE_MS);
+}
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>

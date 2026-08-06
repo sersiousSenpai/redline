@@ -87,6 +87,16 @@ export const clampChatRatio = (r: number): number =>
 export const SAFARI_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15";
 
+/** Px the measured webview slot is inset from its frame element. The native
+ *  webview is a square rect composited over a rounded plate (radius 10): a
+ *  square inset by at least r·(1−1/√2) ≈ 3px can never cross the border curve,
+ *  so 4px keeps the page clear of the plate's corners without reading as a
+ *  gap. Exported (with the helper below) so the geometry is pinned by test. */
+export const WEBVIEW_PLATE_INSET = 4;
+/** Fullscreen is a square window takeover — no plate, no inset. */
+export const webviewSlotInset = (fullscreen: boolean): number =>
+  fullscreen ? 0 : WEBVIEW_PLATE_INSET;
+
 // Native webviews are expensive OS resources, and React StrictMode mounts →
 // unmounts → remounts effects synchronously in dev (a fast toggle off/on does
 // the same). Destroying and recreating the webviews on every such cycle is
@@ -2108,8 +2118,10 @@ function BrowserPaneBase({
         // tab has no picture yet the pane is blank exactly as before.
         const shot = resizing && !effectiveVisible ? tabShots.get(activeId) : undefined;
         const slot = (
+          // Frame + measured slot. The frame owns layout; the webview tracks
+          // the INNER div's rect, inset from the frame so the square native
+          // rect never pokes through the document plate's rounded corners.
           <div
-            ref={slotRef}
             className={browserFullscreen ? "relative" : "flex-1 relative"}
             style={
               browserFullscreen
@@ -2123,23 +2135,31 @@ function BrowserPaneBase({
                 : { background: "var(--color-paper)" }
             }
           >
-            {shot && (
-              <img
-                src={shot}
-                alt=""
-                aria-hidden
-                draggable={false}
-                style={{
-                  position: "absolute",
-                  inset: 0,
-                  width: "100%",
-                  height: "100%",
-                  objectFit: "cover",
-                  objectPosition: "top left",
-                  pointerEvents: "none",
-                }}
-              />
-            )}
+            <div
+              ref={slotRef}
+              style={{
+                position: "absolute",
+                inset: `${webviewSlotInset(browserFullscreen)}px`,
+              }}
+            >
+              {shot && (
+                <img
+                  src={shot}
+                  alt=""
+                  aria-hidden
+                  draggable={false}
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    width: "100%",
+                    height: "100%",
+                    objectFit: "cover",
+                    objectPosition: "top left",
+                    pointerEvents: "none",
+                  }}
+                />
+              )}
+            </div>
           </div>
         );
         // Fullscreen takes over the whole pane — no chat split, just the slot.

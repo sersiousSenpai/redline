@@ -2,7 +2,7 @@
 // Copyright 2026 Yusuf Al-Bazian
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useState } from "react";
-import type { CSSProperties, ReactNode } from "react";
+import type { ReactNode } from "react";
 import type { InterceptionMode, ReviewSession } from "../types";
 import type { MainSurface } from "../lib/mainSurface";
 import type { SurfaceDescriptor, ToggleableSurface } from "../config/workspace";
@@ -20,6 +20,10 @@ import { AlertSettings } from "./AlertSettings";
 import { MemoryStatusPill } from "./MemoryStatusPill";
 import { LiveSessionMenu } from "./LiveSessionMenu";
 import { SettingsMenu } from "./SettingsMenu";
+import { ExtensionsPanel } from "./ExtensionsPanel";
+import { Button } from "./ui/Button";
+import { MenuSurface } from "./ui/MenuSurface";
+import { Pill } from "./ui/Pill";
 import type { SoundConfig } from "../audio/beep";
 import { latestDisplayVersion } from "../lib/revisionVersions";
 
@@ -42,76 +46,10 @@ function isInteractive(target: EventTarget | null): boolean {
   return false;
 }
 
-// One header control, styled consistently. New users couldn't read the old
-// bare-emoji buttons ("reminds me of dial-up"), so primary pane verbs now carry
-// a text `label` beside the glyph; low-traffic utilities stay glyph-only but
-// keep a `title` tooltip + `aria-label`. Same token-keyed look across themes.
-function HeaderButton({
-  onClick,
-  active = false,
-  disabled = false,
-  title,
-  ariaLabel,
-  icon,
-  label,
-  iconMono = false,
-  style,
-}: {
-  onClick: () => void;
-  active?: boolean;
-  disabled?: boolean;
-  title: string;
-  ariaLabel: string;
-  /** Omitted ⇒ text-only button (the default for primary verbs). */
-  icon?: ReactNode;
-  /** Present ⇒ the readable text label beside/instead of a glyph. */
-  label?: string;
-  /** A glyph that reads as a symbol in mono/bold (e.g. `±`, `⇲`). */
-  iconMono?: boolean;
-  style?: CSSProperties;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      title={title}
-      aria-label={ariaLabel}
-      aria-pressed={active}
-      className="flex items-center gap-1.5 rounded-sm px-2 py-0.5 font-sans"
-      style={{
-        fontSize: "11px",
-        lineHeight: 1,
-        border: "1px solid var(--color-rule)",
-        background: active
-          ? "var(--color-anchor-bg)"
-          : "var(--color-bg-elevated)",
-        color: active ? "var(--color-anchor-text)" : "var(--color-ink)",
-        cursor: disabled ? "default" : "pointer",
-        ...style,
-      }}
-    >
-      {icon != null && (
-        <span
-          aria-hidden
-          style={{
-            fontSize: "13px",
-            lineHeight: 1,
-            ...(iconMono
-              ? {
-                  fontFamily: "var(--font-mono, ui-monospace, monospace)",
-                  fontWeight: 700,
-                }
-              : null),
-          }}
-        >
-          {icon}
-        </span>
-      )}
-      {label && <span style={{ fontWeight: 600 }}>{label}</span>}
-    </button>
-  );
-}
+// Header controls are the shared ui/Button primitive (text labels for primary
+// pane verbs — new users couldn't read the old bare-emoji buttons; low-traffic
+// utilities stay glyph-only with a `title` tooltip + `aria-label`). The
+// surface radio group below composes them into one segmented control.
 
 interface HeaderProps {
   session: ReviewSession | null;
@@ -172,8 +110,16 @@ interface HeaderProps {
   splitVertical: boolean;
   /** Flip the split between side-by-side and stacked. */
   onToggleSplitOrientation: () => void;
-  /** Open the one quiet memory surface (the read-mostly inspector). */
+  /** Snap every plate back to the canonical resting shape (⌘⇧0). */
+  onSnapBack: () => void;
+  /** Open the ⌘K command palette. The button matters beyond discoverability:
+   *  keystrokes focused inside the native browser webview never reach our
+   *  DOM, so over the browser surface this is how ⌘K exists at all. */
+  onOpenPalette: () => void;
+  /** Land on the Memory main surface (the pill popover's primary action). */
   onOpenMemory: () => void;
+  /** The quick-inspector modal (the pill popover's escape hatch). */
+  onOpenMemoryInspector: () => void;
   /** A live collaboration room is active (sharing or joined). */
   collabActive: boolean;
   /** Invite needs an active plan session to share. */
@@ -223,7 +169,10 @@ export function Header({
   splitActive,
   splitVertical,
   onToggleSplitOrientation,
+  onSnapBack,
+  onOpenPalette,
   onOpenMemory,
+  onOpenMemoryInspector,
   collabActive,
   canInvite,
   onInvite,
@@ -285,7 +234,7 @@ export function Header({
     : 0;
   return (
     <header
-      className="flex items-center justify-end gap-4 pl-20 pr-6 py-2"
+      className="rl-app-header flex items-center justify-end gap-4 pl-20 pr-6 py-2"
       onMouseDown={(e) => {
         if (e.button !== 0) return;
         if (isInteractive(e.target)) return;
@@ -297,36 +246,67 @@ export function Header({
       }}
     >
       <div className="flex items-center gap-3">
-        <div className="flex items-center gap-1.5" role="radiogroup" aria-label="Main pane surface">
-          {/* Surface radio group — clicking full-switches the center pane
-              (clicking the active surface is a no-op). Membership and order
-              come from the workspace manifest; right-click edits in place.
-              Text-only labels (no glyphs; the emoji read as toy-like and one
-              filled its button). The tooltip carries the longer description. */}
-          {surfaces.map(({ id, label, title }) => (
-            <span
-              key={id}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                setCtxMenu({ x: e.clientX, y: e.clientY, id });
-              }}
-            >
-              <HeaderButton
-                onClick={() => {
-                  if (surface !== id) onSelectSurface(id);
+        <div className="flex items-center gap-1.5">
+          {/* Surface picker — one segmented control (a floating control
+              cluster on the canvas) instead of a loose row of buttons.
+              Clicking full-switches the center pane (clicking the active
+              surface is a no-op). Membership and order come from the
+              workspace manifest; right-click edits in place. Text-only
+              labels; the tooltip carries the longer description. */}
+          <div
+            className="flex items-stretch overflow-hidden"
+            role="radiogroup"
+            aria-label="Main pane surface"
+            style={{
+              border: "1px solid var(--color-rule)",
+              borderRadius: "var(--rl-radius-control)",
+              background: "var(--color-bg-elevated)",
+            }}
+          >
+            {surfaces.map(({ id, label, title }, i) => (
+              <span
+                key={id}
+                className="flex"
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setCtxMenu({ x: e.clientX, y: e.clientY, id });
                 }}
-                active={surface === id}
-                title={surface === id ? `${label} is showing` : title}
-                ariaLabel={title}
-                label={label}
-              />
-            </span>
-          ))}
+              >
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={surface === id}
+                  aria-label={title}
+                  title={surface === id ? `${label} is showing` : title}
+                  onClick={() => {
+                    if (surface !== id) onSelectSurface(id);
+                  }}
+                  className="font-sans px-2.5 py-1"
+                  style={{
+                    fontSize: "var(--rl-text-xs)",
+                    fontWeight: 600,
+                    lineHeight: 1,
+                    background:
+                      surface === id ? "var(--color-anchor-bg)" : "transparent",
+                    color:
+                      surface === id
+                        ? "var(--color-ink)"
+                        : "var(--color-ink-muted)",
+                    borderLeft:
+                      i > 0 ? "1px solid var(--color-rule)" : "none",
+                    cursor: "pointer",
+                  }}
+                >
+                  {label}
+                </button>
+              </span>
+            ))}
+          </div>
           {/* Explicit tiling: while a non-document surface is up, pin the
               document alongside it. Sticky — switching surfaces then swaps
               only the non-document tile. */}
           {surface !== "document" && (
-            <HeaderButton
+            <Button
               onClick={onToggleDocPin}
               active={docPinned}
               title={
@@ -352,7 +332,7 @@ export function Header({
             />
           )}
           {splitActive && (
-            <HeaderButton
+            <Button
               onClick={onToggleSplitOrientation}
               title={splitVertical ? "Side-by-side split" : "Stacked split"}
               ariaLabel={
@@ -361,7 +341,33 @@ export function Header({
               icon={splitVertical ? "⬌" : "⬍"}
             />
           )}
+          {/* Snap-back (⌘⇧0): the layout cluster's escape hatch — return
+              every plate to the canonical resting shape. Quiet glyph; the
+              tour will point here, so it carries a stable anchor. */}
+          <span data-tour="snapback" className="flex">
+            <Button
+              onClick={onSnapBack}
+              title="Snap the layout back to its resting shape (⌘⇧0)"
+              ariaLabel="Snap the layout back to its resting shape"
+              icon="⌂"
+            />
+          </span>
+          <Button
+            onClick={onOpenPalette}
+            title="Command palette (⌘K)"
+            ariaLabel="Open the command palette"
+            icon="⌘K"
+            iconMono
+          />
         </div>
+        {/* The ambient memory pill — header chrome, no longer buried in the
+            Settings dropdown (Memory is a main surface now). */}
+        {memoryEnabled && (
+          <MemoryStatusPill
+            onOpenMemory={onOpenMemory}
+            onOpenInspector={onOpenMemoryInspector}
+          />
+        )}
         <SettingsMenu
           mode={<ModeToggle mode={mode} onChange={onModeChange} />}
           theme={<ThemePicker theme={theme} onThemeChange={onThemeChange} />}
@@ -369,6 +375,7 @@ export function Header({
           lint={<LintPicker lint={lint} onLintChange={onLintChange} />}
           agents={<AgentSeats />}
           surfaces={surfacesPanel}
+          extensions={<ExtensionsPanel />}
           notifications={
             <AlertSettings
               enabled={flashEnabled}
@@ -382,9 +389,6 @@ export function Header({
               onSoundPreview={onFlashSoundPreview}
               onTest={onFlashTest}
             />
-          }
-          memory={
-            memoryEnabled ? <MemoryStatusPill onOpen={onOpenMemory} /> : null
           }
         />
         {session && downloadVersion !== undefined && (
@@ -404,32 +408,13 @@ export function Header({
             onShareSnapshot={onShareSnapshot}
           />
         )}
-        {latest && (
-          <span
-            className="font-mono rounded-sm px-2 py-0.5"
-            style={{
-              background: "var(--color-anchor-bg)",
-              color: "var(--color-anchor-text)",
-              fontSize: "11px",
-            }}
-          >
-            v{badgeVersion}
-          </span>
-        )}
+        {latest && <Pill mono>v{badgeVersion}</Pill>}
       </div>
       {ctxMenu && ctxItems.length > 0 && (
-        <div
-          role="menu"
-          aria-label="Customize surface"
-          className="fixed z-50 rounded-md py-1"
-          style={{
-            left: ctxMenu.x,
-            top: ctxMenu.y,
-            minWidth: "120px",
-            border: "1px solid var(--color-rule)",
-            background: "var(--color-bg-elevated)",
-            boxShadow: "0 8px 24px rgba(0,0,0,0.28)",
-          }}
+        <MenuSurface
+          ariaLabel="Customize surface"
+          className="fixed z-50 py-1"
+          style={{ left: ctxMenu.x, top: ctxMenu.y, minWidth: "120px" }}
           // Keep the click-away closer from eating the item click.
           onMouseDown={(e) => e.stopPropagation()}
         >
@@ -440,7 +425,7 @@ export function Header({
               role="menuitem"
               className="block w-full text-left px-3 py-1 font-sans"
               style={{
-                fontSize: "11px",
+                fontSize: "var(--rl-text-xs)",
                 background: "transparent",
                 border: "none",
                 color: "var(--color-ink)",
@@ -454,7 +439,7 @@ export function Header({
               {item.label}
             </button>
           ))}
-        </div>
+        </MenuSurface>
       )}
     </header>
   );

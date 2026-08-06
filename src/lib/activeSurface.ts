@@ -14,6 +14,7 @@ export interface SurfaceInfo {
     | "browser"
     | "review"
     | "servers"
+    | "memory"
     | "terminal"
     | "welcome";
   id: string | null;
@@ -28,6 +29,7 @@ export interface SurfaceInputs {
   drafterOpen: boolean;
   reviewOpen: boolean;
   serversOpen: boolean;
+  memoryOpen: boolean;
   /** The active plan review session, when one is selected. */
   activeId: string | null;
   planTitle: string | null;
@@ -85,6 +87,18 @@ export function deriveActiveSurface(s: SurfaceInputs): SurfaceInfo {
       kind: "servers",
       id: null,
       label: "Localhost",
+      detail: null,
+      projectPath: null,
+    };
+  }
+  if (s.memoryOpen) {
+    // The Memory surface spans the whole lake — machine-scoped like Localhost;
+    // the Companion just needs to know "they're looking at their own memory."
+    return {
+      ...base,
+      kind: "memory",
+      id: null,
+      label: "Memory",
       detail: null,
       projectPath: null,
     };

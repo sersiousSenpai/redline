@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { useEffect } from "react";
+import { REVIEW_KEYMAP, type ShortcutGroup } from "../lib/keymap";
 
 // Generic shortcut cheat-sheet modal (the app's first) plus the review
 // pane's keymap. `ShortcutHelp` is reusable — pass any groups; the wrapper
-// below feeds it the review bindings.
+// below feeds it the review bindings from the declarative registry
+// (lib/keymap.ts), where every shortcut description lives.
 
-export interface ShortcutGroup {
-  title: string;
-  items: { keys: string; label: string }[];
-}
+export type { ShortcutGroup };
 
 export function ShortcutHelp({
   title,
@@ -68,37 +67,6 @@ export function ShortcutHelp({
   );
 }
 
-const REVIEW_GROUPS: ShortcutGroup[] = [
-  {
-    title: "Files",
-    items: [
-      { keys: "J", label: "Next file" },
-      { keys: "K", label: "Previous file" },
-      { keys: "V", label: "Toggle viewed (collapses)" },
-      { keys: "X", label: "Collapse / expand file" },
-      { keys: "⌘B", label: "Toggle file tree" },
-    ],
-  },
-  {
-    title: "Annotations",
-    items: [
-      { keys: "[", label: "Previous annotation" },
-      { keys: "]", label: "Next annotation" },
-      { keys: "click", label: "Select a line (row or +)" },
-      { keys: "drag", label: "Select a range (gutter or text)" },
-      { keys: "⇧click", label: "Extend the selection" },
-    ],
-  },
-  {
-    title: "Review",
-    items: [
-      { keys: "⌘F", label: "Find in diff" },
-      { keys: "⌘↩", label: "Submit (while the agent waits)" },
-      { keys: "?", label: "This help" },
-    ],
-  },
-];
-
 export default function ReviewShortcutHelp({ onClose }: { onClose: () => void }) {
-  return <ShortcutHelp title="Code review shortcuts" groups={REVIEW_GROUPS} onClose={onClose} />;
+  return <ShortcutHelp title="Code review shortcuts" groups={REVIEW_KEYMAP} onClose={onClose} />;
 }

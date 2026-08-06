@@ -15,6 +15,7 @@ const base: MemoryStatus = {
   compactedCount: 0,
   reclaimedBytes: 0,
   lastCompactionTs: null,
+  pendingProposals: 0,
 };
 
 describe("relativeTime", () => {
@@ -45,5 +46,10 @@ describe("pillLabel", () => {
   it("falls back to the captured count before the first organize", () => {
     const s = { ...base, itemCount: 12 };
     expect(pillLabel(s, NOW)).toBe("Memory · 12 captured");
+  });
+
+  it("lets held proposals outrank the ambient line — a queued destructive op is never invisible", () => {
+    const s = { ...base, itemCount: 40, lastOrganizedTs: NOW - 60_000, pendingProposals: 2 };
+    expect(pillLabel(s, NOW)).toBe("Memory · 2 to review");
   });
 });

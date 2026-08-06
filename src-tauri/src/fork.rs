@@ -501,6 +501,7 @@ pub async fn fork_thread_send(
                 thread_id: comment_id.clone(),
                 parent_session_id: Some(session_id.clone()),
             }),
+            crate::seat::model_for("fork_plan"),
         );
     } else {
         crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
@@ -724,6 +725,7 @@ pub async fn review_thread_send(
                 thread_id: annotation_id.clone(),
                 parent_session_id: Some(review_id.clone()),
             }),
+            crate::seat::model_for("fork_review"),
         );
     } else {
         crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
@@ -902,6 +904,7 @@ pub async fn review_question_send(
                 thread_id: question_id.clone(),
                 parent_session_id: Some(review_id.clone()),
             }),
+            crate::seat::model_for("fork_review"),
         );
     } else {
         crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
@@ -1126,6 +1129,7 @@ pub async fn draft_thread_send(
                 thread_id: comment_id.clone(),
                 parent_session_id: None,
             }),
+            crate::seat::model_for("fork_drafter"),
         );
     } else {
         crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));

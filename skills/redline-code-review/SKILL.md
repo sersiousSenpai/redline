@@ -10,7 +10,7 @@ description: >-
   session to address. Covers the command, the feedback format (line, whole-file
   and review-wide blocks, labels), review rounds, and the
   REDLINE_REVIEW_RESOLUTIONS reply contract.
-version: 3
+version: 4
 ---
 
 # Redline code review
@@ -66,6 +66,21 @@ prompt.
   continue.
 - **Dismissal / still-reviewing** — a single line telling you no feedback is
   coming (or to re-run later). Continue with what you were doing.
+- **`PUSHED:` block** — the reply (feedback or approval) may carry a block like:
+
+  ```
+  PUSHED: your changes are committed and pushed.
+    commit: a1b2c3d
+    branch: origin/fix/review-notes
+    pull request: https://github.com/…/pull/12
+  ```
+
+  The user committed and pushed your changes **from the review pane** — the
+  work already landed. Do NOT commit, push, or re-stage those changes
+  yourself; the commit shown is on the current branch and published to the
+  branch shown. The `pull request` line appears only when one was opened. Any
+  further edits you make (e.g. addressing the same reply's annotations) are
+  NEW work on top of that commit.
 
 ## Addressing feedback
 

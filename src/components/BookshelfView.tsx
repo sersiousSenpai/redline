@@ -4,12 +4,12 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
-  FilePlus2,
   FolderPlus,
   Hammer,
   Library,
   Paperclip,
   Pencil,
+  Star,
   Trash2,
   X,
 } from "lucide-react";
@@ -26,15 +26,16 @@ import {
   loadShelf,
   moveDraft,
   moveFolder,
-  newDraft,
   renameDraft,
   renameFolder,
   runShipwright,
+  setTemplate,
   type BookshelfDraft,
   type DeleteImpact,
   type FolderNode,
   type Shelf,
 } from "../lib/bookshelf";
+import { DocumentsMenu } from "./DocumentsMenu";
 
 // The shelf: the folder tree plus the documents in it. Rendered *inside* the
 // document surface rather than as a fourth pane, so it inherits that pane's
@@ -49,8 +50,12 @@ import {
 interface BookshelfViewProps {
   /** The currently-open document, highlighted in the list. */
   openDraftId: string | null;
+  /** Every document open in the drafter — the dropdown's OPEN section. */
+  openIds?: string[];
   /** Open a document in the editor (also closes the shelf). */
   onOpen: (draftId: string) => void;
+  /** Remove a document from the drafter's open set (dropdown ✕). */
+  onCloseDoc?: (draftId: string) => void;
   /** Close the shelf and return to the open document. */
   onClose: () => void;
   /** The repo the new-document button should tag a fresh document with, and the
@@ -106,7 +111,9 @@ interface PendingDelete {
 
 export function BookshelfView({
   openDraftId,
+  openIds = [],
   onOpen,
+  onCloseDoc,
   onClose,
   defaultProject = null,
 }: BookshelfViewProps) {
@@ -354,25 +361,14 @@ export function BookshelfView({
         >
           <FolderPlus size={13} /> New folder
         </button>
-        <button
-          type="button"
-          className="flex items-center gap-1 rounded-sm px-2 py-1"
-          onClick={() =>
-            void run(async () => {
-              const id = await newDraft(selectedFolder, undefined, defaultProject);
-              onOpen(id);
-            })
-          }
-          style={{
-            fontSize: "11.5px",
-            border: "1px solid var(--color-rule)",
-            background: "var(--color-anchor-bg)",
-            color: "var(--color-anchor-text)",
-            cursor: "pointer",
-          }}
-        >
-          <FilePlus2 size={13} /> New document
-        </button>
+        <DocumentsMenu
+          openIds={openIds}
+          activeId={openDraftId}
+          defaultProject={defaultProject}
+          folderId={selectedFolder}
+          onActivate={onOpen}
+          onCloseDoc={(id) => onCloseDoc?.(id)}
+        />
         <button
           type="button"
           onClick={onClose}
@@ -519,6 +515,19 @@ export function BookshelfView({
                     className="truncate"
                     style={{ fontSize: "13px", color: "var(--color-ink)" }}
                   >
+                    {d.isTemplate && (
+                      <Star
+                        size={11}
+                        fill="currentColor"
+                        aria-label="Template"
+                        style={{
+                          display: "inline",
+                          marginRight: "5px",
+                          verticalAlign: "-1px",
+                          color: "var(--color-warning)",
+                        }}
+                      />
+                    )}
                     {draftLabel(d)}
                     {d.draftId === openDraftId && (
                       <span
@@ -550,6 +559,31 @@ export function BookshelfView({
                     )}
                     {!d.hasDoc && <span>empty</span>}
                   </div>
+                </button>
+                <button
+                  type="button"
+                  className={
+                    d.isTemplate ? undefined : "opacity-0 group-hover:opacity-100"
+                  }
+                  title={
+                    d.isTemplate
+                      ? "Stop using as a template"
+                      : "Use as template — “New from template” offers a clean copy"
+                  }
+                  onClick={() =>
+                    void run(() => setTemplate(d.draftId, !d.isTemplate))
+                  }
+                  style={{
+                    color: d.isTemplate
+                      ? "var(--color-warning)"
+                      : "var(--color-ink-muted)",
+                    cursor: "pointer",
+                  }}
+                >
+                  <Star
+                    size={13}
+                    fill={d.isTemplate ? "currentColor" : "none"}
+                  />
                 </button>
                 <button
                   type="button"

@@ -3,10 +3,12 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useMenuOverlay } from "./menuOverlay";
+import { MenuSurface } from "./ui/MenuSurface";
 
 // One "Settings" entry point that folds the formerly-loose header controls —
-// interception mode, theme, font, notifications, memory — into a single
-// dropdown, so the header reads as a few clear verbs plus Settings + Options.
+// interception mode, theme, font, notifications — into a single dropdown, so
+// the header reads as a few clear verbs plus Settings + Options. (The memory
+// pill graduated to header chrome when Memory became a main surface.)
 // The controls are passed in already-wired (render props) so this component
 // owns only layout + open/close; each nested control keeps its own popover.
 
@@ -19,9 +21,9 @@ interface SettingsMenuProps {
   agents: ReactNode;
   /** Surfaces — the workspace-manifest lens (see SurfacesPanel.tsx). */
   surfaces: ReactNode;
+  /** Extensions — the WASM extension host's management view. */
+  extensions: ReactNode;
   notifications: ReactNode;
-  /** null when the memory surface is disabled in the workspace manifest. */
-  memory: ReactNode;
 }
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
@@ -33,7 +35,7 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
       <span
         className="font-sans"
         style={{
-          fontSize: "11px",
+          fontSize: "var(--rl-text-xs)",
           fontWeight: 600,
           color: "var(--color-ink-muted)",
           whiteSpace: "nowrap",
@@ -53,8 +55,8 @@ export function SettingsMenu({
   lint,
   agents,
   surfaces,
+  extensions,
   notifications,
-  memory,
 }: SettingsMenuProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -83,17 +85,21 @@ export function SettingsMenu({
   }, [open]);
 
   return (
-    <div ref={rootRef} className="relative">
+    // The tour anchors here: the theme/mode pickers live inside this popover,
+    // which only renders while open, so their own data-tour ids are absent
+    // from the DOM whenever the menu is closed.
+    <div ref={rootRef} data-tour="settings" className="relative">
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        title="Settings — mode, theme, font, notifications, memory"
+        title="Settings — mode, theme, font, notifications"
         aria-haspopup="menu"
         aria-expanded={open}
-        className="flex items-center gap-1.5 rounded-sm px-2 py-1 font-sans"
+        className="flex items-center gap-1.5 px-2 py-1 font-sans"
         style={{
-          fontSize: "11px",
+          fontSize: "var(--rl-text-xs)",
           lineHeight: 0,
+          borderRadius: "var(--rl-radius-control)",
           border: "1px solid var(--color-rule)",
           background: "var(--color-bg-elevated)",
           color: "var(--color-ink)",
@@ -115,23 +121,21 @@ export function SettingsMenu({
           <circle cx="12" cy="12" r="3" />
           <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
         </svg>
-        <span style={{ fontWeight: 600, fontSize: "11px" }}>Settings</span>
+        <span style={{ fontWeight: 600, fontSize: "var(--rl-text-xs)" }}>
+          Settings
+        </span>
         <span style={{ color: "var(--color-ink-muted)", fontSize: "9px" }}>
           ▾
         </span>
       </button>
 
       {open && (
-        <div
-          role="menu"
-          aria-label="Settings"
-          className="absolute right-0 z-50 rounded-md"
+        <MenuSurface
+          ariaLabel="Settings"
+          className="absolute right-0 z-50"
           style={{
             top: "calc(100% + 6px)",
             width: "260px",
-            border: "1px solid var(--color-rule)",
-            background: "var(--color-bg-elevated)",
-            boxShadow: "0 8px 24px rgba(0,0,0,0.28)",
             // Nested control popovers extend past the panel edge.
             overflow: "visible",
           }}
@@ -142,11 +146,9 @@ export function SettingsMenu({
           <Row label="Linting">{lint}</Row>
           <Row label="Agent Seats">{agents}</Row>
           <Row label="Surfaces">{surfaces}</Row>
+          <Row label="Extensions">{extensions}</Row>
           <Row label="Notifications">{notifications}</Row>
-          {memory != null && (
-            <div className="flex items-center px-3 py-2">{memory}</div>
-          )}
-        </div>
+        </MenuSurface>
       )}
     </div>
   );

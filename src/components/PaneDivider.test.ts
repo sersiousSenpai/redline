@@ -15,14 +15,15 @@ describe("collapsedCaretNudge", () => {
   });
 
   it("shifts a collapsed leading pane's caret inward (rightward)", () => {
-    // Sidebar collapsed: its divider hugs the left window edge, so the pill
-    // must move right to clear it.
-    expect(collapsedCaretNudge(true, "vertical", "leading")).toBe(6);
+    // Sidebar collapsed: its divider hugs the row's left edge, so the pill
+    // must move right to clear the clip. (18px pill on the 10px gutter →
+    // 4px overhang per side.)
+    expect(collapsedCaretNudge(true, "vertical", "leading")).toBe(4);
   });
 
   it("shifts a collapsed trailing pane's caret inward (leftward)", () => {
-    // Discussion pane collapsed: its divider hugs the right window edge.
-    expect(collapsedCaretNudge(true, "vertical", "trailing")).toBe(-6);
+    // Discussion pane collapsed: its divider hugs the row's right edge.
+    expect(collapsedCaretNudge(true, "vertical", "trailing")).toBe(-4);
   });
 
   it("mirrors the two sides exactly, so both carets look identical", () => {

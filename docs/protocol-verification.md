@@ -165,6 +165,12 @@ Any prior experiment captures this. Copy the first request entry from `hook-log.
 - `cwd` field path: `cwd` (top-level)
 - `transcript_path` present? [x] yes — full path to per-session `.jsonl` transcript
 - **New beyond spec:** `effort`, `permission_mode`, `tool_use_id`, `tool_input.planFilePath`
+- **No model field.** Neither hook payload names the model. Redline's model
+  provenance (`prompts.model`) therefore reads the newest `message.model` from
+  the tail of `transcript_path` (`model_from_transcript`, lib.rs). Consequence:
+  a brand-new session has no assistant message when its first
+  `UserPromptSubmit` fires, so its prompts get their model stamped **one hook
+  fire late** (the next prompt, or ExitPlanMode — whichever comes first).
 
 ---
 

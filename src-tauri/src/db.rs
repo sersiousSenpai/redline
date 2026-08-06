@@ -10,7 +10,7 @@ use crate::state::{
     reparse_sections, AttachState, BrowseMessage, CodeReviewSession, Comment, CommentAttachment,
     CommentKind, CommentOffer,
     CommentScope, CommentSelection, CommentStatus, EditPayload, Linked, LinkedMessage, Mission,
-    MissionFinding, MissionMessage, Resolution, ReviewAnnotation, ReviewQuestion,
+    MissionFinding, MissionMessage, PushRecord, Resolution, ReviewAnnotation, ReviewQuestion,
     ReviewSession, Revision, RoundHistoryEntry, SessionStatus, SourceFeedback, StructuralPayload,
     ThreadMessage, VoiceMessage,
 };
@@ -193,6 +193,16 @@ pub struct BookshelfDraft {
     /// the markdown mirror (or a pre-Bookshelf draft awaiting migration) has
     /// none, and the shelf shouldn't pretend otherwise.
     pub has_doc: bool,
+    /// Marked as a template: an ordinary document the dropdown offers under
+    /// "New from template" — instantiating deep-copies its body into a fresh
+    /// ordinary document.
+    pub is_template: bool,
+    /// Times this document has been opened (once per open, never per
+    /// keystroke) — ranks the dropdown's FREQUENT section.
+    pub open_count: i64,
+    /// Epoch millis of the most recent open; `None` = never opened since the
+    /// column existed. Tie-breaks FREQUENT.
+    pub last_opened_at: Option<i64>,
 }
 
 /// One folder in the shelf's adjacency list. `parent_id = None` is the root.
@@ -663,6 +673,22 @@ impl Database {
                 PRIMARY KEY (review_id, id)
             );
 
+            -- Commit-and-push actions taken from the review pane, one row per
+            -- push. The latest row per review is reported to the waiting agent
+            -- as the feedback payload's PUSHED: block.
+            CREATE TABLE IF NOT EXISTS review_pushes (
+                id TEXT PRIMARY KEY,
+                review_id TEXT,
+                repo_path TEXT NOT NULL,
+                remote TEXT NOT NULL,
+                branch TEXT NOT NULL,
+                commit_sha TEXT,
+                pr_url TEXT,
+                pr_number INTEGER,
+                files INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL
+            );
+
             -- Polis data lake: the raw, complete prompt store. One row per
             -- captured prompt (hook / drafter / rust-firstturn / voice). Bodies
             -- live here (ledger-owned) so a session delete can never orphan the
@@ -801,6 +827,31 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_supersessions_new
                 ON supersessions (new_seq);
 
+            -- Second Brain P3: the user's own margin notes + stars over the
+            -- record. Readable and EDITABLE rows in a plain, never-hashed side
+            -- table — the `supersessions` pattern: the tamper-evident facts are
+            -- the `note` ledger events (each act appends one, committing to
+            -- {action, text}); this table only holds the current state so the
+            -- UI never re-parses payloads. One row per annotated target
+            -- (partial unique below); target_kind 'none' rows are standalone
+            -- thoughts, each its own row, referenced by the event as
+            -- (ref_kind='none', ref_id=id). A note is a curation signal for
+            -- the classifier, NEVER provenance. Nothing here is ever deleted.
+            CREATE TABLE IF NOT EXISTS user_notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                seq INTEGER,                  -- latest `note` ledger event seq
+                target_kind TEXT NOT NULL,    -- ledger_event | class_node | session | none
+                target_id TEXT,               -- event seq / node id / session id; NULL when standalone
+                text TEXT NOT NULL DEFAULT '',
+                starred INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_user_notes_target
+                ON user_notes (target_kind, target_id) WHERE target_kind <> 'none';
+            CREATE INDEX IF NOT EXISTS idx_user_notes_starred
+                ON user_notes (starred, updated_at);
+
             -- Agent-written pattern observations over a node's lake items
             -- (recurrence / trend / co-occurrence). Derived, never ground
             -- truth: the classifier must never file by one. cite_seqs is a
@@ -850,12 +901,14 @@ impl Database {
             CREATE TABLE IF NOT EXISTS browse_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ts INTEGER NOT NULL,
-                action TEXT NOT NULL,          -- 'navigate' (a page the user landed on)
+                action TEXT NOT NULL,          -- verb vocabulary: 'navigate' | 'select' | 'submit' | 'leave'
+                                              -- (enforced by ledger::BrowseAction, not a CHECK — additive widening)
                 browse_id TEXT,               -- the tab's discussion-thread key
                 url TEXT NOT NULL,
                 title TEXT,
                 text TEXT NOT NULL,           -- normalized page content (for P3 FTS)
-                context_hash TEXT NOT NULL    -- body_hash over `text`
+                context_hash TEXT NOT NULL,   -- body_hash over `text`
+                from_event_id INTEGER         -- trail edge: preceding browse_events.id (NULL = trail root)
             );
             CREATE INDEX IF NOT EXISTS idx_browse_events_hash ON browse_events (context_hash);
             CREATE INDEX IF NOT EXISTS idx_browse_events_tab ON browse_events (browse_id);
@@ -1044,6 +1097,29 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_draft_chat_messages
                 ON draft_chat_messages (draft_id, created_at);
 
+            -- The Memory surface's Ask thread (Second Brain P4). One global
+            -- conversation over the lake + catalog, keyed by a constant thread
+            -- id ("memchat") so the schema stays multi-thread-ready without
+            -- the GUI having to manage thread identity. `last_seq` is the
+            -- ledger high-water mark the agent last saw — the memchat analog
+            -- of draft_chat's doc hash (the record grows between turns).
+            CREATE TABLE IF NOT EXISTS mem_chat_threads (
+                thread_id TEXT PRIMARY KEY,
+                claude_session_id TEXT,
+                last_seq INTEGER
+            );
+
+            CREATE TABLE IF NOT EXISTS mem_chat_messages (
+                id TEXT PRIMARY KEY,
+                thread_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                body TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_mem_chat_messages
+                ON mem_chat_messages (thread_id, created_at);
+
             CREATE TABLE IF NOT EXISTS draft_comments (
                 id TEXT PRIMARY KEY,
                 draft_id TEXT NOT NULL,
@@ -1185,6 +1261,23 @@ impl Database {
         let _ = conn.execute("ALTER TABLE prompts ADD COLUMN thread_kind TEXT", []);
         let _ = conn.execute("ALTER TABLE prompts ADD COLUMN thread_id TEXT", []);
         let _ = conn.execute("ALTER TABLE prompts ADD COLUMN parent_session_id TEXT", []);
+
+        // Model provenance: which model actually received a prompt, carried as
+        // ground truth. `model_source` says how we know — 'seat' (the spawn's
+        // own `--model` flag) or 'transcript' (backfilled from the session's
+        // JSONL). NULL means the CLI default applied and we refuse to guess.
+        // Non-hashed (only prompt_id + body_hash enter the chained event), so
+        // additive and chain-safe — the gist/thread_kind precedent.
+        let _ = conn.execute("ALTER TABLE prompts ADD COLUMN model TEXT", []);
+        let _ = conn.execute("ALTER TABLE prompts ADD COLUMN model_source TEXT", []);
+
+        // Behavioral foundation (P0): the trail edge — which browse event this
+        // one followed from. Non-hashed (only `context_hash` enters the chained
+        // event), so purely additive and chain-safe. NULL = trail root, and
+        // every pre-existing row. The verb widening of `action` needs no
+        // migration: it is enforced in Rust (`ledger::BrowseAction`), not by a
+        // CHECK, and existing rows are all already 'navigate'.
+        let _ = conn.execute("ALTER TABLE browse_events ADD COLUMN from_event_id INTEGER", []);
 
         // Dojo P3: backfill the browse-events FTS index for the upgrade path where
         // `browse_events` already had rows (a P2-only build) before the FTS table
@@ -1389,6 +1482,21 @@ impl Database {
         // (only the webview can read localStorage).
         let _ = conn.execute("ALTER TABLE drafts ADD COLUMN doc_json TEXT", []);
         let _ = conn.execute("ALTER TABLE drafts ADD COLUMN folder_id TEXT", []);
+        // Templates + the documents dropdown. A template is an ordinary shelf
+        // document carrying a flag — it keeps folders, sources, the editor and
+        // the launch path for free. `open_count`/`last_opened_at` feed the
+        // dropdown's FREQUENT section; bumped once per open, never per
+        // keystroke, and deliberately independent of `updated_at` (which means
+        // "content changed" and orders the shelf).
+        let _ = conn.execute(
+            "ALTER TABLE drafts ADD COLUMN is_template INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE drafts ADD COLUMN open_count INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute("ALTER TABLE drafts ADD COLUMN last_opened_at INTEGER", []);
         Ok(())
     }
 
@@ -1497,8 +1605,8 @@ impl Database {
             "INSERT INTO prompts
                 (ts, source, origin, surface, role, session_id, claude_session_id,
                  mission_id, project_path, body, body_hash,
-                 thread_kind, thread_id, parent_session_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                 thread_kind, thread_id, parent_session_id, model, model_source)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
              ON CONFLICT(body_hash, claude_session_id) DO NOTHING",
             params![
                 p.ts,
@@ -1515,12 +1623,77 @@ impl Database {
                 p.thread_kind,
                 p.thread_id,
                 p.parent_session_id,
+                p.model,
+                p.model_source,
             ],
         )?;
         if changed == 0 {
             return Ok(None);
         }
         Ok(Some(conn.last_insert_rowid()))
+    }
+
+    /// Whether any prompt captured under this claude session still lacks a
+    /// model — the cheap guard that keeps the hook hot path from re-reading a
+    /// transcript tail once everything is already stamped.
+    pub fn session_needs_model(&self, claude_session_id: &str) -> bool {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM prompts
+                WHERE claude_session_id = ?1 AND model IS NULL)",
+            params![claude_session_id],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|n| n != 0)
+        .unwrap_or(false)
+    }
+
+    /// Backfill the model onto every prompt of a claude session that doesn't
+    /// have one (`model_source = 'transcript'`). Rows already stamped at
+    /// capture (`'seat'`) are never overwritten — capture-time truth outranks
+    /// a backfill. Returns how many rows were stamped.
+    pub fn backfill_session_model(
+        &self,
+        claude_session_id: &str,
+        model: &str,
+    ) -> rusqlite::Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE prompts SET model = ?2, model_source = 'transcript'
+             WHERE claude_session_id = ?1 AND model IS NULL",
+            params![claude_session_id, model],
+        )
+    }
+
+    /// Bind a drafter-launched prompt row to the session that eventually ran
+    /// it. The launch records with `claude_session_id = NULL` (claude hasn't
+    /// spawned yet); the ingest hook's claim is the first moment the id is
+    /// known. `OR IGNORE` respects the `(body_hash, claude_session_id)` unique
+    /// index — if the hook already captured the same body under that session,
+    /// the drafter row simply stays a launch record.
+    pub fn bind_drafter_prompt_session(
+        &self,
+        body_hash: &str,
+        draft_id: &str,
+        claude_session_id: &str,
+    ) -> rusqlite::Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE OR IGNORE prompts SET claude_session_id = ?3
+             WHERE body_hash = ?1 AND thread_kind = 'drafter' AND thread_id = ?2
+               AND claude_session_id IS NULL",
+            params![body_hash, draft_id, claude_session_id],
+        )
+    }
+
+    /// `(prompt_id, model)` for every prompt with a stamped model — the Memory
+    /// inspector joins this onto its event rows for the per-row chip + filter.
+    pub fn list_prompt_models(&self) -> rusqlite::Result<Vec<(i64, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT id, model FROM prompts WHERE model IS NOT NULL")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
     }
 
     /// Insert a browsing event into the ledger-owned `browse_events` store.
@@ -1547,9 +1720,9 @@ impl Database {
             return Ok(None);
         }
         conn.execute(
-            "INSERT INTO browse_events (ts, action, browse_id, url, title, text, context_hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![r.ts, r.action, r.browse_id, r.url, r.title, r.text, r.context_hash],
+            "INSERT INTO browse_events (ts, action, browse_id, url, title, text, context_hash, from_event_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![r.ts, r.action, r.browse_id, r.url, r.title, r.text, r.context_hash, r.from_event_id],
         )?;
         Ok(Some(conn.last_insert_rowid()))
     }
@@ -1624,12 +1797,15 @@ impl Database {
     /// body-blind. Idempotent via the `gist IS NULL` guard: a re-compaction of
     /// an already-compacted row is a no-op returning `Ok(None)`. On success
     /// returns the new ledger seq. `reason` distinguishes an automatic gist
-    /// (`"cold"`) from an explicit forget (`"forget"`).
+    /// (`"cold"`) from an explicit forget (`"forget"`). `actor` is who released
+    /// the words — the keeper's seat name for an automatic gist, the local
+    /// human for an explicit forget.
     pub fn compact_prompt_body(
         &self,
         prompt_id: i64,
         gist: &str,
         reason: &str,
+        actor: &str,
     ) -> rusqlite::Result<Option<i64>> {
         let conn = self.conn.lock().unwrap();
         // Read the original body + hash under the same lock, then swap — all
@@ -1661,7 +1837,7 @@ impl Database {
             ("gist_hash", &gist_hash),
             ("reason", reason),
         ]);
-        let author = crate::ledger::local_author();
+        let author = actor.to_string();
         let pid_str = prompt_id.to_string();
         let ev = Self::append_ledger_event_locked(
             &conn,
@@ -2112,7 +2288,8 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT d.draft_id, d.title, d.project_path, d.folder_id, d.created_at, d.updated_at,
                     (SELECT COUNT(*) FROM draft_sources s WHERE s.draft_id = d.draft_id),
-                    (d.doc_json IS NOT NULL AND d.doc_json <> '')
+                    (d.doc_json IS NOT NULL AND d.doc_json <> ''),
+                    d.is_template, d.open_count, d.last_opened_at
              FROM drafts d ORDER BY d.updated_at DESC, d.draft_id ASC",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -2125,9 +2302,62 @@ impl Database {
                 updated_at: r.get(5)?,
                 source_count: r.get(6)?,
                 has_doc: r.get::<_, i64>(7)? != 0,
+                is_template: r.get::<_, i64>(8)? != 0,
+                open_count: r.get(9)?,
+                last_opened_at: r.get(10)?,
             })
         })?;
         rows.collect()
+    }
+
+    /// Flip a document's template flag. Content is untouched — a template is an
+    /// ordinary document the dropdown offers to instantiate.
+    pub fn set_draft_template(&self, draft_id: &str, is_template: bool) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE drafts SET is_template = ?2 WHERE draft_id = ?1",
+            params![draft_id, is_template as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Deep-copy a document's body — `title`, `doc_json`, `doc_markdown`,
+    /// `project_path` — into `dest` (template instantiation, or duplicating
+    /// any document). Sources, comments, suggestions and chat threads are
+    /// deliberately NOT copied, and the copy is always an ordinary document
+    /// (`is_template` stays 0). Returns `false` when `src` doesn't exist.
+    pub fn copy_draft_body(
+        &self,
+        src: &str,
+        dest: &str,
+        fallback_project: Option<&str>,
+    ) -> rusqlite::Result<bool> {
+        let Some((json, markdown, src_project)) = self.get_draft_doc(src)? else {
+            return Ok(false);
+        };
+        let title = self.get_draft(src)?.and_then(|(t, _, _, _)| t);
+        self.upsert_draft(
+            dest,
+            title.as_deref().or(Some("Untitled document")),
+            src_project.as_deref().or(fallback_project),
+            &markdown,
+            json.as_deref(),
+        )?;
+        Ok(true)
+    }
+
+    /// Count an open of this document (the dropdown's FREQUENT signal).
+    /// Deliberately does NOT bump `updated_at` — that means "content changed"
+    /// and orders the shelf; opening a document must not reorder it.
+    pub fn touch_draft(&self, draft_id: &str) -> rusqlite::Result<()> {
+        let now = crate::ledger::now_millis();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE drafts SET open_count = open_count + 1, last_opened_at = ?2
+             WHERE draft_id = ?1",
+            params![draft_id, now],
+        )?;
+        Ok(())
     }
 
     /// Rename a document. The title is normally derived from the markdown's
@@ -2867,6 +3097,122 @@ impl Database {
         Ok(())
     }
 
+    // --- Memory Ask thread (Second Brain P4) — the draft_chat shape, keyed by
+    // the constant memchat thread id. See memchat.rs.
+
+    pub fn insert_mem_chat_message(
+        &self,
+        msg: &crate::state::MemChatMessage,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO mem_chat_messages (id, thread_id, role, body, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                msg.id,
+                msg.thread_id,
+                msg.role,
+                msg.body,
+                msg.status,
+                msg.created_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_mem_chat_thread(
+        &self,
+        thread_id: &str,
+    ) -> rusqlite::Result<Vec<crate::state::MemChatMessage>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, thread_id, role, body, status, created_at
+             FROM mem_chat_messages WHERE thread_id = ?1 ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![thread_id], |r| {
+            Ok(crate::state::MemChatMessage {
+                id: r.get(0)?,
+                thread_id: r.get(1)?,
+                role: r.get(2)?,
+                body: r.get(3)?,
+                status: r.get(4)?,
+                created_at: r.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn get_mem_chat_session(&self, thread_id: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT claude_session_id FROM mem_chat_threads WHERE thread_id = ?1",
+            params![thread_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+    }
+
+    pub fn set_mem_chat_session(&self, thread_id: &str, session_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO mem_chat_threads (thread_id, claude_session_id)
+             VALUES (?1, ?2)
+             ON CONFLICT(thread_id) DO UPDATE SET claude_session_id = excluded.claude_session_id",
+            params![thread_id, session_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_mem_chat_session(&self, thread_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE mem_chat_threads SET claude_session_id = NULL WHERE thread_id = ?1",
+            params![thread_id],
+        )?;
+        Ok(())
+    }
+
+    /// The ledger high-water mark the Ask agent last saw (its follow-up header
+    /// says whether the record grew since). `None` before the first turn.
+    pub fn get_mem_chat_last_seq(&self, thread_id: &str) -> Option<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT last_seq FROM mem_chat_threads WHERE thread_id = ?1",
+            params![thread_id],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+        .ok()
+        .flatten()
+    }
+
+    pub fn set_mem_chat_last_seq(&self, thread_id: &str, seq: i64) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO mem_chat_threads (thread_id, last_seq)
+             VALUES (?1, ?2)
+             ON CONFLICT(thread_id) DO UPDATE SET last_seq = excluded.last_seq",
+            params![thread_id, seq],
+        )?;
+        Ok(())
+    }
+
+    /// Drop the Ask thread + its resumable session — the "New conversation"
+    /// reset. The turns already captured in the lake stay there (the thread
+    /// rows are presentation, not the record).
+    pub fn delete_mem_chat(&self, thread_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM mem_chat_messages WHERE thread_id = ?1",
+            params![thread_id],
+        )?;
+        conn.execute(
+            "DELETE FROM mem_chat_threads WHERE thread_id = ?1",
+            params![thread_id],
+        )?;
+        Ok(())
+    }
+
     /// Insert a draft comment (the drafter sidecar).
     pub fn insert_draft_comment(&self, c: &crate::state::DraftComment) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
@@ -3062,6 +3408,7 @@ impl Database {
             "mission" => Some(("mission_messages", "mission_id")),
             "companion" => Some(("companion_messages", "companion_id")),
             "drafter" | "drafter_chat" => Some(("draft_chat_messages", "draft_id")),
+            "memchat" => Some(("mem_chat_messages", "thread_id")),
             "session" | "fork" => Some(("thread_messages", "session_id")),
             _ => None,
         }
@@ -3150,7 +3497,7 @@ impl Database {
         let mut sql = String::from(
             "SELECT le.seq, le.ts, le.kind, le.ref_kind, le.ref_id, le.session_id,
                     p.surface, p.origin, p.role, p.mission_id, p.project_path, p.body,
-                    p.thread_kind, p.thread_id, p.parent_session_id
+                    p.thread_kind, p.thread_id, p.parent_session_id, p.model
              FROM prompts p
              JOIN ledger_events le ON le.prompt_id = p.id
              WHERE 1 = 1",
@@ -3183,6 +3530,10 @@ impl Database {
         if let Some(p) = f.project.as_deref().filter(|s| !s.is_empty()) {
             sql.push_str(" AND p.project_path = ?");
             binds.push(Box::new(p.to_string()));
+        }
+        if let Some(m) = f.model.as_deref().filter(|s| !s.is_empty()) {
+            sql.push_str(" AND p.model = ?");
+            binds.push(Box::new(m.to_string()));
         }
         if let Some(seq) = f.since_seq {
             sql.push_str(" AND le.seq > ?");
@@ -3223,6 +3574,7 @@ impl Database {
                 thread_kind: r.get(12)?,
                 thread_id: r.get(13)?,
                 parent_session_id: r.get(14)?,
+                model: r.get(15)?,
             })
         })?;
         rows.collect()
@@ -3262,6 +3614,219 @@ impl Database {
         )?;
         let rows = stmt.query_map(params![since_seq.max(0), limit.max(0)], Self::row_to_ledger_event)?;
         rows.collect()
+    }
+
+    /// Filtered, cursor-paged Timeline query — the Memory surface's spine.
+    /// Newest-first; `f.before_seq` chains pages, so (unlike
+    /// `list_ledger_events`' single capped read) the whole history is
+    /// reachable. Every filter is a bound parameter (the
+    /// `list_context_prompts` discipline). Prompt and browse provenance are
+    /// LEFT-JOINed so one query serves every row shape; the accepted class
+    /// filing is probed per returned page row (the `supersessions_for_seqs`
+    /// pattern) — all derived at read time, never stored.
+    pub fn query_ledger_events(
+        &self,
+        f: &crate::context::LedgerFilters,
+    ) -> rusqlite::Result<Vec<crate::context::TimelineItem>> {
+        let conn = self.conn.lock().unwrap();
+        // Two user_notes probes, joined once for the whole page: `n_on` is the
+        // note/star ANNOTATING this event (target_kind='ledger_event'); `n_own`
+        // is a `note` event's OWN readable row — its standalone row by id, or
+        // the row on whatever target it annotates — so the list shows the
+        // note's current text, not a payload hash.
+        let mut sql = String::from(
+            "SELECT le.seq, le.ts, le.kind, le.author, le.prompt_id, le.session_id,
+                    le.version_number, le.ref_kind, le.ref_id, le.payload_hash,
+                    le.prev_hash, le.entry_hash,
+                    p.surface, p.project_path, p.thread_kind, p.model,
+                    COALESCE(p.gist, p.body), p.compacted_at,
+                    be.browse_id, be.url, be.title, be.action, be.from_event_id,
+                    COALESCE(n_on.starred, 0), n_on.text,
+                    COALESCE(n_own.starred, 0), n_own.text
+             FROM ledger_events le
+             LEFT JOIN prompts p ON p.id = le.prompt_id
+             LEFT JOIN browse_events be
+               ON le.ref_kind = 'browse_event' AND be.id = CAST(le.ref_id AS INTEGER)
+             LEFT JOIN user_notes n_on
+               ON n_on.target_kind = 'ledger_event'
+              AND n_on.target_id = CAST(le.seq AS TEXT)
+             LEFT JOIN user_notes n_own
+               ON le.kind = 'note'
+              AND ((le.ref_kind = 'none' AND n_own.id = CAST(le.ref_id AS INTEGER))
+                OR (le.ref_kind <> 'none' AND n_own.target_kind = le.ref_kind
+                    AND n_own.target_id = le.ref_id))
+             WHERE 1 = 1",
+        );
+        let mut binds: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(k) = f.kind.as_deref().filter(|s| !s.is_empty()) {
+            sql.push_str(" AND le.kind = ?");
+            binds.push(Box::new(k.to_string()));
+        }
+        if let Some(a) = f.author.as_deref().filter(|s| !s.is_empty()) {
+            sql.push_str(" AND le.author = ?");
+            binds.push(Box::new(a.to_string()));
+        }
+        if let Some(s) = f.session_id.as_deref().filter(|s| !s.is_empty()) {
+            sql.push_str(" AND le.session_id = ?");
+            binds.push(Box::new(s.to_string()));
+        }
+        if let Some(s) = f.surface.as_deref().filter(|s| !s.is_empty()) {
+            sql.push_str(" AND p.surface = ?");
+            binds.push(Box::new(s.to_string()));
+        }
+        if let Some(p) = f.project.as_deref().filter(|s| !s.is_empty()) {
+            sql.push_str(" AND p.project_path = ?");
+            binds.push(Box::new(p.to_string()));
+        }
+        if let Some(q) = f.q.as_deref().filter(|s| !s.is_empty()) {
+            // Escape LIKE metacharacters so the query text is matched literally.
+            // Note text is searched alongside bodies — a margin note is words
+            // you wrote, the strongest recall handle there is.
+            let escaped = q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+            sql.push_str(
+                " AND (COALESCE(p.gist, p.body) LIKE ? ESCAPE '\\'
+                    OR n_own.text LIKE ? ESCAPE '\\')",
+            );
+            let pat = format!("%{escaped}%");
+            binds.push(Box::new(pat.clone()));
+            binds.push(Box::new(pat));
+        }
+        // Star / note facets — structural clauses, nothing user-typed. An
+        // event counts as starred/noted through either probe: annotated, or a
+        // `note` event whose own row carries the star/text.
+        if f.starred.unwrap_or(false) {
+            sql.push_str(" AND (n_on.starred = 1 OR n_own.starred = 1)");
+        }
+        if f.noted.unwrap_or(false) {
+            sql.push_str(" AND (COALESCE(n_on.text, '') <> '' OR COALESCE(n_own.text, '') <> '')");
+        }
+        // P4 citation focus: exact seqs (the Ask agent's `#seq` chips). An
+        // empty list behaves like an absent filter, matching every other axis.
+        if let Some(seqs) = f.seqs.as_deref().filter(|s| !s.is_empty()) {
+            let marks = vec!["?"; seqs.len()].join(", ");
+            sql.push_str(&format!(" AND le.seq IN ({marks})"));
+            for s in seqs {
+                binds.push(Box::new(*s));
+            }
+        }
+        // P4 citation focus: events filed under one accepted class node. Same
+        // two-keyspace discipline as the filing probe below — `class_links.
+        // target_id` is the ledger seq for prompt/decision/revision/note
+        // targets but the `browse_events` row id for browse targets.
+        if let Some(node) = f.class_node.as_deref().filter(|s| !s.is_empty()) {
+            sql.push_str(
+                " AND (EXISTS (SELECT 1 FROM class_links cl
+                        WHERE cl.status = 'accepted' AND cl.node_id = ?
+                          AND cl.target_kind IN ('prompt', 'decision', 'revision', 'note')
+                          AND cl.target_id = CAST(le.seq AS TEXT))
+                    OR (le.ref_kind = 'browse_event'
+                        AND EXISTS (SELECT 1 FROM class_links cl
+                        WHERE cl.status = 'accepted' AND cl.node_id = ?
+                          AND cl.target_kind = 'browse_event'
+                          AND cl.target_id = le.ref_id)))",
+            );
+            binds.push(Box::new(node.to_string()));
+            binds.push(Box::new(node.to_string()));
+        }
+        // P5 Map focus: an agent thread's prompts / a browse tab's trail. Both
+        // bound; both narrow through the existing LEFT JOINs (which then act
+        // as inner joins — a non-prompt/non-browse row can't match).
+        if let Some(t) = f.thread_id.as_deref().filter(|s| !s.is_empty()) {
+            sql.push_str(" AND p.thread_id = ?");
+            binds.push(Box::new(t.to_string()));
+        }
+        if let Some(b) = f.browse_id.as_deref().filter(|s| !s.is_empty()) {
+            sql.push_str(" AND be.browse_id = ?");
+            binds.push(Box::new(b.to_string()));
+        }
+        if let Some(ts) = f.since_ts {
+            sql.push_str(" AND le.ts >= ?");
+            binds.push(Box::new(ts));
+        }
+        if let Some(ts) = f.until_ts {
+            sql.push_str(" AND le.ts <= ?");
+            binds.push(Box::new(ts));
+        }
+        if let Some(seq) = f.before_seq {
+            sql.push_str(" AND le.seq < ?");
+            binds.push(Box::new(seq));
+        }
+        sql.push_str(" ORDER BY le.seq DESC LIMIT ?");
+        binds.push(Box::new(crate::context::clamp_ledger_limit(f.limit)));
+
+        let mut stmt = conn.prepare(&sql)?;
+        let refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(refs.as_slice(), |r| {
+            let event = Self::row_to_ledger_event(r)?;
+            let body: Option<String> = r.get(16)?;
+            let compacted_at: Option<i64> = r.get(17)?;
+            let starred_on: i64 = r.get(23)?;
+            let note_on: Option<String> = r.get(24)?;
+            let starred_own: i64 = r.get(25)?;
+            let note_own: Option<String> = r.get(26)?;
+            Ok(crate::context::TimelineItem {
+                event,
+                surface: r.get(12)?,
+                project_path: r.get(13)?,
+                thread_kind: r.get(14)?,
+                model: r.get(15)?,
+                // A `note` event's list text is its row's current words.
+                preview: body.or(note_own).map(|b| {
+                    if b.chars().count() > crate::context::PREVIEW_CHARS {
+                        b.chars().take(crate::context::PREVIEW_CHARS).collect::<String>() + "…"
+                    } else {
+                        b
+                    }
+                }),
+                compacted: compacted_at.is_some(),
+                browse_id: r.get(18)?,
+                url: r.get(19)?,
+                title: r.get(20)?,
+                action: r.get(21)?,
+                from_event_id: r.get(22)?,
+                class_node_id: None,
+                class_title: None,
+                starred: starred_on != 0 || starred_own != 0,
+                note: note_on.filter(|t| !t.is_empty()),
+            })
+        })?;
+        let mut items: Vec<crate::context::TimelineItem> = rows.collect::<Result<_, _>>()?;
+
+        // Accepted class filing per page row. `class_links.target_id` is the
+        // ledger `seq` for prompt/decision/revision targets but the
+        // `browse_events` row id for browse targets — two probes, seq first,
+        // so a numeric browse id can never shadow a seq (or vice versa).
+        let mut by_seq = conn.prepare(
+            "SELECT cl.node_id, cn.title FROM class_links cl
+             JOIN class_nodes cn ON cn.id = cl.node_id
+             WHERE cl.status = 'accepted'
+               AND cl.target_kind IN ('prompt', 'decision', 'revision', 'note')
+               AND cl.target_id = ?1
+             ORDER BY cl.id LIMIT 1",
+        )?;
+        let mut by_browse = conn.prepare(
+            "SELECT cl.node_id, cn.title FROM class_links cl
+             JOIN class_nodes cn ON cn.id = cl.node_id
+             WHERE cl.status = 'accepted' AND cl.target_kind = 'browse_event'
+               AND cl.target_id = ?1
+             ORDER BY cl.id LIMIT 1",
+        )?;
+        for it in &mut items {
+            let pair = |r: &rusqlite::Row| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?));
+            let mut filing = by_seq
+                .query_row(params![it.event.seq.to_string()], pair)
+                .optional()?;
+            if filing.is_none() && it.event.ref_kind.as_deref() == Some("browse_event") {
+                if let Some(rid) = it.event.ref_id.as_deref() {
+                    filing = by_browse.query_row(params![rid], pair).optional()?;
+                }
+            }
+            if let Some((node_id, title)) = filing {
+                it.class_node_id = Some(node_id);
+                it.class_title = Some(title);
+            }
+        }
+        Ok(items)
     }
 
     /// Shared row→`LedgerEventRow` mapper (the column order every ledger SELECT
@@ -3391,6 +3956,17 @@ impl Database {
         rows.collect()
     }
 
+    /// Ledger event counts grouped by author — the Timeline's actor facet
+    /// (`local_author()` vs the agent seat names P0 made distinct).
+    pub fn event_counts_by_author(&self) -> rusqlite::Result<Vec<(String, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT author, COUNT(*) FROM ledger_events GROUP BY author ORDER BY COUNT(*) DESC",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        rows.collect()
+    }
+
     /// Accepted-class-node counts per root class (title → linked-item count
     /// rolled over the whole subtree) — the "class" axis of `/v1/context/stats`.
     /// Roots only; a repo-less lake yields just `~general`.
@@ -3455,6 +4031,7 @@ impl Database {
             ("mission", "mission_messages", "created_at", "role = 'assistant'", ""),
             ("voice", "voice_messages", "created_at", "role = 'assistant'", ""),
             ("drafter", "draft_chat_messages", "created_at", "role = 'assistant'", ""),
+            ("memory", "mem_chat_messages", "created_at", "role = 'assistant'", ""),
             // Plan sidecar threads and Drafter comment threads BOTH write to
             // `thread_messages`; the only thing separating them is whether the
             // `comment_id` resolves to a `draft_comments` row.
@@ -4187,10 +4764,12 @@ impl Database {
     /// rather than gating it behind per-item review). Returns the node ids that
     /// were flipped, so the caller can emit their `class_curate` ledger events.
     /// Structural proposals are applied separately (see `apply_class_proposal`).
-    pub fn accept_all_pending(&self) -> rusqlite::Result<Vec<String>> {
+    /// `actor` lands in `curated_by`: the classifier's seat name on the
+    /// auto-organize path, the local human on a manual accept-all.
+    pub fn accept_all_pending(&self, actor: &str) -> rusqlite::Result<Vec<String>> {
         let conn = self.conn.lock().unwrap();
         let now = crate::ledger::now_millis();
-        let author = crate::ledger::local_author();
+        let author = actor.to_string();
         let mut stmt = conn.prepare("SELECT id FROM class_nodes WHERE status = 'proposed'")?;
         let ids: Vec<String> = stmt
             .query_map([], |r| r.get::<_, String>(0))?
@@ -4343,6 +4922,17 @@ impl Database {
         rows.collect()
     }
 
+    /// How many structural proposals are held awaiting review — the ambient
+    /// pill/hero count, so the held-op channel is visible without loading rows.
+    pub fn count_pending_class_proposals(&self) -> rusqlite::Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM class_proposals WHERE status = 'proposed'",
+            [],
+            |r| r.get(0),
+        )
+    }
+
     pub fn get_class_proposal(
         &self,
         id: i64,
@@ -4387,9 +4977,13 @@ impl Database {
     /// the proposal row. Returns the facts for the `taxonomy_reorg` ledger event.
     /// Promotion re-parents preserving id/links/pins/subtree; collapse creates a
     /// digest node citing exact ledger seqs and removes the cold subtree.
+    /// `actor` is who applied it — the classifier's seat name on the
+    /// auto-organize path, the local human on a review-strip accept — and lands
+    /// in `curated_by` plus the `supersede` event's hashed `author`.
     pub fn apply_class_proposal(
         &self,
         id: i64,
+        actor: &str,
     ) -> rusqlite::Result<Option<crate::classmem::AppliedReorg>> {
         let p = match self.get_class_proposal(id)? {
             Some(p) => p,
@@ -4430,7 +5024,7 @@ impl Database {
                          status, pinned, curated_by, created_at, updated_at)
                      VALUES (?1, ?2, 'digest', ?3, ?4, NULL, NULL, 'accepted', 0,
                              ?5, ?6, ?6)",
-                    params![digest_id, parent, digest_title, p.summary, crate::ledger::local_author(), now],
+                    params![digest_id, parent, digest_title, p.summary, actor, now],
                 )?;
                 // Citation links to the exact ledger seqs.
                 if let Some(extra) = &p.extra_json {
@@ -4519,7 +5113,7 @@ impl Database {
                              status, pinned, curated_by, created_at, updated_at)
                          VALUES (?1, ?2, 'node', ?3, NULL, NULL, NULL, 'accepted', 0,
                                  ?4, ?5, ?5)",
-                        params![nid, parent, part.title, crate::ledger::local_author(), now],
+                        params![nid, parent, part.title, actor, now],
                     )?;
                     for lid in &part.link_ids {
                         conn.execute(
@@ -4547,7 +5141,7 @@ impl Database {
                     }
                 };
                 let rationale = p.rationale.clone().unwrap_or_default();
-                match Self::apply_supersession_locked(&conn, old_seq, new_seq, &rationale)? {
+                match Self::apply_supersession_locked(&conn, old_seq, new_seq, &rationale, actor)? {
                     crate::classmem::SupersessionOutcome::Applied {
                         effective_old,
                         new_seq,
@@ -4599,9 +5193,10 @@ impl Database {
         old_seq: i64,
         new_seq: i64,
         rationale: &str,
+        actor: &str,
     ) -> rusqlite::Result<crate::classmem::SupersessionOutcome> {
         let conn = self.conn.lock().unwrap();
-        Self::apply_supersession_locked(&conn, old_seq, new_seq, rationale)
+        Self::apply_supersession_locked(&conn, old_seq, new_seq, rationale, actor)
     }
 
     /// The core, callable with an already-held lock (`apply_class_proposal`
@@ -4611,6 +5206,7 @@ impl Database {
         old_seq: i64,
         new_seq: i64,
         rationale: &str,
+        actor: &str,
     ) -> rusqlite::Result<crate::classmem::SupersessionOutcome> {
         use crate::classmem::SupersessionOutcome as Out;
         let kind_of = |seq: i64| -> rusqlite::Result<Option<String>> {
@@ -4670,7 +5266,7 @@ impl Database {
             ("superseded_by", &new_str),
             ("rationale", rationale),
         ]);
-        let author = crate::ledger::local_author();
+        let author = actor.to_string();
         let old_str = effective_old.to_string();
         let ev = Self::append_ledger_event_locked(
             conn,
@@ -4720,6 +5316,233 @@ impl Database {
         Ok(out)
     }
 
+    // --- user notes (Second Brain P3) ---
+
+    fn row_to_user_note(r: &rusqlite::Row) -> rusqlite::Result<crate::context::UserNote> {
+        Ok(crate::context::UserNote {
+            id: r.get(0)?,
+            seq: r.get(1)?,
+            target_kind: r.get(2)?,
+            target_id: r.get(3)?,
+            text: r.get(4)?,
+            starred: r.get::<_, i64>(5)? != 0,
+            created_at: r.get(6)?,
+            updated_at: r.get(7)?,
+        })
+    }
+
+    const USER_NOTE_COLS: &'static str =
+        "id, seq, target_kind, target_id, text, starred, created_at, updated_at";
+
+    /// Apply one note act atomically: resolve (or create) the `user_notes`
+    /// row, apply the text or star change, and append the `note` ledger event
+    /// committing to `{action, text}` — the row + its tamper-evident fact under
+    /// one lock (the `insert_class_observation` discipline). Exactly one of
+    /// `text`/`starred` per call (one act = one event); a no-op appends
+    /// nothing. Never deletes — clearing text keeps the row and its history.
+    pub fn write_user_note(
+        &self,
+        w: &crate::context::NoteWrite,
+        actor: &str,
+    ) -> rusqlite::Result<crate::context::NoteOutcome> {
+        use crate::context::NoteOutcome as Out;
+        if w.text.is_some() == w.starred.is_some() {
+            return Ok(Out::Rejected(
+                "one act per call: set exactly one of `text` / `starred`".into(),
+            ));
+        }
+        let conn = self.conn.lock().unwrap();
+
+        // Resolve the row: by explicit id, else by target (creating on first
+        // touch), else a fresh standalone.
+        let select_one = format!("SELECT {} FROM user_notes", Self::USER_NOTE_COLS);
+        let mut note: Option<crate::context::UserNote> = None;
+        let (target_kind, target_id): (String, Option<String>);
+        if let Some(id) = w.note_id {
+            let found = conn
+                .query_row(
+                    &format!("{select_one} WHERE id = ?1"),
+                    params![id],
+                    Self::row_to_user_note,
+                )
+                .optional()?;
+            match found {
+                Some(n) => {
+                    target_kind = n.target_kind.clone();
+                    target_id = n.target_id.clone();
+                    note = Some(n);
+                }
+                None => return Ok(Out::Rejected(format!("no note #{id}"))),
+            }
+        } else {
+            let tk = w.target_kind.as_deref().unwrap_or("none");
+            if !matches!(tk, "ledger_event" | "class_node" | "session" | "none") {
+                return Ok(Out::Rejected(format!("unknown note target kind `{tk}`")));
+            }
+            if tk == "none" {
+                // A fresh standalone thought — it must start with words.
+                if w.text.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                    return Ok(Out::Rejected("a standalone note needs text".into()));
+                }
+                (target_kind, target_id) = (tk.to_string(), None);
+            } else {
+                let Some(tid) = w.target_id.as_deref().filter(|s| !s.trim().is_empty()) else {
+                    return Ok(Out::Rejected(format!("a `{tk}` note needs a target id")));
+                };
+                // The annotated thing must exist where we can check it —
+                // pointing the record at a phantom target would poison the
+                // timeline probes (the supersession discipline).
+                let exists = match tk {
+                    "ledger_event" => conn
+                        .query_row(
+                            "SELECT COUNT(*) FROM ledger_events WHERE seq = ?1",
+                            params![tid.parse::<i64>().unwrap_or(-1)],
+                            |r| r.get::<_, i64>(0),
+                        )?
+                        > 0,
+                    "class_node" => conn
+                        .query_row(
+                            "SELECT COUNT(*) FROM class_nodes WHERE id = ?1",
+                            params![tid],
+                            |r| r.get::<_, i64>(0),
+                        )?
+                        > 0,
+                    // Session ids span disjoint id-spaces (plan/browse/voice…);
+                    // referenced by id, never FK-checked — the session_tree rule.
+                    _ => true,
+                };
+                if !exists {
+                    return Ok(Out::Rejected(format!("no {tk} `{tid}` to annotate")));
+                }
+                note = conn
+                    .query_row(
+                        &format!("{select_one} WHERE target_kind = ?1 AND target_id = ?2"),
+                        params![tk, tid],
+                        Self::row_to_user_note,
+                    )
+                    .optional()?;
+                (target_kind, target_id) = (tk.to_string(), Some(tid.to_string()));
+            }
+        }
+
+        let now = crate::ledger::now_millis();
+        let mut row = match note {
+            Some(n) => n,
+            None => {
+                conn.execute(
+                    "INSERT INTO user_notes
+                        (seq, target_kind, target_id, text, starred, created_at, updated_at)
+                     VALUES (NULL, ?1, ?2, '', 0, ?3, ?3)",
+                    params![target_kind, target_id, now],
+                )?;
+                crate::context::UserNote {
+                    id: conn.last_insert_rowid(),
+                    seq: None,
+                    target_kind: target_kind.clone(),
+                    target_id: target_id.clone(),
+                    text: String::new(),
+                    starred: false,
+                    created_at: now,
+                    updated_at: now,
+                }
+            }
+        };
+
+        // Apply the act; a no-op returns without touching the ledger. (A row
+        // freshly created above always differs: standalone requires text, and
+        // a star-toggle on a new row flips 0→1.)
+        let action = if let Some(text) = w.text.as_deref() {
+            if row.text == text {
+                return Ok(Out::Unchanged(row));
+            }
+            row.text = text.to_string();
+            "note"
+        } else {
+            let starred = w.starred.unwrap_or(false);
+            if row.starred == starred {
+                return Ok(Out::Unchanged(row));
+            }
+            row.starred = starred;
+            if starred {
+                "star"
+            } else {
+                "unstar"
+            }
+        };
+
+        // Field order is frozen — it is the payload-hash identity.
+        let ph = crate::ledger::decision_payload_hash(&[("action", action), ("text", &row.text)]);
+        // A standalone note's event references its own row (each thought is
+        // its own history); a targeted note references the annotated thing.
+        let row_id_str = row.id.to_string();
+        let (ref_kind, ref_id): (&str, &str) = if row.target_kind == "none" {
+            ("none", &row_id_str)
+        } else {
+            (&row.target_kind, row.target_id.as_deref().unwrap_or(""))
+        };
+        let author = actor.to_string();
+        let ev = Self::append_ledger_event_locked(
+            &conn,
+            &crate::ledger::LedgerAppend {
+                kind: crate::ledger::EventKind::Note.as_str(),
+                author: &author,
+                ts: now,
+                prompt_id: None,
+                session_id: (row.target_kind == "session").then_some(ref_id),
+                version_number: None,
+                ref_kind: Some(ref_kind),
+                ref_id: Some(ref_id),
+                payload_hash: &ph,
+            },
+        )?;
+        conn.execute(
+            "UPDATE user_notes SET seq = ?2, text = ?3, starred = ?4, updated_at = ?5
+             WHERE id = ?1",
+            params![row.id, ev.seq, row.text, row.starred as i64, ev.ts],
+        )?;
+        row.seq = Some(ev.seq);
+        row.updated_at = ev.ts;
+        Ok(Out::Written(row))
+    }
+
+    /// The note row annotating one target, if any — the detail rail's read.
+    pub fn get_user_note(
+        &self,
+        target_kind: &str,
+        target_id: &str,
+    ) -> rusqlite::Result<Option<crate::context::UserNote>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            &format!(
+                "SELECT {} FROM user_notes WHERE target_kind = ?1 AND target_id = ?2",
+                Self::USER_NOTE_COLS
+            ),
+            params![target_kind, target_id],
+            Self::row_to_user_note,
+        )
+        .optional()
+    }
+
+    /// Every note row (optionally starred-only), most recently touched first —
+    /// the notes list, the mirror's row files, and the bundle join.
+    pub fn list_user_notes(
+        &self,
+        starred_only: bool,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<crate::context::UserNote>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM user_notes WHERE (?1 = 0 OR starred = 1)
+             ORDER BY updated_at DESC, id DESC LIMIT ?2",
+            Self::USER_NOTE_COLS
+        ))?;
+        let rows = stmt.query_map(
+            params![starred_only as i64, limit.max(0)],
+            Self::row_to_user_note,
+        )?;
+        rows.collect()
+    }
+
     // --- class observations (agent-derived patterns) ---
 
     /// Insert an observation + append its `observation` ledger event,
@@ -4732,6 +5555,7 @@ impl Database {
         node_id: &str,
         summary: &str,
         cite_seqs: &[i64],
+        actor: &str,
     ) -> rusqlite::Result<Option<i64>> {
         if cite_seqs.is_empty() || summary.trim().is_empty() {
             return Ok(None);
@@ -4768,7 +5592,7 @@ impl Database {
             ("summary", summary),
             ("cites", &cites),
         ]);
-        let author = crate::ledger::local_author();
+        let author = actor.to_string();
         let ev = Self::append_ledger_event_locked(
             &conn,
             &crate::ledger::LedgerAppend {
@@ -5021,17 +5845,28 @@ impl Database {
         // `browse_event` ledger row joins `browse_events` by ref_id, so the
         // classifier sees the page text (as `body`) under a synthetic
         // `browse_event` surface and can file it under a class like any prompt.
+        // User notes get the same treatment (P3): a `note` event joins its
+        // CURRENT `user_notes` row — standalone rows by id, targeted rows by
+        // target — under a synthetic `note` surface, so the user's own words
+        // become classifiable lake items (a strong curation signal; filing
+        // authority stays with project_path/surface).
         let mut stmt = conn.prepare(
             "SELECT le.seq, le.ts, le.kind, le.ref_kind, le.ref_id, le.session_id,
                     COALESCE(p.surface, CASE WHEN le.ref_kind = 'browse_event'
-                                             THEN 'browse_event' END),
+                                             THEN 'browse_event' END,
+                             CASE WHEN le.kind = 'note' THEN 'note' END),
                     p.origin, p.role, p.mission_id, p.project_path,
-                    COALESCE(p.body, be.text),
-                    p.thread_kind, p.thread_id, p.parent_session_id
+                    COALESCE(p.body, be.text, un.text),
+                    p.thread_kind, p.thread_id, p.parent_session_id, p.model
              FROM ledger_events le
              LEFT JOIN prompts p ON le.prompt_id = p.id
              LEFT JOIN browse_events be
                     ON le.ref_kind = 'browse_event' AND le.ref_id = CAST(be.id AS TEXT)
+             LEFT JOIN user_notes un
+                    ON le.kind = 'note'
+                   AND ((le.ref_kind = 'none' AND un.id = CAST(le.ref_id AS INTEGER))
+                     OR (le.ref_kind <> 'none' AND un.target_kind = le.ref_kind
+                         AND un.target_id = le.ref_id))
              WHERE le.seq > ?1
              ORDER BY le.seq ASC
              LIMIT ?2",
@@ -5060,6 +5895,7 @@ impl Database {
                 thread_kind: r.get(12)?,
                 thread_id: r.get(13)?,
                 parent_session_id: r.get(14)?,
+                model: r.get(15)?,
             })
         })?;
         rows.collect()
@@ -5125,6 +5961,92 @@ impl Database {
                 })
             },
         )
+    }
+
+    // --- memory map (Second Brain P5) ---
+
+    /// Every session-tree relation, ordered by row id — the Map's `lineage`
+    /// edges. Read whole (the table is small: one row per attached child
+    /// thread), never paged.
+    pub fn list_session_tree_rows(
+        &self,
+    ) -> rusqlite::Result<Vec<(String, String, String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT child_kind, child_id, parent_kind, parent_id
+             FROM session_tree ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?;
+        rows.collect()
+    }
+
+    /// Every supersession as `(old_seq, new_seq)`, oldest link first — the
+    /// Map's `supersedes` edges resolve these seqs to their class/session
+    /// endpoints via `resolve_map_endpoints`.
+    pub fn list_supersession_pairs(&self) -> rusqlite::Result<Vec<(i64, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT old_seq, new_seq FROM supersessions ORDER BY old_seq ASC",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
+    }
+
+    /// `(class node_id, session_id)` pairs reachable through accepted links —
+    /// the raw material of the Map's derived `co-occurs` edge. Two keyspaces,
+    /// the `query_ledger_events` discipline: seq-keyed targets resolve through
+    /// `ledger_events.session_id`; `session` targets ARE the session id.
+    /// DISTINCT, so a class citing one session five times contributes one pair.
+    pub fn class_session_pairs(&self) -> rusqlite::Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT l.node_id, le.session_id
+               FROM class_links l
+               JOIN ledger_events le ON le.seq = CAST(l.target_id AS INTEGER)
+              WHERE l.status = 'accepted'
+                AND l.target_kind IN ('prompt', 'decision', 'revision', 'note', 'ledger')
+                AND le.session_id IS NOT NULL
+             UNION
+             SELECT DISTINCT l.node_id, l.target_id
+               FROM class_links l
+              WHERE l.status = 'accepted' AND l.target_kind = 'session'
+             ORDER BY 1, 2",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
+    }
+
+    /// For each seq: `(session_id, accepted class filing)` — how a decision
+    /// lands on the Map (its class when filed, its session otherwise; never a
+    /// raw-event node). Same seq-keyspace rule as `class_session_pairs`.
+    pub fn resolve_map_endpoints(
+        &self,
+        seqs: &[i64],
+    ) -> rusqlite::Result<std::collections::HashMap<i64, (Option<String>, Option<String>)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT le.session_id,
+                    (SELECT cl.node_id FROM class_links cl
+                      WHERE cl.status = 'accepted'
+                        AND cl.target_kind IN ('prompt', 'decision', 'revision', 'note', 'ledger')
+                        AND cl.target_id = CAST(le.seq AS TEXT)
+                      ORDER BY cl.id ASC LIMIT 1)
+             FROM ledger_events le WHERE le.seq = ?1",
+        )?;
+        let mut out = std::collections::HashMap::new();
+        for &seq in seqs {
+            if let Some(pair) = stmt
+                .query_row(params![seq], |r| {
+                    Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?))
+                })
+                .optional()?
+            {
+                out.insert(seq, pair);
+            }
+        }
+        Ok(out)
     }
 
     fn subtree_pinned(conn: &rusqlite::Connection, id: &str) -> rusqlite::Result<bool> {
@@ -6579,10 +7501,72 @@ impl Database {
             params![review_id],
         )?;
         conn.execute(
+            "DELETE FROM review_pushes WHERE review_id = ?1",
+            params![review_id],
+        )?;
+        conn.execute(
             "DELETE FROM review_sessions WHERE review_id = ?1",
             params![review_id],
         )?;
         Ok(())
+    }
+
+    const REVIEW_PUSH_COLS: &'static str = "id, review_id, repo_path, remote, branch, \
+         commit_sha, pr_url, pr_number, files, created_at";
+
+    fn map_review_push(row: &rusqlite::Row<'_>) -> rusqlite::Result<PushRecord> {
+        Ok(PushRecord {
+            id: row.get(0)?,
+            review_id: row.get(1)?,
+            repo_path: row.get(2)?,
+            remote: row.get(3)?,
+            branch: row.get(4)?,
+            commit_sha: row.get(5)?,
+            pr_url: row.get(6)?,
+            pr_number: row.get(7)?,
+            files: row.get(8)?,
+            created_at: row.get(9)?,
+        })
+    }
+
+    pub fn insert_review_push(&self, p: &PushRecord) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            &format!(
+                "INSERT INTO review_pushes ({})
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                Self::REVIEW_PUSH_COLS
+            ),
+            params![
+                p.id,
+                p.review_id,
+                p.repo_path,
+                p.remote,
+                p.branch,
+                p.commit_sha,
+                p.pr_url,
+                p.pr_number,
+                p.files,
+                p.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The newest push recorded for a review — the one the feedback payload
+    /// reports.
+    pub fn latest_push_for_review(&self, review_id: &str) -> Option<PushRecord> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            &format!(
+                "SELECT {} FROM review_pushes WHERE review_id = ?1
+                 ORDER BY created_at DESC, id DESC LIMIT 1",
+                Self::REVIEW_PUSH_COLS
+            ),
+            params![review_id],
+            Self::map_review_push,
+        )
+        .ok()
     }
 
     const REVIEW_ANNOTATION_COLS: &'static str =
@@ -7342,6 +8326,8 @@ mod tests {
             thread_kind: None,
             thread_id: None,
             parent_session_id: None,
+            model: None,
+            model_source: None,
         }
     }
 
@@ -7427,15 +8413,15 @@ mod tests {
         let r2 = append(&db, "review_verdict", "h4"); // seq 4
 
         // Non-decision kinds are never superseded (either side).
-        assert_rejected(db.apply_supersession(1, r1.seq, "").unwrap());
-        assert_rejected(db.apply_supersession(r1.seq, 1, "").unwrap());
+        assert_rejected(db.apply_supersession(1, r1.seq, "", "tester").unwrap());
+        assert_rejected(db.apply_supersession(r1.seq, 1, "", "tester").unwrap());
         // Unknown seqs reject.
-        assert_rejected(db.apply_supersession(r1.seq, 999, "").unwrap());
+        assert_rejected(db.apply_supersession(r1.seq, 999, "", "tester").unwrap());
         // Old must precede new.
-        assert_rejected(db.apply_supersession(a1.seq, r1.seq, "").unwrap());
+        assert_rejected(db.apply_supersession(a1.seq, r1.seq, "", "tester").unwrap());
 
         // Happy path: r1 → a1.
-        match db.apply_supersession(r1.seq, a1.seq, "reversed").unwrap() {
+        match db.apply_supersession(r1.seq, a1.seq, "reversed", "tester").unwrap() {
             SupersessionOutcome::Applied { effective_old, new_seq, event_seq } => {
                 assert_eq!((effective_old, new_seq), (r1.seq, a1.seq));
                 // The supersede event landed on the chain, referencing old.
@@ -7455,14 +8441,14 @@ mod tests {
 
         // "At most once": superseding r1 again redirects to the chain head
         // (a1), so r1 → r2 records a1 → r2, not a second edge from r1.
-        match db.apply_supersession(r1.seq, r2.seq, "newer again").unwrap() {
+        match db.apply_supersession(r1.seq, r2.seq, "newer again", "tester").unwrap() {
             SupersessionOutcome::Applied { effective_old, new_seq, .. } => {
                 assert_eq!((effective_old, new_seq), (a1.seq, r2.seq));
             }
             other => panic!("expected Applied, got {other:?}"),
         }
         // The idempotent duplicate lands on "already the head" and rejects.
-        assert_rejected(db.apply_supersession(r1.seq, r2.seq, "").unwrap());
+        assert_rejected(db.apply_supersession(r1.seq, r2.seq, "", "tester").unwrap());
 
         // The index answers both hops.
         let map = db.supersessions_for_seqs(&[r1.seq, a1.seq, r2.seq]).unwrap();
@@ -7480,13 +8466,13 @@ mod tests {
         append(&db, "prompt", "h1");
         let r = append(&db, "resolution", "h2");
         let a = append(&db, "approval", "h3");
-        match db.apply_supersession(r.seq, a.seq, "why").unwrap() {
+        match db.apply_supersession(r.seq, a.seq, "why", "keeper").unwrap() {
             SupersessionOutcome::Applied { .. } => {}
             other => panic!("expected Applied, got {other:?}"),
         }
         accepted_node(&db, "cn-x", None, "X");
         assert!(db
-            .insert_class_observation("cn-x", "a pattern", &[1, 2])
+            .insert_class_observation("cn-x", "a pattern", &[1, 2], "keeper")
             .unwrap()
             .is_some());
         let v = db.verify_ledger_chain().unwrap();
@@ -7500,12 +8486,12 @@ mod tests {
         accepted_node(&db, "cn-x", None, "X");
 
         // Uncited / empty-summary / unknown-node inserts are rejected.
-        assert!(db.insert_class_observation("cn-x", "s", &[]).unwrap().is_none());
-        assert!(db.insert_class_observation("cn-x", "  ", &[1]).unwrap().is_none());
-        assert!(db.insert_class_observation("ghost", "s", &[1]).unwrap().is_none());
+        assert!(db.insert_class_observation("cn-x", "s", &[], "keeper").unwrap().is_none());
+        assert!(db.insert_class_observation("cn-x", "  ", &[1], "keeper").unwrap().is_none());
+        assert!(db.insert_class_observation("ghost", "s", &[1], "keeper").unwrap().is_none());
 
         let id = db
-            .insert_class_observation("cn-x", "deploys follow auth changes", &[4, 9])
+            .insert_class_observation("cn-x", "deploys follow auth changes", &[4, 9], "keeper")
             .unwrap()
             .expect("first insert lands");
         let obs = db.list_class_observations("cn-x", false).unwrap();
@@ -7522,7 +8508,7 @@ mod tests {
         // Identical summary dedups — including after a dismiss, so a
         // dismissed pattern never resurfaces under the same wording.
         assert!(db
-            .insert_class_observation("cn-x", "deploys follow auth changes", &[4])
+            .insert_class_observation("cn-x", "deploys follow auth changes", &[4], "keeper")
             .unwrap()
             .is_none());
         let node = db.set_observation_dismissed(id).unwrap();
@@ -7530,7 +8516,7 @@ mod tests {
         assert!(db.list_class_observations("cn-x", false).unwrap().is_empty());
         assert_eq!(db.list_class_observations("cn-x", true).unwrap().len(), 1);
         assert!(db
-            .insert_class_observation("cn-x", "deploys follow auth changes", &[4, 9])
+            .insert_class_observation("cn-x", "deploys follow auth changes", &[4, 9], "keeper")
             .unwrap()
             .is_none());
         // A dismissed observation can't be pinned.
@@ -7543,7 +8529,7 @@ mod tests {
         accepted_node(&db, "cn-root", None, "root");
         accepted_node(&db, "cn-cold", Some("cn-root"), "cold branch");
         append(&db, "prompt", "h1");
-        db.insert_class_observation("cn-cold", "some pattern", &[1])
+        db.insert_class_observation("cn-cold", "some pattern", &[1], "keeper")
             .unwrap()
             .expect("observation lands");
 
@@ -7561,7 +8547,7 @@ mod tests {
             .unwrap();
         assert!(matches!(staged, crate::classmem::StagedOutcome::Structural));
         let pid = db.list_class_proposals().unwrap()[0].id;
-        assert!(db.apply_class_proposal(pid).unwrap().is_some());
+        assert!(db.apply_class_proposal(pid, "tester").unwrap().is_some());
 
         // The rows retired with the branch…
         assert!(db.list_class_observations("cn-cold", true).unwrap().is_empty());
@@ -7606,7 +8592,7 @@ mod tests {
         let props = db.list_class_proposals().unwrap();
         assert_eq!(props.len(), 1);
         assert_eq!(props[0].op, "supersede");
-        let applied = db.apply_class_proposal(props[0].id).unwrap().expect("applies");
+        let applied = db.apply_class_proposal(props[0].id, "tester").unwrap().expect("applies");
         assert_eq!(applied.op, "supersede");
         assert_eq!(applied.detail, format!("#{} → #{}", r.seq, a.seq));
         assert!(db.list_class_proposals().unwrap().is_empty());
@@ -7615,6 +8601,26 @@ mod tests {
             Some(&a.seq)
         );
         assert!(db.verify_ledger_chain().unwrap().ok);
+    }
+
+    #[test]
+    fn pending_proposal_count_tracks_staging_and_resolution() {
+        let db = Database::open_in_memory().unwrap();
+        append(&db, "prompt", "h1");
+        let r = append(&db, "resolution", "h2");
+        let a = append(&db, "approval", "h3");
+        assert_eq!(db.count_pending_class_proposals().unwrap(), 0);
+
+        db.stage_proposal(
+            None,
+            &Proposal::Supersede { old_seq: r.seq, new_seq: a.seq, rationale: None },
+        )
+        .unwrap();
+        assert_eq!(db.count_pending_class_proposals().unwrap(), 1);
+
+        let pid = db.list_class_proposals().unwrap()[0].id;
+        db.reject_class_proposal(pid).unwrap();
+        assert_eq!(db.count_pending_class_proposals().unwrap(), 0);
     }
 
     fn count_reorg_events(db: &Database) -> i64 {
@@ -7664,7 +8670,7 @@ mod tests {
         let flipped = db.accept_class_node(&node.id).unwrap();
         assert_eq!(flipped, vec![node.id.clone()]);
         for nid in &flipped {
-            crate::classmem::record_curate(&db, nid, "accept", "");
+            crate::classmem::record_curate(&db, "tester", nid, "accept", "");
         }
         assert_eq!(db.get_class_node(&node.id).unwrap().unwrap().status, "accepted");
         // Re-accept flips nothing (idempotent — no duplicate flip).
@@ -7685,11 +8691,13 @@ mod tests {
     fn browse_event_records_dedups_and_keeps_chain_green() {
         let db = Database::open_in_memory().unwrap();
         let ev = |browse_id: &str, text: &str| crate::ledger::BrowseEventInput {
-            action: "navigate".into(),
+            action: crate::ledger::BrowseAction::Navigate,
             browse_id: Some(browse_id.into()),
             url: "https://example.com".into(),
             title: Some("Example".into()),
             text: text.into(),
+            from_event_id: None,
+            author: None,
         };
         // First page records → a browse_event ledger row + a browse_events row.
         assert!(crate::ledger::record_browse_event(&db, ev("t1", "page one")).unwrap().is_some());
@@ -7728,18 +8736,892 @@ mod tests {
     }
 
     #[test]
+    fn browse_trail_edge_round_trips_and_stays_out_of_the_chain() {
+        let db = Database::open_in_memory().unwrap();
+        let ev = |text: &str, from: Option<i64>| crate::ledger::BrowseEventInput {
+            action: crate::ledger::BrowseAction::Navigate,
+            browse_id: Some("t1".into()),
+            url: "https://example.com".into(),
+            title: None,
+            text: text.into(),
+            from_event_id: from,
+            author: None,
+        };
+        // Root, then a follow — the trail edge points at the preceding row.
+        assert!(crate::ledger::record_browse_event(&db, ev("origin page", None)).unwrap().is_some());
+        assert!(crate::ledger::record_browse_event(&db, ev("followed page", Some(1))).unwrap().is_some());
+        let (root_from, follow_from): (Option<i64>, Option<i64>) = {
+            let conn = db.conn.lock().unwrap();
+            (
+                conn.query_row("SELECT from_event_id FROM browse_events WHERE id = 1", [], |r| r.get(0)).unwrap(),
+                conn.query_row("SELECT from_event_id FROM browse_events WHERE id = 2", [], |r| r.get(0)).unwrap(),
+            )
+        };
+        assert_eq!(root_from, None, "a trail root has no edge");
+        assert_eq!(follow_from, Some(1));
+        // Non-hashed: the chain is blind to the edge and stays green.
+        assert!(db.verify_ledger_chain().unwrap().ok);
+    }
+
+    #[test]
+    fn actor_authorship_separates_human_and_agent_events_on_one_chain() {
+        let db = Database::open_in_memory().unwrap();
+        // Human prompt (author: None → local_author).
+        crate::ledger::record_prompt(
+            &db,
+            crate::ledger::PromptInput {
+                source: crate::ledger::PromptSource::Hook,
+                origin: crate::ledger::Origin::Redline,
+                surface: "pty".into(),
+                role: None,
+                session_id: None,
+                claude_session_id: Some("cs-h".into()),
+                mission_id: None,
+                project_path: None,
+                body: "a human prompt".into(),
+                thread: None,
+                author: None,
+                model: None,
+                model_source: None,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        // Agent-constructed prompt authors as its surface seat.
+        crate::ledger::record_prompt(
+            &db,
+            crate::ledger::PromptInput {
+                source: crate::ledger::PromptSource::RustFirstTurn,
+                origin: crate::ledger::Origin::Redline,
+                surface: "browse".into(),
+                role: None,
+                session_id: None,
+                claude_session_id: Some("cs-a".into()),
+                mission_id: None,
+                project_path: None,
+                body: "a constructed agent prompt".into(),
+                thread: None,
+                author: Some("browse".into()),
+                model: None,
+                model_source: None,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        // Agent browse capture + agent curation carry their seat names.
+        crate::ledger::record_browse_event(
+            &db,
+            crate::ledger::BrowseEventInput {
+                action: crate::ledger::BrowseAction::Navigate,
+                browse_id: Some("t1".into()),
+                url: "https://example.com".into(),
+                title: None,
+                text: "driven page".into(),
+                from_event_id: None,
+                author: Some("browse".into()),
+            },
+        )
+        .unwrap()
+        .unwrap();
+        accepted_node(&db, "cn-a", None, "A");
+        crate::classmem::record_curate(&db, "classifier", "cn-a", "organize", "");
+        crate::ledger::record_revision_event(&db, "s1", 1, "# plan", None).unwrap().unwrap();
+
+        let mut authors: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for e in db.list_ledger_events(10).unwrap() {
+            authors.insert(e.kind, e.author);
+        }
+        let local = crate::ledger::local_author();
+        assert_eq!(authors["revision"], local);
+        assert_eq!(authors["class_curate"], "classifier");
+        assert_eq!(authors["browse_event"], "browse");
+        // The prompt events: one local, one agent (same kind — check both exist).
+        let prompt_authors: Vec<String> = db
+            .list_ledger_events(10)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "prompt")
+            .map(|e| e.author)
+            .collect();
+        assert!(prompt_authors.contains(&local));
+        assert!(prompt_authors.contains(&"browse".to_string()));
+
+        // Mixed human/agent authors on ONE chain: verification stays green —
+        // the P0 boundary proof (author was always hashed; only its value
+        // sharpened).
+        let v = db.verify_ledger_chain().unwrap();
+        assert!(v.ok, "mixed-author chain must verify: {v:?}");
+    }
+
+    // --- Timeline query (Memory surface P1) --------------------------------
+
+    fn tprompt(db: &Database, surface: &str, body: &str, cs: &str, proj: &str, author: &str) {
+        crate::ledger::record_prompt(
+            db,
+            crate::ledger::PromptInput {
+                source: crate::ledger::PromptSource::Hook,
+                origin: crate::ledger::Origin::Redline,
+                surface: surface.into(),
+                role: None,
+                session_id: None,
+                claude_session_id: Some(cs.into()),
+                mission_id: None,
+                project_path: Some(proj.into()),
+                body: body.into(),
+                thread: None,
+                author: Some(author.into()),
+                model: None,
+                model_source: None,
+            },
+        )
+        .unwrap()
+        .unwrap();
+    }
+
+    #[test]
+    fn timeline_query_filters_cursor_and_provenance_joins() {
+        let db = Database::open_in_memory().unwrap();
+        tprompt(&db, "pty", "alpha prompt body", "cs-1", "/proj/a", "human");
+        tprompt(&db, "browse", "beta prompt body", "cs-2", "/proj/b", "browse");
+        crate::ledger::record_browse_event(
+            &db,
+            crate::ledger::BrowseEventInput {
+                action: crate::ledger::BrowseAction::Navigate,
+                browse_id: Some("t1".into()),
+                url: "https://example.com/one".into(),
+                title: Some("One".into()),
+                text: "page one".into(),
+                from_event_id: None,
+                author: Some("browse".into()),
+            },
+        )
+        .unwrap()
+        .unwrap();
+        append(&db, "approval", "h-app");
+
+        let f = crate::context::LedgerFilters::default;
+        let all = db.query_ledger_events(&f()).unwrap();
+        assert_eq!(all.len(), 4);
+        assert!(
+            all.windows(2).all(|w| w[0].event.seq > w[1].event.seq),
+            "pages are newest-first"
+        );
+
+        // Kind facet + preview from the prompt join.
+        let prompts = db
+            .query_ledger_events(&crate::context::LedgerFilters {
+                kind: Some("prompt".into()),
+                ..f()
+            })
+            .unwrap();
+        assert_eq!(prompts.len(), 2);
+        assert!(prompts.iter().all(|i| i.preview.is_some() && !i.compacted));
+
+        // Actor facet spans event kinds (agent prompt + agent browse capture).
+        let agent = db
+            .query_ledger_events(&crate::context::LedgerFilters {
+                author: Some("browse".into()),
+                ..f()
+            })
+            .unwrap();
+        assert_eq!(agent.len(), 2);
+
+        // Surface + project facets ride the prompt join.
+        let pty = db
+            .query_ledger_events(&crate::context::LedgerFilters {
+                surface: Some("pty".into()),
+                ..f()
+            })
+            .unwrap();
+        assert_eq!(pty.len(), 1);
+        assert_eq!(pty[0].project_path.as_deref(), Some("/proj/a"));
+        assert_eq!(pty[0].preview.as_deref(), Some("alpha prompt body"));
+
+        // Bound-LIKE body search.
+        let hit = db
+            .query_ledger_events(&crate::context::LedgerFilters {
+                q: Some("beta prompt".into()),
+                ..f()
+            })
+            .unwrap();
+        assert_eq!(hit.len(), 1);
+        assert_eq!(hit[0].project_path.as_deref(), Some("/proj/b"));
+
+        // Browse provenance is joined onto the event row.
+        let be = db
+            .query_ledger_events(&crate::context::LedgerFilters {
+                kind: Some("browse_event".into()),
+                ..f()
+            })
+            .unwrap();
+        assert_eq!(be.len(), 1);
+        assert_eq!(be[0].url.as_deref(), Some("https://example.com/one"));
+        assert_eq!(be[0].action.as_deref(), Some("navigate"));
+        assert_eq!(be[0].browse_id.as_deref(), Some("t1"));
+
+        // Cursor pages chain without overlap and reach the whole history.
+        let page1 = db
+            .query_ledger_events(&crate::context::LedgerFilters {
+                limit: Some(2),
+                ..f()
+            })
+            .unwrap();
+        assert_eq!(page1.len(), 2);
+        let page2 = db
+            .query_ledger_events(&crate::context::LedgerFilters {
+                limit: Some(2),
+                before_seq: Some(page1.last().unwrap().event.seq),
+                ..f()
+            })
+            .unwrap();
+        assert_eq!(page2.len(), 2);
+        assert!(page2[0].event.seq < page1[1].event.seq);
+    }
+
+    #[test]
+    fn timeline_query_like_filter_is_injection_safe() {
+        let db = Database::open_in_memory().unwrap();
+        tprompt(&db, "pty", "sale is 100% real", "cs-a", "/p", "human");
+        tprompt(&db, "pty", "sale is 100x real", "cs-b", "/p", "human");
+
+        // LIKE metacharacters match literally, not as wildcards.
+        let percent = db
+            .query_ledger_events(&crate::context::LedgerFilters {
+                q: Some("100%".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(percent.len(), 1);
+        assert_eq!(percent[0].preview.as_deref(), Some("sale is 100% real"));
+
+        // Hostile text stays a bound value; the table survives.
+        let hostile = db
+            .query_ledger_events(&crate::context::LedgerFilters {
+                q: Some("'; DROP TABLE prompts; --".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(hostile.is_empty());
+        assert_eq!(db.query_ledger_events(&Default::default()).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn timeline_query_class_filing_probes_respect_target_keyspaces() {
+        let db = Database::open_in_memory().unwrap();
+        // seq 1 = browse event (browse row id 1); seq 2 = prompt.
+        crate::ledger::record_browse_event(
+            &db,
+            crate::ledger::BrowseEventInput {
+                action: crate::ledger::BrowseAction::Navigate,
+                browse_id: Some("t1".into()),
+                url: "https://example.com".into(),
+                title: None,
+                text: "a page".into(),
+                from_event_id: None,
+                author: None,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        tprompt(&db, "pty", "filed prompt", "cs-1", "/p", "human");
+
+        accepted_node(&db, "cn-p", None, "Prompts");
+        accepted_node(&db, "cn-b", None, "Pages");
+        add_link(&db, "cn-p", "prompt", "2"); // prompt filed by ledger seq
+        add_link(&db, "cn-b", "browse_event", "1"); // page filed by browse row id
+        // A browse link whose numeric key collides with the prompt's seq must
+        // never shadow the seq-keyed filing (`target_kind` splits the keyspaces).
+        add_link(&db, "cn-b", "browse_event", "2");
+
+        let all = db.query_ledger_events(&Default::default()).unwrap();
+        let prompt = all.iter().find(|i| i.event.kind == "prompt").unwrap();
+        assert_eq!(prompt.class_node_id.as_deref(), Some("cn-p"));
+        assert_eq!(prompt.class_title.as_deref(), Some("Prompts"));
+        let page = all.iter().find(|i| i.event.kind == "browse_event").unwrap();
+        assert_eq!(page.class_node_id.as_deref(), Some("cn-b"));
+        assert_eq!(page.class_title.as_deref(), Some("Pages"));
+    }
+
+    #[test]
+    fn timeline_query_citation_focus_filters_by_seqs_and_class_node() {
+        let db = Database::open_in_memory().unwrap();
+        // seq 1 = browse event (browse row id 1); seq 2, 3 = prompts.
+        crate::ledger::record_browse_event(
+            &db,
+            crate::ledger::BrowseEventInput {
+                action: crate::ledger::BrowseAction::Navigate,
+                browse_id: Some("t1".into()),
+                url: "https://example.com".into(),
+                title: None,
+                text: "a page".into(),
+                from_event_id: None,
+                author: None,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        tprompt(&db, "pty", "first prompt", "cs-1", "/p", "human");
+        tprompt(&db, "pty", "second prompt", "cs-2", "/p", "human");
+
+        // The Ask agent's `#seq` chips: exact rows, still newest-first; an
+        // unknown seq just doesn't match; an empty list is no filter at all.
+        let f = crate::context::LedgerFilters::default;
+        let picked = db
+            .query_ledger_events(&crate::context::LedgerFilters {
+                seqs: Some(vec![1, 3, 999]),
+                ..f()
+            })
+            .unwrap();
+        assert_eq!(
+            picked.iter().map(|i| i.event.seq).collect::<Vec<_>>(),
+            vec![3, 1]
+        );
+        let unfiltered = db
+            .query_ledger_events(&crate::context::LedgerFilters {
+                seqs: Some(vec![]),
+                ..f()
+            })
+            .unwrap();
+        assert_eq!(unfiltered.len(), 3);
+
+        // The class chip: only events filed under the node, across BOTH
+        // target keyspaces (prompt by ledger seq, page by browse row id) —
+        // and only accepted links count.
+        accepted_node(&db, "cn-x", None, "X");
+        add_link(&db, "cn-x", "prompt", "2"); // the first prompt, by seq
+        add_link(&db, "cn-x", "browse_event", "1"); // the page, by browse row id
+        let filed = db
+            .query_ledger_events(&crate::context::LedgerFilters {
+                class_node: Some("cn-x".into()),
+                ..f()
+            })
+            .unwrap();
+        assert_eq!(
+            filed.iter().map(|i| i.event.seq).collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+        let none = db
+            .query_ledger_events(&crate::context::LedgerFilters {
+                class_node: Some("cn-missing".into()),
+                ..f()
+            })
+            .unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn timeline_query_map_focus_filters_by_thread_and_browse() {
+        let db = Database::open_in_memory().unwrap();
+        // seq 1 = browse event on tab t1; seq 2 = a linked-thread prompt;
+        // seq 3 = a plain pty prompt (matches neither focus).
+        crate::ledger::record_browse_event(
+            &db,
+            crate::ledger::BrowseEventInput {
+                action: crate::ledger::BrowseAction::Navigate,
+                browse_id: Some("t1".into()),
+                url: "https://example.com".into(),
+                title: None,
+                text: "a page".into(),
+                from_event_id: None,
+                author: None,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        crate::ledger::record_prompt(
+            &db,
+            crate::ledger::PromptInput {
+                source: crate::ledger::PromptSource::RustFirstTurn,
+                origin: crate::ledger::Origin::Redline,
+                surface: "linked".into(),
+                role: None,
+                session_id: None,
+                claude_session_id: Some("cs-l".into()),
+                mission_id: None,
+                project_path: None,
+                body: "linked turn".into(),
+                thread: Some(crate::ledger::ThreadRef {
+                    thread_kind: "linked",
+                    thread_id: "L1".into(),
+                    parent_session_id: None,
+                }),
+                author: Some("linked".into()),
+                model: None,
+                model_source: None,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        tprompt(&db, "pty", "plain prompt", "cs-p", "/p", "human");
+
+        let f = crate::context::LedgerFilters::default;
+        let by_thread = db
+            .query_ledger_events(&crate::context::LedgerFilters {
+                thread_id: Some("L1".into()),
+                ..f()
+            })
+            .unwrap();
+        assert_eq!(
+            by_thread.iter().map(|i| i.event.seq).collect::<Vec<_>>(),
+            vec![2],
+            "thread focus reaches exactly the thread's prompts"
+        );
+        let by_tab = db
+            .query_ledger_events(&crate::context::LedgerFilters {
+                browse_id: Some("t1".into()),
+                ..f()
+            })
+            .unwrap();
+        assert_eq!(
+            by_tab.iter().map(|i| i.event.seq).collect::<Vec<_>>(),
+            vec![1],
+            "browse focus reaches exactly the tab's trail"
+        );
+        assert!(db
+            .query_ledger_events(&crate::context::LedgerFilters {
+                browse_id: Some("t-missing".into()),
+                ..f()
+            })
+            .unwrap()
+            .is_empty());
+    }
+
+    // --- memory map (Second Brain P5) --------------------------------------
+
+    /// Append a ledger event inside a named session — the map fixtures need
+    /// distinct session ids (the module-wide `append` hardcodes one).
+    fn append_in(
+        db: &Database,
+        kind: &str,
+        session: &str,
+        ph: &str,
+    ) -> crate::ledger::LedgerEventRow {
+        db.append_ledger_event(&crate::ledger::LedgerAppend {
+            kind,
+            author: "tester",
+            ts: 1000,
+            prompt_id: None,
+            session_id: Some(session),
+            version_number: None,
+            ref_kind: Some("session"),
+            ref_id: Some(session),
+            payload_hash: ph,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn memory_map_empty_lake_renders_empty_buckets() {
+        let db = Database::open_in_memory().unwrap();
+        let m = crate::context::build_memory_map(&db);
+        assert!(m.nodes.is_empty());
+        assert!(m.edges.is_empty());
+    }
+
+    #[test]
+    fn memory_map_builds_declared_nodes_and_edges_never_raw_prompts() {
+        let db = Database::open_in_memory().unwrap();
+        // Three events in session s1 (seqs 1–3): two get filed into classes.
+        let e1 = append_in(&db, "prompt", "s1", "h1");
+        let e2 = append_in(&db, "prompt", "s1", "h2");
+        append_in(&db, "prompt", "s1", "h3");
+
+        // Classes: A (root) ⊃ B; C apart; D/E share a project; P proposed.
+        accepted_node(&db, "cn-a", None, "A");
+        accepted_node(&db, "cn-b", Some("cn-a"), "B");
+        accepted_node(&db, "cn-c", None, "C");
+        {
+            let now = crate::ledger::now_millis();
+            let conn = db.conn.lock().unwrap();
+            for id in ["cn-d", "cn-e"] {
+                conn.execute(
+                    "INSERT INTO class_nodes
+                        (id, parent_id, kind, title, summary, project_path, ip_name,
+                         status, pinned, curated_by, created_at, updated_at)
+                     VALUES (?1, NULL, 'node', upper(?1), NULL, '/pp', NULL,
+                             'accepted', 0, 'user', ?2, ?2)",
+                    params![id, now],
+                )
+                .unwrap();
+            }
+            conn.execute(
+                "INSERT INTO class_nodes
+                    (id, parent_id, kind, title, summary, project_path, ip_name,
+                     status, pinned, curated_by, created_at, updated_at)
+                 VALUES ('cn-p', NULL, 'node', 'P', NULL, NULL, NULL,
+                         'proposed', 0, NULL, ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+        }
+        // Filings: A and B reach s1 through seq-keyed links; C by direct
+        // session link — all three share s1, but A↔B is parent↔child.
+        add_link(&db, "cn-a", "prompt", &e1.seq.to_string());
+        add_link(&db, "cn-b", "prompt", &e2.seq.to_string());
+        add_link(&db, "cn-c", "session", "s1");
+
+        // Lineage: a browse tab under a plan session.
+        db.insert_session_link("browse", "tab-1", "session", "s9", 1000)
+            .unwrap();
+
+        let m = crate::context::build_memory_map(&db);
+
+        // Rule 1: classes and sessions only — the three prompts are mass,
+        // never dots; the proposed node is not on the record yet.
+        assert_eq!(
+            m.nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
+            vec![
+                "class:cn-a",
+                "class:cn-b",
+                "class:cn-c",
+                "class:cn-d",
+                "class:cn-e",
+                "thread:browse:tab-1",
+                "thread:session:s9",
+            ]
+        );
+        let node = |id: &str| m.nodes.iter().find(|n| n.id == id).unwrap();
+        assert_eq!(node("class:cn-a").mass, 1);
+        assert_eq!(node("class:cn-b").parent_id.as_deref(), Some("class:cn-a"));
+        assert_eq!(node("thread:browse:tab-1").kind, "thread");
+        assert_eq!(node("thread:browse:tab-1").browse_id.as_deref(), Some("tab-1"));
+        assert_eq!(
+            node("thread:browse:tab-1").parent_id.as_deref(),
+            Some("thread:session:s9")
+        );
+        assert_eq!(node("thread:session:s9").kind, "session");
+        assert_eq!(node("thread:session:s9").session_id.as_deref(), Some("s9"));
+
+        // Declared edges, deterministic order: contains, lineage, then the
+        // derived co-occurrences — shared session A↔C and B↔C (parent↔child
+        // A↔B is `contains`' job), shared project D↔E.
+        let flat: Vec<(String, String, String, i64)> = m
+            .edges
+            .iter()
+            .map(|e| (e.kind.clone(), e.from.clone(), e.to.clone(), e.weight))
+            .collect();
+        assert_eq!(
+            flat,
+            vec![
+                ("co_occurs".into(), "class:cn-a".into(), "class:cn-c".into(), 1),
+                ("co_occurs".into(), "class:cn-b".into(), "class:cn-c".into(), 1),
+                ("co_occurs".into(), "class:cn-d".into(), "class:cn-e".into(), 1),
+                ("contains".into(), "class:cn-a".into(), "class:cn-b".into(), 1),
+                ("lineage".into(), "thread:session:s9".into(), "thread:browse:tab-1".into(), 1),
+            ]
+        );
+        let basis = |from: &str, to: &str| {
+            m.edges
+                .iter()
+                .find(|e| e.from == from && e.to == to)
+                .and_then(|e| e.basis.as_deref().map(str::to_string))
+        };
+        assert_eq!(
+            basis("class:cn-a", "class:cn-c").as_deref(),
+            Some("1 shared session")
+        );
+        assert_eq!(
+            basis("class:cn-d", "class:cn-e").as_deref(),
+            Some("shared project")
+        );
+
+        // Determinism: the payload (minus the timestamp) is byte-identical
+        // across builds — the seeded layout downstream depends on it.
+        let again = crate::context::build_memory_map(&db);
+        assert_eq!(
+            serde_json::to_string(&m.nodes).unwrap(),
+            serde_json::to_string(&again.nodes).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_string(&m.edges).unwrap(),
+            serde_json::to_string(&again.edges).unwrap()
+        );
+    }
+
+    #[test]
+    fn memory_map_supersedes_edge_resolves_to_class_else_session() {
+        let db = Database::open_in_memory().unwrap();
+        // The synthetic fixture the empty `supersessions` table demands: a
+        // resolution in sA superseded by an approval in sB.
+        let r1 = append_in(&db, "resolution", "sA", "h1");
+        let a1 = append_in(&db, "approval", "sB", "h2");
+        match db.apply_supersession(r1.seq, a1.seq, "newer", "tester").unwrap() {
+            crate::classmem::SupersessionOutcome::Applied { .. } => {}
+            other => panic!("expected Applied, got {other:?}"),
+        }
+        // The old decision is filed; the new one is not — so the edge runs
+        // class → session, and sB becomes a node just by hosting a decision.
+        accepted_node(&db, "cn-x", None, "X");
+        add_link(&db, "cn-x", "decision", &r1.seq.to_string());
+
+        let m = crate::context::build_memory_map(&db);
+        assert!(m.nodes.iter().any(|n| n.id == "thread:session:sB"));
+        let sup: Vec<&crate::context::MapEdge> =
+            m.edges.iter().filter(|e| e.kind == "supersedes").collect();
+        assert_eq!(sup.len(), 1);
+        assert_eq!(sup[0].from, "class:cn-x");
+        assert_eq!(sup[0].to, "thread:session:sB");
+        assert_eq!(sup[0].weight, 1);
+        assert_eq!(
+            sup[0].basis.as_deref(),
+            Some(format!("#{} → #{}", r1.seq, a1.seq).as_str())
+        );
+    }
+
+    // --- user notes (Second Brain P3) --------------------------------------
+
+    fn nwrite(
+        target: Option<(&str, &str)>,
+        note_id: Option<i64>,
+        text: Option<&str>,
+        starred: Option<bool>,
+    ) -> crate::context::NoteWrite {
+        crate::context::NoteWrite {
+            note_id,
+            target_kind: target.map(|(k, _)| k.to_string()),
+            target_id: target.map(|(_, id)| id.to_string()),
+            text: text.map(str::to_string),
+            starred,
+        }
+    }
+
+    fn written(out: crate::context::NoteOutcome) -> crate::context::UserNote {
+        match out {
+            crate::context::NoteOutcome::Written(n) => n,
+            other => panic!("expected Written, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn user_note_acts_append_one_event_each_and_keep_the_chain_green() {
+        let db = Database::open_in_memory().unwrap();
+        tprompt(&db, "pty", "alpha prompt body", "cs-1", "/p", "human");
+        let note_events =
+            || db.list_ledger_events(50).unwrap().iter().filter(|e| e.kind == "note").count();
+
+        // Write, then edit — same row, one event per act.
+        let ev = |t: Option<&str>, s: Option<bool>| nwrite(Some(("ledger_event", "1")), None, t, s);
+        let n1 = written(db.write_user_note(&ev(Some("check this against P2"), None), "human").unwrap());
+        assert_eq!(n1.text, "check this against P2");
+        assert_eq!(note_events(), 1);
+        let n2 = written(db.write_user_note(&ev(Some("checked; superseded by P3"), None), "human").unwrap());
+        assert_eq!(n2.id, n1.id, "one row per target — edits update it");
+        assert_eq!(note_events(), 2);
+
+        // A no-op act appends NOTHING.
+        match db.write_user_note(&ev(Some("checked; superseded by P3"), None), "human").unwrap() {
+            crate::context::NoteOutcome::Unchanged(_) => {}
+            other => panic!("no-op must be Unchanged, got {other:?}"),
+        }
+        assert_eq!(note_events(), 2);
+
+        // Star / unstar are their own acts on the same row.
+        let n3 = written(db.write_user_note(&ev(None, Some(true)), "human").unwrap());
+        assert!(n3.starred);
+        assert_eq!(n3.id, n1.id);
+        assert_eq!(note_events(), 3);
+        match db.write_user_note(&ev(None, Some(true)), "human").unwrap() {
+            crate::context::NoteOutcome::Unchanged(_) => {}
+            other => panic!("re-star must be Unchanged, got {other:?}"),
+        }
+        let n4 = written(db.write_user_note(&ev(None, Some(false)), "human").unwrap());
+        assert!(!n4.starred);
+        assert_eq!(note_events(), 4);
+
+        // The row reads back; the event references its target.
+        let got = db.get_user_note("ledger_event", "1").unwrap().unwrap();
+        assert_eq!(got.text, "checked; superseded by P3");
+        assert_eq!(got.seq, n4.seq);
+        let ev_row = db
+            .list_ledger_events(50)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.kind == "note")
+            .unwrap();
+        assert_eq!(ev_row.ref_kind.as_deref(), Some("ledger_event"));
+        assert_eq!(ev_row.ref_id.as_deref(), Some("1"));
+
+        // Rejections: phantom target, no act, two acts at once.
+        let rejected = |out: crate::context::NoteOutcome| {
+            matches!(out, crate::context::NoteOutcome::Rejected(_))
+        };
+        assert!(rejected(
+            db.write_user_note(&nwrite(Some(("ledger_event", "999")), None, Some("x"), None), "human")
+                .unwrap()
+        ));
+        assert!(rejected(
+            db.write_user_note(&nwrite(Some(("ledger_event", "1")), None, None, None), "human")
+                .unwrap()
+        ));
+        assert!(rejected(
+            db.write_user_note(
+                &nwrite(Some(("ledger_event", "1")), None, Some("x"), Some(true)),
+                "human"
+            )
+            .unwrap()
+        ));
+        assert!(rejected(
+            db.write_user_note(&nwrite(Some(("diary", "1")), None, Some("x"), None), "human")
+                .unwrap()
+        ));
+
+        // The one non-negotiable: `CanonicalEvent` untouched, chain green.
+        let v = db.verify_ledger_chain().unwrap();
+        assert!(v.ok, "note acts must not disturb the chain: {v:?}");
+    }
+
+    #[test]
+    fn standalone_notes_each_own_a_row_and_edit_by_id() {
+        let db = Database::open_in_memory().unwrap();
+        let a = written(
+            db.write_user_note(&nwrite(None, None, Some("a loose thought"), None), "human").unwrap(),
+        );
+        let b = written(
+            db.write_user_note(&nwrite(None, None, Some("another thought"), None), "human").unwrap(),
+        );
+        assert_eq!(a.target_kind, "none");
+        assert_ne!(a.id, b.id, "each standalone thought is its own row");
+
+        // The event references the ROW (ref_kind='none', ref_id=row id).
+        let evs: Vec<_> = db
+            .list_ledger_events(10)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "note")
+            .collect();
+        assert_eq!(evs.len(), 2);
+        assert!(evs.iter().all(|e| e.ref_kind.as_deref() == Some("none")));
+        assert!(evs.iter().any(|e| e.ref_id.as_deref() == Some(&a.id.to_string() as &str)));
+
+        // Edits address the row by id; an empty standalone is rejected.
+        let a2 = written(
+            db.write_user_note(&nwrite(None, Some(a.id), Some("a sharper thought"), None), "human")
+                .unwrap(),
+        );
+        assert_eq!(a2.id, a.id);
+        assert!(matches!(
+            db.write_user_note(&nwrite(None, None, Some("   "), None), "human").unwrap(),
+            crate::context::NoteOutcome::Rejected(_)
+        ));
+
+        // Starring one filters the list.
+        written(db.write_user_note(&nwrite(None, Some(b.id), None, Some(true)), "human").unwrap());
+        let all = db.list_user_notes(false, 100).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].id, b.id, "most recently touched first");
+        let starred = db.list_user_notes(true, 100).unwrap();
+        assert_eq!(starred.len(), 1);
+        assert_eq!(starred[0].id, b.id);
+
+        assert!(db.verify_ledger_chain().unwrap().ok);
+    }
+
+    #[test]
+    fn timeline_carries_star_note_probes_and_facets_filter() {
+        let db = Database::open_in_memory().unwrap();
+        tprompt(&db, "pty", "alpha prompt body", "cs-1", "/p", "human"); // seq 1
+        tprompt(&db, "pty", "beta prompt body", "cs-2", "/p", "human"); // seq 2
+        written(
+            db.write_user_note(&nwrite(Some(("ledger_event", "1")), None, None, Some(true)), "human")
+                .unwrap(),
+        ); // seq 3
+        written(
+            db.write_user_note(
+                &nwrite(Some(("ledger_event", "2")), None, Some("remember the beta"), None),
+                "human",
+            )
+            .unwrap(),
+        ); // seq 4
+        written(
+            db.write_user_note(&nwrite(None, None, Some("a loose thought"), None), "human").unwrap(),
+        ); // seq 5
+
+        let all = db.query_ledger_events(&Default::default()).unwrap();
+        assert_eq!(all.len(), 5);
+        let by_seq = |s: i64| all.iter().find(|i| i.event.seq == s).unwrap();
+        assert!(by_seq(1).starred && by_seq(1).note.is_none());
+        assert_eq!(by_seq(2).note.as_deref(), Some("remember the beta"));
+        assert!(!by_seq(2).starred);
+        // A note event's list text is its row's current words, not a hash.
+        assert_eq!(by_seq(5).preview.as_deref(), Some("a loose thought"));
+
+        // Facets: starred = the annotated event + the star act's own event;
+        // noted = the noted event + both text-bearing note events.
+        let starred = db
+            .query_ledger_events(&crate::context::LedgerFilters {
+                starred: Some(true),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            starred.iter().map(|i| i.event.seq).collect::<Vec<_>>(),
+            vec![3, 1]
+        );
+        let noted = db
+            .query_ledger_events(&crate::context::LedgerFilters {
+                noted: Some(true),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            noted.iter().map(|i| i.event.seq).collect::<Vec<_>>(),
+            vec![5, 4, 2]
+        );
+
+        // Body search reaches note text.
+        let hit = db
+            .query_ledger_events(&crate::context::LedgerFilters {
+                q: Some("loose thought".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(hit.iter().map(|i| i.event.seq).collect::<Vec<_>>(), vec![5]);
+    }
+
+    #[test]
+    fn note_events_are_lake_items_with_their_current_words() {
+        let db = Database::open_in_memory().unwrap();
+        tprompt(&db, "pty", "alpha prompt body", "cs-1", "/p", "human"); // seq 1
+        written(
+            db.write_user_note(
+                &nwrite(Some(("ledger_event", "1")), None, Some("margin note"), None),
+                "human",
+            )
+            .unwrap(),
+        ); // seq 2
+        let standalone = written(
+            db.write_user_note(&nwrite(None, None, Some("a standalone thought"), None), "human")
+                .unwrap(),
+        ); // seq 3
+        // An EDIT after the events were appended: the classifier reads the
+        // row's CURRENT words for every act-event of that row.
+        written(
+            db.write_user_note(&nwrite(None, Some(standalone.id), Some("sharper words"), None), "human")
+                .unwrap(),
+        ); // seq 4
+
+        let items = db.list_lake_items_since(0, 100).unwrap();
+        assert_eq!(items.len(), 4);
+        let notes: Vec<_> = items.iter().filter(|i| i.kind == "note").collect();
+        assert_eq!(notes.len(), 3);
+        assert!(notes.iter().all(|i| i.surface.as_deref() == Some("note")));
+        assert_eq!(notes[0].body.as_deref(), Some("margin note"));
+        assert!(notes[1..].iter().all(|i| i.body.as_deref() == Some("sharper words")));
+    }
+
+    #[test]
     fn revert_link_removes_pointer_appends_compensating_event_and_keeps_chain_green() {
         let db = Database::open_in_memory().unwrap();
         // An accepted class with an accepted link — the gardener's "file" outcome.
         accepted_node(&db, "root-r", None, "redline");
         let link_id = add_link(&db, "root-r", "prompt", "42");
         // Record the accept as a curate event, like the gardener does.
-        crate::classmem::record_curate(&db, "root-r", "organize", "");
+        crate::classmem::record_curate(&db, "classifier", "root-r", "organize", "");
         assert!(db.verify_ledger_chain().unwrap().ok);
 
         // Revert → the pointer is gone, but the ledger only GREW (a compensating
         // 'revert' class_curate event), so the chain still verifies.
-        assert!(crate::classmem::revert_link(&db, link_id).unwrap());
+        assert!(crate::classmem::revert_link(&db, "tester", link_id).unwrap());
         assert!(db.list_class_links_for_node("root-r").unwrap().is_empty());
         assert!(db.verify_ledger_chain().unwrap().ok);
 
@@ -7756,7 +9638,7 @@ mod tests {
         assert_eq!(n, 2);
 
         // Reverting a link that no longer exists is a no-op (false), no new event.
-        assert!(!crate::classmem::revert_link(&db, link_id).unwrap());
+        assert!(!crate::classmem::revert_link(&db, "tester", link_id).unwrap());
     }
 
     #[test]
@@ -7968,6 +9850,9 @@ mod tests {
                     thread_id: "tab-1".to_string(),
                     parent_session_id: Some("s9".to_string()),
                 }),
+                author: None,
+                model: None,
+                model_source: None,
             },
         )
         .unwrap();
@@ -8014,11 +9899,13 @@ mod tests {
     fn browse_events_fts_ranks_keyword_hits_and_is_injection_safe() {
         let db = Database::open_in_memory().unwrap();
         let page = |url: &str, title: &str, text: &str| crate::ledger::BrowseEventInput {
-            action: "navigate".into(),
+            action: crate::ledger::BrowseAction::Navigate,
             browse_id: Some("t1".into()),
             url: url.into(),
             title: Some(title.into()),
             text: text.into(),
+            from_event_id: None,
+            author: None,
         };
         crate::ledger::record_browse_event(
             &db,
@@ -8123,8 +10010,8 @@ mod tests {
         )
         .unwrap();
         let prop = db.list_class_proposals().unwrap().remove(0);
-        let applied = db.apply_class_proposal(prop.id).unwrap().unwrap();
-        crate::classmem::record_reorg(&db, &applied.op, &applied.node_id, &applied.detail);
+        let applied = db.apply_class_proposal(prop.id, "tester").unwrap().unwrap();
+        crate::classmem::record_reorg(&db, "tester", &applied.op, &applied.node_id, &applied.detail);
 
         let g = db.get_class_node("grown").unwrap().unwrap();
         assert_eq!(g.id, "grown"); // id preserved
@@ -8165,8 +10052,8 @@ mod tests {
         )
         .unwrap();
         let prop = db.list_class_proposals().unwrap().remove(0);
-        let applied = db.apply_class_proposal(prop.id).unwrap().unwrap();
-        crate::classmem::record_reorg(&db, &applied.op, &applied.node_id, &applied.detail);
+        let applied = db.apply_class_proposal(prop.id, "tester").unwrap().unwrap();
+        crate::classmem::record_reorg(&db, "tester", &applied.op, &applied.node_id, &applied.detail);
 
         // Original cold branch is gone.
         assert!(db.get_class_node("cold").unwrap().is_none());
@@ -8206,7 +10093,7 @@ mod tests {
         .unwrap();
         let prop = db.list_class_proposals().unwrap().remove(0);
         // Pins veto collapse — the op is a no-op and the branch survives intact.
-        assert!(db.apply_class_proposal(prop.id).unwrap().is_none());
+        assert!(db.apply_class_proposal(prop.id, "tester").unwrap().is_none());
         assert!(db.get_class_node("cold").unwrap().is_some());
         assert!(db.list_class_nodes().unwrap().iter().all(|n| n.kind != "digest"));
     }
@@ -8251,6 +10138,9 @@ mod tests {
                 project_path: None,
                 body: "a long cold prompt body destined to be compacted to a gist".into(),
                 thread: None,
+                author: None,
+                model: None,
+                model_source: None,
             },
         )
         .unwrap()
@@ -8264,7 +10154,7 @@ mod tests {
         assert!(db.verify_ledger_chain().unwrap().ok);
 
         // Compact it → a new ledger seq is returned.
-        let cseq = db.compact_prompt_body(pid, "gist: a cold prompt", "cold").unwrap();
+        let cseq = db.compact_prompt_body(pid, "gist: a cold prompt", "cold", "keeper").unwrap();
         assert!(cseq.is_some());
 
         // The body now reads as the gist for every consumer.
@@ -8298,7 +10188,7 @@ mod tests {
         assert_eq!(bh, orig_hash, "body_hash is never rewritten");
 
         // Idempotent: compacting again is a no-op.
-        assert!(db.compact_prompt_body(pid, "again", "cold").unwrap().is_none());
+        assert!(db.compact_prompt_body(pid, "again", "cold", "keeper").unwrap().is_none());
     }
 
     #[test]
@@ -8322,7 +10212,7 @@ mod tests {
         )
         .unwrap();
         let prop = db.list_class_proposals().unwrap().remove(0);
-        db.apply_class_proposal(prop.id).unwrap().unwrap();
+        db.apply_class_proposal(prop.id, "tester").unwrap().unwrap();
 
         // auth2 is gone; its link + child moved onto auth1.
         assert!(db.get_class_node("auth2").unwrap().is_none());
@@ -8354,7 +10244,7 @@ mod tests {
         )
         .unwrap();
         let prop = db.list_class_proposals().unwrap().remove(0);
-        db.apply_class_proposal(prop.id).unwrap().unwrap();
+        db.apply_class_proposal(prop.id, "tester").unwrap().unwrap();
 
         let clerk = db
             .list_class_nodes()
@@ -8394,7 +10284,7 @@ mod tests {
             2
         );
         // Auto-organize flips everything to accepted in one shot.
-        let flipped = db.accept_all_pending().unwrap();
+        let flipped = db.accept_all_pending("classifier").unwrap();
         assert_eq!(flipped.len(), 2);
         assert!(db.list_class_nodes().unwrap().iter().all(|n| n.status == "accepted"));
         let collab = db
@@ -8405,7 +10295,7 @@ mod tests {
             .unwrap();
         assert_eq!(db.list_class_links_for_node(&collab.id).unwrap()[0].status, "accepted");
         // Idempotent: nothing left to flip.
-        assert!(db.accept_all_pending().unwrap().is_empty());
+        assert!(db.accept_all_pending("classifier").unwrap().is_empty());
     }
 
     #[test]
@@ -8468,11 +10358,11 @@ mod tests {
     #[test]
     fn revision_and_decision_events_are_idempotent() {
         let db = Database::open_in_memory().unwrap();
-        assert!(crate::ledger::record_revision_event(&db, "s1", 1, "plan body").unwrap().is_some());
+        assert!(crate::ledger::record_revision_event(&db, "s1", 1, "plan body", None).unwrap().is_some());
         // Same (session, version, payload) → skipped.
-        assert!(crate::ledger::record_revision_event(&db, "s1", 1, "plan body").unwrap().is_none());
+        assert!(crate::ledger::record_revision_event(&db, "s1", 1, "plan body", None).unwrap().is_none());
         // Changed body at same version → recorded.
-        assert!(crate::ledger::record_revision_event(&db, "s1", 1, "edited").unwrap().is_some());
+        assert!(crate::ledger::record_revision_event(&db, "s1", 1, "edited", None).unwrap().is_some());
 
         let dec = |ph: &str| crate::ledger::DecisionInput {
             kind: crate::ledger::EventKind::Approval,

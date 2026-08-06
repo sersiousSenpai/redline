@@ -38,7 +38,7 @@ pub const MIRROR_BATCH: i64 = 2000;
 
 /// Redline-owned subdirectories under the mirror root. Rebuild clears ONLY
 /// these, never the user's own vault files elsewhere in the directory.
-const MANAGED_DIRS: [&str; 3] = ["sessions", "missions", "unfiled"];
+const MANAGED_DIRS: [&str; 4] = ["sessions", "missions", "unfiled", "notes"];
 
 /// A ledger event enriched with its prompt provenance + full body, as read by
 /// `Database::list_mirror_events`. `body` is the full prompt body for prompt
@@ -171,6 +171,41 @@ pub fn note_for(row: &MirrorRow, body: Option<&str>) -> MirrorNote {
     MirrorNote { rel_path, content: c }
 }
 
+/// The live markdown file for one `user_notes` row (Second Brain P3). Unlike
+/// event notes — one immutable file per ledger event — a user note row is
+/// EDITABLE, so its file mirrors the row's CURRENT state and is rewritten
+/// whenever a `note` event passes a sync. Derived purely from the row, so
+/// incremental sync and a from-scratch rebuild still produce identical bytes
+/// (both read the same rows); the per-act history stays in the event files.
+pub fn note_row_file(n: &crate::context::UserNote) -> MirrorNote {
+    let mut c = String::new();
+    c.push_str("---\n");
+    c.push_str(&format!("note_id: {}\n", n.id));
+    c.push_str(&format!(
+        "target: {}\n",
+        match n.target_id.as_deref() {
+            Some(id) => format!("{} {}", n.target_kind, id),
+            None => "standalone".to_string(),
+        }
+    ));
+    c.push_str(&format!("starred: {}\n", n.starred));
+    c.push_str(&format!("seq: {}\n", n.seq.map(|s| s.to_string()).unwrap_or("-".into())));
+    c.push_str(&format!("created: {}\n", n.created_at));
+    c.push_str(&format!("updated: {}\n", n.updated_at));
+    c.push_str("---\n\n");
+    c.push_str(&format!("# note {}{}\n\n", n.id, if n.starred { " ★" } else { "" }));
+    if !n.text.is_empty() {
+        c.push_str(&n.text);
+        if !n.text.ends_with('\n') {
+            c.push('\n');
+        }
+    }
+    MirrorNote {
+        rel_path: format!("notes/note-{:06}.md", n.id),
+        content: c,
+    }
+}
+
 /// Collect the notes for every event with `seq > since_seq` (ascending). Reads
 /// the DB; joins revision bodies at write time. Deterministic given the ledger.
 /// Returns `(notes, max_seq_seen)`.
@@ -178,6 +213,7 @@ pub fn collect_notes(db: &Database, since_seq: i64) -> Result<(Vec<MirrorNote>, 
     let mut notes = Vec::new();
     let mut cursor = since_seq;
     let mut max_seq = since_seq;
+    let mut saw_user_note = false;
     loop {
         let rows = db
             .list_mirror_events(cursor, MIRROR_BATCH)
@@ -195,6 +231,7 @@ pub fn collect_notes(db: &Database, since_seq: i64) -> Result<(Vec<MirrorNote>, 
                     _ => None,
                 }
             } else {
+                saw_user_note |= e.kind == "note";
                 None
             };
             notes.push(note_for(row, body.as_deref()));
@@ -203,6 +240,14 @@ pub fn collect_notes(db: &Database, since_seq: i64) -> Result<(Vec<MirrorNote>, 
         cursor = rows.last().map(|r| r.event.seq).unwrap_or(cursor);
         if (rows.len() as i64) < MIRROR_BATCH {
             break;
+        }
+    }
+    // Any `note` act in the drained range means some row changed — regenerate
+    // every row file (notes are few; rewriting identical bytes is a no-op).
+    // Every row change appends an event, so this can never miss an edit.
+    if saw_user_note {
+        for n in db.list_user_notes(false, i64::MAX).map_err(|e| e.to_string())? {
+            notes.push(note_row_file(&n));
         }
     }
     Ok((notes, max_seq))
@@ -220,8 +265,10 @@ fn ensure_scaffold(root: &Path) -> Result<(), String> {
         `surface`, session/mission, project).\n\n\
         - Redline **writes** here; it never reads your edits back. Edit freely — \
         your changes won't corrupt the ledger, but they also won't flow back.\n\
-        - Everything under `sessions/`, `missions/`, and `unfiled/` is \
-        Redline-managed and reproduced exactly by **Rebuild mirror**.\n\
+        - Everything under `sessions/`, `missions/`, `unfiled/`, and `notes/` \
+        is Redline-managed and reproduced exactly by **Rebuild mirror** \
+        (`notes/` holds your own margin notes' CURRENT text; their edit \
+        history lives in the per-event files).\n\
         - Any Obsidian vault (or any tool) can open this folder directly — it's \
         just markdown.\n";
     // Idempotent: only write if missing or changed, so a rebuild stays stable.
@@ -397,6 +444,9 @@ mod tests {
                     project_path: Some("/repo".into()),
                     body: format!("prompt body {i}"),
                     thread: None,
+                    author: None,
+                    model: None,
+                    model_source: None,
                 },
             )
             .unwrap();
@@ -414,7 +464,7 @@ mod tests {
             },
         )
         .unwrap();
-        crate::ledger::record_revision_event(db, "sess1", 1, "# Plan\n\nthe body").unwrap();
+        crate::ledger::record_revision_event(db, "sess1", 1, "# Plan\n\nthe body", None).unwrap();
     }
 
     /// Read every file under a dir into a path→content map (relative paths).
@@ -474,6 +524,9 @@ mod tests {
                 project_path: None,
                 body: "a mission prompt".into(),
                 thread: None,
+                author: None,
+                model: None,
+                model_source: None,
             },
         )
         .unwrap();
@@ -490,6 +543,59 @@ mod tests {
         );
         // And the mission prompt landed under missions/.
         assert!(read_tree(&reb).keys().any(|k| k.starts_with("missions/m1/")));
+
+        let _ = std::fs::remove_dir_all(&inc);
+        let _ = std::fs::remove_dir_all(&reb);
+    }
+
+    #[test]
+    fn user_note_rows_mirror_as_live_files_and_stay_deterministic() {
+        let db = Database::open_in_memory().unwrap();
+        seed(&db, 1);
+
+        // Incremental: sync, then note + star + edit, then sync the tail.
+        let inc = tmpdir("note-inc");
+        let first = sync(&inc, &db, 0).unwrap();
+        let write = |text: Option<&str>, starred: Option<bool>| {
+            let out = db
+                .write_user_note(
+                    &crate::context::NoteWrite {
+                        note_id: None,
+                        target_kind: Some("ledger_event".into()),
+                        target_id: Some("1".into()),
+                        text: text.map(str::to_string),
+                        starred,
+                    },
+                    "human",
+                )
+                .unwrap();
+            match out {
+                crate::context::NoteOutcome::Written(n) => n,
+                other => panic!("expected Written, got {other:?}"),
+            }
+        };
+        let n = write(Some("first thought"), None);
+        write(None, Some(true));
+        write(Some("sharper thought"), None);
+        sync(&inc, &db, first).unwrap();
+
+        // The row file exists once, carries the CURRENT text + star.
+        let tree = read_tree(&inc);
+        let rel = format!("notes/note-{:06}.md", n.id);
+        let content = tree.get(&rel).expect("note row file mirrored");
+        assert!(content.contains("sharper thought"));
+        assert!(!content.contains("first thought"), "row file is current state, not history");
+        assert!(content.contains("starred: true"));
+        assert!(content.contains("target: ledger_event 1"));
+
+        // The mutable row does not break the determinism anchor.
+        let reb = tmpdir("note-reb");
+        rebuild(&reb, &db).unwrap();
+        assert_eq!(
+            read_tree(&inc),
+            read_tree(&reb),
+            "incremental with note edits must equal a from-scratch rebuild"
+        );
 
         let _ = std::fs::remove_dir_all(&inc);
         let _ = std::fs::remove_dir_all(&reb);
@@ -538,6 +644,9 @@ mod tests {
                 project_path: Some("/repo".into()),
                 body: "a later prompt".into(),
                 thread: None,
+                author: None,
+                model: None,
+                model_source: None,
             },
         )
         .unwrap();

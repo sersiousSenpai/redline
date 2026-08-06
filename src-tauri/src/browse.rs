@@ -627,6 +627,7 @@ pub async fn browse_send(
                     .filter(|(pk, _)| pk == "session")
                     .map(|(_, pid)| pid),
             }),
+            crate::seat::model_for("browse"),
         );
     } else {
         crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));

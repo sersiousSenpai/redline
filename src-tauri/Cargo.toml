@@ -6,14 +6,41 @@ authors = ["Yusuf Al-Bazian"]
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/sersiousSenpai/redline"
-# Two binaries now ship: the Tauri app (`redline`, from src/main.rs) and the
-# `redline-mcp` stdio proxy (src/bin/). `cargo run` / `tauri dev` invoke cargo
-# without `--bin`, so name the app as the default to keep them unambiguous.
+# `tauri dev` invokes a bare `cargo run`, which sees every default-member bin
+# (redline + redline-mcp) and refuses to pick. This selects the app — and
+# narrows that `cargo run` to this package, so dev iteration no longer rebuilds
+# the proxy (`cargo build` / `cargo test` / `tauri build` still do).
 default-run = "redline"
+
+# Workspace so the `redline-mcp` stdio proxy builds as its OWN crate instead of
+# a `src/bin/` of this package (size lever, docs/perf-budget.md "Size budget"):
+# as a package bin it linked all of `redline_lib` — tauri, whisper, syntect —
+# and weighed ~28 MB; on its own dependency graph it is ~2 MB. Neither package
+# depends on the other. `cargo build` / `cargo test` / `tauri dev` all invoke
+# cargo without `-p`, so default-members keeps the proxy building (and its
+# tests running) in every flow — dropping it from default-members would
+# silently stop producing `target/<profile>/redline-mcp`, which the settings
+# surface's `~/.claude.json` snippet points at.
+[workspace]
+members = [
+    "crates/redline-mcp",
+    "crates/redline-extension-abi",
+    "crates/redline-extension-sdk",
+]
+default-members = [
+    ".",
+    "crates/redline-mcp",
+    "crates/redline-extension-abi",
+    "crates/redline-extension-sdk",
+]
 
 [lib]
 name = "redline_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# Desktop-only: the app binary consumes the lib as an rlib. `staticlib`/`cdylib`
+# exist for mobile targets we don't build; producing all three link kinds costs
+# an extra full link of a ~30 MB artifact nothing consumes, on every build.
+# Restore the others if iOS/Android targets ever land.
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -62,16 +89,26 @@ syntect = { version = "5", default-features = false, features = ["default-onig"]
 two-face = { version = "0.5", default-features = false, features = ["syntect-default-onig"] }
 # HTTP client for the voice agent's premium (cloud) TTS — the synth call is made
 # from Rust so the user's API key never enters the webview and there's no browser
-# CORS. Default TLS (Security.framework on macOS), JSON bodies.
-# `blocking` is used by the `redline-mcp` stdio proxy binary (src/bin/), which
-# forwards MCP tool calls to the localhost daemon over synchronous GETs — a
-# simple stdin→HTTP→stdout loop needs no async runtime.
-reqwest = { version = "0.13.4", features = ["json", "blocking"] }
+# CORS. Default TLS (Security.framework on macOS), JSON bodies. `blocking` is
+# deliberately ABSENT: its only user was the `redline-mcp` proxy, now its own
+# workspace member with its own leaner reqwest (size lever, docs/perf-budget.md).
+reqwest = { version = "0.13.4", features = ["json"] }
 # Resample the microphone's hardware-rate PCM (44.1/48 kHz) down to the 16 kHz
 # mono Whisper expects. Pure Rust (no C build); used by the batch Whisper
 # dictation backend to prepare the accumulated utterance before inference.
 rubato = "0.16"
 tauri-plugin-deep-link = "2.4.9"
+# WASM extension host (B3): shared ABI vocabulary (event payloads, host-call
+# types, scope/event name constants) — path dep during development, published
+# to crates.io with the first marketplace release.
+redline-extension-abi = { path = "crates/redline-extension-abi" }
+# Pure-Rust WebAssembly interpreter running `kind: "wasm"` extensions
+# in-process. Chosen over a JIT runtime deliberately: +~1.5 MB vs +8-12 MB
+# (small-binary pillar), and v1 extensions are glue — event in, a few
+# `host_call`s out — where interpreter overhead is milliseconds. The runtime
+# sits behind `extension_host::Runtime`; a feature-gated JIT (`ext-jit`)
+# stays purely additive if an extension ever proves compute-bound.
+wasmi = "1.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Local Whisper (whisper.cpp) speech-to-text as the higher-quality, pluggable
@@ -134,4 +171,28 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSOpenPanel", "NSSavePanel", "NSMenu", "NSGraphics", "NSScreen",
     "NSImage", "NSImageRep", "NSBitmapImageRep",
 ] }
+
+[dev-dependencies]
+# Assemble the extension host's inline test fixtures (real wasm modules from
+# `wat` text) — test-only; the shipped host consumes `.wasm` bytes.
+wat = "1"
+
+# Size levers for the shipped binary (budget + baselines: docs/perf-budget.md
+# "Size budget"; pinned by src-tauri/tests/size_guard.rs so a revert fails
+# `cargo test` even though tests build in debug).
+#
+# `panic` stays on the default "unwind" DELIBERATELY, despite ~2 MB of unwind
+# tables: thread/task panics must stay contained (a panicking command kills a
+# task, not the app mid-review), and the extension host's crash isolation is
+# built on `catch_unwind`, which `abort` would silently disable.
+[profile.release]
+# Cross-crate inlining/DCE and generic dedup across the 600+-crate graph, where
+# the tauri/wry/axum/serde monomorphization bloat lives. "fat" buys ~0.5-1 MB
+# more at 2-3x the link time — not worth it as the everyday profile.
+lto = "thin"
+codegen-units = 1
+# ~64k symbols + string table on a 30 MB Mach-O. macOS keeps debug info out of
+# the binary anyway (OSO/dSYM), so local debugging loses nothing; release-CI
+# dSYM extraction runs before bundling.
+strip = "symbols"
 

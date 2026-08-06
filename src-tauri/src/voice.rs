@@ -670,6 +670,7 @@ pub async fn voice_send(
                         thread_id: session_id.clone(),
                         parent_session_id: None,
                     }),
+                    crate::seat::model_for("voice"),
                 );
             }
             None => {
@@ -693,6 +694,7 @@ pub async fn voice_send(
                         thread_id: session_id.clone(),
                         parent_session_id: Some(session_id.clone()),
                     }),
+                    crate::seat::model_for("voice"),
                 );
             }
         }

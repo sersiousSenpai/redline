@@ -219,7 +219,8 @@ async fn resolve_diff_text(
 }
 
 /// Validate the repo (known project + actually a git repo) and return its dir.
-async fn checked_repo_dir(db: &Database, repo: &str) -> Result<PathBuf, String> {
+/// `pub(crate)`: the push/revert commands (`push.rs`) guard with the same rule.
+pub(crate) async fn checked_repo_dir(db: &Database, repo: &str) -> Result<PathBuf, String> {
     let repo = repo.trim();
     if repo.is_empty() {
         return Err("missing repo path".into());
@@ -786,7 +787,18 @@ pub async fn review_fingerprint(
     sha: Option<String>,
 ) -> Result<String, String> {
     let dir = checked_repo_dir(&state.db, &repo).await?;
-    let text = resolve_diff_text(&dir, source, base.as_deref(), sha.as_deref()).await?;
+    fingerprint_for(&dir, source, base.as_deref(), sha.as_deref()).await
+}
+
+/// The fingerprint itself, repo-dir in hand. `pub(crate)`: the revert command
+/// (`push.rs`) refuses to apply against a diff the pane isn't showing.
+pub(crate) async fn fingerprint_for(
+    dir: &Path,
+    source: DiffSource,
+    base: Option<&str>,
+    sha: Option<&str>,
+) -> Result<String, String> {
+    let text = resolve_diff_text(dir, source, base, sha).await?;
     let mut h: u64 = 5381;
     for b in text.bytes() {
         h = h.wrapping_mul(33) ^ (b as u64);
@@ -847,7 +859,7 @@ pub struct ReviewFileContents {
 /// traversal, control chars, and unreasonable length. Paths reach git inside
 /// a `ref:path` spec (never as a bare argument), so flag injection isn't in
 /// play — traversal out of the repo is.
-fn safe_rel_path(p: &str) -> Result<&str, String> {
+pub(crate) fn safe_rel_path(p: &str) -> Result<&str, String> {
     if p.is_empty()
         || p.len() > 1024
         || p.starts_with('/')
@@ -1062,6 +1074,13 @@ fn emit_changed(app: &tauri::AppHandle, review_id: &str) {
     if let Err(e) = app.emit("review-annotations-changed", review_id.to_string()) {
         tracing::warn!(error = %e, "failed to emit review-annotations-changed");
     }
+    crate::extension_host::publish(
+        redline_extension_abi::events::REVIEW_ANNOTATIONS_CHANGED,
+        &redline_extension_abi::events::ReviewAnnotationsChanged {
+            review_id: review_id.to_string(),
+            ts_ms: crate::extension_host::now_ms(),
+        },
+    );
 }
 
 #[tauri::command]

@@ -1,0 +1,133 @@
+# Release — per-arch DMGs on every v* tag, draft GitHub release for a human
+# to publish.
+#
+# GATED on Apple Developer enrollment: every Apple credential is read from
+# repo secrets, and the signing/notarization step is skipped when they're
+# absent — the build then produces AD-HOC signed DMGs. That makes the whole
+# workflow dry-runnable TODAY via workflow_dispatch (artifacts only, no
+# GitHub release): the DMG must build, mount, and contain Redline.app.
+# Signed distribution is table stakes for launch, so a tag release with the
+# secrets unset is a dry run by definition, never something to ship.
+#
+# Secrets consumed when present:
+#   APPLE_CERTIFICATE            base64-encoded .p12 (Developer ID Application)
+#   APPLE_CERTIFICATE_PASSWORD   passphrase for the .p12
+#   APPLE_SIGNING_IDENTITY       e.g. "Developer ID Application: … (TEAMID)"
+#   APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID   notarytool credentials
+#                                (app-specific password, not the account one)
+#
+# Still to land here when the release goes live (after the Developer ID
+# certificate arrives — NOT part of the CI phase):
+#   - updater artifacts: tauri `createUpdaterArtifacts` + minisign keypair +
+#     latest.json on the GitHub release (tauri-plugin-updater; source builds
+#     keep the git-pull update path unchanged and first-class forever)
+#   - dsymutil + Sentry dSYM upload (lands with the telemetry decision)
+#   - co-locating the lean redline-mcp binary inside the .app bundle
+#     (docs/local-only-audit.md)
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dmg:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+          # Last Intel runner image GitHub offers (macos-13 is retired).
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    env:
+      HAS_APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Ensure cmake
+        run: command -v cmake >/dev/null || brew install cmake
+      - run: npm ci
+
+      - name: Import Developer ID certificate
+        if: env.HAS_APPLE_CERT == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -t 21600 build.keychain
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k build.keychain \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          rm "$RUNNER_TEMP/cert.p12"
+          # Signing identity + notarytool credentials for the tauri bundler
+          # (it signs when APPLE_SIGNING_IDENTITY is set and notarizes when
+          # the APPLE_ID triple is set).
+          {
+            echo "APPLE_SIGNING_IDENTITY=${{ secrets.APPLE_SIGNING_IDENTITY }}"
+            echo "APPLE_ID=${{ secrets.APPLE_ID }}"
+            echo "APPLE_PASSWORD=${{ secrets.APPLE_PASSWORD }}"
+            echo "APPLE_TEAM_ID=${{ secrets.APPLE_TEAM_ID }}"
+          } >> "$GITHUB_ENV"
+
+      # --bundles here rather than tauri.conf.json targets, so the local
+      # `npm run redline` flow never pays DMG-creation time.
+      - name: Build DMG (ad-hoc signed when no certificate is configured)
+        run: npx tauri build --target ${{ matrix.target }} --bundles app,dmg
+
+      - name: Verify DMG mounts and contains the app
+        shell: bash
+        run: |
+          DMG="$(ls src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg)"
+          hdiutil verify "$DMG"
+          MOUNT="$RUNNER_TEMP/dmg-mount"
+          hdiutil attach -readonly -nobrowse -mountpoint "$MOUNT" "$DMG"
+          test -d "$MOUNT/Redline.app"
+          codesign -dv "$MOUNT/Redline.app" 2>&1 || true
+          hdiutil detach "$MOUNT"
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: redline-dmg-${{ matrix.target }}
+          path: src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+
+  # One draft release holding both arch DMGs; a human presses Publish.
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: dmg
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dmgs
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: dmgs/**/*.dmg

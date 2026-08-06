@@ -35,6 +35,11 @@ use crate::ledger::{self, now_millis};
 // --- Tunables (code-only; nothing is exposed to the user) ------------------
 
 /// How often the keeper wakes to consider a run.
+/// The actor the keeper authors its ledger events (compaction, observations)
+/// as — its seat name (`seat::KNOWN_SEATS`), so autonomous writes are
+/// separable from the human's in the chain.
+const KEEPER_ACTOR: &str = "keeper";
+
 const TICK: std::time::Duration = std::time::Duration::from_secs(30);
 /// New ledger events since the last organize that trigger a run on their own.
 const GROWTH_THRESHOLD: i64 = 25;
@@ -414,7 +419,7 @@ pub async fn compaction_pass(db: &Database) -> Result<usize, String> {
 
     let mut applied = 0usize;
     for (id, (gist, reason)) in &gists {
-        match db.compact_prompt_body(*id, gist, reason) {
+        match db.compact_prompt_body(*id, gist, reason, KEEPER_ACTOR) {
             Ok(Some(_)) => applied += 1,
             Ok(None) => {} // raced / already compacted
             Err(e) => tracing::warn!(error = %e, prompt = id, "compact_prompt_body failed"),
@@ -623,7 +628,7 @@ pub async fn observations_pass(db: &Database) -> Result<usize, String> {
     };
     let mut written = 0usize;
     for a in parse_observations(&text, &allowed) {
-        match db.insert_class_observation(&a.node_id, &a.summary, &a.cite_seqs) {
+        match db.insert_class_observation(&a.node_id, &a.summary, &a.cite_seqs, KEEPER_ACTOR) {
             Ok(Some(_)) => written += 1,
             Ok(None) => {} // dedup (incl. previously dismissed) or node gone
             Err(e) => tracing::warn!(error = %e, node = %a.node_id, "insert observation failed"),
@@ -708,6 +713,12 @@ pub fn spawn(app: AppHandle, db: Arc<Database>) {
             let _ = app.emit("memory-changed", ());
             let _ = app.emit("classmem-changed", ());
             let _ = app.emit("ledger-changed", ());
+            crate::extension_host::publish(
+                redline_extension_abi::events::LEDGER_CHANGED,
+                &redline_extension_abi::events::LedgerChanged {
+                    ts_ms: crate::extension_host::now_ms(),
+                },
+            );
         }
     });
 }

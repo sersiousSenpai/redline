@@ -1,0 +1,36 @@
+The user reviewed your code changes in Redline and has requested revisions.
+
+REPO: /Users/me/proj
+REVIEW ROUND: 2
+
+PUSHED: your changes are committed and pushed.
+  commit: a1b2c3d
+  branch: origin/fix/review-notes
+  pull request: https://github.com/me/proj/pull/12
+
+ANNOTATIONS:
+
+## src/main.rs
+
+src/main.rs:new L42-45 [comment]
+  SELECTED LINES (verbatim):
+    let x = y.unwrap();
+    return Ok(x);
+  USER COMMENT (verbatim):
+    Tighten this error path.
+  ANNOTATION_ID: rc-001
+
+REQUIRED RESPONSE FORMAT:
+
+Apply the requested changes directly to the code in this repository. [suggestion] blocks propose a concrete replacement — apply it (or the closest correct version, explaining any deviation in the resolution). [deletion] means the user wants those lines gone. [comment] is feedback to address in place. A `(whole file)` block addresses that file overall; a `(review-wide)` block addresses the whole change.
+
+LABEL SEMANTICS: a `{label}` suffix qualifies the block. praise / note / thought require no code change — acknowledge them in the resolution. nitpick / typo / polish are minor but real. issue / todo / question / suggestion / chore ask for action. A `blocking` decoration MUST be addressed before this review can be approved; `non-blocking` is at the author's judgment; `if-minor` means apply it only if the fix is small.
+
+When you finish, print a resolution block in this exact format:
+
+REDLINE_REVIEW_RESOLUTIONS
+{
+  "rc-001": "<what you did for this annotation>"
+}
+
+Every ANNOTATION_ID above MUST appear as a key. Do not skip any. The user will re-run /redline-code-review to verify your fixes as the next review round.

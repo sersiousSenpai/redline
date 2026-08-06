@@ -102,6 +102,11 @@ interface DiffViewProps {
   questions?: ReviewQuestion[];
   onAddQuestion?: (q: ReviewQuestion) => void;
   onDeleteQuestion?: (id: string) => void;
+  /** Present = revert entry points render. The panel snaps a selection to
+   *  the enclosing hunk of the RAW diff (augmented copies may have merged
+   *  hunks, so no hunk index crosses this boundary) and owns the confirm. */
+  onRevertSelection?: (range: ReviewRange) => void;
+  onRevertFile?: (filePath: string) => void;
 }
 
 const DiffView = forwardRef<DiffViewHandle, DiffViewProps>(function DiffView(
@@ -122,6 +127,8 @@ const DiffView = forwardRef<DiffViewHandle, DiffViewProps>(function DiffView(
     questions,
     onAddQuestion,
     onDeleteQuestion,
+    onRevertSelection,
+    onRevertFile,
   }: DiffViewProps,
   ref,
 ) {
@@ -736,6 +743,7 @@ const DiffView = forwardRef<DiffViewHandle, DiffViewProps>(function DiffView(
             notes.length ? () => setOpenCardId(notes[0].id) : undefined
           }
           onAddNote={canAnnotate ? startFileNote : undefined}
+          onRevert={onRevertFile}
         />,
       );
     } else if (row.type === "hunk") {
@@ -923,6 +931,19 @@ const DiffView = forwardRef<DiffViewHandle, DiffViewProps>(function DiffView(
             onClick={startQuestion}
           >
             ✦ Ask AI
+          </button>
+        )}
+        {onRevertSelection && (
+          <button
+            type="button"
+            className="rl-review-btn"
+            title="Revert this change from the working tree — snaps to the enclosing hunk"
+            onClick={() => {
+              onRevertSelection(selection);
+              setSelection(null);
+            }}
+          >
+            ⎌ Revert
           </button>
         )}
         <button
@@ -1219,6 +1240,7 @@ const FileRow = memo(function FileRow({
   noteCount,
   onOpenNotes,
   onAddNote,
+  onRevert,
 }: {
   row: Extract<ReviewRow, { type: "file" }>;
   isViewed: boolean;
@@ -1227,6 +1249,8 @@ const FileRow = memo(function FileRow({
   noteCount: number;
   onOpenNotes?: () => void;
   onAddNote?: (filePath: string) => void;
+  /** Revert this file's whole change from the working tree. */
+  onRevert?: (filePath: string) => void;
 }) {
   const { file, filePath } = row;
   const renamed = file.status === "renamed";
@@ -1301,6 +1325,20 @@ const FileRow = memo(function FileRow({
           }}
         >
           + Note
+        </button>
+      )}
+      {onRevert && !file.binary && file.status !== "renamed" && (
+        <button
+          type="button"
+          className="rl-review-btn"
+          style={{ fontSize: "10.5px", padding: "1px 6px", minHeight: 0, fontWeight: 400 }}
+          title="Revert this file's whole change from the working tree"
+          onClick={(e) => {
+            e.stopPropagation();
+            onRevert(filePath);
+          }}
+        >
+          ⎌ Revert
         </button>
       )}
       <label

@@ -107,6 +107,13 @@ fi
 
 npm run tauri build
 
+# Rebuild the MCP proxy on its own dependency graph. The joint tauri build
+# above produces target/release/redline-mcp with workspace-unified (fatter)
+# reqwest features; this `-p` pass — a cached relink, seconds — leaves the
+# lean artifact that scripts/size-budget.json pins (~1.5 MB vs ~3 MB) and
+# that release packaging will co-locate beside the app binary.
+(cd src-tauri && cargo build --release -p redline-mcp)
+
 APP_SRC="src-tauri/target/release/bundle/macos/Redline.app"
 if [ ! -d "$APP_SRC" ]; then
   echo "error: build finished but $APP_SRC was not produced" >&2

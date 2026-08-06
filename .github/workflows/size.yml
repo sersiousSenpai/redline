@@ -1,0 +1,59 @@
+# Size budgets — main + nightly + manual, deliberately NOT pull requests:
+# the measured artifact is the real release binary (tauri build: lto=thin,
+# codegen-units=1, stripped, frontend assets embedded), a 15–25 minute
+# build. PR-time protection is the *source* invariants in ci.yml's suites
+# (sizeGuard.test.ts, size_guard.rs); this workflow is the byte-level
+# backstop that catches what those can't — dependency growth, asset bloat,
+# grammar dumps.
+#
+# The build sequence mirrors scripts/redline.sh exactly: the joint
+# `tauri build` feature-unifies reqwest across workspace members (that IS
+# the shipped app binary), then a cached `-p redline-mcp` relink restores
+# the lean proxy artifact that scripts/size-budget.json pins.
+name: Size
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 10 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  size:
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Ensure cmake
+        run: command -v cmake >/dev/null || brew install cmake
+      - run: npm ci
+      # Runs beforeBuildCommand (npm run build) itself, then the release
+      # cargo build with assets embedded — the binary the budget means.
+      - name: Release build
+        run: npx tauri build --bundles app
+      - name: Relink lean redline-mcp
+        working-directory: src-tauri
+        run: cargo build --release -p redline-mcp
+      # `shell: bash` gives -o pipefail, so the tee can't mask a breach.
+      - name: Check size budgets
+        shell: bash
+        run: node scripts/check-size.mjs --strict | tee size-report.txt
+      - name: Upload size report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: size-report
+          path: size-report.txt
+          if-no-files-found: ignore

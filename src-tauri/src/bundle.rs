@@ -93,6 +93,23 @@ pub struct BundleTree {
     pub links: Vec<ClassLink>,
 }
 
+/// A user note/star row carried in a bundle (Second Brain P3) — the CURRENT
+/// readable state; the act-by-act history rides along as `note` events. Kept
+/// as its own snapshot struct (not `context::UserNote`) so the bundle wire
+/// shape stays frozen independently of the app's internals.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleNote {
+    pub id: i64,
+    pub seq: Option<i64>,
+    pub target_kind: String,
+    pub target_id: Option<String>,
+    pub text: String,
+    pub starred: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 /// The whole export bundle. Ordering of every collection is deterministic (by
 /// seq / id) so two exports of the same ledger state are byte-identical.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,6 +125,11 @@ pub struct ContextBundle {
     pub prompts: Vec<BundlePrompt>,
     pub revisions: Vec<BundleRevision>,
     pub tree: BundleTree,
+    /// User notes/stars in scope (P3). `default` so every pre-P3 bundle still
+    /// deserializes — the addition is additive, which is why `BUNDLE_SCHEMA`
+    /// stays at /1 (verification never reads this field).
+    #[serde(default)]
+    pub notes: Vec<BundleNote>,
 }
 
 /// The result of `verify_bundle`.
@@ -222,6 +244,48 @@ pub fn build_bundle(db: &Database, scope: &BundleScope) -> Result<ContextBundle,
     prompts.sort_by_key(|p| p.id);
     revisions.sort_by(|a, b| a.session_id.cmp(&b.session_id).then(a.version_number.cmp(&b.version_number)));
 
+    // User notes in scope: everything for a full export; for scoped bundles,
+    // the notes ON bundled events plus (session scope) the note on the session
+    // itself. Standalone thoughts travel only in full bundles — they belong to
+    // no narrower slice.
+    let event_seqs: std::collections::HashSet<i64> = events.iter().map(|e| e.seq).collect();
+    let mut notes: Vec<BundleNote> = db
+        .list_user_notes(false, i64::MAX)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|n| match scope {
+            BundleScope::Full => true,
+            BundleScope::Session(sid) => {
+                (n.target_kind == "session" && n.target_id.as_deref() == Some(sid.as_str()))
+                    || (n.target_kind == "ledger_event"
+                        && n.target_id
+                            .as_deref()
+                            .and_then(|t| t.parse::<i64>().ok())
+                            .map(|s| event_seqs.contains(&s))
+                            .unwrap_or(false))
+            }
+            _ => {
+                n.target_kind == "ledger_event"
+                    && n.target_id
+                        .as_deref()
+                        .and_then(|t| t.parse::<i64>().ok())
+                        .map(|s| event_seqs.contains(&s))
+                        .unwrap_or(false)
+            }
+        })
+        .map(|n| BundleNote {
+            id: n.id,
+            seq: n.seq,
+            target_kind: n.target_kind,
+            target_id: n.target_id,
+            text: n.text,
+            starred: n.starred,
+            created_at: n.created_at,
+            updated_at: n.updated_at,
+        })
+        .collect();
+    notes.sort_by_key(|n| n.id);
+
     Ok(ContextBundle {
         schema: BUNDLE_SCHEMA.to_string(),
         scope: scope.label(),
@@ -231,6 +295,7 @@ pub fn build_bundle(db: &Database, scope: &BundleScope) -> Result<ContextBundle,
         prompts,
         revisions,
         tree,
+        notes,
     })
 }
 
@@ -419,6 +484,9 @@ mod tests {
                 project_path: Some("/repo".into()),
                 body: "first prompt".into(),
                 thread: None,
+                author: None,
+                model: None,
+                model_source: None,
             },
         )
         .unwrap();
@@ -435,6 +503,9 @@ mod tests {
                 project_path: None,
                 body: "second prompt".into(),
                 thread: None,
+                author: None,
+                model: None,
+                model_source: None,
             },
         )
         .unwrap();
@@ -451,7 +522,7 @@ mod tests {
             },
         )
         .unwrap();
-        crate::ledger::record_revision_event(db, "s1", 1, "# Plan\n\nbody").unwrap();
+        crate::ledger::record_revision_event(db, "s1", 1, "# Plan\n\nbody", None).unwrap();
     }
 
     #[test]
@@ -526,7 +597,7 @@ mod tests {
             .find(|e| e.kind == "prompt")
             .and_then(|e| e.prompt_id)
             .unwrap();
-        db.compact_prompt_body(pid, "gist of first prompt", "cold")
+        db.compact_prompt_body(pid, "gist of first prompt", "cold", "keeper")
             .unwrap();
 
         // The already-built bundle still verifies (it carried its own bodies +
@@ -539,6 +610,69 @@ mod tests {
         let post = build_bundle(&db, &BundleScope::Full).unwrap();
         assert!(verify_bundle(&post).ok, "a fresh post-compaction bundle verifies");
         assert!(post.prompts.iter().any(|p| p.body == "gist of first prompt"));
+    }
+
+    #[test]
+    fn pre_note_bundle_still_verifies_after_notes_land() {
+        // §7.2 — the proof `CanonicalEvent` was not disturbed by P3: a bundle
+        // exported BEFORE any `note` event must verify unchanged after notes,
+        // stars and standalone thoughts are written (the compaction-test
+        // discipline, run across the P3 boundary).
+        let db = Database::open_in_memory().unwrap();
+        seed(&db);
+        let pre = build_bundle(&db, &BundleScope::Full).unwrap();
+        assert!(verify_bundle(&pre).ok);
+        assert!(pre.notes.is_empty());
+        // A pre-P3 bundle (no `notes` key at all) still deserializes.
+        let mut legacy = serde_json::to_value(&pre).unwrap();
+        legacy.as_object_mut().unwrap().remove("notes");
+        let parsed: ContextBundle = serde_json::from_value(legacy).unwrap();
+        assert!(verify_bundle(&parsed).ok, "a pre-P3 bundle must round-trip");
+
+        // Cross the boundary: a note, a star, and a standalone thought.
+        let write = |w: crate::context::NoteWrite| {
+            match db.write_user_note(&w, "human").unwrap() {
+                crate::context::NoteOutcome::Written(n) => n,
+                other => panic!("expected Written, got {other:?}"),
+            }
+        };
+        write(crate::context::NoteWrite {
+            target_kind: Some("ledger_event".into()),
+            target_id: Some("1".into()),
+            text: Some("margin note on the first prompt".into()),
+            ..Default::default()
+        });
+        write(crate::context::NoteWrite {
+            target_kind: Some("ledger_event".into()),
+            target_id: Some("1".into()),
+            starred: Some(true),
+            ..Default::default()
+        });
+        write(crate::context::NoteWrite {
+            text: Some("a standalone thought".into()),
+            ..Default::default()
+        });
+
+        // The live chain verifies across the boundary…
+        assert!(db.verify_ledger_chain().unwrap().ok, "chain green across P3");
+        // …the frozen pre-P3 bundle is untouched by it…
+        assert!(verify_bundle(&pre).ok, "an already-exported bundle is immutable");
+        // …and a fresh full bundle carries the notes and verifies.
+        let post = build_bundle(&db, &BundleScope::Full).unwrap();
+        let v = verify_bundle(&post);
+        assert!(v.ok && v.full_chain, "post-note full bundle verifies: {v:?}");
+        assert_eq!(post.notes.len(), 2, "the annotated row + the standalone row");
+        assert!(post.notes.iter().any(|n| n.text == "a standalone thought"));
+        assert!(post
+            .notes
+            .iter()
+            .any(|n| n.starred && n.target_id.as_deref() == Some("1")));
+
+        // Scope discipline: the session bundle carries only the note on its
+        // own events; the standalone thought stays out.
+        let sess = build_bundle(&db, &BundleScope::Session("s1".into())).unwrap();
+        assert_eq!(sess.notes.len(), 1);
+        assert_eq!(sess.notes[0].target_id.as_deref(), Some("1"));
     }
 
     #[test]

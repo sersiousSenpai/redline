@@ -11,7 +11,10 @@
 //!
 //! The `backend` field exists from day one (defaulting to `claude-code`) so
 //! the GUI never churns when a second backend lands (Phase 5); today any
-//! other value still spawns Claude Code.
+//! other value still spawns Claude Code. When that second backend is
+//! evaluated, ACP (the agent-client protocol now field-proven across
+//! multiple agent CLIs) is a live candidate standard for this seam —
+//! weigh it against a bespoke adapter then, not before.
 //!
 //! Fork-thread categories default to *inherit*: an empty seat config adds no
 //! flags, so the thread runs exactly like its parent surface. The one real
@@ -44,12 +47,14 @@ pub const KNOWN_SEATS: &[&str] = &[
     "mission",
     "voice",
     "drafter",
+    "memory",
     "keeper",
     "classifier",
     "librarian",
     "shipwright",
     "seatassign",
     "ai_review",
+    "ai_commit",
     "fork_plan",
     "fork_review",
     "fork_drafter",
@@ -284,6 +289,19 @@ pub fn flag_args_from(cfg: &SeatConfig) -> Vec<String> {
 /// The flag tail for a seat — what every spawn site appends to its argv.
 pub fn flag_args(seat: &str) -> Vec<String> {
     flag_args_from(&effective(seat))
+}
+
+/// The model a seat's spawn explicitly requests via `--model`, if any — the
+/// value `flag_args` would emit, so a prompt stamped with it is ground truth.
+/// `None` = the seat has no explicit model and the CLI default applies; the
+/// caller must store nothing rather than guess.
+pub fn model_for(seat: &str) -> Option<String> {
+    effective(seat)
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(str::to_string)
 }
 
 /// The claude binary a seat should spawn, if overridden: the seat's own

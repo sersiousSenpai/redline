@@ -693,6 +693,45 @@ export interface LinkedCancelledEvent {
   linkedId: string;
 }
 
+// --- Memory Ask thread (mirrors src-tauri/src/memchat.rs) --------------------
+
+/** One persisted turn in the Memory surface's Ask thread. Mirrors the Rust
+ *  `MemChatMessage`; the thread id is the constant "memchat". */
+export interface MemChatMessage {
+  id: string;
+  threadId: string;
+  /** "user" | "assistant". */
+  role: string;
+  body: string;
+  /** "complete" | "error". */
+  status: string;
+  createdAt: number;
+}
+
+/** A chunk of streaming Ask-agent text. */
+export interface MemChatDeltaEvent {
+  threadId: string;
+  text: string;
+}
+
+/** An Ask turn finished — `body` is the authoritative full reply. */
+export interface MemChatDoneEvent {
+  threadId: string;
+  messageId: string;
+  body: string;
+}
+
+/** An Ask turn failed; `error` is also persisted as a terminal row. */
+export interface MemChatErrorEvent {
+  threadId: string;
+  error: string;
+}
+
+/** An Ask turn was cancelled — nothing was persisted for it. */
+export interface MemChatCancelledEvent {
+  threadId: string;
+}
+
 // --- Code Review surface (mirrors src-tauri/src/review.rs + state.rs) --------
 
 /** Which diff the reviewer is looking at. `vsBase`/`commitSha` carry their ref
@@ -835,6 +874,101 @@ export interface ReviewQuestion {
   endLine: number;
   quotedText: string;
   createdAt: number;
+}
+
+/** Live git state behind the review pane's status strip (`push_status`). */
+export interface GitStatus {
+  /** Current branch; null = detached HEAD. */
+  branch: string | null;
+  headShort: string | null;
+  headSubject: string | null;
+  /** e.g. "origin/main"; null when the branch has no upstream (normal). */
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  staged: number;
+  unstaged: number;
+  untracked: number;
+  remotes: string[];
+  defaultRemote: string | null;
+  /** The remote's default branch (from refs/remotes/<remote>/HEAD). */
+  defaultBranch: string | null;
+  /** "merge" | "rebase" | "cherry-pick" | "bisect" when one is underway. */
+  inProgress: string | null;
+  ghAvailable: boolean;
+  ghAuthed: boolean;
+}
+
+export interface PrRequest {
+  title: string;
+  base?: string | null;
+  body: string;
+}
+
+/** The `review_push` command's request. The target is the PUSH destination
+ *  only — the checkout is never switched. */
+export interface PushRequest {
+  repo: string;
+  reviewId: string;
+  message: string;
+  /** Files to stage; null = everything (`git add -A`). */
+  paths: string[] | null;
+  target: string;
+  remote: string;
+  setUpstream: boolean;
+  createLocalBranch: boolean;
+  noVerify: boolean;
+  /** Push the current HEAD as-is, skipping stage + commit. */
+  skipCommit: boolean;
+  confirmProtected: boolean;
+  pr: PrRequest | null;
+}
+
+export interface PushStep {
+  name: string;
+  ok: boolean;
+  detail: string;
+}
+
+export interface PushOutcome {
+  committed: string | null;
+  committedShort: string | null;
+  branch: string;
+  remote: string;
+  /** `<remote>/<target>` — where the work is now published. */
+  pushedRef: string;
+  prUrl: string | null;
+  prNumber: number | null;
+  steps: PushStep[];
+}
+
+/** One recorded push (`review_last_push`) — backs the strip's last-push chip. */
+export interface PushRecord {
+  id: string;
+  reviewId: string;
+  repoPath: string;
+  remote: string;
+  branch: string;
+  commitSha?: string;
+  prUrl?: string;
+  prNumber?: number;
+  files: number;
+  createdAt: number;
+}
+
+/** `review-push-log` streaming event. */
+export interface PushLogEvent {
+  reviewId: string;
+  line: string;
+}
+
+/** The AI commit drafter's output (`ai_commit_draft`) — always editable. */
+export interface CommitDraft {
+  subject: string;
+  body: string;
+  branch: string;
+  prTitle: string;
+  prBody: string;
 }
 
 /** AI pre-review streaming events. */

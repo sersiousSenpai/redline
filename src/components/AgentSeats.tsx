@@ -60,10 +60,12 @@ const SEAT_GROUPS: { label: string; seats: SeatRow[] }[] = [
       { name: "companion", label: "Companion" },
       { name: "voice", label: "Voice agent" },
       { name: "drafter", label: "Drafter discussion" },
+      { name: "memory", label: "Memory Ask" },
       { name: "browse", label: "Browser page discussions" },
       { name: "linked", label: "Linked discussion" },
       { name: "mission", label: "Missions" },
       { name: "ai_review", label: "AI code review" },
+      { name: "ai_commit", label: "Commit drafter" },
     ],
   },
   {

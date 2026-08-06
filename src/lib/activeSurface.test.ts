@@ -6,6 +6,7 @@ const base: SurfaceInputs = {
   drafterOpen: false,
   reviewOpen: false,
   serversOpen: false,
+  memoryOpen: false,
   activeId: null,
   planTitle: null,
   planProject: null,
@@ -37,6 +38,22 @@ describe("deriveActiveSurface", () => {
       kind: "servers",
       id: null,
       label: "Localhost",
+      projectPath: null,
+    });
+  });
+
+  it("reports the Memory surface without an id or a project", () => {
+    // Machine-scoped like Localhost: the whole lake, no session identity.
+    const s = deriveActiveSurface({
+      ...base,
+      memoryOpen: true,
+      activeId: "sess-1",
+      hasTerminal: true,
+    });
+    expect(s).toMatchObject({
+      kind: "memory",
+      id: null,
+      label: "Memory",
       projectPath: null,
     });
   });

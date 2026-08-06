@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import type { Comment } from "../types";
+import { Button } from "./ui/Button";
 
 interface FooterProps {
   comments: Comment[];
@@ -84,11 +85,11 @@ export function Footer({
 
   return (
     <footer
-      className="flex items-center justify-between gap-4 px-6 py-2 border-t"
+      className="rl-app-footer flex items-center justify-between gap-4 px-6 py-2 border-t"
       style={{
         borderColor: "var(--color-rule)",
         color: "var(--color-ink-muted)",
-        fontSize: "12px",
+        fontSize: "var(--rl-text-sm)",
       }}
     >
       <span className="flex items-center gap-2">
@@ -110,7 +111,7 @@ export function Footer({
             className="italic flex items-center gap-1"
             style={{
               color: "var(--color-ink-muted)",
-              fontSize: "12px",
+              fontSize: "var(--rl-text-sm)",
               cursor: "pointer",
             }}
           >
@@ -155,7 +156,7 @@ export function Footer({
               className="flex items-center gap-1"
               style={{
                 color: "var(--color-ink-muted)",
-                fontSize: "12px",
+                fontSize: "var(--rl-text-sm)",
                 cursor: "pointer",
               }}
             >
@@ -177,17 +178,11 @@ export function Footer({
         )}
       </span>
       <span data-tour="footer" className="flex items-center gap-2">
-        <button
-          type="button"
+        <Button
+          size="sm"
           onClick={onSubmit}
           disabled={!canSubmit || waiting}
-          className="rounded px-3 py-1 font-medium disabled:opacity-40"
-          style={{
-            background: "var(--color-bg-elevated)",
-            border: "1px solid var(--color-rule)",
-            color: "var(--color-ink)",
-            fontSize: "12px",
-          }}
+          className="font-medium"
         >
           {/* One constant verb naming the destination — the real Claude Code
               session, never the per-comment Discuss fork. The caption carries
@@ -206,20 +201,15 @@ export function Footer({
               </span>
             )}
           </span>
-        </button>
-        <button
-          type="button"
+        </Button>
+        <Button
+          size="sm"
+          variant="success"
           onClick={onApprove}
           disabled={!canApprove || waiting}
-          className="rounded px-3 py-1 font-medium disabled:opacity-40"
-          style={{
-            background: "var(--color-success)",
-            color: "var(--color-on-accent)",
-            fontSize: "12px",
-          }}
-        >
-          Approve plan
-        </button>
+          className="font-medium"
+          label="Approve plan"
+        />
       </span>
     </footer>
   );
@@ -243,7 +233,7 @@ function Badge({
         style={{
           textTransform: "uppercase",
           letterSpacing: "0.12em",
-          fontSize: "11px",
+          fontSize: "var(--rl-text-xs)",
           fontWeight: 600,
         }}
       >

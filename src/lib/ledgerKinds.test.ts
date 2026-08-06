@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { describe, it, expect } from "vitest";
-import { kindLabel, describeVerdict } from "./LedgerPane";
+import { kindLabel, describeVerdict } from "./ledgerKinds";
 
 describe("kindLabel", () => {
   it("maps known ledger kinds to human labels", () => {

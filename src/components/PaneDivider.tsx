@@ -1,24 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { SHELL_GUTTER } from "../lib/paneLayout";
+
+/** How far the 18px-wide chevron pill overhangs each side of the gutter it is
+ *  centred on: (18 − SHELL_GUTTER) / 2. */
+const PILL_OVERHANG = (18 - SHELL_GUTTER) / 2;
 
 /** Horizontal nudge (px) applied to the collapse caret so a *collapsed* pane's
- *  pill isn't shaved at the window edge.
+ *  pill isn't shaved at the row edge.
  *
- *  The 18px-wide pill is centred on a 6px divider, so it overhangs 6px each
- *  side. That's invisible mid-window, but a collapsed pane's divider sits
- *  against the window edge: the outer overhang is clipped by the row's
- *  overflow-hidden and the inner overhang is painted over by the adjacent
- *  column (a later positioned sibling). Both rounded ends get shaved and the
- *  caret reads as a square. Shifting inward by exactly the overhang lands the
- *  whole pill inside the viewport — a leading pane's divider hugs the left edge
- *  (so shift right), a trailing pane's hugs the right (so shift left).
- *  Horizontal dividers span the full width and never hug an edge, so they are
- *  left alone. */
+ *  The 18px-wide pill is centred on the gutter, so it overhangs PILL_OVERHANG
+ *  px each side. That's invisible mid-window, but a collapsed pane's divider
+ *  sits at the row's edge (the hull ring is <main> padding, outside the row's
+ *  clip): the outer overhang is clipped by the row's overflow-hidden and the
+ *  inner overhang is painted over by the adjacent column (a later positioned
+ *  sibling). Both rounded ends get shaved and the caret reads as a square.
+ *  Shifting inward by exactly the overhang lands the whole pill inside the
+ *  row — a leading pane's divider hugs the left edge (so shift right), a
+ *  trailing pane's hugs the right (so shift left). Horizontal dividers span
+ *  the full width and never hug an edge, so they are left alone. */
 export function collapsedCaretNudge(
   collapsed: boolean,
   orientation: "vertical" | "horizontal",
   side: "leading" | "trailing",
-  overhang = 6,
+  overhang = PILL_OVERHANG,
 ): number {
   if (!collapsed || orientation === "horizontal") return 0;
   return side === "leading" ? overhang : -overhang;
@@ -48,6 +53,10 @@ interface PaneDividerProps {
    *  the document is obscured and a combined "latch" replaces the two squished
    *  chevrons. */
   hideChevron?: boolean;
+  /** This divider runs INSIDE a plate (the voice split in the document
+   *  column), where there is no hull to show through — paint a resting 1px
+   *  hairline instead of the gutter's transparent rest state. */
+  hairline?: boolean;
 }
 
 // Divider hosting a drag affordance (when expanded) and a collapse/expand
@@ -64,6 +73,7 @@ export function PaneDivider({
   fullscreen = false,
   onExitFullscreen,
   hideChevron = false,
+  hairline = false,
 }: PaneDividerProps) {
   const horizontal = orientation === "horizontal";
   const resizeCursor = horizontal ? "row-resize" : "col-resize";
@@ -103,32 +113,36 @@ export function PaneDivider({
   // re-opens a collapsed dock.
   const rotation = horizontal ? (!fullscreen && collapsed ? -90 : 90) : 0;
 
-  // The interactive grab zone extends a few px past the 6px visible bar on each
-  // side so the resize cursor is easy to acquire even when a scrollbar gutter
-  // sits right next to the divider — without thickening the bar or its layout
-  // width. As a real DOM element painted above the document column, it also
-  // helps the cursor switch over the adjacent native scrollbar gutter.
+  // The interactive grab zone extends a few px past the gutter on each side so
+  // the resize cursor is easy to acquire even when a scrollbar gutter sits
+  // right next to the divider — without thickening the bar or its layout
+  // width. With the 10px gutter that lands an ~22px effective target. As a
+  // real DOM element painted above the document column, it also helps the
+  // cursor switch over the adjacent native scrollbar gutter.
   const overhang = 6;
-  const collapsedNudge = collapsedCaretNudge(
-    collapsed,
-    orientation,
-    side,
-    overhang,
-  );
+  const collapsedNudge = collapsedCaretNudge(collapsed, orientation, side);
   return (
     <div
-      className="relative shrink-0"
-      style={horizontal ? { height: "6px" } : { width: "6px" }}
+      className={[
+        "relative shrink-0 rl-divider",
+        horizontal ? "rl-divider--h" : "rl-divider--v",
+        hairline ? "rl-divider--hairline" : "",
+        dragDisabled ? "rl-divider--static" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+      style={
+        horizontal
+          ? { height: `${SHELL_GUTTER}px` }
+          : { width: `${SHELL_GUTTER}px` }
+      }
     >
-      {/* Visible bar — non-interactive; the grab zone below handles pointers. */}
+      {/* Visible bar — non-interactive (the grab zone below handles pointers);
+          transparent at rest so the hull shows through the gutter, a slim
+          centered bar on hover, accent while dragging (see styles.css). */}
       <div
-        style={{
-          position: "absolute",
-          inset: 0,
-          pointerEvents: "none",
-          background: dragging ? "var(--color-info)" : "var(--color-rule)",
-          transition: dragging ? undefined : "background-color 0.12s",
-        }}
+        className="rl-divider-bar"
+        style={dragging ? { background: "var(--color-info)" } : undefined}
       />
       {/* Widened transparent grab/cursor zone. */}
       <div

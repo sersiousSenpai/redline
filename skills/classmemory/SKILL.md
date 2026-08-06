@@ -12,7 +12,7 @@ description: >-
   provenance-as-ground-truth discipline, and the vectorless tree-walk retrieval
   contract (current decisions first, superseded as history, observations as
   labeled patterns).
-version: 2
+version: 3
 ---
 
 # Redline ClassMemory
@@ -62,6 +62,13 @@ you always just emit the best organization; write it as if it will be applied.)
    nodes came from an agent pass over the lake — never `file`, `supersede`, or
    reorganize based on one. Provenance (`project_path`, `surface`) remains the
    only filing authority.
+5. **User notes are a strong curation signal — never provenance.** Lake items
+   of kind `note` (surface `note`) are the user's OWN margin notes on events
+   and standalone thoughts — the only human-authored signal in the lake. What
+   the user bothered to write down matters: weight noted/starred subjects for
+   filing and promotion, and `file` notes themselves (`target_kind: "note"`,
+   `target_id` = the lake seq). But a note never overrides `project_path` /
+   `surface` — the filing authority does not move.
 
 ### The shape: emergent, 2–3 deep
 
@@ -137,9 +144,9 @@ Each op:
 | `supersede` | a newer decision replaces an older one on the same subject | `old_seq`, `new_seq` |
 
 - `target_kind` ∈ `prompt | session | revision | mission | decision |
-  browse_event | linked | companion | browse_thread`;
+  browse_event | note | linked | companion | browse_thread`;
   `target_id` is the lake id (prompt seq, session id, ledger seq, mission id,
-  thread id).
+  thread id; a `note` files by its lake seq, like a decision).
 - **Lineage is provenance too.** Delta lines may carry `session=`, `thread=`
   (`kind:id` — the browse tab / linked discussion / draft / voice thread the
   prompt belongs to), and `parent=session:<id>` (the plan session that thread
@@ -210,7 +217,12 @@ catalog — it is a **vectorless tree-walk**, not a similarity search:
 4. **Expand a `digest` node only when detail is needed** — its `summary` answers
    most questions; when you need specifics, follow its `cite_seqs` links to the
    exact ledger rows.
-5. **Observations come last, labeled as patterns.** A node's `observations` are
+5. **User notes come FIRST, quoted as the user's own words.** A `note` link is
+   the one human-authored signal in the lake — the user stopped and wrote it
+   down themselves. When a node carries note links (or the events you surface
+   carry stars/notes), lead with them verbatim before prompts, pages, or
+   patterns; a starred item outranks an unstarred sibling at equal relevance.
+6. **Observations come last, labeled as patterns.** A node's `observations` are
    agent-derived pattern notes (each citing the seqs it derives from). Surface
    them *after* facts and decisions, phrased as a hypothesis ("a pattern in
    your history suggests…"), never asserted as a fact or a decision. A `pinned`

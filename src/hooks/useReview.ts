@@ -60,6 +60,9 @@ export function useReview() {
   // in-progress annotation would be worse than a banner.
   const [stale, setStale] = useState(false);
   const fingerprintRef = useRef<string | null>(null);
+  /** The fingerprint of the diff the pane is SHOWING — revert passes it so
+   *  the backend can refuse to apply against a drifted diff. */
+  const getFingerprint = useCallback(() => fingerprintRef.current, []);
 
   /** Re-resolve the diff for the current repo/source. vsBase needs `base`;
    *  commitSha needs `sha` — with the param missing we show nothing rather
@@ -422,6 +425,7 @@ export function useReview() {
     loading,
     error,
     stale,
+    getFingerprint,
     holdActive,
     submitReview,
     dismissReview,

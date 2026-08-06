@@ -18,6 +18,7 @@
 // future-versioned file survives a GUI gesture.
 
 import type { MainSurface } from "../lib/mainSurface";
+import type { CanonicalOverrides } from "../lib/paneLayout";
 
 /** Surfaces a manifest can disable. Main surfaces (minus the document — the
  *  core pane is not removable) plus the auxiliary ones the header composes. */
@@ -60,6 +61,7 @@ export const MAIN_SURFACE_DESCRIPTORS: readonly SurfaceDescriptor[] = [
   { id: "drafter", label: "Prompt Drafter", title: "Draft a new prompt" },
   { id: "review", label: "Code Review", title: "Review code changes" },
   { id: "servers", label: "Localhost", title: "See your local dev servers" },
+  { id: "memory", label: "Memory", title: "Your prompt and decision history" },
 ];
 
 /** Human-readable names for the surface checkboxes and context menus. */
@@ -87,6 +89,10 @@ export interface Workspace {
   landing?: string;
   /** Per-project overrides keyed by absolute project path. */
   projects?: Record<string, { landing?: string }>;
+  /** Optional snap-back target overrides in px, e.g.
+   *  `{"layout": {"sidebar": 280, "discussion": 360, "terminal": 300}}`.
+   *  Read leniently field-by-field — see workspaceLayout. */
+  layout?: { sidebar?: number; discussion?: number; terminal?: number };
   [key: string]: unknown;
 }
 
@@ -201,6 +207,28 @@ export function initialSurface(
     return "document";
   }
   return resolved;
+}
+
+/** The canonical-shape overrides a manifest carries (A3 snap-back — the one
+ *  layout knob that is file-first: there is no GUI writer yet, only the
+ *  hand-edit). Lenient field-by-field: anything that isn't a finite positive
+ *  number is ignored; range sanity lives in canonicalLayout, which also
+ *  knows the window. Absent or malformed block = no overrides = the built-in
+ *  canonical shape. */
+export function workspaceLayout(ws: Workspace): CanonicalOverrides {
+  const raw: unknown = ws.layout;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
+  const num = (v: unknown): number | undefined =>
+    typeof v === "number" && Number.isFinite(v) && v > 0 ? v : undefined;
+  const r = raw as Record<string, unknown>;
+  const out: CanonicalOverrides = {};
+  const sidebar = num(r.sidebar);
+  const discussion = num(r.discussion);
+  const terminal = num(r.terminal);
+  if (sidebar !== undefined) out.sidebar = sidebar;
+  if (discussion !== undefined) out.discussion = discussion;
+  if (terminal !== undefined) out.terminal = terminal;
+  return out;
 }
 
 // ---- Pure updaters (each backs one GUI gesture; all preserve unknown keys) --

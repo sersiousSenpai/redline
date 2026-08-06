@@ -20,6 +20,16 @@ export interface ThemeTokens {
   "color-ink": string;
   "color-ink-muted": string;
   "color-rule": string;
+  /** The hull: the canvas visible in the shell's gutters and edge ring, a step
+   *  behind the paper so the panes read as inset plates on it. */
+  "color-canvas": string;
+  /** Plate hairline — quieter than --color-rule (a rule separates content
+   *  regions; this merely finds the plate's edge against the canvas). */
+  "color-plate-border": string;
+  /** Corner-glow accent for plates on dark themes (the Agent-Seats hero
+   *  language, at a whisper); transparent on light themes, which get their
+   *  depth from shadow alone. Static CSS mixes this into the plate shadow. */
+  "color-plate-glow": string;
   "color-anchor-bg": string;
   "color-anchor-text": string;
   "color-info": string;
@@ -175,6 +185,12 @@ export function deriveTokens(base: ThemeBase): ThemeTokens {
     // WCAG AA floor for body text; well-separated themes are unaffected.
     "color-ink-muted": mutedInk(fg, bg, 0.45, 4.5),
     "color-rule": mix(fg, bg, 0.82),
+    // Dark themes deepen toward black so the paper plates lift off the hull;
+    // light themes tint faintly toward ink (going darker would read as a
+    // different, muddier palette rather than a recess).
+    "color-canvas": isDark ? mix(bg, "#000000", 0.35) : mix(bg, fg, 0.05),
+    "color-plate-border": mix(fg, bg, 0.85),
+    "color-plate-glow": isDark ? base.blue : "transparent",
     "color-anchor-bg": anchorBg,
     // Anchor labels sit on `anchorBg`, not `bg`, and are small UI affordances
     // rather than body text — clamp to the 3:1 UI-component floor against that

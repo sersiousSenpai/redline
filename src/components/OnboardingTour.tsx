@@ -8,6 +8,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { tourShortcuts } from "../lib/keymap";
 
 // A first-run guided tour: dim the window, cut a spotlight around the real
 // region being explained, and float a themed tooltip card pointing at it. The
@@ -101,21 +102,45 @@ function KeyCap({ children }: { children: ReactNode }) {
 // Authored copy lives here so it can be wordsmithed in one place. Voice: warm,
 // plain, second-person — matches the README / Feedback tone. Each card is a
 // short lead + optional structured bullets + a muted detail line, so nothing
-// reads as a wall of text.
+// reads as a wall of text. The shortcuts step reads the declarative keymap
+// registry (lib/keymap.ts), so a new global binding shows up here without a
+// second copy. Anchor hygiene: the theme/mode pickers live INSIDE the
+// Settings popover and only exist in the DOM while it's open — steps about
+// them anchor the always-present settings trigger (data-tour="settings")
+// instead.
 const STEPS: TourStep[] = [
   {
     id: "welcome",
     title: "Welcome to Redline",
     lead: (
       <>
-        Redline sits between you and Claude Code, turning its plans into
-        something you can mark up.
+        Redline turns Claude Code's plans into documents you mark up — the way
+        a lawyer redlines a contract.
       </>
     ),
     body: (
       <>
-        Here's the quick tour — replay it anytime from{" "}
-        <strong>Redline → Getting Started</strong>.
+        Everything lives on one canvas: the plan in the middle, your terminal
+        below, the discussion beside it. Here's the quick tour — replay it
+        anytime from <strong>Redline → Getting Started</strong>.
+      </>
+    ),
+  },
+  {
+    id: "landing",
+    anchor: "landing",
+    placement: "bottom",
+    title: "This page is live",
+    lead: (
+      <>
+        The empty document isn't a placeholder — <strong>just start
+        typing</strong> and it becomes a draft prompt.
+      </>
+    ),
+    body: (
+      <>
+        Shape the prompt in the drafter, then launch it: Claude plans in the
+        terminal, and the plan lands back here for review.
       </>
     ),
   },
@@ -155,7 +180,7 @@ const STEPS: TourStep[] = [
   },
   {
     id: "mode",
-    anchor: "mode",
+    anchor: "settings",
     placement: "bottom",
     title: "Active, Ambient, or Paused",
     lead: <>Choose how Redline handles incoming plans.</>,
@@ -164,6 +189,11 @@ const STEPS: TourStep[] = [
       { label: "Ambient", text: "Countdown, then auto-approve.", color: "var(--color-warning)" },
       { label: "Paused", text: "Let Claude run untouched.", color: "var(--color-ink-muted)" },
     ],
+    body: (
+      <>
+        The mode switch lives here in <strong>Settings</strong>.
+      </>
+    ),
   },
   {
     id: "sessions",
@@ -255,28 +285,33 @@ const STEPS: TourStep[] = [
   },
   {
     id: "shortcuts",
+    anchor: "snapback",
+    placement: "bottom",
     title: "Keyboard shortcuts",
-    lead: <>Show or hide a pane without reaching for the mouse.</>,
-    shortcuts: [
-      { keys: ["Shift", "←"], text: "Sidebar" },
-      { keys: ["Shift", "→"], text: "Discussion pane" },
-      { keys: ["Shift", "↓"], text: "Terminal" },
-      { keys: ["Shift", "↑"], text: "Switch sidebar tabs" },
-      { keys: ["⌘ / Ctrl", "+"], text: "Zoom in" },
-      { keys: ["⌘ / Ctrl", "−"], text: "Zoom out" },
-      { keys: ["⌘ / Ctrl", "0"], text: "Reset zoom" },
-    ],
+    lead: (
+      <>
+        <strong>⌘K</strong> runs anything — surfaces, plans, themes. And when
+        the layout gets away from you, <strong>⌘⇧0</strong> (or this ⌂) snaps
+        every pane back to its resting shape.
+      </>
+    ),
+    shortcuts: tourShortcuts(),
   },
   {
     id: "finish",
-    anchor: "theme",
+    anchor: "settings",
     placement: "bottom",
     title: "Make it yours",
-    lead: <>Pick a theme up top — there are twelve.</>,
+    lead: (
+      <>
+        Themes and fonts live in <strong>Settings</strong> — there are
+        fourteen moods to pick from.
+      </>
+    ),
     body: (
       <>
-        That's the loop: intercept → review → send → approve. Replay anytime from{" "}
-        <strong>Redline → Getting Started</strong>.
+        That's the loop: draft → plan → review → send → approve. Replay
+        anytime from <strong>Redline → Getting Started</strong>.
       </>
     ),
   },

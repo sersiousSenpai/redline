@@ -96,28 +96,21 @@ pub struct RouteSpec {
 
 /// Scope names, one per protected capability group. Extensions request
 /// these in their manifest; `extension.rs` validates against this list.
-pub const SCOPE_PLAN_SUGGEST: &str = "plan.suggest";
-pub const SCOPE_PLAN_COMMENT: &str = "plan.comment";
-/// Deliberately **not** a reuse of `plan.comment`: "may propose, may not write"
-/// is exactly the capability an offer invents, and `ROUTE_TABLE` is keyed on
+///
+/// The names themselves live in `redline-extension-abi` (re-exported here)
+/// so manifests, SDK helper docs, and this table spell them identically —
+/// this module stays sovereign over route classes, `ROUTE_TABLE`, and the
+/// `authorize()` decision. `SCOPE_PLAN_OFFER` is deliberately **not** a
+/// reuse of `plan.comment`: "may propose, may not write" is exactly the
+/// capability an offer invents, and `ROUTE_TABLE` is keyed on
 /// `(method, path)` — so a flag in the body could never carry its own class.
-pub const SCOPE_PLAN_OFFER: &str = "plan.offer";
-pub const SCOPE_BROWSER_DRIVE: &str = "browser.drive";
-pub const SCOPE_CONSULT: &str = "consult";
-pub const SCOPE_MEMORY_PROPOSE: &str = "memory.propose";
-pub const SCOPE_DRAFTER_SUGGEST: &str = "drafter.suggest";
-pub const SCOPE_REVIEW_ANNOTATE: &str = "review.annotate";
-
-pub const KNOWN_SCOPES: &[&str] = &[
-    SCOPE_PLAN_SUGGEST,
-    SCOPE_PLAN_COMMENT,
-    SCOPE_PLAN_OFFER,
-    SCOPE_BROWSER_DRIVE,
-    SCOPE_CONSULT,
-    SCOPE_MEMORY_PROPOSE,
-    SCOPE_DRAFTER_SUGGEST,
-    SCOPE_REVIEW_ANNOTATE,
-];
+pub use redline_extension_abi::scopes::{
+    BROWSER_DRIVE as SCOPE_BROWSER_DRIVE, CONSULT as SCOPE_CONSULT,
+    DRAFTER_SUGGEST as SCOPE_DRAFTER_SUGGEST, MEMORY_PROPOSE as SCOPE_MEMORY_PROPOSE,
+    PLAN_COMMENT as SCOPE_PLAN_COMMENT, PLAN_OFFER as SCOPE_PLAN_OFFER,
+    PLAN_SUGGEST as SCOPE_PLAN_SUGGEST, REVIEW_ANNOTATE as SCOPE_REVIEW_ANNOTATE,
+    UI_PANEL as SCOPE_UI_PANEL, KNOWN_SCOPES,
+};
 
 /// The frozen `/v1` contract — every route the daemon serves, in router
 /// registration order. The middleware consults this table on every request
@@ -145,8 +138,16 @@ pub const ROUTE_TABLE: &[RouteSpec] = &[
         method: "GET",
         path: "/viewer/*path",
         class: RouteClass::Open,
-        purpose: "Async-share viewer static assets",
+        purpose: "Async-share viewer static assets (legacy standalone bundle)",
         request: "path of the bundled asset",
+        response: "asset bytes with content type",
+    },
+    RouteSpec {
+        method: "GET",
+        path: "/assets/*path",
+        class: RouteClass::Open,
+        purpose: "Shared build chunks for the async-share viewer page (folded into the app build)",
+        request: "path of the built asset under dist/assets",
         response: "asset bytes with content type",
     },
     RouteSpec {
@@ -501,6 +502,22 @@ pub const ROUTE_TABLE: &[RouteSpec] = &[
         request: "?repo=&source=...",
         response: "JSON cleared count",
     },
+    RouteSpec {
+        method: "GET",
+        path: "/v1/extensions",
+        class: RouteClass::Open,
+        purpose: "Installed extensions with live status (kind, scopes, events, strikes, panel)",
+        request: "—",
+        response: "JSON extension list",
+    },
+    RouteSpec {
+        method: "POST",
+        path: "/v1/extensions/:name/panel",
+        class: RouteClass::Protected(SCOPE_UI_PANEL),
+        purpose: "Replace the extension's sanitized markdown panel (the sanctioned UI slot; `name` must match the bearer's grant)",
+        request: "JSON {markdown}",
+        response: "JSON {ok}",
+    },
 ];
 
 /// Look up the contract row for a request. `path` must be the registered
@@ -550,6 +567,29 @@ fn grants() -> &'static RwLock<HashMap<String, ExtensionGrant>> {
 
 pub fn register_grant(token: String, grant: ExtensionGrant) {
     grants().write().expect("grants lock").insert(token, grant);
+}
+
+/// The grant behind a bearer token, if it is a registered extension token.
+/// Handlers that must bind a write to the caller's *identity* (not just its
+/// scope) use this — e.g. the panel route's "`name` must match the bearer's
+/// grant" rule. The master token has no grant and returns `None`.
+pub fn grant_for(token: &str) -> Option<ExtensionGrant> {
+    let grants = grants().read().expect("grants lock");
+    grants
+        .iter()
+        .find(|(t, _)| ct_eq(t, token))
+        .map(|(_, g)| g.clone())
+}
+
+/// Revoke every token granted to the named extension, immediately (B4:
+/// marketplace uninstall/update must not leave a live token behind for the
+/// rest of the boot — per-boot rotation alone is too slow a revocation for
+/// an explicit uninstall). Returns how many tokens died.
+pub fn revoke_grant(name: &str) -> usize {
+    let mut grants = grants().write().expect("grants lock");
+    let before = grants.len();
+    grants.retain(|_, g| g.name != name);
+    before - grants.len()
 }
 
 #[cfg(test)]
@@ -865,6 +905,32 @@ mod tests {
                 scope: SCOPE_BROWSER_DRIVE
             })
         );
+        clear_grants_for_test();
+    }
+
+    /// B4 uninstall/update revocation: after `revoke_grant`, the extension's
+    /// token is a stranger to `authorize()` — not merely scope-stripped.
+    #[test]
+    fn revoked_grant_token_is_denied() {
+        let _guard = grants_test_lock();
+        clear_grants_for_test();
+        register_grant(
+            "tok-revoke-me".to_string(),
+            ExtensionGrant {
+                name: "shortlived".to_string(),
+                scopes: vec![SCOPE_PLAN_COMMENT.to_string()],
+            },
+        );
+        assert_eq!(
+            authorize("/v1/sessions/:session_id/comments", "POST", Some("tok-revoke-me")),
+            Ok(())
+        );
+        assert_eq!(revoke_grant("shortlived"), 1);
+        assert_eq!(
+            authorize("/v1/sessions/:session_id/comments", "POST", Some("tok-revoke-me")),
+            Err(Denial::BadToken)
+        );
+        assert_eq!(revoke_grant("shortlived"), 0, "second revoke finds nothing");
         clear_grants_for_test();
     }
 

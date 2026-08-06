@@ -66,6 +66,13 @@ These are cheap regression nets, not a substitute for the rules above:
   Shipwright surfaces it and you decide. When you act on one, add it to
   `perf_guard.rs` — a rule the suite enforces beats a rule an agent re-reports
   every run, which is the whole argument this doc is built on.
+- `src-tauri/tests/size_guard.rs` — pins the `[profile.release]` size levers and
+  the rlib-only lib in the manifest text (tests build in debug, so only a
+  source invariant can catch a profile revert).
+- `src/lib/sizeGuard.test.ts` — asserts mermaid/docx stay dynamic-only imports
+  and `PlanEditor` stays lazy, catching main-chunk regressions at PR time.
+- `scripts/check-size.mjs` — measures built artifacts against
+  `scripts/size-budget.json` (warn locally, `--strict` in CI).
 
 > **The guard test is the deliverable.** Two whole-app freezes became four
 > written rules became five source-text tests, and that is the only friction fix
@@ -95,3 +102,85 @@ npm run build
 If a change genuinely needs to break a rule, say so explicitly in review and
 explain why the content is bounded — silence reads as "this is safe" when it may
 not be.
+
+## Size budget
+
+The shipped artifact is part of the product. Redline counter-positions against
+server-stack collaboration apps as **local-first and light**: one small binary,
+no backend stack, instant boot. That claim needs the same discipline as the
+main-thread rules above — measured baselines, hard ceilings, and guards that
+catch the *cause* of a regression at PR time.
+
+**Budgets:** `scripts/size-budget.json`, checked by `scripts/check-size.mjs`
+(warn-only locally, `--strict` in CI). Ratchet budgets **down** as levers land;
+every **increase** must be a deliberate, reviewed diff of the JSON — never
+silent drift.
+
+**Where the guards run** (`.github/workflows/`): `ci.yml` gates every PR and
+main push — the full cargo suite on macos-14 (the `size_guard.rs` source
+invariants run there), tsc + vite build + vitest on ubuntu (ditto
+`sizeGuard.test.ts`), and `cargo deny check licenses` against
+`src-tauri/deny.toml`. `size.yml` checks the byte budgets on main pushes +
+nightly + manual dispatch — deliberately NOT on PRs, because the honest
+artifact is the real release binary (a 15–25 min build); it mirrors
+`scripts/redline.sh`'s sequence exactly (joint `tauri build`, then the lean
+`-p redline-mcp` relink) and runs `check-size.mjs --strict`, uploading the
+output as a `size-report` artifact. `release.yml` builds per-arch DMGs on
+`v*` tags (dry-runnable via workflow_dispatch; ad-hoc signed until the
+Developer ID secrets land).
+
+### Baseline (measured 2026-08-06)
+
+| Artifact | Size | Notes |
+|---|---|---|
+| `target/release/redline` (arm64) | 30,038,704 B | pre-profile build (Jul 3): unstripped (64,629 symbols), no LTO, 16 codegen units |
+| …of which `__text` | 14.88 MB | tauri/wry/axum/serde monomorphization |
+| …of which `__const` | 4.66 MB | syntect + two-face grammar dumps |
+| …of which unwind tables | ~2.8 MB | `__eh_frame` + `__gcc_except_tab` (kept: see below) |
+| main chunk `dist/assets/index-*.js` | 3,056,164 B | Tiptap+PromptDrafter and xterm still static |
+| `dist/` total | 8.6 MB | embedded into the binary by Tauri |
+| `dist-viewer/` total | 4.2 MB | re-bundled its own mermaid/cytoscape/katex (~2.27 MB duplicated) |
+
+### After the B1d frontend diet (measured 2026-08-06, same day)
+
+| Artifact | Size | What moved |
+|---|---|---|
+| boot-path JS (entry + preloaded shared chunk) | 1,101,717 B | **−64%**: PromptDrafter/VoicePanel/ShareSnapshotDialog lazy, xterm behind a load-once loader, `highlight.js` → `lib/common` (−1.2 MB of grammars), App's one `docModel` need split into pure `sectionMaps` (freed the Tiptap/prosemirror/yjs chain) |
+| `dist/` total | 7,708,940 B | now **includes** the viewer (second Rollup entry, shares every chunk) |
+| `dist-viewer/` | retired | folded into the main build; the daemon serves `viewer/index.html` + `/assets/*` from the embedded app assets, legacy standalone bundle still served if present |
+
+The budget metric changed with the fold: `bootJsBytes` is the entry chunk
+**plus** every chunk `dist/index.html` modulepreloads (the entry's transitive
+static closure — shared-with-the-viewer modules live in a preloaded chunk, so
+the entry file alone would under-count). `ANALYZE=1 npm run build` writes a
+`dist/stats.html` treemap for attribution.
+
+**`manualChunks` is deliberately absent** (tried and reverted here): pinning
+vendor groups makes rollup co-locate shared dependencies into the pinned
+chunks — measured: react fragments landed in an editor pin, lodash-es and
+dompurify in a mermaid pin — which the entry then statically imports. The
+`bootJsBytes` sum plus the `sizeGuard.test.ts` source invariants (lazy
+surfaces stay lazy, xterm only via its loader, no `highlight.js` barrel) are
+the re-merge guards instead.
+
+### Levers
+
+| Lever | Status | Expected |
+|---|---|---|
+| `[profile.release]`: `strip="symbols"`, `lto="thin"`, `codegen-units=1` | **landed** (pinned by `size_guard.rs`) | measured 2026-08-06 (first post-profile release build, B1d dist embedded): 30.04 MB → **25.66 MB**; ceiling ratcheted 33 → 28 MB |
+| lib `crate-type = ["rlib"]` only | **landed** | build time + target/ footprint, not shipped size |
+| `panic = "abort"` | **rejected permanently** | would save ~2 MB but breaks `catch_unwind` panic containment (and the extension host's crash isolation is built on it) |
+| `opt-level = "s"` | pending, gated | adopt only if first-open highlight of a large TSX stays in budget (syntect throughput is a product invariant); fallback: per-package `opt-level = 3` pins for syntect/onig |
+| `redline-mcp` workspace split (own crate, own `reqwest(blocking)`) | **landed** (pinned by `size_guard.rs::mcp_proxy_stays_split_and_lean`; ceiling in `size-budget.json`) | measured: the mcp binary ~28 MB → **1.50 MB** (release, own feature set: no TLS/charset/proxy-detection); app drops the `blocking` feature |
+| grammar-dump trim (curated syntect set built in `build.rs`) | pending, optional | −1.5 to −3 MB `__const` |
+| lazy `PromptDrafter` / `VoicePanel` / `ShareSnapshotDialog` / xterm loader / hljs `lib/common` | **landed** (pinned by `sizeGuard.test.ts`) | measured: boot-path JS 3.06 MB → **1.10 MB** (`manualChunks` tried and rejected — co-location, see above) |
+| viewer as second Rollup entry (dedupe mermaid/katex) | **landed** | measured: `dist-viewer/` (4.2 MB resource) retired; `dist/` total 8.6 → 7.71 MB **including** the viewer |
+| `wasmi` extension host (B3) | **landed** — a deliberate spend, not a lever | the one budgeted size **increase**: the in-process WASM host (interpreter, no JIT — wasmtime's +8–12 MB was rejected for exactly this row). Measured 2026-08-06: binary **25.49 MB** with the full host + ABI crate linked in — the interpreter's cost disappeared into thin-LTO variance against the 25.66 MB pre-B3 build. Ceiling unchanged at 28 MB (91.0% used). |
+
+Post-profile release build measured 2026-08-06 (all four rows ~91% of their
+ratcheted ceilings): binary 25.66 MB, mcp proxy 1.50 MB, boot-path JS
+1.11 MB, dist 7.72 MB. The ad-hoc-signed aarch64 DMG from the same build is
+12.8 MB and passes `hdiutil verify` + mount + detach — the exact assertions
+`release.yml` makes in CI. Re-measured after the B3 wasmi host landed:
+binary 25.49 MB, boot-path JS 1.13 MB (Extensions panel), mcp 1.50 MB,
+dist 7.74 MB — all green, ceilings untouched.

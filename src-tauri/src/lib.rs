@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 mod agent;
+mod ai_commit;
 mod ai_review;
 mod auth;
 mod bookshelf;
@@ -20,6 +21,7 @@ mod dictation;
 mod dictation_whisper;
 mod draft_chat;
 mod extension;
+mod extension_host;
 mod feedback;
 mod fork;
 mod fsbrowse;
@@ -30,20 +32,26 @@ mod keeper;
 mod ledger;
 mod linked;
 mod librarian;
+mod marketplace;
 mod seatassign;
-/// The MCP stdio proxy's request→route→response core. `pub` so the
-/// `redline-mcp` binary (`src/bin/`) can share the exact, unit-tested logic.
+/// App-side MCP remnant: the `~/.claude.json` snippet generator for the
+/// settings surface. The protocol core + proxy binary moved to the
+/// `crates/redline-mcp` workspace member (size lever — see that crate's docs).
 pub mod mcp;
+mod memchat;
 mod mirror;
 mod mission;
 mod parser;
 #[cfg(test)]
 mod perf_guard;
 mod pty;
+mod push;
 mod repoicon;
 mod resolutions;
 mod review;
 mod review_feedback;
+#[cfg(target_os = "macos")]
+mod scroller_guard;
 mod seat;
 mod shipwright;
 mod skill;
@@ -349,6 +357,9 @@ impl PendingResponses {
 struct PendingReviewEntry {
     token: u64,
     tx: oneshot::Sender<String>,
+    /// When this curl was held — pushes recorded BEFORE it are old news and
+    /// must not be re-reported in the reply.
+    held_at: i64,
 }
 
 #[derive(Clone)]
@@ -377,11 +388,22 @@ impl PendingReviews {
         }
         let token = self.next_token.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
-        map.insert(review_id.to_string(), PendingReviewEntry { token, tx });
+        map.insert(
+            review_id.to_string(),
+            PendingReviewEntry {
+                token,
+                tx,
+                held_at: now_millis(),
+            },
+        );
         (rx, token)
     }
     fn take(&self, review_id: &str) -> Option<oneshot::Sender<String>> {
         self.map.lock().unwrap().remove(review_id).map(|e| e.tx)
+    }
+    /// When the currently-held curl (if any) started waiting.
+    fn held_since(&self, review_id: &str) -> Option<i64> {
+        self.map.lock().unwrap().get(review_id).map(|e| e.held_at)
     }
     /// Drop-guard removal: only if this registration still owns the slot.
     fn take_if_owned(&self, review_id: &str, token: u64) -> Option<oneshot::Sender<String>> {
@@ -892,8 +914,9 @@ impl ActiveMission {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SurfaceInfo {
-    /// `plan | drafter | browser | review | servers | terminal | welcome`.
-    /// Free-form on purpose — a new surface needs no backend change here.
+    /// `plan | drafter | browser | review | servers | memory | terminal |
+    /// welcome`. Free-form on purpose — a new surface needs no backend change
+    /// here.
     pub kind: String,
     /// The surface's id in its own id-space (plan session id, draft id,
     /// browse id, review id). `None` for terminal/welcome.
@@ -1176,6 +1199,12 @@ async fn handle_plan(
             "Redline is paused — this plan was auto-approved without review.",
         ));
     }
+
+    // Model provenance: by ExitPlanMode time the transcript has assistant
+    // turns, so any of this session's prompts still lacking a model (hook
+    // captures carry no seat) get stamped here. Guarded to a single EXISTS
+    // probe when there's nothing to do.
+    backfill_model_from_hook(&app_state.store.database(), &payload, &session_id);
 
     // A fork agent (a "Discuss" thread) inherits this hook. If one ever calls
     // ExitPlanMode, the POST arrives under the fork's own session id — never
@@ -1461,6 +1490,18 @@ async fn handle_plan(
     if let Err(e) = app_state.app_handle.emit("plan-received", event) {
         tracing::warn!(error = %e, "failed to emit plan-received");
     }
+    extension_host::publish(
+        ext_events::PLAN_RECEIVED,
+        &ext_events::PlanReceived {
+            session_id: session_id.clone(),
+            version: i64::from(version_number),
+            is_new_session,
+            thread_start,
+            mode: event_mode.to_string(),
+            restored,
+            ts_ms: extension_host::now_ms(),
+        },
+    );
     refresh_tray(&app_state.app_handle, &app_state.store);
 
     // Orphan fix: if a prior held POST for this session is still pending (Claude
@@ -1617,6 +1658,73 @@ fn ingest_prompt_text(v: &serde_json::Value) -> String {
         .to_string()
 }
 
+/// How much of a transcript's tail the model backfill reads. Transcripts reach
+/// many MB; the newest assistant message is what carries the answer, so the
+/// tail is all that's ever read.
+const TRANSCRIPT_TAIL_BYTES: u64 = 256 * 1024;
+
+/// Newest `message.model` in the tail of a session transcript JSONL, or `None`
+/// (no assistant turn yet — a brand-new session gets its model one hook fire
+/// late; documented in docs/protocol-verification.md terms: the hook payload
+/// itself carries no model field, the transcript is the only source).
+fn model_from_transcript(path: &str) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    f.seek(SeekFrom::Start(len.saturating_sub(TRANSCRIPT_TAIL_BYTES)))
+        .ok()?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).ok()?;
+    // A mid-file seek lands mid-line (and possibly mid-UTF-8); the lossy
+    // conversion + per-line parse skip the torn first line naturally.
+    let text = String::from_utf8_lossy(&buf);
+    for line in text.lines().rev() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if let Some(m) = v
+            .pointer("/message/model")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+        {
+            return Some(m.to_string());
+        }
+    }
+    None
+}
+
+/// Stamp `prompts.model` for a claude session from its hook payload's
+/// transcript, where still unknown. Shared by both hook handlers; best-effort.
+/// The `session_needs_model` guard keeps the hot path from re-reading a
+/// transcript tail once every prompt of the session is stamped.
+fn backfill_model_from_hook(
+    db: &db::Database,
+    payload: &serde_json::Value,
+    claude_session_id: &str,
+) {
+    if claude_session_id.is_empty() || !db.session_needs_model(claude_session_id) {
+        return;
+    }
+    let Some(path) = payload
+        .get("transcript_path")
+        .and_then(serde_json::Value::as_str)
+        .filter(|p| !p.is_empty())
+    else {
+        return;
+    };
+    let Some(model) = model_from_transcript(path) else {
+        return;
+    };
+    match db.backfill_session_model(claude_session_id, &model) {
+        Ok(n) if n > 0 => {
+            tracing::info!(model = %model, rows = n, "stamped prompt model from transcript");
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "prompt model backfill failed"),
+    }
+}
+
 /// Classify a captured prompt as belonging to a Redline-managed project or an
 /// external `claude` session. Fact-based: a session running in a directory
 /// Redline already tracks as a project is ours; anything else is external.
@@ -1679,6 +1787,15 @@ async fn handle_prompts_ingest(
                 {
                     tracing::warn!(error = %e, "failed to link launched session to its draft");
                 }
+                // Bind the drafter's launch-time prompt row (recorded with no
+                // claude session — claude hadn't spawned) to the session that
+                // now runs it, then let the transcript stamp its model. This
+                // is the seam that makes drafter-launched prompts reachable by
+                // the model backfill at all.
+                if let Err(e) = db.bind_drafter_prompt_session(&bh, &draft_id, sid) {
+                    tracing::warn!(error = %e, "failed to bind drafter prompt to its session");
+                }
+                backfill_model_from_hook(&db, &v, sid);
             }
         }
         return (StatusCode::OK, Json(serde_json::json!({ "skipped": "agent_dup" })))
@@ -1703,6 +1820,7 @@ async fn handle_prompts_ingest(
     } else {
         "external"
     };
+    let sid_for_backfill = claude_session_id.clone();
     let input = ledger::PromptInput {
         source: ledger::PromptSource::Hook,
         origin,
@@ -1714,10 +1832,17 @@ async fn handle_prompts_ingest(
         project_path: cwd,
         body: prompt,
         thread: None,
+        author: None, // hook-captured prompts are the human's own
+        model: None,  // interactive sessions carry no seat; the transcript backfill stamps it
+        model_source: None,
     };
-    match ledger::record_prompt(&db, input) {
+    let response = match ledger::record_prompt(&db, input) {
         Ok(Some(seq)) => {
             let _ = app_state.app_handle.emit("ledger-changed", ());
+            extension_host::publish(
+                ext_events::LEDGER_CHANGED,
+                &ext_events::LedgerChanged { ts_ms: extension_host::now_ms() },
+            );
             (StatusCode::CREATED, Json(serde_json::json!({ "seq": seq }))).into_response()
         }
         Ok(None) => {
@@ -1727,12 +1852,41 @@ async fn handle_prompts_ingest(
             tracing::warn!(error = %e, "prompt ingest failed");
             (StatusCode::OK, Json(serde_json::json!({ "skipped": "error" }))).into_response()
         }
+    };
+    // After the row exists: stamp this session's still-unstamped prompts from
+    // the transcript tail. A brand-new session has no assistant turn yet — its
+    // model lands on the next fire.
+    if let Some(sid) = sid_for_backfill.as_deref().filter(|s| !s.is_empty()) {
+        backfill_model_from_hook(&db, &v, sid);
     }
+    response
 }
 
-/// Resolve the built browser-viewer directory (`dist-viewer/`). In a bundled
-/// release it rides along as a Tauri resource; in dev it sits at the repo root
-/// next to the crate. `None` when the viewer hasn't been built yet.
+/// Look up a file of the app's built frontend (`dist/`). In a bundled release
+/// the whole dist tree is compiled into the binary (`frontendDist`), so this
+/// reads the embedded asset; under `tauri dev` nothing is embedded and it
+/// falls back to the repo's `dist/` on disk (present after `npm run build`).
+/// Since the viewer folded into the main build (B1d), this is how the daemon
+/// serves `viewer/index.html` and the shared `/assets/*` chunks it references.
+fn embedded_dist_file(app: &AppHandle, rel: &str) -> Option<Vec<u8>> {
+    let resolver = app.asset_resolver();
+    for key in [format!("/{rel}"), rel.to_string()] {
+        if let Some(asset) = resolver.get(key) {
+            return Some(asset.bytes);
+        }
+    }
+    let dev = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../dist")
+        .join(rel);
+    std::fs::read(&dev).ok()
+}
+
+/// Resolve the built browser-viewer directory (`dist-viewer/`) — the PRE-FOLD
+/// standalone layout, kept serving as a fallback until the folded path is
+/// proven. In a bundled release it rides along as a Tauri resource; in dev it
+/// sits at the repo root next to the crate. `None` when it was never built
+/// (the normal state after B1d — the folded viewer serves from
+/// `embedded_dist_file` instead).
 fn viewer_dist_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
     if let Ok(p) = app
         .path()
@@ -1770,7 +1924,7 @@ async fn serve_viewer_file(state: &AppState, rel: &str) -> axum::response::Respo
     let Some(base) = viewer_dist_dir(&state.app_handle) else {
         return (
             StatusCode::NOT_FOUND,
-            "Viewer not built — run `npm run build:viewer`.",
+            "Viewer not built — run `npm run build`.",
         )
             .into_response();
     };
@@ -1790,15 +1944,315 @@ async fn serve_viewer_file(state: &AppState, rel: &str) -> axum::response::Respo
     }
 }
 
+/// `/viewer/` — the folded build's page first (embedded `viewer/index.html`,
+/// whose chunk refs resolve at `/assets/*`), then the legacy standalone
+/// bundle (whose refs resolve at `/viewer/assets/*`, still served below).
 async fn handle_viewer_index(State(state): State<AppState>) -> axum::response::Response {
+    if let Some(bytes) = embedded_dist_file(&state.app_handle, "viewer/index.html") {
+        return (
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            bytes,
+        )
+            .into_response();
+    }
     serve_viewer_file(&state, "index.html").await
 }
 
+/// `/viewer/*path` — legacy standalone-bundle assets only; the folded page
+/// never requests these.
 async fn handle_viewer_asset(
     State(state): State<AppState>,
     Path(path): Path<String>,
 ) -> axum::response::Response {
     serve_viewer_file(&state, &path).await
+}
+
+/// `/assets/*path` — the shared build chunks the folded viewer page loads.
+/// Same path hygiene as the legacy route: only plain name components reach
+/// the lookup, and the lookup itself is confined to the built `dist/` tree
+/// (embedded in release, on-disk in dev).
+async fn handle_root_asset(
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+) -> axum::response::Response {
+    let mut clean = std::path::PathBuf::new();
+    for comp in std::path::Path::new(&path).components() {
+        match comp {
+            std::path::Component::Normal(c) => clean.push(c),
+            std::path::Component::RootDir | std::path::Component::CurDir => {}
+            _ => return (StatusCode::BAD_REQUEST, "bad path").into_response(),
+        }
+    }
+    let rel = format!("assets/{}", clean.to_string_lossy());
+    match embedded_dist_file(&state.app_handle, &rel) {
+        Some(bytes) => (
+            [(header::CONTENT_TYPE, viewer_content_type(&clean))],
+            bytes,
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, "not found").into_response(),
+    }
+}
+
+use redline_extension_abi::events as ext_events;
+
+/// `GET /v1/extensions` — installed extensions with live status (kind,
+/// scopes, events, strikes, sanitized panel). Open: read-only surface, same
+/// posture as the other list reads.
+async fn handle_extensions_list() -> Json<Vec<extension_host::ExtensionInfo>> {
+    Json(extension_host::snapshot())
+}
+
+#[derive(Deserialize)]
+struct ExtensionPanelReq {
+    markdown: String,
+}
+
+/// `POST /v1/extensions/:name/panel` — the sanctioned UI slot. The auth
+/// middleware already demanded the `ui.panel` scope; this handler adds the
+/// identity rule: an extension token may only write ITS OWN panel. The
+/// master token (trusted surfaces the app itself spawned) may write any.
+async fn handle_extension_panel(
+    axum::extract::Path(name): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<ExtensionPanelReq>,
+) -> axum::response::Response {
+    let bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim);
+    let allowed = match bearer {
+        Some(t) if t == auth::daemon_token() => true,
+        Some(t) => auth::grant_for(t).map(|g| g.name == name).unwrap_or(false),
+        None => false,
+    };
+    if !allowed {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "panel writes are per-extension: `name` must match the bearer's grant"
+            })),
+        )
+            .into_response();
+    }
+    match extension_host::set_panel(&name, &req.markdown) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+/// app_settings key holding the JSON list of user-disabled extension names.
+const EXTENSIONS_DISABLED_KEY: &str = "extensions.disabled";
+
+/// Installed extensions for the Extensions settings panel — the same
+/// snapshot the open `/v1/extensions` route serves.
+#[tauri::command]
+fn extensions_list() -> Vec<extension_host::ExtensionInfo> {
+    extension_host::snapshot()
+}
+
+/// Enable/disable an extension (trusted UI). Disable stops delivery
+/// immediately; enable takes effect at the next launch (the status text
+/// says so). The choice persists across boots in `app_settings`.
+#[tauri::command]
+fn extension_set_enabled(
+    store: tauri::State<'_, SessionStore>,
+    name: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let db = store.database();
+    let mut disabled: std::collections::BTreeSet<String> = db
+        .get_setting(EXTENSIONS_DISABLED_KEY)
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default();
+    if enabled {
+        disabled.remove(&name);
+    } else {
+        disabled.insert(name.clone());
+    }
+    db.set_setting(
+        EXTENSIONS_DISABLED_KEY,
+        &serde_json::to_string(&disabled).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    extension_host::set_enabled(&name, enabled)
+}
+
+/// Uninstall an extension: drop it from the registry, revoke its token
+/// immediately (B4 — per-boot rotation alone is too slow a revocation for
+/// an explicit uninstall), and delete its folder.
+#[tauri::command(async)]
+fn extension_uninstall(name: String) -> Result<(), String> {
+    let dir = extension_host::remove(&name)?;
+    auth::revoke_grant(&name);
+    // Belt and braces: only ever delete inside ~/.redline/extensions.
+    let root = extension::extensions_root().ok_or("no extensions root")?;
+    if !dir.starts_with(&root) {
+        return Err(format!(
+            "refusing to delete {} (outside the extensions root)",
+            dir.display()
+        ));
+    }
+    std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())
+}
+
+// --- Marketplace (Elevation B4, see `marketplace.rs`) ---------------------
+
+/// app_settings keys for the SQLite-cached index document + fetch stamp.
+const MARKETPLACE_CACHE_KEY: &str = "marketplace.index.cache";
+const MARKETPLACE_FETCHED_KEY: &str = "marketplace.index.fetched_ms";
+
+/// What the Browse tab renders: enriched entries plus provenance of the
+/// document they came from.
+#[derive(serde::Serialize)]
+struct MarketplaceIndexView {
+    fetched_ms: Option<i64>,
+    /// "network" or "cache" — the Browse tab says which it is showing.
+    source: String,
+    warnings: Vec<String>,
+    entries: Vec<marketplace::MarketEntry>,
+}
+
+/// The `(name, installed version)` join input for `marketplace::enrich`.
+fn installed_pairs() -> Vec<(String, Option<String>)> {
+    extension_host::snapshot()
+        .into_iter()
+        .map(|e| (e.name, e.version))
+        .collect()
+}
+
+/// Fetch (or serve the cached) marketplace index. `refresh` forces a
+/// network fetch — otherwise the cache wins and the network is touched only
+/// when there is no cache at all (first open). A fetch failure falls back
+/// to the cache with a warning instead of an error wall.
+#[tauri::command(async)]
+async fn marketplace_index(
+    store: tauri::State<'_, SessionStore>,
+    refresh: bool,
+) -> Result<MarketplaceIndexView, String> {
+    let cached = {
+        let db = store.database();
+        db.get_setting(MARKETPLACE_CACHE_KEY)
+    };
+    let mut warnings = Vec::new();
+    let (raw, source) = if refresh || cached.is_none() {
+        match marketplace::fetch_index().await {
+            Ok(fresh) => {
+                // Cache only a document that parses — a bad fetch must not
+                // poison the consent path's cache.
+                match marketplace::parse_index(&fresh) {
+                    Ok(_) => {
+                        let db = store.database();
+                        let _ = db.set_setting(MARKETPLACE_CACHE_KEY, &fresh);
+                        let _ = db.set_setting(
+                            MARKETPLACE_FETCHED_KEY,
+                            &extension_host::now_ms().to_string(),
+                        );
+                        (fresh, "network".to_string())
+                    }
+                    Err(why) => match cached {
+                        Some(old) => {
+                            warnings.push(format!("fetched index unusable ({why}) — showing cached"));
+                            (old, "cache".to_string())
+                        }
+                        None => return Err(why),
+                    },
+                }
+            }
+            Err(why) => match cached {
+                Some(old) => {
+                    warnings.push(format!("{why} — showing cached"));
+                    (old, "cache".to_string())
+                }
+                None => return Err(why),
+            },
+        }
+    } else {
+        (cached.expect("checked above"), "cache".to_string())
+    };
+    let (entries, parse_warnings) = marketplace::parse_index(&raw)?;
+    warnings.extend(parse_warnings);
+    let fetched_ms = {
+        let db = store.database();
+        db.get_setting(MARKETPLACE_FETCHED_KEY)
+            .and_then(|s| s.parse().ok())
+    };
+    Ok(MarketplaceIndexView {
+        fetched_ms,
+        source,
+        warnings,
+        entries: marketplace::enrich(entries, &installed_pairs()),
+    })
+}
+
+/// Install (or update) one extension from the cached index. Consent-bound:
+/// `sha256` is the hash the user saw in the consent dialog, and the install
+/// refuses if the cached entry no longer matches it. Downloads, verifies
+/// (sha256 + exact size + wasm magic), writes the generated manifest, and
+/// hot-registers — no relaunch. Updates drop and revoke the old
+/// registration first; nothing ever updates without this explicit call.
+#[tauri::command(async)]
+async fn marketplace_install(
+    store: tauri::State<'_, SessionStore>,
+    name: String,
+    sha256: String,
+) -> Result<(), String> {
+    let (raw, disabled) = {
+        let db = store.database();
+        let raw = db
+            .get_setting(MARKETPLACE_CACHE_KEY)
+            .ok_or("no marketplace index loaded — open Browse first")?;
+        let disabled: std::collections::BTreeSet<String> = db
+            .get_setting(EXTENSIONS_DISABLED_KEY)
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
+        (raw, disabled)
+    };
+    let (entries, _) = marketplace::parse_index(&raw)?;
+    let entry = entries
+        .into_iter()
+        .find(|e| e.name == name)
+        .ok_or_else(|| format!("extension {name:?} is not in the index"))?;
+    if entry.artifact.sha256 != sha256 {
+        return Err(
+            "the index entry changed since you consented — refresh and review it again"
+                .to_string(),
+        );
+    }
+    if !marketplace::min_redline_ok(&entry.min_redline) {
+        return Err(format!(
+            "this extension needs Redline >= {} (you run {})",
+            entry.min_redline,
+            marketplace::APP_VERSION
+        ));
+    }
+    // A manually-installed external extension owning this name is not ours
+    // to overwrite.
+    if let Some(existing) = extension_host::snapshot().iter().find(|e| e.name == name) {
+        if existing.kind != extension::KIND_WASM {
+            return Err(format!(
+                "an external-process extension named {name:?} is already installed — remove it first"
+            ));
+        }
+    }
+    let bytes = marketplace::fetch_artifact(&entry).await?;
+    let root = extension::extensions_root().ok_or("no extensions root")?;
+    // Update path: drop the live registration and revoke its token before
+    // touching the directory.
+    if extension_host::remove(&name).is_ok() {
+        auth::revoke_grant(&name);
+    }
+    let dir = marketplace::write_install(&entry, &bytes, &root)?;
+    let loaded = extension::load_extension_dir(&dir)?;
+    let booted = extension::boot_token(loaded)?;
+    extension_host::load_one(booted, disabled.contains(&name))?;
+    tracing::info!("marketplace: installed {name} v{}", entry.version);
+    Ok(())
 }
 
 async fn run_server(state: AppState) {
@@ -1807,11 +2261,14 @@ async fn run_server(state: AppState) {
     let app_handle = state.app_handle.clone();
     let app = Router::new()
         // Async-share browser viewer, served for the sender's local preview
-        // (loopback only). `/viewer` → `/viewer/` so the page's relative
-        // `./assets/...` refs resolve; `/viewer/*path` serves the bundle.
+        // (loopback only). `/viewer` → `/viewer/` so relative refs resolve;
+        // the folded page's chunks load from `/assets/*` (shared with the
+        // app build), while `/viewer/*path` keeps serving a legacy
+        // standalone bundle if one is still on disk.
         .route("/viewer", get(|| async { Redirect::permanent("/viewer/") }))
         .route("/viewer/", get(handle_viewer_index))
         .route("/viewer/*path", get(handle_viewer_asset))
+        .route("/assets/*path", get(handle_root_asset))
         .route("/v1/plan", post(handle_plan))
         // Polis prompt store (Phase 1): the global UserPromptSubmit capture hook
         // POSTs its stdin payload here. Fail-open by design — never 500s the hook.
@@ -1936,6 +2393,13 @@ async fn run_server(state: AppState) {
                 .post(handle_review_annotations_add)
                 .delete(handle_review_annotations_clear),
         )
+        // WASM extension surface (Elevation B3): the installed-extensions
+        // snapshot (status, strikes, panel) and the one sanctioned UI slot —
+        // an extension replaces its own sanitized markdown panel. The panel
+        // route is scope-guarded by the middleware (`ui.panel`) and
+        // identity-guarded in the handler (name must match the grant).
+        .route("/v1/extensions", get(handle_extensions_list))
+        .route("/v1/extensions/:name/panel", post(handle_extension_panel))
         // Control-plane auth (Shardplate Phase 2): every request is checked
         // against the frozen v1 contract in `auth::ROUTE_TABLE` — mutating
         // routes demand the per-boot bearer token (or a scoped extension
@@ -1944,6 +2408,11 @@ async fn run_server(state: AppState) {
         // a contract entry is a loud 401, not a silent hole.
         .layer(axum::middleware::from_fn(auth::require_daemon_auth))
         .with_state(state);
+    // The WASM extension host drives every guest `host_call` through THIS
+    // exact router (single dispatch path — see extension_host.rs). A clone
+    // of the served router, installed before the bind so an early event
+    // delivery can never observe a half-configured surface.
+    extension_host::install_router(app.clone());
     match tokio::net::TcpListener::bind(DAEMON_ADDR).await {
         Ok(listener) => {
             daemon_status.set_bound(true);
@@ -2134,6 +2603,17 @@ async fn handle_offer_feedback(
         "plan item offered (not written)"
     );
     let _ = app_state.app_handle.emit("comment-offer", &offer);
+    extension_host::publish(
+        ext_events::COMMENT_OFFER,
+        &ext_events::CommentOffer {
+            offer_id: offer.id.clone(),
+            session_id: offer.session_id.clone(),
+            block_id: Some(offer.block_id.clone()),
+            body: offer.body.clone(),
+            agent_id: offer.agent_id.clone(),
+            ts_ms: extension_host::now_ms(),
+        },
+    );
     (
         StatusCode::CREATED,
         Json(serde_json::json!({
@@ -3182,6 +3662,13 @@ async fn handle_review_start(
         let _ = app_state
             .app_handle
             .emit("review-annotations-changed", session.review_id.clone());
+            extension_host::publish(
+                ext_events::REVIEW_ANNOTATIONS_CHANGED,
+                &ext_events::ReviewAnnotationsChanged {
+                    review_id: session.review_id.clone(),
+                    ts_ms: extension_host::now_ms(),
+                },
+            );
     }
 
     // Bind the review to the dock terminal whose claude sent this curl (the
@@ -3211,6 +3698,16 @@ async fn handle_review_start(
     if let Err(e) = app_state.app_handle.emit("review-requested", event) {
         tracing::warn!(error = %e, "failed to emit review-requested");
     }
+    extension_host::publish(
+        ext_events::REVIEW_STARTED,
+        &ext_events::ReviewStarted {
+            review_id: session.review_id.clone(),
+            repo_path: session.repo_path.clone(),
+            source: session.source.clone(),
+            round: session.round,
+            ts_ms: extension_host::now_ms(),
+        },
+    );
     // Companion journal: a code review opened (round n).
     let _ = db.append_journal(
         "review_start",
@@ -3268,14 +3765,27 @@ fn submit_review_feedback(
     approve: bool,
     approve_message: Option<String>,
 ) -> Result<(), String> {
+    // A push made while THIS curl was held is news the agent needs (the work
+    // already landed — don't commit it again); an older push was already
+    // reported in an earlier round's reply.
+    let held_since = pending.held_since(&review_id);
     let tx = pending.take(&review_id).ok_or(
         "no agent is waiting on this review — run /redline-code-review in the terminal first",
     )?;
+    let push = review_state
+        .db
+        .latest_push_for_review(&review_id)
+        .filter(|p| held_since.is_some_and(|t| p.created_at >= t));
     let payload = if approve {
         let msg = approve_message
             .filter(|m| !m.trim().is_empty())
             .unwrap_or_else(|| review_feedback::DEFAULT_APPROVE_MESSAGE.to_string());
-        format!("{msg}\n")
+        // Approve + push is the natural "ship it" — the approval line carries
+        // the same machine-validated block the feedback payload would.
+        match &push {
+            Some(p) => format!("{msg}\n\n{}", review_feedback::pushed_block(p)),
+            None => format!("{msg}\n"),
+        }
     } else {
         let session = review_state
             .db
@@ -3289,6 +3799,7 @@ fn submit_review_feedback(
             &session.repo_path,
             session.round,
             &annotations,
+            push.as_ref(),
         );
         // Everything serialized is now on the agent's desk.
         for mut a in annotations {
@@ -3298,6 +3809,13 @@ fn submit_review_feedback(
             }
         }
         let _ = app.emit("review-annotations-changed", review_id.clone());
+        extension_host::publish(
+            ext_events::REVIEW_ANNOTATIONS_CHANGED,
+            &ext_events::ReviewAnnotationsChanged {
+                review_id: review_id.clone(),
+                ts_ms: extension_host::now_ms(),
+            },
+        );
         text
     };
     tracing::info!(review_id = %review_id, approve, "submit_review_feedback fired");
@@ -3474,6 +3992,13 @@ async fn handle_review_annotations_add(
             let _ = app_state
                 .app_handle
                 .emit("review-annotations-changed", session.review_id.clone());
+                extension_host::publish(
+                    ext_events::REVIEW_ANNOTATIONS_CHANGED,
+                    &ext_events::ReviewAnnotationsChanged {
+                        review_id: session.review_id.clone(),
+                        ts_ms: extension_host::now_ms(),
+                    },
+                );
             Json(serde_json::json!({ "ok": true, "annotation": annotation })).into_response()
         }
         Err(e) => browser_error_response(e),
@@ -3506,6 +4031,13 @@ async fn handle_review_annotations_clear(
                 let _ = app_state
                     .app_handle
                     .emit("review-annotations-changed", session.review_id.clone());
+                    extension_host::publish(
+                        ext_events::REVIEW_ANNOTATIONS_CHANGED,
+                        &ext_events::ReviewAnnotationsChanged {
+                            review_id: session.review_id.clone(),
+                            ts_ms: extension_host::now_ms(),
+                        },
+                    );
             }
             Json(serde_json::json!({ "ok": true, "cleared": n })).into_response()
         }
@@ -3777,6 +4309,8 @@ struct ContextPromptsQ {
     thread_kind: Option<String>,
     thread_id: Option<String>,
     parent_session: Option<String>,
+    /// Exact-match filter on the recorded model (`prompts.model`).
+    model: Option<String>,
 }
 
 /// `GET /v1/context/prompts?session=&mission=&surface=&project=&since_seq=&q=&limit=`
@@ -3798,6 +4332,7 @@ async fn handle_context_prompts(
         thread_kind: q.thread_kind,
         thread_id: q.thread_id,
         parent_session_id: q.parent_session,
+        model: q.model,
     };
     match context::list_prompts(&db, &filters) {
         Ok(items) => Json(serde_json::json!({ "items": items })).into_response(),
@@ -3818,8 +4353,11 @@ async fn handle_context_session_history(
     }
 }
 
-/// `GET /v1/context/stats` — aggregate counts (per day / surface / kind / class).
-/// Agent/MCP-facing only; there is deliberately no dashboard UI. Read-only.
+/// `GET /v1/context/stats` — aggregate counts (per day / surface / kind /
+/// class / author). Shared with the `context_stats` command: the Memory
+/// surface's facet rails and activity ribbon read the same builder ("no
+/// dashboard UI" was the memory-is-plumbing stance; the Memory-as-a-Second-
+/// Brain plan deliberately overturned it). Read-only.
 async fn handle_context_stats(State(app_state): State<AppState>) -> axum::response::Response {
     let db = app_state.store.database();
     Json(context::build_stats(&db)).into_response()
@@ -3911,39 +4449,7 @@ async fn handle_context_tree(
     Path((kind, id)): Path<(String, String)>,
 ) -> axum::response::Response {
     let db = app_state.store.database();
-    let parent = db.session_tree_parent(&kind, &id).ok().flatten();
-    let children = db.session_tree_children(&kind, &id).unwrap_or_default();
-    let child_digests: Vec<serde_json::Value> = children
-        .into_iter()
-        .map(|(ck, cid, created_at)| {
-            let (count, last_ts) = db.thread_stats(&ck, &cid).unwrap_or((0, None));
-            serde_json::json!({
-                "kind": ck,
-                "id": cid,
-                "label": db.thread_label(&ck, &cid),
-                "createdAt": created_at,
-                "messageCount": count,
-                "lastTs": last_ts,
-            })
-        })
-        .collect();
-    let (count, last_ts) = db.thread_stats(&kind, &id).unwrap_or((0, None));
-    Json(serde_json::json!({
-        "node": {
-            "kind": kind,
-            "id": id,
-            "label": db.thread_label(&kind, &id),
-            "messageCount": count,
-            "lastTs": last_ts,
-        },
-        "parent": parent.map(|(pk, pid)| serde_json::json!({
-            "kind": pk,
-            "id": pid,
-            "label": db.thread_label(&pk, &pid),
-        })),
-        "children": child_digests,
-    }))
-    .into_response()
+    Json(context::build_thread_tree(&db, &kind, &id)).into_response()
 }
 
 #[derive(Deserialize)]
@@ -4486,11 +4992,13 @@ async fn browser_cache_snapshot(
             match ledger::record_browse_event(
                 &db,
                 ledger::BrowseEventInput {
-                    action: "navigate".to_string(),
+                    action: ledger::BrowseAction::Navigate,
                     browse_id,
                     url: url.clone(),
                     title: (!title.is_empty()).then(|| title.clone()),
                     text,
+                    from_event_id: None,
+                    author: None, // the human's own browsing
                 },
             ) {
                 Ok(Some(_)) => {
@@ -4504,6 +5012,10 @@ async fn browser_cache_snapshot(
                         Some(&url),
                     );
                     let _ = app.emit("ledger-changed", ());
+                    extension_host::publish(
+                        ext_events::LEDGER_CHANGED,
+                        &ext_events::LedgerChanged { ts_ms: extension_host::now_ms() },
+                    );
                     let _ = app.emit("memory-changed", ());
                 }
                 Ok(None) => {} // consecutive duplicate — nothing recorded
@@ -7000,6 +7512,73 @@ fn ledger_prompt_body(
     store.database().get_prompt_body(id).map_err(|e| e.to_string())
 }
 
+/// `(prompt_id, model)` for every prompt with a recorded model — the Memory
+/// inspector joins this onto its event rows for the per-row model chip and the
+/// model filter. `(async)`: a full-table scan that grows with the lake.
+#[tauri::command(async)]
+fn ledger_prompt_models(
+    store: tauri::State<'_, SessionStore>,
+) -> Result<Vec<(i64, String)>, String> {
+    store
+        .database()
+        .list_prompt_models()
+        .map_err(|e| e.to_string())
+}
+
+/// Filtered, cursor-paged Timeline query — the Memory surface's spine.
+/// `ledger_list_events` above keeps its single capped read for the pill's
+/// quick inspector; this one chains pages via `filters.before_seq`, so the
+/// whole history is reachable. `(async)`: pages join provenance per row.
+#[tauri::command(async)]
+fn ledger_query(
+    store: tauri::State<'_, SessionStore>,
+    filters: context::LedgerFilters,
+) -> Result<Vec<context::TimelineItem>, String> {
+    context::query_ledger(&store.database(), &filters)
+}
+
+/// Aggregate counts (per day / surface / kind / class / author) — the Memory
+/// surface's facet rails + activity ribbon. Same builder as
+/// `GET /v1/context/stats`, one thin caller each.
+#[tauri::command(async)]
+fn context_stats(store: tauri::State<'_, SessionStore>) -> Result<context::ContextStats, String> {
+    Ok(context::build_stats(&store.database()))
+}
+
+/// The Map tab's data: classes + sessions as nodes, the four declared edge
+/// kinds (Second Brain P5, §3). Data only — the deterministic seeded layout is
+/// the frontend's pure `memoryMap.ts`. No route twin: the Map is a GUI-only
+/// view, agents keep reading the structured routes.
+#[tauri::command(async)]
+fn memory_map(store: tauri::State<'_, SessionStore>) -> Result<context::MemoryMapView, String> {
+    Ok(context::build_memory_map(&store.database()))
+}
+
+/// BM25 search over captured browse pages — the Timeline's page-content
+/// search. Same query/clamp discipline as `GET /v1/context/browse/search`.
+#[tauri::command(async)]
+fn context_search(
+    store: tauri::State<'_, SessionStore>,
+    q: String,
+    limit: Option<i64>,
+) -> Result<Vec<db::BrowseHit>, String> {
+    store
+        .database()
+        .search_browse_events(&q, limit.unwrap_or(20).clamp(1, 100))
+        .map_err(|e| e.to_string())
+}
+
+/// One session-tree node with parent + child digests — the Timeline's session
+/// grouping drill-down. Same assembly as `GET /v1/context/tree/:kind/:id`.
+#[tauri::command(async)]
+fn context_thread_tree(
+    store: tauri::State<'_, SessionStore>,
+    kind: String,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    Ok(context::build_thread_tree(&store.database(), &kind, &id))
+}
+
 /// Read/write the "capture external claude sessions" toggle (default on).
 #[tauri::command]
 fn ledger_get_capture_external(store: tauri::State<'_, SessionStore>) -> bool {
@@ -7079,6 +7658,11 @@ fn record_drafted_prompt(
         project_path,
         body,
         thread,
+        author: None, // the launched draft is the human's own document
+        // The launch command passes no --model (buildPlanLaunchCommand); the
+        // transcript backfill stamps it once the session is bound + answering.
+        model: None,
+        model_source: None,
     };
     ledger::record_prompt(&db, input)?;
     let _ = db.append_journal(
@@ -7089,6 +7673,10 @@ fn record_drafted_prompt(
         None,
     );
     let _ = app.emit("ledger-changed", ());
+    extension_host::publish(
+        ext_events::LEDGER_CHANGED,
+        &ext_events::LedgerChanged { ts_ms: extension_host::now_ms() },
+    );
     Ok(())
 }
 
@@ -7154,15 +7742,21 @@ fn drafter_get_doc(
     if draft_id.trim().is_empty() {
         return Err("missing draft id".to_string());
     }
-    let row = store
-        .database()
-        .get_draft_doc(&draft_id)
-        .map_err(|e| e.to_string())?;
+    let db = store.database();
+    let row = db.get_draft_doc(&draft_id).map_err(|e| e.to_string())?;
     let (doc_json, doc_markdown, project_path) = row.unwrap_or((None, String::new(), None));
+    // When the DB last saw a write — what the crash-shadow recovery compares
+    // its own stamp against. 0 for a row that doesn't exist yet.
+    let updated_at = db
+        .get_draft(&draft_id)
+        .map_err(|e| e.to_string())?
+        .map(|(_, _, _, at)| at)
+        .unwrap_or(0);
     Ok(serde_json::json!({
         "docJson": doc_json,
         "docMarkdown": doc_markdown,
         "projectPath": project_path,
+        "updatedAt": updated_at,
     }))
 }
 
@@ -7236,10 +7830,21 @@ fn draft_suggestion_resolve(
     if status != "applied" && status != "rejected" {
         return Err("status must be applied|rejected".to_string());
     }
-    store
+    let updated = store
         .database()
         .resolve_draft_suggestion(&id, &status)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    if updated {
+        extension_host::publish(
+            ext_events::SUGGESTION_RESOLVED,
+            &ext_events::SuggestionResolved {
+                suggestion_id: id,
+                status,
+                ts_ms: extension_host::now_ms(),
+            },
+        );
+    }
+    Ok(updated)
 }
 
 #[derive(Deserialize)]
@@ -7695,6 +8300,10 @@ async fn export_context_bundle(
         let db = store.database();
         let _ = db.record_plan_export(sid, "session", Some(&head_hash));
         let _ = app.emit("ledger-changed", ());
+        extension_host::publish(
+            ext_events::LEDGER_CHANGED,
+            &ext_events::LedgerChanged { ts_ms: extension_host::now_ms() },
+        );
     }
     tracing::info!(path = %path.display(), scope = %scope, "exported context bundle");
     Ok(Some(path.to_string_lossy().to_string()))
@@ -7802,6 +8411,10 @@ async fn classmem_organize(
     let outcome = classmem::organize_once(&db).await;
     let _ = app.emit("classmem-changed", ());
     let _ = app.emit("ledger-changed", ());
+    extension_host::publish(
+        ext_events::LEDGER_CHANGED,
+        &ext_events::LedgerChanged { ts_ms: extension_host::now_ms() },
+    );
     let _ = app.emit("memory-changed", ());
     let o = outcome?;
     Ok(serde_json::json!({
@@ -7829,6 +8442,9 @@ fn memory_status(store: tauri::State<'_, SessionStore>) -> Result<serde_json::Va
     let chain = db.verify_ledger_chain().map_err(|e| e.to_string())?;
     let (compacted, reclaimed, last_compaction_ts) =
         db.compaction_stats().map_err(|e| e.to_string())?;
+    let pending_proposals = db
+        .count_pending_class_proposals()
+        .map_err(|e| e.to_string())?;
     Ok(serde_json::json!({
         "live": true,
         "itemCount": max_seq,
@@ -7839,6 +8455,7 @@ fn memory_status(store: tauri::State<'_, SessionStore>) -> Result<serde_json::Va
         "compactedCount": compacted,
         "reclaimedBytes": reclaimed,
         "lastCompactionTs": last_compaction_ts,
+        "pendingProposals": pending_proposals,
     }))
 }
 
@@ -7853,10 +8470,14 @@ fn memory_forget(
 ) -> Result<Option<i64>, String> {
     let db = store.database();
     let seq = db
-        .compact_prompt_body(prompt_id, "[forgotten]", "forget")
+        .compact_prompt_body(prompt_id, "[forgotten]", "forget", &ledger::local_author())
         .map_err(|e| e.to_string())?;
     let _ = app.emit("memory-changed", ());
     let _ = app.emit("ledger-changed", ());
+    extension_host::publish(
+        ext_events::LEDGER_CHANGED,
+        &ext_events::LedgerChanged { ts_ms: extension_host::now_ms() },
+    );
     Ok(seq)
 }
 
@@ -7872,13 +8493,76 @@ fn memory_revert_link(
     link_id: i64,
 ) -> Result<bool, String> {
     let db = store.database();
-    let reverted = classmem::revert_link(&db, link_id)?;
+    let reverted = classmem::revert_link(&db, &ledger::local_author(), link_id)?;
     if reverted {
         let _ = app.emit("memory-changed", ());
         let _ = app.emit("ledger-changed", ());
+        extension_host::publish(
+            ext_events::LEDGER_CHANGED,
+            &ext_events::LedgerChanged { ts_ms: extension_host::now_ms() },
+        );
         let _ = app.emit("classmem-changed", ());
     }
     Ok(reverted)
+}
+
+/// Second Brain P3: one note/star act — write or edit a note's text, star or
+/// unstar a target, or create a standalone thought (`targetKind` absent /
+/// `none`). Exactly one of `text`/`starred` per call: each act appends one
+/// `note` ledger event; the readable `user_notes` row updates in place.
+/// Rejections (phantom target, no act) surface as command errors.
+#[tauri::command]
+fn memory_note_write(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    write: context::NoteWrite,
+) -> Result<context::UserNote, String> {
+    let db = store.database();
+    match db
+        .write_user_note(&write, &ledger::local_author())
+        .map_err(|e| e.to_string())?
+    {
+        context::NoteOutcome::Written(n) => {
+            let _ = app.emit("memory-changed", ());
+            let _ = app.emit("ledger-changed", ());
+            extension_host::publish(
+                ext_events::LEDGER_CHANGED,
+                &ext_events::LedgerChanged { ts_ms: extension_host::now_ms() },
+            );
+            Ok(n)
+        }
+        // A no-op wrote nothing — nothing to announce.
+        context::NoteOutcome::Unchanged(n) => Ok(n),
+        context::NoteOutcome::Rejected(why) => Err(why),
+    }
+}
+
+/// The note row annotating one target, if any — the detail rail's read (the
+/// Timeline row already carries `starred`/`note`, so this serves the Catalog
+/// and any non-timeline caller).
+#[tauri::command]
+fn memory_note_get(
+    store: tauri::State<'_, SessionStore>,
+    target_kind: String,
+    target_id: String,
+) -> Result<Option<context::UserNote>, String> {
+    store
+        .database()
+        .get_user_note(&target_kind, &target_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Every note row (optionally starred-only), most recently touched first.
+#[tauri::command]
+fn memory_notes_list(
+    store: tauri::State<'_, SessionStore>,
+    starred_only: Option<bool>,
+    limit: Option<i64>,
+) -> Result<Vec<context::UserNote>, String> {
+    store
+        .database()
+        .list_user_notes(starred_only.unwrap_or(false), limit.unwrap_or(500))
+        .map_err(|e| e.to_string())
 }
 
 /// The class tree (flat + link counts); the FE builds the hierarchy.
@@ -7996,11 +8680,16 @@ fn classmem_accept_node(
 ) -> Result<(), String> {
     let db = store.database();
     let flipped = db.accept_class_node(&id).map_err(|e| e.to_string())?;
+    let actor = ledger::local_author();
     for nid in &flipped {
-        classmem::record_curate(&db, nid, "accept", "");
+        classmem::record_curate(&db, &actor, nid, "accept", "");
     }
     let _ = app.emit("classmem-changed", ());
     let _ = app.emit("ledger-changed", ());
+    extension_host::publish(
+        ext_events::LEDGER_CHANGED,
+        &ext_events::LedgerChanged { ts_ms: extension_host::now_ms() },
+    );
     Ok(())
 }
 
@@ -8023,11 +8712,16 @@ fn classmem_accept_link(
 ) -> Result<(), String> {
     let db = store.database();
     if let Some((node_id, flipped)) = db.accept_class_link(link_id).map_err(|e| e.to_string())? {
+        let actor = ledger::local_author();
         for nid in &flipped {
-            classmem::record_curate(&db, nid, "accept", "");
+            classmem::record_curate(&db, &actor, nid, "accept", "");
         }
-        classmem::record_curate(&db, &node_id, "accept_link", &link_id.to_string());
+        classmem::record_curate(&db, &actor, &node_id, "accept_link", &link_id.to_string());
         let _ = app.emit("ledger-changed", ());
+        extension_host::publish(
+            ext_events::LEDGER_CHANGED,
+            &ext_events::LedgerChanged { ts_ms: extension_host::now_ms() },
+        );
     }
     let _ = app.emit("classmem-changed", ());
     Ok(())
@@ -8051,14 +8745,19 @@ fn classmem_accept_proposal(
     id: i64,
 ) -> Result<(), String> {
     let db = store.database();
-    if let Some(applied) = db.apply_class_proposal(id).map_err(|e| e.to_string())? {
+    let actor = ledger::local_author();
+    if let Some(applied) = db.apply_class_proposal(id, &actor).map_err(|e| e.to_string())? {
         // A supersede records its own `supersede` ledger event inside the
         // apply — recording a taxonomy_reorg on top would double-log it
         // (with an empty node_id, breaking the reorg contract).
         if applied.op != "supersede" {
-            classmem::record_reorg(&db, &applied.op, &applied.node_id, &applied.detail);
+            classmem::record_reorg(&db, &actor, &applied.op, &applied.node_id, &applied.detail);
         }
         let _ = app.emit("ledger-changed", ());
+        extension_host::publish(
+            ext_events::LEDGER_CHANGED,
+            &ext_events::LedgerChanged { ts_ms: extension_host::now_ms() },
+        );
     }
     let _ = app.emit("classmem-changed", ());
     Ok(())
@@ -8084,9 +8783,13 @@ fn classmem_pin_node(
 ) -> Result<(), String> {
     let db = store.database();
     db.set_class_node_pinned(&id, pinned).map_err(|e| e.to_string())?;
-    classmem::record_curate(&db, &id, "pin", if pinned { "1" } else { "0" });
+    classmem::record_curate(&db, &ledger::local_author(), &id, "pin", if pinned { "1" } else { "0" });
     let _ = app.emit("classmem-changed", ());
     let _ = app.emit("ledger-changed", ());
+    extension_host::publish(
+        ext_events::LEDGER_CHANGED,
+        &ext_events::LedgerChanged { ts_ms: extension_host::now_ms() },
+    );
     Ok(())
 }
 
@@ -8100,9 +8803,13 @@ fn classmem_dismiss_observation(
 ) -> Result<(), String> {
     let db = store.database();
     if let Some(node_id) = db.set_observation_dismissed(id).map_err(|e| e.to_string())? {
-        classmem::record_curate(&db, &node_id, "observation_dismiss", &id.to_string());
+        classmem::record_curate(&db, &ledger::local_author(), &node_id, "observation_dismiss", &id.to_string());
         let _ = app.emit("classmem-changed", ());
         let _ = app.emit("ledger-changed", ());
+        extension_host::publish(
+            ext_events::LEDGER_CHANGED,
+            &ext_events::LedgerChanged { ts_ms: extension_host::now_ms() },
+        );
     }
     Ok(())
 }
@@ -8119,12 +8826,17 @@ fn classmem_pin_observation(
     if let Some(node_id) = db.set_observation_pinned(id, pinned).map_err(|e| e.to_string())? {
         classmem::record_curate(
             &db,
+            &ledger::local_author(),
             &node_id,
             "observation_pin",
             &format!("{id}:{}", pinned as i64),
         );
         let _ = app.emit("classmem-changed", ());
         let _ = app.emit("ledger-changed", ());
+        extension_host::publish(
+            ext_events::LEDGER_CHANGED,
+            &ext_events::LedgerChanged { ts_ms: extension_host::now_ms() },
+        );
     }
     Ok(())
 }
@@ -8142,9 +8854,13 @@ fn classmem_rename_node(
     }
     let db = store.database();
     db.rename_class_node(&id, &title).map_err(|e| e.to_string())?;
-    classmem::record_curate(&db, &id, "rename", &title);
+    classmem::record_curate(&db, &ledger::local_author(), &id, "rename", &title);
     let _ = app.emit("classmem-changed", ());
     let _ = app.emit("ledger-changed", ());
+    extension_host::publish(
+        ext_events::LEDGER_CHANGED,
+        &ext_events::LedgerChanged { ts_ms: extension_host::now_ms() },
+    );
     Ok(())
 }
 
@@ -8320,6 +9036,11 @@ pub fn run() {
         )
         .init();
 
+    // Before any window (and its scrollers) exists: defuse the AppKit/WebKit
+    // scroller-style swap race that segfaulted the app — see scroller_guard.rs.
+    #[cfg(target_os = "macos")]
+    scroller_guard::pin_scroller_style();
+
     tauri::Builder::default()
         // Must be the first plugin (Tauri v2 requirement). A second `redline`
         // launch hands off to the running instance and focuses its window
@@ -8344,6 +9065,11 @@ pub fn run() {
         // JS plugin's onOpenUrl (both cold-start and running-instance).
         .plugin(tauri_plugin_deep_link::init())
         .invoke_handler(tauri::generate_handler![
+            extensions_list,
+            extension_set_enabled,
+            extension_uninstall,
+            marketplace_index,
+            marketplace_install,
             list_sessions,
             get_session,
             export_revision_markdown,
@@ -8472,6 +9198,11 @@ pub fn run() {
             ai_review::ai_review_start,
             ai_review::ai_review_cancel,
             ai_review::ai_review_active,
+            push::push_status,
+            push::review_push,
+            push::review_revert,
+            push::review_last_push,
+            ai_commit::ai_commit_draft,
             review::review_sessions_list,
             review::review_delete,
             review::review_annotation_add,
@@ -8533,6 +9264,8 @@ pub fn run() {
             bookshelf::bookshelf_list,
             bookshelf::bookshelf_migrate_local,
             bookshelf::bookshelf_new_draft,
+            bookshelf::bookshelf_set_template,
+            bookshelf::bookshelf_touch_draft,
             bookshelf::bookshelf_rename_draft,
             bookshelf::bookshelf_move_draft,
             bookshelf::bookshelf_draft_impact,
@@ -8556,6 +9289,11 @@ pub fn run() {
             draft_chat::draft_comment_delete,
             fork::draft_thread_send,
             fork::draft_thread_discard,
+            memchat::memchat_send,
+            memchat::memchat_thread,
+            memchat::memchat_cancel,
+            memchat::memchat_clear,
+            memchat::memchat_kill_all,
             companion::companion_create,
             companion::companion_list,
             companion::companion_get_thread,
@@ -8576,8 +9314,14 @@ pub fn run() {
             set_source_feedback,
             get_source_feedback,
             ledger_list_events,
+            ledger_query,
             ledger_verify,
             ledger_prompt_body,
+            ledger_prompt_models,
+            context_stats,
+            context_search,
+            context_thread_tree,
+            memory_map,
             ledger_get_capture_external,
             ledger_set_capture_external,
             record_drafted_prompt,
@@ -8601,6 +9345,9 @@ pub fn run() {
             memory_status,
             memory_forget,
             memory_revert_link,
+            memory_note_write,
+            memory_note_get,
+            memory_notes_list,
             prompt_text,
             librarian_agent,
             shipwright_agent,
@@ -8780,6 +9527,12 @@ pub fn run() {
             let draft_chat_state = draft_chat::DraftChatState::new(db.clone());
             app.manage(draft_chat_state);
 
+            // The Memory surface's Ask agent: one persisted conversation over
+            // the lake + catalog. Same lazy-`claude` reasoning; reads the
+            // record through the local context/memory routes.
+            let memchat_state = memchat::MemChatState::new(db.clone());
+            app.manage(memchat_state);
+
             // The Companion: one global discussion spanning every surface.
             // Grounds each turn on the ActiveSurface mirror + journal delta.
             let companion_state = companion::CompanionState::new(db.clone());
@@ -8879,14 +9632,67 @@ pub fn run() {
             };
             tauri::async_runtime::spawn(run_server(app_state));
 
-            // Extension tokens (plugin manifest v1): mint per-boot scoped
-            // tokens for every valid manifest under ~/.redline/extensions,
-            // before any agent or extension can race the daemon. Skip-with-
-            // warning posture — a bad manifest never blocks the boot.
+            // Extension tokens (manifest v1 external + v2 wasm): mint
+            // per-boot scoped tokens for every valid manifest under
+            // ~/.redline/extensions, before any agent or extension can race
+            // the daemon. Skip-with-warning posture — a bad manifest never
+            // blocks the boot. Wasm extensions then run in-process on the
+            // extension host; their token stays in memory only.
             if let Some(ext_root) = extension::extensions_root() {
-                let loaded = extension::install_boot_tokens(&ext_root);
-                if !loaded.is_empty() {
-                    tracing::info!("{} extension token(s) issued", loaded.len());
+                let booted = extension::install_boot_tokens(&ext_root);
+                if !booted.is_empty() {
+                    tracing::info!("{} extension token(s) issued", booted.len());
+                }
+                let disabled: std::collections::HashSet<String> = store
+                    .database()
+                    .get_setting(EXTENSIONS_DISABLED_KEY)
+                    .and_then(|raw| serde_json::from_str(&raw).ok())
+                    .unwrap_or_default();
+                extension_host::start(app.handle().clone(), booted, &disabled);
+
+                // B4 metadata-only launch check: refresh the cached index
+                // and surface available updates — but ONLY when a cache
+                // already exists (the user has opened the marketplace at
+                // least once). Redline never phones home on its own; see
+                // docs/local-only-audit.md. Updates are never installed
+                // here — installing is always an explicit, re-consented
+                // user action.
+                let launch_store = store.clone();
+                let launch_app = app.handle().clone();
+                if launch_store.database().get_setting(MARKETPLACE_CACHE_KEY).is_some() {
+                    tauri::async_runtime::spawn(async move {
+                        let Ok(fresh) = marketplace::fetch_index().await else {
+                            return; // offline is fine — the cache stands
+                        };
+                        let Ok((entries, _)) = marketplace::parse_index(&fresh) else {
+                            return;
+                        };
+                        {
+                            let db = launch_store.database();
+                            let _ = db.set_setting(MARKETPLACE_CACHE_KEY, &fresh);
+                            let _ = db.set_setting(
+                                MARKETPLACE_FETCHED_KEY,
+                                &extension_host::now_ms().to_string(),
+                            );
+                        }
+                        let updates: Vec<String> =
+                            marketplace::enrich(entries, &installed_pairs())
+                                .into_iter()
+                                .filter(|m| {
+                                    m.state == marketplace::InstallState::UpdateAvailable
+                                })
+                                .map(|m| format!("{} {}", m.entry.name, m.entry.version))
+                                .collect();
+                        if !updates.is_empty() {
+                            db::note_friction(
+                                "extension_update_available",
+                                Some("extensions"),
+                                None,
+                                Some(&updates.join(", ")),
+                            );
+                            let _ = launch_app.emit("extensions-changed", ());
+                        }
+                    });
                 }
             }
 
@@ -9128,6 +9934,9 @@ pub fn run() {
                 if let Some(chat) = app_handle.try_state::<draft_chat::DraftChatState>() {
                     chat.kill_all();
                 }
+                if let Some(mem) = app_handle.try_state::<memchat::MemChatState>() {
+                    mem.kill_all();
+                }
                 if let Some(comp) = app_handle.try_state::<companion::CompanionState>() {
                     comp.kill_all();
                 }
@@ -9195,6 +10004,112 @@ mod tests {
         assert_eq!(0u32.div_ceil(SNAP_WORDS_PER_MINUTE).max(1), 1);
         assert_eq!(1u32.div_ceil(SNAP_WORDS_PER_MINUTE).max(1), 1);
         assert_eq!(201u32.div_ceil(SNAP_WORDS_PER_MINUTE).max(1), 2);
+    }
+
+    /// The transcript backfill: newest `message.model` wins, and a transcript
+    /// with no assistant turn yields `None` — never a guess.
+    #[test]
+    fn model_from_transcript_reads_the_newest_model_from_the_tail() {
+        let dir = std::env::temp_dir().join(format!("rl-model-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n",
+                "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-older-model\"}}\n",
+                "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-newest-model\"}}\n",
+                "{\"type\":\"system\",\"subtype\":\"turn_end\"}\n",
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            model_from_transcript(path.to_str().unwrap()).as_deref(),
+            Some("claude-newest-model")
+        );
+
+        // A brand-new session: user turn only → None (the model lands one
+        // hook fire late, once an assistant message exists).
+        let fresh = dir.join("fresh.jsonl");
+        std::fs::write(
+            &fresh,
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n",
+        )
+        .unwrap();
+        assert_eq!(model_from_transcript(fresh.to_str().unwrap()), None);
+
+        // Unreadable path → None, never an error path in the hook.
+        assert_eq!(model_from_transcript("/nonexistent/nope.jsonl"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The seat stamp + transcript backfill contract on the prompts table:
+    /// a seat-stamped row is never overwritten by the backfill, an unstamped
+    /// row is, and the drafter launch row binds to its session exactly once.
+    #[test]
+    fn model_backfill_and_drafter_bind_respect_capture_truth() {
+        let db = Database::open_in_memory().unwrap();
+        // A drafter-launched prompt: no claude session yet, no model.
+        let body = "# plan body";
+        let bh = ledger::body_hash(body);
+        ledger::record_prompt(
+            &db,
+            ledger::PromptInput {
+                source: ledger::PromptSource::DrafterLaunch,
+                origin: ledger::Origin::Redline,
+                surface: "drafter".into(),
+                role: None,
+                session_id: None,
+                claude_session_id: None,
+                mission_id: None,
+                project_path: None,
+                body: body.into(),
+                thread: Some(ledger::ThreadRef {
+                    thread_kind: "drafter",
+                    thread_id: "draft-1".into(),
+                    parent_session_id: None,
+                }),
+                author: None,
+                model: None,
+                model_source: None,
+            },
+        )
+        .unwrap();
+        // A seat-stamped agent prompt under a live session.
+        ledger::record_prompt(
+            &db,
+            ledger::PromptInput {
+                source: ledger::PromptSource::RustFirstTurn,
+                origin: ledger::Origin::Redline,
+                surface: "browse".into(),
+                role: None,
+                session_id: None,
+                claude_session_id: Some("cs-1".into()),
+                mission_id: None,
+                project_path: None,
+                body: "discuss".into(),
+                thread: None,
+                author: None,
+                model: Some("sonnet".into()),
+                model_source: Some("seat".into()),
+            },
+        )
+        .unwrap();
+
+        // Bind the drafter row to its session (the ingest hook's claim moment).
+        assert_eq!(db.bind_drafter_prompt_session(&bh, "draft-1", "cs-1").unwrap(), 1);
+        // Re-binding matches nothing: claude_session_id is no longer NULL.
+        assert_eq!(db.bind_drafter_prompt_session(&bh, "draft-1", "cs-2").unwrap(), 0);
+
+        // The drafter row now lacks a model under cs-1 → backfill stamps it,
+        // and the seat-stamped row keeps its capture-time truth.
+        assert!(db.session_needs_model("cs-1"));
+        assert_eq!(db.backfill_session_model("cs-1", "claude-from-transcript").unwrap(), 1);
+        assert!(!db.session_needs_model("cs-1"), "everything stamped now");
+        let models = db.list_prompt_models().unwrap();
+        assert_eq!(models.len(), 2);
+        assert!(models.iter().any(|(_, m)| m == "sonnet"));
+        assert!(models.iter().any(|(_, m)| m == "claude-from-transcript"));
     }
 
     /// Cold-wallet posture pin: the daemon must bind loopback only, never a

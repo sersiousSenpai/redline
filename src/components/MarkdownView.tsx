@@ -3,7 +3,11 @@
 import { Fragment, memo, useMemo } from "react";
 import MarkdownIt from "markdown-it";
 import taskLists from "markdown-it-task-lists";
-import hljs from "highlight.js";
+// lib/common (~40 languages), NOT the full barrel — the barrel is ~1.9 MB of
+// grammars on the main chunk (docs/perf-budget.md "Size budget"). Same set the
+// editor's code blocks use (lowlight `common`); unknown languages fall through
+// to escaped plain text below, exactly as an unhighlightable fence does today.
+import hljs from "highlight.js/lib/common";
 import { MermaidView } from "../editor/extensions/MermaidView";
 
 // html: false escapes any raw HTML in the source — safe for untrusted

@@ -26,7 +26,8 @@ Unregistered routes fail closed: a route added to the router without a `ROUTE_TA
 |---|---|---|---|---|---|
 | GET | `/viewer` | open | Redirect to /viewer/ so relative asset refs resolve | — | 308 → /viewer/ |
 | GET | `/viewer/` | open | Async-share viewer page (sender's local preview) | — | text/html viewer bundle index |
-| GET | `/viewer/*path` | open | Async-share viewer static assets | path of the bundled asset | asset bytes with content type |
+| GET | `/viewer/*path` | open | Async-share viewer static assets (legacy standalone bundle) | path of the bundled asset | asset bytes with content type |
+| GET | `/assets/*path` | open | Shared build chunks for the async-share viewer page (folded into the app build) | path of the built asset under dist/assets | asset bytes with content type |
 | POST | `/v1/plan` | hook contract | Plan-hold ingest: the ExitPlanMode hook POSTs the plan and blocks until the review resolves | JSON hook payload {session_id, plan markdown, cwd, ...} | held; resolves to the review verdict (approve/deny reason) |
 | POST | `/v1/prompts/ingest` | hook contract | Polis lake capture: the global UserPromptSubmit hook POSTs its stdin payload (fail-open) | JSON hook payload (prompt, session, cwd) | 200 always (never blocks the hook) |
 | GET | `/v1/sessions/:session_id/plan` | open | Latest plan revision with block structure (agent-in-doc read) | session id in path | JSON {version, blocks:[{id, markdown}, ...]} |
@@ -71,6 +72,8 @@ Unregistered routes fail closed: a route added to the router without a `ROUTE_TA
 | GET | `/v1/reviews/annotations` | open | List external annotations on a live review | ?repo= known project | JSON annotation list |
 | POST | `/v1/reviews/annotations` | token: `review.annotate` | Post a finding into a live review (external local tools) | JSON schema-only body with required source tag | JSON created annotation |
 | DELETE | `/v1/reviews/annotations` | token: `review.annotate` | Clear a source's annotations from a live review | ?repo=&source=... | JSON cleared count |
+| GET | `/v1/extensions` | open | Installed extensions with live status (kind, scopes, events, strikes, panel) | — | JSON extension list |
+| POST | `/v1/extensions/:name/panel` | token: `ui.panel` | Replace the extension's sanitized markdown panel (the sanctioned UI slot; `name` must match the bearer's grant) | JSON {markdown} | JSON {ok} |
 
 ## Scopes
 
@@ -82,4 +85,5 @@ Unregistered routes fail closed: a route added to the router without a `ROUTE_TA
 - `memory.propose` — `POST /v1/memory/proposals`
 - `drafter.suggest` — `POST /v1/drafter/:draft_id/suggestions`
 - `review.annotate` — `POST /v1/reviews/annotations`, `DELETE /v1/reviews/annotations`
+- `ui.panel` — `POST /v1/extensions/:name/panel`
 

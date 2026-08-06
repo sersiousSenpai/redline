@@ -17,7 +17,7 @@ const fullscreenBase: PaneLayoutInput = {
 
 describe("shouldExitFullscreen", () => {
   it("exits when collapsing the sidebar frees enough room", () => {
-    // 800 - 12 dividers - 400 pane = 388 ≥ DOC_MIN → side-by-side fits.
+    // 800 - 20 dividers - 20 edge ring - 400 pane = 360 ≥ DOC_MIN → fits.
     const next = { ...fullscreenBase, sidebarCollapsed: true };
     expect(
       shouldExitFullscreen(
@@ -34,7 +34,7 @@ describe("shouldExitFullscreen", () => {
       winWidth: 600,
       sidebarCollapsed: true,
     };
-    // 600 - 12 - 400 = 188 < DOC_MIN → the pane still wouldn't fit beside.
+    // 600 - 20 - 20 - 400 = 160 < DOC_MIN → the pane still wouldn't fit beside.
     expect(
       shouldExitFullscreen(
         { sidebarCollapsed: false, winWidth: 600 },

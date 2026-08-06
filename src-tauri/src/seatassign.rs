@@ -165,6 +165,17 @@ pub const SEAT_FACTS: &[SeatFact] = &[
         note: None,
     },
     SeatFact {
+        seat: "memory",
+        label: "Memory Ask",
+        role: "The Memory surface's Ask agent: answers \"what did I decide / \
+               research about X\" by walking the ClassMemory catalog and the \
+               lake through the local read routes, citing ledger seqs the \
+               Timeline jumps to. Retrieval-heavy multi-step reasoning, and a \
+               wrong or uncited answer misrepresents the user's own record.",
+        traits: &["interactive", "long_context"],
+        note: None,
+    },
+    SeatFact {
         seat: "keeper",
         label: "Keeper",
         role: "Background compaction: summarizes cold prompt bodies into gists on an \
@@ -223,6 +234,15 @@ pub const SEAT_FACTS: &[SeatFact] = &[
         role: "Reads a whole diff and emits schema-constrained findings; long input, \
                high precision, and a wrong call costs the user real time.",
         traits: &["background", "long_context"],
+        note: None,
+    },
+    SeatFact {
+        seat: "ai_commit",
+        label: "Commit drafter",
+        role: "Drafts a commit message, branch name and PR description from the \
+               review diff for the push dialog; the user edits the result, so a \
+               fast good-enough draft beats a slow perfect one.",
+        traits: &["interactive", "latency_sensitive"],
         note: None,
     },
     SeatFact {

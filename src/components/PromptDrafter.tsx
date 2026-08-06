@@ -49,11 +49,33 @@ interface PromptDrafterProps {
   onOpenShelf?: () => void;
   /** Attached sources on the open document, for the footer's count. */
   sourceCount?: number;
+  /** The documents dropdown (host-wired), mounted beside the Bookshelf button. */
+  documentsMenu?: React.ReactNode;
+  /** Persistence status, rendered quietly next to the word count. The host
+   *  owns the write (and its retries); this just says how it's going. */
+  saveState?: DrafterSaveState | null;
+  /** The landing handoff (A4): returns the keystrokes the host buffered
+   *  between the first key typed on the landing and this editor taking
+   *  focus, and resets the handoff. Called atomically with the mount focus;
+   *  empty on ordinary opens. */
+  consumeSeed?: (() => string) | null;
+}
+
+/** What the footer's save indicator can say. `savedAt` is epoch ms. */
+export interface DrafterSaveState {
+  kind: "saving" | "saved" | "retrying";
+  savedAt?: number;
 }
 
 // The Prompt Drafter: a Word-style document editor for authoring a prompt and
 // launching it into a new Claude Code plan session. JSON is the in-editor source
 // of truth (full fidelity, persisted); markdown is generated only at send time.
+// The idle flush: a pause in typing this long lands the write.
+const PERSIST_DEBOUNCE_MS = 400;
+// The max-wait cap: a pure debounce never fires under sustained typing, so an
+// un-flushed edit this old forces the write regardless.
+const PERSIST_MAX_WAIT_MS = 2000;
+
 function PromptDrafterBase({
   draftId,
   doc,
@@ -65,14 +87,24 @@ function PromptDrafterBase({
   onDiscuss = null,
   onOpenShelf,
   sourceCount = 0,
+  documentsMenu = null,
+  saveState = null,
+  consumeSeed = null,
 }: PromptDrafterProps) {
   const persistTimer = useRef<number | null>(null);
+  // When the oldest un-flushed edit happened — drives the max-wait cap.
+  const firstPendingAt = useRef<number | null>(null);
   // Latest onPersist without re-creating the editor on identity churn.
   const onPersistRef = useRef(onPersist);
   onPersistRef.current = onPersist;
   // Persist the document + its markdown mirror (sidecars ON so block ids
   // survive for the agents' block-addressed suggestions) as one write.
   const persistNow = useCallback((ed: NonNullable<typeof editor>) => {
+    if (persistTimer.current !== null) {
+      window.clearTimeout(persistTimer.current);
+      persistTimer.current = null;
+    }
+    firstPendingAt.current = null;
     onPersistRef.current(
       ed.getJSON(),
       planDocToMarkdown(ed.state.doc, { sidecars: true }),
@@ -89,12 +121,18 @@ function PromptDrafterBase({
       },
     },
     onUpdate: ({ editor }) => {
-      // Debounce the write — avoid a serialize+stringify per keystroke.
+      // Debounce the write — avoid a serialize+stringify per keystroke — but
+      // cap how long an edit can wait: under sustained typing the 400ms idle
+      // window never opens, and a pure debounce would hold the write forever.
+      const now = Date.now();
+      if (firstPendingAt.current === null) firstPendingAt.current = now;
+      const overdue = now - firstPendingAt.current >= PERSIST_MAX_WAIT_MS;
       if (persistTimer.current !== null)
         window.clearTimeout(persistTimer.current);
-      persistTimer.current = window.setTimeout(() => {
-        persistNow(editor);
-      }, 400);
+      persistTimer.current = window.setTimeout(
+        () => persistNow(editor),
+        overdue ? 0 : PERSIST_DEBOUNCE_MS,
+      );
     },
   });
 
@@ -102,10 +140,20 @@ function PromptDrafterBase({
   // Done in an effect (not useEditor's `autofocus`, which targets the wrong
   // instance under React.StrictMode's mount→unmount→remount) and deferred a
   // frame so the ProseMirror view is in the DOM before we focus it.
+  const consumeSeedRef = useRef(consumeSeed);
+  consumeSeedRef.current = consumeSeed;
   useEffect(() => {
     if (!editor) return;
     const raf = requestAnimationFrame(() => {
-      if (!editor.isDestroyed) editor.commands.focus("end");
+      if (editor.isDestroyed) return;
+      // The landing handoff: keystrokes typed between the landing's first
+      // key and this focus were buffered by the host — insert them ahead of
+      // the caret, in the same synchronous block as the focus, so no keydown
+      // can land between the two. A text node, not a string: insertContent
+      // parses strings as markup, and the user may well have typed a "<".
+      const seed = consumeSeedRef.current?.() ?? "";
+      if (seed) editor.commands.insertContent({ type: "text", text: seed });
+      editor.commands.focus("end");
     });
     return () => cancelAnimationFrame(raf);
   }, [editor]);
@@ -119,6 +167,21 @@ function PromptDrafterBase({
         if (editor && !editor.isDestroyed) persistNow(editor);
       }
     };
+  }, [editor, persistNow]);
+
+  // Quit flush. The unmount effect covers toggling the pane; it does NOT
+  // cover app quit, where the webview is torn down wholesale. `beforeunload`
+  // still runs synchronously then — persistNow calls the host's onPersist,
+  // which writes the localStorage crash shadow before its async invoke, and
+  // the shadow is the part guaranteed to land during teardown.
+  useEffect(() => {
+    const flush = () => {
+      if (persistTimer.current !== null && editor && !editor.isDestroyed) {
+        persistNow(editor);
+      }
+    };
+    window.addEventListener("beforeunload", flush);
+    return () => window.removeEventListener("beforeunload", flush);
   }, [editor, persistNow]);
 
   // Agent write-suggestions: drain the pending queue on mount (proposals made
@@ -511,7 +574,7 @@ function PromptDrafterBase({
       <div className="relative flex min-h-0 flex-1">
         <div
           ref={workspaceRef}
-          className="rl-thin-scroll-y rl-page-workspace relative min-h-0 flex-1 overflow-y-auto"
+          className="rl-thin-scroll-y rl-page-workspace rl-page-workspace--drafter relative min-h-0 flex-1 overflow-y-auto"
         >
           {selection && pendingSel === null && (
             <button
@@ -652,8 +715,11 @@ function PromptDrafterBase({
             onClick={onDiscuss}
             title="Discuss this draft — talk or type"
             textRef={pageRef}
-            /* the page's --rl-page-pad-x */
-            textInset={84}
+            /* 0: clear the page SHEET's edge, not the text inside it — in a
+               Word-style surface the sheet is the document, and a pill on the
+               white paper reads as on the document however clear of the words
+               it is. */
+            textInset={0}
           />
         )}
       </div>
@@ -695,14 +761,35 @@ function PromptDrafterBase({
             )}
           </button>
         )}
+        {documentsMenu}
         <ProjectPicker
           options={projectOptions}
           value={selectedProject}
           onChange={onSelectedProjectChange}
           onAfterPick={() => editor?.chain().focus().run()}
         />
+        {saveState && (
+          <span
+            className="ml-auto"
+            style={{
+              fontSize: "11px",
+              color:
+                saveState.kind === "retrying"
+                  ? "var(--color-warning)"
+                  : "var(--color-ink-muted)",
+              whiteSpace: "nowrap",
+            }}
+            title="Whether this document's latest keystrokes have reached the database"
+          >
+            {saveState.kind === "saving"
+              ? "Saving…"
+              : saveState.kind === "retrying"
+                ? "Unsaved — retrying"
+                : `Saved · ${describeAgo(saveState.savedAt)}`}
+          </span>
+        )}
         <span
-          className="ml-auto"
+          className={saveState ? undefined : "ml-auto"}
           style={{
             fontSize: "11px",
             color: "var(--color-ink-muted)",
@@ -738,6 +825,16 @@ function PromptDrafterBase({
       </div>
     </div>
   );
+}
+
+/** "2s ago" / "3m ago" — coarse on purpose; it re-renders on editor
+ *  transactions, not on a clock, so second-precision would sit stale. */
+function describeAgo(at?: number): string {
+  if (!at) return "now";
+  const s = Math.max(0, Math.round((Date.now() - at) / 1000));
+  if (s < 60) return `${s}s ago`;
+  const m = Math.round(s / 60);
+  return m < 60 ? `${m}m ago` : `${Math.round(m / 60)}h ago`;
 }
 
 /** Memoized: one of the center-pane surfaces that used to reconcile on

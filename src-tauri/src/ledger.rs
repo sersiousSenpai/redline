@@ -131,6 +131,15 @@ pub enum EventKind {
     /// via `payload_hash`, so observation history is tamper-evident even after
     /// the row is retired.
     Observation,
+    /// Second Brain P3: the user's own margin note / star over the record. The
+    /// readable, editable row lives in the plain `user_notes` side table (the
+    /// `supersessions` pattern); each act (write / edit / star / unstar) appends
+    /// one of these, referencing the annotated target by `(ref_kind ∈
+    /// ledger_event | class_node | session, ref_id)` — or `(ref_kind="none",
+    /// ref_id=row id)` for a standalone thought — and committing to
+    /// `{action, text}` via `payload_hash`. Edits append; nothing is destroyed.
+    /// A note is a strong CURATION signal for the classifier, never provenance.
+    Note,
 }
 
 impl EventKind {
@@ -151,6 +160,7 @@ impl EventKind {
             EventKind::SessionLink => "session_link",
             EventKind::Supersede => "supersede",
             EventKind::Observation => "observation",
+            EventKind::Note => "note",
         }
     }
 }
@@ -272,6 +282,10 @@ pub struct PromptRow<'a> {
     pub thread_kind: Option<&'a str>,
     pub thread_id: Option<&'a str>,
     pub parent_session_id: Option<&'a str>,
+    /// Model provenance (non-hashed, same precedent): the model that received
+    /// the prompt and how we know (`"seat"` / `"transcript"`). NULL = unknown.
+    pub model: Option<&'a str>,
+    pub model_source: Option<&'a str>,
 }
 
 /// A row to insert into the ledger-owned `browse_events` table (Dojo P2).
@@ -283,6 +297,10 @@ pub struct BrowseEventRow<'a> {
     pub title: Option<&'a str>,
     pub text: &'a str,
     pub context_hash: &'a str,
+    /// Trail edge to the preceding `browse_events.id`, when known (non-hashed —
+    /// only `context_hash` enters the chained event, so the column is free to
+    /// add/populate).
+    pub from_event_id: Option<i64>,
 }
 
 /// The result of verifying the whole chain.
@@ -389,7 +407,8 @@ pub fn claim_drafted_prompt(body_hash: &str) -> Option<String> {
 #[derive(Debug, Clone)]
 pub struct ThreadRef {
     /// `browse | linked | mission | voice | drafter | drafter_chat | fork |
-    /// review_thread | review_question | companion` — the thread's kind.
+    /// review_thread | review_question | companion | memchat` — the thread's
+    /// kind.
     pub thread_kind: &'static str,
     /// The thread's own id in its id-space (browse_id, linked_id, …).
     pub thread_id: String,
@@ -409,6 +428,17 @@ pub struct PromptInput {
     pub project_path: Option<String>,
     pub body: String,
     pub thread: Option<ThreadRef>,
+    /// Who authored this prompt: `None` is the local human (`local_author()`);
+    /// an agent-constructed prompt carries its seat/surface name so per-actor
+    /// trajectories stay separable. Hashed into the chain via `CanonicalEvent`.
+    pub author: Option<String>,
+    /// The model that received this prompt, when known at capture — a seat's
+    /// explicit `--model` flag. `None` means the CLI default applied: store
+    /// nothing, never a guess (the transcript backfill fills it in later).
+    pub model: Option<String>,
+    /// How the model is known: `"seat"` at capture, `"transcript"` on
+    /// backfill. Always `None` when `model` is.
+    pub model_source: Option<String>,
 }
 
 /// Record a prompt into the lake + emit its ledger event. Returns the new
@@ -436,12 +466,14 @@ pub fn record_prompt(db: &Database, input: PromptInput) -> Result<Option<i64>, S
             .thread
             .as_ref()
             .and_then(|t| t.parent_session_id.as_deref()),
+        model: input.model.as_deref(),
+        model_source: input.model_source.as_deref(),
     };
     let prompt_id = match db.insert_prompt(&row).map_err(|e| e.to_string())? {
         Some(id) => id,
         None => return Ok(None), // dedup: identical (body, claude session) already stored
     };
-    let author = local_author();
+    let author = input.author.unwrap_or_else(local_author);
     let append = LedgerAppend {
         kind: EventKind::Prompt.as_str(),
         author: &author,
@@ -463,6 +495,7 @@ pub fn record_prompt(db: &Database, input: PromptInput) -> Result<Option<i64>, S
 /// event. Best-effort — logs on error, never propagates, so a spawn is never
 /// blocked by ledger bookkeeping. `body` must be the exact prompt string the
 /// agent receives, or the guard won't match the hook.
+#[allow(clippy::too_many_arguments)]
 pub fn record_agent_prompt(
     db: &Database,
     source: PromptSource,
@@ -472,8 +505,10 @@ pub fn record_agent_prompt(
     session_id: Option<String>,
     mission_id: Option<String>,
     thread: Option<ThreadRef>,
+    model: Option<String>,
 ) {
     register_agent_prompt(&body_hash(body));
+    let model_source = model.as_ref().map(|_| "seat".to_string());
     let input = PromptInput {
         source,
         origin: Origin::Redline,
@@ -485,17 +520,56 @@ pub fn record_agent_prompt(
         project_path,
         body: body.to_string(),
         thread,
+        // The constructed body is the surface agent's artifact, so it authors
+        // the event as itself — the surface string is already ground truth here.
+        author: Some(surface.to_string()),
+        model,
+        model_source,
     };
     if let Err(e) = record_prompt(db, input) {
         tracing::warn!(error = %e, surface, "failed to record agent prompt to ledger");
     }
 }
 
+/// The browse-event verb vocabulary — what actually happened on the page. Every
+/// verb is a discrete act, never an inferred duration (no dwell — attention is
+/// measured by returns and trail depth, both derived from acts already stored).
+/// `Navigate` is the only production emit today; the rest complete the seam
+/// `browse_events.action` was designed with ("left open for finer-grained
+/// interactions later") so capture can widen without another schema change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowseAction {
+    /// A page came on screen.
+    Navigate,
+    /// Text on the page was selected/highlighted. Capture is deliberately
+    /// deferred (like the two below) until a rendered trail shows what is
+    /// missing — the vocabulary exists so capture is a new emit call, not a
+    /// schema change.
+    #[allow(dead_code)]
+    Select,
+    /// A form on the page was submitted.
+    #[allow(dead_code)]
+    Submit,
+    /// The page was left (tab closed or navigated away).
+    #[allow(dead_code)]
+    Leave,
+}
+
+impl BrowseAction {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BrowseAction::Navigate => "navigate",
+            BrowseAction::Select => "select",
+            BrowseAction::Submit => "submit",
+            BrowseAction::Leave => "leave",
+        }
+    }
+}
+
 /// Fields for recording a browsing event — a page the user landed on (Dojo P2).
 pub struct BrowseEventInput {
-    /// What happened. Today always `"navigate"` (a page that came on screen);
-    /// left open for finer-grained interactions later.
-    pub action: String,
+    /// What happened, from the closed verb vocabulary above.
+    pub action: BrowseAction,
     /// The tab's discussion-thread key, so events can be grouped per tab.
     pub browse_id: Option<String>,
     pub url: String,
@@ -503,6 +577,14 @@ pub struct BrowseEventInput {
     /// Normalized on-screen content (title + url + headings + body). Hashed to
     /// the context hash and retained for later lexical retrieval (P3 FTS5).
     pub text: String,
+    /// Trail edge: the `browse_events.id` this event followed from (a click or
+    /// navigation chain), when known. `None` for trail roots — and for every
+    /// event today; the column exists so trails can be captured later without
+    /// a migration.
+    pub from_event_id: Option<i64>,
+    /// Who performed the act: `None` is the local human; an agent driving the
+    /// tab (the browse agent over the curl bridge) passes its seat name.
+    pub author: Option<String>,
 }
 
 /// Record a browsing event into the lake: store the normalized page content in
@@ -516,18 +598,19 @@ pub fn record_browse_event(db: &Database, input: BrowseEventInput) -> Result<Opt
     let ts = now_millis();
     let row = BrowseEventRow {
         ts,
-        action: &input.action,
+        action: input.action.as_str(),
         browse_id: input.browse_id.as_deref(),
         url: &input.url,
         title: input.title.as_deref(),
         text: &input.text,
         context_hash: &ch,
+        from_event_id: input.from_event_id,
     };
     let id = match db.insert_browse_event(&row).map_err(|e| e.to_string())? {
         Some(id) => id,
         None => return Ok(None), // consecutive duplicate for this tab
     };
-    let author = local_author();
+    let author = input.author.unwrap_or_else(local_author);
     let ref_id = id.to_string();
     let append = LedgerAppend {
         kind: EventKind::BrowseEvent.as_str(),
@@ -547,11 +630,14 @@ pub fn record_browse_event(db: &Database, input: BrowseEventInput) -> Result<Opt
 /// Emit a ledger event for a plan revision. Idempotent per
 /// `(session_id, version_number, payload_hash)` — a re-received identical
 /// revision does not spam the chain. Returns the new seq, or `None` if skipped.
+/// `author` is the explicit actor; `None` is the local human (a revision from
+/// the user's own supervised plan session).
 pub fn record_revision_event(
     db: &Database,
     session_id: &str,
     version_number: i64,
     raw_plan_markdown: &str,
+    author: Option<&str>,
 ) -> Result<Option<i64>, String> {
     let ph = body_hash(raw_plan_markdown);
     if db
@@ -560,7 +646,7 @@ pub fn record_revision_event(
     {
         return Ok(None);
     }
-    let author = local_author();
+    let author = author.map(str::to_string).unwrap_or_else(local_author);
     let append = LedgerAppend {
         kind: EventKind::Revision.as_str(),
         author: &author,

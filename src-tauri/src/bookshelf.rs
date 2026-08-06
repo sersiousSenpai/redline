@@ -105,36 +105,85 @@ pub fn bookshelf_list(store: tauri::State<'_, SessionStore>) -> Result<Shelf, St
     })
 }
 
-/// Mint a new, empty document on the shelf and return its id. The row exists
+/// Mint a new document on the shelf and return its id. The row exists
 /// immediately so the document has a home before the first keystroke — the
 /// drafter's debounce then fills in its body.
+///
+/// With `from_draft_id` (instantiating a template — or duplicating any
+/// document), the source's `title`, `doc_json`, `doc_markdown` and
+/// `project_path` are deep-copied; the copy is always an ordinary document
+/// (`is_template` stays 0). Sources, comments, suggestions and chat threads
+/// are deliberately NOT copied — a template yields a clean document. Block ids
+/// (`blk-…`) copy as-is: they are scoped per draft, and `DraftBlockIds`
+/// only mints ids that are missing.
 #[tauri::command(async)]
 pub fn bookshelf_new_draft(
     store: tauri::State<'_, SessionStore>,
     folder_id: Option<String>,
     title: Option<String>,
     project_path: Option<String>,
+    from_draft_id: Option<String>,
 ) -> Result<String, String> {
     let draft_id = uuid::Uuid::new_v4().to_string();
     let db = store.database();
-    let title = title
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
-        .unwrap_or_else(|| "Untitled document".to_string());
-    db.upsert_draft(
-        &draft_id,
-        Some(&title),
-        project_path.as_deref(),
-        "",
-        // An empty document, not "no document": the shelf row is real from now on.
-        Some(""),
-    )
-    .map_err(|e| e.to_string())?;
+    let from = from_draft_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(src) = from {
+        let copied = db
+            .copy_draft_body(src, &draft_id, project_path.as_deref())
+            .map_err(|e| e.to_string())?;
+        if !copied {
+            return Err("that template no longer exists".to_string());
+        }
+    } else {
+        let title = title
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| "Untitled document".to_string());
+        db.upsert_draft(
+            &draft_id,
+            Some(&title),
+            project_path.as_deref(),
+            "",
+            // An empty document, not "no document": the shelf row is real from now on.
+            Some(""),
+        )
+        .map_err(|e| e.to_string())?;
+    }
     if let Some(folder) = folder_id.as_deref() {
         db.move_draft(&draft_id, Some(folder))
             .map_err(|e| e.to_string())?;
     }
     Ok(draft_id)
+}
+
+/// Flip a document's template flag (the shelf's ★ toggle).
+#[tauri::command(async)]
+pub fn bookshelf_set_template(
+    store: tauri::State<'_, SessionStore>,
+    draft_id: String,
+    is_template: bool,
+) -> Result<(), String> {
+    store
+        .database()
+        .set_draft_template(&draft_id, is_template)
+        .map_err(|e| e.to_string())
+}
+
+/// Count one open of a document — the documents dropdown's FREQUENT signal.
+/// Called once per open, never per keystroke and never on activation-switch
+/// of an already-open document.
+#[tauri::command(async)]
+pub fn bookshelf_touch_draft(
+    store: tauri::State<'_, SessionStore>,
+    draft_id: String,
+) -> Result<(), String> {
+    store
+        .database()
+        .touch_draft(&draft_id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command(async)]
@@ -535,6 +584,61 @@ mod tests {
                 .parent_id,
             None
         );
+    }
+
+    #[test]
+    fn instantiating_a_template_copies_the_body_but_not_sources_or_comments() {
+        let db = Database::open_in_memory().unwrap();
+        db.upsert_draft(
+            "tpl",
+            Some("Redline — Bugs/Fixes"),
+            Some("/repo/redline"),
+            "# Redline — Bugs/Fixes",
+            Some(r#"{"type":"doc","content":[]}"#),
+        )
+        .unwrap();
+        db.set_draft_template("tpl", true).unwrap();
+        db.add_draft_source("s1", "tpl", "url", None, Some("http://x"), None, None, None)
+            .unwrap();
+        db.insert_draft_chat_message(&crate::state::DraftChatMessage {
+            id: "m1".into(),
+            draft_id: "tpl".into(),
+            role: "user".into(),
+            body: "hi".into(),
+            status: "complete".into(),
+            created_at: 1,
+        })
+        .unwrap();
+
+        assert!(db.copy_draft_body("tpl", "copy", None).unwrap());
+        let (json, md, project) = db.get_draft_doc("copy").unwrap().unwrap();
+        assert_eq!(json.as_deref(), Some(r#"{"type":"doc","content":[]}"#));
+        assert_eq!(md, "# Redline — Bugs/Fixes");
+        assert_eq!(project.as_deref(), Some("/repo/redline"));
+        // A clean document: no sources, no chat thread — and never a template.
+        assert!(db.list_draft_sources("copy").unwrap().is_empty());
+        assert!(db.load_draft_chat_thread("copy").unwrap().is_empty());
+        let drafts = db.list_drafts().unwrap();
+        let copy = drafts.iter().find(|d| d.draft_id == "copy").unwrap();
+        assert!(!copy.is_template);
+        assert_eq!(copy.title.as_deref(), Some("Redline — Bugs/Fixes"));
+        let tpl = drafts.iter().find(|d| d.draft_id == "tpl").unwrap();
+        assert!(tpl.is_template, "the source keeps its flag");
+        // A vanished source is a loud error path, not a silent blank document.
+        assert!(!db.copy_draft_body("nope", "copy2", None).unwrap());
+    }
+
+    #[test]
+    fn touching_a_draft_counts_opens_without_reordering_the_shelf() {
+        let db = Database::open_in_memory().unwrap();
+        db.upsert_draft("d1", Some("A"), None, "# A", Some("{}")).unwrap();
+        let before = db.list_drafts().unwrap()[0].updated_at;
+        db.touch_draft("d1").unwrap();
+        db.touch_draft("d1").unwrap();
+        let row = &db.list_drafts().unwrap()[0];
+        assert_eq!(row.open_count, 2);
+        assert!(row.last_opened_at.is_some());
+        assert_eq!(row.updated_at, before, "opening must not reorder the shelf");
     }
 
     #[test]

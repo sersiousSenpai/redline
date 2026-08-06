@@ -10,11 +10,15 @@ import type {
   ReviewBranches,
   ReviewFileContents,
 } from "../types";
-import { nextAnnotationId } from "../lib/reviewSelection";
+import { nextAnnotationId, type ReviewRange } from "../lib/reviewSelection";
 import { ReviewAnnotationComposer } from "./ReviewAnnotationCard";
 import type { ProjectOption } from "./ProjectPicker";
 import type { UseReview } from "../hooks/useReview";
+import { usePush } from "../hooks/usePush";
 import { diffStats, displayPath, type DiffViewMode } from "../lib/flattenDiff";
+import BranchPicker from "./BranchPicker";
+import ReviewGitStrip from "./ReviewGitStrip";
+import ReviewPushDialog from "./ReviewPushDialog";
 import {
   augmentFile,
   contentConsistent,
@@ -81,6 +85,8 @@ function ReviewPanel({ review, projectOptions, onClose }: ReviewPanelProps) {
   } = review;
 
   const ai = useAiReview(review.activeReviewId);
+  const push = usePush(repo, activeReviewId);
+  const [pushOpen, setPushOpen] = useState(false);
   const aiDraftCount = useMemo(
     () => annotations.filter((a) => a.source === "ai" && a.status === "draft").length,
     [annotations],
@@ -210,7 +216,6 @@ function ReviewPanel({ review, projectOptions, onClose }: ReviewPanelProps) {
 
   // --- branch picker ---------------------------------------------------------
   const [branches, setBranches] = useState<ReviewBranches | null>(null);
-  const [customBase, setCustomBase] = useState(false);
   useEffect(() => {
     if (!repo) {
       setBranches(null);
@@ -273,6 +278,107 @@ function ReviewPanel({ review, projectOptions, onClose }: ReviewPanelProps) {
     [hideViewed, viewed],
   );
 
+  // --- push + revert ---------------------------------------------------------
+
+  // The diff's own file list — the push dialog's default staging scope. A
+  // rename stages BOTH its old and new path.
+  const reviewedPaths = useMemo(() => {
+    if (!diff) return [];
+    const out: string[] = [];
+    for (const f of diff) {
+      out.push(displayPath(f));
+      if (f.status === "renamed" && f.oldPath !== f.newPath) out.push(f.oldPath);
+    }
+    return out;
+  }, [diff]);
+
+  // Revert only makes sense against the working tree — commit-shaped sources
+  // describe history, not the tree the revert would rewrite.
+  const canRevert =
+    !!activeReviewId &&
+    (source === "uncommitted" || source === "staged" || source === "unstagedPlusUntracked");
+  const [revertError, setRevertError] = useState<string | null>(null);
+
+  const runRevert = useCallback(
+    async (filePath: string, scope: "hunk" | "file", hunkIndex: number | null) => {
+      if (!repo) return;
+      const fingerprint = review.getFingerprint();
+      if (!fingerprint) {
+        setRevertError("the diff hasn't finished resolving — try again");
+        return;
+      }
+      try {
+        await invoke("review_revert", {
+          repo,
+          source,
+          base,
+          sha,
+          filePath,
+          scope,
+          hunkIndex,
+          fingerprint,
+        });
+        setRevertError(null);
+        await refreshDiff();
+        void push.refreshStatus();
+      } catch (err) {
+        setRevertError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [repo, source, base, sha, review, refreshDiff, push],
+  );
+
+  /** A selection revert snaps to the enclosing hunk of the RAW diff (the
+   *  augmented copies DiffView renders may have merged hunks). */
+  const revertSelection = useCallback(
+    (range: ReviewRange) => {
+      const file = diff?.find((f) => displayPath(f) === range.filePath);
+      if (!file) return;
+      const idx = file.hunks.findIndex((h) =>
+        h.lines.some((l) => {
+          const no = range.side === "old" ? l.oldLine : l.newLine;
+          return (
+            no != null && no >= range.startLine && no <= range.endLine && l.kind !== "context"
+          );
+        }),
+      );
+      if (idx < 0) {
+        setRevertError("select changed lines to revert — context lines have nothing to undo");
+        return;
+      }
+      const h = file.hunks[idx];
+      const [lo, hi] =
+        range.side === "old"
+          ? [h.oldStart, h.oldStart + Math.max(h.oldLines, 1) - 1]
+          : [h.newStart, h.newStart + Math.max(h.newLines, 1) - 1];
+      if (
+        !window.confirm(
+          `Revert snaps to the enclosing hunk — lines ${lo}–${hi} of ${range.filePath} ` +
+            `will be reverted in your working tree. Continue?`,
+        )
+      ) {
+        return;
+      }
+      void runRevert(range.filePath, "hunk", idx);
+    },
+    [diff, runRevert],
+  );
+
+  const revertFile = useCallback(
+    (filePath: string) => {
+      if (
+        !window.confirm(
+          `Revert ALL changes to ${filePath} in your working tree? ` +
+            `An untracked file is deleted outright.`,
+        )
+      ) {
+        return;
+      }
+      void runRevert(filePath, "file", null);
+    },
+    [runRevert],
+  );
+
   // Panel-level keys: ⌘F search, ⌘B tree, ⌘↩ submit, ? help.
   const handlePanelKeys = useCallback(
     (e: React.KeyboardEvent) => {
@@ -288,6 +394,13 @@ function ReviewPanel({ review, projectOptions, onClose }: ReviewPanelProps) {
         setShowTree((v: boolean) => !v);
         return;
       }
+      if (e.metaKey && e.shiftKey && e.key.toLowerCase() === "p") {
+        if (repo && activeReviewId) {
+          e.preventDefault();
+          setPushOpen(true);
+        }
+        return;
+      }
       if (e.metaKey && e.key === "Enter" && !typing) {
         if (holdActive && liveCount > 0) {
           e.preventDefault();
@@ -300,7 +413,7 @@ function ReviewPanel({ review, projectOptions, onClose }: ReviewPanelProps) {
         setHelpOpen(true);
       }
     },
-    [holdActive, liveCount, submitReview, setShowTree, helpOpen],
+    [holdActive, liveCount, submitReview, setShowTree, helpOpen, repo, activeReviewId],
   );
 
   // First open with exactly one known project → pick it, no empty state.
@@ -356,61 +469,15 @@ function ReviewPanel({ review, projectOptions, onClose }: ReviewPanelProps) {
           ))}
         </select>
 
-        {source === "vsBase" &&
-          (branches && !customBase ? (
-            <select
-              value={base ?? ""}
-              onChange={(e) => {
-                if (e.target.value === " custom") {
-                  setCustomBase(true);
-                  return;
-                }
-                setBase(e.target.value || null);
-              }}
-              className="rl-review-select"
-              aria-label="Base branch"
-              style={{ maxWidth: 200 }}
-            >
-              <option value="" disabled>
-                Pick a base branch…
-              </option>
-              {branches.local.length > 0 && (
-                <optgroup label="Local">
-                  {branches.local.map((b) => (
-                    <option key={`l:${b}`} value={b}>
-                      {b}
-                      {branches.head === b ? " (current)" : ""}
-                    </option>
-                  ))}
-                </optgroup>
-              )}
-              {branches.remote.length > 0 && (
-                <optgroup label="Remote">
-                  {branches.remote.map((b) => (
-                    <option key={`r:${b}`} value={b}>
-                      {b}
-                    </option>
-                  ))}
-                </optgroup>
-              )}
-              <option value=" custom">Custom ref…</option>
-            </select>
-          ) : (
-            <input
-              value={base ?? ""}
-              onChange={(e) => setBase(e.target.value || null)}
-              placeholder="base ref (e.g. main)"
-              className="rl-review-select"
-              style={{ width: 140 }}
-              aria-label="Base ref"
-              spellCheck={false}
-              autoFocus={customBase}
-              onBlur={() => {
-                // An emptied custom field falls back to the picker.
-                if (customBase && !base) setCustomBase(false);
-              }}
-            />
-          ))}
+        {source === "vsBase" && (
+          <BranchPicker
+            branches={branches}
+            value={base}
+            onChange={setBase}
+            ariaLabel="Base branch"
+            placeholder="Pick a base branch…"
+          />
+        )}
 
         {source === "commitSha" && (
           <select
@@ -541,6 +608,16 @@ function ReviewPanel({ review, projectOptions, onClose }: ReviewPanelProps) {
           >
             ?
           </button>
+          {activeReviewId && repo && (
+            <button
+              type="button"
+              className="rl-review-btn"
+              title="Commit these changes and push them to a branch you choose — your checkout is never switched (⇧⌘P)"
+              onClick={() => setPushOpen(true)}
+            >
+              ⇧ Push to…
+            </button>
+          )}
           {holdActive && (
             <span className="rl-review-holdbar">
               <span className="rl-review-hold-dot" title="The agent is waiting on this review" />
@@ -610,6 +687,8 @@ function ReviewPanel({ review, projectOptions, onClose }: ReviewPanelProps) {
           </button>
         </div>
       </div>
+
+      {repo && <ReviewGitStrip status={push.status} lastPush={push.lastPush} />}
 
       {!repo ? (
         <Empty>Choose a project to review its changes.</Empty>
@@ -716,6 +795,19 @@ function ReviewPanel({ review, projectOptions, onClose }: ReviewPanelProps) {
                 </button>
               </div>
             )}
+            {revertError && (
+              <div className="rl-review-stale shrink-0">
+                {revertError}
+                <button
+                  type="button"
+                  className="rl-review-btn"
+                  style={{ marginLeft: 8 }}
+                  onClick={() => setRevertError(null)}
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
             {orphans.length > 0 && (
               <div className="rl-review-orphans shrink-0">
                 <button
@@ -768,6 +860,8 @@ function ReviewPanel({ review, projectOptions, onClose }: ReviewPanelProps) {
               questions={questions}
               onAddQuestion={(q) => void addQuestion(q)}
               onDeleteQuestion={(id) => void deleteQuestion(id)}
+              onRevertSelection={canRevert ? revertSelection : undefined}
+              onRevertFile={canRevert ? revertFile : undefined}
             />
             <AiDrawer ai={ai} />
           </div>
@@ -776,6 +870,18 @@ function ReviewPanel({ review, projectOptions, onClose }: ReviewPanelProps) {
         <Empty>{loading ? "Resolving diff…" : ""}</Empty>
       )}
       {helpOpen && <ReviewShortcutHelp onClose={() => setHelpOpen(false)} />}
+      {repo && activeReviewId && (
+        <ReviewPushDialog
+          open={pushOpen}
+          onClose={() => setPushOpen(false)}
+          repo={repo}
+          reviewId={activeReviewId}
+          push={push}
+          branches={branches}
+          reviewedPaths={reviewedPaths}
+          onPushed={() => void refreshDiff()}
+        />
+      )}
     </section>
   );
 }

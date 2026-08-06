@@ -2,6 +2,7 @@
 // Copyright 2026 Yusuf Al-Bazian
 import { useEffect, useRef, useState } from "react";
 import { useMenuOverlay } from "./menuOverlay";
+import { MenuSurface } from "./ui/MenuSurface";
 
 interface DownloadMenuProps {
   /** Version whose export the menu offers ("what you see is what you save"). */
@@ -84,12 +85,13 @@ export function DownloadMenu({
         }
         aria-haspopup="menu"
         aria-expanded={open}
-        className="flex items-center gap-1.5 rounded px-2.5 py-1 font-medium"
+        className="flex items-center gap-1.5 px-2.5 py-1 font-medium"
         style={{
           background: "var(--color-bg-elevated)",
+          borderRadius: "var(--rl-radius-control)",
           border: "1px solid var(--color-rule)",
           color: "var(--color-ink)",
-          fontSize: "12px",
+          fontSize: "var(--rl-text-sm)",
           cursor: disabled ? "default" : "pointer",
           opacity: disabled ? 0.4 : 1,
         }}
@@ -101,17 +103,10 @@ export function DownloadMenu({
       </button>
 
       {open && (
-        <div
-          role="menu"
-          aria-label="Options"
-          className="absolute right-0 z-50 rounded-md overflow-hidden"
-          style={{
-            top: "calc(100% + 6px)",
-            width: "210px",
-            border: "1px solid var(--color-rule)",
-            background: "var(--color-bg-elevated)",
-            boxShadow: "0 8px 24px rgba(0,0,0,0.28)",
-          }}
+        <MenuSurface
+          ariaLabel="Options"
+          className="absolute right-0 z-50 overflow-hidden"
+          style={{ top: "calc(100% + 6px)", width: "210px" }}
         >
           {ACTIONS.map((a, idx) => {
             const shareDisabled = a.key === "share" && !canShare;
@@ -134,7 +129,7 @@ export function DownloadMenu({
                 }
                 className="rl-menu-item w-full text-left px-3 py-2 font-sans"
                 style={{
-                  fontSize: "12px",
+                  fontSize: "var(--rl-text-sm)",
                   fontWeight: 600,
                   color: "var(--color-ink)",
                   cursor: shareDisabled ? "default" : "pointer",
@@ -149,7 +144,7 @@ export function DownloadMenu({
               </button>
             );
           })}
-        </div>
+        </MenuSurface>
       )}
     </div>
   );

@@ -15,7 +15,7 @@
 //! *priority order* live in `skills/librarian/SKILL.md` and
 //! `docs/polis-librarian-spike-3a.md`; this module only supplies the numbers.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::classmem::LakeItem;
 use crate::db::Database;
@@ -272,6 +272,8 @@ pub struct PromptFilters {
     pub thread_kind: Option<String>,
     pub thread_id: Option<String>,
     pub parent_session_id: Option<String>,
+    /// Exact-match filter on the recorded model (`prompts.model`).
+    pub model: Option<String>,
 }
 
 /// Clamp + default `GET /v1/context/prompts`'s `?limit=`.
@@ -409,8 +411,10 @@ pub fn build_session_history(db: &Database, session_id: &str) -> Option<SessionH
     })
 }
 
-/// `GET /v1/context/stats` — agent/MCP-facing counts (no UI). Every axis is a
-/// `(label, count)` list plus the two grand totals.
+/// `GET /v1/context/stats` and the `context_stats` command — shared counts for
+/// agents/MCP AND the Memory surface's facet rails and activity ribbon (the
+/// old "no dashboard UI" stance was overturned by the Memory-as-a-Second-Brain
+/// plan). Every axis is a `(label, count)` list plus the two grand totals.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextStats {
@@ -421,6 +425,10 @@ pub struct ContextStats {
     pub by_surface: Vec<(String, i64)>,
     pub by_kind: Vec<(String, i64)>,
     pub by_class: Vec<(String, i64)>,
+    /// Ledger events per author — the Timeline's actor facet. Meaningful only
+    /// since P0 made agents author as their seat name; older rows are uniformly
+    /// the local human.
+    pub by_author: Vec<(String, i64)>,
 }
 
 /// Build the stats digest. Best-effort per axis (an unmigrated table yields an
@@ -430,6 +438,7 @@ pub fn build_stats(db: &Database) -> ContextStats {
     let by_surface = db.prompt_counts_by_surface().unwrap_or_default();
     let by_kind = db.event_counts_by_kind().unwrap_or_default();
     let by_class = db.class_link_counts_by_root().unwrap_or_default();
+    let by_author = db.event_counts_by_author().unwrap_or_default();
     let total_prompts = by_surface.iter().map(|(_, c)| c).sum();
     let total_events = db.max_ledger_seq().unwrap_or(0);
     ContextStats {
@@ -440,7 +449,439 @@ pub fn build_stats(db: &Database) -> ContextStats {
         by_surface,
         by_kind,
         by_class,
+        by_author,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Timeline query (the Memory surface's spine)
+// ---------------------------------------------------------------------------
+
+/// Clamp + default for the Timeline's page size. Pages are cursor-chained
+/// (`before_seq`), so the cap bounds one IPC payload, not the reachable
+/// history — unlike `ledger_list_events`' old hard 1,000-row ceiling.
+pub const LEDGER_PAGE_MAX: i64 = 500;
+
+/// List-row preview length (chars). The detail rail fetches the full body.
+pub const PREVIEW_CHARS: usize = 240;
+
+/// Filters for `db::query_ledger_events` / the `ledger_query` command. All
+/// clauses are ANDed; every value is bound, never spliced into SQL. `Default`
+/// + `serde(default)` so the frontend sends only the axes it is filtering on.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LedgerFilters {
+    /// Exact event kind (`prompt`, `approval`, `browse_event`, …).
+    pub kind: Option<String>,
+    /// Exact author — the actor facet (`local_author()` or a seat name).
+    pub author: Option<String>,
+    pub session_id: Option<String>,
+    /// Prompt-provenance facets (via the `prompts` join; non-prompt events
+    /// never match when one of these is set).
+    pub surface: Option<String>,
+    pub project: Option<String>,
+    /// Substring over the prompt body (gist once compacted) — bound LIKE.
+    pub q: Option<String>,
+    /// Inclusive ts range, for the activity ribbon's date filter.
+    pub since_ts: Option<i64>,
+    pub until_ts: Option<i64>,
+    /// Cursor: only events with `seq` strictly below this. Pages walk
+    /// newest→oldest; the next cursor is the last returned row's `seq`.
+    pub before_seq: Option<i64>,
+    pub limit: Option<i64>,
+    /// Star/note facets (Second Brain P3). Only `true` filters — `false`/absent
+    /// means the axis is off, matching how the facet chips toggle.
+    pub starred: Option<bool>,
+    pub noted: Option<bool>,
+    /// Citation focus (Second Brain P4): exact ledger seqs — the Ask agent's
+    /// `#seq` chips drive the Timeline here. Empty behaves like absent.
+    pub seqs: Option<Vec<i64>>,
+    /// Citation focus: only events filed under this accepted class node.
+    pub class_node: Option<String>,
+    /// Map focus (Second Brain P5): prompts recorded on one agent thread
+    /// (`prompts.thread_id` — a linked/drafter/mission/memchat conversation).
+    pub thread_id: Option<String>,
+    /// Map focus: one browse tab's trail (`browse_events.browse_id`).
+    pub browse_id: Option<String>,
+}
+
+pub fn clamp_ledger_limit(raw: Option<i64>) -> i64 {
+    raw.unwrap_or(LEDGER_PAGE_MAX).clamp(1, LEDGER_PAGE_MAX)
+}
+
+/// One Timeline row: the ledger event plus the read-side provenance the rail
+/// renders — prompt columns when the event is a prompt, the browse columns
+/// when it is a browse event, and the accepted class filing. All joined at
+/// query time; nothing here is stored beyond the existing tables.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineItem {
+    #[serde(flatten)]
+    pub event: LedgerEventRow,
+    pub surface: Option<String>,
+    pub project_path: Option<String>,
+    pub thread_kind: Option<String>,
+    pub model: Option<String>,
+    /// First `PREVIEW_CHARS` of the body (gist once compacted) — the list row.
+    /// The detail rail fetches the full text via `ledger_prompt_body`.
+    pub preview: Option<String>,
+    /// The body was compacted away; `preview` shows the released gist.
+    pub compacted: bool,
+    pub browse_id: Option<String>,
+    pub url: Option<String>,
+    pub title: Option<String>,
+    /// The browse verb (`navigate | select | submit | leave`).
+    pub action: Option<String>,
+    pub from_event_id: Option<i64>,
+    /// Accepted class filing (first link), for the class grouping + detail rail.
+    pub class_node_id: Option<String>,
+    pub class_title: Option<String>,
+    /// Second Brain P3: this event is starred (annotated directly, or a `note`
+    /// event whose own row is starred).
+    pub starred: bool,
+    /// The current text of the note ON this event (`user_notes` probe) — the
+    /// detail rail's editor seed. `None` when empty/absent.
+    pub note: Option<String>,
+}
+
+/// Timeline page, newest-first. Thin over `db::query_ledger_events`.
+pub fn query_ledger(db: &Database, f: &LedgerFilters) -> Result<Vec<TimelineItem>, String> {
+    db.query_ledger_events(f).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Memory map (Second Brain P5)
+// ---------------------------------------------------------------------------
+
+/// One Map node. §3 rule 1: nodes are classes and sessions — never raw
+/// prompts; prompts appear only as `mass`. Exactly one of the four focus
+/// handles is set, and it is what a click filters the Timeline by (§3 rule 4):
+/// a class filing, a plan session, a browse tab's trail, or an agent thread.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MapNode {
+    /// Map keyspace: `class:<node_id>` | `thread:<kind>:<id>`.
+    pub id: String,
+    /// `class | digest | session | thread`.
+    pub kind: String,
+    pub label: String,
+    /// Classes: filed-link count. Threads: message count. Radius, never dots.
+    pub mass: i64,
+    /// Same-keyspace structural parent (`contains` for classes, `lineage` for
+    /// threads) — the layout prior.
+    pub parent_id: Option<String>,
+    pub pinned: bool,
+    pub project_path: Option<String>,
+    pub class_node_id: Option<String>,
+    pub session_id: Option<String>,
+    pub browse_id: Option<String>,
+    pub thread_id: Option<String>,
+}
+
+/// One Map edge with DECLARED semantics (§3 rule 3): `contains` (class tree) ·
+/// `lineage` (session → threads) · `supersedes` (decision chain, endpoints
+/// resolved to their class/session) · `co_occurs` (the only derived edge —
+/// classes sharing sessions or a project while filed apart).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MapEdge {
+    pub kind: String,
+    pub from: String,
+    pub to: String,
+    pub weight: i64,
+    /// Human line for the derived/chain edges ("3 shared sessions", "#12 → #40").
+    pub basis: Option<String>,
+}
+
+/// The `memory_map` command's payload — data only; the deterministic layout is
+/// the frontend's pure `memoryMap.ts` (same input → same picture).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryMapView {
+    pub generated_ts: i64,
+    pub nodes: Vec<MapNode>,
+    pub edges: Vec<MapEdge>,
+}
+
+/// Assemble the Map: accepted classes + session-tree threads (plus sessions a
+/// supersession resolves to), with the four declared edge kinds. Everything is
+/// ordered (nodes by id, edges by kind/from/to) so the payload — and therefore
+/// the seeded layout downstream — is deterministic. Best-effort per source: a
+/// missing table yields empty buckets, never an error (5 of 15 event kinds
+/// have never fired; the Map must render an honest empty state).
+pub fn build_memory_map(db: &Database) -> MemoryMapView {
+    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+    let mut nodes: Vec<MapNode> = Vec::new();
+    let mut edges: Vec<MapEdge> = Vec::new();
+
+    // --- classes (accepted only — proposed nodes are not yet on the record) --
+    let all_classes = db.list_class_nodes_with_counts().unwrap_or_default();
+    let accepted: Vec<&(crate::classmem::ClassNode, i64)> = all_classes
+        .iter()
+        .filter(|(n, _)| n.status == "accepted")
+        .collect();
+    let accepted_ids: HashSet<&str> = accepted.iter().map(|(n, _)| n.id.as_str()).collect();
+    let mut class_parent: HashMap<&str, &str> = HashMap::new();
+    let mut class_project: HashMap<&str, Option<&str>> = HashMap::new();
+    for (n, count) in &accepted {
+        let parent = n
+            .parent_id
+            .as_deref()
+            .filter(|p| accepted_ids.contains(p));
+        if let Some(p) = parent {
+            class_parent.insert(n.id.as_str(), p);
+            edges.push(MapEdge {
+                kind: "contains".into(),
+                from: format!("class:{p}"),
+                to: format!("class:{}", n.id),
+                weight: 1,
+                basis: None,
+            });
+        }
+        class_project.insert(n.id.as_str(), n.project_path.as_deref());
+        nodes.push(MapNode {
+            id: format!("class:{}", n.id),
+            kind: if n.kind == "digest" { "digest" } else { "class" }.into(),
+            label: n.title.clone(),
+            mass: *count,
+            parent_id: parent.map(|p| format!("class:{p}")),
+            pinned: n.pinned,
+            project_path: n.project_path.clone(),
+            class_node_id: Some(n.id.clone()),
+            session_id: None,
+            browse_id: None,
+            thread_id: None,
+        });
+    }
+
+    // --- session tree (lineage) ---------------------------------------------
+    let tree_rows = db.list_session_tree_rows().unwrap_or_default();
+    let mut threads: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut thread_parent: HashMap<(String, String), (String, String)> = HashMap::new();
+    for (ck, cid, pk, pid) in &tree_rows {
+        threads.insert((ck.clone(), cid.clone()));
+        threads.insert((pk.clone(), pid.clone()));
+        thread_parent
+            .entry((ck.clone(), cid.clone()))
+            .or_insert_with(|| (pk.clone(), pid.clone()));
+        edges.push(MapEdge {
+            kind: "lineage".into(),
+            from: format!("thread:{pk}:{pid}"),
+            to: format!("thread:{ck}:{cid}"),
+            weight: 1,
+            basis: None,
+        });
+    }
+
+    // --- supersedes (decision chain, endpoints mapped per rule 1) -----------
+    let pairs = db.list_supersession_pairs().unwrap_or_default();
+    let seqs: Vec<i64> = pairs.iter().flat_map(|&(o, n)| [o, n]).collect();
+    let endpoints = db.resolve_map_endpoints(&seqs).unwrap_or_default();
+    // A decision lands on its class when filed, its session otherwise. A
+    // session seen only here still becomes a node — it hosts a decision.
+    let resolve = |seq: i64, threads: &mut BTreeSet<(String, String)>| -> Option<String> {
+        let (session, class) = endpoints.get(&seq)?;
+        if let Some(c) = class.as_deref().filter(|c| accepted_ids.contains(c)) {
+            return Some(format!("class:{c}"));
+        }
+        let sid = session.as_deref()?;
+        threads.insert(("session".into(), sid.to_string()));
+        Some(format!("thread:session:{sid}"))
+    };
+    let mut chain: BTreeMap<(String, String), (i64, String)> = BTreeMap::new();
+    for (old, new) in &pairs {
+        let (Some(from), Some(to)) = (
+            resolve(*old, &mut threads),
+            resolve(*new, &mut threads),
+        ) else {
+            continue;
+        };
+        if from == to {
+            continue;
+        }
+        let entry = chain
+            .entry((from, to))
+            .or_insert_with(|| (0, format!("#{old} → #{new}")));
+        entry.0 += 1;
+    }
+    for ((from, to), (weight, basis)) in chain {
+        edges.push(MapEdge {
+            kind: "supersedes".into(),
+            from,
+            to,
+            weight,
+            basis: Some(basis),
+        });
+    }
+
+    // --- thread nodes (labels + message-count mass, resolved per node) ------
+    for (kind, id) in &threads {
+        let (count, _) = db.thread_stats(kind, id).unwrap_or((0, None));
+        let label = db
+            .thread_label(kind, id)
+            .unwrap_or_else(|| format!("{kind} {}", id.chars().take(8).collect::<String>()));
+        let is_session = kind == "session";
+        let is_browse = kind == "browse";
+        nodes.push(MapNode {
+            id: format!("thread:{kind}:{id}"),
+            kind: if is_session { "session" } else { "thread" }.into(),
+            label,
+            mass: count,
+            parent_id: thread_parent
+                .get(&(kind.clone(), id.clone()))
+                .map(|(pk, pid)| format!("thread:{pk}:{pid}")),
+            pinned: false,
+            project_path: None,
+            class_node_id: None,
+            session_id: is_session.then(|| id.clone()),
+            browse_id: is_browse.then(|| id.clone()),
+            thread_id: (!is_session && !is_browse).then(|| id.clone()),
+        });
+    }
+
+    // --- co-occurs (the one derived edge, opt-in downstream) ----------------
+    // Classes sharing sessions (through their accepted links) or a project
+    // while filed apart. Direct parent↔child pairs are skipped — `contains`
+    // already states that relation; the signal here is UNEXPECTED adjacency.
+    let mut sessions_by_class: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    let pairs = db.class_session_pairs().unwrap_or_default();
+    for (node, session) in &pairs {
+        if accepted_ids.contains(node.as_str()) {
+            sessions_by_class
+                .entry(node.as_str())
+                .or_default()
+                .insert(session.as_str());
+        }
+    }
+    let mut class_list: Vec<&str> = accepted_ids.iter().copied().collect();
+    class_list.sort_unstable();
+    for (i, a) in class_list.iter().enumerate() {
+        for b in &class_list[i + 1..] {
+            if class_parent.get(a) == Some(b) || class_parent.get(b) == Some(a) {
+                continue;
+            }
+            let shared = match (sessions_by_class.get(a), sessions_by_class.get(b)) {
+                (Some(sa), Some(sb)) => sa.intersection(sb).count() as i64,
+                _ => 0,
+            };
+            let same_project = matches!(
+                (class_project.get(a), class_project.get(b)),
+                (Some(Some(pa)), Some(Some(pb))) if pa == pb
+            );
+            if shared == 0 && !same_project {
+                continue;
+            }
+            let basis = match (shared, same_project) {
+                (0, _) => "shared project".to_string(),
+                (n, false) => format!("{n} shared session{}", if n == 1 { "" } else { "s" }),
+                (n, true) => format!(
+                    "{n} shared session{} · project",
+                    if n == 1 { "" } else { "s" }
+                ),
+            };
+            edges.push(MapEdge {
+                kind: "co_occurs".into(),
+                from: format!("class:{a}"),
+                to: format!("class:{b}"),
+                weight: shared + i64::from(same_project),
+                basis: Some(basis),
+            });
+        }
+    }
+
+    nodes.sort_by(|a, b| a.id.cmp(&b.id));
+    edges.sort_by(|a, b| {
+        (a.kind.as_str(), a.from.as_str(), a.to.as_str())
+            .cmp(&(b.kind.as_str(), b.from.as_str(), b.to.as_str()))
+    });
+    MemoryMapView {
+        generated_ts: now_millis(),
+        nodes,
+        edges,
+    }
+}
+
+/// One user note/star row (`user_notes`) — the readable, current-state side of
+/// `note` ledger events (Second Brain P3). Serialized camelCase for the Memory
+/// surface.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserNote {
+    pub id: i64,
+    /// Latest `note` ledger event seq that touched this row.
+    pub seq: Option<i64>,
+    /// `ledger_event | class_node | session | none` (standalone thought).
+    pub target_kind: String,
+    pub target_id: Option<String>,
+    pub text: String,
+    pub starred: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// One note-write act from the surface. Exactly ONE of `text` / `starred` per
+/// call — each act appends exactly one `note` ledger event, so the record
+/// stays one-act-one-event. `noteId` addresses a specific row (standalone
+/// edits); otherwise the row is resolved (or created) by target.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct NoteWrite {
+    pub note_id: Option<i64>,
+    /// Defaults to `none` (a standalone note) when absent.
+    pub target_kind: Option<String>,
+    pub target_id: Option<String>,
+    pub text: Option<String>,
+    pub starred: Option<bool>,
+}
+
+/// What a note-write did — the `SupersessionOutcome` shape: rejections are
+/// data, not errors, and a no-op is explicit (it must append NO event).
+#[derive(Debug)]
+pub enum NoteOutcome {
+    /// The act applied; one `note` ledger event was appended.
+    Written(UserNote),
+    /// Nothing changed (same text / same star) — no event appended.
+    Unchanged(UserNote),
+    Rejected(String),
+}
+
+/// One session-tree node with its parent and child digests — shared by
+/// `GET /v1/context/tree/:kind/:id` AND the `context_thread_tree` command
+/// (same assembly, two thin callers, so route and GUI can't drift).
+pub fn build_thread_tree(db: &Database, kind: &str, id: &str) -> serde_json::Value {
+    let parent = db.session_tree_parent(kind, id).ok().flatten();
+    let children = db.session_tree_children(kind, id).unwrap_or_default();
+    let child_digests: Vec<serde_json::Value> = children
+        .into_iter()
+        .map(|(ck, cid, created_at)| {
+            let (count, last_ts) = db.thread_stats(&ck, &cid).unwrap_or((0, None));
+            serde_json::json!({
+                "kind": ck,
+                "id": cid,
+                "label": db.thread_label(&ck, &cid),
+                "createdAt": created_at,
+                "messageCount": count,
+                "lastTs": last_ts,
+            })
+        })
+        .collect();
+    let (count, last_ts) = db.thread_stats(kind, id).unwrap_or((0, None));
+    serde_json::json!({
+        "node": {
+            "kind": kind,
+            "id": id,
+            "label": db.thread_label(kind, id),
+            "messageCount": count,
+            "lastTs": last_ts,
+        },
+        "parent": parent.map(|(pk, pid)| serde_json::json!({
+            "kind": pk,
+            "id": pid,
+            "label": db.thread_label(&pk, &pid),
+        })),
+        "children": child_digests,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -606,6 +1047,9 @@ mod tests {
                 project_path: project.map(str::to_string),
                 body: body.to_string(),
                 thread: None,
+                author: None,
+                model: None,
+                model_source: None,
             },
         )
         .unwrap();
@@ -663,6 +1107,9 @@ mod tests {
                     thread_id: "tab-42".to_string(),
                     parent_session_id: Some("sess-parent".to_string()),
                 }),
+                author: None,
+                model: None,
+                model_source: None,
             },
         )
         .unwrap();
@@ -858,7 +1305,7 @@ mod tests {
             },
         )
         .unwrap();
-        crate::ledger::record_revision_event(&db, sid, 1, "# Plan\n\nDo the thing.").unwrap();
+        crate::ledger::record_revision_event(&db, sid, 1, "# Plan\n\nDo the thing.", None).unwrap();
         // A decision event on the session (an approval).
         crate::ledger::record_decision(
             &db,

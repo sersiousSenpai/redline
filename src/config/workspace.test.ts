@@ -12,9 +12,11 @@ import {
   setLanding,
   setSurfaceEnabled,
   surfaceEnabled,
+  workspaceLayout,
   MAIN_SURFACE_DESCRIPTORS,
   TOGGLEABLE_SURFACES,
 } from "./workspace";
+import { canonicalLayout } from "../lib/paneLayout";
 
 describe("workspace snapshot — default manifest reproduces today's UI", () => {
   // The pre-registry header hardcoded exactly this radio group, in this order,
@@ -30,6 +32,7 @@ describe("workspace snapshot — default manifest reproduces today's UI", () => 
       ["drafter", "Prompt Drafter", "Draft a new prompt"],
       ["review", "Code Review", "Review code changes"],
       ["servers", "Localhost", "See your local dev servers"],
+      ["memory", "Memory", "Your prompt and decision history"],
     ]);
   });
 
@@ -47,8 +50,10 @@ describe("workspace snapshot — default manifest reproduces today's UI", () => 
       "browser",
       "drafter",
       "servers",
+      "memory",
     ]);
     expect(surfaceEnabled(ws, "servers")).toBe(true);
+    expect(surfaceEnabled(ws, "memory")).toBe(true);
   });
 
   it("enables every toggleable surface by default", () => {
@@ -102,6 +107,7 @@ describe("surface disabling", () => {
       "drafter",
       "review",
       "servers",
+      "memory",
     ]);
   });
 
@@ -135,6 +141,7 @@ describe("header ordering", () => {
       "browser",
       "drafter",
       "servers",
+      "memory",
     ]);
   });
 
@@ -147,9 +154,10 @@ describe("header ordering", () => {
       "browser",
       "review",
       "servers",
+      "memory",
     ]);
     expect(moveHeaderSurface(ws, "document", -1)).toBe(ws);
-    expect(moveHeaderSurface(ws, "servers", 1)).toBe(ws);
+    expect(moveHeaderSurface(ws, "memory", 1)).toBe(ws);
   });
 
   it("a hidden surface keeps its slot for when it comes back", () => {
@@ -160,6 +168,7 @@ describe("header ordering", () => {
       "drafter",
       "review",
       "servers",
+      "memory",
     ]);
     ws = setSurfaceEnabled(ws, "browser", true);
     expect(headerSurfaces(ws).map((d) => d.id)).toEqual([
@@ -168,6 +177,7 @@ describe("header ordering", () => {
       "browser",
       "review",
       "servers",
+      "memory",
     ]);
   });
 });
@@ -210,6 +220,7 @@ describe("first-gesture materialization", () => {
       "drafter",
       "review",
       "servers",
+      "memory",
     ]);
     for (const s of TOGGLEABLE_SURFACES) {
       expect(ws.surfaces?.[s]).toBe(s !== "voice");
@@ -222,5 +233,50 @@ describe("first-gesture materialization", () => {
       if (d.id === "document") continue;
       expect(TOGGLEABLE_SURFACES).toContain(d.id);
     }
+  });
+});
+
+describe("layout overrides (snap-back canonical shape)", () => {
+  it("absent or malformed blocks mean no overrides", () => {
+    expect(workspaceLayout({})).toEqual({});
+    expect(workspaceLayout({ layout: undefined })).toEqual({});
+    expect(workspaceLayout({ layout: "wide" } as never)).toEqual({});
+    expect(workspaceLayout({ layout: [280] } as never)).toEqual({});
+    expect(workspaceLayout({ layout: null } as never)).toEqual({});
+  });
+
+  it("valid fields pass through; junk fields drop individually", () => {
+    const ws = parseWorkspace(
+      JSON.stringify({
+        layout: {
+          sidebar: 280,
+          discussion: "360",
+          terminal: -50,
+          mystery: 12,
+        },
+      }),
+    );
+    expect(workspaceLayout(ws)).toEqual({ sidebar: 280 });
+  });
+
+  it("a hand-written manifest reshapes the canonical layout", () => {
+    const ws = parseWorkspace(
+      JSON.stringify({ layout: { sidebar: 300, terminal: 320 } }),
+    );
+    const c = canonicalLayout(1440, 900, workspaceLayout(ws));
+    expect(c.sidebarWidth).toBe(300);
+    expect(c.termHeight).toBe(320);
+    expect(c.paneWidth).toBe(320); // untouched field keeps its default
+  });
+
+  it("the layout block survives a GUI gesture's read-modify-write", () => {
+    const ws = parseWorkspace(
+      JSON.stringify({ layout: { sidebar: 280 } }),
+    );
+    const rewritten = setLanding(ws, "drafter");
+    expect(workspaceLayout(rewritten)).toEqual({ sidebar: 280 });
+    // And it round-trips through serialization.
+    const reparsed = parseWorkspace(serializeWorkspace(rewritten));
+    expect(workspaceLayout(reparsed)).toEqual({ sidebar: 280 });
   });
 });

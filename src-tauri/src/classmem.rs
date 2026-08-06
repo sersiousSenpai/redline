@@ -39,6 +39,11 @@ use crate::ledger::{self, now_millis, DecisionInput, EventKind};
 /// A general (repo-less) root always seeded alongside the repo roots.
 pub const GENERAL_ROOT_ID: &str = "root-general";
 
+/// The actor the auto-organize path authors its ledger events as — the
+/// classifier's seat name (`seat::KNOWN_SEATS`), so agent curation is
+/// separable from the human's in the chain.
+pub const CLASSIFIER_ACTOR: &str = "classifier";
+
 /// Cap on how much delta the classifier is fed / how many links a node returns —
 /// keeps the spawn prompt and route responses bounded on a long history.
 pub const MAX_DELTA_ITEMS: usize = 400;
@@ -173,6 +178,10 @@ pub struct LakeItem {
     pub thread_kind: Option<String>,
     pub thread_id: Option<String>,
     pub parent_session_id: Option<String>,
+    /// The model that received the prompt, when recorded — carried as ground
+    /// truth (seat flag or transcript backfill), never inferred. `None` for
+    /// decision events and for prompts whose model was never established.
+    pub model: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -731,7 +740,7 @@ pub fn build_classifier_prompt(
         "\n## Output\n\nReturn ONLY a JSON object (optionally in a ```json fence) \
          of the form:\n\n\
          {\"proposals\": [\n  \
-         {\"op\":\"file\",\"parent_id\":\"<root/node id>\",\"sub_class\":\"<optional new sub-class title>\",\"target_kind\":\"prompt|session|revision|mission|decision|browse_event\",\"target_id\":\"<lake seq/id>\",\"note\":\"<short>\",\"rationale\":\"<why>\"},\n  \
+         {\"op\":\"file\",\"parent_id\":\"<root/node id>\",\"sub_class\":\"<optional new sub-class title>\",\"target_kind\":\"prompt|session|revision|mission|decision|browse_event|note\",\"target_id\":\"<lake seq/id>\",\"note\":\"<short>\",\"rationale\":\"<why>\"},\n  \
          {\"op\":\"create\",\"parent_id\":\"<id>\",\"title\":\"<class>\",\"rationale\":\"<why: size×coherence×recency>\"},\n  \
          {\"op\":\"promote\",\"node_id\":\"<id>\",\"new_parent_id\":\"<id>\",\"rationale\":\"<grew, earns its own class>\"},\n  \
          {\"op\":\"split\",\"node_id\":\"<id>\",\"into\":[{\"title\":\"<a>\",\"link_ids\":[]},{\"title\":\"<b>\",\"link_ids\":[]}],\"rationale\":\"<why>\"},\n  \
@@ -746,7 +755,13 @@ pub fn build_classifier_prompt(
          replaces an OLDER one on the same subject — never for prompts or \
          discussion, and never based on an observation (observations are \
          derived, not ground truth). Supersession marks the old decision as \
-         replaced; it never erases it.\n",
+         replaced; it never erases it. Lake items of kind `note` are the \
+         user's OWN margin notes and standalone thoughts — the only \
+         human-authored signal in the lake. Weight them strongly for filing \
+         and promotion (what the user bothered to write down matters), and \
+         file them with target_kind `note` — but a note is a CURATION signal, \
+         never provenance: `project_path`/`surface` remain the only filing \
+         authority.\n",
     );
     p
 }
@@ -927,9 +942,11 @@ pub async fn organize_once(db: &Database) -> Result<OrganizeOutcome, String> {
             let mut applied_reorgs = 0usize;
             let mut held = 0usize;
             if auto_apply {
-                let accepted = db.accept_all_pending().map_err(|e| e.to_string())?;
+                let accepted = db
+                    .accept_all_pending(CLASSIFIER_ACTOR)
+                    .map_err(|e| e.to_string())?;
                 for nid in &accepted {
-                    record_curate(db, nid, "organize", "");
+                    record_curate(db, CLASSIFIER_ACTOR, nid, "organize", "");
                 }
                 // Recompute activity AFTER staging for the collapse interlock.
                 let direct2 = db.node_direct_link_activity().map_err(|e| e.to_string())?;
@@ -965,8 +982,11 @@ pub async fn organize_once(db: &Database) -> Result<OrganizeOutcome, String> {
                             continue; // leave pending → shows in the review strip
                         }
                     }
-                    if let Some(a) = db.apply_class_proposal(prop.id).map_err(|e| e.to_string())? {
-                        record_reorg(db, &a.op, &a.node_id, &a.detail);
+                    if let Some(a) = db
+                        .apply_class_proposal(prop.id, CLASSIFIER_ACTOR)
+                        .map_err(|e| e.to_string())?
+                    {
+                        record_reorg(db, CLASSIFIER_ACTOR, &a.op, &a.node_id, &a.detail);
                         applied_reorgs += 1;
                     }
                 }
@@ -1151,7 +1171,7 @@ pub async fn verify_supersede_proposals(db: &Database, cwd: &str) -> (usize, usi
             continue; // no verdict → stays staged
         };
         if v.apply && v.confidence >= SUPERSEDE_CONFIDENCE_MIN {
-            match db.apply_class_proposal(prop.id) {
+            match db.apply_class_proposal(prop.id, CLASSIFIER_ACTOR) {
                 Ok(Some(a)) => {
                     tracing::info!(target: "redline::classmem", detail = %a.detail,
                         confidence = v.confidence, "supersession applied");
@@ -1180,13 +1200,15 @@ pub async fn verify_supersede_proposals(db: &Database, cwd: &str) -> (usize, usi
 // ---------------------------------------------------------------------------
 
 /// Record a `class_curate` decision event for an accepted/pinned/renamed node.
-pub fn record_curate(db: &Database, node_id: &str, action: &str, detail: &str) {
+/// `actor` is who curated: the classifier's seat name on the auto-organize
+/// path, the local human on a GUI accept/pin/rename.
+pub fn record_curate(db: &Database, actor: &str, node_id: &str, action: &str, detail: &str) {
     let ph = ledger::decision_payload_hash(&[("action", action), ("node", node_id), ("detail", detail)]);
     if let Err(e) = ledger::record_decision(
         db,
         DecisionInput {
             kind: EventKind::ClassCurate,
-            author: None,
+            author: Some(actor.to_string()),
             session_id: None,
             ref_kind: "class_node",
             ref_id: node_id,
@@ -1204,11 +1226,11 @@ pub fn record_curate(db: &Database, node_id: &str, action: &str, detail: &str) {
 /// undone without ever deleting a ledger event, so `verify_ledger_chain` /
 /// `verify_bundle` stay green — the reversal is *recorded*, not erased. Returns
 /// `true` if a link was removed, `false` if the link id didn't exist.
-pub fn revert_link(db: &Database, link_id: i64) -> Result<bool, String> {
+pub fn revert_link(db: &Database, actor: &str, link_id: i64) -> Result<bool, String> {
     match db.delete_class_link(link_id).map_err(|e| e.to_string())? {
         Some((node_id, target_kind, target_id)) => {
             let detail = format!("{target_kind}:{target_id}");
-            record_curate(db, &node_id, "revert", &detail);
+            record_curate(db, actor, &node_id, "revert", &detail);
             Ok(true)
         }
         None => Ok(false),
@@ -1216,12 +1238,13 @@ pub fn revert_link(db: &Database, link_id: i64) -> Result<bool, String> {
 }
 
 /// Record a `taxonomy_reorg` ledger event for an accepted structural op.
-pub fn record_reorg(db: &Database, op: &str, node_id: &str, detail: &str) {
+/// `actor` is who applied it — classifier seat name or the local human.
+pub fn record_reorg(db: &Database, actor: &str, op: &str, node_id: &str, detail: &str) {
     let ph = ledger::decision_payload_hash(&[("op", op), ("node", node_id), ("detail", detail)]);
     let ts = now_millis();
     if let Err(e) = db.append_ledger_event(&ledger::LedgerAppend {
         kind: EventKind::TaxonomyReorg.as_str(),
-        author: &ledger::local_author(),
+        author: actor,
         ts,
         prompt_id: None,
         session_id: None,
@@ -1366,6 +1389,7 @@ That's it."#;
             thread_kind: Some("browse".into()),
             thread_id: Some("tab-7".into()),
             parent_session_id: Some("sess-42".into()),
+            model: None,
         }];
         let mut stats = HashMap::new();
         stats.insert(

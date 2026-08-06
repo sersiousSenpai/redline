@@ -61,6 +61,38 @@ mod tests {
         assert_async_command(src, "devmap.rs", "dev_server_stop");
     }
 
+    /// Uninstalling an extension deletes its directory tree from disk —
+    /// filesystem work that must not run on the WebView main thread. (The
+    /// command lives in lib.rs as a private fn, so the assertion is spelled
+    /// inline rather than through `assert_async_command`'s `pub fn` shape.)
+    #[test]
+    fn extension_uninstall_stays_async() {
+        let src = include_str!("lib.rs");
+        assert!(
+            src.contains("#[tauri::command(async)]\nfn extension_uninstall"),
+            "lib.rs: `extension_uninstall` must be `#[tauri::command(async)]` — \
+             fs::remove_dir_all must not run on the WebView main thread \
+             (see docs/perf-budget.md)"
+        );
+    }
+
+    /// The marketplace commands fetch over the network, hash artifacts, and
+    /// write extension dirs — none of it may run on the WebView main thread.
+    /// (lib.rs-root commands are private `fn`, so the shapes are spelled
+    /// inline, like `extension_uninstall` above.)
+    #[test]
+    fn marketplace_commands_stay_async() {
+        let src = include_str!("lib.rs");
+        for func in ["marketplace_index", "marketplace_install"] {
+            assert!(
+                src.contains(&format!("#[tauri::command(async)]\nasync fn {func}")),
+                "lib.rs: `{func}` must be `#[tauri::command(async)]` — network \
+                 fetch + sha256 + fs writes must not run on the WebView main \
+                 thread (see docs/perf-budget.md)"
+            );
+        }
+    }
+
     /// Thumbnail capture waits on WebKit's completion handler and then encodes
     /// and writes a PNG. Blocking the WebView thread on any of that would
     /// freeze the app for the length of every capture.
@@ -109,6 +141,8 @@ mod tests {
             "bookshelf_list",
             "bookshelf_migrate_local",
             "bookshelf_new_draft",
+            "bookshelf_set_template",
+            "bookshelf_touch_draft",
             "bookshelf_delete_draft",
             "bookshelf_delete_folder",
             "draft_source_import_file",

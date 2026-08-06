@@ -1,0 +1,7 @@
+{
+  "_comment": "Hard ceilings in BYTES for shipped artifacts, checked by scripts/check-size.mjs (warn locally, --strict in CI). Baselines and the ratchet discipline live in docs/perf-budget.md 'Size budget'. Ratchet DOWN as levers land; every INCREASE must be a deliberate, reviewed diff of this file. bootJsBytes = the entry chunk PLUS every chunk dist/index.html modulepreloads (the full static boot path; ratcheted 2026-08-06 after the B1d frontend diet, actual 1.10 MB). distTotalBytes ratcheted same day after the viewer folded into the main build (actual 7.71 MB, dist-viewer retired). binaryBytes ratcheted 2026-08-06 after the first post-profile release build (strip/thin-LTO/1cgu + the slimmer embedded dist: actual 25.66 MB, was 30.04 MB pre-profile).",
+  "binaryBytes": 28000000,
+  "mcpBinBytes": 1650000,
+  "bootJsBytes": 1210000,
+  "distTotalBytes": 8500000
+}

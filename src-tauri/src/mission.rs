@@ -645,6 +645,7 @@ pub async fn mission_send(
                 thread_id: mission_id.clone(),
                 parent_session_id: None,
             }),
+            crate::seat::model_for("mission"),
         );
     } else {
         crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));

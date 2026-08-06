@@ -21,8 +21,11 @@
                 el.style.setProperty(k, vars[k]);
               }
             }
-            if (vars["--color-paper"])
-              el.style.backgroundColor = vars["--color-paper"];
+            /* The shell's hull (--color-canvas) is the app background; fall
+               back to paper for a vars cache written before the plate shell
+               existed (one launch later applyTheme refreshes the cache). */
+            var bg = vars["--color-canvas"] || vars["--color-paper"];
+            if (bg) el.style.backgroundColor = bg;
             if (vars["--color-ink"]) el.style.color = vars["--color-ink"];
           }
           /* Replay the chosen app font (independent of the color theme), kept
@@ -35,10 +38,12 @@
           var lint = localStorage.getItem("redline.lint");
           if (lint) el.setAttribute("data-lint", lint);
           if (!raw) {
-            /* First-ever launch: match the Terminal (default) theme so the
-               first paint is its blue-black, never white. Kept in sync with
-               THEMES' terminal entry (themes.ts). */
-            el.style.backgroundColor = "#0a0e16";
+            /* First-ever launch: match the Terminal (default) theme's derived
+               canvas — the hull the plates sit on — so the first paint is its
+               deep blue-black, never white. Kept in sync with THEMES' terminal
+               entry (themes.ts) as mixed toward black by deriveTokens'
+               color-canvas (#0a0e16 → #07090e). */
+            el.style.backgroundColor = "#07090e";
             el.style.color = "#d6e1ef";
           }
         } catch (e) {

@@ -3,16 +3,34 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  CANONICAL_PANE_W,
+  CANONICAL_SIDEBAR_W,
+  CANONICAL_TERM_COLLAPSE_H,
+  CANONICAL_TERM_MIN_H,
   DIVIDER_W,
   DOC_MIN,
   DOC_MIN_FRAC,
+  SHELL_EDGE,
+  SHELL_GUTTER,
   VOICE_DOC_MIN,
   VOICE_PANE_MIN,
+  canonicalLayout,
   computePaneLayout,
   docMinFor,
   voicePaneMaxW,
   type PaneLayoutInput,
 } from "./paneLayout";
+
+// The shell's two constants are load-bearing for the plate look: the gutter is
+// the divider (PaneDivider's box spans it) and the edge ring is constant <main>
+// padding. Drag math reads them through computePaneLayout only.
+describe("shell constants", () => {
+  it("pins the gutter/divider identity and the edge ring", () => {
+    expect(DIVIDER_W).toBe(SHELL_GUTTER);
+    expect(SHELL_GUTTER).toBe(10);
+    expect(SHELL_EDGE).toBe(10);
+  });
+});
 
 const base: PaneLayoutInput = {
   winWidth: 1440,
@@ -31,7 +49,7 @@ describe("computePaneLayout", () => {
     expect(l.sidebarOverlayPx).toBe(0);
     expect(l.paneOverlayPx).toBe(0);
     expect(l.curtainActive).toBe(false);
-    expect(l.docFlowW).toBe(1440 - 2 * DIVIDER_W - 240 - 320);
+    expect(l.docFlowW).toBe(1440 - 2 * DIVIDER_W - 2 * SHELL_EDGE - 240 - 320);
     expect(l.docVisibleW).toBe(l.docFlowW);
   });
 
@@ -40,7 +58,7 @@ describe("computePaneLayout", () => {
     const l = computePaneLayout({ ...base, paneWidth: 1000 });
     expect(l.docFlowW).toBe(docMinFor(1440));
     expect(l.curtainActive).toBe(true);
-    const available = 1440 - 2 * DIVIDER_W;
+    const available = 1440 - 2 * DIVIDER_W - 2 * SHELL_EDGE;
     const deficit = 240 + 1000 + docMinFor(1440) - available;
     expect(l.sidebarOverlayPx + l.paneOverlayPx).toBe(deficit);
     // The wide pane absorbs nearly all of it.
@@ -58,7 +76,7 @@ describe("computePaneLayout", () => {
     });
     expect(l.sidebarOverlayPx).toBeLessThanOrEqual(200);
     expect(l.paneOverlayPx).toBeLessThanOrEqual(2000);
-    const available = 900 - 2 * DIVIDER_W;
+    const available = 900 - 2 * DIVIDER_W - 2 * SHELL_EDGE;
     expect(l.sidebarFlowW + l.paneFlowW + l.docFlowW).toBe(available);
     expect(l.docFlowW).toBe(docMinFor(900));
   });
@@ -97,7 +115,7 @@ describe("computePaneLayout", () => {
     expect(l.paneFlowW).toBe(0);
     expect(l.paneOverlayPx).toBe(0);
     // Only one divider in fullscreen.
-    expect(l.docFlowW).toBe(1440 - DIVIDER_W - 240);
+    expect(l.docFlowW).toBe(1440 - DIVIDER_W - 2 * SHELL_EDGE - 240);
   });
 
   it("degrades gracefully on tiny windows with no negative widths", () => {
@@ -154,5 +172,71 @@ describe("voicePaneMaxW", () => {
       expect(max).toBeLessThanOrEqual(Math.max(w, VOICE_PANE_MIN));
       prev = max;
     }
+  });
+});
+
+// The resting arrangement ⌘⇧0 returns to (and a fresh install's doors open
+// onto). Reading prefs and the voice panel are outside this model on purpose.
+describe("canonicalLayout", () => {
+  it("derives the resting shape on a roomy window", () => {
+    const c = canonicalLayout(1440, 900);
+    expect(c.sidebarWidth).toBe(CANONICAL_SIDEBAR_W);
+    expect(c.paneWidth).toBe(CANONICAL_PANE_W);
+    expect(c.termHeight).toBe(270); // 30% of 900 beats the floor
+    expect(c.termCollapsed).toBe(false);
+    expect(c.surface).toBe("document");
+    expect(c.docPinned).toBe(false);
+    expect(c.splitRatio).toBe(0.5);
+    expect(c.sidebarCollapsed).toBe(false);
+    expect(c.paneCollapsed).toBe(false);
+    expect(c.paneFullscreen).toBe(false);
+    expect(c.termFullscreen).toBe(false);
+  });
+
+  it("floors the terminal where 30% gets too short", () => {
+    expect(canonicalLayout(1440, 800).termHeight).toBe(CANONICAL_TERM_MIN_H);
+  });
+
+  it("folds the dock only under the collapse height", () => {
+    expect(canonicalLayout(1440, CANONICAL_TERM_COLLAPSE_H).termCollapsed).toBe(
+      false,
+    );
+    expect(
+      canonicalLayout(1440, CANONICAL_TERM_COLLAPSE_H - 1).termCollapsed,
+    ).toBe(true);
+    // Folded, the height is still derived — expanding the dock later lands
+    // on a sane size, not zero.
+    expect(canonicalLayout(1440, 700).termHeight).toBe(CANONICAL_TERM_MIN_H);
+  });
+
+  it("honors in-range manifest overrides, rounded to px", () => {
+    const c = canonicalLayout(1440, 900, {
+      sidebar: 280.4,
+      discussion: 360,
+      terminal: 300,
+    });
+    expect(c.sidebarWidth).toBe(280);
+    expect(c.paneWidth).toBe(360);
+    expect(c.termHeight).toBe(300);
+  });
+
+  it("off-range overrides fall back to defaults — leniency, not clamping", () => {
+    const c = canonicalLayout(1440, 900, {
+      sidebar: 5000, // typo-sized: > 60% of the window
+      discussion: 40, // below any usable pane
+      terminal: Number.NaN,
+    });
+    expect(c.sidebarWidth).toBe(CANONICAL_SIDEBAR_W);
+    expect(c.paneWidth).toBe(CANONICAL_PANE_W);
+    expect(c.termHeight).toBe(270);
+  });
+
+  it("override range scales with the window it must fit", () => {
+    // 700px wide: a 500px sidebar exceeds 60% and falls back.
+    expect(canonicalLayout(700, 900, { sidebar: 500 }).sidebarWidth).toBe(
+      CANONICAL_SIDEBAR_W,
+    );
+    // The same 500 is fine on a wide window.
+    expect(canonicalLayout(1800, 900, { sidebar: 500 }).sidebarWidth).toBe(500);
   });
 });

@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { memo, useCallback, useEffect, useRef } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Terminal } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
-import { WebglAddon } from "@xterm/addon-webgl";
-import "@xterm/xterm/css/xterm.css";
+import type { Terminal } from "@xterm/xterm";
+import type { FitAddon } from "@xterm/addon-fit";
+import { loadXterm, xtermMods, type XtermMods } from "../lib/xtermLoader";
 import { contrastRatio, luminance, mix } from "../theme/derive";
 import { getTheme, type AnsiSlot } from "../theme/themes";
 import { isResizing, onResizeSession } from "../lib/resizeSession";
@@ -325,10 +324,31 @@ export const TerminalView = memo(function TerminalView({
     term.write(merged);
   }, []);
 
+  // The xterm module set loads once, at the first terminal's mount, and is
+  // cached for the app's lifetime (lib/xtermLoader) — every later mount sees
+  // it synchronously and behaves exactly as a static import did. `xt` flips
+  // null → mods at most once per component, so the create effect below still
+  // runs its body exactly once per tab.
+  const [xt, setXt] = useState<XtermMods | null>(xtermMods());
+  useEffect(() => {
+    if (xt) return;
+    let gone = false;
+    loadXterm().then(
+      (m) => {
+        if (!gone) setXt(m);
+      },
+      (err) => console.error("[redline] xterm failed to load:", err),
+    );
+    return () => {
+      gone = true;
+    };
+  }, [xt]);
+
   // Create the terminal + PTY once.
   useEffect(() => {
     const host = hostRef.current;
-    if (!host) return;
+    if (!host || !xt) return;
+    const { Terminal, FitAddon, WebglAddon } = xt;
 
     const term = new Terminal({
       fontFamily:
@@ -516,9 +536,10 @@ export const TerminalView = memo(function TerminalView({
       fitRef.current = null;
     };
     // Spawn once for this tab's lifetime; cwd/theme/visibility are applied via
-    // the effects below (and refs) without re-forking the shell.
+    // the effects below (and refs) without re-forking the shell. `xt` changes
+    // at most once (null → loaded), and the body doesn't run until it has.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [xt]);
 
   // Re-theme in place when the app theme changes.
   useEffect(() => {

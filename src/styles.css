@@ -10,6 +10,13 @@
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
     "Liberation Mono", monospace;
 
+  /* Shell hull + plate chrome — Studio's derived values, same rule as the
+     color tokens below: applyTheme() overrides pre-paint, these only cover
+     the CSS-loaded-before-JS moment. */
+  --color-canvas: #111114;
+  --color-plate-border: #3c3c40;
+  --color-plate-glow: #5b9fe4;
+
   /* Studio-theme defaults — the flagship dark mood. applyTheme() in main.tsx
      overrides these via inline custom properties on <html> before React paints,
      but we still match the runtime-default theme here so the brief moment
@@ -50,6 +57,19 @@
   background: var(--color-selection);
 }
 
+/* Static design scales — deliberately NOT theme-derived: every theme shares one
+   geometry and one type ramp, so switching themes recolors the shell without
+   reshaping it. Plate radius pairs with SHELL_GUTTER/SHELL_EDGE in
+   paneLayout.ts; control radius is the inner tier of the three-tier language
+   (hero dialog > plate > control). */
+:root {
+  --rl-radius-plate: 10px;
+  --rl-radius-control: 6px;
+  --rl-text-xs: 11px;
+  --rl-text-sm: 12px;
+  --rl-text-md: 13px;
+}
+
 html,
 body,
 #root {
@@ -58,7 +78,9 @@ body,
 
 body {
   margin: 0;
-  background: var(--color-paper);
+  /* The hull. Panes paint their own paper as inset plates (.rl-plate); the
+     canvas shows in the gutters between them and the window-edge ring. */
+  background: var(--color-canvas, var(--color-paper));
   color: var(--color-ink);
   /* The app font (--font-sans) drives all chrome and the document; the user
      picks it via the FontPicker. The terminal and code blocks pin themselves
@@ -2932,6 +2954,113 @@ p.rl-block-modified {
   font-size: 12px;
 }
 
+/* ── Push & branch actions ─────────────────────────────────────────── */
+/* The git status strip: branch → upstream, dirty counts, HEAD, last push. */
+.rl-review-gitstrip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 12px;
+  border-bottom: 1px solid var(--color-rule);
+  background: var(--color-bg-elevated);
+  font-family: var(--font-mono, ui-monospace, Menlo, monospace);
+  font-size: 11px;
+  color: var(--color-ink-muted);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.rl-review-gitstrip-branch {
+  color: var(--color-ink);
+  font-weight: 600;
+}
+.rl-review-gitstrip-warn {
+  color: var(--color-warning);
+}
+.rl-review-gitstrip-chip {
+  margin-left: auto;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--color-success) 40%, transparent);
+  background: color-mix(in srgb, var(--color-success) 10%, transparent);
+  color: var(--color-ink);
+}
+.rl-review-gitstrip-chip a {
+  color: var(--color-anchor-text);
+  text-decoration: none;
+}
+.rl-review-gitstrip-chip a:hover {
+  text-decoration: underline;
+}
+
+/* The push dialog (mounted above the native browser webview via
+   useMenuOverlay, so no z-index games are needed against it). */
+.rl-push-dialog {
+  width: min(34rem, 94vw);
+  max-height: 88vh;
+  overflow-y: auto;
+  background: var(--color-paper);
+  border: 1px solid var(--color-rule);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+  color: var(--color-ink);
+  font-size: 12.5px;
+}
+.rl-push-textarea {
+  font-size: 12.5px;
+  font-family: var(--font-mono, ui-monospace, Menlo, monospace);
+  border: 1px solid var(--color-rule);
+  border-radius: 4px;
+  background: var(--color-paper);
+  color: var(--color-ink);
+  padding: 6px 8px;
+  resize: vertical;
+  line-height: 1.45;
+  width: 100%;
+}
+.rl-push-preview,
+.rl-push-log {
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--color-rule);
+  background: var(--color-bg-elevated);
+  font-family: var(--font-mono, ui-monospace, Menlo, monospace);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--color-ink-muted);
+}
+.rl-push-log {
+  max-height: 120px;
+  overflow-y: auto;
+  color: var(--color-ink);
+}
+.rl-push-warn {
+  font-size: 11.5px;
+  color: var(--color-warning);
+}
+.rl-push-error {
+  font-size: 12px;
+  color: var(--color-warning);
+  font-weight: 600;
+}
+.rl-push-protected {
+  padding: 6px 10px;
+  border-radius: 4px;
+  border: 1px solid color-mix(in srgb, var(--color-warning) 50%, transparent);
+  background: color-mix(in srgb, var(--color-warning) 12%, transparent);
+  font-size: 12px;
+}
+.rl-push-result {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12.5px;
+}
+.rl-push-result a {
+  color: var(--color-anchor-text);
+}
+
 /* ── Live collaboration (Phase 1a) ─────────────────────────────────── */
 /* Remote carets + selections from @tiptap/extension-collaboration-cursor.
    The extension inlines each user's color; these rules supply the shape. */
@@ -2988,7 +3117,10 @@ p.rl-block-modified {
    subtle horizontal scanline, and a cyan glow bleeding down from the top. Kept
    at very low opacity so it reads as surface texture, never as a veil over the
    document — the overlay is pointer-events:none and sits behind interactive
-   chrome via a fixed full-viewport layer at the back of the stacking context. */
+   chrome via a fixed full-viewport layer at the back of the stacking context.
+   Under the plate shell this layer IS the hull's texture: the opaque plates
+   cover it, and it surfaces in the gutters, the edge ring, and the quiet
+   header/footer bars. */
 :root[data-theme="terminal"] body::before {
   content: "";
   position: fixed;
@@ -3030,6 +3162,266 @@ p.rl-block-modified {
   z-index: 1;
 }
 
+/* ── Plate shell ───────────────────────────────────────────────────────────
+   One continuous themed canvas — the hull, --color-canvas, painted by body —
+   with the four working panes (sessions sidebar, document column, discussion
+   pane, terminal dock) as inset rounded plates on it. The gutter between two
+   plates IS the divider (PaneDivider's box spans it, transparent at rest), and
+   under the Terminal theme the body::before FX shows through the gutters as
+   the hull's texture. Applied by explicit class on exactly those four
+   containers — never keyed on [data-rl-pane], which the voice dock inside the
+   document plate also carries and would grow a nested plate. */
+.rl-plate {
+  position: relative;
+  /* A private stacking context keeps the glow overlay's z-index INSIDE the
+     plate — without it the ::after would float over app-level overlays (a
+     fullscreen discussion, the latch). Deliberately isolation, not contain:
+     the terminal dock must stay containment-free (WebGL canvas, see below). */
+  isolation: isolate;
+  border-radius: var(--rl-radius-plate);
+  border: 1px solid var(--color-plate-border);
+  background: var(--color-paper);
+  box-shadow: 0 4px 16px
+    color-mix(in srgb, var(--color-plate-glow) 6%, rgba(0, 0, 0, 0.16));
+}
+/* A whisper of the Agent-Seats hero corner-glow, pinned to the plate's
+   top-left. --color-plate-glow is transparent on light themes (deriveTokens),
+   so they read shadow-only. Pointer-transparent and near-invisible by design:
+   ambiance, never a veil over content. */
+.rl-plate::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  pointer-events: none;
+  border-radius: inherit;
+  background: radial-gradient(
+    220px 150px at 0% 0%,
+    color-mix(in srgb, var(--color-plate-glow) 5%, transparent),
+    transparent 70%
+  );
+}
+
+/* WebGL escape hatch: if the rounded clip misdraws the xterm WebGL canvas
+   on-device, stamp data-rl-dock-caps on <html> — the dock keeps a square clip
+   and the glow overlay restores the plate read with an inset hairline ring
+   plus four canvas-colored corner caps (visual rounding, no clip change). */
+html[data-rl-dock-caps] .rl-term-dock.rl-plate {
+  border-radius: 0;
+}
+html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
+  border-radius: 0;
+  box-shadow: inset 0 0 0 1px var(--color-plate-border);
+  background:
+    radial-gradient(circle at 100% 100%, transparent 9px, var(--color-canvas) 10px)
+      top left / 10px 10px no-repeat,
+    radial-gradient(circle at 0% 100%, transparent 9px, var(--color-canvas) 10px)
+      top right / 10px 10px no-repeat,
+    radial-gradient(circle at 100% 0%, transparent 9px, var(--color-canvas) 10px)
+      bottom left / 10px 10px no-repeat,
+    radial-gradient(circle at 0% 0%, transparent 9px, var(--color-canvas) 10px)
+      bottom right / 10px 10px no-repeat;
+}
+
+/* ── Doors-open boot (A2) ──────────────────────────────────────────────────
+   The plates ARE the doors. main.tsx stamps <html data-rl-boot="closed">
+   before React mounts (real launches only, never under reduced motion), so
+   the frame the hidden window is revealed with holds the plates gathered
+   over the document; useBootChoreography flips the attribute to "opening"
+   one frame later and everything transitions to identity, the document plate
+   resolving last between the parting doors. Compositor-only transform and
+   opacity: layout never changes, applyLiveLayout's geometry stays valid, and
+   xterm needs no refit. Removing the attribute (hard timeout, first
+   keypress/pointer, or the main.tsx dead-man switch) leaves the DOM
+   byte-identical to a boot that never ran. The longest delay + duration must
+   finish inside BOOT_OPEN_MS — boot.test.ts pins both invariants. */
+@media (prefers-reduced-motion: no-preference) {
+  html[data-rl-boot="closed"] .rl-app-header {
+    transform: translateY(8px);
+  }
+  html[data-rl-boot="closed"] .rl-app-footer {
+    transform: translateY(-8px);
+  }
+  html[data-rl-boot="closed"] .rl-sidebar-clip {
+    transform: translateX(48px);
+  }
+  html[data-rl-boot="closed"] .rl-pane-clip {
+    transform: translateX(-48px);
+  }
+  html[data-rl-boot="closed"] .rl-term-dock {
+    transform: translateY(-32px);
+  }
+  html[data-rl-boot="closed"] .rl-doc-column {
+    opacity: 0;
+    transform: scale(0.985);
+  }
+  html[data-rl-boot="opening"] .rl-app-header,
+  html[data-rl-boot="opening"] .rl-app-footer,
+  html[data-rl-boot="opening"] .rl-sidebar-clip,
+  html[data-rl-boot="opening"] .rl-pane-clip,
+  html[data-rl-boot="opening"] .rl-term-dock,
+  html[data-rl-boot="opening"] .rl-doc-column {
+    opacity: 1;
+    transform: none;
+    transition:
+      transform 460ms cubic-bezier(0.22, 1, 0.36, 1),
+      opacity 460ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  /* The stagger: bars first, the side plates part together, the dock rises,
+     and the document resolves last — revealed between the doors. */
+  html[data-rl-boot="opening"] .rl-sidebar-clip,
+  html[data-rl-boot="opening"] .rl-pane-clip {
+    transition-delay: 80ms;
+  }
+  html[data-rl-boot="opening"] .rl-term-dock {
+    transition-delay: 160ms;
+  }
+  html[data-rl-boot="opening"] .rl-doc-column {
+    transition-delay: 240ms;
+  }
+}
+
+/* ── Snap-back settle (A3) ─────────────────────────────────────────────────
+   snapBack() writes the canonical values through the persisted setters —
+   discrete jumps — and rides `data-rl-snapback` on <html> for ~320 ms so
+   they travel as one short fold. No resize session is open during the
+   gesture, so the data-rl-resizing suppression below can't fight it; under
+   reduced motion the attribute is never set and the jumps land instantly.
+   Width/height here, not transform: these are real layout changes whose
+   contents must track (the clips reveal, the dock refits xterm through its
+   ResizeObserver mid-flight and at rest). */
+@media (prefers-reduced-motion: no-preference) {
+  html[data-rl-snapback] .rl-sidebar-clip,
+  html[data-rl-snapback] .rl-pane-clip,
+  html[data-rl-snapback] .rl-term-dock {
+    transition:
+      width 280ms cubic-bezier(0.22, 1, 0.36, 1),
+      height 280ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  /* One-shot acknowledgment: every plate breathes a ring of its own glow. */
+  html[data-rl-snapback] .rl-plate {
+    animation: rl-snap-glow 320ms ease-out;
+  }
+}
+@keyframes rl-snap-glow {
+  from {
+    box-shadow:
+      0 0 0 1px
+        color-mix(in srgb, var(--color-plate-glow) 45%, var(--color-plate-border)),
+      0 4px 16px color-mix(in srgb, var(--color-plate-glow) 6%, rgba(0, 0, 0, 0.16));
+  }
+}
+
+/* ── Landing (A4) ──────────────────────────────────────────────────────────
+   The document plate's zero state as a live first page: a blinking caret
+   before a placeholder-styled "Draft a new plan" line. Typing anywhere on
+   the plate hands the keystrokes to a fresh Drafter document (App's landing
+   listener buffers them through the handoff — lib/landing.ts). The fade-in
+   waits for bootSettled so the page resolves after the doors part, never
+   through them; under reduced motion it is simply there. */
+.rl-landing {
+  min-height: 55vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 12px;
+  opacity: 0;
+}
+.rl-landing-in {
+  opacity: 1;
+  transition: opacity 420ms ease;
+}
+.rl-landing-start {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 26px;
+  font-weight: 600;
+  color: var(--color-ink-muted);
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: text; /* the line is a place to type, not a button */
+  transition: color 0.15s;
+}
+.rl-landing-start:hover {
+  color: var(--color-ink);
+}
+.rl-landing-caret {
+  width: 2px;
+  height: 1.1em;
+  background: var(--color-ink);
+  animation: rl-landing-blink 1.1s steps(1) infinite;
+}
+@keyframes rl-landing-blink {
+  50% {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rl-landing {
+    opacity: 1;
+  }
+  .rl-landing-in {
+    transition: none;
+  }
+  .rl-landing-caret {
+    animation: none;
+  }
+}
+.rl-landing-hint {
+  font-size: var(--rl-text-sm);
+  color: var(--color-ink-muted);
+}
+.rl-landing-lines {
+  margin-top: 22px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+/* ── Gutter dividers ───────────────────────────────────────────────────────
+   PaneDivider's layout box spans the whole gutter between two plates. At rest
+   it paints nothing — the gutter is hull, and the gutter IS the divider. Hover
+   raises a slim centered bar as the drag affordance; dragging paints it in the
+   accent (inline, so it never waits on a hover state). Inside a plate (the
+   voice split) there is no hull to show, so the hairline variant keeps a
+   resting 1px rule instead. */
+.rl-divider-bar {
+  position: absolute;
+  pointer-events: none;
+  background: transparent;
+  transition: background-color 0.12s;
+}
+.rl-divider--v .rl-divider-bar {
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+}
+.rl-divider--h .rl-divider-bar {
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 2px;
+  transform: translateY(-50%);
+}
+.rl-divider:not(.rl-divider--static):hover .rl-divider-bar {
+  background: var(--color-plate-border);
+}
+.rl-divider--hairline.rl-divider--v .rl-divider-bar {
+  width: 1px;
+  background: var(--color-rule);
+}
+.rl-divider--hairline.rl-divider--v:not(.rl-divider--static):hover
+  .rl-divider-bar {
+  width: 2px;
+  background: var(--color-plate-border);
+}
+
 /* ── Live resizing ─────────────────────────────────────────────────────────
    A drag frame writes geometry straight onto the handful of elements that use
    it (see `applyLiveLayout` in App.tsx) — never a custom property on a shared
@@ -3054,14 +3446,31 @@ p.rl-block-modified {
   /* Containment must lift with the clip: `contain: paint` would clip the
      spilled curtain right back inside the flow width. */
   contain: none;
+  /* The clip stops being the plate too — its chrome would sit mid-curtain at
+     the flow boundary. The spilled aside takes the plate look below, so the
+     curtain reads as a plate sliding over the document plate. */
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
 }
-/* The curtain's own drop shadow — what makes it read as painted over the doc
-   rather than beside it. */
+.rl-sidebar-clip[data-rl-curtain]::after,
+.rl-pane-clip[data-rl-curtain]::after {
+  content: none;
+}
+/* The curtain's plate dress + drop shadow — what makes it read as painted over
+   the doc rather than beside it. (No overflow/clip-path here: the discussion
+   aside scrolls itself, so children may poke the rounded corners by a couple
+   of px — invisible at this radius, and the state is transient.) */
 .rl-sidebar-clip[data-rl-curtain] .rl-sidebar-aside {
   background: var(--color-paper);
+  border-radius: var(--rl-radius-plate);
+  border: 1px solid var(--color-plate-border);
   box-shadow: 8px 0 24px rgba(0, 0, 0, 0.18);
 }
 .rl-pane-clip[data-rl-curtain] .rl-pane-aside {
+  background: var(--color-paper);
+  border-radius: var(--rl-radius-plate);
+  border: 1px solid var(--color-plate-border);
   box-shadow: -8px 0 24px rgba(0, 0, 0, 0.18);
 }
 
@@ -3090,17 +3499,42 @@ html[data-rl-resizing] [data-rl-pane] {
    values chasing a moving pointer, and these targets are binary — there is
    nothing for them to lag behind. */
 
-/* The Discuss pill hinges up into a thin vertical tab against the pane edge —
-   ~110px of gutter given back for ~30px — icon on top, the word reading
-   downward. A rigid rotation about a pivot DiscussPill computes from the pill's
+/* The Discuss pill yields down a three-stage ladder (useTextClearance writes
+   the stage NAME into data-rl-stowed): full → a thin vertical tab hinged 90°
+   against the pane edge (~110px of gutter given back for ~30px, icon on top,
+   the word reading downward) → a bare icon circle hugging the edge. The hinge
+   is a rigid rotation about a pivot DiscussPill computes from the pill's
    measured size (see its onMeasure); the pivot sits outside the box, which is
    what lets one rotation carry the flat pill onto the standing one without a
    composed translate sweeping it outside the pane's `contain: paint` box. */
 .rl-discuss-pill {
+  left: 16px;
   transition: transform 220ms cubic-bezier(0.2, 0, 0, 1);
 }
-.rl-discuss-pill[data-rl-stowed="1"] {
+.rl-discuss-pill[data-rl-stowed="stowed"] {
   transform: rotate(90deg);
+}
+/* The icon stage: a 26px circle at the pane edge, unrotated (a circle has no
+   orientation), holding just the glyph — right edge ~32px, so it stands on
+   the drafter's 40px desk gutter with room to spare. */
+.rl-discuss-pill[data-rl-stowed="icon"] {
+  left: 6px;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  justify-content: center;
+  transform: none;
+}
+.rl-discuss-pill[data-rl-stowed="icon"] .rl-discuss-label {
+  display: none;
+}
+/* Guarantee the icon has desk to stand on: the drafter's desk gutter widens
+   from the base 28px to 40px. Static — a gutter driven by the measured stage
+   would move the sheet, change the gap, and oscillate the very state that set
+   it. Scoped to the drafter workspace so the share viewer's page metrics are
+   untouched. */
+.rl-page-workspace--drafter {
+  --rl-page-gap: 40px;
 }
 
 /* The Contents button sheds its label and is left as the bare ☰ it already

@@ -551,6 +551,7 @@ pub async fn companion_send(
                 thread_id: companion_id.clone(),
                 parent_session_id: None,
             }),
+            crate::seat::model_for("companion"),
         );
     } else {
         crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));

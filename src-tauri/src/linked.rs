@@ -587,6 +587,7 @@ pub async fn linked_send(
                     .filter(|(pk, _)| pk == "session")
                     .map(|(_, pid)| pid),
             }),
+            crate::seat::model_for("linked"),
         );
     } else {
         crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));

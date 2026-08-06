@@ -1,0 +1,80 @@
+# CI — every pull request and every push to main. Three independent gates:
+#
+#   rust      — the full cargo test suite on macos-14 (goldens, route-drift,
+#               perf-guard and size-guard source invariants all live there,
+#               plus the redline-mcp workspace member via default-members).
+#               The frontend is built first: tauri's context codegen resolves
+#               `frontendDist` (../dist), and the daemon's dev fallback serves
+#               viewer assets from that directory on disk.
+#   frontend  — tsc + vite build + vitest on ubuntu (fast, platform-neutral).
+#   licenses  — cargo-deny license audit (src-tauri/deny.toml): the manual
+#               permissive-only gate goes mechanical.
+#
+# Size BYTE budgets are deliberately NOT checked here — the real release
+# build takes 15–25 minutes, so byte checks run on main + nightly in
+# size.yml. The *source* invariants that prevent size regressions
+# (sizeGuard.test.ts, size_guard.rs) do run here, inside the two suites.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      # whisper.cpp compiles from source via cmake (not part of the Xcode
+      # CLT). macos-14 images ship cmake today; the guard keeps us honest if
+      # the image ever drops it.
+      - name: Ensure cmake
+        run: command -v cmake >/dev/null || brew install cmake
+      - run: npm ci
+      - name: Build frontend
+        run: npm run build
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: tsc + vite build
+        run: npm run build
+      - name: vitest
+        run: npm test
+
+  licenses:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses
+          manifest-path: src-tauri/Cargo.toml

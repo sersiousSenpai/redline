@@ -1,7 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { describe, it, expect } from "vitest";
-import { clampChatRatio, reorderTabs } from "./BrowserPane";
+import {
+  WEBVIEW_PLATE_INSET,
+  clampChatRatio,
+  reorderTabs,
+  webviewSlotInset,
+} from "./BrowserPane";
+
+// The native webview is a square rect composited over the rounded document
+// plate. The measured slot insets so the rect can never cross the plate's
+// corner curve: with radius r, any inset ≥ r·(1−1/√2) clears it.
+describe("webviewSlotInset", () => {
+  it("insets the docked slot past the 10px plate radius' corner curve", () => {
+    expect(webviewSlotInset(false)).toBe(WEBVIEW_PLATE_INSET);
+    expect(WEBVIEW_PLATE_INSET).toBeGreaterThanOrEqual(
+      Math.ceil(10 * (1 - 1 / Math.SQRT2)),
+    );
+  });
+
+  it("drops the inset in fullscreen — a square takeover has no plate", () => {
+    expect(webviewSlotInset(true)).toBe(0);
+  });
+});
 
 // Regression: a prior build let the discussion divider fold all the way to the
 // edge, persisting `redline.browser.chatRatio = 1`. That gave the browser slot

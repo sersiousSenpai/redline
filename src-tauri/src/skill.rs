@@ -94,12 +94,12 @@ const SKILLS: &[EmbeddedSkill] = &[
     },
     EmbeddedSkill {
         name: "redline-code-review",
-        version: 3,
+        version: 4,
         content: include_str!("../../skills/redline-code-review/SKILL.md"),
     },
     EmbeddedSkill {
         name: "classmemory",
-        version: 2,
+        version: 3,
         content: include_str!("../../skills/classmemory/SKILL.md"),
     },
     EmbeddedSkill {
@@ -311,6 +311,10 @@ mod tests {
             "old_seq",
             "supersededBy",
             "observations",
+            // P3: user notes are a curation signal, never provenance, and
+            // retrieval leads with them (the one human-authored signal).
+            "target_kind: \"note\"",
+            "human-authored",
         ] {
             assert!(
                 cm.content.contains(needle),

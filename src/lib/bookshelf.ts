@@ -31,6 +31,12 @@ export interface BookshelfDraft {
   updatedAt: number;
   sourceCount: number;
   hasDoc: boolean;
+  /** ★ — offered under "New from template"; instantiating deep-copies the body. */
+  isTemplate: boolean;
+  /** Times opened (once per open) — ranks the documents dropdown's FREQUENT. */
+  openCount: number;
+  /** Epoch ms of the last open; null = never opened since the column existed. */
+  lastOpenedAt: number | null;
 }
 
 export interface Shelf {
@@ -64,6 +70,9 @@ export interface DraftDoc {
   docJson: string | null;
   docMarkdown: string;
   projectPath: string | null;
+  /** When the DB last saw a write (0 = row doesn't exist yet) — what the
+   *  crash-shadow recovery compares its own stamp against. */
+  updatedAt: number;
 }
 
 /** A folder plus its children — what `BookshelfView` renders. */
@@ -115,12 +124,16 @@ export function buildFolderTree(folders: BookshelfFolder[]): FolderNode[] {
   return roots;
 }
 
-/** The documents that sit directly in `folderId` (null = the shelf root). */
+/** The documents that sit directly in `folderId` (null = the shelf root).
+ *  Templates sort ahead of ordinary documents; recency order (the backend's
+ *  `updated_at DESC`) is preserved within each group — sort() is stable. */
 export function draftsInFolder(
   drafts: BookshelfDraft[],
   folderId: string | null,
 ): BookshelfDraft[] {
-  return drafts.filter((d) => (d.folderId ?? null) === folderId);
+  return drafts
+    .filter((d) => (d.folderId ?? null) === folderId)
+    .sort((a, b) => Number(b.isTemplate) - Number(a.isTemplate));
 }
 
 /** A document's display name: its title, else a stable placeholder. */
@@ -140,12 +153,24 @@ export const newDraft = (
   folderId: string | null,
   title?: string,
   projectPath?: string | null,
+  /** Deep-copy this document's body (template instantiation); the copy is
+   *  always an ordinary document with no sources, comments or threads. */
+  fromDraftId?: string | null,
 ) =>
   invoke<string>("bookshelf_new_draft", {
     folderId,
     title: title ?? null,
     projectPath: projectPath ?? null,
+    fromDraftId: fromDraftId ?? null,
   });
+
+export const setTemplate = (draftId: string, isTemplate: boolean) =>
+  invoke<void>("bookshelf_set_template", { draftId, isTemplate });
+
+/** Count one open — once per open, never on activation-switch of an
+ *  already-open document. */
+export const touchDraft = (draftId: string) =>
+  invoke<void>("bookshelf_touch_draft", { draftId });
 
 export const renameDraft = (draftId: string, title: string) =>
   invoke<void>("bookshelf_rename_draft", { draftId, title });

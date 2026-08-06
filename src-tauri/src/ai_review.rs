@@ -145,8 +145,9 @@ fn ai_review_args() -> Vec<String> {
 }
 
 /// Render the parsed diff with per-side line numbers — the same coordinates
-/// `relocate_quoted` will match `quoted` against.
-fn render_diff(diff: &[crate::review::DiffFile]) -> String {
+/// `relocate_quoted` will match `quoted` against. `pub(crate)`: the commit
+/// drafter (`ai_commit.rs`) shows its model the same rendering.
+pub(crate) fn render_diff(diff: &[crate::review::DiffFile]) -> String {
     let mut out = String::new();
     for f in diff {
         let status = format!("{:?}", f.status).to_lowercase();
@@ -455,6 +456,13 @@ pub async fn ai_review_start(
         }
         if added > 0 {
             let _ = app.emit("review-annotations-changed", rid.clone());
+            crate::extension_host::publish(
+                redline_extension_abi::events::REVIEW_ANNOTATIONS_CHANGED,
+                &redline_extension_abi::events::ReviewAnnotationsChanged {
+                    review_id: rid.clone(),
+                    ts_ms: crate::extension_host::now_ms(),
+                },
+            );
         }
         let _ = app.emit(
             "review-ai-done",

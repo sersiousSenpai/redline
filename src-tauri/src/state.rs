@@ -641,6 +641,28 @@ pub struct ReviewQuestion {
     pub created_at: i64,
 }
 
+/// One recorded commit-and-push from the Code Review surface. Backed by the
+/// `review_pushes` table; `review_feedback.rs` reports the latest one back to
+/// the waiting agent as the `PUSHED:` block.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PushRecord {
+    pub id: String,
+    pub review_id: String,
+    pub repo_path: String,
+    pub remote: String,
+    /// The push TARGET branch (never the checkout, which is untouched).
+    pub branch: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_number: Option<i64>,
+    pub files: i64,
+    pub created_at: i64,
+}
+
 /// One turn in a browser tab's browse-agent discussion thread. Mirrors
 /// `ThreadMessage`, but scoped to a per-tab `browse_id` (a stable UUID the
 /// frontend persists alongside its tab list) rather than a plan
@@ -731,6 +753,23 @@ pub struct CommentOffer {
 pub struct DraftChatMessage {
     pub id: String,
     pub draft_id: String,
+    /// "user" | "assistant".
+    pub role: String,
+    pub body: String,
+    /// "complete" | "error".
+    pub status: String,
+    pub created_at: i64,
+}
+
+/// One turn in the Memory surface's Ask thread (Second Brain P4). Mirrors
+/// `DraftChatMessage`, keyed by the constant memchat thread id; the agent's
+/// resumable session id + the ledger high-water mark it last saw live in
+/// `mem_chat_threads`. See memchat.rs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemChatMessage {
+    pub id: String,
+    pub thread_id: String,
     /// "user" | "assistant".
     pub role: String,
     pub body: String,
@@ -1131,6 +1170,7 @@ impl SessionStore {
             session_id,
             version_number as i64,
             &revision.raw_plan_markdown,
+            None, // the human's own supervised plan session
         ) {
             tracing::warn!(error = %e, "failed to record revision ledger event");
         }

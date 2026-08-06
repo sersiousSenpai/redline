@@ -6,14 +6,23 @@ import { listen } from "@tauri-apps/api/event";
 
 import { usePersistedState } from "../theme/usePersistedState";
 
-import { describeVerdict, kindLabel, KIND_COLOR } from "./LedgerPane";
+import {
+  describeVerdict,
+  fmtTime,
+  kindLabel,
+  KIND_COLOR,
+  type ChainVerdict,
+  type LedgerEvent,
+} from "../lib/ledgerKinds";
 import {
   buildTree,
+  countDescendants,
   sortObservations,
   type ClassNode,
+  type LinkView,
   type Observation,
   type TreeNode,
-} from "./ClassMemoryPane";
+} from "../lib/classTree";
 import {
   mirrorIsBehind,
   mirrorSummary,
@@ -22,43 +31,11 @@ import {
 } from "../lib/portability";
 import type { SkillStatus } from "../types";
 
-// The one slim, read-mostly memory surface — replacing the four Polis toolbar
-// panes (ledger / ClassMemory / Librarian / portability). Memory organizes and
-// compacts itself in the background now, so this is for the rare curious glance,
-// not a console to manage. Three tabs: the Lake (the hash-chained record, with
-// Verify + a manual Forget), the Catalog (the auto-built class tree, read-only),
-// and Settings (mirror / export / MCP), folded away.
-
-interface LedgerEvent {
-  seq: number;
-  ts: number;
-  kind: string;
-  author: string;
-  promptId: number | null;
-  sessionId: string | null;
-  versionNumber: number | null;
-  refKind: string | null;
-  refId: string | null;
-  payloadHash: string;
-  prevHash: string;
-  entryHash: string;
-}
-
-interface ChainVerdict {
-  ok: boolean;
-  checked: number;
-  firstBadSeq: number | null;
-  headHash: string | null;
-}
-
-interface LinkView {
-  id: number;
-  targetKind: string;
-  targetId: string;
-  label: string | null;
-  /** The decision seq that superseded this link's target (null = current). */
-  supersededBy: number | null;
-}
+// The pill's quick inspector — an ephemeral, read-mostly modal for the fast
+// glance (the full Memory surface, `MemorySurface.tsx`, is the main-pane home).
+// Three tabs: the Lake (the hash-chained record, with Verify + a manual
+// Forget), the Catalog (the auto-built class tree, read-only), and Settings
+// (mirror / export / MCP), folded away.
 
 interface MemoryInspectorProps {
   onClose: () => void;
@@ -67,15 +44,6 @@ interface MemoryInspectorProps {
 }
 
 type Tab = "lake" | "catalog" | "settings";
-
-function fmtTime(ms: number): string {
-  return new Date(ms).toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
 
 export function MemoryInspector({
   onClose,
@@ -196,6 +164,13 @@ export function MemoryInspector({
 
 // --- Lake: the hash-chained record (read + Verify + Forget) ----------------
 
+/** Compact model chip text: the stored id minus the family prefix and any
+ *  trailing date stamp — "claude-haiku-4-5-20251001" reads "haiku-4-5". The
+ *  full id stays in the row title and the detail pane. */
+function shortModel(model: string): string {
+  return model.replace(/^claude-/, "").replace(/-20\d{6}$/, "");
+}
+
 function LakeTab() {
   const [events, setEvents] = useState<LedgerEvent[]>([]);
   const [verdict, setVerdict] = useState<ChainVerdict | null>(null);
@@ -203,10 +178,15 @@ function LakeTab() {
   const [selected, setSelected] = useState<LedgerEvent | null>(null);
   const [body, setBody] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // promptId → the model that received it (ground truth: seat flag or
+  // transcript backfill; prompts with no recorded model are simply absent).
+  const [models, setModels] = useState<Map<number, string>>(() => new Map());
+  const [modelFilter, setModelFilter] = useState("");
 
   const load = useCallback(async () => {
     try {
       setEvents(await invoke<LedgerEvent[]>("ledger_list_events", { limit: 1000 }));
+      setModels(new Map(await invoke<[number, string][]>("ledger_prompt_models")));
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -228,6 +208,18 @@ function LakeTab() {
           .map((e) => e.promptId as number),
       ),
     [events],
+  );
+
+  // The rows on screen: the whole chain, or — under a model filter — only the
+  // prompt events that model received.
+  const shownEvents = useMemo(
+    () =>
+      modelFilter
+        ? events.filter(
+            (e) => e.promptId != null && models.get(e.promptId) === modelFilter,
+          )
+        : events,
+    [events, models, modelFilter],
   );
 
   const verify = useCallback(async () => {
@@ -287,6 +279,29 @@ function LakeTab() {
           {events.length} event{events.length === 1 ? "" : "s"} · local-only · hash-chained
         </span>
         <div style={{ flex: 1 }} />
+        {models.size > 0 && (
+          <select
+            value={modelFilter}
+            onChange={(e) => setModelFilter(e.target.value)}
+            title="Show only prompts a specific model received"
+            style={{
+              border: "1px solid var(--color-rule)",
+              borderRadius: 4,
+              padding: "3px 6px",
+              fontSize: 12,
+              background: "var(--color-bg-elevated)",
+              color: "var(--color-ink)",
+              cursor: "pointer",
+            }}
+          >
+            <option value="">All models</option>
+            {[...new Set(models.values())].sort().map((m) => (
+              <option key={m} value={m}>
+                {shortModel(m)}
+              </option>
+            ))}
+          </select>
+        )}
         <button
           type="button"
           onClick={verify}
@@ -323,13 +338,16 @@ function LakeTab() {
 
       <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
         <div style={{ flex: "1 1 55%", overflowY: "auto", minWidth: 0 }}>
-          {events.length === 0 ? (
+          {shownEvents.length === 0 ? (
             <div style={{ padding: 16, color: "var(--color-ink-muted)", fontSize: 13 }}>
-              No events yet. Prompts, plan revisions, and decisions appear here as you work.
+              {modelFilter
+                ? "No prompts recorded for that model."
+                : "No events yet. Prompts, plan revisions, and decisions appear here as you work."}
             </div>
           ) : (
-            events.map((ev) => {
+            shownEvents.map((ev) => {
               const compacted = ev.promptId != null && compactedPromptIds.has(ev.promptId);
+              const model = ev.promptId != null ? models.get(ev.promptId) : undefined;
               return (
                 <button
                   key={ev.seq}
@@ -373,6 +391,22 @@ function LakeTab() {
                       style={{ fontSize: 11, color: "var(--color-ink-muted)" }}
                     >
                       🗜 gist
+                    </span>
+                  )}
+                  {model && (
+                    <span
+                      title={`Received by ${model}`}
+                      style={{
+                        flex: "0 0 auto",
+                        padding: "0 6px",
+                        borderRadius: 999,
+                        fontSize: 10,
+                        border: "1px solid var(--color-rule)",
+                        color: "var(--color-ink-muted)",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {shortModel(model)}
                     </span>
                   )}
                   {/* The one variable-width field: shrink + ellipsize rather
@@ -448,6 +482,12 @@ function LakeTab() {
               </div>
               <Field label="Author" value={selected.author} />
               <Field label="When" value={fmtTime(selected.ts)} />
+              {selected.promptId != null && models.has(selected.promptId) && (
+                <Field
+                  label="Model"
+                  value={models.get(selected.promptId) as string}
+                />
+              )}
               {selected.sessionId && <Field label="Session" value={selected.sessionId} />}
               {selected.refKind && (
                 <Field label="References" value={`${selected.refKind} · ${selected.refId ?? ""}`} />
@@ -631,7 +671,7 @@ function CatalogTab() {
           </div>
         ) : (
           tree.map((n) => (
-            <TreeRow
+            <ClassTreeRow
               key={n.id}
               node={n}
               depth={0}
@@ -760,18 +800,20 @@ function CatalogTab() {
   );
 }
 
-/** Descendant count — what a collapsed chevron is hiding. */
-function countDescendants(node: TreeNode): number {
-  return node.children.reduce((sum, c) => sum + 1 + countDescendants(c), 0);
-}
-
-function TreeRow({
+/**
+ * One class-tree row (chevron, depth rails, pinned/link-count/"n inside"
+ * badges). Exported: the Memory surface's Catalog tab renders the same rows
+ * (the SettingsTab precedent — one implementation, two mounts), injecting its
+ * curation buttons through `actions`; the inspector stays read-only.
+ */
+export function ClassTreeRow({
   node,
   depth,
   selected,
   onSelect,
   collapsedIds,
   onToggle,
+  actions,
 }: {
   node: TreeNode;
   depth: number;
@@ -779,6 +821,8 @@ function TreeRow({
   onSelect: (id: string) => void;
   collapsedIds: Set<string>;
   onToggle: (id: string) => void;
+  /** Per-row trailing cluster (status badge + curation buttons). */
+  actions?: (node: TreeNode) => React.ReactNode;
 }) {
   const isDigest = node.kind === "digest";
   const hasChildren = node.children.length > 0;
@@ -886,10 +930,11 @@ function TreeRow({
             {countDescendants(node)} inside
           </span>
         )}
+        {actions?.(node)}
       </div>
       {!collapsed &&
         node.children.map((c) => (
-          <TreeRow
+          <ClassTreeRow
             key={c.id}
             node={c}
             depth={depth + 1}
@@ -897,6 +942,7 @@ function TreeRow({
             onSelect={onSelect}
             collapsedIds={collapsedIds}
             onToggle={onToggle}
+            actions={actions}
           />
         ))}
     </>
@@ -904,8 +950,10 @@ function TreeRow({
 }
 
 // --- Settings: mirror / export / MCP (folded away) -------------------------
+// Exported: the Memory surface's Health tab renders the same sections (one
+// implementation, two mounts — inspector modal + main surface).
 
-function SettingsTab({
+export function SettingsTab({
   activeSessionId,
   activeSessionName,
 }: {

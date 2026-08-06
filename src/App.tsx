@@ -28,11 +28,27 @@ const PlanEditor = lazy(() =>
 );
 import type { PlanEditorActions } from "./components/PlanEditor";
 import type { PlanEditorCollab } from "./components/PlanEditor";
+import { EmptyState } from "./components/EmptyState";
+import { LandingPage } from "./components/LandingPage";
+import {
+  applySeed,
+  isEditableTarget,
+  isSeedKey,
+  seedStep,
+  type LandingPhase,
+} from "./lib/landing";
 import { Footer } from "./components/Footer";
 import { Header } from "./components/Header";
+import { Button } from "./components/ui/Button";
 import { InviteDialog } from "./components/InviteDialog";
 import { JoinDialog } from "./components/JoinDialog";
-import { ShareSnapshotDialog } from "./components/ShareSnapshotDialog";
+// Carries the markdown→PM parser + block serializer (the heavy editor chain);
+// only mounts when the share dialog opens.
+const ShareSnapshotDialog = lazy(() =>
+  import("./components/ShareSnapshotDialog").then((m) => ({
+    default: m.ShareSnapshotDialog,
+  })),
+);
 import { importSharedPlanFromUrl } from "./collab/importSharedLink";
 import { deriveActiveSurface } from "./lib/activeSurface";
 import { PresenceBar } from "./components/PresenceBar";
@@ -78,9 +94,18 @@ import { FileViewer } from "./components/FileViewer";
 import { BrowserPane } from "./components/BrowserPane";
 import { MenuOverlayProvider } from "./components/menuOverlay";
 import { SplitPane } from "./components/SplitPane";
-import { PromptDrafter } from "./components/PromptDrafter";
+// Same Tiptap/ProseMirror stack as PlanEditor — lazy for the same reason. The
+// landing's type-to-start seed keeps buffering in App's window listener until
+// the chunk mounts and consumeSeed runs, so the handoff stays lossless.
+const PromptDrafter = lazy(() =>
+  import("./components/PromptDrafter").then((m) => ({
+    default: m.PromptDrafter,
+  })),
+);
+import type { DrafterSaveState } from "./components/PromptDrafter";
 import ReviewPanel from "./components/ReviewPanel";
 import { MemoryInspector } from "./components/MemoryInspector";
+import { MemorySurface } from "./components/MemorySurface";
 import ReviewDiscussionPane from "./components/ReviewDiscussionPane";
 import { ServersPane } from "./components/ServersPane";
 import { useReview } from "./hooks/useReview";
@@ -90,11 +115,15 @@ import {
   effectiveDiscussionContext,
   type DiscussionContext,
 } from "./lib/discussionContext";
-import { VoicePanel } from "./components/VoicePanel";
+// Off the boot path: the voice dock opens on click, and its chunk (audio
+// drivers + discussion surface) loads from disk in the same beat.
+const VoicePanel = lazy(() =>
+  import("./components/VoicePanel").then((m) => ({ default: m.VoicePanel })),
+);
 import type { ProjectOption } from "./components/ProjectPicker";
 import { useFolderWorkspaces } from "./hooks/useFolderWorkspaces";
 import { computeParagraphDiff, type ParagraphDiff } from "./diff";
-import { blockIdByAnchorId } from "./editor/docModel";
+import { blockIdByAnchorId } from "./editor/sectionMaps";
 import { useTextSelection } from "./hooks/useTextSelection";
 import {
   applyFont,
@@ -110,8 +139,8 @@ import {
   storeTheme,
 } from "./theme/applyTheme";
 import type { ThemeName } from "./theme/themes";
-import { DEFAULT_THEME, isThemeName } from "./theme/themes";
-import { SUGGESTED_FONT_FOR_THEME, isFontName } from "./theme/fonts";
+import { DEFAULT_THEME, THEMES, isThemeName } from "./theme/themes";
+import { FONTS, SUGGESTED_FONT_FOR_THEME, isFontName } from "./theme/fonts";
 import { reconcilePick, reconcileTheme } from "./theme/prefsSync";
 import type { LintName } from "./theme/lint";
 import { SUGGESTED_LINT_FOR_THEME, isLintName } from "./theme/lint";
@@ -126,8 +155,11 @@ import { TerminalTabs } from "./components/TerminalTabs";
 import type { TerminalTabsHandle } from "./components/TerminalTabs";
 import { DecisionWindowBanner } from "./components/DecisionWindowBanner";
 import { FlashOverlay } from "./components/FlashOverlay";
+import { CommandPalette } from "./components/CommandPalette";
 import { playInterceptBeep, DEFAULT_SOUND } from "./audio/beep";
 import { buildResumeCommand } from "./lib/resumeCommand";
+import { buildCommands } from "./lib/commands";
+import { isPaletteKey, isSnapBackKey } from "./lib/keymap";
 import {
   TOC_RAIL_W,
   TOC_RAIL_W_WIDE,
@@ -148,6 +180,7 @@ import {
   setLanding,
   setSurfaceEnabled,
   surfaceEnabled,
+  workspaceLayout,
   type ToggleableSurface,
   type Workspace,
 } from "./config/workspace";
@@ -165,12 +198,17 @@ import {
 } from "./lib/nudge";
 import {
   DIVIDER_W,
+  SHELL_EDGE,
+  SHELL_GUTTER,
   VOICE_PANE_MIN,
   VOICE_PANE_W,
+  canonicalLayout,
   computePaneLayout,
   voicePaneMaxW,
   type PaneLayout,
 } from "./lib/paneLayout";
+import { SNAPBACK_SETTLE_MS } from "./lib/boot";
+import { useBootChoreography } from "./hooks/useBootChoreography";
 /** Toggle the curtain attribute only on a real flip — `setAttribute` with an
  *  unchanged value still invalidates style, and this runs every drag frame. */
 function setCurtain(el: HTMLElement | null, on: boolean): void {
@@ -211,9 +249,12 @@ import {
   listSources,
   loadDraftDoc,
   migrateLegacyDraft,
+  newDraft,
   persistDraftDoc,
+  touchDraft,
 } from "./lib/bookshelf";
 import { BookshelfView } from "./components/BookshelfView";
+import { DocumentsMenu } from "./components/DocumentsMenu";
 import { SendToRedlineDialog } from "./components/SendToRedlineDialog";
 import type { JSONContent } from "@tiptap/react";
 import type {
@@ -281,6 +322,38 @@ interface ToastSpec {
   message: string;
   tone?: "success" | "info";
   action?: { label: string; onAction: () => void };
+}
+
+// --- Drafter crash shadow ---------------------------------------------------
+// A synchronous localStorage copy of the open document, written on every flush
+// BEFORE the async DB invoke, cleared once the write confirms. Deliberately
+// localStorage — but strictly as a crash journal, never primary storage (which
+// is exactly what the Bookshelf moved away from). Bounded to the open document.
+interface DrafterShadow {
+  json: JSONContent;
+  markdown: string;
+  at: number;
+}
+
+const drafterShadowKey = (id: string) => `redline.drafter.shadow.${id}`;
+
+function readDrafterShadow(id: string): DrafterShadow | null {
+  try {
+    const raw = localStorage.getItem(drafterShadowKey(id));
+    if (!raw) return null;
+    const s = JSON.parse(raw) as DrafterShadow;
+    return s && typeof s.at === "number" && s.json ? s : null;
+  } catch {
+    return null;
+  }
+}
+
+function clearDrafterShadow(id: string): void {
+  try {
+    localStorage.removeItem(drafterShadowKey(id));
+  } catch {
+    /* nothing to clear, or storage unavailable — either way it's gone */
+  }
 }
 
 // A round control used by the floating document pill (zoom ±, width toggle).
@@ -486,6 +559,7 @@ function App() {
   const drafterOpen = mainSurface === "drafter";
   const reviewOpen = mainSurface === "review";
   const serversOpen = mainSurface === "servers";
+  const memoryOpen = mainSurface === "memory";
   const docVisible = mainSurface === "document" || docPinned;
   const [splitVertical, setSplitVertical] = usePersistedState(
     "redline.split.vertical",
@@ -638,6 +712,35 @@ function App() {
     if (!drafterDraftId) setDrafterDraftId(crypto.randomUUID());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [drafterDraftId]);
+  // Every document open in the drafter (`drafterDraftId` stays the ACTIVE
+  // one). A UI preference like the active id, so localStorage is right; the
+  // editor still mounts only the active document via the keyed remount, so
+  // extra open documents cost nothing at runtime.
+  const [drafterOpenIds, setDrafterOpenIds] = usePersistedState<string[]>(
+    "redline.drafter.openIds",
+    [],
+  );
+  // Invariant: the active document is always in the open set. This is also
+  // the ONE place an open is counted (`bookshelf_touch_draft`) — activating an
+  // already-open document changes nothing here, so it never double-counts.
+  useEffect(() => {
+    if (!drafterDraftId || drafterOpenIds.includes(drafterDraftId)) return;
+    setDrafterOpenIds([...drafterOpenIds, drafterDraftId]);
+    void touchDraft(drafterDraftId).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drafterDraftId]);
+  // Close a document (dropdown ✕): drop it from the set; if it was active,
+  // activate its neighbour. Closing the last one leaves the active id null and
+  // the mint effect above opens a fresh blank — the drafter never goes dark.
+  const closeDrafterDoc = (id: string) => {
+    const idx = drafterOpenIds.indexOf(id);
+    if (idx < 0) return;
+    const next = drafterOpenIds.filter((x) => x !== id);
+    setDrafterOpenIds(next);
+    if (drafterDraftId === id) {
+      setDrafterDraftId(next[Math.min(idx, next.length - 1)] ?? null);
+    }
+  };
   // Load the open document from the DB, after the one-time localStorage
   // migration has had its chance to put it there. The migration is idempotent
   // (its flag is a DB setting) and runs before the first read, so the very
@@ -662,8 +765,44 @@ function App() {
         // markdown mirror is still on disk and still readable by the agents.
         parsed = null;
       }
+      // A row with a markdown mirror but no TipTap body — the Shipwright
+      // lands documents this way, and templates seeded from markdown ride the
+      // same path. Build the doc from the mirror rather than opening blank.
+      if (!parsed && loaded?.docMarkdown.trim()) {
+        try {
+          const { planMarkdownToDoc } = await import("./editor/markdown/parser");
+          parsed = planMarkdownToDoc(loaded.docMarkdown).toJSON() as JSONContent;
+        } catch {
+          parsed = null;
+        }
+        if (!alive) return;
+      }
+      // Crash recovery: a shadow newer than the DB row means the app died
+      // between a keystroke and its write landing. Offer the shadow; either
+      // answer clears it (declined = the user chose the stored copy).
+      const shadow = readDrafterShadow(drafterDraftId);
+      if (shadow && shadow.at > (loaded?.updatedAt ?? 0)) {
+        if (
+          window.confirm(
+            "Recover unsaved changes? This document has edits that didn't reach the database before the app last closed.",
+          )
+        ) {
+          parsed = shadow.json;
+          const project = loaded?.projectPath ?? null;
+          // Land the recovered body now; the shadow clears only once the DB
+          // write is confirmed.
+          void persistDraftDoc(drafterDraftId, shadow.markdown, shadow.json, project)
+            .then(() => clearDrafterShadow(drafterDraftId))
+            .catch(() => {});
+        } else {
+          clearDrafterShadow(drafterDraftId);
+        }
+      }
       setDrafterDoc(parsed);
       if (loaded?.projectPath) setDrafterProject(loaded.projectPath);
+      // The save indicator describes the OPEN document — don't carry the
+      // previous one's "Saved · 2s ago" across a switch.
+      setDrafterSaveState(null);
       setDrafterDocReady(true);
     })();
     return () => {
@@ -693,17 +832,56 @@ function App() {
   const [drafterSections, setDrafterSections] = useState<Section[]>([]);
   // Persist the open document: the TipTap fidelity source AND the markdown
   // mirror agents read via /v1/drafter/:id/doc, in one write on the drafter's
-  // existing 400ms debounce.
+  // debounce (400ms idle, 2s max-wait). Three guarantees layered on the write:
+  //
+  // 1. The crash shadow lands in localStorage synchronously BEFORE the async
+  //    invoke — a hard kill between keystroke and write loses nothing.
+  // 2. A failed write is visible ("Unsaved — retrying") and retried with
+  //    backoff — never a swallowed catch.
+  // 3. The shadow clears only once the DB write confirms.
+  const [drafterSaveState, setDrafterSaveState] =
+    useState<DrafterSaveState | null>(null);
+  // Monotonic write id: a stale attempt (superseded by a newer keystroke's
+  // write) must neither clear the newer shadow nor overwrite its status.
+  const drafterSaveSeq = useRef(0);
+  const drafterRetryTimer = useRef<number | null>(null);
   const drafterPersist = useCallback(
     (json: JSONContent, markdown: string) => {
       setDrafterMarkdown(markdown);
       if (!drafterDraftId) return;
-      void persistDraftDoc(
-        drafterDraftId,
-        markdown,
-        json,
-        drafterProject,
-      ).catch(() => {});
+      const id = drafterDraftId;
+      try {
+        localStorage.setItem(
+          drafterShadowKey(id),
+          JSON.stringify({ json, markdown, at: Date.now() } as DrafterShadow),
+        );
+      } catch {
+        /* quota / private mode — the DB write below is still the real path */
+      }
+      const seq = ++drafterSaveSeq.current;
+      if (drafterRetryTimer.current !== null) {
+        window.clearTimeout(drafterRetryTimer.current);
+        drafterRetryTimer.current = null;
+      }
+      const attempt = (retriesLeft: number, delayMs: number) => {
+        setDrafterSaveState({ kind: "saving" });
+        persistDraftDoc(id, markdown, json, drafterProject)
+          .then(() => {
+            if (seq !== drafterSaveSeq.current) return; // a newer write owns the state
+            clearDrafterShadow(id);
+            setDrafterSaveState({ kind: "saved", savedAt: Date.now() });
+          })
+          .catch(() => {
+            if (seq !== drafterSaveSeq.current) return;
+            setDrafterSaveState({ kind: "retrying" });
+            if (retriesLeft <= 0) return; // bounded: the shadow still holds the words
+            drafterRetryTimer.current = window.setTimeout(() => {
+              drafterRetryTimer.current = null;
+              attempt(retriesLeft - 1, Math.min(delayMs * 2, 15_000));
+            }, delayMs);
+          });
+      };
+      attempt(5, 1000);
     },
     [drafterDraftId, drafterProject],
   );
@@ -796,6 +974,15 @@ function App() {
     false,
   );
   const [tourOpen, setTourOpen] = useState(false);
+  // ⌘K command palette (A5). Open state only — the registry is the
+  // paletteCommands memo below, and both wired globals (⌘K, ⌘⇧0) are
+  // matched by lib/keymap so the combos live in one place.
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  // Doors-open boot (A2): main.tsx armed the closed frame before React
+  // mounted; this parts the plates after the reveal and reports when the
+  // shell has settled. A first-ever launch (tour not yet run) holds the
+  // closed frame one breath longer before opening.
+  const { bootAnimating, bootSettled } = useBootChoreography(!onboardingDone);
   const clampZoom = (z: number) =>
     Math.min(1.6, Math.max(0.8, Math.round(z * 100) / 100));
   const zoomIn = () => setDocZoom((z) => clampZoom(z + 0.1));
@@ -827,6 +1014,12 @@ function App() {
   const zoomCtrlW = useRef(DOC_CTRL_ROW_W);
   // Cmd/Ctrl +/-/0 zoom the document. These combos aren't text input, so we
   // claim them globally (and preventDefault the browser's own page zoom).
+  // ⌘⇧0 snap-back (A3) and ⌘K palette (A5) are matched by lib/keymap — the
+  // snap-back matcher uses e.code because Shift rewrites e.key ("0" → ")")
+  // on US layouts; the shift guard on plain "0" keeps layouts where it
+  // doesn't from firing both. Through a ref: snapBack is defined below the
+  // terminal state it writes, and the listener mounts once.
+  const snapBackRef = useRef<() => void>(() => {});
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey)) return;
@@ -836,9 +1029,15 @@ function App() {
       } else if (e.key === "-" || e.key === "_") {
         e.preventDefault();
         setDocZoom((z) => Math.max(0.8, Math.round((z - 0.1) * 100) / 100));
-      } else if (e.key === "0") {
+      } else if (isSnapBackKey(e)) {
+        e.preventDefault();
+        snapBackRef.current();
+      } else if (e.key === "0" && !e.shiftKey) {
         e.preventDefault();
         setDocZoom(1);
+      } else if (isPaletteKey(e)) {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -888,6 +1087,56 @@ function App() {
     "redline.terminalPane.fullscreen",
     false,
   );
+  // A3 snap-back: one gesture returns the shell to its canonical resting
+  // arrangement — the shape a fresh install's doors open onto. Values go
+  // through the proven persisted setters, so persistence and the
+  // state→geometry pass follow for free; `data-rl-snapback` rides <html>
+  // for ~320ms so the discrete jumps travel as one short fold (no resize
+  // session is open, so the data-rl-resizing suppression can't fight it;
+  // reduced motion never sets the attribute). Voice is deliberately
+  // untouched — voice is first-class, and snap-back must never kill an
+  // active discussion. A hand-edited workspace.json `layout` block adjusts
+  // the target (GUI–file duality; see workspaceLayout).
+  const snapBackTimer = useRef(0);
+  const snapBack = useCallback(() => {
+    const target = canonicalLayout(
+      window.innerWidth,
+      window.innerHeight,
+      workspaceLayout(workspace),
+    );
+    if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      const html = document.documentElement;
+      html.setAttribute("data-rl-snapback", "");
+      window.clearTimeout(snapBackTimer.current);
+      snapBackTimer.current = window.setTimeout(
+        () => html.removeAttribute("data-rl-snapback"),
+        SNAPBACK_SETTLE_MS,
+      );
+    }
+    setSidebarWidth(target.sidebarWidth);
+    setSidebarCollapsed(false);
+    setPaneWidth(target.paneWidth);
+    setPaneCollapsed(false);
+    setPaneFullscreen(false);
+    setTermHeight(target.termHeight);
+    setTermCollapsed(target.termCollapsed);
+    setTermFullscreen(false);
+    setDocPinned(false);
+    selectSurface(target.surface);
+  }, [
+    workspace,
+    selectSurface,
+    setSidebarWidth,
+    setSidebarCollapsed,
+    setPaneWidth,
+    setPaneCollapsed,
+    setPaneFullscreen,
+    setTermHeight,
+    setTermCollapsed,
+    setTermFullscreen,
+    setDocPinned,
+  ]);
+  snapBackRef.current = snapBack;
   const [termTabCount, setTermTabCount] = useState(1);
   const [termHasUnseen, setTermHasUnseen] = useState(false);
   const [activeTermId, setActiveTermId] = useState<string | null>(null);
@@ -1321,7 +1570,7 @@ function App() {
       setGeom(
         sidebarCurtainDivRef.current,
         "right",
-        `${-(l.sidebarOverlayPx + 6)}px`,
+        `${-(l.sidebarOverlayPx + SHELL_GUTTER)}px`,
       );
       // Fullscreen makes the clip `display: contents` — no box to size, and a
       // stale width left on it would be resurrected on the way out.
@@ -1338,7 +1587,7 @@ function App() {
       setGeom(
         paneCurtainDivRef.current,
         "left",
-        `${-(l.paneOverlayPx + 6)}px`,
+        `${-(l.paneOverlayPx + SHELL_GUTTER)}px`,
       );
       setGeom(
         termDockRef.current,
@@ -1891,42 +2140,39 @@ function App() {
   // Initial load: hook status + sessions
   useEffect(() => {
     (async () => {
-      try {
-        const status = await invoke<HookStatus>("get_hook_status");
-        setHookStatus(status);
-      } catch (err) {
-        console.error("get_hook_status failed", err);
-      }
-      try {
-        const skill = await invoke<SkillStatus>("get_skill_status");
-        setSkillStatus(skill);
-      } catch (err) {
-        console.error("get_skill_status failed", err);
-      }
-      try {
-        const m = await invoke<InterceptionMode>("get_interception_mode");
-        setMode(m);
-      } catch (err) {
-        console.error("get_interception_mode failed", err);
-      }
-      try {
-        // Authoritative mount-time check — beats racing the daemon-bind-failed
-        // event, which may fire before this listener is wired up.
-        const bound = await invoke<boolean>("get_daemon_status");
-        setDaemonBound(bound);
-      } catch (err) {
-        console.error("get_daemon_status failed", err);
-      }
+      // The boot lookups are independent of one another AND of the session
+      // list, so they all fly concurrently — the doors animate over this
+      // stretch, and every serial IPC here used to delay first content.
+      const statuses = Promise.all([
+        invoke<HookStatus>("get_hook_status").then(setHookStatus, (err) =>
+          console.error("get_hook_status failed", err),
+        ),
+        invoke<SkillStatus>("get_skill_status").then(setSkillStatus, (err) =>
+          console.error("get_skill_status failed", err),
+        ),
+        invoke<InterceptionMode>("get_interception_mode").then(
+          setMode,
+          (err) => console.error("get_interception_mode failed", err),
+        ),
+        // Authoritative mount-time check — beats racing the
+        // daemon-bind-failed event, which may fire before this listener is
+        // wired up.
+        invoke<boolean>("get_daemon_status").then(setDaemonBound, (err) =>
+          console.error("get_daemon_status failed", err),
+        ),
+      ]);
       // The workspace manifest gates what mounts, so it loads with the other
-      // boot lookups. Missing/malformed file = defaults = today's stock UI.
-      let ws = defaultWorkspace();
-      try {
-        ws = parseWorkspace(await invoke<string | null>("get_workspace"));
-        setWorkspace(ws);
-      } catch {
-        /* command unavailable (tests / web) — defaults apply */
-      }
-      const list = await refreshSummaries();
+      // boot lookups. Missing/malformed file = defaults = today's stock UI
+      // (and so does an unavailable command — tests / web).
+      const [ws, list] = await Promise.all([
+        invoke<string | null>("get_workspace").then(
+          (text) => parseWorkspace(text),
+          () => defaultWorkspace(),
+        ),
+        refreshSummaries(),
+        statuses,
+      ]);
+      setWorkspace(ws);
       const first = list[0]?.sessionId ?? null;
       setActiveId(first);
       await loadSession(first);
@@ -2398,6 +2644,7 @@ function App() {
     drafterOpen,
     reviewOpen,
     serversOpen,
+    memoryOpen,
     activeId,
     planTitle: activeSummary?.planTitle ?? null,
     planProject: activeSummary?.projectPath ?? null,
@@ -3313,24 +3560,42 @@ function App() {
     launchPromptDraft(markdown, project);
   };
 
-  // Seed the Prompt Drafter with agent-authored markdown (markdown → Tiptap doc)
-  // and pre-select the repo guessed from the plan text, so the drafter's picker
-  // already shows the right project when the user ships it with "Send to Claude
-  // Code". Shared by the mission "→ Drafter" and browser "Open in Drafter" paths.
+  // Seed the Prompt Drafter with agent-authored markdown and pre-select the
+  // repo guessed from the plan text, so the drafter's picker already shows the
+  // right project when the user ships it with "Send to Claude Code". Shared by
+  // the mission "→ Drafter" and browser "Open in Drafter" paths.
+  //
+  // Mints a real Bookshelf document and opens it BY ID. The old in-place
+  // `setDrafterDoc` seeding never changed `drafterDraftId`, so it never
+  // remounted the editor — it only appeared to work because the body happened
+  // to be unmounted when the surface was deselected, and with multiple open
+  // documents it breaks outright.
   const openDrafterWithMarkdown = async (markdown: string) => {
     if (!markdown.trim()) return;
+    let json: JSONContent;
     try {
       const { planMarkdownToDoc } = await import("./editor/markdown/parser");
-      setDrafterDoc(planMarkdownToDoc(markdown).toJSON() as JSONContent);
+      json = planMarkdownToDoc(markdown).toJSON() as JSONContent;
     } catch {
       // Fall back to a single text block if the parser import/parse fails.
-      setDrafterDoc({
+      json = {
         type: "doc",
         content: [{ type: "paragraph", content: [{ type: "text", text: markdown }] }],
-      } as unknown as JSONContent);
+      } as unknown as JSONContent;
     }
     const guess = guessProjectForPlan(markdown, projectOptions);
     if (guess !== null) setDrafterProject(guess);
+    const project = guess ?? drafterProject;
+    try {
+      const id = await newDraft(null, undefined, project);
+      await persistDraftDoc(id, markdown, json, project);
+      setDrafterShelfOpen(false);
+      setDrafterDraftId(id); // the load effect reads it back and remounts
+    } catch {
+      // The mint failed (DB unavailable?) — fall back to seeding the open
+      // document in place so the content is at least on screen.
+      setDrafterDoc(json);
+    }
     selectSurface("drafter");
   };
 
@@ -3642,7 +3907,10 @@ function App() {
     (!hookStatus.installed ||
       !skillStatus.installed ||
       setupPhase === "done");
-  const tourActive = tourOpen || (!onboardingDone && !setupModalActive);
+  // First-run auto-start waits for the doors to settle — the tour's spotlight
+  // must never overlay plates that are still mid-flight.
+  const tourActive =
+    tourOpen || (!onboardingDone && !setupModalActive && bootSettled);
   const browserOverlayActive =
     showReadme ||
     showFeedback ||
@@ -3658,7 +3926,10 @@ function App() {
   // A curtained side pane paints over the doc column in React DOM — which the
   // native webview would ignore (it always paints above). Hide the browser
   // while any curtain is up, exactly like under modals and drags.
+  // And hidden while the boot doors are mid-flight: the native webview
+  // ignores DOM transforms and would paint over the moving plates.
   const browserVisible =
+    !bootAnimating &&
     !browserOverlayActive &&
     !sidebarDragging &&
     !isDragging &&
@@ -3666,6 +3937,133 @@ function App() {
     !splitDragging &&
     !liveFlags.curtain &&
     openMenuCount === 0;
+
+  // A4 — the landing's type-to-start handoff. Typing on the empty document
+  // plate opens a fresh Drafter document with the keystrokes carried through:
+  // from the first printable key until the editor takes focus, keydowns
+  // buffer here (lib/landing.ts is the pure machine) and the drafter consumes
+  // the buffer atomically with its mount focus, so the handoff is lossless.
+  // The fresh UUID rides the drafter's established blank-document path: the
+  // load effect finds no row, opens blank, and the first persisted keystroke
+  // upserts it (drafter_set_doc). Eligibility mirrors the JSX branch that
+  // renders LandingPage, minus every surface that owns keys — a modal up, a
+  // focused input, or the terminal (isEditableTarget catches xterm's hidden
+  // textarea) must never have its typing hijacked into a draft.
+  const landingTypeEligible =
+    mainSurface === "document" &&
+    !loading &&
+    !activeId &&
+    sidebarTab.kind === "sessions" &&
+    !joinedActive &&
+    !browserOverlayActive &&
+    !howItWorksOpen &&
+    !sendConfirm;
+  const landingTypeEligibleRef = useRef(false);
+  landingTypeEligibleRef.current = landingTypeEligible;
+  const landingPhaseRef = useRef<LandingPhase>("idle");
+  const landingSeedRef = useRef("");
+  // Shared by the caret line's click (no seed) and the type-to-start path.
+  const startDraftFromLanding = useCallback(() => {
+    setDrafterShelfOpen(false);
+    setDrafterDraftId(crypto.randomUUID());
+    selectSurfaceRef.current("drafter");
+  }, [setDrafterDraftId]);
+  // Handed to PromptDrafter; consuming resets the handoff, so a later click
+  // away from the editor can't revive a stale buffer.
+  const consumeLandingSeed = useCallback(() => {
+    landingPhaseRef.current = "idle";
+    const seed = landingSeedRef.current;
+    landingSeedRef.current = "";
+    return seed;
+  }, []);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const phase = landingPhaseRef.current;
+      if (phase === "idle" && !landingTypeEligibleRef.current) return;
+      const action = seedStep(phase, {
+        printable: isSeedKey(e),
+        erase: e.key === "Backspace",
+        editable: isEditableTarget(e.target as HTMLElement | null),
+      });
+      if (action === "ignore") return;
+      if (action === "release") {
+        // The editor owns input now — never swallow its keystroke.
+        landingPhaseRef.current = "idle";
+      } else {
+        e.preventDefault();
+      }
+      if (action === "start") landingPhaseRef.current = "handoff";
+      landingSeedRef.current = applySeed(landingSeedRef.current, action, e.key);
+      if (action === "start") startDraftFromLanding();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [startDraftFromLanding]);
+
+  // The ⌘K registry (A5): assembled from the same closed lists the header
+  // renders — headerSurfaceList (manifest-hidden surfaces never appear),
+  // THEMES/FONTS, the live session summaries — over the app's proven
+  // setters. lib/commands.ts stays pure; every closure lives here.
+  // onThemeChange/onFontChange are redefined per render, so they're
+  // deliberately not deps — the values they close over that matter to a
+  // *later* click (theme, font) are.
+  const paletteCommands = useMemo(
+    () =>
+      buildCommands({
+        surfaces: headerSurfaceList,
+        currentSurface: mainSurface,
+        sessions: summaries.map((s) => ({
+          id: s.sessionId,
+          title: s.planTitle || s.projectName || "Untitled plan",
+          project: s.projectName,
+        })),
+        themes: THEMES.map(({ name, label }) => ({ name, label })),
+        currentTheme: theme,
+        fonts: FONTS.map(({ name, label }) => ({ name, label })),
+        currentFont: font,
+        actions: {
+          draftNewPlan: startDraftFromLanding,
+          openSession: (id) => {
+            selectSessions();
+            setActiveId(id);
+            selectSurfaceRef.current("document");
+          },
+          // Ids come back from the deps' own closed list, so the lookup both
+          // validates and re-types them — no cast, nothing free-typed.
+          selectSurface: (id) => {
+            const d = headerSurfaceList.find((s) => s.id === id);
+            if (d) selectSurfaceRef.current(d.id);
+          },
+          snapBack,
+          toggleSidebar: () => setSidebarCollapsed((c) => !c),
+          toggleDiscussion: () => setPaneCollapsed((c) => !c),
+          toggleTerminal: () => setTermCollapsed((c) => !c),
+          setTheme: (name) => {
+            if (isThemeName(name)) onThemeChange(name);
+          },
+          setFont: (name) => {
+            if (isFontName(name)) onFontChange(name);
+          },
+          zoomReset: () => setDocZoom(1),
+          replayTour: () => setTourOpen(true),
+        },
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      headerSurfaceList,
+      mainSurface,
+      summaries,
+      theme,
+      font,
+      startDraftFromLanding,
+      snapBack,
+      selectSessions,
+      setSidebarCollapsed,
+      setPaneCollapsed,
+      setTermCollapsed,
+      setDocZoom,
+    ],
+  );
 
   return (
     <MenuOverlayProvider value={adjustMenuOverlay}>
@@ -3760,7 +4158,8 @@ function App() {
           setSplitRatio(0.5);
           setDocPinned((v) => !v);
         }}
-        onOpenMemory={() => setMemoryInspectorOpen(true)}
+        onOpenMemory={() => selectSurface("memory")}
+        onOpenMemoryInspector={() => setMemoryInspectorOpen(true)}
         collabActive={!!collabShare || !!joinedRoom}
         canInvite={sessionReady && !!latest}
         onInvite={() => setInviteOpen(true)}
@@ -3774,6 +4173,8 @@ function App() {
           setSplitRatio(0.5);
           setSplitVertical((v) => !v);
         }}
+        onSnapBack={snapBack}
+        onOpenPalette={() => setPaletteOpen(true)}
       />
       {decisionWindow && (
         <DecisionWindowBanner
@@ -3802,7 +4203,14 @@ function App() {
         />
       ) : null}
       </ErrorBoundary>
-      <main className="relative flex-1 overflow-hidden flex flex-col">
+      {/* The window-edge hull ring: constant padding, never part of drag math
+          (`computePaneLayout` subtracts it from the row's available width).
+          Fullscreen takeovers (terminal, discussion) are absolute inset-0
+          against this element, so they cover the ring — plates only. */}
+      <main
+        className="relative flex-1 overflow-hidden flex flex-col"
+        style={{ padding: `${SHELL_EDGE}px` }}
+      >
         <ErrorBoundary
           region="content area"
           fallback={(err, reset) => (
@@ -3822,7 +4230,7 @@ function App() {
         // aside spill right OVER the doc, painted above it.
         <div
           ref={sidebarClipRef}
-          className="shrink-0 rl-sidebar-clip"
+          className="shrink-0 rl-sidebar-clip rl-plate"
           data-rl-pane
           // No `width` here on purpose: `applyLiveLayout` owns it, so a drag
           // frame never has to go through React and React never clobbers a
@@ -3923,7 +4331,7 @@ function App() {
         />
         <div
           ref={docColumnRef}
-          className="flex-1 overflow-hidden flex relative rl-doc-column"
+          className="flex-1 overflow-hidden flex relative rl-doc-column rl-plate"
           style={{ background: "var(--color-paper)" }}
         >
           {/* The document region: everything the doc column used to hold
@@ -4201,17 +4609,15 @@ function App() {
                   <>
                     The session owner removed your invite — the live room is
                     no longer reachable from this instance.{" "}
-                    <button
-                      type="button"
+                    <Button
+                      variant="ghost"
                       onClick={leaveJoined}
+                      label="Leave the session"
                       style={{
+                        display: "inline-flex",
                         textDecoration: "underline",
-                        color: "var(--color-accent)",
-                        cursor: "pointer",
                       }}
-                    >
-                      Leave the session
-                    </button>
+                    />
                   </>
                 }
               />
@@ -4221,10 +4627,15 @@ function App() {
                 body="Select a file from the tree to view it here."
               />
             ) : loading || (activeId && !sessionReady) ? (
-              <EmptyState
-                title="Loading…"
-                body="Fetching the latest review session."
-              />
+              // Mid-choreography the plate stays quietly blank — a "Loading…"
+              // flash inside the parting doors reads as a glitch, and the
+              // plate's own fade already covers the wait.
+              bootAnimating ? null : (
+                <EmptyState
+                  title="Loading…"
+                  body="Fetching the latest review session."
+                />
+              )
             ) : sessionReady ? (
               isViewingHistorical && viewedRevision ? (
                 <HistoricalRevisionView
@@ -4263,34 +4674,17 @@ function App() {
                 </Suspense>
               )
             ) : (
-              <EmptyState
-                title="No plans yet"
-                body={
-                  <>
-                    Open any project in a terminal, run{" "}
-                    <code className="font-mono">claude</code>, and press{" "}
-                    <code className="font-mono">shift+tab</code> to switch into
-                    plan mode. When Claude finishes planning, the plan opens
-                    here for review.
-                    <br />
-                    <button
-                      type="button"
-                      onClick={() => setHowItWorksOpen(true)}
-                      style={{
-                        marginTop: "12px",
-                        fontSize: "13px",
-                        color: "var(--color-info)",
-                        background: "transparent",
-                        border: "none",
-                        padding: 0,
-                        cursor: "pointer",
-                        textDecoration: "underline",
-                      }}
-                    >
-                      New here? See how Redline works →
-                    </button>
-                  </>
-                }
+              // A4 — the landing: a live first page in place of the old
+              // instruction card. The caret line mints a fresh Drafter
+              // document; typing anywhere does the same with the keystrokes
+              // carried through (the landing listener above). The terminal
+              // path the card used to describe still works — the how-it-works
+              // card covers it.
+              <LandingPage
+                visible={bootSettled && !loading}
+                sessionsExist={summaries.length > 0}
+                onStart={startDraftFromLanding}
+                onHowItWorks={() => setHowItWorksOpen(true)}
               />
             )}
           </article>
@@ -4324,11 +4718,13 @@ function App() {
             const drafterBody = drafterShelfOpen ? (
               <BookshelfView
                 openDraftId={drafterDraftId}
+                openIds={drafterOpenIds}
                 defaultProject={drafterProject}
                 onOpen={(id) => {
                   setDrafterDraftId(id);
                   setDrafterShelfOpen(false);
                 }}
+                onCloseDoc={closeDrafterDoc}
                 onClose={() => setDrafterShelfOpen(false)}
               />
             ) : !drafterDocReady ? (
@@ -4337,28 +4733,51 @@ function App() {
                 body="Reading it from your Bookshelf."
               />
             ) : (
-              <PromptDrafter
-                // Remount on the open document so TipTap picks up its content:
-                // `content` is captured once, at editor creation.
-                key={drafterDraftId ?? ""}
-                draftId={drafterDraftId ?? ""}
-                doc={drafterDoc}
-                onPersist={drafterPersist}
-                projectOptions={projectOptions}
-                selectedProject={drafterProject}
-                onSelectedProjectChange={setDrafterProject}
-                onLaunch={launchPromptDraft}
-                // The floating Discuss pill inside the drafter pane opens the
-                // draft's voice panel — the one discussion surface (talk or
-                // type). Hidden while the panel is up.
-                onDiscuss={
-                  voiceEnabled && drafterDraftId && !drafterVoiceOpen
-                    ? () => setDrafterVoiceOpen(true)
-                    : null
+              // Lazy chunk; fallback matches the doc-loading beat above so a
+              // first open never flashes an empty pane.
+              <Suspense
+                fallback={
+                  <EmptyState
+                    title="Opening the document…"
+                    body="Reading it from your Bookshelf."
+                  />
                 }
-                onOpenShelf={() => setDrafterShelfOpen(true)}
-                sourceCount={drafterSourceCount}
-              />
+              >
+                <PromptDrafter
+                  // Remount on the open document so TipTap picks up its content:
+                  // `content` is captured once, at editor creation.
+                  key={drafterDraftId ?? ""}
+                  draftId={drafterDraftId ?? ""}
+                  doc={drafterDoc}
+                  onPersist={drafterPersist}
+                  projectOptions={projectOptions}
+                  selectedProject={drafterProject}
+                  onSelectedProjectChange={setDrafterProject}
+                  onLaunch={launchPromptDraft}
+                  // The floating Discuss pill inside the drafter pane opens the
+                  // draft's voice panel — the one discussion surface (talk or
+                  // type). Hidden while the panel is up.
+                  onDiscuss={
+                    voiceEnabled && drafterDraftId && !drafterVoiceOpen
+                      ? () => setDrafterVoiceOpen(true)
+                      : null
+                  }
+                  onOpenShelf={() => setDrafterShelfOpen(true)}
+                  sourceCount={drafterSourceCount}
+                  saveState={drafterSaveState}
+                  consumeSeed={consumeLandingSeed}
+                  documentsMenu={
+                    <DocumentsMenu
+                      openIds={drafterOpenIds}
+                      activeId={drafterDraftId}
+                      defaultProject={drafterProject}
+                      side="above"
+                      onActivate={setDrafterDraftId}
+                      onCloseDoc={closeDrafterDoc}
+                    />
+                  }
+                />
+              </Suspense>
             );
             const reviewBody = (
               <ReviewPanel
@@ -4379,6 +4798,12 @@ function App() {
                 onThumbCaptured={persistDevServerThumb}
               />
             );
+            const memoryBody = (
+              <MemorySurface
+                activeSessionId={session?.sessionId ?? null}
+                activeSessionName={session?.projectName ?? null}
+              />
+            );
             // Exactly one surface owns the pane; a non-document surface splits
             // against the document only while the doc pin is on, with the exact
             // same SplitPane (orientation toggle, ratio and fold-to-edge
@@ -4392,7 +4817,9 @@ function App() {
                     ? reviewBody
                     : mainSurface === "servers"
                       ? serversBody
-                      : null;
+                      : mainSurface === "memory"
+                        ? memoryBody
+                        : null;
             if (secondaryBody && docPinned)
               return (
                 <SplitPane
@@ -4508,6 +4935,8 @@ function App() {
                 onToggle={closeVoicePanel}
                 onPointerDown={startVoiceDrag}
                 hideChevron={latchActive}
+                // Runs inside the document plate — no hull to show through.
+                hairline
               />
               {/* Width is owned by the resize hook + the adopt effect, never
                   rendered from here. `data-rl-pane` lets the app-wide resizing
@@ -4517,31 +4946,35 @@ function App() {
                 data-rl-pane
                 className="shrink-0 flex overflow-hidden"
               >
-                {planVoiceOpen ? (
-                  <VoicePanel
-                    // Remount cleanly if the active session changes (a revision
-                    // arriving calls setActiveId) instead of mutating sessionId
-                    // under a live warm session.
-                    key={activeId ?? ""}
-                    sessionId={activeId ?? ""}
-                    markdown={latest?.rawPlanMarkdown ?? ""}
-                    sections={sections}
-                    onActivityChange={setDiscussionLive}
-                    onClose={() => setVoiceOpen(false)}
-                  />
-                ) : (
-                  <VoicePanel
-                    // Keyed `drafter:<draft_id>` — the backend derives the kind
-                    // from the key shape — and primed with the draft's markdown
-                    // mirror.
-                    key={`drafter:${drafterDraftId ?? ""}`}
-                    sessionId={`drafter:${drafterDraftId ?? ""}`}
-                    markdown={drafterMarkdown}
-                    sections={drafterSections}
-                    cwd={drafterProject}
-                    onClose={() => setDrafterVoiceOpen(false)}
-                  />
-                )}
+                {/* Lazy chunk: the dock renders empty for the load beat, then
+                    the panel mounts — width is ref-owned, so nothing shifts. */}
+                <Suspense fallback={null}>
+                  {planVoiceOpen ? (
+                    <VoicePanel
+                      // Remount cleanly if the active session changes (a revision
+                      // arriving calls setActiveId) instead of mutating sessionId
+                      // under a live warm session.
+                      key={activeId ?? ""}
+                      sessionId={activeId ?? ""}
+                      markdown={latest?.rawPlanMarkdown ?? ""}
+                      sections={sections}
+                      onActivityChange={setDiscussionLive}
+                      onClose={() => setVoiceOpen(false)}
+                    />
+                  ) : (
+                    <VoicePanel
+                      // Keyed `drafter:<draft_id>` — the backend derives the kind
+                      // from the key shape — and primed with the draft's markdown
+                      // mirror.
+                      key={`drafter:${drafterDraftId ?? ""}`}
+                      sessionId={`drafter:${drafterDraftId ?? ""}`}
+                      markdown={drafterMarkdown}
+                      sections={drafterSections}
+                      cwd={drafterProject}
+                      onClose={() => setDrafterVoiceOpen(false)}
+                    />
+                  )}
+                </Suspense>
               </div>
             </>
           )}
@@ -4625,7 +5058,7 @@ function App() {
         // stays pinned at min and is revealed from the right.
         <div
           ref={paneClipRef}
-          className={paneFullscreen ? undefined : "rl-pane-clip"}
+          className={paneFullscreen ? undefined : "rl-pane-clip rl-plate"}
           data-rl-pane={paneFullscreen ? undefined : ""}
           style={
             paneFullscreen
@@ -4671,12 +5104,14 @@ function App() {
           className={
             paneFullscreen
               ? "absolute inset-0 z-30 overflow-y-auto rl-discussion"
-              : "overflow-y-auto border-l shrink-0 rl-discussion rl-pane-aside"
+              : "overflow-y-auto shrink-0 rl-discussion rl-pane-aside"
           }
           style={
             {
+              // No border of its own: docked, the pane-clip's plate chrome owns
+              // the edge; curtained, the CSS curtain rules dress this aside as
+              // the plate (an inline borderColor here would override them).
               background: "var(--color-paper)",
-              borderColor: "var(--color-rule)",
               // Curtain state (read as painted above the doc) is a CSS rule on
               // `.rl-pane-clip[data-rl-curtain] .rl-pane-aside` — see
               // styles.css. Width is owned by `applyLiveLayout`; fullscreen
@@ -5104,7 +5539,10 @@ function App() {
           className={
             termFullscreen
               ? "absolute inset-0 z-30"
-              : "relative shrink-0 overflow-hidden rl-term-dock"
+              : // Collapsed, the dock folds to height 0 — the plate class must
+                // go with it, or its top/bottom hairlines survive the fold as
+                // a 2px rounded sliver across the hull.
+                `relative shrink-0 overflow-hidden rl-term-dock${termCollapsed ? "" : " rl-plate"}`
           }
           data-rl-pane={termFullscreen ? undefined : ""}
           // Height is owned by `applyLiveLayout` (it folds in the collapsed
@@ -5265,27 +5703,29 @@ function App() {
         />
       )}
       {shareOpen && session && latest && (
-        <ShareSnapshotDialog
-          sessionId={session.sessionId}
-          version={latest.versionNumber}
-          ownerName={relayDefaults.displayName}
-          currentSections={latest.sections}
-          currentMarkdown={latest.rawPlanMarkdown}
-          addComment={addEditorComment}
-          onNavigateToReturn={(ret) => {
-            // Land where the comments actually live: the revision that was
-            // current at import time (viewed as latest when they coincide),
-            // with the first imported comment scrolled + flashed.
-            setShareOpen(false);
-            setViewedVersionNumber(
-              ret.landedVersion === latest.versionNumber
-                ? null
-                : ret.landedVersion,
-            );
-            if (ret.commentIds[0]) focusComment(ret.commentIds[0]);
-          }}
-          onClose={() => setShareOpen(false)}
-        />
+        <Suspense fallback={null}>
+          <ShareSnapshotDialog
+            sessionId={session.sessionId}
+            version={latest.versionNumber}
+            ownerName={relayDefaults.displayName}
+            currentSections={latest.sections}
+            currentMarkdown={latest.rawPlanMarkdown}
+            addComment={addEditorComment}
+            onNavigateToReturn={(ret) => {
+              // Land where the comments actually live: the revision that was
+              // current at import time (viewed as latest when they coincide),
+              // with the first imported comment scrolled + flashed.
+              setShareOpen(false);
+              setViewedVersionNumber(
+                ret.landedVersion === latest.versionNumber
+                  ? null
+                  : ret.landedVersion,
+              );
+              if (ret.commentIds[0]) focusComment(ret.commentIds[0]);
+            }}
+            onClose={() => setShareOpen(false)}
+          />
+        </Suspense>
       )}
       {memoryInspectorOpen && (
         <MemoryInspector
@@ -5320,6 +5760,13 @@ function App() {
       {howItWorksOpen && (
         <HowItWorksCard onClose={() => setHowItWorksOpen(false)} />
       )}
+      {/* ⌘K palette. Registers with the menu-overlay contract while open, so
+          the native browser webview hides beneath it. */}
+      <CommandPalette
+        open={paletteOpen}
+        commands={paletteCommands}
+        onClose={() => setPaletteOpen(false)}
+      />
       {/* Onboarding tour: replay from the menu always, or auto-run once on first
           launch — but only after the hook/skill setup modal is out of the way,
           so the two never overlap. */}
@@ -5330,7 +5777,8 @@ function App() {
           (!hookStatus.installed ||
             !skillStatus.installed ||
             setupPhase === "done");
-        const show = tourOpen || (!onboardingDone && !setupActive);
+        const show =
+          tourOpen || (!onboardingDone && !setupActive && bootSettled);
         if (!show) return null;
         return (
           <OnboardingTour
@@ -5480,22 +5928,6 @@ async function isUninterestingDir(dir: string): Promise<boolean> {
   if (d === "/") return true;
   const home = await getHomeDir();
   return home != null && d === home;
-}
-
-function EmptyState({ title, body }: { title: string; body: ReactNode }) {
-  return (
-    <div className="font-sans" style={{ color: "var(--color-ink-muted)" }}>
-      <div
-        className="font-serif font-semibold mb-2"
-        style={{ color: "var(--color-ink)", fontSize: "22px" }}
-      >
-        {title}
-      </div>
-      <p style={{ fontSize: "14px", lineHeight: 1.6, maxWidth: "60ch" }}>
-        {body}
-      </p>
-    </div>
-  );
 }
 
 export default App;

@@ -17,18 +17,20 @@
 //! (curl bridge to the localhost daemon so it can read `/v1/context/overview`,
 //! `/v1/memory/*`, `/v1/mission/*` for detail), MCP stripped.
 //!
-//! # Status: VACANT, not dead — the repurposing spec
+//! # Status: OCCUPIED — the strip exists (Second Brain P6)
 //!
-//! This module has no caller in `src/` today. `LibrarianCard.tsx` and
-//! `lib/librarian.ts` went when the Librarian dissolved into `keeper.rs`; the
-//! surviving traces are a past-tense comment in `MemoryInspector.tsx` and a seat
-//! row in `AgentSeats.tsx`. Commit `9827088` added the Librarian and collapsed
-//! the Polis panes in the same breath, so its checklist UI was never built.
-//!
-//! **Do not delete it.** What the dissolution vacated is a *role*, and the role
-//! is worth more now than it was then, because there are far more surfaces to be
-//! incoherent across. Keeping the module also means the Shipwright inherited a
-//! working spawn/parse template instead of a deleted one — which it did.
+//! The original `LibrarianCard.tsx`/`lib/librarian.ts` went when the Librarian
+//! dissolved into `keeper.rs` (commit `9827088` added the agent and collapsed
+//! the Polis panes in the same breath, so its checklist UI was never built),
+//! and this module sat vacant until Memory-as-a-Second-Brain P6 gave it the
+//! **Librarian attention strip** on the Memory surface's Health tab
+//! (`LibrarianStrip` in `MemorySurface.tsx`, pure layer in
+//! `src/lib/librarian.ts`): one Survey click runs `librarian_agent`, the
+//! ranked checklist renders in place, and the last run persists locally. The
+//! vacancy note argued the *role* was worth keeping because there were ever
+//! more surfaces to be incoherent across — that is the role the strip renders.
+//! Keeping the module through the vacancy also meant the Shipwright inherited
+//! a working spawn/parse template instead of a deleted one — which it did.
 //!
 //! ## The three roles, once the Shipwright lands
 //!

@@ -29,6 +29,9 @@ const draft = (
   updatedAt: 0,
   sourceCount: 0,
   hasDoc: true,
+  isTemplate: false,
+  openCount: 0,
+  lastOpenedAt: null,
   ...over,
 });
 
@@ -70,6 +73,22 @@ describe("draftsInFolder", () => {
     expect(draftsInFolder(drafts, "f1").map((d) => d.draftId)).toEqual([
       "d2",
       "d3",
+    ]);
+  });
+
+  it("sorts templates ahead of ordinary documents, keeping recency within", () => {
+    // Backend order is updated_at DESC; ★ rises without reshuffling the rest.
+    const drafts = [
+      draft("recent", "f1"),
+      draft("tpl-b", "f1", { isTemplate: true }),
+      draft("older", "f1"),
+      draft("tpl-a", "f1", { isTemplate: true }),
+    ];
+    expect(draftsInFolder(drafts, "f1").map((d) => d.draftId)).toEqual([
+      "tpl-b",
+      "tpl-a",
+      "recent",
+      "older",
     ]);
   });
 });

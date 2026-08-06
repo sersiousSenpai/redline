@@ -494,6 +494,7 @@ pub async fn draft_chat_send(
                 thread_id: draft_id.clone(),
                 parent_session_id: None,
             }),
+            crate::seat::model_for("drafter"),
         );
     } else {
         crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
