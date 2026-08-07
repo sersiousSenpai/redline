@@ -1294,7 +1294,9 @@ mod tests {
     /// unknown option with empty stdout and a non-zero status, and every
     /// downstream parser would cheerfully return nothing — a permanently empty
     /// dashboard with no error anywhere. So assert on the SHAPE of a live scan,
-    /// never on what happens to be running.
+    /// never on what happens to be running — and for the "flags stopped
+    /// matching" case, plant a listener of our own rather than assume the box
+    /// has one (a bare CI runner has none).
     #[test]
     fn a_live_scan_runs_the_real_commands_and_returns_a_coherent_shape() {
         if std::process::Command::new("lsof").arg("-v").output().is_err() {
@@ -1303,12 +1305,18 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let scan = scan_with(&db, std::process::id()).expect("a live scan must not error");
 
-        // Something on a dev machine is always listening (launchd, at minimum),
-        // so a completely empty sweep means the flags stopped matching.
+        // A wrong lsof flag means empty stdout with a non-zero status, which
+        // run_capture still surfaces as Ok("") — an invisibly empty dashboard.
+        // Hold a loopback socket and sweep WITHOUT excluding this process: a
+        // correct invocation must see at least the listener we planted.
+        let planted = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let seeded = scan_with(&Database::open_in_memory().unwrap(), u32::MAX)
+            .expect("a live scan must not error");
         assert!(
-            !scan.running.is_empty() || !scan.others.is_empty(),
-            "no listeners at all — the lsof invocation is probably wrong"
+            !seeded.running.is_empty() || !seeded.others.is_empty(),
+            "a planted listener was invisible — the lsof invocation is probably wrong"
         );
+        drop(planted);
         assert!(scan.others.len() <= MAX_OTHERS);
         assert!(scan.recent.len() <= MAX_RECENT as usize);
 
