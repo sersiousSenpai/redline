@@ -46,6 +46,8 @@ mod mission;
 mod parser;
 #[cfg(test)]
 mod perf_guard;
+mod preflight;
+mod project;
 mod pty;
 mod push;
 mod queue;
@@ -2666,6 +2668,8 @@ async fn run_server(state: AppState) {
         .route("/v1/memory/tree", get(handle_memory_tree))
         .route("/v1/memory/node/:id", get(handle_memory_node))
         .route("/v1/memory/prompts", get(handle_memory_prompts))
+        // The batched read: one call in place of the tree→node→search walk.
+        .route("/v1/memory/answer-pack", get(handle_memory_answer_pack))
         .route("/v1/memory/proposals", post(handle_memory_proposals))
         // Context access (Phase 3): the Librarian agent's friction digest —
         // ground-truth counts/staleness (backlog, held proposals, stalled
@@ -4899,12 +4903,9 @@ fn build_node_view(
     let Some(node) = db.get_class_node(id).map_err(|e| e.to_string())? else {
         return Ok(None);
     };
-    let children: Vec<_> = db
-        .list_class_nodes()
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .filter(|n| n.parent_id.as_deref() == Some(id))
-        .collect();
+    // Children straight off the parent index — never "read every node, then
+    // filter"; the class table grows with the catalog.
+    let children = db.list_class_children(id).map_err(|e| e.to_string())?;
     let raw_links = db.list_class_links_for_node(id).map_err(|e| e.to_string())?;
     let ledger_seq = |l: &crate::classmem::ClassLink| -> Option<i64> {
         matches!(l.target_kind.as_str(), "prompt" | "decision" | "ledger")
@@ -4912,14 +4913,20 @@ fn build_node_view(
             .flatten()
     };
     let seqs: Vec<i64> = raw_links.iter().filter_map(&ledger_seq).collect();
+    // Two batched reads for the whole link set — the per-link `link_preview`
+    // took the connection mutex once per link, so a hundred-link node was a
+    // hundred round trips through the shared lock.
+    let labels = db.link_previews_for_seqs(&seqs).unwrap_or_default();
     let superseded = db.supersessions_for_seqs(&seqs).unwrap_or_default();
     let links: Vec<LinkView> = raw_links
         .into_iter()
         .map(|link| {
-            let label = db.link_preview(&link.target_kind, &link.target_id);
-            let superseded_by =
-                ledger_seq(&link).and_then(|seq| superseded.get(&seq).copied());
-            LinkView { link, label, superseded_by }
+            let seq = ledger_seq(&link);
+            LinkView {
+                label: seq.and_then(|s| labels.get(&s).cloned()),
+                superseded_by: seq.and_then(|s| superseded.get(&s).copied()),
+                link,
+            }
         })
         .collect();
     let observations = db
@@ -4949,6 +4956,41 @@ async fn handle_memory_node(
 }
 
 #[derive(Deserialize)]
+struct AnswerPackQ {
+    q: Option<String>,
+    node: Option<String>,
+    limit: Option<i64>,
+}
+
+/// `GET /v1/memory/answer-pack?q=&node=&limit=` — the retrieval agent's ONE
+/// call. Resolves the question to a class node (explicitly via `?node=`, else
+/// by best title match) and returns that node's subtree, links (labelled, with
+/// `supersededBy`) and observations, together with the user's matching notes,
+/// matching lake prompts and matching browsed pages.
+///
+/// It replaces a 5–7 turn walk, so it must never send the agent back into one:
+/// the lexical arms are populated from `?q=` regardless of whether a node
+/// resolved, and a stale `?node=` degrades to the best match instead of an
+/// empty answer. Read-only, byte-bounded.
+async fn handle_memory_answer_pack(
+    State(app_state): State<AppState>,
+    Query(q): Query<AnswerPackQ>,
+) -> axum::response::Response {
+    let db = app_state.store.database();
+    let limit = context::clamp_answer_pack_limit(q.limit);
+    // Assembly touches several tables under the DB lock — off the async
+    // executor's thread, like every other heavy bridge read.
+    let pack = tokio::task::spawn_blocking(move || {
+        context::build_answer_pack(&db, q.q.as_deref(), q.node.as_deref(), limit)
+    })
+    .await;
+    match pack {
+        Ok(pack) => Json(pack).into_response(),
+        Err(e) => browser_error_response(format!("answer-pack assembly failed: {e}")),
+    }
+}
+
+#[derive(Deserialize)]
 struct MemoryPromptsQ {
     since_seq: Option<i64>,
     limit: Option<i64>,
@@ -4965,7 +5007,17 @@ async fn handle_memory_prompts(
     let limit = q.limit.unwrap_or(200).clamp(1, classmem::MAX_DELTA_ITEMS as i64);
     let since = q.since_seq.unwrap_or(0).max(0);
     match db.list_lake_items_since(since, limit) {
-        Ok(items) => Json(serde_json::json!({ "items": items })).into_response(),
+        Ok(mut items) => {
+            // Byte-budget the response, the way `/v1/context/prompts` does.
+            // The item count was capped but the BYTES were not, and this
+            // route's body column is `COALESCE(p.body, be.text, un.text)` —
+            // `be.text` is a whole normalized page, so 400 browse items could
+            // serialize megabytes under the DB lock. The route is live on the
+            // MCP proxy, so a remote caller could ask for that at will.
+            let kept = context::budgeted_item_count(items.iter().map(|i| i.body.as_deref()));
+            items.truncate(kept);
+            Json(serde_json::json!({ "items": items })).into_response()
+        }
         Err(e) => browser_error_response(e.to_string()),
     }
 }
@@ -5082,7 +5134,7 @@ async fn handle_context_session_history(
 /// Brain plan deliberately overturned it). Read-only.
 async fn handle_context_stats(State(app_state): State<AppState>) -> axum::response::Response {
     let db = app_state.store.database();
-    Json(context::build_stats(&db)).into_response()
+    Json(context::build_stats_cached(&db)).into_response()
 }
 
 /// `GET /v1/surface/active` — where the user is in the app right now, mirrored
@@ -8683,7 +8735,7 @@ fn ledger_query(
 /// `GET /v1/context/stats`, one thin caller each.
 #[tauri::command(async)]
 fn context_stats(store: tauri::State<'_, SessionStore>) -> Result<context::ContextStats, String> {
-    Ok(context::build_stats(&store.database()))
+    Ok(context::build_stats_cached(&store.database()))
 }
 
 /// The Map tab's data: classes + sessions as nodes, the four declared edge
@@ -9589,7 +9641,12 @@ async fn classmem_organize(
 /// The one quiet surface's data source: everything the memory pill + inspector
 /// need in a single read. `live` is always true (the keeper is always running);
 /// `backlog` is un-organized ledger growth; `chainOk` is a live re-verify.
-#[tauri::command]
+///
+/// `(async)` and INCREMENTAL, both deliberately: this fires on a 60s poll and
+/// on every browse capture, and it used to re-hash the entire ledger chain on
+/// the WebView main thread — the exact shape `perf_guard.rs` exists to catch.
+/// The full chain walk still runs, on the 6h `ledger-backup` keeper watch.
+#[tauri::command(async)]
 fn memory_status(store: tauri::State<'_, SessionStore>) -> Result<serde_json::Value, String> {
     let db = store.database();
     let max_seq = db.max_ledger_seq().map_err(|e| e.to_string())?;
@@ -9599,7 +9656,9 @@ fn memory_status(store: tauri::State<'_, SessionStore>) -> Result<serde_json::Va
         Some(r) if r.status == "done" => (r.finished_at, r.summary),
         _ => (None, None),
     };
-    let chain = db.verify_ledger_chain().map_err(|e| e.to_string())?;
+    let chain = db
+        .verify_ledger_chain_incremental()
+        .map_err(|e| e.to_string())?;
     let (compacted, reclaimed, last_compaction_ts) =
         db.compaction_stats().map_err(|e| e.to_string())?;
     let pending_proposals = db
@@ -10270,6 +10329,8 @@ pub fn run() {
             attach_discussion,
             get_interception_mode,
             set_interception_mode,
+            preflight::preflight_status,
+            project::project_create,
             get_ui_prefs,
             set_ui_pref,
             get_agent_seats,

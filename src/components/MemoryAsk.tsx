@@ -2,6 +2,7 @@
 // Copyright 2026 Yusuf Al-Bazian
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 import type { MemChatMessage } from "../types";
 import type { ClassNode } from "../lib/classTree";
@@ -64,6 +65,25 @@ export function MemoryAsk({ onCite }: MemoryAskProps) {
       createdAt: Date.now(),
     }),
   });
+
+  // What the agent is retrieving right now. Retrieval takes most of a turn's
+  // wall clock, so without this the user watches a blank ticker through the
+  // part of the turn where the most is actually happening. Rides the same
+  // event channel as the deltas — no new polling.
+  const [retrieving, setRetrieving] = useState<string | null>(null);
+  useEffect(() => {
+    const un = listen<{ threadId: string; label: string }>("memchat-status", (e) => {
+      setRetrieving(e.payload.label);
+    });
+    return () => {
+      void un.then((f) => f());
+    };
+  }, []);
+  // The status belongs to one turn: clear it when the turn ends, and when the
+  // answer starts streaming (by then retrieval is done).
+  useEffect(() => {
+    if (status !== "streaming" || liveText) setRetrieving(null);
+  }, [status, liveText]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -225,7 +245,10 @@ export function MemoryAsk({ onCite }: MemoryAskProps) {
                 </div>
               </div>
             ) : (
-              <WorkingIndicator startedAt={startedAt ?? undefined} />
+              <WorkingIndicator
+                label={retrieving ?? "Thinking"}
+                startedAt={startedAt ?? undefined}
+              />
             ))}
         </div>
       </div>

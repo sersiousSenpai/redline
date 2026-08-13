@@ -42,6 +42,11 @@ interface SessionSidebarProps {
   unseenIds?: ReadonlySet<string>;
   /** Open the RunReport container for an orchestrated run (chip click). */
   onOpenRunReport?: (sessionId: string) => void;
+  /** Deselect every session so the document plate shows the front door.
+   *  This is the ONLY way back to it: boot auto-selects the most recent plan
+   *  and nothing else ever clears the selection, so without this row the
+   *  front door is unreachable for anyone who has ever reviewed a plan. */
+  onNewPlan?: () => void;
 }
 
 /** Chip palette for the orchestrated-run lifecycle. `stalled` warns; `landed`
@@ -94,6 +99,7 @@ function SessionSidebarBase({
   viewedVersionNumber,
   unseenIds,
   onOpenRunReport,
+  onNewPlan,
 }: SessionSidebarProps) {
   // Which sessions are expanded to show their revision tree. The active
   // session auto-expands so its history is visible the moment it's selected.
@@ -129,6 +135,35 @@ function SessionSidebarBase({
       className="flex-1 overflow-y-auto rl-thin-scroll-y"
       style={{ background: "var(--color-paper)" }}
     >
+      {/* The front door's entry point. It sits above the list rather than in
+          it because it isn't a session — it is where new ones come from. A
+          contextual row here, not a header button (the header is a closed set
+          of surfaces). Reads as selected when nothing else is, so "where am
+          I" stays answerable. */}
+      {onNewPlan && (
+        <button
+          type="button"
+          onClick={onNewPlan}
+          className="flex w-full items-center gap-2 px-3 py-2.5 border-b text-left"
+          style={{
+            borderColor: "var(--color-rule)",
+            background:
+              activeId === null ? "var(--color-anchor-bg)" : "transparent",
+            color:
+              activeId === null
+                ? "var(--color-anchor-text)"
+                : "var(--color-ink)",
+            fontSize: "12.5px",
+            fontWeight: 600,
+            cursor: "pointer",
+          }}
+        >
+          <span aria-hidden style={{ opacity: 0.7 }}>
+            ＋
+          </span>
+          Plan a build
+        </button>
+      )}
       {joined && (
         <>
           <div

@@ -423,12 +423,136 @@ pub fn classify_line(v: &Value) -> StreamLine {
     }
 }
 
+/// The tool calls carried by one parsed stream line, as `(name, input)`.
+///
+/// The complete call — name AND arguments — arrives on the `assistant` message
+/// line. The `stream_event` `content_block_start` for a tool_use fires earlier
+/// but with an empty `input` (the arguments stream in as `input_json_delta`
+/// afterwards), so it can say *that* a tool ran but never *which* URL, which is
+/// the only part worth showing a waiting user.
+pub fn tool_uses(v: &Value) -> Vec<(String, Value)> {
+    if v.get("type").and_then(Value::as_str) != Some("assistant") {
+        return Vec::new();
+    }
+    v.get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
+                .filter_map(|b| {
+                    let name = b.get("name").and_then(Value::as_str)?;
+                    Some((
+                        name.to_string(),
+                        b.get("input").cloned().unwrap_or(Value::Null),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A short, human phrase for a retrieval tool call — what to show a user who
+/// is otherwise watching a blank elapsed ticker until the first answer token.
+///
+/// Deliberately about the RECORD, not the plumbing: "searching the lake" is
+/// what the user recognizes; `Bash(curl -s http://127.0.0.1:7676/…)` is not.
+/// Anything unrecognized falls back to the bare tool name rather than a
+/// misleading guess.
+pub fn retrieval_status_label(name: &str, input: &Value) -> String {
+    // Every bridge read is a `curl` in a Bash call; the URL is the signal.
+    let text = input
+        .get("command")
+        .or_else(|| input.get("url"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let phrase = if text.contains("/v1/memory/answer-pack") {
+        "searching your memory…"
+    } else if text.contains("/v1/memory/tree") {
+        "reading the catalog…"
+    } else if text.contains("/v1/memory/node") {
+        "opening a class…"
+    } else if text.contains("/v1/context/browse/search") {
+        "searching pages…"
+    } else if text.contains("/v1/context/prompts") || text.contains("/v1/memory/prompts") {
+        "searching the lake…"
+    } else if text.contains("/v1/context/sessions") {
+        "reading a plan's history…"
+    } else if text.contains("/v1/context/threads") || text.contains("/v1/context/tree") {
+        "following a thread…"
+    } else if text.contains("/v1/context/stats") {
+        "counting the record…"
+    } else {
+        return match name {
+            "Skill" => "loading a skill…".to_string(),
+            "WebSearch" => "searching the web…".to_string(),
+            "WebFetch" => "fetching a page…".to_string(),
+            other => format!("{other}…"),
+        };
+    };
+    phrase.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn parse(line: &str) -> StreamLine {
         classify_line(&serde_json::from_str::<Value>(line).unwrap())
+    }
+
+    /// The label map is what a waiting user actually reads, so it is asserted
+    /// route by route.
+    #[test]
+    fn retrieval_labels_name_the_record_not_the_plumbing() {
+        let bash = |cmd: &str| serde_json::json!({ "command": cmd });
+        let cases = [
+            ("curl -s 'http://127.0.0.1:7676/v1/memory/answer-pack?q=loop'", "searching your memory…"),
+            ("curl -s http://127.0.0.1:7676/v1/memory/tree", "reading the catalog…"),
+            ("curl -s http://127.0.0.1:7676/v1/memory/node/root-loop", "opening a class…"),
+            ("curl -s 'http://127.0.0.1:7676/v1/context/prompts?q=x'", "searching the lake…"),
+            ("curl -s 'http://127.0.0.1:7676/v1/context/browse/search?q=x'", "searching pages…"),
+            ("curl -s http://127.0.0.1:7676/v1/context/stats", "counting the record…"),
+            ("curl -s http://127.0.0.1:7676/v1/context/sessions/s1/history", "reading a plan's history…"),
+        ];
+        for (cmd, want) in cases {
+            assert_eq!(retrieval_status_label("Bash", &bash(cmd)), want, "for {cmd}");
+        }
+        // Non-bridge tools fall back to something honest.
+        assert_eq!(retrieval_status_label("Skill", &Value::Null), "loading a skill…");
+        assert_eq!(retrieval_status_label("Grep", &Value::Null), "Grep…");
+    }
+
+    /// Tool calls are read off the `assistant` line, where the arguments are
+    /// complete — not off `content_block_start`, where `input` is still empty.
+    #[test]
+    fn tool_uses_reads_complete_calls_off_the_assistant_line() {
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": { "content": [
+                { "type": "text", "text": "Let me look." },
+                { "type": "tool_use", "name": "Bash",
+                  "input": { "command": "curl -s http://127.0.0.1:7676/v1/memory/tree" } }
+            ]}
+        });
+        let calls = tool_uses(&line);
+        assert_eq!(calls.len(), 1, "text blocks are not tool calls");
+        assert_eq!(calls[0].0, "Bash");
+        assert_eq!(
+            retrieval_status_label(&calls[0].0, &calls[0].1),
+            "reading the catalog…"
+        );
+        // A partial-message line carries no complete call.
+        let partial = serde_json::json!({
+            "type": "stream_event",
+            "event": { "type": "content_block_start",
+                       "content_block": { "type": "tool_use", "name": "Bash", "input": {} } }
+        });
+        assert!(tool_uses(&partial).is_empty());
+        // And a plain text turn has none either.
+        assert!(tool_uses(&serde_json::json!({ "type": "assistant",
+            "message": { "content": [{ "type": "text", "text": "hi" }] } })).is_empty());
     }
 
     #[test]

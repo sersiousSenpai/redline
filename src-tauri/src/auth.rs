@@ -368,6 +368,14 @@ pub const ROUTE_TABLE: &[RouteSpec] = &[
         response: "JSON prompt list",
     },
     RouteSpec {
+        method: "GET",
+        path: "/v1/memory/answer-pack",
+        class: RouteClass::Open,
+        purpose: "Batched retrieval read: node + subtree + links + notes + lexical hits in one call",
+        request: "?q= term, ?node= node id, ?limit= n",
+        response: "JSON answer pack (byte-bounded)",
+    },
+    RouteSpec {
         method: "POST",
         path: "/v1/memory/proposals",
         class: RouteClass::Protected(SCOPE_MEMORY_PROPOSE),

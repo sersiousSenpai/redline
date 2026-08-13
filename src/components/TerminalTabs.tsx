@@ -78,6 +78,12 @@ interface TerminalTabsProps {
   fullscreen: boolean;
   onFullscreenChange: (v: boolean) => void;
   onTabsChange: (count: number) => void;
+  /** The live terminal ids, whenever that SET changes (not on every cwd or
+   *  title update). A host driving a specific terminal — the front door
+   *  waiting on a plan it launched — needs to know when that one goes away,
+   *  which a count can't tell it: close one and open another and the count
+   *  never moved. */
+  onTabIdsChange?: (ids: string[]) => void;
   /** Notified when the GRID changes: visible tile count and its row count.
    *  Distinct from onTabsChange — tab count ≠ tile count, and 9 tabs / 2
    *  tiles is normal. App grows the dock from this. */
@@ -217,6 +223,7 @@ export const TerminalTabs = memo(
       fullscreen,
       onFullscreenChange,
       onTabsChange,
+      onTabIdsChange,
       onTileCountChange,
       onActivityChange,
       collapsed,
@@ -455,6 +462,14 @@ export const TerminalTabs = memo(
   useEffect(() => {
     onTabsChange(tabs.length);
   }, [tabs.length, onTabsChange]);
+
+  // Keyed on the joined ids, not on `tabs`: that array's identity churns on
+  // every cwd poll and title change, and re-firing this on all of those would
+  // hand the host a new array to diff many times a second.
+  const tabIdKey = tabs.map((t) => t.id).join(",");
+  useEffect(() => {
+    onTabIdsChange?.(tabIdKey ? tabIdKey.split(",") : []);
+  }, [tabIdKey, onTabIdsChange]);
 
   useEffect(() => {
     onTileCountChange?.(tiles.length, shape.rows);

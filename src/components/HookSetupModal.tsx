@@ -212,7 +212,10 @@ export function HookSetupModal({
             <div className="flex items-center justify-end">
               <button
                 type="button"
-                onClick={onInstall}
+                // Called with no argument on purpose: App's installIntegration
+                // takes a `showExplainer` flag, and handing it a MouseEvent
+                // would make the modal's own behaviour depend on coercion.
+                onClick={() => onInstall()}
                 className="rounded px-3 py-1.5 font-medium"
                 style={{
                   background: "var(--color-info)",

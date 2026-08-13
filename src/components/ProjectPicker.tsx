@@ -2,6 +2,7 @@
 // Copyright 2026 Yusuf Al-Bazian
 import { useEffect, useMemo, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { Folder } from "lucide-react";
 import { useMenuOverlay } from "./menuOverlay";
 
 export interface ProjectOption {
@@ -20,6 +21,16 @@ interface ProjectPickerProps {
   onChange: (path: string | null) => void;
   /** Re-focus the editor after the native folder dialog steals focus. */
   onAfterPick?: () => void;
+  /** When given, the menu offers `＋ New project…` beside `Browse…`. On a
+   *  genuine first run `options` is empty — every entry is derived from
+   *  existing sessions and open folders — so without this the only way to
+   *  build is in $HOME or in someone else's directory. The caller owns the
+   *  naming step; this row only asks for it. */
+  onNewProject?: () => void;
+  /** Render the trigger as a front-door glass pill (`.rl-fd-tool`) instead of
+   *  the drafter's bordered control. Inline styles would beat the class, so
+   *  this is a swap rather than an override. */
+  chromeless?: boolean;
 }
 
 function basename(path: string): string {
@@ -37,6 +48,8 @@ export function ProjectPicker({
   value,
   onChange,
   onAfterPick,
+  onNewProject,
+  chromeless = false,
 }: ProjectPickerProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -82,18 +95,30 @@ export function ProjectPicker({
         type="button"
         onClick={() => setOpen((o) => !o)}
         title="Choose the project to launch the plan in"
-        className="flex items-center gap-1 rounded-sm px-2"
-        style={{
-          height: "30px",
-          maxWidth: "220px",
-          fontSize: "12px",
-          border: "1px solid var(--color-rule)",
-          background: "var(--color-bg-elevated)",
-          color: "var(--color-ink)",
-          cursor: "pointer",
-        }}
+        className={
+          chromeless
+            ? "rl-fd-tool is-wide"
+            : "flex items-center gap-1 rounded-sm px-2"
+        }
+        style={
+          chromeless
+            ? { maxWidth: "220px" }
+            : {
+                height: "30px",
+                maxWidth: "220px",
+                fontSize: "12px",
+                border: "1px solid var(--color-rule)",
+                background: "var(--color-bg-elevated)",
+                color: "var(--color-ink)",
+                cursor: "pointer",
+              }
+        }
       >
-        <span style={{ opacity: 0.7 }}>📁</span>
+        {chromeless ? (
+          <Folder size={13} style={{ opacity: 0.65, flexShrink: 0 }} />
+        ) : (
+          <span style={{ opacity: 0.7 }}>📁</span>
+        )}
         <span
           style={{
             overflow: "hidden",
@@ -103,7 +128,9 @@ export function ProjectPicker({
         >
           {label}
         </span>
-        <span style={{ opacity: 0.6, fontSize: "10px" }}>▾</span>
+        <span className={chromeless ? "rl-fd-caret" : undefined} style={chromeless ? undefined : { opacity: 0.6, fontSize: "10px" }}>
+          ▾
+        </span>
       </button>
       {open && (
         <div
@@ -148,6 +175,15 @@ export function ProjectPicker({
             />
           ))}
           <RowDivider />
+          {onNewProject && (
+            <MenuRow
+              label="＋ New project…"
+              onClick={() => {
+                setOpen(false);
+                onNewProject();
+              }}
+            />
+          )}
           <MenuRow label="📁 Browse…" onClick={browse} />
         </div>
       )}

@@ -107,18 +107,51 @@ describe("applySeed", () => {
   });
 });
 
-// Source invariants — the wiring half of the handoff lives in App.tsx and
-// PromptDrafter.tsx; these pin the contract the pure machine assumes.
+// Source invariants — the wiring half of the handoff lives in App.tsx,
+// FrontDoor.tsx and PromptDrafter.tsx; these pin the contract the pure
+// machine assumes.
 describe("landing wiring", () => {
   const app = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
   const drafter = readFileSync(
     join(process.cwd(), "src/components/PromptDrafter.tsx"),
     "utf8",
   );
+  const frontDoor = readFileSync(
+    join(process.cwd(), "src/components/FrontDoor.tsx"),
+    "utf8",
+  );
 
-  it("App renders LandingPage where the 'No plans yet' zero state lived", () => {
-    expect(app).toContain("<LandingPage");
+  it("App renders the front door where the 'No plans yet' zero state lived", () => {
+    expect(app).toContain("<FrontDoor");
     expect(app).not.toContain("No plans yet");
+  });
+
+  it("keeps the tour anchor the landing carried", () => {
+    expect(frontDoor).toContain('data-tour="landing"');
+  });
+
+  it("the front door is REACHABLE — something clears the session selection", () => {
+    // The door renders only when no plan is selected, and boot auto-selects
+    // the most recent one. Without a deselect path it is unreachable for
+    // anyone who has ever reviewed a plan — it would show on a virgin
+    // install and never again. This shipped broken exactly once.
+    expect(app).toContain("setActiveId(null)");
+    expect(app).toContain("onNewPlan={openFrontDoor}");
+  });
+
+  it("the front door drains the seed in a LAYOUT effect — the losslessness guarantee", () => {
+    // A passive effect would let the browser dispatch the next keydown
+    // between focus and drain, reordering a character. The composer is
+    // always mounted, so focus + consume is all that is left of the handoff
+    // — but it still has to be synchronous with the DOM update.
+    const idx = frontDoor.indexOf("consumeSeed()");
+    expect(idx).toBeGreaterThan(-1);
+    const effectIdx = frontDoor.lastIndexOf("useLayoutEffect", idx);
+    const focusIdx = frontDoor.lastIndexOf("taRef.current?.focus()", idx);
+    expect(effectIdx).toBeGreaterThan(-1);
+    // Focus happens first, inside that same layout effect.
+    expect(focusIdx).toBeGreaterThan(effectIdx);
+    expect(idx - effectIdx).toBeLessThan(600);
   });
 
   it("the drafter consumes the seed in the same task as its mount focus — the losslessness guarantee", () => {

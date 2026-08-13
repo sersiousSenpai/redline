@@ -287,19 +287,30 @@ pub fn clamp_prompt_limit(raw: Option<i64>) -> i64 {
 /// `limit` on long prompts still can't blow up the response.
 pub fn list_prompts(db: &Database, filters: &PromptFilters) -> Result<Vec<LakeItem>, String> {
     let mut items = db.list_context_prompts(filters).map_err(|e| e.to_string())?;
+    let keep = budgeted_item_count(items.iter().map(|i| i.body.as_deref()));
+    items.truncate(keep);
+    Ok(items)
+}
+
+/// How many leading items fit in `MAX_CONTEXT_BYTES`, given each one's body.
+/// Always at least one (a single oversized item is truncated by the DB layer,
+/// not dropped — an empty response would read as "nothing recorded").
+///
+/// Shared by `/v1/context/prompts` and `/v1/memory/prompts`: an item cap alone
+/// is not a bound when one item can be a 40KB page snapshot.
+pub fn budgeted_item_count<'a>(bodies: impl Iterator<Item = Option<&'a str>>) -> usize {
     let mut budget = MAX_CONTEXT_BYTES;
     let mut keep = 0usize;
-    for it in &items {
+    for body in bodies {
         // ~120 bytes of metadata overhead per item + the (truncated) body.
-        let cost = 120 + it.body.as_deref().map(str::len).unwrap_or(0);
+        let cost = 120 + body.map(str::len).unwrap_or(0);
         if keep > 0 && cost > budget {
             break;
         }
         budget = budget.saturating_sub(cost);
         keep += 1;
     }
-    items.truncate(keep);
-    Ok(items)
+    keep
 }
 
 /// A revision reduced to a digest (no body) for the session-history route.
@@ -348,8 +359,8 @@ pub struct SessionHistory {
 
 /// Build a session's history, or `None` if the session id is unknown.
 pub fn build_session_history(db: &Database, session_id: &str) -> Option<SessionHistory> {
-    let all = db.load_all().ok()?;
-    let session = all.get(session_id)?;
+    // ONE session, not the whole review history reparsed to keep one entry.
+    let session = &db.load_session(session_id).ok()??;
 
     let revisions: Vec<RevisionDigest> = session
         .revisions
@@ -429,6 +440,33 @@ pub struct ContextStats {
     /// since P0 made agents author as their seat name; older rows are uniformly
     /// the local human.
     pub by_author: Vec<(String, i64)>,
+}
+
+/// `build_stats` memoized on the ledger head. Five GROUP BY aggregations over
+/// the whole lake, and the Memory surface's facet rails re-read them on every
+/// `memory-changed` — which a browse capture burst fires repeatedly.
+///
+/// The head seq is a sound cache key because every axis this counts is derived
+/// from a table that appends a ledger event when it changes: a prompt, an
+/// event, a class link, an author. Nothing here can move without the head
+/// moving, so a hit is never stale.
+pub fn build_stats_cached(db: &Database) -> ContextStats {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<Option<(i64, ContextStats)>>> = OnceLock::new();
+    let cell = CACHE.get_or_init(|| Mutex::new(None));
+    let head = db.max_ledger_seq().unwrap_or(0);
+    if let Ok(guard) = cell.lock() {
+        if let Some((at, stats)) = guard.as_ref() {
+            if *at == head {
+                return stats.clone();
+            }
+        }
+    }
+    let fresh = build_stats(db);
+    if let Ok(mut guard) = cell.lock() {
+        *guard = Some((head, fresh.clone()));
+    }
+    fresh
 }
 
 /// Build the stats digest. Best-effort per axis (an unmigrated table yields an
@@ -799,6 +837,259 @@ pub fn build_memory_map(db: &Database) -> MemoryMapView {
         generated_ts: now_millis(),
         nodes,
         edges,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Answer pack — the batched retrieval read
+// ---------------------------------------------------------------------------
+
+/// Default `?limit=` on each list inside the answer pack.
+pub const ANSWER_PACK_LIMIT: i64 = 20;
+/// Clamp on that limit — a caller can widen a list, not unbound it.
+pub const ANSWER_PACK_LIMIT_MAX: i64 = 60;
+
+pub fn clamp_answer_pack_limit(raw: Option<i64>) -> i64 {
+    raw.unwrap_or(ANSWER_PACK_LIMIT)
+        .clamp(1, ANSWER_PACK_LIMIT_MAX)
+}
+
+/// One link out of the resolved node, with its label and supersession status
+/// resolved — the same `(label, supersededBy)` decoration
+/// `GET /v1/memory/node/:id` carries, so an agent reading the pack and an agent
+/// reading the node route see one shape.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackLink {
+    #[serde(flatten)]
+    pub link: crate::classmem::ClassLink,
+    pub label: Option<String>,
+    /// The decision seq that superseded this link's target (`None` = current).
+    pub superseded_by: Option<i64>,
+}
+
+/// The resolved node and everything hanging off it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackNode {
+    pub node: crate::classmem::ClassNode,
+    /// Children to depth 2 — enough for the agent to see where to descend
+    /// next without a second call.
+    pub children: Vec<crate::classmem::ClassNode>,
+    pub grandchildren: Vec<crate::classmem::ClassNode>,
+    pub links: Vec<PackLink>,
+    pub observations: Vec<crate::classmem::ClassObservation>,
+}
+
+/// A matching prompt from the lake, carrying its supersession status so a
+/// stale decision can't be read back as current.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackPromptHit {
+    #[serde(flatten)]
+    pub item: LakeItem,
+    pub superseded_by: Option<i64>,
+}
+
+/// One batched read that answers most memory questions: the resolved class
+/// node with its subtree, links and observations, plus the user's own matching
+/// notes, matching prompts from the lake and matching pages from the browse
+/// stream.
+///
+/// It exists to collapse a 5–7 turn retrieval walk into ONE tool call. Which
+/// is why the miss path is a design requirement, not a nicety: `promptHits`,
+/// `browseHits` and `matchedNodes` are always populated from the query text,
+/// even when node resolution fails outright or a caller passes a stale
+/// `?node=`. A resolution miss must still hand back lexical evidence — never
+/// an empty pack that pushes the agent back into the walk it was built to
+/// replace.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnswerPack {
+    /// The ledger head this pack was assembled at — the agent cites against it.
+    pub head_seq: i64,
+    pub query: Option<String>,
+    /// `None` when nothing resolved; the lexical hits below still stand.
+    pub node: Option<PackNode>,
+    /// Runners-up from node resolution, so the agent can redirect in one step.
+    pub matched_nodes: Vec<crate::classmem::ClassNode>,
+    /// The user's own words — FIRST, and the last thing the budget trims.
+    pub notes: Vec<UserNote>,
+    pub prompt_hits: Vec<PackPromptHit>,
+    pub browse_hits: Vec<crate::db::BrowseHit>,
+    /// Which lists the byte budget cut, so the agent knows to narrow rather
+    /// than conclude the record is empty.
+    pub truncated: Vec<String>,
+}
+
+/// Assemble the pack. Every list is bounded by `limit`, and the whole response
+/// is bounded by `MAX_CONTEXT_BYTES` — trimming links, then prompt hits, then
+/// browse hits, and the user's notes only if nothing else is left to give.
+pub fn build_answer_pack(
+    db: &Database,
+    q: Option<&str>,
+    node_id: Option<&str>,
+    limit: i64,
+) -> AnswerPack {
+    let head_seq = db.max_ledger_seq().unwrap_or(0);
+    let query = q.map(str::trim).filter(|s| !s.is_empty());
+
+    // --- resolve a node: the explicit id first, then the best title match ---
+    let mut matched: Vec<crate::classmem::ClassNode> = query
+        .map(|term| db.match_class_nodes(term, limit).unwrap_or_default())
+        .unwrap_or_default();
+    let resolved = node_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|id| db.get_class_node(id).ok().flatten())
+        // A stale `?node=` falls through to the best lexical match rather than
+        // returning nothing — the miss path.
+        .or_else(|| matched.first().cloned());
+    if let Some(r) = &resolved {
+        matched.retain(|n| n.id != r.id);
+    }
+
+    // Per-list ceilings applied BEFORE the byte budget. A bulging class can
+    // hold thousands of links, and feeding all of them into a trim loop that
+    // re-serializes per dropped item is quadratic on exactly the nodes most
+    // worth asking about. The budget below still has the final say.
+    let node_cap = (limit * 5).max(20) as usize;
+    let mut over_cap: Vec<&str> = Vec::new();
+    let node = resolved.map(|node| {
+        let mut children = db.list_class_children(&node.id).unwrap_or_default();
+        let mut grandchildren: Vec<crate::classmem::ClassNode> = children
+            .iter()
+            .flat_map(|c| db.list_class_children(&c.id).unwrap_or_default())
+            .collect();
+        if children.len() > node_cap {
+            children.truncate(node_cap);
+            over_cap.push("children");
+        }
+        if grandchildren.len() > node_cap {
+            grandchildren.truncate(node_cap);
+            over_cap.push("grandchildren");
+        }
+        let mut raw_links = db.list_class_links_for_node(&node.id).unwrap_or_default();
+        if raw_links.len() > node_cap {
+            raw_links.truncate(node_cap);
+            over_cap.push("links");
+        }
+        let ledger_seq = |l: &crate::classmem::ClassLink| -> Option<i64> {
+            matches!(l.target_kind.as_str(), "prompt" | "decision" | "ledger")
+                .then(|| l.target_id.trim().parse().ok())
+                .flatten()
+        };
+        let seqs: Vec<i64> = raw_links.iter().filter_map(ledger_seq).collect();
+        // Two batched reads for the whole link set, not two per link.
+        let labels = db.link_previews_for_seqs(&seqs).unwrap_or_default();
+        let superseded = db.supersessions_for_seqs(&seqs).unwrap_or_default();
+        let links: Vec<PackLink> = raw_links
+            .into_iter()
+            .map(|link| {
+                let seq = ledger_seq(&link);
+                PackLink {
+                    label: seq.and_then(|s| labels.get(&s).cloned()),
+                    superseded_by: seq.and_then(|s| superseded.get(&s).copied()),
+                    link,
+                }
+            })
+            .collect();
+        let mut observations = db.list_class_observations(&node.id, false).unwrap_or_default();
+        if observations.len() > node_cap {
+            observations.truncate(node_cap);
+            over_cap.push("observations");
+        }
+        PackNode { node, children, grandchildren, links, observations }
+    });
+
+    // --- lexical evidence: always produced, node or no node ---
+    let notes = query
+        .map(|term| db.search_user_notes(term, limit).unwrap_or_default())
+        .unwrap_or_default();
+    let prompt_items = query
+        .map(|term| {
+            db.search_prompts_fts(term, limit).unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "answer-pack: prompt search failed");
+                Vec::new()
+            })
+        })
+        .unwrap_or_default();
+    let hit_seqs: Vec<i64> = prompt_items.iter().map(|i| i.seq).collect();
+    let hit_superseded = db.supersessions_for_seqs(&hit_seqs).unwrap_or_default();
+    let prompt_hits: Vec<PackPromptHit> = prompt_items
+        .into_iter()
+        .map(|item| PackPromptHit {
+            superseded_by: hit_superseded.get(&item.seq).copied(),
+            item,
+        })
+        .collect();
+    let browse_hits = query
+        .map(|term| db.search_browse_events(term, limit).unwrap_or_default())
+        .unwrap_or_default();
+
+    let mut pack = AnswerPack {
+        head_seq,
+        query: query.map(str::to_string),
+        node,
+        matched_nodes: matched,
+        notes,
+        prompt_hits,
+        browse_hits,
+        truncated: over_cap.into_iter().map(str::to_string).collect(),
+    };
+    enforce_pack_budget(&mut pack);
+    pack
+}
+
+/// Trim the pack to `MAX_CONTEXT_BYTES`, cheapest evidence first. The order is
+/// the retrieval contract's priority read backwards: browse pages, then lake
+/// prompts, then the node's link list, and the user's own notes dead last —
+/// they are the one human-authored signal, so they are the last thing we drop.
+fn enforce_pack_budget(pack: &mut AnswerPack) {
+    fn size(p: &AnswerPack) -> usize {
+        serde_json::to_vec(p).map(|v| v.len()).unwrap_or(0)
+    }
+    if size(pack) <= MAX_CONTEXT_BYTES {
+        return;
+    }
+    // (name, current length, drop-n-from-the-tail). Dropping in proportional
+    // chunks rather than one at a time keeps this logarithmic in list length —
+    // each `size()` call re-serializes the whole pack, so a pop-one loop over a
+    // long list would be quadratic on exactly the biggest packs.
+    type Len = fn(&AnswerPack) -> usize;
+    type Drop = fn(&mut AnswerPack, usize);
+    let steps: [(&str, Len, Drop); 4] = [
+        ("browseHits", |p| p.browse_hits.len(), |p, n| {
+            let keep = p.browse_hits.len().saturating_sub(n);
+            p.browse_hits.truncate(keep);
+        }),
+        ("promptHits", |p| p.prompt_hits.len(), |p, n| {
+            let keep = p.prompt_hits.len().saturating_sub(n);
+            p.prompt_hits.truncate(keep);
+        }),
+        ("links", |p| p.node.as_ref().map(|n| n.links.len()).unwrap_or(0), |p, n| {
+            if let Some(node) = p.node.as_mut() {
+                let keep = node.links.len().saturating_sub(n);
+                node.links.truncate(keep);
+            }
+        }),
+        ("notes", |p| p.notes.len(), |p, n| {
+            let keep = p.notes.len().saturating_sub(n);
+            p.notes.truncate(keep);
+        }),
+    ];
+    for (name, len, drop) in steps {
+        let mut cut = false;
+        while size(pack) > MAX_CONTEXT_BYTES && len(pack) > 0 {
+            drop(pack, (len(pack) / 4).max(1));
+            cut = true;
+        }
+        if cut && !pack.truncated.iter().any(|t| t == name) {
+            pack.truncated.push(name.to_string());
+        }
+        if size(pack) <= MAX_CONTEXT_BYTES {
+            return;
+        }
     }
 }
 
@@ -1229,6 +1520,176 @@ mod tests {
         )
         .unwrap();
         assert_eq!(capped.len(), 2);
+    }
+
+    /// Seed an accepted class node with a child and one link into the lake.
+    fn seed_class(db: &Database, id: &str, title: &str) {
+        db.seed_class_roots(&[(id.to_string(), title.to_string(), Some("/repo".into()))])
+            .unwrap();
+        db.accept_class_node(id).unwrap();
+    }
+
+    /// The pack's shape contract: the user's own words lead, the resolved node
+    /// carries its subtree/links/observations, links carry `supersededBy`, and
+    /// the whole thing stays inside the byte budget.
+    #[test]
+    fn answer_pack_is_bounded_and_notes_lead() {
+        let db = Database::open_in_memory().unwrap();
+        seed_class(&db, "root-loop", "Loop Engineering");
+        seed_prompt(&db, "pty_plan", Some("/repo"), "wire the loop executor");
+        seed_prompt(&db, "browse", Some("/repo"), "loop retry semantics");
+        // The user's own margin note on the first prompt's event.
+        db.write_user_note(
+            &NoteWrite {
+                target_kind: Some("ledger_event".into()),
+                target_id: Some("1".into()),
+                text: Some("the loop executor decision was mine".into()),
+                ..Default::default()
+            },
+            "yusuf",
+        )
+        .unwrap();
+        // A link off the node into the lake, and a supersession over it.
+        db.stage_proposal(
+            None,
+            &crate::classmem::Proposal::File {
+                parent_id: "root-loop".into(),
+                sub_class: None,
+                target_kind: "prompt".into(),
+                target_id: "1".into(),
+                note: None,
+                rationale: None,
+            },
+        )
+        .unwrap();
+        db.accept_all_pending("yusuf").unwrap();
+
+        let pack = build_answer_pack(&db, Some("loop"), None, ANSWER_PACK_LIMIT);
+        assert_eq!(pack.head_seq, db.max_ledger_seq().unwrap());
+        // The node resolved off the query alone.
+        let node = pack.node.as_ref().expect("the node must resolve from `q`");
+        assert_eq!(node.node.id, "root-loop");
+        assert_eq!(node.links.len(), 1, "the accepted link rides along");
+        assert!(
+            node.links[0].label.is_some(),
+            "labels are resolved in one batched read"
+        );
+        assert!(node.links[0].superseded_by.is_none(), "nothing superseded it");
+        // The human-authored signal is present and leads.
+        assert_eq!(pack.notes.len(), 1);
+        assert!(pack.notes[0].text.contains("the loop executor decision was mine"));
+        // Lexical evidence from the lake.
+        assert_eq!(pack.prompt_hits.len(), 2);
+        assert!(pack.prompt_hits.iter().all(|h| h.superseded_by.is_none()));
+        // Budgeted.
+        let bytes = serde_json::to_vec(&pack).unwrap().len();
+        assert!(bytes <= MAX_CONTEXT_BYTES, "{bytes} bytes exceeds the budget");
+        assert!(pack.truncated.is_empty(), "nothing to trim at this size");
+    }
+
+    /// The miss path is the whole reason the route is worth having: a query
+    /// that resolves to NO node must still hand back one-call lexical
+    /// evidence, never an empty pack that pushes the agent back into the walk.
+    #[test]
+    fn answer_pack_miss_path_still_returns_lexical_evidence() {
+        let db = Database::open_in_memory().unwrap();
+        seed_prompt(&db, "pty_plan", Some("/repo"), "the peculiar widget migration");
+        db.write_user_note(
+            &NoteWrite {
+                text: Some("widget migration was a slog".into()),
+                ..Default::default()
+            },
+            "yusuf",
+        )
+        .unwrap();
+
+        // Nothing has been organized — there is no catalog to resolve against.
+        let pack = build_answer_pack(&db, Some("widget"), None, ANSWER_PACK_LIMIT);
+        assert!(pack.node.is_none(), "no catalog, so nothing resolves");
+        assert_eq!(pack.prompt_hits.len(), 1, "the lake still answers");
+        assert_eq!(pack.notes.len(), 1, "and so do the user's own words");
+
+        // A STALE `?node=` must degrade the same way, not blank the pack.
+        let stale = build_answer_pack(&db, Some("widget"), Some("no-such-node"), ANSWER_PACK_LIMIT);
+        assert!(stale.node.is_none());
+        assert_eq!(stale.prompt_hits.len(), 1);
+        assert_eq!(stale.notes.len(), 1);
+
+        // And a query matching nothing says so honestly rather than erroring.
+        let empty = build_answer_pack(&db, Some("zzzznothing"), None, ANSWER_PACK_LIMIT);
+        assert!(empty.node.is_none());
+        assert!(empty.prompt_hits.is_empty());
+        assert!(empty.notes.is_empty());
+    }
+
+    /// Over budget, the priority order runs backwards: pages go first, the
+    /// user's own notes go last.
+    #[test]
+    fn answer_pack_trims_pages_before_notes() {
+        let db = Database::open_in_memory().unwrap();
+        let big = "loop ".repeat(1_200); // ~6KB per prompt body
+        for i in 0..20 {
+            seed_prompt(&db, "pty_plan", Some("/repo"), &format!("{big} {i}"));
+        }
+        db.write_user_note(
+            &NoteWrite {
+                text: Some("loop notes matter most".into()),
+                ..Default::default()
+            },
+            "yusuf",
+        )
+        .unwrap();
+
+        let pack = build_answer_pack(&db, Some("loop"), None, ANSWER_PACK_LIMIT_MAX);
+        let bytes = serde_json::to_vec(&pack).unwrap().len();
+        assert!(bytes <= MAX_CONTEXT_BYTES, "{bytes} bytes exceeds the budget");
+        assert!(
+            pack.truncated.contains(&"promptHits".to_string()),
+            "the lake arm must be what gets cut: {:?}",
+            pack.truncated
+        );
+        assert_eq!(pack.notes.len(), 1, "the user's own words survive the trim");
+        assert!(!pack.truncated.contains(&"notes".to_string()));
+    }
+
+    /// A bulging class must not be able to make the pack quadratic: the link
+    /// list is capped before the byte budget ever runs, and the cap is
+    /// reported rather than silently applied.
+    #[test]
+    fn answer_pack_caps_a_bulging_node_before_budgeting() {
+        let db = Database::open_in_memory().unwrap();
+        seed_class(&db, "root-big", "Big Class");
+        for i in 0..400 {
+            seed_prompt(&db, "pty_plan", Some("/repo"), &format!("big item {i}"));
+            db.stage_proposal(
+                None,
+                &crate::classmem::Proposal::File {
+                    parent_id: "root-big".into(),
+                    sub_class: None,
+                    target_kind: "prompt".into(),
+                    target_id: (i + 1).to_string(),
+                    note: None,
+                    rationale: None,
+                },
+            )
+            .unwrap();
+        }
+        db.accept_all_pending("yusuf").unwrap();
+
+        let pack = build_answer_pack(&db, Some("Big"), None, ANSWER_PACK_LIMIT);
+        let node = pack.node.as_ref().expect("the node resolves");
+        assert!(
+            node.links.len() <= (ANSWER_PACK_LIMIT * 5).max(20) as usize,
+            "the link list must be capped, got {}",
+            node.links.len()
+        );
+        assert!(
+            pack.truncated.contains(&"links".to_string()),
+            "a capped list is reported, never silently trimmed: {:?}",
+            pack.truncated
+        );
+        let bytes = serde_json::to_vec(&pack).unwrap().len();
+        assert!(bytes <= MAX_CONTEXT_BYTES, "{bytes} bytes exceeds the budget");
     }
 
     #[test]

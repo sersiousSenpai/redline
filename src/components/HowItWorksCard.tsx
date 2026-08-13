@@ -86,6 +86,26 @@ export function HowItWorksCard({ onClose }: { onClose: () => void }) {
           How Redline works
         </h2>
 
+        {/* Step 0 — the front door. It sits ahead of the loop rather than
+            inside it: it is the same loop, entered without a terminal. The
+            manual route below still works; you just don't need it. */}
+        <div
+          className="rounded-md border p-3"
+          style={{
+            borderColor: "color-mix(in srgb, var(--color-info) 40%, var(--color-rule))",
+            background: "color-mix(in srgb, var(--color-info) 8%, transparent)",
+            fontSize: "13px",
+            lineHeight: 1.55,
+            color: "var(--color-ink)",
+            marginBottom: 14,
+          }}
+        >
+          <strong>The short way:</strong> on the front page, type what you want
+          to build and press <code className="font-mono" style={chip}>⏎</code>.
+          Redline picks the project and starts the planning session for you —
+          everything below happens on its own from there.
+        </div>
+
         <p
           style={{
             fontSize: "13px",
@@ -94,8 +114,9 @@ export function HowItWorksCard({ onClose }: { onClose: () => void }) {
             marginBottom: 14,
           }}
         >
-          You don't drive Redline with commands — it plugs into Claude Code and
-          intercepts plans automatically. The loop:
+          Under the hood you don't drive Redline with commands — it plugs into
+          Claude Code and intercepts plans automatically. The loop, whether you
+          start it from the front page or a terminal:
         </p>
 
         <div className="flex flex-col gap-2.5" style={{ marginBottom: 18 }}>

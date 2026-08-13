@@ -766,6 +766,126 @@ pub fn build_classifier_prompt(
     p
 }
 
+// ---------------------------------------------------------------------------
+// Catalog snapshot (baked into a retrieval agent's first turn)
+// ---------------------------------------------------------------------------
+
+/// Byte bound on the baked catalog snapshot. Deliberately a fifth of the
+/// classifier's corpus budget: the snapshot's job is to hand a retrieval agent
+/// enough *node ids* to skip the tree-walk turn, not to be the answer. Anything
+/// that doesn't fit is a node the agent can still reach by curling the node
+/// route — which the header tells it to do.
+pub const CATALOG_SNAPSHOT_MAX_BYTES: usize = 12_000;
+
+/// Render the ACCEPTED catalog as a compact indented outline — the thing a
+/// retrieval agent otherwise spends a whole model turn curling
+/// `/v1/memory/tree` to learn.
+///
+/// `title [id] (N links)` per node; roots carry their `project_path` (the
+/// binding that answers "which repo is this?"); a `digest` node carries a short
+/// gist so a collapsed cold branch still says what it holds. Observations are
+/// deliberately absent — the answer-pack serves those per node, and snapshot
+/// bytes buy breadth of ids instead.
+///
+/// Truncation drops the DEEPEST levels first: losing leaf nodes costs the agent
+/// one extra descent, while losing roots would hide whole classes. Pure, so the
+/// budget and the drop order are unit-tested directly.
+pub fn render_catalog_snapshot(
+    nodes: &[(ClassNode, i64)],
+    head_seq: i64,
+    max_bytes: usize,
+) -> String {
+    let accepted: Vec<(ClassNode, i64)> = nodes
+        .iter()
+        .filter(|(n, _)| n.status == "accepted")
+        .cloned()
+        .collect();
+    if accepted.is_empty() {
+        return format!(
+            "(the catalog is empty as of seq {head_seq} — nothing has been \
+             organized yet; search the lake directly)\n"
+        );
+    }
+    let tree: Vec<ClassNode> = accepted.iter().map(|(n, _)| n.clone()).collect();
+
+    // One rendered block per node (a digest adds its gist line), in document
+    // order, tagged with its depth. Everything below is bookkeeping over this.
+    let blocks: Vec<(usize, String)> = accepted
+        .iter()
+        .map(|(n, links)| {
+            let depth = tree_depth(&tree, n);
+            let indent = "  ".repeat(depth);
+            let proj = n
+                .project_path
+                .as_deref()
+                .filter(|_| n.parent_id.is_none())
+                .map(|p| format!(" project={p}"))
+                .unwrap_or_default();
+            let mut block = format!("{indent}- {} [{}] ({links} links){proj}\n", n.title, n.id);
+            if n.kind == "digest" {
+                if let Some(s) = n.summary.as_deref().filter(|s| !s.trim().is_empty()) {
+                    block.push_str(&format!("{indent}  digest: {}\n", truncate_1line(s, 100)));
+                }
+            }
+            (depth, block)
+        })
+        .collect();
+    let max_depth = blocks.iter().map(|(d, _)| *d).max().unwrap_or(0);
+    // Room for the "… not shown" footer, always reserved so adding it can't
+    // push a snapshot over budget.
+    const FOOTER: usize = 80;
+    let budget = max_bytes.saturating_sub(FOOTER);
+
+    // The deepest level cap that fits whole. Levels are dropped deepest-first:
+    // a missing leaf costs the agent one descent, a missing root hides a class.
+    let level_bytes = |cap: usize| -> usize {
+        blocks
+            .iter()
+            .filter(|(d, _)| *d <= cap)
+            .map(|(_, b)| b.len())
+            .sum()
+    };
+    let mut cap = 0usize;
+    while cap < max_depth && level_bytes(cap + 1) <= budget {
+        cap += 1;
+    }
+
+    // Then spend whatever is left admitting nodes from the NEXT level in
+    // document order, so a budget that clears a level by a few bytes doesn't
+    // discard the entire level below it.
+    let mut spent = level_bytes(cap);
+    let mut admitted: Vec<bool> = blocks.iter().map(|(d, _)| *d <= cap).collect();
+    if cap < max_depth {
+        for (i, (d, b)) in blocks.iter().enumerate() {
+            if *d == cap + 1 && spent + b.len() <= budget {
+                admitted[i] = true;
+                spent += b.len();
+            }
+        }
+    }
+
+    let mut out = String::new();
+    let mut dropped = 0usize;
+    for (i, (_, b)) in blocks.iter().enumerate() {
+        if admitted[i] {
+            // Roots alone can still overflow a very small budget.
+            if out.len() + b.len() > budget && !out.is_empty() {
+                dropped += 1;
+                continue;
+            }
+            out.push_str(b);
+        } else {
+            dropped += 1;
+        }
+    }
+    if dropped > 0 {
+        out.push_str(&format!(
+            "- … ({dropped} more node(s) not shown — descend with the node route)\n"
+        ));
+    }
+    out
+}
+
 fn tree_depth(tree: &[ClassNode], node: &ClassNode) -> usize {
     let mut depth = 0;
     let mut cur = node.parent_id.clone();
@@ -1408,6 +1528,94 @@ That's it."#;
         // Memory-by-session lineage rides the delta line as ground truth too.
         assert!(p.contains("thread=browse:tab-7"));
         assert!(p.contains("parent=session:sess-42"));
+    }
+
+    /// The snapshot exists to save a model turn, so its shape is a contract:
+    /// accepted nodes only, ids present (they're what the answer-pack's
+    /// `&node=` takes), roots carrying their project binding, digests carrying
+    /// their gist.
+    #[test]
+    fn catalog_snapshot_renders_ids_counts_and_root_bindings() {
+        let n = |id: &str, parent: Option<&str>, title: &str, status: &str| ClassNode {
+            id: id.into(),
+            parent_id: parent.map(str::to_string),
+            kind: "node".into(),
+            title: title.into(),
+            summary: None,
+            project_path: parent.is_none().then(|| "/x/redline".to_string()),
+            ip_name: None,
+            status: status.into(),
+            pinned: false,
+            curated_by: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let mut digest = n("d1", Some("root"), "Cold Branch", "accepted");
+        digest.kind = "digest".into();
+        digest.summary = Some("the old loop work, collapsed".into());
+        let nodes = vec![
+            (n("root", None, "redline", "accepted"), 40i64),
+            (n("kid", Some("root"), "Loop Engineering", "accepted"), 12),
+            (digest, 5),
+            (n("ghost", Some("root"), "Not Yet Accepted", "proposed"), 3),
+        ];
+        let out = render_catalog_snapshot(&nodes, 4224, CATALOG_SNAPSHOT_MAX_BYTES);
+        assert!(out.contains("- redline [root] (40 links) project=/x/redline"));
+        assert!(out.contains("  - Loop Engineering [kid] (12 links)"));
+        // A root's project binding rides along; a child's does not repeat it.
+        assert!(!out.contains("Loop Engineering [kid] (12 links) project="));
+        // Digest nodes say what they hold.
+        assert!(out.contains("digest: the old loop work, collapsed"));
+        // Proposed nodes are not the catalog.
+        assert!(!out.contains("Not Yet Accepted"));
+    }
+
+    /// Truncation drops the DEEPEST levels first: a lost leaf costs the agent
+    /// one descent, a lost root would hide a whole class.
+    #[test]
+    fn catalog_snapshot_drops_the_deepest_levels_first() {
+        let n = |id: &str, parent: Option<&str>| ClassNode {
+            id: id.into(),
+            parent_id: parent.map(str::to_string),
+            kind: "node".into(),
+            title: format!("title-of-{id}"),
+            summary: None,
+            project_path: None,
+            ip_name: None,
+            status: "accepted".into(),
+            pinned: false,
+            curated_by: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let mut nodes = vec![(n("root", None), 1i64)];
+        for i in 0..80 {
+            nodes.push((n(&format!("mid{i}"), Some("root")), 1));
+            nodes.push((n(&format!("leaf{i}"), Some(&format!("mid{i}"))), 1));
+        }
+        let full = render_catalog_snapshot(&nodes, 1, CATALOG_SNAPSHOT_MAX_BYTES);
+        assert!(full.contains("title-of-leaf0"), "it all fits at 12KB");
+
+        // A budget that can't hold the leaves keeps the roots and mids.
+        let tight = render_catalog_snapshot(&nodes, 1, 3_000);
+        assert!(tight.len() <= 3_000, "the snapshot must respect its budget");
+        assert!(tight.contains("title-of-root"));
+        assert!(tight.contains("title-of-mid0"));
+        assert!(!tight.contains("title-of-leaf0"), "deepest level dropped first");
+        assert!(tight.contains("more node(s) not shown"));
+
+        // A budget that can't even hold the roots still returns something
+        // bounded rather than blowing the prompt.
+        let brutal = render_catalog_snapshot(&nodes, 1, 400);
+        assert!(brutal.len() <= 400);
+        assert!(brutal.contains("title-of-root"));
+    }
+
+    #[test]
+    fn catalog_snapshot_says_so_when_the_catalog_is_empty() {
+        let out = render_catalog_snapshot(&[], 99, CATALOG_SNAPSHOT_MAX_BYTES);
+        assert!(out.contains("catalog is empty"));
+        assert!(out.contains("seq 99"));
     }
 
     #[test]

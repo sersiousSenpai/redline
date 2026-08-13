@@ -2239,11 +2239,20 @@ export function MemorySurface({ activeSessionId, activeSessionName }: MemorySurf
 
   useEffect(() => {
     void loadStatus();
-    const un = listen("memory-changed", () => void loadStatus());
+    // Debounced for the same reason as the pill's: a browse capture burst
+    // emits one `memory-changed` per page, and the hero only needs the
+    // settled number.
+    let coalesce: number | undefined;
+    const reload = () => {
+      window.clearTimeout(coalesce);
+      coalesce = window.setTimeout(() => void loadStatus(), 1_000);
+    };
+    const un = listen("memory-changed", reload);
     // Proposal verdicts emit only classmem-changed; the hero's held-for-review
     // count and the catalog chip badge must follow them too.
-    const unClass = listen("classmem-changed", () => void loadStatus());
+    const unClass = listen("classmem-changed", reload);
     return () => {
+      window.clearTimeout(coalesce);
       void un.then((f) => f());
       void unClass.then((f) => f());
     };

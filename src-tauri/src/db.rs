@@ -442,6 +442,23 @@ impl Database {
             let _ = std::fs::create_dir_all(parent);
         }
         let conn = Connection::open(path)?;
+        // Connection pragmas, best-effort (a pragma an older SQLite doesn't
+        // know must never fail the open). WAL is the load-bearing one: readers
+        // no longer block behind the writer, which is what made an agent's
+        // retrieval curls queue behind a browse capture on the single
+        // `Mutex<Connection>`. `synchronous=NORMAL` is WAL's safe companion —
+        // durable across process crash, only at risk on OS/power loss, and the
+        // crown-jewels protection here is the `VACUUM INTO` backup, not fsync
+        // per commit. `foreign_keys` is deliberately untouched.
+        for pragma in [
+            "PRAGMA journal_mode = WAL",
+            "PRAGMA synchronous = NORMAL",
+            "PRAGMA busy_timeout = 5000",
+            "PRAGMA cache_size = -64000",
+            "PRAGMA mmap_size = 268435456",
+        ] {
+            let _ = conn.execute_batch(pragma);
+        }
         let db = Self {
             conn: Mutex::new(conn),
         };
@@ -460,6 +477,18 @@ impl Database {
         };
         db.migrate()?;
         Ok(db)
+    }
+
+    /// The planner's chosen strategy for a statement, joined into one line —
+    /// the substrate for the query-plan guard tests. A hot read that regresses
+    /// to `SCAN <table>` is the failure this catches; parameters are never
+    /// bound (the plan doesn't depend on their values here).
+    #[cfg(test)]
+    pub fn explain_query_plan(&self, sql: &str) -> rusqlite::Result<String> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(3))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?.join(" | "))
     }
 
     fn migrate(&self) -> rusqlite::Result<()> {
@@ -986,14 +1015,25 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_browse_events_hash ON browse_events (context_hash);
             CREATE INDEX IF NOT EXISTS idx_browse_events_tab ON browse_events (browse_id);
 
-            -- Dojo P3: a lexical (BM25) full-text index over browse events only.
+            -- Dojo P3: a lexical (BM25) full-text index over browse events.
             -- Browsing is high-volume and keyword-heavy, so lexical recall beats
             -- dense vectors as the first cut — and FTS5 ships with SQLite, so
             -- there is no new dependency, no embedding model, and retrieval stays
-            -- auditable (you can see which terms matched). Plans/prompts keep the
-            -- vectorless ClassMemory walk; only this noisy stream gets fuzzy
-            -- lexical search. External-content table over `browse_events`, kept in
-            -- sync by an AFTER INSERT trigger (browse_events is insert-only).
+            -- auditable (you can see which terms matched).
+            --
+            -- DESIGN LAW, amended: this used to read "only this noisy stream gets
+            -- lexical search; plans/prompts keep the vectorless ClassMemory walk".
+            -- The walk stays the ORGANIZING principle — the catalog is how memory
+            -- is structured, and no embedding model enters the product — but the
+            -- prompt lake now carries its own FTS index too (`prompts_fts`, built
+            -- after the gist ALTERs below). The distinction that actually
+            -- mattered was never lexical-vs-walk: it was that a *ranked* fuzzy
+            -- index must not become the taxonomy. So `prompts_fts` is used as a
+            -- FILTER inside the existing ordered queries, and bm25 ranks only
+            -- inside the answer pack's own search. The `?q=` prompt route was a
+            -- LIKE cross-scan over the whole chain; that is what changed.
+            -- External-content table over `browse_events`, kept in sync by an
+            -- AFTER INSERT trigger (browse_events is insert-only).
             CREATE VIRTUAL TABLE IF NOT EXISTS browse_events_fts USING fts5(
                 title, url, text,
                 content='browse_events',
@@ -1279,6 +1319,33 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_dev_servers_seen
                 ON dev_servers (last_seen_at DESC);
+
+            -- Retrieval-path indexes. Every one of these covers a query that was
+            -- a full table scan on the read side of the Memory surface — the
+            -- probes an agent's retrieval turn and the Timeline page both pay
+            -- for, per row, under the single connection lock.
+            --
+            -- The Timeline's filing probe asks "which node is this target filed
+            -- under?" — the reverse of `idx_class_links_node`, so it had no
+            -- index at all and scanned the link table once per page row.
+            CREATE INDEX IF NOT EXISTS idx_class_links_target
+                ON class_links (target_kind, target_id, status);
+            -- Ledger lookups by provenance rather than by seq: the prompt join
+            -- direction (`/v1/context/prompts`), the session spine, and the
+            -- activity-ribbon date range.
+            CREATE INDEX IF NOT EXISTS idx_ledger_prompt ON ledger_events (prompt_id);
+            CREATE INDEX IF NOT EXISTS idx_ledger_session ON ledger_events (session_id);
+            CREATE INDEX IF NOT EXISTS idx_ledger_ts ON ledger_events (ts);
+            -- The existing unique index on user_notes is PARTIAL
+            -- (`WHERE target_kind <> 'none'`), so the Timeline's two note joins
+            -- — which don't carry that predicate — couldn't use it.
+            CREATE INDEX IF NOT EXISTS idx_user_notes_target_all
+                ON user_notes (target_kind, target_id);
+            -- `supersessions.old_seq` is the PK, but the batched
+            -- `WHERE old_seq IN (…)` reader wants it as a named index too on
+            -- databases where the table predates the current schema.
+            CREATE INDEX IF NOT EXISTS idx_supersessions_old
+                ON supersessions (old_seq);
             "#,
         )?;
         // Best-effort additive migrations (errors on existing columns are ignored)
@@ -1325,6 +1392,72 @@ impl Database {
         let _ = conn.execute("ALTER TABLE prompts ADD COLUMN gist TEXT", []);
         let _ = conn.execute("ALTER TABLE prompts ADD COLUMN compacted_at INTEGER", []);
         let _ = conn.execute("ALTER TABLE prompts ADD COLUMN original_bytes INTEGER", []);
+        // `compaction_stats` aggregates over exactly this partial set, on every
+        // memory-status poll. It lives down here rather than in the batch above
+        // because it references migrated columns — the batch runs before the
+        // ALTERs on an upgrade, where `gist` does not exist yet.
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_prompts_compacted
+                ON prompts (compacted_at) WHERE gist IS NOT NULL",
+            [],
+        );
+
+        // Lexical index over the prompt lake. Same reasoning as
+        // `browse_events_fts` (see the amended design-law note above it), but
+        // `prompts` is NOT insert-only: compaction rewrites `gist`/`body` in
+        // place, and an explicit forget releases the words. So this needs the
+        // full trigger set — insert, update AND delete — with the FTS5
+        // `'delete'` idiom supplying the OLD indexed text on the way out.
+        // Indexing `COALESCE(gist, body)` is what makes compaction correct:
+        // once a body is released the gist becomes the searchable text, and the
+        // released words genuinely stop matching.
+        //
+        // Down here, after the ALTERs, because every statement references
+        // `gist` — in the batch above it would run before that column exists.
+        let _ = conn.execute_batch(
+            r#"
+            CREATE VIRTUAL TABLE IF NOT EXISTS prompts_fts USING fts5(
+                body,
+                content='prompts',
+                content_rowid='id'
+            );
+            CREATE TRIGGER IF NOT EXISTS prompts_fts_ai AFTER INSERT ON prompts BEGIN
+                INSERT INTO prompts_fts (rowid, body)
+                VALUES (new.id, COALESCE(new.gist, new.body));
+            END;
+            CREATE TRIGGER IF NOT EXISTS prompts_fts_ad AFTER DELETE ON prompts BEGIN
+                INSERT INTO prompts_fts (prompts_fts, rowid, body)
+                VALUES ('delete', old.id, COALESCE(old.gist, old.body));
+            END;
+            CREATE TRIGGER IF NOT EXISTS prompts_fts_au AFTER UPDATE ON prompts BEGIN
+                INSERT INTO prompts_fts (prompts_fts, rowid, body)
+                VALUES ('delete', old.id, COALESCE(old.gist, old.body));
+                INSERT INTO prompts_fts (rowid, body)
+                VALUES (new.id, COALESCE(new.gist, new.body));
+            END;
+            "#,
+        );
+        // Backfill for every database that already had prompts. Guarded on the
+        // `%_docsize` shadow table, which counts INDEXED docs — `COUNT(*)` on an
+        // external-content FTS table reads the CONTENT table instead, so it can
+        // never tell you the index is empty. A plain `'rebuild'` would be wrong
+        // here too: it re-reads `prompts.body` by column name, which is `''` for
+        // every compacted row, silently dropping their gists from the index.
+        {
+            let prompt_ct: i64 = conn
+                .query_row("SELECT COUNT(*) FROM prompts", [], |r| r.get(0))
+                .unwrap_or(0);
+            let indexed_ct: i64 = conn
+                .query_row("SELECT COUNT(*) FROM prompts_fts_docsize", [], |r| r.get(0))
+                .unwrap_or(-1);
+            if prompt_ct > 0 && indexed_ct == 0 {
+                let _ = conn.execute(
+                    "INSERT INTO prompts_fts (rowid, body)
+                     SELECT id, COALESCE(gist, body) FROM prompts",
+                    [],
+                );
+            }
+        }
 
         // Memory-by-session provenance: which interaction thread a prompt
         // belongs to (browse_id / linked_id / draft_id / …) and the parent plan
@@ -2007,6 +2140,100 @@ impl Database {
             })
         })?;
         rows.collect()
+    }
+
+    /// Row → `LakeItem` over the canonical projection every lake reader
+    /// selects (`le.seq … p.model`), so the readers can't drift.
+    fn row_to_lake_item(r: &rusqlite::Row) -> rusqlite::Result<crate::classmem::LakeItem> {
+        let body: Option<String> = r.get(11)?;
+        Ok(crate::classmem::LakeItem {
+            seq: r.get(0)?,
+            ts: r.get(1)?,
+            kind: r.get(2)?,
+            ref_kind: r.get(3)?,
+            ref_id: r.get(4)?,
+            session_id: r.get(5)?,
+            surface: r.get(6)?,
+            origin: r.get(7)?,
+            role: r.get(8)?,
+            mission_id: r.get(9)?,
+            project_path: r.get(10)?,
+            body: body.map(|b| {
+                if b.chars().count() > 4000 {
+                    b.chars().take(4000).collect::<String>() + "…"
+                } else {
+                    b
+                }
+            }),
+            thread_kind: r.get(12)?,
+            thread_id: r.get(13)?,
+            parent_session_id: r.get(14)?,
+            model: r.get(15)?,
+        })
+    }
+
+    /// BM25-ranked search over captured prompt bodies — the answer pack's lake
+    /// arm, and the one place ranking (rather than filtering) is the point: a
+    /// pack has room for ~20 hits, so which 20 matters more than their order in
+    /// the chain.
+    ///
+    /// A compacted prompt matches (and returns) its gist, so releasing the
+    /// words never removes the memory from search — only the released words
+    /// stop matching. Falls back to a bound LIKE for a query that yields no
+    /// FTS tokens.
+    ///
+    /// `le.kind = 'prompt'` is load-bearing: a compacted row also carries a
+    /// `compaction` event pointing at the same `prompt_id`, so without it the
+    /// join returns one hit per event and a compacted prompt would appear
+    /// twice, spending the pack's budget on a duplicate.
+    pub fn search_prompts_fts(
+        &self,
+        q: &str,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<crate::classmem::LakeItem>> {
+        let trimmed = q.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+        const COLS: &str = "SELECT le.seq, le.ts, le.kind, le.ref_kind, le.ref_id, le.session_id,
+                    p.surface, p.origin, p.role, p.mission_id, p.project_path,
+                    COALESCE(NULLIF(p.body, ''), p.gist),
+                    p.thread_kind, p.thread_id, p.parent_session_id, p.model";
+        let conn = self.conn.lock().unwrap();
+        match sanitize_fts_query(trimmed) {
+            Some(match_q) => {
+                let mut stmt = conn.prepare(&format!(
+                    "{COLS}
+                     FROM prompts_fts
+                     JOIN prompts p ON p.id = prompts_fts.rowid
+                     JOIN ledger_events le ON le.prompt_id = p.id
+                     WHERE prompts_fts MATCH ?1 AND le.kind = 'prompt'
+                     ORDER BY bm25(prompts_fts) LIMIT ?2"
+                ))?;
+                let rows =
+                    stmt.query_map(params![match_q, limit.max(1)], Self::row_to_lake_item)?;
+                rows.collect()
+            }
+            None => {
+                let escaped = trimmed
+                    .replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_");
+                let mut stmt = conn.prepare(&format!(
+                    "{COLS}
+                     FROM prompts p
+                     JOIN ledger_events le ON le.prompt_id = p.id
+                     WHERE COALESCE(NULLIF(p.body, ''), p.gist) LIKE ?1 ESCAPE '\\'
+                       AND le.kind = 'prompt'
+                     ORDER BY le.seq DESC LIMIT ?2"
+                ))?;
+                let rows = stmt.query_map(
+                    params![format!("%{escaped}%"), limit.max(1)],
+                    Self::row_to_lake_item,
+                )?;
+                rows.collect()
+            }
+        }
     }
 
     /// Fetch a browse event's `(url, title, text, context_hash)` by id — the read
@@ -3868,10 +4095,30 @@ impl Database {
             binds.push(Box::new(seq.max(0)));
         }
         if let Some(q) = f.substring.as_deref().filter(|s| !s.is_empty()) {
-            // Escape LIKE metacharacters so the query text is matched literally.
-            let escaped = q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
-            sql.push_str(" AND p.body LIKE ? ESCAPE '\\'");
-            binds.push(Box::new(format!("%{escaped}%")));
+            // FTS as a FILTER, not a ranker: the clause narrows `prompts`
+            // through the index, and the route's `ORDER BY le.seq` and response
+            // shape are untouched. (bm25 ranking lives in `search_prompts_fts`,
+            // where re-ordering is the point.) Before this, `?q=` was a LIKE
+            // cross-scan of every prompt body joined to the whole chain.
+            //
+            // An unsanitizable query — punctuation only, say — yields no FTS
+            // tokens; fall back to the bound LIKE so it still matches something
+            // rather than erroring or silently returning nothing.
+            match sanitize_fts_query(q) {
+                Some(match_q) => {
+                    sql.push_str(
+                        " AND p.id IN (SELECT rowid FROM prompts_fts WHERE prompts_fts MATCH ?)",
+                    );
+                    binds.push(Box::new(match_q));
+                }
+                None => {
+                    // Escape LIKE metacharacters so the text matches literally.
+                    let escaped =
+                        q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+                    sql.push_str(" AND COALESCE(NULLIF(p.body, ''), p.gist) LIKE ? ESCAPE '\\'");
+                    binds.push(Box::new(format!("%{escaped}%")));
+                }
+            }
         }
         sql.push_str(" ORDER BY le.seq ASC LIMIT ?");
         binds.push(Box::new(f.limit.max(1)));
@@ -4120,41 +4367,91 @@ impl Database {
         })?;
         let mut items: Vec<crate::context::TimelineItem> = rows.collect::<Result<_, _>>()?;
 
-        // Accepted class filing per page row. `class_links.target_id` is the
-        // ledger `seq` for prompt/decision/revision targets but the
-        // `browse_events` row id for browse targets — two probes, seq first,
-        // so a numeric browse id can never shadow a seq (or vice versa).
-        let mut by_seq = conn.prepare(
-            "SELECT cl.node_id, cn.title FROM class_links cl
-             JOIN class_nodes cn ON cn.id = cl.node_id
-             WHERE cl.status = 'accepted'
-               AND cl.target_kind IN ('prompt', 'decision', 'revision', 'note')
-               AND cl.target_id = ?1
-             ORDER BY cl.id LIMIT 1",
+        // Accepted class filing for the WHOLE page in two batched queries.
+        // `class_links.target_id` is the ledger `seq` for prompt/decision/
+        // revision targets but the `browse_events` row id for browse targets —
+        // two keyspaces, probed seq-first, so a numeric browse id can never
+        // shadow a seq (or vice versa).
+        //
+        // This used to be one query per row per keyspace: a 500-row page cost
+        // up to 1,000 executions, each an unindexed scan of `class_links`, all
+        // under the single connection lock. `MIN(cl.id)` reproduces the old
+        // `ORDER BY cl.id LIMIT 1` precedence — the earliest accepted filing
+        // wins — and `idx_class_links_target` now serves the lookup direction.
+        let seq_keys: Vec<String> = items.iter().map(|it| it.event.seq.to_string()).collect();
+        let browse_keys: Vec<String> = items
+            .iter()
+            .filter(|it| it.event.ref_kind.as_deref() == Some("browse_event"))
+            .filter_map(|it| it.event.ref_id.clone())
+            .collect();
+        let by_seq = Self::filings_for_targets(
+            &conn,
+            &["prompt", "decision", "revision", "note"],
+            &seq_keys,
         )?;
-        let mut by_browse = conn.prepare(
-            "SELECT cl.node_id, cn.title FROM class_links cl
-             JOIN class_nodes cn ON cn.id = cl.node_id
-             WHERE cl.status = 'accepted' AND cl.target_kind = 'browse_event'
-               AND cl.target_id = ?1
-             ORDER BY cl.id LIMIT 1",
-        )?;
+        let by_browse = Self::filings_for_targets(&conn, &["browse_event"], &browse_keys)?;
         for it in &mut items {
-            let pair = |r: &rusqlite::Row| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?));
-            let mut filing = by_seq
-                .query_row(params![it.event.seq.to_string()], pair)
-                .optional()?;
-            if filing.is_none() && it.event.ref_kind.as_deref() == Some("browse_event") {
-                if let Some(rid) = it.event.ref_id.as_deref() {
-                    filing = by_browse.query_row(params![rid], pair).optional()?;
-                }
-            }
+            let filing = by_seq.get(&it.event.seq.to_string()).or_else(|| {
+                (it.event.ref_kind.as_deref() == Some("browse_event"))
+                    .then(|| it.event.ref_id.as_deref().and_then(|rid| by_browse.get(rid)))
+                    .flatten()
+            });
             if let Some((node_id, title)) = filing {
-                it.class_node_id = Some(node_id);
-                it.class_title = Some(title);
+                it.class_node_id = Some(node_id.clone());
+                it.class_title = Some(title.clone());
             }
         }
         Ok(items)
+    }
+
+    /// `target_id → (node_id, class title)` for a page of link targets, in one
+    /// query per chunk. The earliest accepted link wins (`MIN(cl.id)`), which
+    /// is the precedence the per-row `ORDER BY cl.id LIMIT 1` probe had.
+    fn filings_for_targets(
+        conn: &Connection,
+        kinds: &[&str],
+        targets: &[String],
+    ) -> rusqlite::Result<std::collections::HashMap<String, (String, String)>> {
+        let mut out = std::collections::HashMap::new();
+        if targets.is_empty() {
+            return Ok(out);
+        }
+        let kind_marks = vec!["?"; kinds.len()].join(", ");
+        for chunk in targets.chunks(400) {
+            let target_marks = vec!["?"; chunk.len()].join(", ");
+            let mut stmt = conn.prepare(&format!(
+                "SELECT cl.target_id, cl.node_id, cn.title FROM class_links cl
+                 JOIN class_nodes cn ON cn.id = cl.node_id
+                 WHERE cl.status = 'accepted'
+                   AND cl.target_kind IN ({kind_marks})
+                   AND cl.target_id IN ({target_marks})
+                   AND cl.id = (SELECT MIN(earlier.id) FROM class_links earlier
+                                WHERE earlier.status = 'accepted'
+                                  AND earlier.target_kind IN ({kind_marks})
+                                  AND earlier.target_id = cl.target_id)"
+            ))?;
+            let mut binds: Vec<&dyn rusqlite::ToSql> = Vec::new();
+            for k in kinds {
+                binds.push(k);
+            }
+            for t in chunk {
+                binds.push(t);
+            }
+            for k in kinds {
+                binds.push(k);
+            }
+            let rows = stmt.query_map(binds.as_slice(), |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    (r.get::<_, String>(1)?, r.get::<_, String>(2)?),
+                ))
+            })?;
+            for row in rows {
+                let (target, filing) = row?;
+                out.insert(target, filing);
+            }
+        }
+        Ok(out)
     }
 
     /// Shared row→`LedgerEventRow` mapper (the column order every ledger SELECT
@@ -4661,6 +4958,134 @@ impl Database {
         Ok(n > 0)
     }
 
+    /// `app_settings` keys holding the last incremental verification anchor.
+    const VERIFY_LAST_SEQ: &'static str = "redline.ledgerVerify.lastSeq";
+    const VERIFY_HEAD_HASH: &'static str = "redline.ledgerVerify.headHash";
+
+    /// Verify only what the chain has grown by since the last verification,
+    /// anchored on the stored `(lastSeq, headHash)` pair.
+    ///
+    /// HONEST TRADE, stated plainly: this cannot detect retroactive tampering
+    /// of rows it already verified — it re-checks the anchor row's stored
+    /// `entry_hash` and then walks forward from there, so an edit to some
+    /// ancient row's `ts` would slip past. That is why the FULL
+    /// `verify_ledger_chain` stays wired to the 6h `ledger-backup` keeper watch
+    /// (inside its `spawn_blocking`): the periodic deep check is what catches
+    /// retroactive edits, and this cheap one is what a 60s status poll can
+    /// afford. On any anchor mismatch — a missing anchor, a rewound chain, an
+    /// anchor row whose hash no longer matches — it falls back to the full walk
+    /// and re-anchors.
+    pub fn verify_ledger_chain_incremental(&self) -> rusqlite::Result<crate::ledger::ChainVerdict> {
+        let head_seq = self.max_ledger_seq()?;
+        let anchor_seq: Option<i64> = self
+            .get_setting(Self::VERIFY_LAST_SEQ)
+            .and_then(|s| s.parse().ok());
+        let anchor_hash = self.get_setting(Self::VERIFY_HEAD_HASH);
+
+        // Re-anchor on the head SEQ (not the row count): the anchor is a row
+        // address, and the two only coincide because the chain is append-only.
+        let full_and_reanchor = |db: &Self| -> rusqlite::Result<crate::ledger::ChainVerdict> {
+            let verdict = db.verify_ledger_chain()?;
+            if verdict.ok {
+                let at = db.max_ledger_seq().unwrap_or(0);
+                let _ = db.set_setting(Self::VERIFY_LAST_SEQ, &at.to_string());
+                let _ = db.set_setting(
+                    Self::VERIFY_HEAD_HASH,
+                    verdict
+                        .head_hash
+                        .as_deref()
+                        .unwrap_or(crate::ledger::GENESIS_PREV),
+                );
+            }
+            Ok(verdict)
+        };
+
+        let (Some(anchor_seq), Some(anchor_hash)) = (anchor_seq, anchor_hash) else {
+            return full_and_reanchor(self);
+        };
+        // A rewound or shrunk chain is not an incremental case.
+        if anchor_seq > head_seq {
+            return full_and_reanchor(self);
+        }
+        // The anchor row must still hash to what we recorded.
+        let stored: Option<String> = {
+            let conn = self.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT entry_hash FROM ledger_events WHERE seq = ?1",
+                params![anchor_seq],
+                |r| r.get(0),
+            )
+            .optional()?
+        };
+        let anchor_ok = match (&stored, anchor_seq) {
+            // seq 0 = "verified an empty chain"; genesis prev stands in.
+            (None, 0) => anchor_hash == crate::ledger::GENESIS_PREV,
+            (Some(h), _) => *h == anchor_hash,
+            _ => false,
+        };
+        if !anchor_ok {
+            return full_and_reanchor(self);
+        }
+        if head_seq == anchor_seq {
+            return Ok(crate::ledger::ChainVerdict {
+                ok: true,
+                checked: head_seq,
+                first_bad_seq: None,
+                head_hash: Some(anchor_hash),
+            });
+        }
+
+        // Walk only the suffix.
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT seq, ts, kind, author, prompt_id, session_id, version_number,
+                    ref_kind, ref_id, payload_hash, prev_hash, entry_hash
+             FROM ledger_events WHERE seq > ?1 ORDER BY seq ASC",
+        )?;
+        let rows = stmt.query_map(params![anchor_seq], Self::row_to_ledger_event)?;
+        let mut prev = anchor_hash;
+        let mut checked = anchor_seq;
+        for row in rows {
+            let e = row?;
+            let bad = crate::ledger::ChainVerdict {
+                ok: false,
+                checked,
+                first_bad_seq: Some(e.seq),
+                head_hash: None,
+            };
+            if e.prev_hash != prev {
+                return Ok(bad);
+            }
+            let canon = crate::ledger::CanonicalEvent {
+                seq: e.seq,
+                ts: e.ts,
+                kind: &e.kind,
+                author: &e.author,
+                prompt_id: e.prompt_id,
+                session_id: e.session_id.as_deref(),
+                version_number: e.version_number,
+                ref_kind: e.ref_kind.as_deref(),
+                ref_id: e.ref_id.as_deref(),
+                payload_hash: &e.payload_hash,
+            };
+            if crate::ledger::compute_entry_hash(&e.prev_hash, &canon) != e.entry_hash {
+                return Ok(bad);
+            }
+            prev = e.entry_hash;
+            checked += 1;
+        }
+        drop(stmt);
+        drop(conn);
+        let _ = self.set_setting(Self::VERIFY_LAST_SEQ, &head_seq.to_string());
+        let _ = self.set_setting(Self::VERIFY_HEAD_HASH, &prev);
+        Ok(crate::ledger::ChainVerdict {
+            ok: true,
+            checked,
+            first_bad_seq: None,
+            head_hash: Some(prev),
+        })
+    }
+
     /// Re-walk the whole chain, recomputing each `entry_hash` from stored fields
     /// and checking `prev_hash` linkage. Reports the first seq that fails.
     pub fn verify_ledger_chain(&self) -> rusqlite::Result<crate::ledger::ChainVerdict> {
@@ -4836,6 +5261,133 @@ impl Database {
                 created_at: r.get(6)?,
             })
         })?;
+        rows.collect()
+    }
+
+    /// One node's direct children, straight off `idx_class_nodes_parent`. The
+    /// batched replacement for "read every class node, then filter in Rust" —
+    /// the shape `build_node_view` used to pay on every descent.
+    pub fn list_class_children(
+        &self,
+        parent_id: &str,
+    ) -> rusqlite::Result<Vec<crate::classmem::ClassNode>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, parent_id, kind, title, summary, project_path, ip_name,
+                    status, pinned, curated_by, created_at, updated_at
+             FROM class_nodes WHERE parent_id = ?1 ORDER BY title ASC",
+        )?;
+        let rows = stmt.query_map(params![parent_id], Self::row_to_class_node)?;
+        rows.collect()
+    }
+
+    /// `link_preview` for a whole page of link targets in ONE query under ONE
+    /// lock, keyed by ledger seq. The per-link version issued a query (and took
+    /// the connection mutex) once per link, which is what made a node with a
+    /// hundred links a hundred round trips through the shared lock.
+    ///
+    /// A compacted prompt yields its gist rather than the emptied body — the
+    /// `list_ledger_events` idiom, so a released body still reads as something.
+    pub fn link_previews_for_seqs(
+        &self,
+        seqs: &[i64],
+    ) -> rusqlite::Result<std::collections::HashMap<i64, String>> {
+        let mut out = std::collections::HashMap::new();
+        if seqs.is_empty() {
+            return Ok(out);
+        }
+        let conn = self.conn.lock().unwrap();
+        // Chunked so a very wide node can't exceed SQLite's bound-parameter cap.
+        for chunk in seqs.chunks(400) {
+            let marks = vec!["?"; chunk.len()].join(", ");
+            let mut stmt = conn.prepare(&format!(
+                "SELECT le.seq, le.kind, COALESCE(NULLIF(p.body, ''), p.gist)
+                 FROM ledger_events le LEFT JOIN prompts p ON le.prompt_id = p.id
+                 WHERE le.seq IN ({marks})"
+            ))?;
+            let refs: Vec<&dyn rusqlite::ToSql> =
+                chunk.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+            let rows = stmt.query_map(refs.as_slice(), |r| {
+                let seq: i64 = r.get(0)?;
+                let kind: String = r.get(1)?;
+                let body: Option<String> = r.get(2)?;
+                let label = match body {
+                    Some(b) => b.replace('\n', " ").chars().take(120).collect::<String>(),
+                    None => format!("[{kind} event]"),
+                };
+                Ok((seq, label))
+            })?;
+            for row in rows {
+                let (seq, label) = row?;
+                out.insert(seq, label);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Substring search over the user's own margin notes — the one
+    /// human-authored signal in the lake, which is why the answer pack leads
+    /// with these. A plain bound LIKE is right here: `user_notes` is tiny (one
+    /// row per annotated target), so an FTS index would cost more than it saves.
+    /// Starred notes rank first, then most recently touched.
+    pub fn search_user_notes(
+        &self,
+        q: &str,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<crate::context::UserNote>> {
+        let trimmed = q.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let escaped = trimmed
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM user_notes
+             WHERE text LIKE ?1 ESCAPE '\\'
+             ORDER BY starred DESC, updated_at DESC, id DESC LIMIT ?2",
+            Self::USER_NOTE_COLS
+        ))?;
+        let rows = stmt.query_map(
+            params![format!("%{escaped}%"), limit.max(1)],
+            Self::row_to_user_note,
+        )?;
+        rows.collect()
+    }
+
+    /// Class nodes whose title or summary matches a term, best guess first —
+    /// how the answer pack resolves a question to a node when the caller didn't
+    /// name one. The class table is small (a catalog, not a lake), so a LIKE
+    /// scan is honest here; a title hit outranks a summary hit, and accepted
+    /// outranks proposed.
+    pub fn match_class_nodes(
+        &self,
+        q: &str,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<crate::classmem::ClassNode>> {
+        let trimmed = q.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let escaped = trimmed
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let pat = format!("%{escaped}%");
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, parent_id, kind, title, summary, project_path, ip_name,
+                    status, pinned, curated_by, created_at, updated_at
+             FROM class_nodes
+             WHERE title LIKE ?1 ESCAPE '\\' OR summary LIKE ?1 ESCAPE '\\'
+             ORDER BY (title LIKE ?1 ESCAPE '\\') DESC,
+                      (status = 'accepted') DESC,
+                      LENGTH(title) ASC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![pat, limit.max(1)], Self::row_to_class_node)?;
         rows.collect()
     }
 
@@ -5623,22 +6175,32 @@ impl Database {
     }
 
     /// old_seq → new_seq for the given seqs — backs the per-link
-    /// `supersededBy` annotation in the node view. (As-of queries later fall
-    /// out of the same table by filtering `event_seq <= asof`.)
+    /// `supersededBy` annotation in the node view. One `IN` query per chunk
+    /// rather than one query per seq: a node with a hundred links used to mean
+    /// a hundred statement executions here. (As-of queries later fall out of
+    /// the same table by filtering `event_seq <= asof`.)
     pub fn supersessions_for_seqs(
         &self,
         seqs: &[i64],
     ) -> rusqlite::Result<std::collections::HashMap<i64, i64>> {
-        let conn = self.conn.lock().unwrap();
         let mut out = std::collections::HashMap::new();
-        let mut stmt =
-            conn.prepare("SELECT new_seq FROM supersessions WHERE old_seq = ?1")?;
-        for &seq in seqs {
-            if let Some(new_seq) = stmt
-                .query_row(params![seq], |r| r.get::<_, i64>(0))
-                .optional()?
-            {
-                out.insert(seq, new_seq);
+        if seqs.is_empty() {
+            return Ok(out);
+        }
+        let conn = self.conn.lock().unwrap();
+        for chunk in seqs.chunks(400) {
+            let marks = vec!["?"; chunk.len()].join(", ");
+            let mut stmt = conn.prepare(&format!(
+                "SELECT old_seq, new_seq FROM supersessions WHERE old_seq IN ({marks})"
+            ))?;
+            let refs: Vec<&dyn rusqlite::ToSql> =
+                chunk.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+            let rows = stmt.query_map(refs.as_slice(), |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+            })?;
+            for row in rows {
+                let (old_seq, new_seq) = row?;
+                out.insert(old_seq, new_seq);
             }
         }
         Ok(out)
@@ -6071,6 +6633,23 @@ impl Database {
     pub fn max_ledger_seq(&self) -> rusqlite::Result<i64> {
         let conn = self.conn.lock().unwrap();
         conn.query_row("SELECT COALESCE(MAX(seq), 0) FROM ledger_events", [], |r| r.get(0))
+    }
+
+    /// What kinds of events landed after `since_seq`, and how many of each —
+    /// the cheap shape of a ledger delta, `(kind, count)` newest-heaviest
+    /// first. A seq PK range scan plus a GROUP BY over a handful of rows; it
+    /// exists so a retrieval agent can be told *what* grew instead of just
+    /// *that* it grew, and skip a re-walk the delta doesn't touch.
+    pub fn ledger_delta_summary(&self, since_seq: i64) -> rusqlite::Result<Vec<(String, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT kind, COUNT(*) FROM ledger_events
+             WHERE seq > ?1 GROUP BY kind ORDER BY COUNT(*) DESC, kind ASC",
+        )?;
+        let rows = stmt.query_map(params![since_seq.max(0)], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        rows.collect()
     }
 
     /// The seq the last completed classifier run consumed up to — the delta
@@ -8882,14 +9461,43 @@ impl Database {
         Ok(())
     }
 
+    /// Every session, fully reparsed — the startup read that populates
+    /// `SessionStore`. Cost scales with the whole review history, so callers
+    /// wanting ONE session must use `load_session`.
     pub fn load_all(&self) -> rusqlite::Result<HashMap<String, ReviewSession>> {
+        self.load_sessions(None)
+    }
+
+    /// One session, reparsed alone. `/v1/context/sessions/:id/history` used to
+    /// call `load_all` and throw away everything but one entry — every
+    /// revision of every session in the database, re-sectioned through the
+    /// markdown parser, to serve a single id.
+    pub fn load_session(&self, session_id: &str) -> rusqlite::Result<Option<ReviewSession>> {
+        Ok(self.load_sessions(Some(session_id))?.remove(session_id))
+    }
+
+    /// Shared body of `load_all` / `load_session`: the same three queries, with
+    /// an optional `session_id` narrowing on each, so the two readers cannot
+    /// drift in what they reconstruct.
+    fn load_sessions(&self, only: Option<&str>) -> rusqlite::Result<HashMap<String, ReviewSession>> {
         let conn = self.conn.lock().unwrap();
         let mut sessions: HashMap<String, ReviewSession> = HashMap::new();
+        let binds: Vec<String> = only.map(str::to_string).into_iter().collect();
+        let refs = || -> Vec<&dyn rusqlite::ToSql> {
+            binds.iter().map(|s| s as &dyn rusqlite::ToSql).collect()
+        };
+        let narrow = |sql: &str, order: &str| -> String {
+            match only {
+                Some(_) => format!("{sql} WHERE session_id = ?1 {order}"),
+                None => format!("{sql} {order}"),
+            }
+        };
 
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&narrow(
             "SELECT session_id, project_path, project_name, created_at, status, attach_state, updated_at, run_state FROM sessions",
-        )?;
-        let rows = stmt.query_map([], |row| {
+            "",
+        ))?;
+        let rows = stmt.query_map(refs().as_slice(), |row| {
             let status_str: String = row.get(4)?;
             let attach_str: String = row.get(5)?;
             Ok(ReviewSession {
@@ -8910,11 +9518,12 @@ impl Database {
         }
         drop(stmt);
 
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&narrow(
             "SELECT session_id, version_number, received_at, raw_plan_markdown, thread_start, restored
-             FROM revisions ORDER BY session_id, version_number",
-        )?;
-        let revs = stmt.query_map([], |row| {
+             FROM revisions",
+            "ORDER BY session_id, version_number",
+        ))?;
+        let revs = stmt.query_map(refs().as_slice(), |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, u32>(1)?,
@@ -8941,7 +9550,7 @@ impl Database {
         }
         drop(stmt);
 
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&narrow(
             "SELECT id, session_id, version_number, type, scope, anchor_id,
                     body, edit_original, edit_revised, created_at, status,
                     resolution_body, resolution_version, resolution_accepted_at,
@@ -8950,10 +9559,10 @@ impl Database {
                     sel_sub_block_id, reopen_note, reopen_history, actionable,
                     author, agent_state, reviewer,
                     external_created_at, share_request_id, attachments
-             FROM comments
-             ORDER BY session_id, version_number, created_at",
-        )?;
-        let comments = stmt.query_map([], |row| {
+             FROM comments",
+            "ORDER BY session_id, version_number, created_at",
+        ))?;
+        let comments = stmt.query_map(refs().as_slice(), |row| {
             let kind_str: String = row.get(3)?;
             let scope_str: Option<String> = row.get(4)?;
             let status_str: String = row.get(10)?;
@@ -9800,6 +10409,513 @@ fn session_status_from(s: &str) -> SessionStatus {
         "approved" => SessionStatus::Approved,
         "aborted" => SessionStatus::Aborted,
         _ => SessionStatus::InReview,
+    }
+}
+
+/// The batched-read rewrites from the retrieval latency work. Each of these
+/// replaced an N+1 (one query per page row, or per link) with one query per
+/// page — so the assertions are about RESULTS being identical to what the
+/// per-row probes produced, since the plan-level win is guarded separately in
+/// `query_plan_guards`.
+#[cfg(test)]
+mod batched_read_tests {
+    use super::*;
+
+    fn seed_prompt(db: &Database, body: &str) -> i64 {
+        crate::ledger::record_prompt(
+            db,
+            crate::ledger::PromptInput {
+                source: crate::ledger::PromptSource::Hook,
+                origin: crate::ledger::Origin::Redline,
+                surface: "pty_plan".to_string(),
+                role: None,
+                session_id: Some("s1".to_string()),
+                claude_session_id: Some(format!("cs-{body}")),
+                mission_id: None,
+                project_path: Some("/repo".to_string()),
+                body: body.to_string(),
+                thread: None,
+                author: None,
+                model: None,
+                model_source: None,
+            },
+        )
+        .unwrap()
+        .expect("the prompt must have been recorded")
+    }
+
+    /// The Timeline's filing column, batched. The precedence rule survives:
+    /// the EARLIEST accepted link wins, exactly as `ORDER BY cl.id LIMIT 1`
+    /// used to give.
+    #[test]
+    fn batched_filing_keeps_earliest_link_precedence() {
+        let db = Database::open_in_memory().unwrap();
+        let seq = seed_prompt(&db, "wire the loop executor");
+        db.seed_class_roots(&[
+            ("n-first".into(), "First Home".into(), None),
+            ("n-second".into(), "Second Home".into(), None),
+        ])
+        .unwrap();
+        db.accept_class_node("n-first").unwrap();
+        db.accept_class_node("n-second").unwrap();
+        // Two accepted filings on the SAME target; the earlier link id wins.
+        for node in ["n-first", "n-second"] {
+            db.stage_proposal(
+                None,
+                &crate::classmem::Proposal::File {
+                    parent_id: node.into(),
+                    sub_class: None,
+                    target_kind: "prompt".into(),
+                    target_id: seq.to_string(),
+                    note: None,
+                    rationale: None,
+                },
+            )
+            .unwrap();
+        }
+        db.accept_all_pending("yusuf").unwrap();
+
+        let items = db
+            .query_ledger_events(&crate::context::LedgerFilters::default())
+            .unwrap();
+        let row = items.iter().find(|i| i.event.seq == seq).unwrap();
+        assert_eq!(row.class_node_id.as_deref(), Some("n-first"));
+        assert_eq!(row.class_title.as_deref(), Some("First Home"));
+    }
+
+    /// The batched link decorations must match what the per-link probes gave.
+    #[test]
+    fn link_previews_and_supersessions_batch_correctly() {
+        let db = Database::open_in_memory().unwrap();
+        let a = seed_prompt(&db, "first body");
+        let b = seed_prompt(&db, "second body");
+        let labels = db.link_previews_for_seqs(&[a, b, 9_999]).unwrap();
+        assert_eq!(labels.get(&a).map(String::as_str), Some("first body"));
+        assert_eq!(labels.get(&b).map(String::as_str), Some("second body"));
+        assert!(labels.get(&9_999).is_none(), "absent seqs are absent");
+        // Empty in, empty out — no query, no panic.
+        assert!(db.link_previews_for_seqs(&[]).unwrap().is_empty());
+        assert!(db.supersessions_for_seqs(&[]).unwrap().is_empty());
+    }
+
+    /// `load_session` must reconstruct exactly what `load_all` did for that
+    /// one id — the whole point is that the route stopped paying for the rest.
+    #[test]
+    fn load_session_matches_load_all_for_one_id() {
+        use crate::state::{AttachState, ReviewSession, SessionStatus};
+        let db = Database::open_in_memory().unwrap();
+        let mk = |id: &str| ReviewSession {
+            session_id: id.to_string(),
+            project_path: "/repo".to_string(),
+            project_name: "repo".to_string(),
+            created_at: 500,
+            revisions: Vec::new(),
+            status: SessionStatus::InReview,
+            attach_state: AttachState::Idle,
+            updated_at: 500,
+            run_state: None,
+        };
+        for id in ["wanted", "other"] {
+            db.upsert_session(&mk(id)).unwrap();
+            db.insert_revision(
+                id,
+                &crate::state::Revision {
+                    version_number: 1,
+                    received_at: 600,
+                    raw_plan_markdown: format!("# Plan {id}\n\nDo the thing."),
+                    sections: Vec::new(),
+                    comments: Vec::new(),
+                    thread_start: false,
+                    restored: false,
+                },
+            )
+            .unwrap();
+        }
+
+        let all = db.load_all().unwrap();
+        let one = db.load_session("wanted").unwrap().expect("session exists");
+        let from_all = all.get("wanted").unwrap();
+        assert_eq!(one.session_id, from_all.session_id);
+        assert_eq!(one.revisions.len(), from_all.revisions.len());
+        assert_eq!(
+            one.revisions[0].raw_plan_markdown,
+            from_all.revisions[0].raw_plan_markdown
+        );
+        assert_eq!(one.revisions[0].sections.len(), from_all.revisions[0].sections.len());
+        // …and it does NOT drag the other session along.
+        assert_eq!(all.len(), 2);
+        assert!(db.load_session("nope").unwrap().is_none());
+    }
+
+    /// The incremental verify must agree with the full walk, keep agreeing as
+    /// the chain grows, and fall back to the full walk when its anchor can't
+    /// be trusted.
+    #[test]
+    fn incremental_chain_verify_tracks_the_full_walk() {
+        let db = Database::open_in_memory().unwrap();
+        // Empty chain: both agree, and the anchor is established.
+        assert!(db.verify_ledger_chain_incremental().unwrap().ok);
+
+        seed_prompt(&db, "one");
+        seed_prompt(&db, "two");
+        let full = db.verify_ledger_chain().unwrap();
+        let inc = db.verify_ledger_chain_incremental().unwrap();
+        assert!(inc.ok);
+        assert_eq!(inc.head_hash, full.head_hash);
+        assert_eq!(inc.checked, full.checked);
+
+        // Grow it; the suffix walk keeps up.
+        seed_prompt(&db, "three");
+        let full = db.verify_ledger_chain().unwrap();
+        let inc = db.verify_ledger_chain_incremental().unwrap();
+        assert!(inc.ok);
+        assert_eq!(inc.head_hash, full.head_hash);
+        assert_eq!(inc.checked, full.checked);
+
+        // A no-growth call is a pure anchor hit and still reports the head.
+        let again = db.verify_ledger_chain_incremental().unwrap();
+        assert!(again.ok);
+        assert_eq!(again.head_hash, full.head_hash);
+
+        // Corruption in the SUFFIX — the part the incremental walk actually
+        // reads — must be caught exactly as the full walk catches it.
+        seed_prompt(&db, "four");
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("UPDATE ledger_events SET ts = ts + 1 WHERE seq = 4", [])
+                .unwrap();
+        }
+        assert!(!db.verify_ledger_chain().unwrap().ok);
+        let broken = db.verify_ledger_chain_incremental().unwrap();
+        assert!(!broken.ok);
+        assert_eq!(broken.first_bad_seq, Some(4));
+    }
+
+    /// The documented blind spot, pinned as a test so nobody later mistakes
+    /// the incremental verify for the full one: a retroactive edit to an
+    /// ALREADY-VERIFIED row slips past it. The 6h `ledger-backup` deep walk is
+    /// what catches that, which is why it stays wired up.
+    #[test]
+    fn incremental_verify_cannot_see_retroactive_tampering() {
+        let db = Database::open_in_memory().unwrap();
+        seed_prompt(&db, "one");
+        seed_prompt(&db, "two");
+        seed_prompt(&db, "three");
+        // Anchor on the verified head.
+        assert!(db.verify_ledger_chain_incremental().unwrap().ok);
+
+        // Tamper with an old row, leaving its stored entry_hash alone.
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("UPDATE ledger_events SET ts = ts + 1 WHERE seq = 1", [])
+                .unwrap();
+        }
+        assert!(
+            !db.verify_ledger_chain().unwrap().ok,
+            "the deep walk catches it"
+        );
+        assert!(
+            db.verify_ledger_chain_incremental().unwrap().ok,
+            "the incremental walk does NOT — this is the stated trade, not a bug"
+        );
+    }
+
+    /// A garbage anchor must not be trusted — the verify falls back to the
+    /// full walk and re-anchors rather than reporting a chain it never read.
+    #[test]
+    fn incremental_verify_falls_back_on_a_bad_anchor() {
+        let db = Database::open_in_memory().unwrap();
+        seed_prompt(&db, "one");
+        seed_prompt(&db, "two");
+        assert!(db.verify_ledger_chain_incremental().unwrap().ok);
+
+        // An anchor pointing past the head (a rewound chain) and one whose
+        // hash no longer matches both have to re-verify from scratch.
+        db.set_setting(Database::VERIFY_LAST_SEQ, "9999").unwrap();
+        assert!(db.verify_ledger_chain_incremental().unwrap().ok);
+        assert_eq!(
+            db.get_setting(Database::VERIFY_LAST_SEQ).as_deref(),
+            Some("2"),
+            "the fallback re-anchors on the real head"
+        );
+
+        db.set_setting(Database::VERIFY_HEAD_HASH, &"0".repeat(64))
+            .unwrap();
+        let v = db.verify_ledger_chain_incremental().unwrap();
+        assert!(v.ok);
+        assert_eq!(v.checked, 2, "it walked the whole chain, not a suffix");
+    }
+}
+
+/// The prompt lake's FTS index. `prompts` is not insert-only — compaction and
+/// explicit forget rewrite rows in place — so these cover the trigger set that
+/// `browse_events_fts` never needed.
+#[cfg(test)]
+mod prompt_fts_tests {
+    use super::*;
+
+    fn seed(db: &Database, body: &str) -> i64 {
+        crate::ledger::record_prompt(
+            db,
+            crate::ledger::PromptInput {
+                source: crate::ledger::PromptSource::Hook,
+                origin: crate::ledger::Origin::Redline,
+                surface: "pty_plan".to_string(),
+                role: None,
+                session_id: Some("s1".to_string()),
+                claude_session_id: Some(format!("cs-{body}")),
+                mission_id: None,
+                project_path: Some("/repo".to_string()),
+                body: body.to_string(),
+                thread: None,
+                author: None,
+                model: None,
+                model_source: None,
+            },
+        )
+        .unwrap()
+        .unwrap()
+    }
+
+    fn prompt_id_for(db: &Database, seq: i64) -> i64 {
+        let conn = db.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT prompt_id FROM ledger_events WHERE seq = ?1",
+            params![seq],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// The index must follow a body through its whole life: indexed on write,
+    /// re-indexed to the gist on compaction (released words genuinely stop
+    /// matching), and dropped on delete.
+    #[test]
+    fn prompts_fts_survives_compaction_and_forget() {
+        let db = Database::open_in_memory().unwrap();
+        let seq = seed(&db, "wire the loop executor before the demo");
+        seed(&db, "an unrelated widget migration");
+
+        // Insert trigger: searchable immediately.
+        let hits = db.search_prompts_fts("executor", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].seq, seq);
+
+        // Compaction: the gist becomes the searchable text…
+        let pid = prompt_id_for(&db, seq);
+        db.compact_prompt_body(pid, "gist: the loop executor decision", "cold", "keeper")
+            .unwrap();
+        assert_eq!(
+            db.search_prompts_fts("decision", 10).unwrap().len(),
+            1,
+            "the gist's words are searchable after compaction"
+        );
+        // …and the RELEASED words are gone from the index. "executor" survives
+        // only because the gist happens to repeat it; "demo" did not.
+        assert!(
+            db.search_prompts_fts("demo", 10).unwrap().is_empty(),
+            "released words must stop matching — that is what forgetting means"
+        );
+
+        // Explicit forget replaces the body with the sentinel.
+        let pid2 = prompt_id_for(&db, 2);
+        db.compact_prompt_body(pid2, "[forgotten]", "forget", "yusuf")
+            .unwrap();
+        assert!(db.search_prompts_fts("widget", 10).unwrap().is_empty());
+
+        // The index agrees with itself.
+        let conn = db.conn.lock().unwrap();
+        conn.execute("INSERT INTO prompts_fts(prompts_fts) VALUES('integrity-check')", [])
+            .expect("prompts_fts integrity-check must pass");
+    }
+
+    /// The `?q=` route filters through FTS when the query tokenizes, and falls
+    /// back to a bound LIKE when it doesn't — either way it returns rows, in
+    /// the route's own seq order.
+    #[test]
+    fn context_prompts_selects_fts_or_falls_back_to_like() {
+        let db = Database::open_in_memory().unwrap();
+        seed(&db, "wire the loop executor");
+        seed(&db, "unrelated widget migration");
+        seed(&db, "a second loop change");
+
+        let find = |q: &str| {
+            db.list_context_prompts(&crate::context::PromptFilters {
+                substring: Some(q.to_string()),
+                limit: 50,
+                ..Default::default()
+            })
+            .unwrap()
+        };
+        // FTS path: token match, and the route's ascending seq order holds.
+        let loops = find("loop");
+        assert_eq!(loops.len(), 2);
+        assert!(loops[0].seq < loops[1].seq, "seq ordering is unchanged");
+        // FTS is word-based: a query of pure punctuation has no tokens and
+        // must fall through to LIKE rather than erroring.
+        assert!(find("!!!").is_empty(), "the LIKE fallback matched nothing");
+        assert_eq!(find("widget").len(), 1);
+        // A term that only appears mid-word is an honest FTS miss, not a crash.
+        assert!(find("idge").is_empty());
+    }
+
+    /// An injection-shaped query can only ever fail to match.
+    #[test]
+    fn prompt_search_neutralizes_fts_operators() {
+        let db = Database::open_in_memory().unwrap();
+        seed(&db, "wire the loop executor");
+        // FTS5 operators are quoted into literals by `sanitize_fts_query`.
+        assert!(db.search_prompts_fts("loop OR widget*", 10).unwrap().len() <= 1);
+        assert!(db.search_prompts_fts("\"", 10).unwrap().is_empty());
+        assert!(db.search_prompts_fts("loop NEAR(x)", 10).unwrap().len() <= 1);
+    }
+}
+
+/// Query-plan guards for the retrieval hot path. A perf regression here is
+/// invisible in behavior — every one of these queries returns the same rows
+/// whether it uses an index or scans the table — so the assertion is on the
+/// PLAN, not the result. If one of these starts failing, an index was dropped
+/// or a WHERE clause was rewritten past the index it was shaped for.
+///
+/// The rule: a hot read may not `SCAN` a table that grows with the record
+/// (`ledger_events`, `prompts`, `class_links`, `user_notes`).
+#[cfg(test)]
+mod query_plan_guards {
+    use super::*;
+
+    /// Assert the planner reaches every named table through an index. The
+    /// table name is matched to a word boundary — `SCAN prompts_fts VIRTUAL
+    /// TABLE INDEX` is an FTS MATCH lookup, not a scan of `prompts`.
+    fn assert_indexed(db: &Database, what: &str, sql: &str, tables: &[&str]) {
+        let plan = db.explain_query_plan(sql).expect("EXPLAIN failed");
+        for t in tables {
+            let scanned = plan.split(" | ").any(|step| {
+                step == format!("SCAN {t}") || step.starts_with(&format!("SCAN {t} "))
+            });
+            assert!(
+                !scanned,
+                "{what}: `{t}` is a full table SCAN — the retrieval hot path must \
+                 stay indexed.\n  plan: {plan}"
+            );
+        }
+        assert!(
+            plan.contains("USING INDEX") || plan.contains("USING COVERING INDEX"),
+            "{what}: the planner picked no index at all.\n  plan: {plan}"
+        );
+    }
+
+    /// The Timeline's filing probe — "which accepted class is this target filed
+    /// under?" — runs once per page row. It reads `class_links` in the
+    /// target→node direction, which `idx_class_links_node` cannot serve.
+    #[test]
+    fn timeline_filing_probe_uses_the_target_index() {
+        let db = Database::open_in_memory().unwrap();
+        assert_indexed(
+            &db,
+            "timeline filing probe",
+            "SELECT cl.node_id, cn.title, MIN(cl.id) FROM class_links cl
+             JOIN class_nodes cn ON cn.id = cl.node_id
+             WHERE cl.status = 'accepted'
+               AND cl.target_kind IN ('prompt', 'decision', 'revision', 'note')
+               AND cl.target_id IN ('1', '2')
+             GROUP BY cl.target_id",
+            &["class_links"],
+        );
+    }
+
+    /// `/v1/context/prompts?q=` — the exact statement the route builds. The FTS
+    /// filter narrows `prompts` first, so the join runs prompts→ledger, and
+    /// without `idx_ledger_prompt` that direction scans the whole chain per
+    /// matching prompt. This is the query that used to be a LIKE cross-scan.
+    #[test]
+    fn context_prompts_search_uses_fts_and_the_prompt_index() {
+        let db = Database::open_in_memory().unwrap();
+        let sql = "SELECT le.seq FROM prompts p
+             JOIN ledger_events le ON le.prompt_id = p.id
+             WHERE 1 = 1
+               AND p.id IN (SELECT rowid FROM prompts_fts WHERE prompts_fts MATCH '\"x\"')
+             ORDER BY le.seq ASC LIMIT 10";
+        assert_indexed(&db, "context prompts search", sql, &["ledger_events", "prompts"]);
+        let plan = db.explain_query_plan(sql).unwrap();
+        assert!(
+            plan.contains("prompts_fts"),
+            "the search must go through the FTS index, not a body scan.\n  plan: {plan}"
+        );
+    }
+
+    /// The answer pack's bm25 arm drives from the FTS index.
+    #[test]
+    fn prompt_search_drives_from_the_fts_index() {
+        let db = Database::open_in_memory().unwrap();
+        let plan = db
+            .explain_query_plan(
+                "SELECT le.seq FROM prompts_fts
+                 JOIN prompts p ON p.id = prompts_fts.rowid
+                 JOIN ledger_events le ON le.prompt_id = p.id
+                 WHERE prompts_fts MATCH '\"x\"' AND le.kind = 'prompt'
+                 ORDER BY bm25(prompts_fts) LIMIT 10",
+            )
+            .unwrap();
+        assert!(
+            !plan.split(" | ").any(|s| s.starts_with("SCAN prompts ")),
+            "the prompt table must be reached by rowid from the index.\n  plan: {plan}"
+        );
+        assert!(plan.contains("prompts_fts"), "plan: {plan}");
+    }
+
+    /// The session spine (`/v1/context/sessions/:id/history`).
+    #[test]
+    fn session_events_use_the_session_index() {
+        let db = Database::open_in_memory().unwrap();
+        assert_indexed(
+            &db,
+            "session events",
+            "SELECT seq FROM ledger_events WHERE session_id = 'abc' ORDER BY seq ASC",
+            &["ledger_events"],
+        );
+    }
+
+    /// The activity ribbon's date range.
+    #[test]
+    fn ledger_ts_range_uses_the_ts_index() {
+        let db = Database::open_in_memory().unwrap();
+        assert_indexed(
+            &db,
+            "ledger ts range",
+            "SELECT seq FROM ledger_events WHERE ts >= 1 AND ts <= 2",
+            &["ledger_events"],
+        );
+    }
+
+    /// `compaction_stats` runs on every memory-status poll; the partial index
+    /// turns it into an index-only scan over the compacted set instead of a
+    /// walk of every prompt body in the lake.
+    #[test]
+    fn compaction_stats_uses_the_partial_index() {
+        let db = Database::open_in_memory().unwrap();
+        let plan = db
+            .explain_query_plan(
+                "SELECT COUNT(*), COALESCE(SUM(original_bytes), 0), MAX(compacted_at)
+                 FROM prompts WHERE gist IS NOT NULL",
+            )
+            .unwrap();
+        assert!(
+            plan.contains("idx_prompts_compacted"),
+            "compaction_stats must ride the partial index.\n  plan: {plan}"
+        );
+    }
+
+    /// The Timeline's two `user_notes` probes carry no `target_kind <> 'none'`
+    /// predicate, so the pre-existing PARTIAL unique index could not serve them.
+    #[test]
+    fn user_note_probe_uses_the_unfiltered_target_index() {
+        let db = Database::open_in_memory().unwrap();
+        assert_indexed(
+            &db,
+            "user note probe",
+            "SELECT text FROM user_notes WHERE target_kind = 'ledger_event' AND target_id = '7'",
+            &["user_notes"],
+        );
     }
 }
 

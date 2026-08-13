@@ -3323,74 +3323,686 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
   }
 }
 
-/* ── Landing (A4) ──────────────────────────────────────────────────────────
-   The document plate's zero state as a live first page: a blinking caret
-   before a placeholder-styled "Draft a new plan" line. Typing anywhere on
-   the plate hands the keystrokes to a fresh Drafter document (App's landing
-   listener buffers them through the handoff — lib/landing.ts). The fade-in
-   waits for bootSettled so the page resolves after the doors part, never
-   through them; under reduced motion it is simply there. */
-.rl-landing {
-  min-height: 55vh;
+/* ── Front door ────────────────────────────────────────────────────────────
+   The document plate's resting state, and where Redline opens. One line of
+   type, one box.
+
+   The whole surface is ONE island — a glass slab that changes shape rather
+   than a stack of controls that appear and disappear. It settles when idle,
+   lifts on focus, grows with the text, and on ⏎ becomes the Planning card in
+   place. Everything secondary orbits it and fades; nothing jumps.
+
+   Every colour is derived from the live theme tokens (`color-mix` over
+   --color-info / --color-ink / --color-paper), so the glass re-tints across
+   all twelve themes instead of being a hardcoded slate that fights half of
+   them. Motion honours prefers-reduced-motion at the bottom of the block. */
+
+.rl-frontdoor {
+  /* Centred on its own measure regardless of the plate's wide/normal mode —
+     a hero that hugs the left edge of a 1900px pane reads as a stray panel. */
+  max-width: 42rem;
+  margin-inline: auto;
+  min-height: 70vh;
   display: flex;
   flex-direction: column;
   justify-content: center;
-  align-items: flex-start;
-  gap: 12px;
+  align-items: stretch;
+  position: relative;
   opacity: 0;
 }
-.rl-landing-in {
+/* The entrance is an ANIMATION, not a transition on opacity/transform.
+   A large element parked at a transitioned opacity keeps its own WebKit
+   compositing layer, and an 8-bit layer over a near-black canvas quantizes
+   into a visible hard-edged rectangle — which is exactly what the first two
+   passes of this surface shipped. An animation ends and hands the property
+   back to its base value, so no layer survives it. */
+.rl-frontdoor.is-in {
   opacity: 1;
-  transition: opacity 420ms ease;
+  animation: rl-fd-enter 520ms cubic-bezier(0.16, 1, 0.3, 1);
 }
-.rl-landing-start {
+@keyframes rl-fd-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
+/* The backdrop: ruled paper.
+   Redline's whole metaphor is the marked-up document, and the shell already
+   speaks paper / plate / rule / ink — so the plate's zero state is a sheet
+   waiting to be written on, not a coloured wash. Faint horizontal rules in
+   the ink token, lit from behind the island by a low accent bloom. Both read
+   as the terminal's grid too, which is the other half of the house style.
+
+   MASKED, not merely faded: `mask-image` drives alpha to a hard zero well
+   inside the layer, so unlike a gradient stop there is no residue at the
+   edges and no rectangle can appear. Static — nothing animates. */
+.rl-fd-paper {
+  position: absolute;
+  inset: -8% -12%;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(
+      46% 34% at 50% 42%,
+      color-mix(in srgb, var(--color-info) 11%, transparent),
+      transparent 72%
+    ),
+    repeating-linear-gradient(
+      to bottom,
+      color-mix(in srgb, var(--color-ink) 7%, transparent) 0 1px,
+      transparent 1px 34px
+    );
+  -webkit-mask-image: radial-gradient(
+    54% 44% at 50% 44%,
+    #000 12%,
+    transparent 76%
+  );
+  mask-image: radial-gradient(54% 44% at 50% 44%, #000 12%, transparent 76%);
+}
+.rl-frontdoor > *:not(.rl-fd-paper) {
+  position: relative;
+  z-index: 1;
+}
+
+/* Editorial kicker over a display serif line: the shell's own microtype
+   vocabulary (mono, tracked, uppercase — see .rl-chrome-label) anchoring a
+   plate that would otherwise float. "PLAN MODE" is literal, not decorative:
+   it is the mode ⏎ actually starts. */
+.rl-fd-eyebrow {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.22em;
+  color: color-mix(in srgb, var(--color-ink-muted) 82%, transparent);
+  text-align: center;
+  margin-bottom: 12px;
+}
+.rl-fd-title {
+  font-size: 40px;
+  font-weight: 600;
+  line-height: 1.08;
+  letter-spacing: -0.022em;
+  color: var(--color-ink);
+  text-align: center;
+}
+.rl-fd-sub {
+  margin-top: 10px;
+  margin-bottom: 26px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--color-ink-muted);
+  text-align: center;
+}
+
+/* ── The island ─────────────────────────────────────────────────────────── */
+
+.rl-fd-island {
+  position: relative;
+  border-radius: 18px;
+  padding: 14px 14px 12px;
+  /* Glass: a translucent wash over the paper, blurred and saturated so
+     whatever sits behind it reads as depth rather than noise. */
+  background: color-mix(in srgb, var(--color-bg-elevated) 62%, transparent);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  backdrop-filter: blur(24px) saturate(160%);
+  border: 1px solid color-mix(in srgb, var(--color-ink) 12%, transparent);
+  box-shadow:
+    0 1px 0 0 color-mix(in srgb, var(--color-ink) 6%, transparent) inset,
+    0 8px 28px -12px rgba(0, 0, 0, 0.45);
+  transition:
+    transform 320ms cubic-bezier(0.16, 1, 0.3, 1),
+    box-shadow 320ms cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 260ms ease,
+    background-color 260ms ease;
+}
+/* Lifted = focused, or carrying a sentence, or planning. The slab rises and
+   picks up an accent ring — the shape IS the state. */
+.rl-fd-island.is-lifted {
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--color-info) 42%, transparent);
+  background: color-mix(in srgb, var(--color-bg-elevated) 78%, transparent);
+  box-shadow:
+    0 1px 0 0 color-mix(in srgb, var(--color-ink) 8%, transparent) inset,
+    0 0 0 3px color-mix(in srgb, var(--color-info) 12%, transparent),
+    0 18px 44px -18px rgba(0, 0, 0, 0.6);
+}
+.rl-fd-island.is-planning {
+  border-color: color-mix(in srgb, var(--color-info) 30%, transparent);
+}
+
+/* Content swapping inside the island rises into place instead of popping —
+   the slab is continuous, only what it holds changes. */
+.rl-fd-morph {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  animation: rl-fd-rise 300ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes rl-fd-rise {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+}
+
+.rl-fd-input {
+  width: 100%;
+  resize: none;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--color-ink);
+  font-size: 15px;
+  line-height: 1.55;
+  padding: 4px 4px 0;
+  min-height: 28px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+.rl-fd-input::placeholder {
+  color: color-mix(in srgb, var(--color-ink-muted) 78%, transparent);
+}
+.rl-fd-partial {
+  padding: 0 4px;
+  font-size: var(--rl-text-sm);
+  font-style: italic;
+  color: color-mix(in srgb, var(--color-info) 80%, var(--color-ink-muted));
+}
+
+.rl-fd-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Controls are glass pills, not bordered boxes: hairline edge, translucent
+   fill, a small lift on hover. */
+.rl-fd-tool {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 30px;
+  min-width: 30px;
+  padding: 0 8px;
+  font-size: 12.5px;
+  border-radius: 9px;
+  border: 1px solid color-mix(in srgb, var(--color-ink) 10%, transparent);
+  background: color-mix(in srgb, var(--color-ink) 4%, transparent);
+  color: var(--color-ink-muted);
+  cursor: pointer;
+  transition:
+    background-color 160ms ease,
+    color 160ms ease,
+    border-color 160ms ease;
+}
+.rl-fd-tool.is-wide {
+  padding: 0 10px;
+}
+.rl-fd-tool:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-ink) 9%, transparent);
+  color: var(--color-ink);
+  border-color: color-mix(in srgb, var(--color-ink) 18%, transparent);
+}
+.rl-fd-tool:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.rl-fd-tool.is-hot {
+  border-color: color-mix(in srgb, var(--color-warning) 55%, transparent);
+  background: color-mix(in srgb, var(--color-warning) 18%, transparent);
+  color: var(--color-ink);
+  animation: rl-fd-pulse 1.6s ease-in-out infinite;
+}
+@keyframes rl-fd-pulse {
+  50% {
+    background: color-mix(in srgb, var(--color-warning) 32%, transparent);
+  }
+}
+.rl-fd-caret {
+  font-size: 9px;
+  opacity: 0.55;
+  flex-shrink: 0;
+}
+
+/* The submit key. Dim and inert with nothing to send; it fills with the
+   accent the moment there is a sentence — the button announces the state
+   rather than a hint line doing it. */
+.rl-fd-go {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 30px;
+  width: 34px;
+  border-radius: 9px;
+  border: 1px solid color-mix(in srgb, var(--color-ink) 10%, transparent);
+  background: color-mix(in srgb, var(--color-ink) 4%, transparent);
+  color: var(--color-ink-muted);
+  cursor: default;
+  transition:
+    background-color 220ms ease,
+    color 220ms ease,
+    border-color 220ms ease,
+    transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.rl-fd-go.is-armed {
+  border-color: transparent;
+  background: var(--color-info);
+  color: var(--color-on-accent);
+  cursor: pointer;
+  transform: scale(1.04);
+  box-shadow: 0 4px 14px -4px color-mix(in srgb, var(--color-info) 65%, transparent);
+}
+.rl-fd-go.is-armed:hover {
+  filter: brightness(1.08);
+}
+
+.rl-fd-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  min-width: 232px;
+  z-index: 50;
+  padding: 5px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--color-ink) 14%, transparent);
+  background: color-mix(in srgb, var(--color-bg-elevated) 90%, transparent);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  backdrop-filter: blur(24px) saturate(160%);
+  box-shadow: 0 16px 40px -16px rgba(0, 0, 0, 0.7);
+  animation: rl-fd-rise 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.rl-fd-menu-row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 9px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-ink);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.rl-fd-menu-row:hover {
+  background: color-mix(in srgb, var(--color-ink) 8%, transparent);
+}
+.rl-fd-menu-row.is-on {
+  color: var(--color-ink);
+  font-weight: 600;
+}
+.rl-fd-menu-name {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  font-size: 26px;
-  font-weight: 600;
-  color: var(--color-ink-muted);
-  background: transparent;
-  border: none;
-  padding: 0;
-  cursor: text; /* the line is a place to type, not a button */
-  transition: color 0.15s;
 }
-.rl-landing-start:hover {
+/* The tick holds its slot at every state so the labels never shift sideways
+   when the selection moves. */
+.rl-fd-menu-tick {
+  flex-shrink: 0;
+  color: var(--color-info);
+}
+.rl-fd-kbd {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10.5px;
+  opacity: 0.45;
+}
+
+/* Attachments ride as a `Context:` path list on the prompt — the plan session
+   already has Read/Grep/Glob pre-approved, so paths are all it needs. */
+.rl-fd-attach {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 0 2px;
+}
+.rl-fd-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 4px 2px 8px;
+  border-radius: 7px;
+  border: 1px solid color-mix(in srgb, var(--color-ink) 12%, transparent);
+  background: color-mix(in srgb, var(--color-ink) 6%, transparent);
+  color: var(--color-ink);
+  font-size: 11.5px;
+}
+.rl-fd-x {
+  display: inline-flex;
+  border: none;
+  background: transparent;
+  color: var(--color-ink-muted);
+  line-height: 1;
+  padding: 2px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.rl-fd-x:hover {
+  color: var(--color-ink);
+  background: color-mix(in srgb, var(--color-ink) 10%, transparent);
+}
+
+/* ── Orbit ──────────────────────────────────────────────────────────────── */
+
+/* Starter chips. They retire the moment there is a sentence to finish —
+   collapsing to zero height so the island doesn't shift when they go.
+
+   The collapse animates `grid-template-rows: 1fr → 0fr` on the wrapper, NOT
+   a max-height on the row. A fixed max-height is a lie as soon as the chips
+   wrap to a second line: the row overflows its own clamp and paints on top
+   of whatever sits below it. Grid rows collapse whatever the content
+   actually measures, at any width. */
+.rl-fd-suggest-wrap {
+  display: grid;
+  grid-template-rows: 1fr;
+  margin-top: 14px;
+  opacity: 1;
+  transition:
+    opacity 200ms ease,
+    grid-template-rows 260ms cubic-bezier(0.16, 1, 0.3, 1),
+    margin-top 260ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.rl-fd-suggest-wrap.is-hidden {
+  grid-template-rows: 0fr;
+  opacity: 0;
+  margin-top: 0;
+  pointer-events: none;
+}
+.rl-fd-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  /* Both required for the 0fr collapse to actually reach zero. */
+  min-height: 0;
+  overflow: hidden;
+}
+.rl-fd-suggestion {
+  padding: 5px 11px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--color-ink) 10%, transparent);
+  background: color-mix(in srgb, var(--color-ink) 3%, transparent);
+  color: var(--color-ink-muted);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background-color 160ms ease,
+    color 160ms ease,
+    border-color 160ms ease;
+}
+.rl-fd-suggestion:hover {
+  background: color-mix(in srgb, var(--color-ink) 8%, transparent);
+  border-color: color-mix(in srgb, var(--color-info) 40%, transparent);
   color: var(--color-ink);
 }
-.rl-landing-caret {
-  width: 2px;
-  height: 1.1em;
-  background: var(--color-ink);
-  animation: rl-landing-blink 1.1s steps(1) infinite;
+
+.rl-fd-how {
+  align-self: center;
+  margin-top: 26px;
+  border: none;
+  background: transparent;
+  color: var(--color-ink-muted);
+  font-size: 12px;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: opacity 160ms ease, color 160ms ease;
 }
-@keyframes rl-landing-blink {
-  50% {
-    opacity: 0;
-  }
+.rl-fd-how::after {
+  content: " →";
+  opacity: 0.6;
 }
-@media (prefers-reduced-motion: reduce) {
-  .rl-landing {
-    opacity: 1;
-  }
-  .rl-landing-in {
-    transition: none;
-  }
-  .rl-landing-caret {
-    animation: none;
-  }
+.rl-fd-how:hover {
+  opacity: 1;
+  color: var(--color-info);
 }
-.rl-landing-hint {
-  font-size: var(--rl-text-sm);
+
+/* ── Planning ───────────────────────────────────────────────────────────── */
+
+.rl-fd-planning-prompt {
+  padding: 2px 4px;
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--color-ink);
+  white-space: pre-wrap;
+  max-height: 9em;
+  overflow: hidden;
+}
+.rl-fd-detail {
+  font-size: 11.5px;
+  line-height: 1.5;
   color: var(--color-ink-muted);
 }
-.rl-landing-lines {
-  margin-top: 22px;
+.rl-fd-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--color-ink);
+}
+.rl-fd-quiet {
+  border: none;
+  background: transparent;
+  color: var(--color-ink-muted);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 6px;
+}
+.rl-fd-quiet:hover {
+  color: var(--color-ink);
+  background: color-mix(in srgb, var(--color-ink) 8%, transparent);
+}
+.rl-fd-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* ── Readiness ──────────────────────────────────────────────────────────── */
+/* Only ever rendered when something is actually wrong. */
+
+.rl-fd-strip {
   display: flex;
   flex-direction: column;
+  gap: 9px;
+  margin-top: 18px;
+}
+.rl-fd-item {
+  display: flex;
   align-items: flex-start;
-  gap: 6px;
+  gap: 9px;
+}
+.rl-fd-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-top: 5px;
+  background: color-mix(in srgb, var(--color-ink-muted) 55%, transparent);
+}
+.rl-fd-dot.is-blocked {
+  background: var(--color-warning);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-warning) 22%, transparent);
+}
+/* Inside the island the block is a tinted inset shelf, not a second card. */
+.rl-fd-block {
+  margin-top: 12px;
+  padding: 11px 12px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--color-ink) 10%, transparent);
+  background: color-mix(in srgb, var(--color-ink) 5%, transparent);
+  animation: rl-fd-rise 260ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.rl-fd-block.is-blocking {
+  border-color: color-mix(in srgb, var(--color-warning) 42%, transparent);
+  background: color-mix(in srgb, var(--color-warning) 9%, transparent);
+}
+.rl-fd-block > .rl-fd-strip {
+  margin-top: 0;
+}
+.rl-fd-fix {
+  padding: 4px 10px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--color-ink) 14%, transparent);
+  background: color-mix(in srgb, var(--color-ink) 6%, transparent);
+  color: var(--color-ink);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 160ms ease;
+}
+.rl-fd-fix:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-ink) 12%, transparent);
+}
+.rl-fd-fix:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.rl-fd-fix.is-primary {
+  padding: 6px 13px;
+  border-color: transparent;
+  background: var(--color-info);
+  color: var(--color-on-accent);
+  font-size: 12.5px;
+}
+.rl-fd-fix.is-primary:hover:not(:disabled) {
+  background: var(--color-info);
+  filter: brightness(1.08);
+}
+.rl-fd-err {
+  font-size: 11px;
+  color: var(--color-warning);
+}
+.rl-fd-name {
+  min-width: 190px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--color-ink) 16%, transparent);
+  background: color-mix(in srgb, var(--color-paper) 70%, transparent);
+  color: var(--color-ink);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12.5px;
+  outline: none;
+}
+.rl-fd-name:focus {
+  border-color: color-mix(in srgb, var(--color-info) 55%, transparent);
+}
+
+/* ── Squeezed ───────────────────────────────────────────────────────────────
+   The document column floors at `docMinFor` (300px, or 20% of the window) and
+   the side panes curtain OVER it below that — so 300px is the narrowest this
+   surface is ever handed, and it has to stay usable the whole way down rather
+   than relying on the shell to protect it. The class is set from a measured
+   ResizeObserver in FrontDoor.tsx: the pane is not the viewport, so a media
+   query would be measuring the wrong box.
+
+   The order things are given up in: display type shrinks, then the toolbar
+   wraps, then the subtitle goes, then the chips. The composer is the last
+   thing standing, because it is the only thing here that is load-bearing. */
+
+.rl-frontdoor.is-compact {
+  min-height: 62vh;
+}
+.rl-frontdoor.is-compact .rl-fd-title {
+  font-size: 30px;
+  letter-spacing: -0.015em;
+}
+.rl-frontdoor.is-compact .rl-fd-sub {
+  font-size: 13px;
+  margin-bottom: 20px;
+}
+.rl-frontdoor.is-compact .rl-fd-island {
+  padding: 12px 12px 10px;
+  border-radius: 16px;
+}
+/* Wrapping beats overflowing: at this width the row can't hold the picker,
+   the destination chip and both keys on one line, and the send key sliding
+   under the island's edge is worse than a second row. */
+.rl-frontdoor.is-compact .rl-fd-tools {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+/* The auto-grow sizes from the VALUE's scrollHeight, which is one line while
+   the box is empty — so a placeholder that wraps to two gets clipped. Hold
+   two lines open at widths where it will. */
+.rl-frontdoor.is-compact .rl-fd-input {
+  min-height: 3.1em;
+}
+.rl-frontdoor.is-compact .rl-fd-planning-prompt,
+.rl-frontdoor.is-compact .rl-fd-input {
+  font-size: 14px;
+}
+
+.rl-frontdoor.is-tight {
+  min-height: 0;
+  padding-block: 24px;
+}
+.rl-frontdoor.is-tight .rl-fd-title {
+  font-size: 23px;
+  letter-spacing: -0.01em;
+}
+.rl-frontdoor.is-tight .rl-fd-eyebrow {
+  margin-bottom: 8px;
+}
+/* The subtitle is the first copy to go — the title already carries the
+   stance and the placeholder carries the instruction. */
+.rl-frontdoor.is-tight .rl-fd-sub {
+  display: none;
+}
+.rl-frontdoor.is-tight .rl-fd-title {
+  margin-bottom: 20px;
+}
+.rl-frontdoor.is-tight .rl-fd-how {
+  margin-top: 18px;
+}
+/* The bloom needs room to read as light; at this width it reads as a smudge
+   over the type. Rules only. */
+.rl-frontdoor.is-tight .rl-fd-paper {
+  background: repeating-linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--color-ink) 7%, transparent) 0 1px,
+    transparent 1px 34px
+  );
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rl-fd-suggest-wrap {
+    transition: none;
+  }
+  .rl-frontdoor,
+  .rl-frontdoor.is-in {
+    opacity: 1;
+    transform: none;
+    animation: none;
+  }
+  .rl-fd-island,
+  .rl-fd-go,
+  .rl-fd-tool,
+  .rl-fd-suggestion,
+  .rl-fd-suggestions,
+  .rl-fd-how {
+    transition: none;
+  }
+  .rl-fd-island.is-lifted {
+    transform: none;
+  }
+  .rl-fd-go.is-armed {
+    transform: none;
+  }
+  .rl-fd-morph,
+  .rl-fd-menu,
+  .rl-fd-block {
+    animation: none;
+  }
+  .rl-fd-tool.is-hot {
+    animation: none;
+  }
 }
 
 /* ── Gutter dividers ───────────────────────────────────────────────────────

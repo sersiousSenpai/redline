@@ -130,17 +130,18 @@ const STEPS: TourStep[] = [
     id: "landing",
     anchor: "landing",
     placement: "bottom",
-    title: "This page is live",
+    title: "Type what you want to build",
     lead: (
       <>
-        The empty document isn't a placeholder — <strong>just start
-        typing</strong> and it becomes a draft prompt.
+        One sentence in the box, then <strong>⏎</strong> — Claude starts
+        planning it in a real project.
       </>
     ),
     body: (
       <>
-        Shape the prompt in the drafter, then launch it: Claude plans in the
-        terminal, and the plan lands back here for review.
+        No terminal, no flags. Claude plans in the terminal below and the plan
+        lands back here for you to mark up. <strong>⌘⏎</strong> opens the
+        drafter first if you'd rather shape a longer brief.
       </>
     ),
   },

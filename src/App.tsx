@@ -29,7 +29,7 @@ const PlanEditor = lazy(() =>
 import type { PlanEditorActions } from "./components/PlanEditor";
 import type { PlanEditorCollab } from "./components/PlanEditor";
 import { EmptyState } from "./components/EmptyState";
-import { LandingPage } from "./components/LandingPage";
+import { FrontDoor } from "./components/FrontDoor";
 import {
   applySeed,
   isEditableTarget,
@@ -37,6 +37,18 @@ import {
   seedStep,
   type LandingPhase,
 } from "./lib/landing";
+import {
+  composePrompt,
+  launchStillLive,
+  resolveLaunchProject,
+  type LaunchDestination,
+  type ProjectChoice,
+} from "./lib/frontDoor";
+import {
+  deriveReadiness,
+  type PreflightStatus,
+  type ReadinessItem,
+} from "./lib/readiness";
 import { isLiveRunState } from "./lib/orchestration";
 import { Footer } from "./components/Footer";
 import { Header } from "./components/Header";
@@ -715,6 +727,52 @@ function App() {
     "redline.drafter.project",
     null,
   );
+
+  // ── The front door ──────────────────────────────────────────────────────
+  // All three of these are PERSISTED, not plain useState. A half-typed prompt
+  // has to survive a surface switch, a pane toggle and a reload — a front door
+  // that eats your sentence is exactly the small betrayal this whole surface
+  // exists to remove. `frontDoorPending` deliberately does NOT persist: a
+  // stale "Planning…" card must not outlive a restart.
+  const [frontDoorText, setFrontDoorText] = usePersistedState(
+    "redline.frontDoor.text",
+    "",
+  );
+  const [frontDoorProject, setFrontDoorProject] =
+    usePersistedState<ProjectChoice>("redline.frontDoor.project", null);
+  const [frontDoorAttachments, setFrontDoorAttachments] = usePersistedState<
+    string[]
+  >("redline.frontDoor.attachments", []);
+  // Where ⏎ sends. Sticky like the rest of the door's state — someone who
+  // works by shaping long briefs first shouldn't re-pick it every session.
+  const [frontDoorDest, setFrontDoorDest] = usePersistedState<LaunchDestination>(
+    "redline.frontDoor.destination",
+    "plan",
+  );
+  const [frontDoorPending, setFrontDoorPending] = useState<{
+    prompt: string;
+    startedAt: number;
+    /** The terminal this launch is running in. When it goes, so does the
+     *  session — the card must not outlive it. */
+    terminalId: string | null;
+    /** What the composer held, so an aborted launch gives it back intact
+     *  rather than making the user retype a sentence they already wrote. */
+    text: string;
+    attachments: string[];
+  } | null>(null);
+  const frontDoorPendingRef = useRef(frontDoorPending);
+  frontDoorPendingRef.current = frontDoorPending;
+  // Focus + seed handoff from the type-to-start listener (see lib/landing.ts).
+  const [frontDoorFocus, setFrontDoorFocus] = useState(0);
+  // "Can this machine actually deliver a plan" — null until the first probe
+  // resolves, which readiness reads as *unknown*, never as broken.
+  const [preflight, setPreflight] = useState<PreflightStatus | null>(null);
+  // Gates the 90s `/hooks` nudge: a plan that has ever landed proves the hook
+  // works, so a later wait has some other cause and blaming it would be a lie.
+  const [planEverArrived, setPlanEverArrived] = usePersistedState(
+    "redline.planEverArrived",
+    false,
+  );
   // The draft's durable identity — keys its discussion agent, comments, voice
   // memory, and its lineage in the memory lake. The one drafter thing that
   // stays in localStorage: *which* document is open is a UI preference.
@@ -1278,6 +1336,9 @@ function App() {
   // The dock's GRID, distinct from the tab count — 9 tabs / 2 tiles is
   // normal. Drives dock growth and the browser-pane resync key.
   const [termTiles, setTermTiles] = useState({ count: 1, rows: 1 });
+  // Live terminal ids. Null until the dock first reports — an absent report
+  // must never read as "the terminal is gone".
+  const [liveTermIds, setLiveTermIds] = useState<string[] | null>(null);
   const handleTileCountChange = useCallback(
     (count: number, rows: number) =>
       setTermTiles((prev) =>
@@ -1865,6 +1926,14 @@ function App() {
     });
     const ro = new ResizeObserver(onGeometry);
     ro.observe(container);
+    // The ARTICLE too, not just its container. Its own measure changes
+    // without the pane moving — wide view, and the front door dropping the
+    // 820px column entirely — and those are exactly the moments the answer
+    // flips. Observing it here beats threading each cause through the deps
+    // (the front-door one is derived from `sessionReady`, which is declared
+    // far below this effect). Safe from feedback: the control is absolutely
+    // positioned and out of flow, so mounting it never resizes the article.
+    ro.observe(article);
     const off = onResizeSession((active) => {
       if (!active) recompute();
     });
@@ -2366,9 +2435,17 @@ function App() {
         statuses,
       ]);
       setWorkspace(ws);
-      const first = list[0]?.sessionId ?? null;
-      setActiveId(first);
-      await loadSession(first);
+      // Boot lands on the FRONT DOOR, not on the last plan you happened to
+      // read. Opening Redline is nearly always "I want to build something",
+      // and the plans are one click away in the sidebar either way.
+      //
+      // One carve-out: a session still HELD is Claude literally paused mid-
+      // run waiting on your verdict. Burying that behind a prompt box would
+      // leave an agent blocked with nothing on screen saying so, so a held
+      // plan still claims the plate.
+      const held = list.find((s) => s.attachState === "held") ?? null;
+      setActiveId(held?.sessionId ?? null);
+      await loadSession(held?.sessionId ?? null);
       // Landing: "last" (default) keeps the persisted surface — today's
       // behavior. A fixed or per-project landing overrides it; a landing on
       // a disabled surface falls back to the document.
@@ -2420,6 +2497,11 @@ function App() {
   useEffect(() => {
     const planUnlisten = listen<PlanReceivedEvent>("plan-received", (e) => {
       const payload = e.payload;
+      // A plan has now demonstrably reached Redline on this machine, so the
+      // front door's `/hooks` nudge is retired for good — and this launch, if
+      // it was one, is over.
+      setPlanEverArrived(true);
+      setFrontDoorPending(null);
       // Attention cue: a plan was just intercepted. Fire on *every* intercept,
       // regardless of which session it targets or whether we're focused.
       if (flashEnabledRef.current) {
@@ -2585,6 +2667,20 @@ function App() {
     const decisionUnlisten = listen<PlanDecisionWindowEvent>(
       "plan-decision-window",
       (e) => {
+        // Ambient mode auto-approves after a 20s countdown the user didn't
+        // start. If they launched from the front door seconds ago they are
+        // demonstrably sitting there watching — the strongest possible signal
+        // that they intend to review — so claim the window instead of racing
+        // it, and skip the banner entirely. `claim_review` converts the held
+        // POST to a full review by design, and claiming is strictly the safe
+        // direction: the worst case is a plan getting reviewed rather than
+        // auto-approved.
+        if (frontDoorPendingRef.current) {
+          void invoke<boolean>("claim_review", {
+            sessionId: e.payload.sessionId,
+          }).catch((err) => console.error("claim_review failed", err));
+          return;
+        }
         setDecisionWindow(e.payload);
         // Attention-grab: a short window is useless behind other windows.
         void (async () => {
@@ -3111,6 +3207,13 @@ function App() {
   // synthesized entirely from the room's Yjs state — no backend session.
   const joinedInfo = useJoinedSession(joinedRoom, joinedPresence);
   const joinedActive = !!joinedInfo && activeId === joinedInfo.key;
+
+  // Is there an actual DOCUMENT on the plate right now? The zoom / wide-view
+  // rail and the article's reading measure both exist to serve one, and on
+  // the front door there is none — nothing to zoom, no column to widen. The
+  // rail rendered there was a control wired to nothing that still moved the
+  // hero when you touched it.
+  const docSurfaceActive = sessionReady || joinedActive;
 
   // Width of the table-of-contents rail. Snap constants live in lib/tocRail so
   // the rail and the left space it reserves in the document scroller stay in
@@ -3966,7 +4069,18 @@ function App() {
   // terminal in the chosen project and launch `claude --permission-mode plan`
   // seeded with the prompt — the same spawn-verified handoff as
   // restorePlanSession (no timing guess; the write is checked).
-  const launchPromptDraft = (markdown: string, projectPath: string | null) => {
+  //
+  // `draftId` defaults to the ACTIVE drafter document because that is where
+  // most launches originate — but it must be overridable. Hardcoding it
+  // mis-attributes every launch that didn't come from the Drafter (the
+  // browser's "Send to Claude Code" already suffered this) to whatever
+  // document happened to be open. The front door passes `null`: it has no
+  // document, and the Rust side already takes `draft_id: Option<String>`.
+  const launchPromptDraft = (
+    markdown: string,
+    projectPath: string | null,
+    draftId: string | null = drafterDraftId,
+  ) => {
     const trimmed = markdown.trim();
     if (!trimmed) return;
     // Polis ledger: record the drafted prompt at launch (the plan session
@@ -3976,7 +4090,7 @@ function App() {
     void invoke("record_drafted_prompt", {
       markdown: trimmed,
       projectPath,
-      draftId: drafterDraftId,
+      draftId,
     });
     const cmd = `${buildPlanLaunchCommand(trimmed, projectPath)}\r`;
     suppressTerminalRevealFocus();
@@ -3988,6 +4102,10 @@ function App() {
     }
     setToast("Launching plan in the terminal below ↓");
     setTimeout(() => setToast(null), 4000);
+    // The terminal this launch lives in. Callers that show progress need it:
+    // when the tile goes, so does the session, and a spinner outliving its
+    // process is the exact lie this whole surface exists to remove.
+    return id;
   };
 
   // "Run" on a Localhost card: bring a dev server back without hunting for the
@@ -4058,7 +4176,11 @@ function App() {
     setSendConfirm(null);
     if (!markdown) return;
     selectSurface("document");
-    launchPromptDraft(markdown, project);
+    // draftId `null` — this plan was drafted while browsing, not in the
+    // Drafter, so inheriting whatever document happens to be open there would
+    // file it under an unrelated draft. (The "Open in Drafter" route mints a
+    // real document and keeps its own lineage.)
+    launchPromptDraft(markdown, project, null);
   };
 
   // Seed the Prompt Drafter with agent-authored markdown and pre-select the
@@ -4406,7 +4528,12 @@ function App() {
   // failing still installs the other. Failures render inline in the setup
   // modal (which is unskippable, so it must own its error display); full
   // success advances it to the post-install explainer.
-  const installIntegration = async () => {
+  //
+  // `showExplainer` is false when the front door's readiness strip calls this
+  // as a RECOVERY (the hook was removed after a successful first run). That
+  // path must not take the screen over with a post-install explainer the user
+  // has already read once — it reports through the ordinary toast instead.
+  const installIntegration = async (showExplainer = true) => {
     const errors: string[] = [];
     let hookOk = false;
     let skillOk = false;
@@ -4426,8 +4553,15 @@ function App() {
       console.error("install_skill failed", err);
       errors.push(`Skill install failed: ${err}`);
     }
-    setInstallError(errors.length > 0 ? errors.join(" ") : null);
-    if (errors.length === 0 && hookOk && skillOk) setSetupPhase("done");
+    const ok = errors.length === 0 && hookOk && skillOk;
+    if (showExplainer) {
+      setInstallError(errors.length > 0 ? errors.join(" ") : null);
+      if (ok) setSetupPhase("done");
+    } else {
+      setToast(ok ? "Redline integration reinstalled" : errors.join(" "));
+      setTimeout(() => setToast(null), ok ? 4000 : 8000);
+    }
+    return ok;
   };
 
   // A native child webview paints on top of all React DOM, so when a
@@ -4474,17 +4608,208 @@ function App() {
     !liveFlags.curtain &&
     openMenuCount === 0;
 
+  // ── Front door: preflight, readiness, launch ─────────────────────────────
+  // One call answers "can this machine actually deliver a plan". Re-probed on
+  // a mode change (the mode is part of the answer) and on window focus, since
+  // the things it measures — the hook file, the `claude` binary, curl — are
+  // all edited OUTSIDE Redline while it sits in the background.
+  const preflightModeRef = useRef<string | null>(null);
+  const preflightAtRef = useRef(0);
+  const refreshPreflight = useCallback(() => {
+    preflightAtRef.current = Date.now();
+    void invoke<PreflightStatus>("preflight_status").then(setPreflight, (err) =>
+      console.error("preflight_status failed", err),
+    );
+  }, []);
+  useEffect(() => {
+    // Fires at mount and on every real mode change. The ref dedupe matters:
+    // `mode` starts at its default and is then overwritten by the boot
+    // lookup, and a second probe would re-run `resolve_claude_bin`'s
+    // login-shell fallback (a TCC-visible child) for nothing.
+    if (preflightModeRef.current === mode) return;
+    preflightModeRef.current = mode;
+    refreshPreflight();
+  }, [mode, refreshPreflight]);
+  useEffect(() => {
+    const onFocus = () => {
+      // Throttled for the same reason: focus fires on every ⌘-tab back.
+      if (Date.now() - preflightAtRef.current < 30_000) return;
+      refreshPreflight();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [refreshPreflight]);
+
+  // Close the terminal a launch is running in and the launch is over: the PTY
+  // dies with the tile, so no plan is ever coming. Without this the Planning
+  // card spins forever over nothing — the precise failure this surface was
+  // built to eliminate, reintroduced one layer up.
+  //
+  // `liveTermIds` is null until the dock first reports, so a launch can never
+  // be cancelled by the absence of a report.
+  useEffect(() => {
+    const p = frontDoorPending;
+    if (!p) return;
+    if (launchStillLive(p.terminalId, liveTermIds)) return;
+    setFrontDoorPending(null);
+    // Give the sentence back. It was cleared into the card on launch, and
+    // asking someone to retype what they already wrote — because they changed
+    // their mind about a terminal — is the small betrayal this door exists to
+    // remove. Only when the composer is empty: never clobber newer typing.
+    setFrontDoorText((prev) => (prev.trim() ? prev : p.text));
+    setFrontDoorAttachments((prev) => (prev.length ? prev : p.attachments));
+    setToast("Launch cancelled — that terminal was closed");
+    setTimeout(() => setToast(null), 4000);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveTermIds, frontDoorPending]);
+
+  // The `/hooks` nudge is the only time-based item, so the clock only ticks
+  // while a launch is actually pending.
+  const [readinessNow, setReadinessNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!frontDoorPending) return;
+    const t = setInterval(() => setReadinessNow(Date.now()), 5000);
+    return () => clearInterval(t);
+  }, [frontDoorPending]);
+
+  const readiness = useMemo(
+    () =>
+      deriveReadiness({
+        // The live `mode` beats the probe's snapshot: `mode-changed` lands
+        // long before the re-probe it triggers resolves.
+        preflight: preflight ? { ...preflight, mode } : null,
+        daemonBound,
+        hookModalActive: setupModalActive,
+        planEverArrived: planEverArrived || summaries.length > 0,
+        pendingSince: frontDoorPending?.startedAt ?? null,
+        now: readinessNow,
+        projectCount: projectOptions.length,
+      }),
+    [
+      preflight,
+      mode,
+      daemonBound,
+      setupModalActive,
+      planEverArrived,
+      summaries.length,
+      frontDoorPending,
+      readinessNow,
+      projectOptions.length,
+    ],
+  );
+
+  const frontDoorResolvedProject = useMemo(
+    () =>
+      resolveLaunchProject(frontDoorText, frontDoorProject, {
+        projectOptions,
+        openFolder: sidebarTab.kind === "folder" ? sidebarTab.id : null,
+        lastDrafterProject: drafterProject,
+      }),
+    [frontDoorText, frontDoorProject, projectOptions, sidebarTab, drafterProject],
+  );
+
+  const launchFromFrontDoor = (projectOverride?: string) => {
+    const prompt = composePrompt(frontDoorText, frontDoorAttachments);
+    if (!prompt) return;
+    const project = projectOverride ?? frontDoorResolvedProject;
+    // draftId `null`: the front door has no document, and inheriting the
+    // active Drafter's id would file this plan under an unrelated draft.
+    const terminalId = launchPromptDraft(prompt, project, null) ?? null;
+    if (!terminalId) {
+      // No terminal, so the command was never typed and nothing will ever
+      // arrive. Say so instead of spinning on a launch that didn't happen.
+      setToast("Couldn't open a terminal to launch the plan");
+      setTimeout(() => setToast(null), 6000);
+      return;
+    }
+    const startedAt = Date.now();
+    setReadinessNow(startedAt);
+    setFrontDoorPending({
+      prompt,
+      startedAt,
+      terminalId,
+      text: frontDoorText,
+      attachments: frontDoorAttachments,
+    });
+    // The prompt now lives on the Planning card; a stale copy left in the
+    // composer would relaunch on the next ⏎.
+    setFrontDoorText("");
+    setFrontDoorAttachments([]);
+  };
+
+  const drafterFromFrontDoor = () => {
+    const prompt = composePrompt(frontDoorText, frontDoorAttachments);
+    if (!prompt) return;
+    void openDrafterWithMarkdown(prompt);
+    setFrontDoorText("");
+    setFrontDoorAttachments([]);
+  };
+
+  // Each fix is a one-line reuse of a path App already owns. Resolving true
+  // means the fault is cleared, which is what lets a refused ⏎ carry through
+  // instead of making the user press it again.
+  const applyReadinessFix = async (item: ReadinessItem): Promise<boolean> => {
+    try {
+      switch (item.fix?.kind) {
+        case "resume-mode":
+          await changeMode("active");
+          refreshPreflight();
+          return true;
+        case "install-integration": {
+          const ok = await installIntegration(false);
+          refreshPreflight();
+          return ok;
+        }
+        case "locate-claude": {
+          // The dialog plugin is already in the boot chunk (ProjectPicker),
+          // so this import costs nothing beyond the await.
+          const { open } = await import("@tauri-apps/plugin-dialog");
+          const picked = await open({ directory: false, multiple: false });
+          if (typeof picked !== "string") return false;
+          await invoke("set_claude_bin_override", { path: picked });
+          refreshPreflight();
+          return true;
+        }
+        default:
+          // `new-project` is answered by the door's own naming step, and
+          // `copy-hooks` is a CopyChip — neither reaches here.
+          return false;
+      }
+    } catch (err) {
+      console.error("readiness fix failed", item.id, err);
+      setToast(String(err));
+      setTimeout(() => setToast(null), 6000);
+      return false;
+    }
+  };
+
+  const createFrontDoorProject = async (
+    name: string,
+  ): Promise<string | null> => {
+    try {
+      const path = await invoke<string>("project_create", {
+        parent: null,
+        name,
+      });
+      setFrontDoorProject({ path });
+      setToast(`Created ${path}`);
+      setTimeout(() => setToast(null), 4000);
+      return path;
+    } catch (err) {
+      setToast(String(err));
+      setTimeout(() => setToast(null), 8000);
+      return null;
+    }
+  };
+
   // A4 — the landing's type-to-start handoff. Typing on the empty document
-  // plate opens a fresh Drafter document with the keystrokes carried through:
-  // from the first printable key until the editor takes focus, keydowns
-  // buffer here (lib/landing.ts is the pure machine) and the drafter consumes
-  // the buffer atomically with its mount focus, so the handoff is lossless.
-  // The fresh UUID rides the drafter's established blank-document path: the
-  // load effect finds no row, opens blank, and the first persisted keystroke
-  // upserts it (drafter_set_doc). Eligibility mirrors the JSX branch that
-  // renders LandingPage, minus every surface that owns keys — a modal up, a
-  // focused input, or the terminal (isEditableTarget catches xterm's hidden
-  // textarea) must never have its typing hijacked into a draft.
+  // plate carries the keystrokes into the front door's composer: from the
+  // first printable key until the composer takes focus, keydowns buffer here
+  // (lib/landing.ts is the pure machine) and the composer drains the buffer
+  // in a LAYOUT effect, so the handoff is lossless. Eligibility mirrors the
+  // JSX branch that renders the front door, minus every surface that owns
+  // keys — a modal up, a focused input, or the terminal (isEditableTarget
+  // catches xterm's hidden textarea) must never have its typing hijacked.
   const landingTypeEligible =
     mainSurface === "document" &&
     !loading &&
@@ -4498,14 +4823,26 @@ function App() {
   landingTypeEligibleRef.current = landingTypeEligible;
   const landingPhaseRef = useRef<LandingPhase>("idle");
   const landingSeedRef = useRef("");
-  // Shared by the caret line's click (no seed) and the type-to-start path.
+  // Back to the front door. Boot auto-selects the most recent plan (:2413)
+  // and nothing else ever clears the selection, so without an explicit way
+  // to deselect, the door is unreachable for anyone who has ever reviewed
+  // anything — it would only ever show on a virgin install. This is that way.
+  const openFrontDoor = useCallback(() => {
+    setActiveId(null);
+    setViewedVersionNumber(null);
+    selectSessions();
+    selectSurfaceRef.current("document");
+  }, [selectSessions]);
+
+  // Type-to-start's destination. The composer is ALWAYS mounted while the
+  // door is up, so the cross-surface mount race the seed buffer was built for
+  // doesn't arise here — the nonce just tells it to take focus and drain.
   const startDraftFromLanding = useCallback(() => {
-    setDrafterShelfOpen(false);
-    setDrafterDraftId(crypto.randomUUID());
-    selectSurfaceRef.current("drafter");
-  }, [setDrafterDraftId]);
-  // Handed to PromptDrafter; consuming resets the handoff, so a later click
-  // away from the editor can't revive a stale buffer.
+    setFrontDoorFocus((n) => n + 1);
+  }, []);
+  // Handed to the front-door composer AND to PromptDrafter; consuming resets
+  // the handoff, so a later click away from the editor can't revive a stale
+  // buffer.
   const consumeLandingSeed = useCallback(() => {
     landingPhaseRef.current = "idle";
     const seed = landingSeedRef.current;
@@ -4558,7 +4895,10 @@ function App() {
         fonts: FONTS.map(({ name, label }) => ({ name, label })),
         currentFont: font,
         actions: {
-          draftNewPlan: startDraftFromLanding,
+          // ⌘K "Draft a new plan" lands on the front door, which is now the
+          // primary way to start one. The Drafter is still one hop away
+          // there, behind `Plan ▾ → Draft a document first`.
+          draftNewPlan: openFrontDoor,
           openSession: (id) => {
             selectSessions();
             setActiveId(id);
@@ -4591,7 +4931,7 @@ function App() {
       summaries,
       theme,
       font,
-      startDraftFromLanding,
+      openFrontDoor,
       snapBack,
       selectSessions,
       setSidebarCollapsed,
@@ -4802,6 +5142,7 @@ function App() {
               }
               onLeaveJoined={leaveJoined}
               onSelect={(id) => setActiveId(id)}
+              onNewPlan={openFrontDoor}
               onDelete={deleteSession}
               onExport={exportRevision}
               onSelectRevision={(sessionId, versionNumber) => {
@@ -5126,8 +5467,21 @@ function App() {
                 // Wide view drops the measure entirely and lets the column run
                 // to the pane's edges (`mx-auto` then has nothing to centre);
                 // normal view keeps the 820px reading measure.
-                maxWidth: docWide ? "none" : "820px",
-                paddingRight: `${docPadR}px`,
+                //
+                // With no document on the plate, neither applies: the front
+                // door carries its own measure and centres itself, so the
+                // article steps out of the way entirely. Otherwise a wide-view
+                // setting left over from a plan would slide the hero sideways
+                // — a control the door doesn't even show still moving it.
+                // The front door carries its own measure and centres itself,
+                // so the article's asymmetric reading gutters (pl-16 + pr-8)
+                // only cost it width — 96px of it, which is most of what
+                // separates a squeezed column from a broken hero. Symmetric
+                // and slim; at full width the door caps at 42rem regardless,
+                // so this changes nothing visible on a roomy pane.
+                maxWidth: docSurfaceActive && !docWide ? "820px" : "none",
+                paddingLeft: docSurfaceActive ? undefined : "24px",
+                paddingRight: docSurfaceActive ? `${docPadR}px` : "24px",
                 "--rl-doc-zoom": docZoom,
               } as React.CSSProperties
             }
@@ -5226,17 +5580,38 @@ function App() {
                 </Suspense>
               )
             ) : (
-              // A4 — the landing: a live first page in place of the old
-              // instruction card. The caret line mints a fresh Drafter
-              // document; typing anywhere does the same with the keystrokes
-              // carried through (the landing listener above). The terminal
-              // path the card used to describe still works — the how-it-works
-              // card covers it.
-              <LandingPage
+              // The front door: the resting state of the document plate any
+              // time no plan is selected. One headline, one prompt box, and ⏎
+              // launches a real plan-mode session in a real project. Typing
+              // anywhere lands in the composer (the landing listener above).
+              // Arrival needs no wiring here — `focusIntercepted` already
+              // selects the incoming session, so the Planning card is
+              // replaced by the review pane for free.
+              <FrontDoor
                 visible={bootSettled && !loading}
-                sessionsExist={summaries.length > 0}
-                onStart={startDraftFromLanding}
+                text={frontDoorText}
+                onTextChange={setFrontDoorText}
+                choice={frontDoorProject}
+                onChoiceChange={setFrontDoorProject}
+                projectOptions={projectOptions}
+                resolvedProject={frontDoorResolvedProject}
+                attachments={frontDoorAttachments}
+                onAttachmentsChange={setFrontDoorAttachments}
+                readiness={readiness}
+                onFix={applyReadinessFix}
+                pending={frontDoorPending}
+                onLaunch={launchFromFrontDoor}
+                onDrafter={drafterFromFrontDoor}
+                destination={frontDoorDest}
+                onDestinationChange={setFrontDoorDest}
+                onCancelPending={() => setFrontDoorPending(null)}
                 onHowItWorks={() => setHowItWorksOpen(true)}
+                onCreateProject={createFrontDoorProject}
+                focusNonce={frontDoorFocus}
+                consumeSeed={consumeLandingSeed}
+                // One native capture at a time, no session id — the voice
+                // panel owns the mic whenever it is open.
+                dictationEnabled={!voiceOpen}
               />
             )}
           </article>
@@ -5467,7 +5842,10 @@ function App() {
               (a horizontal row here would trip the overlap check and hide the
               only affordance that undoes the mode). `column-reverse` so the
               order still reads + above − with the mode toggle on top. */}
-          {mainSurface === "document" && !(sidebarTab.kind === "folder" && activeFile) && zoomVisible && (
+          {mainSurface === "document" &&
+            docSurfaceActive &&
+            !(sidebarTab.kind === "folder" && activeFile) &&
+            zoomVisible && (
             <div
               ref={zoomCtrlRef}
               className={`absolute flex items-center gap-1 rounded-full${docWide ? " flex-col-reverse" : ""}`}
@@ -6187,6 +6565,7 @@ function App() {
             fullscreen={termFullscreen}
             onFullscreenChange={setTermFullscreen}
             onTabsChange={setTermTabCount}
+            onTabIdsChange={setLiveTermIds}
             onTileCountChange={handleTileCountChange}
             onActivityChange={setTermHasUnseen}
             collapsed={termFullscreen ? false : termCollapsed}

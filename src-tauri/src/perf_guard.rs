@@ -162,6 +162,24 @@ mod tests {
         }
     }
 
+    /// `memory_status` backs the memory pill: a 60s poll, plus a re-read on
+    /// every browse capture. It walks the ledger to verify the hash chain and
+    /// aggregates compaction stats — on the main thread it froze the UI for the
+    /// length of the walk, once a minute, forever.
+    #[test]
+    fn memory_status_stays_async() {
+        let src = include_str!("lib.rs");
+        assert_async_private_command(src, "lib.rs", "memory_status");
+        // …and it must stay INCREMENTAL. The full re-hash belongs on the 6h
+        // keeper watch, not on a poll.
+        assert!(
+            src.contains("verify_ledger_chain_incremental"),
+            "lib.rs: `memory_status` must use the incremental chain verify — a \
+             full re-hash per poll is the regression this guards \
+             (see docs/perf-budget.md)"
+        );
+    }
+
     /// PTY output must stay batched over a per-terminal raw-byte Channel — never
     /// a per-read global event (`pty-output`), which is the firehose that froze
     /// the whole app. Guard the structural markers so a refactor can't silently

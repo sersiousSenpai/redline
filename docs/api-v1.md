@@ -55,6 +55,7 @@ Unregistered routes fail closed: a route added to the router without a `ROUTE_TA
 | GET | `/v1/memory/tree` | open | ClassMemory catalog tree (retrieval walk entry point) | — | JSON class tree |
 | GET | `/v1/memory/node/:id` | open | One ClassMemory node with members | node id in path | JSON node detail |
 | GET | `/v1/memory/prompts` | open | Prompts under a class (retrieval leaf read) | ?class= node id | JSON prompt list |
+| GET | `/v1/memory/answer-pack` | open | Batched retrieval read: node + subtree + links + notes + lexical hits in one call | ?q= term, ?node= node id, ?limit= n | JSON answer pack (byte-bounded) |
 | POST | `/v1/memory/proposals` | token: `memory.propose` | Stage reviewable ClassMemory proposal rows (never accepts or moves a node) | JSON structured proposal ops | JSON staged proposal ids |
 | GET | `/v1/context/overview` | open | Librarian friction digest: ground-truth counts and staleness | — | JSON overview |
 | GET | `/v1/context/codehealth` | open | Shipwright code digest: git state, recorded corrections, static repo health, runtime failures, unfinished work | ?repo=<absolute path> | JSON code digest |
