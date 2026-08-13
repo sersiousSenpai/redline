@@ -116,41 +116,137 @@ pub fn claude_command_for_seat(seat: &str, default_bin: &str) -> Command {
     }
 }
 
+/// The `--tools` list every headless Redline agent spawns with. Passing
+/// `--tools` RESTRICTS the CLI's built-in set — anything unlisted is stripped,
+/// including the built-in `Skill` tool. Without `Skill` the init handshake
+/// still *lists* discovered skills, but the agent has no tool to load a
+/// skill's body, so every "follow the X skill" prompt line is silently a
+/// no-op (verified empirically on claude CLI 2.1.222). Keep `Skill` here;
+/// write/plan tools (`Edit`/`Write`/`ExitPlanMode`) stay out.
+pub const HEADLESS_TOOLS: &str = "Read,Grep,Glob,WebFetch,WebSearch,Bash,Skill";
+
+/// The INVARIANT argv block every headless bridge spawn shares: stream-json
+/// with partial messages, the `HEADLESS_TOOLS` tool surface, the localhost
+/// curl allow (three quoting variants — see `browse.rs` for why all three
+/// prefix rules are required), with MCP stripped. ONE canonical, deterministic
+/// ordering, defined once: the CLI sees a byte-stable flag block regardless of
+/// which surface spawned it, and the per-spawn variables (prompt, seat flags,
+/// `--resume`) ride outside it. `bridge_args` and the `browse_send`/
+/// `mission_send` spawn sites all consume this const, so the block cannot
+/// drift between call sites — never inline a copy.
+pub const BRIDGE_INVARIANT_ARGS: [&str; 15] = [
+    "--output-format",
+    "stream-json",
+    "--include-partial-messages",
+    "--verbose",
+    "--permission-mode",
+    "default",
+    "--tools",
+    HEADLESS_TOOLS,
+    "--allowedTools",
+    "WebSearch",
+    "WebFetch",
+    "Bash(curl -s http://127.0.0.1:7676/*)",
+    "Bash(curl -s 'http://127.0.0.1:7676/*)",
+    "Bash(curl -s \"http://127.0.0.1:7676/*)",
+    "--strict-mcp-config",
+];
+
 /// The standard arg vector for a headless *browser-bridge* `claude` turn:
-/// stream-json with partial messages, the Read/Grep/Glob/WebFetch/WebSearch/Bash
-/// tool surface, and the localhost curl allow (three quoting variants — see
-/// `browse.rs` for why all three prefix rules are required), with MCP stripped.
-/// `seat` tags the spawn with its Agent Seat, appending any configured
+/// `-p <prompt>` + the canonical `BRIDGE_INVARIANT_ARGS` block. `seat` tags
+/// the spawn with its Agent Seat, appending any configured
 /// `--model`/`--effort`/`--fallback-model` flags (see `seat.rs`). Appends
 /// `--resume <sid>` when resuming a prior session. Shared by the browse
-/// consult path and the linked-discussion agent so the tool surface can't drift
-/// between them. `browse_send`/`mission_send` keep their own inline copies.
+/// consult path and the linked-discussion agent so the tool surface can't
+/// drift between them.
 pub fn bridge_args(seat: &str, prompt: String, prior_session: Option<&str>) -> Vec<String> {
-    let mut args: Vec<String> = vec![
-        "-p".to_string(),
-        prompt,
-        "--output-format".to_string(),
-        "stream-json".to_string(),
-        "--include-partial-messages".to_string(),
-        "--verbose".to_string(),
-        "--permission-mode".to_string(),
-        "default".to_string(),
-        "--tools".to_string(),
-        "Read,Grep,Glob,WebFetch,WebSearch,Bash".to_string(),
-        "--allowedTools".to_string(),
-        "WebSearch".to_string(),
-        "WebFetch".to_string(),
-        "Bash(curl -s http://127.0.0.1:7676/*)".to_string(),
-        "Bash(curl -s 'http://127.0.0.1:7676/*)".to_string(),
-        "Bash(curl -s \"http://127.0.0.1:7676/*)".to_string(),
-        "--strict-mcp-config".to_string(),
-    ];
+    let mut args: Vec<String> = vec!["-p".to_string(), prompt];
+    args.extend(BRIDGE_INVARIANT_ARGS.iter().map(|s| s.to_string()));
     args.extend(crate::seat::flag_args(seat));
     if let Some(sid) = prior_session {
         args.push("--resume".to_string());
         args.push(sid.to_string());
     }
     args
+}
+
+/// Refuse a FINAL argv that could escalate a read-only headless pass into a
+/// write-capable one. `bridge_args` pins `--permission-mode default` and the
+/// no-write `HEADLESS_TOOLS` surface in its invariant block, but a seat's
+/// user-configured `extra_flags` are appended AFTER that block and the CLI
+/// lets the LAST occurrence of a repeated flag win — so a seat tweak could
+/// smuggle `--permission-mode bypassPermissions`/`acceptEdits`,
+/// `--dangerously-skip-permissions`, or an extra `--tools`/`--allowedTools`
+/// value naming `Edit`/`Write`/`NotebookEdit`/`ExitPlanMode` past a guard
+/// that only greps for the literal `acceptEdits`. This inspects EVERY
+/// occurrence of the escalation-capable flags (both `--flag value` and
+/// `--flag=value` spellings) and refuses on the first hit, naming it.
+/// Shared by the intake-triage and moot spawn sites; always call it on the
+/// FINAL argv, after seat flags are appended. Fail-closed by design: a
+/// false refusal costs a spawn, a false pass costs the read-only law.
+pub fn assert_read_only_argv(args: &[String]) -> Result<(), String> {
+    /// A `--tools`/`--allowedTools` value token that names a write/plan tool.
+    /// Substring match per comma token: `NotebookEdit`/`MultiEdit` are caught
+    /// by `Edit`, and a pattern form like `Write(*)` is caught by `Write`.
+    fn write_tool_in(value: &str) -> Option<&str> {
+        value.split(',').map(str::trim).find(|token| {
+            ["Edit", "Write", "ExitPlanMode"]
+                .iter()
+                .any(|w| token.contains(w))
+        })
+    }
+    let mut i = 0;
+    while i < args.len() {
+        let (flag, inline_val) = match args[i].split_once('=') {
+            Some((f, v)) if f.starts_with("--") => (f, Some(v)),
+            _ => (args[i].as_str(), None),
+        };
+        match flag {
+            "--dangerously-skip-permissions" => {
+                return Err("`--dangerously-skip-permissions` is in the argv".to_string());
+            }
+            "--permission-mode" => {
+                let val = match inline_val {
+                    Some(v) => Some(v.to_string()),
+                    None => {
+                        i += 1;
+                        args.get(i).cloned()
+                    }
+                };
+                match val.as_deref().map(str::trim) {
+                    Some("default") => {}
+                    Some(v) => {
+                        return Err(format!(
+                            "`--permission-mode {v}` would override the pinned `default` mode"
+                        ));
+                    }
+                    None => {
+                        return Err("`--permission-mode` was passed with no value".to_string());
+                    }
+                }
+            }
+            "--tools" | "--allowedTools" | "--allowed-tools" => {
+                if let Some(v) = inline_val {
+                    if let Some(tool) = write_tool_in(v) {
+                        return Err(format!("`{flag}` names the write tool `{tool}`"));
+                    }
+                } else {
+                    // Both flags accept a run of space-separated values —
+                    // scan until the next `--flag` so a value appended late
+                    // in the run is still seen.
+                    while i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                        i += 1;
+                        if let Some(tool) = write_tool_in(&args[i]) {
+                            return Err(format!("`{flag}` names the write tool `{tool}`"));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    Ok(())
 }
 
 /// A first-turn prompt fragment that makes a browse or linked agent aware of the
@@ -354,6 +450,22 @@ mod tests {
     }
 
     #[test]
+    fn bridge_invariant_args_are_byte_stable_across_spawns() {
+        // Two spawns with different variable inputs (prompt, resume) must
+        // carry the IDENTICAL invariant flag block, contiguously, right after
+        // the prompt — the deterministic argv prefix the CLI keys caching on.
+        let a = bridge_args("companion", "ask about X".to_string(), None);
+        let b = bridge_args("companion", "totally different".to_string(), Some("sid-9"));
+        assert_eq!(a[0], "-p");
+        assert_eq!(&a[2..2 + BRIDGE_INVARIANT_ARGS.len()], &BRIDGE_INVARIANT_ARGS[..]);
+        assert_eq!(&b[2..2 + BRIDGE_INVARIANT_ARGS.len()], &BRIDGE_INVARIANT_ARGS[..]);
+        // Canonical ordering facts the block must never lose: the tool
+        // surface before the allow-list, MCP stripped last.
+        assert_eq!(BRIDGE_INVARIANT_ARGS[7], HEADLESS_TOOLS);
+        assert_eq!(BRIDGE_INVARIANT_ARGS[14], "--strict-mcp-config");
+    }
+
+    #[test]
     fn bridge_args_unconfigured_seat_adds_no_flags() {
         let args = bridge_args("companion", "hi".to_string(), None);
         assert!(!args.iter().any(|a| a == "--model"));
@@ -384,6 +496,49 @@ mod tests {
         assert!(model_idx < resume_idx && effort_idx < resume_idx);
         assert_eq!(args[resume_idx + 1], "sid-1");
         crate::seat::set_seat_for_test("voice", None);
+    }
+
+    /// The canonical invariant block, argv-shaped, without touching the
+    /// process-global seat store (so these tests can't race `seat::tests`).
+    fn canonical_argv() -> Vec<String> {
+        let mut args: Vec<String> = vec!["-p".to_string(), "say hi".to_string()];
+        args.extend(BRIDGE_INVARIANT_ARGS.iter().map(|s| s.to_string()));
+        args
+    }
+
+    #[test]
+    fn assert_read_only_argv_accepts_the_canonical_bridge_block() {
+        assert!(assert_read_only_argv(&canonical_argv()).is_ok());
+        // Restating the pinned default is harmless, not a refusal.
+        let mut args = canonical_argv();
+        args.extend(["--permission-mode".to_string(), "default".to_string()]);
+        assert!(assert_read_only_argv(&args).is_ok());
+    }
+
+    #[test]
+    fn assert_read_only_argv_refuses_every_smuggled_escalation() {
+        // Each of these rides AFTER the invariant block — exactly where seat
+        // `extra_flags` land, where a later flag wins in the CLI.
+        let smuggles: Vec<Vec<&str>> = vec![
+            vec!["--permission-mode", "bypassPermissions"],
+            vec!["--permission-mode", "acceptEdits"],
+            vec!["--permission-mode=bypassPermissions"],
+            vec!["--permission-mode"], // trailing, valueless — fail closed
+            vec!["--dangerously-skip-permissions"],
+            vec!["--allowedTools", "Edit"],
+            vec!["--allowedTools", "WebSearch", "Write(*)"],
+            vec!["--allowedTools=NotebookEdit"],
+            vec!["--tools", "Read,Grep,Edit"],
+            vec!["--tools=Bash,ExitPlanMode"],
+        ];
+        for smuggle in smuggles {
+            let mut args = canonical_argv();
+            args.extend(smuggle.iter().map(|s| s.to_string()));
+            assert!(
+                assert_read_only_argv(&args).is_err(),
+                "should refuse: {smuggle:?}"
+            );
+        }
     }
 
     #[test]

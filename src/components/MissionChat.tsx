@@ -2,18 +2,11 @@
 // Copyright 2026 Yusuf Al-Bazian
 import { useEffect, useRef, useState } from "react";
 import { Copy, Pin, Target, X } from "lucide-react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import type {
-  Mission,
-  MissionCancelledEvent,
-  MissionDeltaEvent,
-  MissionDoneEvent,
-  MissionErrorEvent,
-  MissionFinding,
-  MissionMessage,
-} from "../types";
+import type { Mission, MissionFinding, MissionMessage } from "../types";
+import { useAgentTurn } from "../hooks/useAgentTurn";
+import { usePersistedState } from "../theme/usePersistedState";
 import { MarkdownView } from "./MarkdownView";
+import { QueuedChip, UnsentNote } from "./QueuedChip";
 import { WorkingIndicator } from "./WorkingIndicator";
 
 interface MissionChatProps {
@@ -30,11 +23,6 @@ interface MissionChatProps {
   /** Hand a synthesized brief (markdown) to the Prompt Drafter. */
   onSynthesize?: (markdown: string) => void;
 }
-
-type ChatStatus = "idle" | "streaming" | "error";
-
-let tmpSeq = 0;
-const tmpId = () => `mtmp-${++tmpSeq}`;
 
 const SYNTHESIZE_PROMPT =
   "Produce the mission synthesis brief now: a clean, Drafter-ready document " +
@@ -58,101 +46,45 @@ export function MissionChat({
   onSynthesize,
 }: MissionChatProps) {
   const missionId = mission.missionId;
-  const [messages, setMessages] = useState<MissionMessage[]>([]);
-  const [liveText, setLiveText] = useState("");
-  const [status, setStatus] = useState<ChatStatus>("idle");
-  const [draft, setDraft] = useState("");
-  const [loaded, setLoaded] = useState(false);
+  // Composer draft survives surface switches and app restarts (the component
+  // is keyed by missionId, so each mission keeps its own).
+  const [draft, setDraft] = usePersistedState<string>(`rl.chatDraft.mission.${missionId}`, "");
   const [showFindings, setShowFindings] = useState(true);
   const [editingGoal, setEditingGoal] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
-  // When set, the next completed reply is the synthesis → hand it to the Drafter.
-  const pendingSynthesizeRef = useRef(false);
-  // Held in a ref so the event-subscription effect can key on `missionId` alone
-  // (onSynthesize is a fresh closure each parent render; subscribing on it would
-  // tear down + re-add the listeners mid-stream and drop delta events).
-  const onSynthesizeRef = useRef(onSynthesize);
-  onSynthesizeRef.current = onSynthesize;
+  // The synthesize handoff itself lives at App level (`mission-synthesize-done`
+  // → Drafter) — the backend owns the pending flag, so it survives this panel
+  // unmounting mid-turn. Nothing to track here.
 
-  // Load persisted turns + subscribe to this mission's orchestrator events.
-  useEffect(() => {
-    let alive = true;
-    setLoaded(false);
-    setMessages([]);
-    setLiveText("");
-    setStatus("idle");
-    pendingSynthesizeRef.current = false;
-
-    void invoke<MissionMessage[]>("get_mission_thread", { missionId })
-      .then((rows) => {
-        if (!alive) return;
-        setMessages(rows);
-        setLoaded(true);
-      })
-      .catch(() => {
-        if (alive) setLoaded(true);
-      });
-
-    const mine = (p: { missionId: string }) => p.missionId === missionId;
-
-    const deltaP = listen<MissionDeltaEvent>("mission-delta", (e) => {
-      if (!alive || !mine(e.payload)) return;
-      setStatus("streaming");
-      setLiveText((t) => t + e.payload.text);
+  // The turn lifecycle — persisted thread, live stream, mid-turn remount
+  // restore (partial text + spinner), self-heal — lives in the shared hook.
+  const { messages, liveText, status, startedAt, loaded, send, cancel, unqueue } =
+    useAgentTurn<MissionMessage>({
+      surface: "mission",
+      key: missionId,
+      idField: "missionId",
+      historyCmd: "get_mission_thread",
+      historyArgs: { missionId },
+      sendFailPrefix: "Couldn't reach the orchestrator",
+      buildSendArgs: (text, extra) => ({
+        missionId,
+        text,
+        cwd: projectDir ?? null,
+        // The backend owns the pending-synthesize flag: the completed reply
+        // comes back as `mission-synthesize-done` at App level, surviving
+        // this panel's unmount.
+        synthesize: extra === "synthesize",
+      }),
+      makeMessage: ({ id, role, body, status }) => ({
+        id,
+        missionId,
+        role,
+        body,
+        status,
+        createdAt: Date.now(),
+      }),
     });
-    const doneP = listen<MissionDoneEvent>("mission-done", (e) => {
-      if (!alive || !mine(e.payload)) return;
-      setMessages((m) => [
-        ...m,
-        {
-          id: e.payload.messageId,
-          missionId,
-          role: "assistant",
-          body: e.payload.body,
-          status: "complete",
-          createdAt: Date.now(),
-        },
-      ]);
-      setLiveText("");
-      setStatus("idle");
-      if (pendingSynthesizeRef.current) {
-        pendingSynthesizeRef.current = false;
-        onSynthesizeRef.current?.(e.payload.body);
-      }
-    });
-    const errorP = listen<MissionErrorEvent>("mission-error", (e) => {
-      if (!alive || !mine(e.payload)) return;
-      pendingSynthesizeRef.current = false;
-      setMessages((m) => [
-        ...m,
-        {
-          id: tmpId(),
-          missionId,
-          role: "assistant",
-          body: e.payload.error,
-          status: "error",
-          createdAt: Date.now(),
-        },
-      ]);
-      setLiveText("");
-      setStatus("error");
-    });
-    const cancelP = listen<MissionCancelledEvent>("mission-cancelled", (e) => {
-      if (!alive || !mine(e.payload)) return;
-      pendingSynthesizeRef.current = false;
-      setLiveText("");
-      setStatus("idle");
-    });
-
-    return () => {
-      alive = false;
-      void deltaP.then((un) => un());
-      void doneP.then((un) => un());
-      void errorP.then((un) => un());
-      void cancelP.then((un) => un());
-    };
-  }, [missionId]);
 
   useEffect(() => {
     stickRef.current = true;
@@ -167,49 +99,6 @@ export function MissionChat({
     const el = scrollRef.current;
     if (!el) return;
     stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-  }
-
-  function send(text: string, synthesize = false) {
-    const trimmed = text.trim();
-    if (!trimmed || status === "streaming") return;
-    stickRef.current = true;
-    pendingSynthesizeRef.current = synthesize;
-    setMessages((m) => [
-      ...m,
-      {
-        id: tmpId(),
-        missionId,
-        role: "user",
-        body: synthesize ? "✦ Synthesize the mission" : trimmed,
-        status: "complete",
-        createdAt: Date.now(),
-      },
-    ]);
-    setLiveText("");
-    setStatus("streaming");
-    void invoke("mission_send", {
-      missionId,
-      text: trimmed,
-      cwd: projectDir ?? null,
-    }).catch((err) => {
-      pendingSynthesizeRef.current = false;
-      setStatus("error");
-      setMessages((m) => [
-        ...m,
-        {
-          id: tmpId(),
-          missionId,
-          role: "assistant",
-          body: `Couldn't reach the orchestrator: ${err}`,
-          status: "error",
-          createdAt: Date.now(),
-        },
-      ]);
-    });
-  }
-
-  function cancel() {
-    void invoke("mission_cancel", { missionId }).catch(() => {});
   }
 
   return (
@@ -248,21 +137,41 @@ export function MissionChat({
           </div>
         ) : (
           messages.map((m) => (
-            <MessageBubble key={m.id} msg={m} onOpenLink={onOpenLink} onSynthesize={onSynthesize} />
+            <MessageBubble
+              key={m.id}
+              msg={m}
+              onOpenLink={onOpenLink}
+              onSynthesize={onSynthesize}
+              onUnqueue={() => {
+                void unqueue(m.id).then((text) => {
+                  if (text) setDraft((prev) => (prev.trim() ? `${text}\n\n${prev}` : text));
+                });
+              }}
+              onResend={() => {
+                stickRef.current = true;
+                send(m.body);
+              }}
+            />
           ))
         )}
         {status === "streaming" &&
           (liveText ? (
             <StreamingBubble text={liveText} onOpenLink={onOpenLink} />
           ) : (
-            <WorkingIndicator />
+            <WorkingIndicator startedAt={startedAt ?? undefined} />
           ))}
       </div>
 
       <div className="px-3 py-2 shrink-0" style={{ borderTop: "1px solid var(--color-rule)" }}>
         <button
           type="button"
-          onClick={() => send(SYNTHESIZE_PROMPT, true)}
+          onClick={() => {
+            stickRef.current = true;
+            send(SYNTHESIZE_PROMPT, {
+              localBody: "✦ Synthesize the mission",
+              extra: "synthesize",
+            });
+          }}
           disabled={status === "streaming"}
           className="w-full rounded px-2 py-1.5 font-medium mb-2"
           style={{
@@ -281,6 +190,7 @@ export function MissionChat({
           setDraft={setDraft}
           streaming={status === "streaming"}
           onSend={() => {
+            stickRef.current = true;
             send(draft);
             setDraft("");
           }}
@@ -503,16 +413,25 @@ function MessageBubble({
   msg,
   onOpenLink,
   onSynthesize,
+  onUnqueue,
+  onResend,
 }: {
   msg: MissionMessage;
   onOpenLink?: (url: string) => void;
   onSynthesize?: (markdown: string) => void;
+  onUnqueue?: () => void;
+  onResend?: () => void;
 }) {
   const isUser = msg.role === "user";
   const isError = msg.status === "error";
+  const isQueued = isUser && msg.status === "queued";
+  const isUnsent = isUser && msg.status === "unsent";
   const showActions = !isUser && !isError && msg.body.trim().length > 0;
   return (
-    <div className="flex flex-col gap-0.5 group/msg">
+    <div
+      className="flex flex-col gap-0.5 group/msg"
+      style={isQueued || isUnsent ? { opacity: 0.65 } : undefined}
+    >
       <span
         style={{
           fontSize: "9px",
@@ -531,6 +450,8 @@ function MessageBubble({
       ) : (
         <MarkdownView body={msg.body} compact rich onLinkClick={onOpenLink} />
       )}
+      {isQueued && <QueuedChip onUnqueue={onUnqueue} />}
+      {isUnsent && <UnsentNote onResend={onResend} />}
       {showActions && <MessageActions body={msg.body} onSynthesize={onSynthesize} />}
     </div>
   );
@@ -638,12 +559,16 @@ function Composer({
         onKeyDown={(e) => {
           if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
-            if (!streaming) onSend();
+            // Sending mid-stream queues the message behind the reply.
+            onSend();
           }
         }}
-        placeholder="Ask the orchestrator about your tabs…"
+        placeholder={
+          streaming
+            ? "Type ahead — sends queue behind the reply…"
+            : "Ask the orchestrator about your tabs…"
+        }
         rows={2}
-        disabled={streaming}
         className="flex-1 rounded px-2 py-1"
         style={{
           fontSize: "12px",
@@ -655,26 +580,27 @@ function Composer({
           overflow: "hidden",
         }}
       />
-      {streaming ? (
+      {streaming && (
         <button
           type="button"
           onClick={onStop}
+          title="Stop the current reply (queued messages still send)"
           className="rounded px-2 py-1 font-medium"
           style={{ background: "var(--color-bg-elevated)", border: "1px solid var(--color-rule)", color: "var(--color-ink)", fontSize: "11px" }}
         >
           Stop
         </button>
-      ) : (
-        <button
-          type="button"
-          onClick={onSend}
-          disabled={!draft.trim()}
-          className="rounded px-2 py-1 font-medium"
-          style={{ background: "var(--color-info)", color: "var(--color-on-accent)", fontSize: "11px", opacity: draft.trim() ? 1 : 0.5 }}
-        >
-          Send
-        </button>
       )}
+      <button
+        type="button"
+        onClick={onSend}
+        disabled={!draft.trim()}
+        title={streaming ? "Queue this message — it sends when the reply finishes" : undefined}
+        className="rounded px-2 py-1 font-medium"
+        style={{ background: "var(--color-info)", color: "var(--color-on-accent)", fontSize: "11px", opacity: draft.trim() ? 1 : 0.5 }}
+      >
+        Send
+      </button>
     </div>
   );
 }

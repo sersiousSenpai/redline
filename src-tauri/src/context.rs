@@ -607,8 +607,8 @@ pub struct MemoryMapView {
 /// supersession resolves to), with the four declared edge kinds. Everything is
 /// ordered (nodes by id, edges by kind/from/to) so the payload — and therefore
 /// the seeded layout downstream — is deterministic. Best-effort per source: a
-/// missing table yields empty buckets, never an error (5 of 15 event kinds
-/// have never fired; the Map must render an honest empty state).
+/// missing table yields empty buckets, never an error (some event kinds may
+/// never have fired; the Map must render an honest empty state).
 pub fn build_memory_map(db: &Database) -> MemoryMapView {
     use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -1260,6 +1260,7 @@ mod tests {
             status,
             attach_state: AttachState::Idle,
             updated_at: 1_000,
+            run_state: None,
         };
         db.upsert_session(&mk("approved-unexported", SessionStatus::Approved)).unwrap();
         db.upsert_session(&mk("approved-exported", SessionStatus::Approved)).unwrap();
@@ -1289,6 +1290,7 @@ mod tests {
             status: SessionStatus::InReview,
             attach_state: AttachState::Idle,
             updated_at: 500,
+            run_state: None,
         })
         .unwrap();
         // A revision row (what `load_all` reads) + its ledger event.

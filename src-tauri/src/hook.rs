@@ -222,6 +222,113 @@ fn ensure_restore_permission_at(path: &std::path::Path) {
     }
 }
 
+/// The locally visible ways Claude Code's native multi-agent workflows can be
+/// silently disabled. Workflows degrade to sequential execution with **no
+/// error** when disabled, so the Orchestrate launch modal warns up front on
+/// the two signals Redline can actually see: `"disableWorkflows": true` in
+/// `~/.claude/settings.json`, and `CLAUDE_CODE_DISABLE_WORKFLOWS` in the
+/// environment Redline's PTYs inherit. (The plan-tier toggle is not locally
+/// detectable — the launch toast covers that gap by telling the user to
+/// expect a workflow approval card.)
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowAvailability {
+    pub disabled_in_settings: bool,
+    pub disabled_in_env: bool,
+}
+
+pub fn workflow_availability() -> WorkflowAvailability {
+    workflow_availability_at(&settings_path())
+}
+
+pub fn workflow_availability_at(path: &std::path::Path) -> WorkflowAvailability {
+    let disabled_in_settings = fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<Value>(&content).ok())
+        .and_then(|json| json.get("disableWorkflows").and_then(|v| v.as_bool()))
+        .unwrap_or(false);
+    let disabled_in_env = std::env::var("CLAUDE_CODE_DISABLE_WORKFLOWS")
+        .map(|v| {
+            let v = v.trim();
+            !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+        })
+        .unwrap_or(false);
+    WorkflowAvailability {
+        disabled_in_settings,
+        disabled_in_env,
+    }
+}
+
+/// Write the Orchestrate launch modal's checked Bash allow rules into
+/// `permissions.allow` (the `ensure_allow` seam the hook install already
+/// uses). Workflow subagents inherit the user's allowlist but run in
+/// acceptEdits — an unallowlisted `cargo test` would queue a permission
+/// prompt per agent while the reviewer is on another surface. Only plain
+/// `Bash(...)` rules are accepted; anything else is rejected rather than
+/// written into the user's settings.
+pub fn apply_orchestrate_allows(rules: &[String]) -> Result<(), String> {
+    apply_orchestrate_allows_at(&settings_path(), rules)
+}
+
+pub fn apply_orchestrate_allows_at(
+    path: &std::path::Path,
+    rules: &[String],
+) -> Result<(), String> {
+    for rule in rules {
+        let ok = rule.starts_with("Bash(")
+            && rule.ends_with(")")
+            && !rule.contains('\n')
+            && rule.len() < 200;
+        if !ok {
+            return Err(format!("refusing to write allow rule `{rule}`"));
+        }
+    }
+    if rules.is_empty() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let mut root: Value = if path.exists() {
+        let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
+        if content.trim().is_empty() {
+            json!({})
+        } else {
+            serde_json::from_str(&content)
+                .map_err(|e| format!("existing settings.json is not valid JSON: {e}"))?
+        }
+    } else {
+        json!({})
+    };
+    let obj = root
+        .as_object_mut()
+        .ok_or_else(|| "settings.json root is not a JSON object".to_string())?;
+    for rule in rules {
+        ensure_allow(obj, rule)?;
+    }
+    let serialized = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    fs::write(path, format!("{}\n", serialized)).map_err(|e| e.to_string())
+}
+
+/// Infer the build/test Bash allow rules the Orchestrate launch modal offers,
+/// from repo markers — pure filesystem sniffing, nothing executes. The rule
+/// strings live here (next to `apply_orchestrate_allows`' validation) so the
+/// frontend never invents permission syntax.
+pub fn orchestrate_allow_candidates(project_dir: &std::path::Path) -> Vec<String> {
+    let mut out = Vec::new();
+    if project_dir.join("Cargo.toml").exists()
+        || project_dir.join("src-tauri").join("Cargo.toml").exists()
+    {
+        out.push("Bash(cargo build:*)".to_string());
+        out.push("Bash(cargo test:*)".to_string());
+    }
+    if project_dir.join("package.json").exists() {
+        out.push("Bash(npm test:*)".to_string());
+        out.push("Bash(npm run build:*)".to_string());
+    }
+    out
+}
+
 pub fn install_at(path: &std::path::Path) -> Result<HookStatus, String> {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
@@ -907,6 +1014,62 @@ mod tests {
         ensure_restore_permission_at(&path);
         let json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(json.get("permissions").is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn orchestrate_allows_write_and_dedupe() {
+        let path = tmppath();
+        let rules = vec![
+            "Bash(cargo build:*)".to_string(),
+            "Bash(cargo test:*)".to_string(),
+        ];
+        apply_orchestrate_allows_at(&path, &rules).unwrap();
+        // Idempotent: a second apply doesn't duplicate.
+        apply_orchestrate_allows_at(&path, &rules).unwrap();
+        let json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let allows = allow_entries(&json);
+        assert_eq!(
+            allows.iter().filter(|r| *r == "Bash(cargo test:*)").count(),
+            1
+        );
+        assert!(allows.contains(&"Bash(cargo build:*)".to_string()));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn orchestrate_allows_reject_non_bash_rules() {
+        let path = tmppath();
+        for bad in [
+            "WebFetch(*)",
+            "Bash(cargo test:*) extra",
+            "Bash(a\nb)",
+        ] {
+            assert!(
+                apply_orchestrate_allows_at(&path, &[bad.to_string()]).is_err(),
+                "rule `{bad}` should be refused"
+            );
+        }
+        assert!(!path.exists(), "a refused batch must write nothing");
+    }
+
+    #[test]
+    fn workflow_availability_reads_disable_flag() {
+        let path = tmppath();
+        // Absent file → not disabled.
+        assert!(!workflow_availability_at(&path).disabled_in_settings);
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&json!({"disableWorkflows": true})).unwrap(),
+        )
+        .unwrap();
+        assert!(workflow_availability_at(&path).disabled_in_settings);
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&json!({"disableWorkflows": false})).unwrap(),
+        )
+        .unwrap();
+        assert!(!workflow_availability_at(&path).disabled_in_settings);
         let _ = std::fs::remove_file(&path);
     }
 }

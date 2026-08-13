@@ -7,6 +7,7 @@ const base: SurfaceInputs = {
   reviewOpen: false,
   serversOpen: false,
   memoryOpen: false,
+  runsOpen: false,
   activeId: null,
   planTitle: null,
   planProject: null,
@@ -54,6 +55,23 @@ describe("deriveActiveSurface", () => {
       kind: "memory",
       id: null,
       label: "Memory",
+      projectPath: null,
+    });
+  });
+
+  it("reports the Runs surface without an id or a project", () => {
+    // Machine-scoped like Localhost: every orchestrated run, no session
+    // identity of its own.
+    const s = deriveActiveSurface({
+      ...base,
+      runsOpen: true,
+      activeId: "sess-1",
+      hasTerminal: true,
+    });
+    expect(s).toMatchObject({
+      kind: "runs",
+      id: null,
+      label: "Runs",
       projectPath: null,
     });
   });

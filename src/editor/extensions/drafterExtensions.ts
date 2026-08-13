@@ -2,6 +2,7 @@
 // Copyright 2026 Yusuf Al-Bazian
 import type { Extensions } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
+import { Code } from "@tiptap/extension-code";
 import Link from "@tiptap/extension-link";
 import Underline from "@tiptap/extension-underline";
 import TextAlign from "@tiptap/extension-text-align";
@@ -25,22 +26,34 @@ import { BlockIdAttribute } from "./BlockIdAttribute";
 import { AnchorIdAttribute } from "./AnchorIdAttribute";
 import { DraftBlockIds } from "./DraftBlockIds";
 import { InsertionMark, DeletionMark } from "./TrackChanges";
+import { TrackChangesInput } from "./TrackChangesInput";
+import { InstructionTrigger } from "./InstructionTrigger";
 import { CommentHighlights } from "./CommentHighlights";
+
+export interface DrafterExtensionOptions {
+  /** Surfaced when a user edit is filtered because its block carries a
+   *  pending agent suggestion — "resolve it first". */
+  onLockedEdit?: (blockId: string) => void;
+  /** The ✦ in-document instruction trigger (Mod-Enter / toolbar): fires with
+   *  the caret paragraph's blockId + text for `draft_instruct`. */
+  onInstruct?: (blockId: string, text: string) => void;
+}
 
 /**
  * Extension set for the standalone Prompt Drafter — a Word-style document
  * editor used to author a prompt before launching a Claude Code plan session.
  *
  * Deliberately decoupled from `planExtensions`: the drafter has no review
- * pipeline, so it drops Collaboration (Yjs CRDT), TrackChangesInput (user
- * keystrokes are plain edits, not proposals), and the rich code-block NodeView
- * (StarterKit's plain code block suffices).
+ * pipeline, so it drops Collaboration (Yjs CRDT) and the rich code-block
+ * NodeView (StarterKit's plain code block suffices).
  *
  * What it now SHARES with the plan editor is agent-facing identity + tracked
  * suggestions: BlockId/AnchorId attributes (ids self-minted by DraftBlockIds —
  * there's no Rust parser round-trip to mint them), the Insertion/Deletion
  * marks (agent write-suggestions render as pending tracked changes with
- * accept/reject — see `../drafterSuggestions.ts`), and CommentHighlights (the
+ * accept/reject — see `../drafterSuggestions.ts`), TrackChangesInput (block
+ * locking always; live Suggesting mode when the user flips the toolbar
+ * toggle — it starts OFF, unlike the plan editor), and CommentHighlights (the
  * draft comment sidecar anchors selections exactly like plan comments).
  *
  * What it keeps is the everyday Word toolset: headings, bold/italic/strike,
@@ -57,13 +70,22 @@ import { CommentHighlights } from "./CommentHighlights";
  * wraps only code/strike/italic/bold/link; unknown marks/attrs pass through
  * untouched.)
  */
-export function drafterExtensions(): Extensions {
+export function drafterExtensions(
+  options: DrafterExtensionOptions = {},
+): Extensions {
+  const { onLockedEdit, onInstruct } = options;
   return [
     // StarterKit ships history ON by default (no Collaboration here), giving
-    // native Cmd/Ctrl+Z undo. Its bundled `code`/`codeBlock` are fine in this
-    // editor — there are no track-change marks for the `code` mark's
-    // `excludes: '_'` to silently block.
-    StarterKit,
+    // native Cmd/Ctrl+Z undo. Its bundled plain `codeBlock` suffices, but the
+    // bundled `code` mark ships `excludes: '_'` (exclude ALL other marks),
+    // which silently blocked rl_ins/rl_del from ever attaching to inline code
+    // — an agent rewrite touching a code span lost its tracked paint. Re-add
+    // it excluding only the formatting marks, letting the redline marks
+    // through (the plan editor's fix, widened to the drafter's mark set).
+    StarterKit.configure({ code: false }),
+    Code.extend({
+      excludes: "bold italic strike link underline highlight textStyle",
+    }),
     Link.configure({
       openOnClick: false,
       autolink: false,
@@ -113,10 +135,18 @@ export function drafterExtensions(): Extensions {
     BlockIdAttribute,
     AnchorIdAttribute,
     DraftBlockIds,
-    // Tracked-change marks for agent write-suggestions (accept/reject). The
-    // drafter's own keystrokes stay plain edits — no TrackChangesInput here.
+    // Tracked-change marks for agent write-suggestions (accept/reject), plus
+    // the input tracker: block locking guards pending agent suggestions from
+    // being typed through in EVERY mode; live Suggesting (keystrokes → tracked
+    // runs) starts OFF and is flipped by the toolbar's Editing/Suggesting
+    // toggle via `setSuggesting`.
     InsertionMark,
     DeletionMark,
+    TrackChangesInput.configure({ onLockedEdit, initialSuggesting: false }),
+    // ✦ co-authoring: Mod-Enter / the toolbar button sends the caret's
+    // paragraph to the doc-side agent as an instruction; also paints the
+    // pulsing "generating" state on the target block.
+    InstructionTrigger.configure({ onInstruct }),
     // Selection-anchored comment highlights for the draft sidecar.
     CommentHighlights,
   ];

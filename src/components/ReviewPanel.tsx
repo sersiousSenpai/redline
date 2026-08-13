@@ -32,6 +32,7 @@ import { useAiReview, type UseAiReview } from "../hooks/useAiReview";
 import DiffView, { type DiffSearch, type DiffViewHandle } from "./DiffView";
 import ReviewFileTree from "./ReviewFileTree";
 import ReviewShortcutHelp from "./ReviewShortcutHelp";
+import RouterVerdictBanner from "./RouterVerdictBanner";
 import { PlanSearchBox } from "./PlanSearchBox";
 
 // Code Review pane: pick a repo + diff source, read the annotatable diff.
@@ -689,6 +690,9 @@ function ReviewPanel({ review, projectOptions, onClose }: ReviewPanelProps) {
       </div>
 
       {repo && <ReviewGitStrip status={push.status} lastPush={push.lastPush} />}
+
+      {/* Shadow attention router: informational banner only — no behavior. */}
+      <RouterVerdictBanner summary={ai.summary} />
 
       {!repo ? (
         <Empty>Choose a project to review its changes.</Empty>

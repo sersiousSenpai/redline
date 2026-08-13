@@ -107,9 +107,10 @@ pub struct RouteSpec {
 pub use redline_extension_abi::scopes::{
     BROWSER_DRIVE as SCOPE_BROWSER_DRIVE, CONSULT as SCOPE_CONSULT,
     DRAFTER_SUGGEST as SCOPE_DRAFTER_SUGGEST, MEMORY_PROPOSE as SCOPE_MEMORY_PROPOSE,
-    PLAN_COMMENT as SCOPE_PLAN_COMMENT, PLAN_OFFER as SCOPE_PLAN_OFFER,
-    PLAN_SUGGEST as SCOPE_PLAN_SUGGEST, REVIEW_ANNOTATE as SCOPE_REVIEW_ANNOTATE,
-    UI_PANEL as SCOPE_UI_PANEL, KNOWN_SCOPES,
+    ORCH_REPORT as SCOPE_ORCH_REPORT, PLAN_COMMENT as SCOPE_PLAN_COMMENT,
+    PLAN_OFFER as SCOPE_PLAN_OFFER, PLAN_SUGGEST as SCOPE_PLAN_SUGGEST,
+    REVIEW_ANNOTATE as SCOPE_REVIEW_ANNOTATE, UI_PANEL as SCOPE_UI_PANEL,
+    WORK_CLAIM as SCOPE_WORK_CLAIM, WORK_FILE as SCOPE_WORK_FILE, KNOWN_SCOPES,
 };
 
 /// The frozen `/v1` contract — every route the daemon serves, in router
@@ -475,8 +476,8 @@ pub const ROUTE_TABLE: &[RouteSpec] = &[
         path: "/v1/reviews/start",
         class: RouteClass::HookContract,
         purpose: "Code-review hold: captures the diff, opens the review pane, HOLDS until the reviewer submits",
-        request: "?repo=&base=... from the /redline-code-review skill",
-        response: "held; resolves to structured line-anchored feedback",
+        request: "?repo=&base=... from the /redline-code-review skill; defer=1 parks the review for the morning (queued overnight runs)",
+        response: "held; resolves to structured line-anchored feedback (deferred: returns immediately)",
     },
     RouteSpec {
         method: "GET",
@@ -501,6 +502,54 @@ pub const ROUTE_TABLE: &[RouteSpec] = &[
         purpose: "Clear a source's annotations from a live review",
         request: "?repo=&source=...",
         response: "JSON cleared count",
+    },
+    RouteSpec {
+        method: "POST",
+        path: "/v1/orchestration/report",
+        class: RouteClass::Protected(SCOPE_ORCH_REPORT),
+        purpose: "File an orchestrated run's structured exit report (claims paired against observed ground truth in the RunReport GUI)",
+        request: "JSON {planSessionId, scriptPath, workflowRan, summary, subtasks:[{title, planSection, verified, skipped, notes}]}",
+        response: "JSON {ok}",
+    },
+    RouteSpec {
+        method: "GET",
+        path: "/v1/work/ready",
+        class: RouteClass::Open,
+        purpose: "The work graph's claimable frontier, urgent-first: open items whose defer time has passed, with no deferred ancestor up the parent chain and no unclosed blocker",
+        request: "?project=&limit=...",
+        response: "JSON {items:[work item, ...]}",
+    },
+    RouteSpec {
+        method: "GET",
+        path: "/v1/work/:id",
+        class: RouteClass::Open,
+        purpose: "One work item plus every typed edge touching it",
+        request: "item id in path",
+        response: "JSON {item, edges:[{fromId, toId, type, ...}]}",
+    },
+    RouteSpec {
+        method: "POST",
+        path: "/v1/work",
+        class: RouteClass::Protected(SCOPE_WORK_FILE),
+        purpose: "File a new work item (task / bug / question / message); `parent` mints a child id and records the parent-child edge",
+        request: "JSON {title, body?, kind?, priority?, status?, parent?, originKind?, originId?, projectPath?, pinned?, deferUntil?, author?}",
+        response: "JSON {item} with the minted hierarchical id",
+    },
+    RouteSpec {
+        method: "POST",
+        path: "/v1/work/:id/claim",
+        class: RouteClass::Protected(SCOPE_WORK_CLAIM),
+        purpose: "Claim an open work item: sets the assignee and a lease; 409 when it is not open",
+        request: "JSON {assignee, leaseSeconds?}",
+        response: "JSON {item} as claimed",
+    },
+    RouteSpec {
+        method: "POST",
+        path: "/v1/work/:id/close",
+        class: RouteClass::Protected(SCOPE_WORK_CLAIM),
+        purpose: "Close a work item with a recorded reason; 409 when already closed",
+        request: "JSON {reason?, author?}",
+        response: "JSON {item} as closed",
     },
     RouteSpec {
         method: "GET",
@@ -836,6 +885,9 @@ mod tests {
             authorize("/v1/sessions/:session_id/feedback", "GET", None),
             Ok(())
         );
+        // Work-graph reads follow the house read convention: open.
+        assert_eq!(authorize("/v1/work/ready", "GET", None), Ok(()));
+        assert_eq!(authorize("/v1/work/:id", "GET", None), Ok(()));
     }
 
     #[test]
@@ -853,6 +905,9 @@ mod tests {
             ("/v1/drafter/:draft_id/suggestions", "POST"),
             ("/v1/reviews/annotations", "POST"),
             ("/v1/reviews/annotations", "DELETE"),
+            ("/v1/work", "POST"),
+            ("/v1/work/:id/claim", "POST"),
+            ("/v1/work/:id/close", "POST"),
         ] {
             assert!(
                 matches!(

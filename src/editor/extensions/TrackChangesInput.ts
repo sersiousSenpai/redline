@@ -19,12 +19,20 @@ export interface TrackChangesInputOptions {
   /** Called when a user edit was blocked because its block carries a pending
    *  foreign-author (agent) suggestion — surface "resolve it first" UI. */
   onLockedEdit?: (blockId: string) => void;
+  /** Whether suggestion mode starts ON. The plan editor (always-tracked)
+   *  keeps the default `true`; the drafter starts in plain Editing mode and
+   *  flips at runtime via `setSuggesting`. */
+  initialSuggesting?: boolean;
 }
 
 interface TrackChangesInputStorage {
   /** Top-level blocks currently owned by a pending foreign-author suggestion
    *  (set via `setLockedBlocks`). User edits inside them are filtered out. */
   lockedBlockIds: Set<string>;
+  /** Live Word-style Suggesting mode: keystrokes become tracked runs. When
+   *  OFF, typing and Backspace behave plainly — but block locking and the
+   *  explicit `strikeSelection` command stay active regardless. */
+  suggesting: boolean;
 }
 
 /**
@@ -67,6 +75,8 @@ declare module "@tiptap/core" {
       /** Replace the set of blocks locked against user edits (M4: blocks
        *  owned by a pending agent suggestion — "resolve it first"). */
       setLockedBlocks: (blockIds: string[]) => ReturnType;
+      /** Toggle live Suggesting mode (Word's Editing/Suggesting switch). */
+      setSuggesting: (on: boolean) => ReturnType;
     };
   }
 }
@@ -233,15 +243,20 @@ export const TrackChangesInput = Extension.create<
   name: "trackChangesInput",
 
   addOptions() {
-    return { onLockedEdit: undefined };
+    return { onLockedEdit: undefined, initialSuggesting: true };
   },
 
   addStorage() {
-    return { lockedBlockIds: new Set<string>() };
+    return {
+      lockedBlockIds: new Set<string>(),
+      suggesting: this.options.initialSuggesting ?? true,
+    };
   },
 
   addKeyboardShortcuts() {
     const run = (dir: -1 | 1) => () => {
+      // Editing mode: let the default (plain) delete run.
+      if (!this.storage.suggesting) return false;
       const { state, view } = this.editor;
       return trackedDelete(state, view.dispatch.bind(view), dir);
     };
@@ -267,6 +282,11 @@ export const TrackChangesInput = Extension.create<
         // Enforcement-only state read by filterTransaction — no transaction
         // to dispatch.
         this.storage.lockedBlockIds = new Set(blockIds);
+        return true;
+      },
+      setSuggesting: (on: boolean) => () => {
+        // Mode flag read by the keymap + appendTransaction — no transaction.
+        this.storage.suggesting = on;
         return true;
       },
     };
@@ -296,6 +316,9 @@ export const TrackChangesInput = Extension.create<
           return true;
         },
         appendTransaction(transactions, oldState, newState) {
+          // Editing mode: keystrokes stay plain edits. The lock filter above
+          // and the explicit strikeSelection command are unaffected.
+          if (!ext.storage.suggesting) return null;
           const relevant = transactions.filter(
             (tr) =>
               tr.docChanged &&

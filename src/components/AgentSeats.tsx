@@ -46,6 +46,54 @@ interface AgentSeatsView {
   blurbs: SeatBlurb[];
 }
 
+/** One roster row — mirrors Rust's `seat::SeatRosterEntry` (P3): the seat's
+ *  standing charter/trigger (user override already merged over the default in
+ *  Rust) plus what it has actually done (seat_stats) and burned (seat_burn,
+ *  tokens only — money is never computed here). */
+export interface SeatRosterEntry {
+  seat: string;
+  charter: string;
+  trigger: string;
+  lastRunAt: number | null;
+  itemsFiled: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  spawns: number;
+}
+
+/** Compact token count: 950 → "950", 12400 → "12.4k", 2000000 → "2M". */
+export function formatTokens(n: number): string {
+  const fmt = (v: number, suffix: string) =>
+    `${v.toFixed(1).replace(/\.0$/, "")}${suffix}`;
+  if (n >= 1_000_000) return fmt(n / 1_000_000, "M");
+  if (n >= 1_000) return fmt(n / 1_000, "k");
+  return String(n);
+}
+
+/** "never ran" / "just now" / "12m ago" / "3h ago" / "5d ago". */
+export function formatLastRun(
+  ts: number | null | undefined,
+  now: number = Date.now(),
+): string {
+  if (!ts) return "never ran";
+  const mins = Math.floor((now - ts) / 60_000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+/** The burn line, tokens only. */
+export function burnSummary(e: SeatRosterEntry): string {
+  if (e.spawns <= 0 && e.inputTokens <= 0 && e.outputTokens <= 0) {
+    return "no burn recorded";
+  }
+  return `${formatTokens(e.inputTokens)} tok in · ${formatTokens(e.outputTokens)} tok out · ${e.spawns} spawn${e.spawns === 1 ? "" : "s"}`;
+}
+
 interface SeatRow {
   name: string;
   label: string;
@@ -66,6 +114,7 @@ const SEAT_GROUPS: { label: string; seats: SeatRow[] }[] = [
       { name: "mission", label: "Missions" },
       { name: "ai_review", label: "AI code review" },
       { name: "ai_commit", label: "Commit drafter" },
+      { name: "orchestrator", label: "Plan orchestrator" },
     ],
   },
   {
@@ -675,6 +724,11 @@ export function AgentSeats() {
   const [seats, setSeats] = useState<Record<string, SeatConfig>>({});
   const [claudeBin, setClaudeBin] = useState("");
   const [blurbs, setBlurbs] = useState<Record<string, SeatBlurb>>({});
+  /** The roster rollup by seat: charter/trigger + stats + burn (P3). */
+  const [roster, setRoster] = useState<Record<string, SeatRosterEntry>>({});
+  // Non-null when the roster rollup failed to load — rendered as a muted
+  // notice so a broken rollup can't masquerade as an unchanged dialog.
+  const [rosterNote, setRosterNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // --- Seat Assignment agent -------------------------------------------
@@ -725,6 +779,17 @@ export function AgentSeats() {
         );
       })
       .catch((e) => setError(String(e)));
+    void invoke<SeatRosterEntry[]>("get_seat_roster")
+      .then((entries) => {
+        if (cancelled) return;
+        setRoster(Object.fromEntries(entries.map((e) => [e.seat, e])));
+      })
+      .catch((e) => {
+        // The pickers still work without the roster, but a silent skip made a
+        // failed rollup indistinguishable from "nothing shipped" — say so.
+        if (!cancelled) setRosterNote(String(e));
+        console.error("get_seat_roster failed", e);
+      });
     void invoke<{ seatAssignPrefs: string | null }>("get_ui_prefs")
       .then((prefs) => {
         if (cancelled) return;
@@ -899,59 +964,103 @@ export function AgentSeats() {
     );
   };
 
+  /** One roster row: the seat's name and standing charter/trigger, what it
+   *  has actually done (stats + burn, tokens only), and the existing
+   *  model/effort/fallback picker. */
   const renderSeat = (row: SeatRow) => {
     const cfg = seats[row.name] ?? {};
     const defaultLabel = defaultLabelFor(row);
     const summary = seatSummary(seats[row.name]);
+    const entry: SeatRosterEntry | undefined = roster[row.name];
     return (
       <div
         key={row.name}
-        className="flex items-center gap-2 px-4 py-2"
+        className="px-4 py-2"
         style={{ borderBottom: "1px solid var(--color-rule)" }}
       >
-        <GlowDot on={!!summary} />
-        <span
-          className="font-sans flex-1 min-w-0"
-          style={{ fontSize: "12px", color: "var(--color-ink)" }}
-        >
-          <SeatInfo blurb={blurbs[row.name]}>
-            <span
+        <div className="flex items-center gap-2">
+          <GlowDot on={!!summary} />
+          <span
+            className="font-sans flex-1 min-w-0"
+            style={{ fontSize: "12px", color: "var(--color-ink)" }}
+          >
+            <SeatInfo blurb={blurbs[row.name]}>
+              <span
+                style={{
+                  borderBottom:
+                    "1px dotted color-mix(in srgb, var(--color-ink-muted) 55%, transparent)",
+                }}
+              >
+                {row.label}
+              </span>
+            </SeatInfo>
+            {summary && (
+              <span
+                className="font-sans"
+                style={{
+                  marginLeft: "8px",
+                  fontSize: "10.5px",
+                  color: "var(--color-ink)",
+                  background: "color-mix(in srgb, var(--color-info) 12%, transparent)",
+                  border:
+                    "1px solid color-mix(in srgb, var(--color-info) 40%, var(--color-rule))",
+                  borderRadius: "999px",
+                  padding: "1px 8px",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {summary}
+              </span>
+            )}
+          </span>
+          <SeatPicker
+            rowLabel={row.label}
+            defaultLabel={defaultLabel}
+            cfg={cfg}
+            onPick={(choice) =>
+              update(row.name, { model: choice.model, effort: choice.effort })
+            }
+            onFallback={(model) => update(row.name, { fallback: model })}
+          />
+        </div>
+        {entry && (
+          <div className="font-sans" style={{ margin: "4px 0 0 16px" }}>
+            <div
               style={{
-                borderBottom:
-                  "1px dotted color-mix(in srgb, var(--color-ink-muted) 55%, transparent)",
-              }}
-            >
-              {row.label}
-            </span>
-          </SeatInfo>
-          {summary && (
-            <span
-              className="font-sans"
-              style={{
-                marginLeft: "8px",
-                fontSize: "10.5px",
+                fontSize: "11px",
+                lineHeight: 1.45,
                 color: "var(--color-ink)",
-                background: "color-mix(in srgb, var(--color-info) 12%, transparent)",
-                border:
-                  "1px solid color-mix(in srgb, var(--color-info) 40%, var(--color-rule))",
-                borderRadius: "999px",
-                padding: "1px 8px",
-                whiteSpace: "nowrap",
               }}
             >
-              {summary}
-            </span>
-          )}
-        </span>
-        <SeatPicker
-          rowLabel={row.label}
-          defaultLabel={defaultLabel}
-          cfg={cfg}
-          onPick={(choice) =>
-            update(row.name, { model: choice.model, effort: choice.effort })
-          }
-          onFallback={(model) => update(row.name, { fallback: model })}
-        />
+              {entry.charter}
+            </div>
+            <div
+              style={{
+                fontSize: "10.5px",
+                fontStyle: "italic",
+                color: "var(--color-ink-muted)",
+                marginTop: "2px",
+              }}
+            >
+              {entry.trigger}
+            </div>
+            <div
+              title={`input ${entry.inputTokens} · output ${entry.outputTokens} · cache read ${entry.cacheReadTokens} · cache write ${entry.cacheCreationTokens}`}
+              style={{
+                fontSize: "10px",
+                color: "var(--color-ink-muted)",
+                marginTop: "3px",
+                letterSpacing: "0.02em",
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
+              {formatLastRun(entry.lastRunAt)} · {entry.itemsFiled} filed ·{" "}
+              {burnSummary(entry)}
+            </div>
+          </div>
+        )}
       </div>
     );
   };
@@ -1174,6 +1283,12 @@ export function AgentSeats() {
                     Which mind sits in each seat — model and effort per agent.
                     Default inherits your Claude Code default; unknown
                     combinations fail at spawn.
+                    {rosterNote ? (
+                      <span style={{ color: "var(--color-warning)" }}>
+                        {" "}
+                        Roster unavailable: {rosterNote}
+                      </span>
+                    ) : null}
                   </div>
                 </div>
                 <button

@@ -140,6 +140,36 @@ pub enum EventKind {
     /// `{action, text}` via `payload_hash`. Edits append; nothing is destroyed.
     /// A note is a strong CURATION signal for the classifier, never provenance.
     Note,
+    /// Work graph: a work item was filed. References the `work_items` row by
+    /// `(ref_kind="work_item", ref_id=item id)` — provenance, never a foreign
+    /// key: the item row (and this event) outlive whatever origin filed it.
+    /// Commits to `(item, action, actor, detail, at)` via `payload_hash`.
+    WorkFile,
+    /// Work graph: a work item was claimed (an assignee took the lease).
+    /// Same reference + payload shape as [`EventKind::WorkFile`].
+    WorkClaim,
+    /// Work graph: a work item was closed (done / wontfix / superseded — the
+    /// reason rides in the payload). Same shape as [`EventKind::WorkFile`].
+    WorkClose,
+    /// Moot: one participant's turn in a bounded, on-the-record multi-agent
+    /// conversation convened on a single work item (`moot.rs`). References the
+    /// subject item by `(ref_kind="work_item", ref_id=item id)` — the
+    /// `record_work_event` shape: provenance, never a foreign key — and
+    /// commits to `(item, moot, round, seat, digest, at)` via `payload_hash`,
+    /// where `digest` is the content hash of the turn's text. The readable
+    /// transcript lives in the moot's Bookshelf document; this event is what
+    /// makes every turn tamper-evident even after the document is edited.
+    MootTurn,
+    /// SHADOW attention router: the AI pre-review pass's triage verdict for one
+    /// code review — `auto` or `attend`, recorded and NEVER acted on. Distinct
+    /// from [`EventKind::ReviewVerdict`] (the HUMAN's annotation resolution) on
+    /// purpose: a machine verdict must never enter the decision stream
+    /// ClassMemory retrieves as "what the user decided". References the review
+    /// by `(ref_kind="code_review", ref_id=review id)` and commits to
+    /// `{review, verdict, reason, signals, bar, cited_seq, at}` via
+    /// `payload_hash`; the readable sidecar lives in `app_settings` under
+    /// `redline.router.verdict.<review id>`.
+    RouterVerdict,
 }
 
 impl EventKind {
@@ -161,6 +191,11 @@ impl EventKind {
             EventKind::Supersede => "supersede",
             EventKind::Observation => "observation",
             EventKind::Note => "note",
+            EventKind::WorkFile => "work_file",
+            EventKind::WorkClaim => "work_claim",
+            EventKind::WorkClose => "work_close",
+            EventKind::MootTurn => "moot_turn",
+            EventKind::RouterVerdict => "router_verdict",
         }
     }
 }
@@ -395,6 +430,41 @@ pub fn claim_drafted_prompt(body_hash: &str) -> Option<String> {
     let now = Instant::now();
     g.retain(|_, (_, t)| now.duration_since(*t) < GUARD_TTL);
     g.remove(body_hash).map(|(draft_id, _)| draft_id)
+}
+
+// ---------------------------------------------------------------------------
+// Orchestration handoff guard
+// ---------------------------------------------------------------------------
+//
+// The Orchestrate lineage: `record_orchestration_launch` registers the typed
+// orchestrator prompt's hash here WITH the plan session id it will execute;
+// when the orchestrator session's first `UserPromptSubmit` hook fire arrives
+// at the ingest handler, the handler claims this map — at that exact moment
+// the new claude session id is known, so the ingest records
+// `session_link(session → plan session)` and advances the run state. Same
+// TTL/consume-once semantics as the guards above.
+
+fn orchestration_guard() -> &'static Mutex<HashMap<String, (String, Instant)>> {
+    static G: OnceLock<Mutex<HashMap<String, (String, Instant)>>> = OnceLock::new();
+    G.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Register an orchestrator prompt body about to be typed into a fresh
+/// session, carrying the plan session id whose approved plan it executes.
+pub fn register_orchestration_prompt(body_hash: &str, plan_session_id: &str) {
+    let mut g = orchestration_guard().lock().unwrap();
+    let now = Instant::now();
+    g.retain(|_, (_, t)| now.duration_since(*t) < GUARD_TTL);
+    g.insert(body_hash.to_string(), (plan_session_id.to_string(), now));
+}
+
+/// Consume an orchestration registration: the plan session id this body was
+/// launched to execute, or `None` if the body wasn't an Orchestrate launch.
+pub fn claim_orchestration_prompt(body_hash: &str) -> Option<String> {
+    let mut g = orchestration_guard().lock().unwrap();
+    let now = Instant::now();
+    g.retain(|_, (_, t)| now.duration_since(*t) < GUARD_TTL);
+    g.remove(body_hash).map(|(plan_sid, _)| plan_sid)
 }
 
 // ---------------------------------------------------------------------------
@@ -747,6 +817,187 @@ pub fn record_session_link(
     )
 }
 
+/// Record a work-item lifecycle act (file / claim / close) — the
+/// `record_session_link` shape: the CALLER inserts/updates the `work_items`
+/// row via `db` first; this helper only appends the chain event, referencing
+/// the item by `(ref_kind="work_item", ref_id=item id)` and committing to
+/// `(item, action, actor, detail, at)` via `payload_hash`. Provenance, never
+/// ownership: the event holds no foreign key, so the item (or its origin)
+/// being deleted later cannot break the chain.
+///
+/// `at` should be the row's own `updated_at`: a same-instant double post
+/// dedupes (via `record_decision`'s idempotency), while a genuinely later
+/// re-act — a re-claim after a lease lapse — still records. Best-effort at
+/// call sites — never block the row write on it. Returns the new seq, `None`
+/// when this exact act was already recorded.
+pub fn record_work_event(
+    db: &Database,
+    kind: EventKind,
+    item_id: &str,
+    actor: Option<&str>,
+    detail: Option<&str>,
+    at: i64,
+) -> Result<Option<i64>, String> {
+    debug_assert!(
+        matches!(
+            kind,
+            EventKind::WorkFile | EventKind::WorkClaim | EventKind::WorkClose
+        ),
+        "record_work_event is for work-item lifecycle kinds only"
+    );
+    if item_id.trim().is_empty() {
+        return Ok(None);
+    }
+    let at_str = at.to_string();
+    let ph = decision_payload_hash(&[
+        ("item", item_id),
+        ("action", kind.as_str()),
+        ("actor", actor.unwrap_or("")),
+        ("detail", detail.unwrap_or("")),
+        ("at", &at_str),
+    ]);
+    record_decision(
+        db,
+        DecisionInput {
+            kind,
+            author: actor
+                .map(str::trim)
+                .filter(|a| !a.is_empty())
+                .map(str::to_string),
+            session_id: None,
+            ref_kind: "work_item",
+            ref_id: item_id,
+            payload_hash: ph,
+        },
+    )
+}
+
+/// Record one moot turn — the `record_work_event` shape: the CALLER lands the
+/// readable transcript (the moot's Bookshelf document) first; this helper only
+/// appends the chain event, referencing the subject item by
+/// `(ref_kind="work_item", ref_id=item id)` and committing to
+/// `(item, moot, round, seat, digest, at)` via `payload_hash` — `turn_digest`
+/// is the content hash of the turn's text, so the transcript document can be
+/// edited (that's the moot's intervention channel) while every turn as spoken
+/// stays tamper-evident. Best-effort at call sites — never block the moot on
+/// it. Returns the new seq, `None` when this exact turn was already recorded.
+pub fn record_moot_turn(
+    db: &Database,
+    item_id: &str,
+    moot_id: &str,
+    round: u32,
+    seat: &str,
+    turn_digest: &str,
+    at: i64,
+) -> Result<Option<i64>, String> {
+    if item_id.trim().is_empty() || moot_id.trim().is_empty() {
+        return Ok(None);
+    }
+    let round_s = round.to_string();
+    let at_s = at.to_string();
+    let ph = decision_payload_hash(&[
+        ("item", item_id),
+        ("moot", moot_id),
+        ("round", &round_s),
+        ("seat", seat),
+        ("digest", turn_digest),
+        ("at", &at_s),
+    ]);
+    record_decision(
+        db,
+        DecisionInput {
+            kind: EventKind::MootTurn,
+            // The speaking seat, namespaced so a seat name can never collide
+            // with a human author identity.
+            author: Some(format!("moot:{seat}")),
+            session_id: None,
+            ref_kind: "work_item",
+            ref_id: item_id,
+            payload_hash: ph,
+        },
+    )
+}
+
+/// One SHADOW attention-router verdict for one completed AI pre-review pass.
+/// `verdict` is the CLOSED vocabulary `auto` | `attend` — there is no third
+/// tier, because a machine never overrules the human. `signals` are the
+/// checkable risk signals that fired, `bar` is the published attend threshold
+/// they were judged at, and `cited_seq` (when present) is a VALIDATED ledger
+/// seq of a user decision the diff contradicts. `at` is the pass-completion
+/// timestamp: an identical same-instant double post dedupes, while each later
+/// pass records its own verdict.
+pub struct ReviewVerdictRecord<'a> {
+    pub review_session_id: &'a str,
+    pub verdict: &'a str,
+    pub reason: &'a str,
+    pub signals: &'a [String],
+    pub bar: usize,
+    pub cited_seq: Option<i64>,
+    pub at: i64,
+}
+
+/// Record a shadow router verdict — the `record_session_link` shape: a
+/// readable, self-describing row first (the house `app_settings` KV, keyed
+/// `redline.router.verdict.<review id>` — signals + bar ride in it, so the
+/// calibration record explains itself), then one chain event committing to the
+/// full payload. SHADOW MODE: this is the verdict's ONLY sink besides the FE
+/// banner payload — nothing reads it to open, hold, land, or skip anything.
+/// Best-effort at call sites — never block the review on it. Returns the new
+/// seq, `None` when this exact verdict was already recorded.
+pub fn record_review_verdict(
+    db: &Database,
+    rec: &ReviewVerdictRecord,
+) -> Result<Option<i64>, String> {
+    if !matches!(rec.verdict, "auto" | "attend") {
+        return Err(format!(
+            "router verdict must be 'auto' or 'attend' (got '{}') — no other tier exists",
+            rec.verdict
+        ));
+    }
+    if rec.review_session_id.trim().is_empty() {
+        return Ok(None);
+    }
+    let signals_joined = rec.signals.join(",");
+    let bar_s = rec.bar.to_string();
+    let cited_s = rec.cited_seq.map(|s| s.to_string()).unwrap_or_default();
+    let at_s = rec.at.to_string();
+    let ph = decision_payload_hash(&[
+        ("review_session_id", rec.review_session_id),
+        ("verdict", rec.verdict),
+        ("reason", rec.reason),
+        ("signals", &signals_joined),
+        ("bar", &bar_s),
+        ("cited_seq", &cited_s),
+        ("at", &at_s),
+    ]);
+    let readable = serde_json::json!({
+        "reviewSessionId": rec.review_session_id,
+        "verdict": rec.verdict,
+        "reason": rec.reason,
+        "signals": rec.signals,
+        "bar": rec.bar,
+        "citedSeq": rec.cited_seq,
+        "at": rec.at,
+    })
+    .to_string();
+    db.set_setting(
+        &format!("redline.router.verdict.{}", rec.review_session_id),
+        &readable,
+    )
+    .map_err(|e| e.to_string())?;
+    record_decision(
+        db,
+        DecisionInput {
+            kind: EventKind::RouterVerdict,
+            author: Some("router".to_string()),
+            session_id: Some(rec.review_session_id),
+            ref_kind: "code_review",
+            ref_id: rec.review_session_id,
+            payload_hash: ph,
+        },
+    )
+}
+
 /// Resolve the parent for a NEW interaction thread — called ONCE at thread
 /// creation; the relation is then recorded via `record_session_link` and never
 /// re-derived. Precedence:
@@ -907,11 +1158,100 @@ mod tests {
     }
 
     #[test]
+    fn orchestration_guard_claims_once_with_plan_session_id() {
+        let bh = format!("orchguard-{}", now_millis());
+        assert_eq!(claim_orchestration_prompt(&bh), None);
+        register_orchestration_prompt(&bh, "plan-sid-9");
+        assert_eq!(
+            claim_orchestration_prompt(&bh),
+            Some("plan-sid-9".to_string())
+        );
+        assert_eq!(claim_orchestration_prompt(&bh), None, "consume-once");
+    }
+
+    #[test]
+    fn orchestration_guard_rearms_after_a_claim() {
+        // Pins the handoff-retry path against the GUARD_TTL bug: a retry
+        // re-calls `record_orchestration_launch`, and because register is a
+        // plain insert, re-registering after a claim (or an expiry) genuinely
+        // re-arms — the retried prompt still earns its `orchestrations` row.
+        let bh = format!("orchguard-rearm-{}", now_millis());
+        register_orchestration_prompt(&bh, "plan-sid-3");
+        assert_eq!(
+            claim_orchestration_prompt(&bh),
+            Some("plan-sid-3".to_string())
+        );
+        register_orchestration_prompt(&bh, "plan-sid-3");
+        assert_eq!(
+            claim_orchestration_prompt(&bh),
+            Some("plan-sid-3".to_string()),
+            "a re-registered body must claim again"
+        );
+    }
+
+    #[test]
     fn decision_payload_hash_stable() {
         let a = decision_payload_hash(&[("k", "v"), ("n", "1")]);
         let b = decision_payload_hash(&[("k", "v"), ("n", "1")]);
         assert_eq!(a, b);
         let c = decision_payload_hash(&[("k", "v"), ("n", "2")]);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn review_verdict_records_once_per_pass_and_chain_stays_green() {
+        let db = Database::open_in_memory().unwrap();
+        let signals = vec!["auth_surface".to_string(), "tests_missing".to_string()];
+        let rec = ReviewVerdictRecord {
+            review_session_id: "rev-1",
+            verdict: "attend",
+            reason: "touches the auth scope table",
+            signals: &signals,
+            bar: 1,
+            cited_seq: None,
+            at: 1234,
+        };
+        let seq = record_review_verdict(&db, &rec).unwrap();
+        assert!(seq.is_some(), "a completed pass records a verdict");
+        // Exactly one event per pass: the identical act dedupes…
+        assert_eq!(record_review_verdict(&db, &rec).unwrap(), None);
+        // …while a genuinely later pass (new `at`) records its own verdict.
+        let rec2 = ReviewVerdictRecord { at: 5678, ..rec };
+        assert!(record_review_verdict(&db, &rec2).unwrap().is_some());
+
+        let v = db.verify_ledger_chain().unwrap();
+        assert!(v.ok, "recording a router verdict must keep the chain green");
+        assert_eq!(v.checked, 2);
+
+        // The readable sidecar is self-describing: verdict + signals + bar.
+        let side = db.get_setting("redline.router.verdict.rev-1").unwrap();
+        let j: serde_json::Value = serde_json::from_str(&side).unwrap();
+        assert_eq!(j["verdict"], "attend");
+        assert_eq!(j["bar"], 1);
+        assert_eq!(j["signals"], serde_json::json!(["auth_surface", "tests_missing"]));
+        assert_eq!(j["citedSeq"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn review_verdict_rejects_any_third_tier() {
+        // The vocabulary is CLOSED: auto | attend. A machine never overrules
+        // the human, so "block" (or anything else) cannot even be recorded.
+        let db = Database::open_in_memory().unwrap();
+        for bad in ["block", "hold", "reject", "", "AUTO"] {
+            let rec = ReviewVerdictRecord {
+                review_session_id: "rev-1",
+                verdict: bad,
+                reason: "r",
+                signals: &[],
+                bar: 1,
+                cited_seq: None,
+                at: 1,
+            };
+            assert!(
+                record_review_verdict(&db, &rec).is_err(),
+                "'{bad}' must be unrecordable"
+            );
+        }
+        assert_eq!(db.max_ledger_seq().unwrap(), 0, "nothing landed on the chain");
     }
 }

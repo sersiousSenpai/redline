@@ -901,6 +901,49 @@ p.rl-block-modified {
   background: color-mix(in srgb, var(--color-info) 7%, transparent);
 }
 
+/* P4: a gutter dot on any drafter block carrying a pending tracked change,
+   so proposals below the fold are discoverable at a glance. (:has is safe —
+   this sheet already leans on color-mix, a newer WebKit feature.) */
+.rl-page-workspace--drafter
+  .rl-prose
+  > [data-block-id]:has(
+    .rl-ins[data-rl-status="pending"],
+    .rl-del[data-rl-status="pending"]
+  ) {
+  position: relative;
+}
+.rl-page-workspace--drafter
+  .rl-prose
+  > [data-block-id]:has(
+    .rl-ins[data-rl-status="pending"],
+    .rl-del[data-rl-status="pending"]
+  )::before {
+  content: "";
+  position: absolute;
+  left: -16px;
+  top: 0.55em;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--color-info) 75%, transparent);
+}
+
+/* ✦ co-authoring: the block a doc-agent instruction targets, pulsing quietly
+   until the tracked suggestion lands (or the turn errors). */
+.rl-generating {
+  border-radius: 3px;
+  animation: rl-generating-pulse 1.6s ease-in-out infinite;
+}
+@keyframes rl-generating-pulse {
+  0%,
+  100% {
+    background: color-mix(in srgb, var(--color-info) 4%, transparent);
+  }
+  50% {
+    background: color-mix(in srgb, var(--color-info) 14%, transparent);
+  }
+}
+
 /* Word-style comment highlight over the originally-selected text. Sits on
    top of inline ins/del marks (the editor renders the ins/del color through
    the highlight tint), and click-bridges with the sidebar card. */
@@ -1983,72 +2026,26 @@ p.rl-block-modified {
 .rl-menu-item[aria-selected="true"]:hover {
   background: color-mix(in srgb, var(--color-ink) 8%, var(--color-anchor-bg));
 }
-/* Quick-open repo bubbles in the terminal tab bar. Resting state is nearly
-   invisible chrome; hover lifts one into an accent pill so the strip reads as
-   "somewhere to click" only when you go looking for it. */
-.rl-repo-bubble {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  height: 20px;
-  padding: 0 9px;
-  border-radius: 999px;
-  border: 1px solid transparent;
-  background: color-mix(in srgb, var(--color-ink) 6%, transparent);
-  color: var(--color-ink-muted);
-  font-size: 11px;
-  line-height: 1;
-  white-space: nowrap;
-  cursor: pointer;
-  transition:
-    background-color 140ms ease,
-    border-color 140ms ease,
-    color 140ms ease,
-    transform 140ms cubic-bezier(0.2, 0, 0, 1),
-    box-shadow 140ms ease;
+/* Terminal tile header action cluster (⤢ ×). Always in flow at its natural
+   width and revealed by OPACITY only — a width reveal would re-truncate the
+   label under the pointer. Shown on hover, keyboard focus within, an open
+   tile menu, or on the focused tile (the one being typed in), so keyboard
+   users and the active tile always see it. */
+.rl-tile-actions {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
 }
-.rl-repo-bubble:hover {
-  background: color-mix(in srgb, var(--color-info) 16%, transparent);
-  border-color: color-mix(in srgb, var(--color-info) 50%, transparent);
-  color: var(--color-ink);
-  transform: translateY(-1px);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
-}
-.rl-repo-bubble:active {
-  transform: translateY(0) scale(0.97);
-  box-shadow: none;
-}
-.rl-repo-bubble:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--color-info) 70%, transparent);
-  outline-offset: 1px;
-}
-/* Its popover is up: hold the hover look so the bubble stays visually tied to
-   the panel hanging below it. */
-.rl-repo-bubble[aria-expanded="true"] {
-  background: color-mix(in srgb, var(--color-info) 16%, transparent);
-  border-color: color-mix(in srgb, var(--color-info) 50%, transparent);
-  color: var(--color-ink);
-}
-/* Instance-count dot — dim until you reach for it. */
-.rl-repo-bubble-dot {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: currentColor;
-  opacity: 0.5;
-  transition: opacity 140ms ease;
-}
-.rl-repo-bubble:hover .rl-repo-bubble-dot {
+.rl-tile-head:hover .rl-tile-actions,
+.rl-tile-head:focus-within .rl-tile-actions,
+.rl-tile-head[data-open] .rl-tile-actions,
+.rl-tile-head[data-focused] .rl-tile-actions {
   opacity: 1;
+  pointer-events: auto;
 }
 @media (prefers-reduced-motion: reduce) {
-  .rl-repo-bubble,
-  .rl-repo-bubble-dot {
+  .rl-tile-actions {
     transition: none;
-  }
-  .rl-repo-bubble:hover,
-  .rl-repo-bubble:active {
-    transform: none;
   }
 }
 /* Settings rows (checkbox labels) whose resting background is transparent. */
@@ -2389,6 +2386,20 @@ p.rl-block-modified {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
   gap: 14px;
+}
+/* The Orchestration Monitor's running-agent dot: a slow breathe, not a blink —
+   a dozen tiles pulsing hard would read as an alarm, not as liveness. */
+@keyframes rl-run-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.rl-run-pulse {
+  animation: rl-run-pulse 1.6s ease-in-out infinite;
 }
 /* The capture shimmer. It lives on the OUTER padding ring of the thumb box, so
    it stays visible while the native webview covers the inner box — the frame is

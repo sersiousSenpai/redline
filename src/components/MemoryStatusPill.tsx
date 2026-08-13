@@ -41,13 +41,22 @@ export function relativeTime(ts: number | null, now: number): string {
 }
 
 /** The pill's one-line label. Pure. Held proposals outrank the ambient line —
- *  a queued destructive op must never be invisible. */
-export function pillLabel(status: MemoryStatus | null, now: number): string {
-  if (!status) return "Memory";
-  if (status.pendingProposals > 0) return `Memory · ${status.pendingProposals} to review`;
-  if (status.lastOrganizedTs) return `Memory · organized ${relativeTime(status.lastOrganizedTs, now)}`;
-  if (status.itemCount > 0) return `Memory · ${status.itemCount} captured`;
-  return "Memory";
+ *  a queued destructive op must never be invisible. The ready-depth segment
+ *  (`· N ready`, the work graph's unfiltered ready frontier) appends after
+ *  whichever memory segment won, and hides entirely at zero. */
+export function pillLabel(
+  status: MemoryStatus | null,
+  now: number,
+  readyWork = 0,
+): string {
+  const base = (() => {
+    if (!status) return "Memory";
+    if (status.pendingProposals > 0) return `Memory · ${status.pendingProposals} to review`;
+    if (status.lastOrganizedTs) return `Memory · organized ${relativeTime(status.lastOrganizedTs, now)}`;
+    if (status.itemCount > 0) return `Memory · ${status.itemCount} captured`;
+    return "Memory";
+  })();
+  return readyWork > 0 ? `${base} · ${readyWork} ready` : base;
 }
 
 export function MemoryStatusPill({
@@ -60,6 +69,9 @@ export function MemoryStatusPill({
   onOpenInspector: () => void;
 }) {
   const [status, setStatus] = useState<MemoryStatus | null>(null);
+  // The work graph's unfiltered ready frontier depth — the ambient "· N
+  // ready" segment. Display-only, like the pill's other segments.
+  const [readyWork, setReadyWork] = useState(0);
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState({ top: 0, right: 0 });
   const btnRef = useRef<HTMLButtonElement | null>(null);
@@ -72,6 +84,12 @@ export function MemoryStatusPill({
       setStatus(await invoke<MemoryStatus>("memory_status"));
     } catch {
       /* best-effort: the pill is ambient, never an error surface */
+    }
+    try {
+      const graph = await invoke<{ readyIds: string[] }>("get_work_graph");
+      setReadyWork(graph.readyIds.length);
+    } catch {
+      /* same best-effort rule: no ready count is a hidden segment, not an error */
     }
   }, []);
 
@@ -173,7 +191,7 @@ export function MemoryStatusPill({
                 : "0 0 4px rgba(47,174,102,0.8)",
           }}
         />
-        <span style={{ whiteSpace: "nowrap" }}>{pillLabel(status, now)}</span>
+        <span style={{ whiteSpace: "nowrap" }}>{pillLabel(status, now, readyWork)}</span>
       </button>
       {open && (
         <div
@@ -224,6 +242,14 @@ export function MemoryStatusPill({
               <span style={{ color: "#e0913a" }}>
                 {status!.pendingProposals} held proposal
                 {status!.pendingProposals === 1 ? "" : "s"}
+              </span>
+            </div>
+          )}
+          {readyWork > 0 && (
+            <div style={row}>
+              <span style={muted}>Ready work</span>
+              <span>
+                {readyWork} item{readyWork === 1 ? "" : "s"} · Runs → Work
               </span>
             </div>
           )}

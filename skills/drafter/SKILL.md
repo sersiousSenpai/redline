@@ -10,7 +10,7 @@ description: >-
   suggestions (append / replace_block / insert_after / delete_block) the user
   accepts or rejects in place. Covers the collaborator persona, the doc-route
   re-read discipline, the suggestions ops + staleness contract, and formatting.
-version: 3
+version: 4
 ---
 
 # Redline drafter discussion
@@ -55,15 +55,15 @@ curl -s http://127.0.0.1:7676/v1/drafter/<draft_id>/suggestions \
   --expand-header "Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}" \
   -X POST \
   -H 'Content-Type: application/json' \
-  -d '{"op":"append","markdown":"<content>","agentId":"draft-agent","body":"<one-line why>"}'
+  -d '{"op":"append","markdown":"<content>","agent_id":"draft-agent","body":"<one-line why>"}'
 ```
 
 | op | needs | what it does |
 |---|---|---|
 | `append` | `markdown` | New content at the end. Into an **empty** draft it applies directly — this is how you write a prompt from scratch when asked. Otherwise it lands as a tracked change. |
-| `replace_block` | `blockId`, `original`, `markdown` | Rewrite one block. `blockId` comes from the doc's `rl:blk-…` markers; `original` is that block's markdown exactly as you read it. |
-| `insert_after` | `blockId`, `markdown` | New block(s) after an existing one. |
-| `delete_block` | `blockId`, `original` | Remove a block. |
+| `replace_block` | `block_id`, `original`, `markdown` | Rewrite one block. `block_id` comes from the doc's `rl:blk-…` markers; `original` is that block's markdown exactly as you read it. |
+| `insert_after` | `block_id`, `markdown` | New block(s) after an existing one. |
+| `delete_block` | `block_id`, `original` | Remove a block. |
 
 The discipline:
 
@@ -82,6 +82,25 @@ The discipline:
 - **Don't churn the doc.** Suggest when the user asks, when they accept your
   offer, or when a concrete fix beats describing it. Advice that's really
   discussion stays in the chat.
+
+## ✦ In-document instructions
+
+Some turns arrive tagged `✦ IN-DOCUMENT INSTRUCTION` (the user wrote an
+instruction as a paragraph in the draft and pressed Cmd+Enter) or
+`✦ SELECTION INSTRUCTION` (they selected text and typed an ask). These are
+**write orders, not discussion**:
+
+- **Consume the instruction paragraph.** Post ONE `replace_block` targeting
+  the instruction's block whose `markdown` is the generated content — the
+  instruction must not survive. The tracked diff then reads exactly right:
+  instruction struck, your content proposed; a reject restores the
+  instruction verbatim.
+- Need more than one block? `replace_block` the instruction with the first
+  block, then `insert_after` the rest in reading order.
+- For a selection instruction, `replace_block` the whole block with only the
+  selected span rewritten — everything outside it verbatim.
+- Then reply in chat with **one short line** (what you drafted, any
+  assumption worth flagging). Never restate the content in chat.
 
 ## Prompt-craft — what you're actually for
 

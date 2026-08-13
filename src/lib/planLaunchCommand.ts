@@ -34,3 +34,35 @@ export function buildPlanLaunchCommand(
 /** Tools the launched plan session may use without prompting. Space-separated
  *  for the `--allowedTools` variadic flag, matching the agent-spawn convention. */
 const ALLOWED_TOOLS = "Read Grep Glob WebSearch WebFetch Bash";
+
+/** Build the *bare* launch for an Orchestrate terminal — deliberately carries
+ *  no prompt. The multi-agent Workflow opt-in is gated on input *origin*
+ *  (human-typed beats argv-positional), so the prompt is delivered separately
+ *  as typed keystrokes (`buildOrchestratePrompt`) once claude's UI is up.
+ *  `acceptEdits` because workflow subagents run there regardless of session
+ *  mode; the model comes from the `orchestrator` seat (default `sonnet`) —
+ *  every subagent inherits it, so an unset default would mean the big model
+ *  × up-to-16 concurrent agents. */
+export function buildOrchestrateLaunchCommand(
+  projectPath: string | null | undefined,
+  model: string,
+): string {
+  const launch = `claude --permission-mode acceptEdits --model ${shq(model)}`;
+  return projectPath ? `cd ${shq(projectPath)} && ${launch}` : launch;
+}
+
+/** The orchestrator's typed prompt: ONE line, because Enter submits typed
+ *  input — an embedded newline would fire the prompt early. The `ultracode`
+ *  keyword and the natural-language "as a multi-agent workflow" ask are each
+ *  a sufficient Workflow opt-in (belt and braces); the curl shape is the
+ *  pre-authorized bridge GET, and the orchestrate skill carries the rest of
+ *  the execution discipline. */
+export function buildOrchestratePrompt(sessionId: string): string {
+  return (
+    `ultracode: execute the approved plan for Redline session ${sessionId} ` +
+    `as a multi-agent workflow. First fetch it: ` +
+    `curl -s "http://127.0.0.1:7676/v1/sessions/${sessionId}/plan" — ` +
+    `rawPlanMarkdown is the reviewed, approved plan. ` +
+    `Follow your orchestrate skill for the execution discipline.`
+  );
+}

@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { describe, expect, it } from "vitest";
-import { buildPlanLaunchCommand } from "./planLaunchCommand";
+import {
+  buildOrchestrateLaunchCommand,
+  buildOrchestratePrompt,
+  buildPlanLaunchCommand,
+} from "./planLaunchCommand";
 
 describe("buildPlanLaunchCommand", () => {
   const ALLOW = "--allowedTools Read Grep Glob WebSearch WebFetch Bash";
@@ -55,5 +59,57 @@ describe("buildPlanLaunchCommand", () => {
   it("escapes single quotes in the project path", () => {
     const cmd = buildPlanLaunchCommand("hi", "/tmp/o'brien");
     expect(cmd).toContain(`cd '/tmp/o'\\''brien' && claude`);
+  });
+});
+
+describe("buildOrchestrateLaunchCommand", () => {
+  it("builds a bare acceptEdits launch that carries no prompt", () => {
+    const cmd = buildOrchestrateLaunchCommand("/Users/me/redline", "sonnet");
+    expect(cmd).toBe(
+      "cd '/Users/me/redline' && claude --permission-mode acceptEdits --model 'sonnet'",
+    );
+    // The Workflow opt-in is origin-gated: the prompt is typed later, never
+    // passed as an argv positional.
+    expect(cmd).not.toContain("ultracode");
+    expect(cmd).not.toContain("Redline session");
+  });
+
+  it("omits the cd when no project path is given", () => {
+    expect(buildOrchestrateLaunchCommand(null, "sonnet")).toBe(
+      "claude --permission-mode acceptEdits --model 'sonnet'",
+    );
+  });
+
+  it("quotes the model and path through shq", () => {
+    const cmd = buildOrchestrateLaunchCommand("/tmp/o'brien", "sonnet");
+    expect(cmd).toContain(`cd '/tmp/o'\\''brien' && claude`);
+    expect(cmd).toContain(`--model 'sonnet'`);
+  });
+});
+
+describe("buildOrchestratePrompt", () => {
+  it("is a single line — Enter submits typed input", () => {
+    const prompt = buildOrchestratePrompt("abc-123");
+    expect(prompt).not.toContain("\n");
+    expect(prompt).not.toContain("\r");
+  });
+
+  it("opens with the ultracode keyword and asks for a multi-agent workflow", () => {
+    const prompt = buildOrchestratePrompt("abc-123");
+    // Keyword + natural-language ask are each a sufficient Workflow opt-in.
+    expect(prompt.startsWith("ultracode:")).toBe(true);
+    expect(prompt).toContain("as a multi-agent workflow");
+  });
+
+  it("embeds the pre-authorized plan-fetch curl for the session", () => {
+    const prompt = buildOrchestratePrompt("abc-123");
+    expect(prompt).toContain(
+      'curl -s "http://127.0.0.1:7676/v1/sessions/abc-123/plan"',
+    );
+    expect(prompt).toContain("rawPlanMarkdown");
+  });
+
+  it("points at the orchestrate skill for the execution discipline", () => {
+    expect(buildOrchestratePrompt("abc-123")).toContain("orchestrate skill");
   });
 });

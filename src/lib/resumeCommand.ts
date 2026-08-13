@@ -65,12 +65,23 @@ const restoreStamp = (now: Date) => {
  *  (the cd is a harmless no-op there); it is the load-bearing fix for the
  *  copy-to-clipboard path, which the user may paste into a terminal sitting
  *  anywhere. */
+/** Appended when the reviewer un-approved an Orchestrate: the resumed
+ *  session's context still holds the ORCHESTRATE_STAND_DOWN deny ("this
+ *  session's work is done"), and without this sentence a resumed claude would
+ *  obey the stale stand-down instead of the restore. */
+const RESCINDED_SENTENCE =
+  " An earlier Redline stand-down in your context is void — the reviewer " +
+  "rescinded that approval, and this plan is back in review.";
+
 export function buildResumeCommand(
   sessionId: string,
   now: Date,
   projectPath?: string | null,
+  rescinded?: boolean,
 ): string {
-  const prompt = `${restorePrompt(sessionId)} (Restore requested ${restoreStamp(now)}.)`;
+  const prompt =
+    `${restorePrompt(sessionId)} (Restore requested ${restoreStamp(now)}.)` +
+    (rescinded ? RESCINDED_SENTENCE : "");
   const resume = `claude --resume ${shq(sessionId)} --permission-mode plan ${shq(prompt)}`;
   return projectPath ? `cd ${shq(projectPath)} && ${resume}` : resume;
 }

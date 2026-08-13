@@ -138,6 +138,76 @@ pub struct JournalRow {
     pub detail: Option<String>,
 }
 
+/// One orchestrated run's durable record: the orchestrator's exit report
+/// (its *claims* — Redline pairs them against independently observed ground
+/// truth in the report GUI), the workflow script path, and the human
+/// resolution that closes the run.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanRunRow {
+    pub plan_session_id: String,
+    pub report_json: String,
+    pub script_path: Option<String>,
+    pub workflow_ran: bool,
+    /// resolved | needs_follow_up | abandoned; None = awaiting the human mark.
+    pub resolution: Option<String>,
+    pub resolution_note: Option<String>,
+    pub resolved_at: Option<i64>,
+    pub created_at: i64,
+}
+
+/// One orchestrated launch's live-monitor anchor: where the orchestrator's
+/// transcript lives, written at the ingest-claim beacon. The discovery
+/// columns are NULL until the run watcher finds the Workflow launch line
+/// (or falls back to sequential mode) in that transcript.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrchestrationRow {
+    pub plan_session_id: String,
+    pub claude_session_id: String,
+    pub transcript_path: String,
+    pub cwd: Option<String>,
+    pub started_at: i64,
+    pub run_id: Option<String>,
+    pub transcript_dir: Option<String>,
+    pub script_path: Option<String>,
+    /// 'workflow' | 'sequential'; None until the watcher knows.
+    pub mode: Option<String>,
+    /// The dock terminal tab the run was launched into (captured at launch,
+    /// folded in at the ingest claim) — lets "stand down" name the tab to
+    /// close. None for runs launched before the column existed.
+    pub terminal_id: Option<String>,
+    /// Joined from `sessions.run_state` (never stored here).
+    pub run_state: Option<String>,
+}
+
+/// One seat's roster stats (P3): facts about what the seat actually did.
+/// Facts live here in the DB — the seat config JSON records intent
+/// (model/effort/charter), never history.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeatStatRow {
+    pub seat: String,
+    pub last_run_at: Option<i64>,
+    pub items_filed: i64,
+    pub updated_at: i64,
+}
+
+/// One seat's accumulated burn (P8) — either a single `(seat, day)` row or a
+/// rollup with the other axis aggregated away (`day`/`seat` = None then).
+/// Tokens only: money is computed at render time elsewhere.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeatBurnRow {
+    pub seat: Option<String>,
+    pub day: Option<String>,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_creation_tokens: i64,
+    pub spawns: i64,
+}
+
 /// One remembered dev server — a `(project_path, port)` pair we have seen
 /// listening at least once. Rows outlive the process, so the Localhost surface
 /// can offer "run it again" for a server that is no longer up.
@@ -376,6 +446,9 @@ impl Database {
             conn: Mutex::new(conn),
         };
         db.migrate()?;
+        // The send queues are in-memory: any row still `queued` now belongs
+        // to a previous run and will never fire.
+        db.sweep_queued_to_unsent()?;
         Ok(db)
     }
 
@@ -1271,6 +1344,24 @@ impl Database {
         let _ = conn.execute("ALTER TABLE prompts ADD COLUMN model TEXT", []);
         let _ = conn.execute("ALTER TABLE prompts ADD COLUMN model_source TEXT", []);
 
+        // Convert-to-Linked provenance: a linked discussion created FROM a
+        // per-tab browse chat records where it came from. `fork_from_session_id`
+        // is consumed by the first turn (`--resume <sid> --fork-session`) and
+        // only read while `claude_session_id` is still NULL, so a failed first
+        // turn re-forks safely.
+        let _ = conn.execute(
+            "ALTER TABLE linked_sessions ADD COLUMN converted_from_browse_id TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE linked_sessions ADD COLUMN converted_origin TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE linked_sessions ADD COLUMN fork_from_session_id TEXT",
+            [],
+        );
+
         // Behavioral foundation (P0): the trail edge — which browse event this
         // one followed from. Non-hashed (only `context_hash` enters the chained
         // event), so purely additive and chain-safe. NULL = trail root, and
@@ -1497,6 +1588,165 @@ impl Database {
             [],
         );
         let _ = conn.execute("ALTER TABLE drafts ADD COLUMN last_opened_at INTEGER", []);
+        // Run lifecycle (orchestrated executions): the run-state machine rides
+        // in nullable columns beside the frozen three-value `status`, so
+        // reconciliation and the liveness watchdog never see it. Only
+        // orchestrated runs populate it — a plain Approve leaves both NULL.
+        // Values: orchestrating | running | awaiting_review (the run finished
+        // its work and parked for the human's morning review — NOT live, no
+        // watcher; transition wiring is a later unit) | in_code_review |
+        // landed | stalled | abandoned (a stand-down; terminal). NULL = no
+        // run (a plain Approve, or a reset after a failed handoff).
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN run_state TEXT", []);
+        let _ = conn.execute(
+            "ALTER TABLE sessions ADD COLUMN run_updated_at INTEGER",
+            [],
+        );
+        // The run's durable record: the orchestrator's exit report (claims),
+        // the workflow script path, and the human resolution. One row per
+        // plan session — a re-run overwrites the report, the resolution is a
+        // later human act.
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS plan_runs (
+                plan_session_id TEXT PRIMARY KEY,
+                report_json TEXT NOT NULL,
+                script_path TEXT,
+                workflow_ran INTEGER NOT NULL DEFAULT 0,
+                resolution TEXT,
+                resolution_note TEXT,
+                resolved_at INTEGER,
+                created_at INTEGER NOT NULL
+            );
+            "#,
+        )?;
+        // The live-monitor anchor, written at the ingest-claim beacon — the one
+        // moment the orchestrator's transcript path is in hand. Separate from
+        // `plan_runs` deliberately: that row exists only from exit-report time
+        // and its upsert resets every column. The discovery columns (run_id,
+        // transcript_dir, script_path, mode) start NULL and are backfilled by
+        // the run watcher as the artifacts appear on disk.
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS orchestrations (
+                plan_session_id  TEXT PRIMARY KEY,
+                claude_session_id TEXT NOT NULL,
+                transcript_path  TEXT NOT NULL,
+                cwd              TEXT,
+                started_at       INTEGER NOT NULL,
+                run_id           TEXT,
+                transcript_dir   TEXT,
+                script_path      TEXT,
+                mode             TEXT
+            );
+            "#,
+        )?;
+        // The dock terminal tab the run was launched into — captured at launch
+        // (stashed in `LaunchedTerminals`, folded in at the ingest claim), so
+        // "stand down" can name the tab to close and a retry can reuse the tab
+        // the user is already looking at. Best-effort additive migration.
+        let _ = conn.execute(
+            "ALTER TABLE orchestrations ADD COLUMN terminal_id TEXT",
+            [],
+        );
+        // The work graph (`work.rs` state plane): durable work items and the
+        // typed edges between them.
+        //
+        // SCHEMA LAW — provenance, not ownership: `origin_kind`/`origin_id`
+        // are TEXT breadcrumbs recording where an item came from (a plan run,
+        // a session, an orchestration, an agent's discovery mid-run, …). They
+        // are deliberately NOT foreign keys to `plan_runs`, `sessions`,
+        // `orchestrations`, or any other table — deleting the origin row must
+        // leave the item standing, exactly as the ledger references rows it
+        // describes without owning them. Likewise `project_path` is a
+        // filterable facet, never an owner: nullable, no FK, and nothing may
+        // cascade through it. Do NOT "fix" this in a later migration by
+        // adding FKs, and never add `branch` / `worktree_path` / `attempts`
+        // columns here — those are execution-engine state and are banned from
+        // this row: an item describes WHAT is to be done and its lifecycle,
+        // never HOW an engine is currently executing it.
+        //
+        // `id` is hash-based and hierarchical: roots mint `rl-xxxx` (hex from
+        // a content hash, lengthened on collision), children append `.N`
+        // ordinals (`rl-xxxx.3`). status: open|claimed|closed|held. kind:
+        // task|bug|question|message. priority is P0-style: 0 = drop
+        // everything, larger = calmer; default 2 = normal.
+        //
+        // `work_edges.type`: blocks | parent-child | discovered-from |
+        // relates-to | duplicates | supersedes | replies-to. Same law: no FK
+        // to any run table, and no FK between items either — an item delete
+        // must never cascade into silent edge loss; edge cleanup is an
+        // explicit, recordable act (next-wave close semantics own it).
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS work_items (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                body TEXT,
+                status TEXT NOT NULL DEFAULT 'open',
+                priority INTEGER NOT NULL DEFAULT 2,
+                kind TEXT NOT NULL DEFAULT 'task',
+                assignee TEXT,
+                claimed_at INTEGER,
+                lease_expires_at INTEGER,
+                closed_at INTEGER,
+                close_reason TEXT,
+                defer_until INTEGER,
+                origin_kind TEXT,
+                origin_id TEXT,
+                project_path TEXT,
+                pinned INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_work_items_status
+                ON work_items (status, priority, created_at);
+            CREATE INDEX IF NOT EXISTS idx_work_items_project
+                ON work_items (project_path);
+
+            CREATE TABLE IF NOT EXISTS work_edges (
+                from_id TEXT NOT NULL,
+                to_id TEXT NOT NULL,
+                type TEXT NOT NULL,
+                created_by TEXT,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (from_id, to_id, type)
+            );
+            CREATE INDEX IF NOT EXISTS idx_work_edges_to
+                ON work_edges (to_id, type);
+            "#,
+        )?;
+        // Seat roster stats (P3): facts about what each agent seat actually
+        // did, so they live in the DB — never in the seat config JSON, which
+        // records intent (model/effort/charter), not history.
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS seat_stats (
+                seat TEXT PRIMARY KEY,
+                last_run_at INTEGER,
+                items_filed INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL
+            );
+            "#,
+        )?;
+        // Per-seat burn (P8): token/spawn counters accumulated per seat per
+        // local day. Tokens ONLY — money is a display-time computation
+        // elsewhere (prices move; recorded facts don't).
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS seat_burn (
+                seat TEXT NOT NULL,
+                day TEXT NOT NULL,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+                spawns INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (seat, day)
+            );
+            "#,
+        )?;
         Ok(())
     }
 
@@ -1961,6 +2211,24 @@ impl Database {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()
+    }
+
+    /// The plan session this claude session was launched to orchestrate, if
+    /// any. A `session → session` link is written exclusively by the
+    /// Orchestrate ingest claim (`claim_orchestration_prompt`), so its
+    /// presence IS "this session is an orchestrator" — used by `handle_plan`
+    /// to refuse an orchestrator that tries to plan instead of execute.
+    pub fn orchestrator_parent_session(&self, claude_session_id: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT parent_id FROM session_tree
+             WHERE child_kind = 'session' AND child_id = ?1 AND parent_kind = 'session'",
+            params![claude_session_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
     }
 
     /// A parent's children, oldest-first: `(child_kind, child_id, created_at)`.
@@ -3414,6 +3682,51 @@ impl Database {
         }
     }
 
+    /// Flip one thread message's `status` (queue lifecycle: `queued` →
+    /// `complete` when its turn starts, `queued` → `unsent` when the drain's
+    /// spawn fails). Status vocabulary across the thread tables:
+    /// `complete | error | queued | unsent`. Returns whether a row changed;
+    /// table/column names come from the fixed `thread_table` map.
+    pub fn set_thread_message_status(
+        &self,
+        kind: &str,
+        message_id: &str,
+        status: &str,
+    ) -> rusqlite::Result<bool> {
+        let Some((table, _)) = Self::thread_table(kind) else {
+            return Ok(false);
+        };
+        let conn = self.conn.lock().unwrap();
+        let sql = format!("UPDATE {table} SET status = ?2 WHERE id = ?1");
+        Ok(conn.execute(&sql, params![message_id, status])? > 0)
+    }
+
+    /// Delete one thread message by id — backs `*_unqueue` (the queued user
+    /// row disappears with its queue entry). Returns whether a row existed.
+    pub fn delete_thread_message(&self, kind: &str, message_id: &str) -> rusqlite::Result<bool> {
+        let Some((table, _)) = Self::thread_table(kind) else {
+            return Ok(false);
+        };
+        let conn = self.conn.lock().unwrap();
+        let sql = format!("DELETE FROM {table} WHERE id = ?1");
+        Ok(conn.execute(&sql, params![message_id])? > 0)
+    }
+
+    /// Startup hygiene: the send queues live in memory, so rows still marked
+    /// `queued` after a relaunch belong to sends that will never fire. Flip
+    /// them to `unsent` so the UI offers "wasn't sent — resend" instead of a
+    /// phantom chip. Swept across every queue-capable surface.
+    pub fn sweep_queued_to_unsent(&self) -> rusqlite::Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let mut flipped = 0;
+        for kind in ["browse", "linked", "mission", "memchat"] {
+            let (table, _) = Self::thread_table(kind).expect("queue-capable kinds are mapped");
+            let sql = format!("UPDATE {table} SET status = 'unsent' WHERE status = 'queued'");
+            flipped += conn.execute(&sql, [])?;
+        }
+        Ok(flipped)
+    }
+
     /// Generic read-only thread fetch across the per-surface `*_messages`
     /// tables — the tail `limit` turns, oldest-first. `None` for an unknown
     /// kind (the route 404s). Table/column names come from the fixed
@@ -3467,8 +3780,23 @@ impl Database {
                 id,
             ),
             "drafter" | "drafter_chat" => ("SELECT title FROM drafts WHERE draft_id = ?1", id),
-            "session" => (
+            // `plan_run` is a work-item origin breadcrumb whose id IS a plan
+            // session id (the orchestrator's exit report files under it), so
+            // it resolves through the same row a `session` ref does.
+            "session" | "plan_run" => (
                 "SELECT project_name FROM sessions WHERE session_id = ?1",
+                id,
+            ),
+            // Work-item origin breadcrumbs from the producer wave: a code
+            // review resolves to the repo it reviewed, a Shipwright finding to
+            // its own headline. (`librarian_run` / `friction` origins carry no
+            // resolvable row on purpose — no arm.)
+            "review" => (
+                "SELECT repo_path FROM review_sessions WHERE review_id = ?1",
+                id,
+            ),
+            "shipwright_finding" => (
+                "SELECT summary FROM shipwright_findings WHERE id = ?1",
                 id,
             ),
             _ => return None,
@@ -5850,6 +6178,13 @@ impl Database {
         // target — under a synthetic `note` surface, so the user's own words
         // become classifiable lake items (a strong curation signal; filing
         // authority stays with project_path/surface).
+        //
+        // Machine bookkeeping stays OUT of the feed: router_verdict (the
+        // shadow router's own record), moot_turn and the work_* lifecycle
+        // acts carry no prompt row and no body, so downstream they'd render
+        // under the "[decision references …]" fallback and read to the
+        // classifier as pseudo-decisions. They remain on the chain and in the
+        // ledger views — they just never feed classification.
         let mut stmt = conn.prepare(
             "SELECT le.seq, le.ts, le.kind, le.ref_kind, le.ref_id, le.session_id,
                     COALESCE(p.surface, CASE WHEN le.ref_kind = 'browse_event'
@@ -5868,6 +6203,8 @@ impl Database {
                      OR (le.ref_kind <> 'none' AND un.target_kind = le.ref_kind
                          AND un.target_id = le.ref_id))
              WHERE le.seq > ?1
+               AND le.kind NOT IN ('router_verdict', 'moot_turn',
+                                   'work_file', 'work_claim', 'work_close')
              ORDER BY le.seq ASC
              LIMIT ?2",
         )?;
@@ -6466,6 +6803,360 @@ impl Database {
         Ok(())
     }
 
+    /// Run-lifecycle transition (orchestrated executions). Stamps
+    /// `run_updated_at` and journals the transition (the Companion feed gets
+    /// a per-plan timeline for free). Returns whether the state actually
+    /// changed — callers emit the chip event only on a real transition.
+    /// A later beacon simply overwrites `stalled`; there is no ordering
+    /// enforcement, the beacons are the truth.
+    pub fn set_run_state(&self, session_id: &str, state: &str) -> rusqlite::Result<bool> {
+        let changed = {
+            let conn = self.conn.lock().unwrap();
+            let prev: Option<Option<String>> = conn
+                .query_row(
+                    "SELECT run_state FROM sessions WHERE session_id = ?1",
+                    params![session_id],
+                    |row| row.get(0),
+                )
+                .ok();
+            let Some(prev) = prev else {
+                return Ok(false); // unknown session — no row, no journal
+            };
+            if prev.as_deref() == Some(state) {
+                false
+            } else {
+                conn.execute(
+                    "UPDATE sessions SET run_state = ?1, run_updated_at = ?2
+                     WHERE session_id = ?3",
+                    params![state, crate::ledger::now_millis(), session_id],
+                )?;
+                true
+            }
+        };
+        if changed {
+            // Outside the conn lock — append_journal locks it again.
+            let _ = self.append_journal(
+                "run_state",
+                Some("session"),
+                Some(session_id),
+                Some(state),
+                None,
+            );
+        }
+        Ok(changed)
+    }
+
+    /// A session's current run state (orchestrated runs only; `None` for a
+    /// plain Approve or an unknown session).
+    pub fn get_run_state(&self, session_id: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT run_state FROM sessions WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+    }
+
+    /// Insert-or-replace a run's exit report. The resolution columns are
+    /// preserved-by-reset deliberately: a re-run's fresh report reopens the
+    /// human verdict (the previous resolution described a previous run).
+    pub fn upsert_plan_run(
+        &self,
+        plan_session_id: &str,
+        report_json: &str,
+        script_path: Option<&str>,
+        workflow_ran: bool,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO plan_runs (plan_session_id, report_json, script_path, workflow_ran,
+                                    resolution, resolution_note, resolved_at, created_at)
+             VALUES (?1, ?2, ?3, ?4, NULL, NULL, NULL, ?5)
+             ON CONFLICT(plan_session_id) DO UPDATE SET
+                report_json = excluded.report_json,
+                script_path = excluded.script_path,
+                workflow_ran = excluded.workflow_ran,
+                resolution = NULL,
+                resolution_note = NULL,
+                resolved_at = NULL,
+                created_at = excluded.created_at",
+            params![
+                plan_session_id,
+                report_json,
+                script_path,
+                workflow_ran as i64,
+                crate::ledger::now_millis()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The human verdict on a run: resolved / needs_follow_up / abandoned.
+    /// Returns false when no report row exists to resolve.
+    pub fn resolve_plan_run(
+        &self,
+        plan_session_id: &str,
+        resolution: &str,
+        note: Option<&str>,
+    ) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE plan_runs SET resolution = ?1, resolution_note = ?2, resolved_at = ?3
+             WHERE plan_session_id = ?4",
+            params![resolution, note, crate::ledger::now_millis(), plan_session_id],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn get_plan_run(&self, plan_session_id: &str) -> Option<PlanRunRow> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT plan_session_id, report_json, script_path, workflow_ran,
+                    resolution, resolution_note, resolved_at, created_at
+             FROM plan_runs WHERE plan_session_id = ?1",
+            params![plan_session_id],
+            |row| {
+                Ok(PlanRunRow {
+                    plan_session_id: row.get(0)?,
+                    report_json: row.get(1)?,
+                    script_path: row.get(2)?,
+                    workflow_ran: row.get::<_, i64>(3)? != 0,
+                    resolution: row.get(4)?,
+                    resolution_note: row.get(5)?,
+                    resolved_at: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            },
+        )
+        .ok()
+    }
+
+    /// Anchor a fresh orchestrated launch. A re-run overwrites the anchor and
+    /// resets the discovery columns — the previous run's artifacts describe a
+    /// previous run, and the watcher re-discovers from the new transcript.
+    pub fn upsert_orchestration(
+        &self,
+        plan_session_id: &str,
+        claude_session_id: &str,
+        transcript_path: &str,
+        cwd: Option<&str>,
+        terminal_id: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO orchestrations (plan_session_id, claude_session_id, transcript_path,
+                                         cwd, started_at, run_id, transcript_dir, script_path, mode,
+                                         terminal_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL, NULL, ?6)
+             ON CONFLICT(plan_session_id) DO UPDATE SET
+                claude_session_id = excluded.claude_session_id,
+                transcript_path = excluded.transcript_path,
+                cwd = excluded.cwd,
+                started_at = excluded.started_at,
+                run_id = NULL,
+                transcript_dir = NULL,
+                script_path = NULL,
+                mode = NULL,
+                terminal_id = COALESCE(excluded.terminal_id, terminal_id)",
+            params![
+                plan_session_id,
+                claude_session_id,
+                transcript_path,
+                cwd,
+                crate::ledger::now_millis(),
+                terminal_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Backfill discovery columns as the watcher learns them. COALESCE-style
+    /// partial update: a passed value wins, an omitted (None) column keeps
+    /// what was already discovered. New-value-wins matters for `mode` — a
+    /// premature sequential fallback upgrades to `workflow` the moment the
+    /// launch line appears.
+    pub fn update_orchestration_discovery(
+        &self,
+        plan_session_id: &str,
+        run_id: Option<&str>,
+        transcript_dir: Option<&str>,
+        script_path: Option<&str>,
+        mode: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE orchestrations SET
+                run_id = COALESCE(?2, run_id),
+                transcript_dir = COALESCE(?3, transcript_dir),
+                script_path = COALESCE(?4, script_path),
+                mode = COALESCE(?5, mode)
+             WHERE plan_session_id = ?1",
+            params![plan_session_id, run_id, transcript_dir, script_path, mode],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_orchestration(&self, plan_session_id: &str) -> Option<OrchestrationRow> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT o.plan_session_id, o.claude_session_id, o.transcript_path, o.cwd,
+                    o.started_at, o.run_id, o.transcript_dir, o.script_path, o.mode,
+                    o.terminal_id, s.run_state
+             FROM orchestrations o
+             LEFT JOIN sessions s ON s.session_id = o.plan_session_id
+             WHERE o.plan_session_id = ?1",
+            params![plan_session_id],
+            Self::orchestration_from_row,
+        )
+        .ok()
+    }
+
+    /// Every anchored run, newest launch first, with the live run-state joined
+    /// in (the History tab's data source and the rehydration sweep's input).
+    pub fn list_orchestrations(&self) -> rusqlite::Result<Vec<OrchestrationRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT o.plan_session_id, o.claude_session_id, o.transcript_path, o.cwd,
+                    o.started_at, o.run_id, o.transcript_dir, o.script_path, o.mode,
+                    o.terminal_id, s.run_state
+             FROM orchestrations o
+             LEFT JOIN sessions s ON s.session_id = o.plan_session_id
+             ORDER BY o.started_at DESC, o.rowid DESC",
+        )?;
+        let rows = stmt
+            .query_map([], Self::orchestration_from_row)?
+            .filter_map(Result::ok)
+            .collect();
+        Ok(rows)
+    }
+
+    fn orchestration_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OrchestrationRow> {
+        Ok(OrchestrationRow {
+            plan_session_id: row.get(0)?,
+            claude_session_id: row.get(1)?,
+            transcript_path: row.get(2)?,
+            cwd: row.get(3)?,
+            started_at: row.get(4)?,
+            run_id: row.get(5)?,
+            transcript_dir: row.get(6)?,
+            script_path: row.get(7)?,
+            mode: row.get(8)?,
+            terminal_id: row.get(9)?,
+            run_state: row.get(10)?,
+        })
+    }
+
+    /// Clear a session's run columns back to NULL — "this session has no run".
+    /// Exists because `set_run_state` takes `&str` and structurally cannot
+    /// write NULL; the click-is-not-evidence rollback needs exactly that.
+    /// Returns whether anything was cleared. Journals as `run_state: cleared`.
+    pub fn clear_run_state(&self, session_id: &str) -> rusqlite::Result<bool> {
+        let changed = {
+            let conn = self.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE sessions SET run_state = NULL, run_updated_at = NULL
+                 WHERE session_id = ?1 AND run_state IS NOT NULL",
+                params![session_id],
+            )? > 0
+        };
+        if changed {
+            // Outside the conn lock — append_journal locks it again.
+            let _ = self.append_journal(
+                "run_state",
+                Some("session"),
+                Some(session_id),
+                Some("cleared"),
+                None,
+            );
+        }
+        Ok(changed)
+    }
+
+    /// Drop a run's monitor anchor. `reset_run` uses this so the Runs surface
+    /// shows nothing rather than a stale corpse (a re-run's upsert would reset
+    /// the columns anyway; the delete is about honest emptiness).
+    pub fn delete_orchestration(&self, plan_session_id: &str) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "DELETE FROM orchestrations WHERE plan_session_id = ?1",
+            params![plan_session_id],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Drop a run's exit report (the `reset_run` counterpart for `plan_runs`).
+    pub fn delete_plan_run(&self, plan_session_id: &str) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "DELETE FROM plan_runs WHERE plan_session_id = ?1",
+            params![plan_session_id],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// The most recent `approval` ledger event for a session — the decision an
+    /// un-approve supersedes.
+    pub fn latest_approval_seq(&self, session_id: &str) -> Option<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT seq FROM ledger_events
+             WHERE kind = 'approval' AND session_id = ?1
+             ORDER BY seq DESC LIMIT 1",
+            params![session_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+    }
+
+    /// The sanctioned reversal of an approval: append a `supersede` ledger
+    /// event referencing the approval by `(ref_kind="ledger_event",
+    /// ref_id=approval_seq)` and insert the queryable `supersessions` index
+    /// row. NEVER a delete — the chain stays intact and verifiable; the old
+    /// approval simply stops being the current claim. `INSERT OR IGNORE`
+    /// honors "superseded at most once" when the same approval is rescinded
+    /// twice. Returns the supersede event's seq.
+    pub fn record_approval_supersession(
+        &self,
+        approval_seq: i64,
+        new_seq: i64,
+        rationale: &str,
+    ) -> rusqlite::Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        let new_str = new_seq.to_string();
+        // Field order frozen — it is the payload-hash identity (the
+        // `apply_supersession_locked` shape).
+        let ph = crate::ledger::decision_payload_hash(&[
+            ("superseded_by", &new_str),
+            ("rationale", rationale),
+        ]);
+        let author = crate::ledger::local_author();
+        let old_str = approval_seq.to_string();
+        let ev = Self::append_ledger_event_locked(
+            &conn,
+            &crate::ledger::LedgerAppend {
+                kind: crate::ledger::EventKind::Supersede.as_str(),
+                author: &author,
+                ts: crate::ledger::now_millis(),
+                prompt_id: None,
+                session_id: None,
+                version_number: None,
+                ref_kind: Some("ledger_event"),
+                ref_id: Some(old_str.as_str()),
+                payload_hash: &ph,
+            },
+        )?;
+        conn.execute(
+            "INSERT OR IGNORE INTO supersessions (old_seq, new_seq, event_seq, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![approval_seq, new_seq, ev.seq, ev.ts],
+        )?;
+        Ok(ev.seq)
+    }
+
     /// Startup sweep: a held POST never survives a restart, so every session
     /// persisted as 'held' was orphaned by the previous instance.
     pub fn detach_held_sessions(&self) -> rusqlite::Result<()> {
@@ -6919,6 +7610,18 @@ impl Database {
         Ok(())
     }
 
+    /// Forget a mission's `claude` session so the next turn starts fresh —
+    /// the context-overflow recovery (an overflowed session would otherwise be
+    /// resumed, and fail, forever).
+    pub fn clear_mission_session(&self, mission_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE missions SET claude_session_id = NULL WHERE mission_id = ?1",
+            params![mission_id],
+        )?;
+        Ok(())
+    }
+
     /// Save a mission's tab workspace (JSON). Deliberately does NOT bump
     /// `updated_at` — tab churn shouldn't reorder the mission list.
     pub fn set_mission_tabs(&self, mission_id: &str, tabs_json: &str) -> rusqlite::Result<()> {
@@ -7177,6 +7880,72 @@ impl Database {
             params![linked_id, claude_session_id],
         )?;
         Ok(())
+    }
+
+    /// Forget a linked discussion's `claude` session so the next turn starts
+    /// fresh — the context-overflow recovery. Also nulls the conversion fork
+    /// source: re-forking a browse session AFTER the linked chat has lived its
+    /// own life would resurrect a stale context, not recover this one.
+    pub fn clear_linked_session(&self, linked_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE linked_sessions
+                SET claude_session_id = NULL, fork_from_session_id = NULL
+              WHERE linked_id = ?1",
+            params![linked_id],
+        )?;
+        Ok(())
+    }
+
+    /// Insert a linked discussion converted from a per-tab browse chat,
+    /// recording its provenance and the browse `claude` session its first turn
+    /// will fork from (`--resume <sid> --fork-session`).
+    pub fn insert_linked_converted(
+        &self,
+        l: &Linked,
+        browse_id: &str,
+        origin: &str,
+        fork_from_session_id: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO linked_sessions
+                (linked_id, title, status, created_at, updated_at,
+                 converted_from_browse_id, converted_origin, fork_from_session_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                l.linked_id,
+                l.title,
+                l.status,
+                l.created_at,
+                l.updated_at,
+                browse_id,
+                origin,
+                fork_from_session_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The browse session the linked chat's FIRST turn should fork from, plus
+    /// the human origin descriptor for the prompt ("tab 2 — Title") — `Some`
+    /// only while that first turn hasn't landed (`claude_session_id` still
+    /// NULL), so a failed first turn re-forks and an established chat never
+    /// re-forks.
+    pub fn get_linked_fork_from(&self, linked_id: &str) -> Option<(String, Option<String>)> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT fork_from_session_id, converted_origin FROM linked_sessions
+              WHERE linked_id = ?1 AND claude_session_id IS NULL",
+            params![linked_id],
+            |row| {
+                Ok(row
+                    .get::<_, Option<String>>(0)?
+                    .map(|sid| (sid, row.get::<_, Option<String>>(1).unwrap_or(None))))
+            },
+        )
+        .ok()
+        .flatten()
     }
 
     /// Save a linked discussion's tab workspace (JSON). Like the mission helper,
@@ -8118,7 +8887,7 @@ impl Database {
         let mut sessions: HashMap<String, ReviewSession> = HashMap::new();
 
         let mut stmt = conn.prepare(
-            "SELECT session_id, project_path, project_name, created_at, status, attach_state, updated_at FROM sessions",
+            "SELECT session_id, project_path, project_name, created_at, status, attach_state, updated_at, run_state FROM sessions",
         )?;
         let rows = stmt.query_map([], |row| {
             let status_str: String = row.get(4)?;
@@ -8132,6 +8901,7 @@ impl Database {
                 status: session_status_from(&status_str),
                 attach_state: AttachState::from_str(&attach_str).unwrap_or(AttachState::Idle),
                 updated_at: row.get(6)?,
+                run_state: row.get(7)?,
             })
         })?;
         for row in rows {
@@ -8281,6 +9051,740 @@ impl Database {
 
         Ok(sessions)
     }
+
+    // --- work graph (the `work.rs` state plane) ------------------------------
+    //
+    // Provenance, not ownership (see the schema comment in `migrate`):
+    // `origin_kind`/`origin_id`/`project_path` are breadcrumbs and facets,
+    // never joins. Nothing in this section touches any run table.
+
+    fn row_to_work_item(row: &rusqlite::Row) -> rusqlite::Result<crate::work::WorkItem> {
+        Ok(crate::work::WorkItem {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            body: row.get(2)?,
+            status: row.get(3)?,
+            priority: row.get(4)?,
+            kind: row.get(5)?,
+            assignee: row.get(6)?,
+            claimed_at: row.get(7)?,
+            lease_expires_at: row.get(8)?,
+            closed_at: row.get(9)?,
+            close_reason: row.get(10)?,
+            defer_until: row.get(11)?,
+            origin_kind: row.get(12)?,
+            origin_id: row.get(13)?,
+            project_path: row.get(14)?,
+            pinned: row.get::<_, i64>(15)? != 0,
+            created_at: row.get(16)?,
+            updated_at: row.get(17)?,
+        })
+    }
+
+    const WORK_ITEM_COLS: &'static str =
+        "id, title, body, status, priority, kind, assignee, claimed_at,
+         lease_expires_at, closed_at, close_reason, defer_until, origin_kind,
+         origin_id, project_path, pinned, created_at, updated_at";
+
+    /// Insert a freshly minted work item. The caller (`work.rs`) owns id
+    /// minting and vocabulary validation; this is the dumb row write.
+    pub fn insert_work_item(&self, item: &crate::work::WorkItem) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO work_items (id, title, body, status, priority, kind,
+                assignee, claimed_at, lease_expires_at, closed_at, close_reason,
+                defer_until, origin_kind, origin_id, project_path, pinned,
+                created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                ?14, ?15, ?16, ?17, ?18)",
+            params![
+                item.id,
+                item.title,
+                item.body,
+                item.status,
+                item.priority,
+                item.kind,
+                item.assignee,
+                item.claimed_at,
+                item.lease_expires_at,
+                item.closed_at,
+                item.close_reason,
+                item.defer_until,
+                item.origin_kind,
+                item.origin_id,
+                item.project_path,
+                item.pinned as i64,
+                item.created_at,
+                item.updated_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_work_item(&self, id: &str) -> Option<crate::work::WorkItem> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            &format!(
+                "SELECT {} FROM work_items WHERE id = ?1",
+                Self::WORK_ITEM_COLS
+            ),
+            params![id],
+            Self::row_to_work_item,
+        )
+        .ok()
+    }
+
+    /// Filterable list over the graph. `status`/`project` are facets, both
+    /// optional; ordered urgent-first (pinned, then P0-style priority, then
+    /// age). Bounded by `limit`.
+    pub fn list_work_items(
+        &self,
+        status: Option<&str>,
+        project: Option<&str>,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<crate::work::WorkItem>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM work_items
+             WHERE (?1 IS NULL OR status = ?1)
+               AND (?2 IS NULL OR project_path = ?2)
+             ORDER BY pinned DESC, priority ASC, created_at ASC
+             LIMIT ?3",
+            Self::WORK_ITEM_COLS
+        ))?;
+        let rows = stmt.query_map(params![status, project, limit.max(1)], |r| {
+            Self::row_to_work_item(r)
+        })?;
+        rows.collect()
+    }
+
+    /// The rollup's item read: every NON-CLOSED item, with the closed filter
+    /// INSIDE the limit — a graph carrying more than `limit` old closed rows
+    /// must still surface every live one (`list_work_items` + a caller-side
+    /// filter would let the closed backlog crowd the bound, its ORDER BY
+    /// created_at ASC being oldest-first). Ordering matches `list_work_items`.
+    pub fn list_unclosed_work_items(
+        &self,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<crate::work::WorkItem>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM work_items
+             WHERE status != 'closed'
+             ORDER BY pinned DESC, priority ASC, created_at ASC
+             LIMIT ?1",
+            Self::WORK_ITEM_COLS
+        ))?;
+        let rows = stmt.query_map(params![limit.max(1)], |r| Self::row_to_work_item(r))?;
+        rows.collect()
+    }
+
+    /// The claimable frontier — READY SEMANTICS (the law of this query).
+    /// An item is ready iff ALL of:
+    ///   1. `status = 'open'` — `claimed` / `closed` / `held` are out;
+    ///   2. its own defer time has passed (`defer_until IS NULL OR <= now`);
+    ///   3. no ancestor up the `parent-child` chain is deferred. The
+    ///      recursive CTE `deferred_down` seeds every item whose
+    ///      `defer_until` is still in the future and walks DOWN through
+    ///      `parent-child` edges (`from` = parent, `to` = child), so the set
+    ///      is exactly "deferred items plus everything beneath one" —
+    ///      membership covers rules 2 and 3 in one exclusion. `UNION` (not
+    ///      `UNION ALL`) dedupes, so an edge cycle still terminates;
+    ///   4. no unclosed blocker: no `blocks` edge pointing AT the item whose
+    ///      from-item exists and is not `closed`. A dangling `blocks` edge
+    ///      (from-item row gone) does NOT block — there is no item left to
+    ///      close, and edges never own rows (schema law: no FK anywhere).
+    /// `project` stays a facet filter (exact `project_path` match); ordering
+    /// stays urgent-first (pinned, then P0-style priority, then age),
+    /// bounded by `limit`.
+    pub fn list_ready_work_items(
+        &self,
+        project: Option<&str>,
+        now: i64,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<crate::work::WorkItem>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "WITH RECURSIVE deferred_down(id) AS (
+                 SELECT id FROM work_items
+                  WHERE defer_until IS NOT NULL AND defer_until > ?2
+                 UNION
+                 SELECT e.to_id FROM work_edges e
+                  JOIN deferred_down d ON e.from_id = d.id
+                  WHERE e.type = 'parent-child'
+             )
+             SELECT {} FROM work_items w
+             WHERE w.status = 'open'
+               AND (?1 IS NULL OR w.project_path = ?1)
+               AND w.id NOT IN (SELECT id FROM deferred_down)
+               AND NOT EXISTS (
+                   SELECT 1 FROM work_edges e
+                    JOIN work_items b ON b.id = e.from_id
+                   WHERE e.to_id = w.id AND e.type = 'blocks'
+                     AND b.status != 'closed'
+               )
+             ORDER BY w.pinned DESC, w.priority ASC, w.created_at ASC
+             LIMIT ?3",
+            Self::WORK_ITEM_COLS
+        ))?;
+        let rows = stmt.query_map(params![project, now, limit.max(1)], |r| {
+            Self::row_to_work_item(r)
+        })?;
+        rows.collect()
+    }
+
+    /// Atomic claim: flip `open` → `claimed` in ONE guarded UPDATE
+    /// (`WHERE id = ?1 AND status = 'open'`), setting assignee / claimed_at /
+    /// lease_expires_at together. SQLite's single writer makes the guard the
+    /// whole race: of any number of competing claimers exactly one sees
+    /// `affected == 1` (true); every other outcome is a clean conflict
+    /// (false) the handler surfaces as HTTP 409. A lapsed lease is NOT
+    /// reclaimed here — `expire_work_leases` (run on every keeper tick)
+    /// flips the row back to `open` first, and the next claim races
+    /// normally.
+    pub fn claim_work_item(
+        &self,
+        id: &str,
+        assignee: &str,
+        now: i64,
+        lease_expires_at: Option<i64>,
+    ) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE work_items
+             SET status = 'claimed', assignee = ?2, claimed_at = ?3,
+                 lease_expires_at = ?4, updated_at = ?3
+             WHERE id = ?1 AND status = 'open'",
+            params![id, assignee, now, lease_expires_at],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Lease expiry — the reclaim half of the claim contract: every `claimed`
+    /// item whose `lease_expires_at` has passed flips back to `open` with the
+    /// claim columns cleared (assignee / claimed_at / lease_expires_at), so
+    /// it re-enters the ready frontier for anyone to claim. Returns how many
+    /// rows flipped. Called on EVERY keeper tick, before the memory
+    /// idle/growth/debounce gates — leases lapse on wall-clock, not on lake
+    /// growth. An item claimed with `lease_expires_at = NULL` never expires
+    /// (an explicit open-ended claim).
+    pub fn expire_work_leases(&self, now: i64) -> rusqlite::Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE work_items
+             SET status = 'open', assignee = NULL, claimed_at = NULL,
+                 lease_expires_at = NULL, updated_at = ?1
+             WHERE status = 'claimed'
+               AND lease_expires_at IS NOT NULL AND lease_expires_at < ?1",
+            params![now],
+        )
+    }
+
+    /// Guarded close: `closed_at` + `close_reason` are set exactly once — the
+    /// UPDATE only touches a row whose status is not already `closed`, so a
+    /// second close is a no-op (false) the handler surfaces as HTTP 409.
+    /// Child/duplicate/supersede edge bookkeeping on close is a later wave's.
+    pub fn close_work_item(
+        &self,
+        id: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE work_items
+             SET status = 'closed', closed_at = ?3, close_reason = ?2,
+                 updated_at = ?3
+             WHERE id = ?1 AND status != 'closed'",
+            params![id, reason, now],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Insert a typed edge; idempotent on the `(from, to, type)` identity.
+    /// Returns whether a new row landed. No FK anywhere — see the schema law.
+    pub fn insert_work_edge(
+        &self,
+        from_id: &str,
+        to_id: &str,
+        edge_type: &str,
+        created_by: Option<&str>,
+        now: i64,
+    ) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "INSERT OR IGNORE INTO work_edges (from_id, to_id, type, created_by, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![from_id, to_id, edge_type, created_by, now],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Every edge touching an item, either direction — the item-detail read.
+    pub fn list_work_edges_touching(
+        &self,
+        id: &str,
+    ) -> rusqlite::Result<Vec<crate::work::WorkEdge>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT from_id, to_id, type, created_by, created_at FROM work_edges
+             WHERE from_id = ?1 OR to_id = ?1
+             ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![id], |r| {
+            Ok(crate::work::WorkEdge {
+                from_id: r.get(0)?,
+                to_id: r.get(1)?,
+                edge_type: r.get(2)?,
+                created_by: r.get(3)?,
+                created_at: r.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// ONE batched read of every edge touching ANY of `ids` (either end) —
+    /// the rollup's replacement for a per-item N+1 loop. Each edge row
+    /// returns once (the table's `(from, to, type)` identity is unique), so
+    /// no caller-side dedupe is needed. Bounded by `limit`, like the item
+    /// read it accompanies.
+    pub fn list_work_edges_touching_any(
+        &self,
+        ids: &[String],
+        limit: i64,
+    ) -> rusqlite::Result<Vec<crate::work::WorkEdge>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().unwrap();
+        let ph = (1..=ids.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT from_id, to_id, type, created_by, created_at FROM work_edges
+             WHERE from_id IN ({ph}) OR to_id IN ({ph})
+             ORDER BY created_at ASC
+             LIMIT ?{}",
+            ids.len() + 1
+        ))?;
+        let lim = limit.max(1);
+        let mut args: Vec<&dyn rusqlite::ToSql> =
+            ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+        args.push(&lim);
+        let rows = stmt.query_map(&args[..], |r| {
+            Ok(crate::work::WorkEdge {
+                from_id: r.get(0)?,
+                to_id: r.get(1)?,
+                edge_type: r.get(2)?,
+                created_by: r.get(3)?,
+                created_at: r.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Direct child ids of a hierarchical item id (`<parent>.N` — one more
+    /// dotted level only, not grandchildren). Feeds child-ordinal minting.
+    pub fn work_child_ids(&self, parent: &str) -> Vec<String> {
+        let conn = self.conn.lock().unwrap();
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT id FROM work_items
+             WHERE id LIKE ?1 || '.%' AND id NOT LIKE ?1 || '.%.%'",
+        ) else {
+            return Vec::new();
+        };
+        stmt.query_map(params![parent], |r| r.get::<_, String>(0))
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
+    }
+
+    // --- seat stats (P3) + seat burn (P8) ------------------------------------
+
+    /// Upsert one seat's stats: `last_run_at` advances only when given (and
+    /// never backwards), `items_filed` accumulates by the given delta.
+    pub fn upsert_seat_stat(
+        &self,
+        seat: &str,
+        last_run_at: Option<i64>,
+        items_filed_delta: i64,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO seat_stats (seat, last_run_at, items_filed, updated_at)
+             VALUES (?1, ?2, MAX(0, ?3), ?4)
+             ON CONFLICT(seat) DO UPDATE SET
+                last_run_at = CASE
+                    WHEN excluded.last_run_at IS NULL THEN last_run_at
+                    ELSE MAX(excluded.last_run_at, COALESCE(last_run_at, 0))
+                END,
+                items_filed = MAX(0, items_filed + ?3),
+                updated_at = excluded.updated_at",
+            params![seat, last_run_at, items_filed_delta, crate::ledger::now_millis()],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_seat_stat(&self, seat: &str) -> Option<SeatStatRow> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT seat, last_run_at, items_filed, updated_at
+             FROM seat_stats WHERE seat = ?1",
+            params![seat],
+            |r| {
+                Ok(SeatStatRow {
+                    seat: r.get(0)?,
+                    last_run_at: r.get(1)?,
+                    items_filed: r.get(2)?,
+                    updated_at: r.get(3)?,
+                })
+            },
+        )
+        .ok()
+    }
+
+    pub fn list_seat_stats(&self) -> rusqlite::Result<Vec<SeatStatRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT seat, last_run_at, items_filed, updated_at
+             FROM seat_stats ORDER BY seat",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(SeatStatRow {
+                seat: r.get(0)?,
+                last_run_at: r.get(1)?,
+                items_filed: r.get(2)?,
+                updated_at: r.get(3)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Additive burn upsert: every counter accumulates onto the `(seat, day)`
+    /// row (`day` = local `YYYY-MM-DD`, the caller formats it). Tokens only —
+    /// money is computed at render time elsewhere.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_seat_burn(
+        &self,
+        seat: &str,
+        day: &str,
+        input_tokens: i64,
+        output_tokens: i64,
+        cache_read_tokens: i64,
+        cache_creation_tokens: i64,
+        spawns: i64,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO seat_burn (seat, day, input_tokens, output_tokens,
+                cache_read_tokens, cache_creation_tokens, spawns, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(seat, day) DO UPDATE SET
+                input_tokens = input_tokens + ?3,
+                output_tokens = output_tokens + ?4,
+                cache_read_tokens = cache_read_tokens + ?5,
+                cache_creation_tokens = cache_creation_tokens + ?6,
+                spawns = spawns + ?7,
+                updated_at = excluded.updated_at",
+            params![
+                seat,
+                day,
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+                spawns,
+                crate::ledger::now_millis()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Per-seat totals across all days (`day` = None in the rollup rows).
+    pub fn seat_burn_totals_by_seat(&self) -> rusqlite::Result<Vec<SeatBurnRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT seat, SUM(input_tokens), SUM(output_tokens),
+                    SUM(cache_read_tokens), SUM(cache_creation_tokens), SUM(spawns)
+             FROM seat_burn GROUP BY seat ORDER BY seat",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(SeatBurnRow {
+                seat: Some(r.get(0)?),
+                day: None,
+                input_tokens: r.get(1)?,
+                output_tokens: r.get(2)?,
+                cache_read_tokens: r.get(3)?,
+                cache_creation_tokens: r.get(4)?,
+                spawns: r.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Per-day totals across all seats (`seat` = None), newest day first,
+    /// bounded by `limit`.
+    pub fn seat_burn_totals_by_day(&self, limit: i64) -> rusqlite::Result<Vec<SeatBurnRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT day, SUM(input_tokens), SUM(output_tokens),
+                    SUM(cache_read_tokens), SUM(cache_creation_tokens), SUM(spawns)
+             FROM seat_burn GROUP BY day ORDER BY day DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit.max(1)], |r| {
+            Ok(SeatBurnRow {
+                seat: None,
+                day: Some(r.get(0)?),
+                input_tokens: r.get(1)?,
+                output_tokens: r.get(2)?,
+                cache_read_tokens: r.get(3)?,
+                cache_creation_tokens: r.get(4)?,
+                spawns: r.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    // --- overnight queue (P0) -------------------------------------------------
+
+    /// The ready plan queue IS this query: sessions the human approved that
+    /// were never run — `status = 'approved' AND run_state IS NULL` (a plain
+    /// Approve leaves `run_state` NULL; every launch beacon sets it, and a
+    /// queued run that parks lands in `awaiting_review`, so nothing re-queues).
+    /// Oldest first (FIFO); returns `(session_id, project_path, project_name)`.
+    pub fn list_queue_ready_sessions(&self) -> rusqlite::Result<Vec<(String, String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT session_id, project_path, project_name FROM sessions
+             WHERE status = 'approved' AND run_state IS NULL
+             ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        rows.collect()
+    }
+
+    // =======================================================================
+    // PRODUCER FILING SEAM (unique anchor: producers-wave-work-filing)
+    //
+    // The one shared helper pair behind every to-do *producer* (plan approval,
+    // review landing, exit report, Librarian, Shipwright, friction watch):
+    // an idempotency lookup plus a mint-and-file that mirrors `work.rs`'s id
+    // law. Kept here beside the work-graph SQL because `work.rs` is a sealed
+    // state plane (its minting is private by design — the intake precedent
+    // already blessed mirroring it rather than opening the plane).
+    // =======================================================================
+
+    /// Idempotency lookup for work-item producers: the newest NON-CLOSED item
+    /// matching `origin_kind` and, when given, `origin_id` / `title` exactly.
+    /// A producer re-deriving the same backlog checks here and skips — closed
+    /// items deliberately do NOT match, so finished work can honestly recur.
+    /// `Ok(None)` is a REAL no-match; a DB/I-O fault surfaces as `Err` so a
+    /// producer can refuse to file rather than degrade its idempotency to
+    /// best-effort and duplicate under faults.
+    pub fn find_unclosed_work_item(
+        &self,
+        origin_kind: &str,
+        origin_id: Option<&str>,
+        title: Option<&str>,
+    ) -> rusqlite::Result<Option<crate::work::WorkItem>> {
+        let conn = self.conn.lock().unwrap();
+        match conn.query_row(
+            &format!(
+                "SELECT {} FROM work_items
+                 WHERE status != 'closed'
+                   AND origin_kind = ?1
+                   AND (?2 IS NULL OR origin_id = ?2)
+                   AND (?3 IS NULL OR title = ?3)
+                 ORDER BY created_at DESC LIMIT 1",
+                Self::WORK_ITEM_COLS
+            ),
+            params![origin_kind, origin_id, title],
+            Self::row_to_work_item,
+        ) {
+            Ok(item) => Ok(Some(item)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// File one produced work item: dedupe on the `(origin_kind, origin_id?,
+    /// title)` provenance triple (an unclosed match skips the write and
+    /// returns `Ok(None)`), mint the id under `work.rs`'s law (root `rl-` +
+    /// sha256 prefix lengthened on collision; child `<parent>.N`, never
+    /// reusing a freed ordinal), insert the row, record the `parent-child`
+    /// edge when parented, and append the `work_file` chain event via the
+    /// existing helper (logged-not-dropped on failure, never blocking the row
+    /// write). Origin stays PROVENANCE, never ownership — TEXT breadcrumbs
+    /// only, exactly as the schema law above demands. Unknown `kind`/`status`
+    /// normalize (`task` / `open`) instead of failing: a producer must never
+    /// turn its host path fragile.
+    #[allow(clippy::too_many_arguments)]
+    pub fn file_produced_work_item(
+        &self,
+        title: &str,
+        body: Option<&str>,
+        kind: &str,
+        status: &str,
+        priority: i64,
+        origin_kind: &str,
+        origin_id: Option<&str>,
+        project_path: Option<&str>,
+        parent: Option<&str>,
+        actor: &str,
+    ) -> Result<Option<String>, String> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err("a produced work item needs a title".to_string());
+        }
+        let origin_kind = origin_kind.trim();
+        if origin_kind.is_empty() {
+            return Err("a produced work item needs an origin_kind".to_string());
+        }
+        let origin_id = origin_id.map(str::trim).filter(|s| !s.is_empty());
+        match self.find_unclosed_work_item(origin_kind, origin_id, Some(title)) {
+            Ok(Some(_)) => return Ok(None), // already standing — the producer is re-running
+            Ok(None) => {}
+            Err(e) => {
+                // Without the idempotency answer, filing could duplicate —
+                // SKIP (the producer re-derives next pass) rather than guess.
+                tracing::warn!(
+                    origin_kind = %origin_kind, title = %title, error = %e,
+                    "work-item idempotency lookup failed; skipping the filing"
+                );
+                return Err(format!("idempotency lookup failed: {e}"));
+            }
+        }
+        let kind = if crate::work::WORK_KINDS.contains(&kind) {
+            kind
+        } else {
+            "task"
+        };
+        let status = if matches!(status, "open" | "held") {
+            status
+        } else {
+            "open"
+        };
+        let now = crate::ledger::now_millis();
+        let id = match parent.map(str::trim).filter(|p| !p.is_empty()) {
+            Some(p) => {
+                if self.get_work_item(p).is_none() {
+                    return Err(format!("no parent work item `{p}`"));
+                }
+                // `<parent>.N`, one past the highest existing direct-child
+                // ordinal — mirrors `work.rs::mint_child_id` exactly.
+                let next = self
+                    .work_child_ids(p)
+                    .iter()
+                    .filter_map(|id| id.rsplit('.').next()?.parse::<i64>().ok())
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+                format!("{p}.{next}")
+            }
+            None => {
+                // `rl-` + sha256 prefix, lengthened (4, 8, 12, 16) until it
+                // misses every row — mirrors `work.rs::mint_root_id` exactly.
+                let mut minted = None;
+                'mint: for salt in 0u32.. {
+                    let hash = crate::ledger::sha256_hex(
+                        format!("{title}\n{now}\n{salt}").as_bytes(),
+                    );
+                    for len in [4usize, 8, 12, 16] {
+                        let cand = format!("rl-{}", &hash[..len]);
+                        if self.get_work_item(&cand).is_none() {
+                            minted = Some(cand);
+                            break 'mint;
+                        }
+                    }
+                }
+                minted.expect("the salt walk always finds a free id")
+            }
+        };
+        let item = crate::work::WorkItem {
+            id: id.clone(),
+            title: title.to_string(),
+            body: body.map(str::to_string).filter(|s| !s.trim().is_empty()),
+            status: status.to_string(),
+            priority,
+            kind: kind.to_string(),
+            assignee: None,
+            claimed_at: None,
+            lease_expires_at: None,
+            closed_at: None,
+            close_reason: None,
+            defer_until: None,
+            origin_kind: Some(origin_kind.to_string()),
+            origin_id: origin_id.map(str::to_string),
+            project_path: project_path
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            pinned: false,
+            created_at: now,
+            updated_at: now,
+        };
+        self.insert_work_item(&item).map_err(|e| e.to_string())?;
+        if let Some(p) = parent.map(str::trim).filter(|p| !p.is_empty()) {
+            // Mirrors the record_work_event pattern below: the failure is
+            // logged WITH both ids — never silently dropped, never blocking
+            // the filed item.
+            if let Err(e) = self.insert_work_edge(p, &id, "parent-child", Some(actor), now) {
+                tracing::warn!(parent = %p, item = %id, error = %e, "produced parent-child edge insert failed");
+            }
+        }
+        let detail = match origin_id {
+            Some(oid) => format!("{origin_kind}:{oid}"),
+            None => origin_kind.to_string(),
+        };
+        if let Err(e) = crate::ledger::record_work_event(
+            self,
+            crate::ledger::EventKind::WorkFile,
+            &id,
+            Some(actor),
+            Some(&detail),
+            now,
+        ) {
+            tracing::warn!(item = %id, error = %e, "produced work_file chain append failed");
+        }
+        Ok(Some(id))
+    }
+
+    /// Moot-only upsert (see `moot::land_doc`): like [`Database::upsert_draft`]
+    /// but RESETS `doc_json` to NULL alongside the fresh markdown mirror.
+    /// `upsert_draft`'s COALESCE deliberately protects a TipTap body from
+    /// markdown-only writers — the right law for every one-shot landing path
+    /// (intake triage, Shipwright, draft_chat's flush). The moot is the one
+    /// writer that re-renders the WHOLE document on every land: a human
+    /// Drafter save between rounds stores a `doc_json` that would otherwise
+    /// win on open forever (the Drafter prefers the TipTap body), hiding
+    /// every later round behind a stale body. Clearing it makes the mirror
+    /// the document again; the frontend rebuilds the body from it on next
+    /// open. The tradeoff — TipTap-only detail in the human's save is
+    /// dropped — is documented and accepted at the moot call site, which
+    /// folds the human's mirror delta into the transcript BEFORE landing.
+    /// Keep this out of every other landing path.
+    pub fn upsert_draft_reset_doc(
+        &self,
+        draft_id: &str,
+        title: Option<&str>,
+        project_path: Option<&str>,
+        doc_markdown: &str,
+    ) -> rusqlite::Result<()> {
+        let now = crate::ledger::now_millis();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO drafts (draft_id, title, project_path, doc_markdown, doc_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?5)
+             ON CONFLICT(draft_id) DO UPDATE SET
+                title = excluded.title,
+                project_path = excluded.project_path,
+                doc_markdown = excluded.doc_markdown,
+                doc_json = NULL,
+                updated_at = excluded.updated_at",
+            params![draft_id, title, project_path, doc_markdown, now],
+        )?;
+        Ok(())
+    }
 }
 
 fn session_status_str(s: SessionStatus) -> &'static str {
@@ -8296,6 +9800,414 @@ fn session_status_from(s: &str) -> SessionStatus {
         "approved" => SessionStatus::Approved,
         "aborted" => SessionStatus::Aborted,
         _ => SessionStatus::InReview,
+    }
+}
+
+/// The work-graph deep-logic battery: ready-CTE semantics, the claim race,
+/// lease expiry, ledger-chain integrity, origin-outliving, and the state-plane
+/// boundary guard. Lives beside the SQL it verifies (the work-graph region of
+/// `impl Database` above).
+#[cfg(test)]
+mod work_graph_tests {
+    use super::*;
+    use crate::ledger::EventKind;
+    use crate::work::WorkItem;
+    use std::sync::Arc;
+
+    fn item(id: &str, now: i64) -> WorkItem {
+        WorkItem {
+            id: id.to_string(),
+            title: format!("item {id}"),
+            body: None,
+            status: "open".to_string(),
+            priority: 2,
+            kind: "task".to_string(),
+            assignee: None,
+            claimed_at: None,
+            lease_expires_at: None,
+            closed_at: None,
+            close_reason: None,
+            defer_until: None,
+            origin_kind: None,
+            origin_id: None,
+            project_path: None,
+            pinned: false,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn ready_ids(db: &Database, now: i64) -> Vec<String> {
+        let mut ids: Vec<String> = db
+            .list_ready_work_items(None, now, 50)
+            .unwrap()
+            .into_iter()
+            .map(|i| i.id)
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    // --- (a) ready-CTE semantics -----------------------------------------
+
+    #[test]
+    fn ready_hides_a_blocked_item_until_its_blocker_closes() {
+        let db = Database::open_in_memory().unwrap();
+        let now = 1_000_000;
+        db.insert_work_item(&item("rl-blkr", now)).unwrap();
+        db.insert_work_item(&item("rl-tgt", now)).unwrap();
+        db.insert_work_edge("rl-blkr", "rl-tgt", "blocks", None, now)
+            .unwrap();
+        // The unclosed blocker hides the target; the blocker itself is ready.
+        assert_eq!(ready_ids(&db, now), vec!["rl-blkr"]);
+        // Blocker closes → the target appears.
+        assert!(db.close_work_item("rl-blkr", Some("done"), now).unwrap());
+        assert_eq!(ready_ids(&db, now), vec!["rl-tgt"]);
+        // A dangling blocks edge (from-item row never existed) does NOT
+        // block: there is no item left to close (schema law — no FKs).
+        db.insert_work_edge("rl-ghost", "rl-tgt", "blocks", None, now)
+            .unwrap();
+        assert_eq!(ready_ids(&db, now), vec!["rl-tgt"]);
+        // A non-blocks edge from an open item does not block either.
+        db.insert_work_item(&item("rl-rel", now)).unwrap();
+        db.insert_work_edge("rl-rel", "rl-tgt", "relates-to", None, now)
+            .unwrap();
+        assert_eq!(ready_ids(&db, now), vec!["rl-rel", "rl-tgt"]);
+        // CLAIMED and HELD blockers still block — the CTE rule is
+        // `b.status != 'closed'`, not `== 'open'`.
+        db.insert_work_item(&item("rl-cblk", now)).unwrap();
+        db.insert_work_item(&item("rl-tgt2", now)).unwrap();
+        db.insert_work_edge("rl-cblk", "rl-tgt2", "blocks", None, now)
+            .unwrap();
+        assert!(db
+            .claim_work_item("rl-cblk", "agent-a", now, Some(now + 10_000))
+            .unwrap());
+        let mut held = item("rl-hblk", now);
+        held.status = "held".to_string();
+        db.insert_work_item(&held).unwrap();
+        db.insert_work_edge("rl-hblk", "rl-tgt2", "blocks", None, now)
+            .unwrap();
+        assert!(
+            !ready_ids(&db, now).contains(&"rl-tgt2".to_string()),
+            "a claimed + a held blocker both stand — the target stays hidden"
+        );
+        // Closing the claimed one is not enough: the held one still blocks.
+        assert!(db.close_work_item("rl-cblk", Some("done"), now).unwrap());
+        assert!(
+            !ready_ids(&db, now).contains(&"rl-tgt2".to_string()),
+            "the held blocker alone still hides the target"
+        );
+        // Both closed → the target appears.
+        assert!(db.close_work_item("rl-hblk", Some("done"), now).unwrap());
+        assert!(ready_ids(&db, now).contains(&"rl-tgt2".to_string()));
+    }
+
+    #[test]
+    fn ready_terminates_and_answers_sanely_on_a_parent_child_cycle() {
+        let db = Database::open_in_memory().unwrap();
+        let now = 1_000_000;
+        // Two items in a parent-child CYCLE, one of them deferred.
+        let mut a = item("rl-cyc-a", now);
+        a.defer_until = Some(now + 60_000);
+        db.insert_work_item(&a).unwrap();
+        db.insert_work_item(&item("rl-cyc-b", now)).unwrap();
+        db.insert_work_edge("rl-cyc-a", "rl-cyc-b", "parent-child", None, now)
+            .unwrap();
+        db.insert_work_edge("rl-cyc-b", "rl-cyc-a", "parent-child", None, now)
+            .unwrap();
+        db.insert_work_item(&item("rl-solo", now)).unwrap();
+        // The query RETURNS (`UNION` dedupes, so the recursive walk
+        // terminates on the cycle) with sane content: both cycle members sit
+        // beneath the deferred one, the free item is ready.
+        assert_eq!(ready_ids(&db, now), vec!["rl-solo"]);
+        // The defer passes → the whole cycle surfaces.
+        assert_eq!(
+            ready_ids(&db, now + 60_000),
+            vec!["rl-cyc-a", "rl-cyc-b", "rl-solo"]
+        );
+    }
+
+    #[test]
+    fn unclosed_list_filters_inside_the_limit_and_edges_read_in_one_batch() {
+        let db = Database::open_in_memory().unwrap();
+        let now = 1_000_000;
+        // More OLD closed rows than the bound, then live items created later.
+        for i in 0..60i64 {
+            let mut it = item(&format!("rl-old{i}"), now - 1_000 + i);
+            it.status = "closed".to_string();
+            it.closed_at = Some(now);
+            db.insert_work_item(&it).unwrap();
+        }
+        db.insert_work_item(&item("rl-live-a", now)).unwrap();
+        db.insert_work_item(&item("rl-live-b", now + 1)).unwrap();
+        db.insert_work_edge("rl-live-a", "rl-live-b", "blocks", None, now)
+            .unwrap();
+        // The closed filter sits INSIDE the limit: a bound smaller than the
+        // closed backlog still returns every live item, no closed ones.
+        let items = db.list_unclosed_work_items(50).unwrap();
+        let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["rl-live-a", "rl-live-b"]);
+        // ONE batched edges read over those ids returns each edge once.
+        let owned: Vec<String> = items.iter().map(|i| i.id.clone()).collect();
+        let edges = db.list_work_edges_touching_any(&owned, 50).unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].edge_type, "blocks");
+        assert_eq!(edges[0].from_id, "rl-live-a");
+        // No ids → no read at all.
+        assert!(db.list_work_edges_touching_any(&[], 50).unwrap().is_empty());
+    }
+
+    #[test]
+    fn find_unclosed_distinguishes_no_match_from_a_db_fault() {
+        let db = Database::open_in_memory().unwrap();
+        let now = 1_000_000;
+        // A real no-match is Ok(None), never an error.
+        assert!(db
+            .find_unclosed_work_item("ghost", None, None)
+            .unwrap()
+            .is_none());
+        let mut it = item("rl-idem", now);
+        it.origin_kind = Some("test".to_string());
+        db.insert_work_item(&it).unwrap();
+        assert!(db
+            .find_unclosed_work_item("test", None, None)
+            .unwrap()
+            .is_some());
+        // A genuine DB fault surfaces as Err — and the producer path SKIPS
+        // the filing on it instead of degrading idempotency to best-effort.
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch("ALTER TABLE work_items RENAME TO work_items_gone")
+                .unwrap();
+        }
+        assert!(db.find_unclosed_work_item("test", None, None).is_err());
+        assert!(
+            db.file_produced_work_item(
+                "t", None, "task", "open", 2, "test", None, None, None, "tester",
+            )
+            .is_err(),
+            "filing must refuse (not duplicate) when the lookup faults"
+        );
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch("ALTER TABLE work_items_gone RENAME TO work_items")
+                .unwrap();
+        }
+        // The fault healed → nothing was filed during it.
+        assert_eq!(db.list_work_items(None, None, 50).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn ready_hides_a_deferred_item_until_its_time_arrives() {
+        let db = Database::open_in_memory().unwrap();
+        let now = 1_000_000;
+        let mut d = item("rl-dfr", now);
+        d.defer_until = Some(now + 5_000);
+        db.insert_work_item(&d).unwrap();
+        assert!(ready_ids(&db, now).is_empty(), "still deferred");
+        // Boundary: `defer_until <= now` is ready.
+        assert_eq!(ready_ids(&db, now + 5_000), vec!["rl-dfr"]);
+    }
+
+    #[test]
+    fn ready_hides_descendants_of_a_deferred_ancestor() {
+        let db = Database::open_in_memory().unwrap();
+        let now = 1_000_000;
+        // Deferred parent → open child → open grandchild, plus a free sibling.
+        let mut p = item("rl-par", now);
+        p.defer_until = Some(now + 60_000);
+        db.insert_work_item(&p).unwrap();
+        db.insert_work_item(&item("rl-par.1", now)).unwrap();
+        db.insert_work_item(&item("rl-par.1.1", now)).unwrap();
+        db.insert_work_item(&item("rl-free", now)).unwrap();
+        db.insert_work_edge("rl-par", "rl-par.1", "parent-child", None, now)
+            .unwrap();
+        db.insert_work_edge("rl-par.1", "rl-par.1.1", "parent-child", None, now)
+            .unwrap();
+        // The child is open and undeferred itself, but its ANCESTOR is
+        // deferred — the recursive walk hides the whole subtree.
+        assert_eq!(ready_ids(&db, now), vec!["rl-free"]);
+        // The parent's defer passes → the whole chain surfaces at once.
+        assert_eq!(
+            ready_ids(&db, now + 60_000),
+            vec!["rl-free", "rl-par", "rl-par.1", "rl-par.1.1"]
+        );
+    }
+
+    // --- (b) the claim race ----------------------------------------------
+
+    #[test]
+    fn competing_claims_yield_exactly_one_winner() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let now = 1_000_000;
+        db.insert_work_item(&item("rl-race", now)).unwrap();
+        let mut handles = Vec::new();
+        for agent in ["agent-a", "agent-b"] {
+            let db = Arc::clone(&db);
+            handles.push(std::thread::spawn(move || {
+                db.claim_work_item("rl-race", agent, now, Some(now + 10_000))
+                    .unwrap()
+            }));
+        }
+        let wins: Vec<bool> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(
+            wins.iter().filter(|w| **w).count(),
+            1,
+            "exactly one competing claim may win"
+        );
+        let it = db.get_work_item("rl-race").unwrap();
+        assert_eq!(it.status, "claimed");
+        assert!(
+            matches!(it.assignee.as_deref(), Some("agent-a") | Some("agent-b")),
+            "the row belongs to whichever claimer won"
+        );
+        assert_eq!(it.lease_expires_at, Some(now + 10_000));
+    }
+
+    // --- (c) lease expiry ------------------------------------------------
+
+    #[test]
+    fn an_expired_lease_returns_the_item_to_open_and_ready() {
+        let db = Database::open_in_memory().unwrap();
+        let now = 1_000_000;
+        db.insert_work_item(&item("rl-lease", now)).unwrap();
+        assert!(db
+            .claim_work_item("rl-lease", "agent-a", now, Some(now + 1_000))
+            .unwrap());
+        assert!(ready_ids(&db, now).is_empty(), "claimed ⇒ not ready");
+        // Lease still live → nothing expires.
+        assert_eq!(db.expire_work_leases(now + 500).unwrap(), 0);
+        // Boundary is STRICT (`lease_expires_at < now`, not `<=`): at
+        // exactly t == lease_expires_at nothing expires either.
+        assert_eq!(db.expire_work_leases(now + 1_000).unwrap(), 0);
+        assert_eq!(db.get_work_item("rl-lease").unwrap().status, "claimed");
+        // Lease lapsed → the claim clears wholesale.
+        let later = now + 2_000;
+        assert_eq!(db.expire_work_leases(later).unwrap(), 1);
+        let it = db.get_work_item("rl-lease").unwrap();
+        assert_eq!(it.status, "open");
+        assert!(it.assignee.is_none());
+        assert!(it.claimed_at.is_none());
+        assert!(it.lease_expires_at.is_none());
+        assert_eq!(it.updated_at, later);
+        // …and the item is ready + claimable again (far-future lease so the
+        // sweep below only ever considers the open-ended claim).
+        assert_eq!(ready_ids(&db, later), vec!["rl-lease"]);
+        assert!(db
+            .claim_work_item("rl-lease", "agent-b", later, Some(later + 10_000_000))
+            .unwrap());
+        // An open-ended claim (NULL lease) never expires.
+        db.insert_work_item(&item("rl-forever", now)).unwrap();
+        assert!(db.claim_work_item("rl-forever", "agent-c", now, None).unwrap());
+        assert_eq!(db.expire_work_leases(now + 1_000_000).unwrap(), 0);
+        assert_eq!(db.get_work_item("rl-forever").unwrap().status, "claimed");
+    }
+
+    // --- (d) lifecycle events keep the chain green ------------------------
+
+    #[test]
+    fn file_claim_close_events_append_and_keep_chain_green() {
+        let db = Database::open_in_memory().unwrap();
+        let now = 1_000_000;
+        db.insert_work_item(&item("rl-led", now)).unwrap();
+        assert!(crate::ledger::record_work_event(
+            &db,
+            EventKind::WorkFile,
+            "rl-led",
+            Some("filer"),
+            None,
+            now
+        )
+        .unwrap()
+        .is_some());
+        assert!(db
+            .claim_work_item("rl-led", "agent-a", now + 1, Some(now + 3_600_000))
+            .unwrap());
+        assert!(crate::ledger::record_work_event(
+            &db,
+            EventKind::WorkClaim,
+            "rl-led",
+            Some("agent-a"),
+            None,
+            now + 1
+        )
+        .unwrap()
+        .is_some());
+        assert!(db.close_work_item("rl-led", Some("done"), now + 2).unwrap());
+        assert!(crate::ledger::record_work_event(
+            &db,
+            EventKind::WorkClose,
+            "rl-led",
+            Some("agent-a"),
+            Some("done"),
+            now + 2
+        )
+        .unwrap()
+        .is_some());
+        // The whole lifecycle is on the chain and the chain verifies.
+        let n: i64 = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM ledger_events
+                 WHERE kind IN ('work_file', 'work_claim', 'work_close')
+                   AND ref_kind = 'work_item' AND ref_id = 'rl-led'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(n, 3);
+        assert!(db.verify_ledger_chain().unwrap().ok, "chain intact");
+        // Close-exactly-once: a second close is a no-op conflict and the row
+        // keeps its first close_reason/closed_at.
+        assert!(!db.close_work_item("rl-led", Some("again"), now + 9).unwrap());
+        let it = db.get_work_item("rl-led").unwrap();
+        assert_eq!(it.closed_at, Some(now + 2));
+        assert_eq!(it.close_reason.as_deref(), Some("done"));
+        assert!(db.verify_ledger_chain().unwrap().ok);
+    }
+
+    // --- (e) provenance outlives the origin -------------------------------
+
+    #[test]
+    fn deleting_the_origin_row_leaves_the_item_standing_and_ready() {
+        let db = Database::open_in_memory().unwrap();
+        let now = 1_000_000;
+        db.upsert_plan_run("X", "{}", None, false).unwrap();
+        let mut it = item("rl-orph", now);
+        it.origin_kind = Some("plan_run".to_string());
+        it.origin_id = Some("X".to_string());
+        db.insert_work_item(&it).unwrap();
+        // The origin dies — provenance is a TEXT breadcrumb, never a foreign
+        // key, so nothing may cascade (the direct regression test for the
+        // old CASCADE defect).
+        assert!(db.delete_plan_run("X").unwrap());
+        assert!(db.get_plan_run("X").is_none());
+        let survivor = db.get_work_item("rl-orph").expect("item outlives origin");
+        assert_eq!(survivor.origin_kind.as_deref(), Some("plan_run"));
+        assert_eq!(survivor.origin_id.as_deref(), Some("X"));
+        assert_eq!(ready_ids(&db, now), vec!["rl-orph"], "still ready");
+    }
+
+    // --- (f) the state-plane boundary guard --------------------------------
+
+    /// BOUNDARY GUARD — mirrors the include_str! style of
+    /// `every_known_event_has_a_tap_beside_its_emit_site`: the work graph is
+    /// a state plane (tables, queries, route handlers). `work.rs` may never
+    /// name the seat-spawn chokepoint symbol nor spawn a process; execution
+    /// engines live elsewhere and talk to the plane over the routes. The
+    /// needles live HERE so the scanned file stays clean.
+    #[test]
+    fn work_state_plane_never_names_the_spawn_chokepoint_or_spawns() {
+        let work = include_str!("work.rs");
+        for needle in ["claude_command_for_seat", "Command::new", "spawn("] {
+            assert_eq!(
+                work.matches(needle).count(),
+                0,
+                "work.rs must contain zero occurrences of `{needle}` — \
+                 the work graph is a state plane, never an execution engine"
+            );
+        }
     }
 }
 
@@ -10322,6 +12234,23 @@ mod tests {
         assert!(items[1].body.is_none()); // decision event has no stored body
         // since_seq filters.
         assert_eq!(db.list_lake_items_since(1, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn lake_items_exclude_machine_record_kinds() {
+        let db = Database::open_in_memory().unwrap();
+        append(&db, "approval", "d1");
+        // Machine bookkeeping: body-less rows that would otherwise render to
+        // the classifier under the "[decision references …]" fallback.
+        for kind in ["router_verdict", "moot_turn", "work_file", "work_claim", "work_close"] {
+            let ph = format!("m-{kind}");
+            append(&db, kind, &ph);
+        }
+        let items = db.list_lake_items_since(0, 100).unwrap();
+        assert_eq!(items.len(), 1, "only the human decision reaches the feed");
+        assert_eq!(items[0].kind, "approval");
+        // They stay on the chain — excluded from the feed, not from history.
+        assert!(db.verify_ledger_chain().unwrap().ok);
     }
 
     #[test]
@@ -12438,6 +14367,7 @@ body.
             status: SessionStatus::InReview,
             attach_state: AttachState::Idle,
             updated_at: 0,
+            run_state: None,
         };
         db.upsert_session(&mk("with-rev", 500)).unwrap();
         db.insert_revision(
@@ -12524,6 +14454,141 @@ body.
         let after = store.get("s").unwrap().updated_at;
         assert!(after >= before);
         assert!(after >= c.created_at);
+    }
+
+    // --- Queue-status lifecycle (send-while-busy) ------------------------
+
+    /// One queue-capable row per surface, so the generic helpers are proven
+    /// against every table in the kind map they claim to cover.
+    fn seed_queueable_rows(db: &Database) {
+        db.insert_browse_message(&crate::state::BrowseMessage {
+            id: "qb".to_string(),
+            browse_id: "tab-1".to_string(),
+            role: "user".to_string(),
+            body: "queued browse".to_string(),
+            status: "queued".to_string(),
+            created_at: 10,
+        })
+        .unwrap();
+        db.insert_linked_message(&crate::state::LinkedMessage {
+            id: "ql".to_string(),
+            linked_id: "l-1".to_string(),
+            role: "user".to_string(),
+            body: "queued linked".to_string(),
+            status: "queued".to_string(),
+            tab_browse_id: None,
+            tab_n: None,
+            tab_title: None,
+            tab_url: None,
+            created_at: 10,
+        })
+        .unwrap();
+        db.insert_mission_message(&crate::state::MissionMessage {
+            id: "qm".to_string(),
+            mission_id: "m-1".to_string(),
+            role: "user".to_string(),
+            body: "queued mission".to_string(),
+            status: "queued".to_string(),
+            created_at: 10,
+        })
+        .unwrap();
+        db.insert_mem_chat_message(&crate::state::MemChatMessage {
+            id: "qc".to_string(),
+            thread_id: "memchat".to_string(),
+            role: "user".to_string(),
+            body: "queued memchat".to_string(),
+            status: "queued".to_string(),
+            created_at: 10,
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn set_thread_message_status_flips_across_the_kind_map() {
+        let db = Database::open_in_memory().unwrap();
+        seed_queueable_rows(&db);
+        for (kind, id) in [
+            ("browse", "qb"),
+            ("linked", "ql"),
+            ("mission", "qm"),
+            ("memchat", "qc"),
+        ] {
+            assert!(
+                db.set_thread_message_status(kind, id, "complete").unwrap(),
+                "{kind} row must flip"
+            );
+        }
+        assert_eq!(db.load_browse_thread("tab-1").unwrap()[0].status, "complete");
+        assert_eq!(db.load_linked_thread("l-1").unwrap()[0].status, "complete");
+        assert_eq!(db.load_mission_thread("m-1").unwrap()[0].status, "complete");
+        assert_eq!(db.load_mem_chat_thread("memchat").unwrap()[0].status, "complete");
+        // A miss and an unknown kind both report false, never error.
+        assert!(!db.set_thread_message_status("browse", "nope", "unsent").unwrap());
+        assert!(!db.set_thread_message_status("martian", "qb", "unsent").unwrap());
+    }
+
+    #[test]
+    fn delete_thread_message_removes_the_unqueued_row() {
+        let db = Database::open_in_memory().unwrap();
+        seed_queueable_rows(&db);
+        assert!(db.delete_thread_message("browse", "qb").unwrap());
+        assert!(db.load_browse_thread("tab-1").unwrap().is_empty());
+        assert!(!db.delete_thread_message("browse", "qb").unwrap(), "already gone");
+        assert!(!db.delete_thread_message("martian", "ql").unwrap());
+        // The other surfaces' rows are untouched.
+        assert_eq!(db.load_linked_thread("l-1").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn startup_sweep_flips_only_queued_rows_to_unsent() {
+        let db = Database::open_in_memory().unwrap();
+        seed_queueable_rows(&db);
+        // A settled row that the sweep must not touch.
+        db.insert_browse_message(&crate::state::BrowseMessage {
+            id: "done".to_string(),
+            browse_id: "tab-1".to_string(),
+            role: "assistant".to_string(),
+            body: "landed".to_string(),
+            status: "complete".to_string(),
+            created_at: 20,
+        })
+        .unwrap();
+        assert_eq!(db.sweep_queued_to_unsent().unwrap(), 4);
+        let browse = db.load_browse_thread("tab-1").unwrap();
+        assert_eq!(browse[0].status, "unsent");
+        assert_eq!(browse[1].status, "complete");
+        assert_eq!(db.load_linked_thread("l-1").unwrap()[0].status, "unsent");
+        assert_eq!(db.load_mission_thread("m-1").unwrap()[0].status, "unsent");
+        assert_eq!(db.load_mem_chat_thread("memchat").unwrap()[0].status, "unsent");
+        // Idempotent: nothing left to flip.
+        assert_eq!(db.sweep_queued_to_unsent().unwrap(), 0);
+    }
+
+    #[test]
+    fn thread_loads_return_queued_rows_in_send_order() {
+        let db = Database::open_in_memory().unwrap();
+        for (id, status, ts) in [
+            ("u1", "complete", 1),
+            ("a1", "complete", 2),
+            ("q1", "queued", 3),
+            ("q2", "queued", 4),
+        ] {
+            db.insert_browse_message(&crate::state::BrowseMessage {
+                id: id.to_string(),
+                browse_id: "tab-1".to_string(),
+                role: "user".to_string(),
+                body: id.to_string(),
+                status: status.to_string(),
+                created_at: ts,
+            })
+            .unwrap();
+        }
+        let rows = db.load_browse_thread("tab-1").unwrap();
+        assert_eq!(
+            rows.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["u1", "a1", "q1", "q2"],
+            "queued rows load with the thread, oldest-first"
+        );
     }
 
     // --- Agent Seat activity (Seat Assignment digest) -------------------
@@ -12693,5 +14758,98 @@ body.
         assert_eq!(rows[0].2, 30, "median of 10/20/30/40/100");
         assert_eq!(rows[0].3, 100, "p90 lands on the long tail");
         assert_eq!(rows[1].0, "plan");
+    }
+
+    #[test]
+    fn seat_stats_upsert_accumulates_and_never_regresses_last_run() {
+        let db = Database::open_in_memory().unwrap();
+        assert!(db.get_seat_stat("browse").is_none());
+        db.upsert_seat_stat("browse", Some(1_000), 2).unwrap();
+        let s = db.get_seat_stat("browse").unwrap();
+        assert_eq!(s.last_run_at, Some(1_000));
+        assert_eq!(s.items_filed, 2);
+        // Deltas accumulate; a None run timestamp leaves the old one standing.
+        db.upsert_seat_stat("browse", None, 3).unwrap();
+        let s = db.get_seat_stat("browse").unwrap();
+        assert_eq!(s.last_run_at, Some(1_000));
+        assert_eq!(s.items_filed, 5);
+        // An out-of-order (older) run must not move last_run_at backwards.
+        db.upsert_seat_stat("browse", Some(500), 0).unwrap();
+        assert_eq!(db.get_seat_stat("browse").unwrap().last_run_at, Some(1_000));
+        db.upsert_seat_stat("browse", Some(2_000), 0).unwrap();
+        assert_eq!(db.get_seat_stat("browse").unwrap().last_run_at, Some(2_000));
+        // A stats-only seat with no run yet keeps a NULL last_run_at.
+        db.upsert_seat_stat("keeper", None, 1).unwrap();
+        assert_eq!(db.get_seat_stat("keeper").unwrap().last_run_at, None);
+        assert_eq!(db.list_seat_stats().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn seat_burn_adds_per_day_and_rolls_up_both_axes() {
+        let db = Database::open_in_memory().unwrap();
+        db.add_seat_burn("browse", "2026-08-11", 100, 50, 10, 5, 1).unwrap();
+        db.add_seat_burn("browse", "2026-08-11", 20, 10, 2, 1, 1).unwrap();
+        db.add_seat_burn("browse", "2026-08-12", 7, 3, 0, 0, 1).unwrap();
+        db.add_seat_burn("voice", "2026-08-12", 1, 1, 1, 1, 1).unwrap();
+
+        let by_seat = db.seat_burn_totals_by_seat().unwrap();
+        assert_eq!(by_seat.len(), 2);
+        let browse = by_seat.iter().find(|r| r.seat.as_deref() == Some("browse")).unwrap();
+        assert_eq!(browse.input_tokens, 127);
+        assert_eq!(browse.output_tokens, 63);
+        assert_eq!(browse.cache_read_tokens, 12);
+        assert_eq!(browse.cache_creation_tokens, 6);
+        assert_eq!(browse.spawns, 3);
+        assert_eq!(browse.day, None, "seat rollup aggregates the day axis");
+
+        let by_day = db.seat_burn_totals_by_day(30).unwrap();
+        assert_eq!(by_day.len(), 2);
+        assert_eq!(by_day[0].day.as_deref(), Some("2026-08-12"), "newest first");
+        assert_eq!(by_day[0].input_tokens, 8, "both seats' burn folds in");
+        assert_eq!(by_day[0].spawns, 2);
+        assert_eq!(by_day[1].day.as_deref(), Some("2026-08-11"));
+        assert_eq!(by_day[1].input_tokens, 120);
+    }
+
+    /// The overnight queue's ready frontier: approved AND never run. Every
+    /// other combination — in review, aborted, or any `run_state` at all
+    /// (including the parked `awaiting_review`) — stays out, so a queued run
+    /// can never re-queue itself.
+    #[test]
+    fn queue_ready_sessions_are_approved_and_unrun_fifo() {
+        use crate::state::{AttachState, ReviewSession, SessionStatus};
+        let db = Database::open_in_memory().unwrap();
+        let mk = |sid: &str, status: SessionStatus, at: i64| ReviewSession {
+            session_id: sid.to_string(),
+            project_path: format!("/repo/{sid}"),
+            project_name: sid.to_string(),
+            created_at: at,
+            revisions: Vec::new(),
+            status,
+            attach_state: AttachState::Idle,
+            updated_at: at,
+            run_state: None,
+        };
+        // Approved + unrun (the queue's targets), out of insertion order.
+        db.upsert_session(&mk("b-approved", SessionStatus::Approved, 200)).unwrap();
+        db.upsert_session(&mk("a-approved", SessionStatus::Approved, 100)).unwrap();
+        // Approved but already run (any run_state value excludes).
+        db.upsert_session(&mk("ran", SessionStatus::Approved, 50)).unwrap();
+        db.set_run_state("ran", "landed").unwrap();
+        // Approved but parked overnight — must NOT re-queue.
+        db.upsert_session(&mk("parked", SessionStatus::Approved, 60)).unwrap();
+        db.set_run_state("parked", "awaiting_review").unwrap();
+        // Not approved at all.
+        db.upsert_session(&mk("reviewing", SessionStatus::InReview, 10)).unwrap();
+        db.upsert_session(&mk("dead", SessionStatus::Aborted, 20)).unwrap();
+
+        let ready = db.list_queue_ready_sessions().unwrap();
+        assert_eq!(
+            ready.iter().map(|(sid, _, _)| sid.as_str()).collect::<Vec<_>>(),
+            vec!["a-approved", "b-approved"],
+            "approved+unrun only, oldest first"
+        );
+        assert_eq!(ready[0].1, "/repo/a-approved", "repo path rides along");
+        assert_eq!(ready[0].2, "a-approved", "project name rides along");
     }
 }

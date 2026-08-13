@@ -51,15 +51,19 @@ struct EmbeddedSkill {
 ///   prompt/context library and emits a prioritized next-actions checklist.
 /// - `sensei`: the Dojo recruit contract — how an external model grounds
 ///   classes-first on the user's lake + ClassMemory (over MCP) to work like them.
+/// - `orchestrate`: the Orchestrate execution contract — fetch the approved
+///   plan (scope contract), run it as a multi-agent workflow (or sequentially),
+///   leave the diff uncommitted, POST the exit report, then the blocking
+///   code-review curl (orchestrator-only, after the workflow returns).
 const SKILLS: &[EmbeddedSkill] = &[
     EmbeddedSkill {
         name: "redline-plan-review",
-        version: 12,
+        version: 13,
         content: include_str!("../../skills/redline-plan-review/SKILL.md"),
     },
     EmbeddedSkill {
         name: "sidecar",
-        version: 2,
+        version: 3,
         content: include_str!("../../skills/sidecar/SKILL.md"),
     },
     EmbeddedSkill {
@@ -84,7 +88,7 @@ const SKILLS: &[EmbeddedSkill] = &[
     },
     EmbeddedSkill {
         name: "drafter",
-        version: 3,
+        version: 4,
         content: include_str!("../../skills/drafter/SKILL.md"),
     },
     EmbeddedSkill {
@@ -127,11 +131,30 @@ const SKILLS: &[EmbeddedSkill] = &[
         version: 1,
         content: include_str!("../../skills/sensei/SKILL.md"),
     },
+    EmbeddedSkill {
+        name: "orchestrate",
+        version: 2,
+        content: include_str!("../../skills/orchestrate/SKILL.md"),
+    },
 ];
 
 /// The version reported in the aggregate status — the redline skill is the
 /// anchor users recognize, so its version stands in for the bundle.
 const SKILL_VERSION: u32 = SKILLS[0].version;
+
+/// Skill directory names Redline itself shipped under `~/.claude/skills/` in a
+/// past version and later renamed or retired: `redline` (renamed to
+/// `redline-plan-review` — the stale v8 copy carries a near-identical
+/// description plus a pre-auth curl flow that now 401s), `redline-review`
+/// (renamed to `redline-code-review`), and `loop-orchestrator` (feature
+/// removed). `install_under` deletes these so a stale copy can't keep shadowing
+/// the live contract. HARD RULE: these are the ONLY names Redline ever shipped
+/// and retired — the list must never contain a name Redline did not create,
+/// because it drives `fs::remove_dir_all` under the user's `~/.claude/skills`
+/// and would delete a skill the user owns.
+/// `retired_names_never_overlap_shipped` guards against a shipped name landing
+/// here.
+const RETIRED_SKILLS: &[&str] = &["redline", "redline-review", "loop-orchestrator"];
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -191,6 +214,15 @@ pub fn get_status_under(root: &std::path::Path) -> SkillStatus {
             Err(()) => all_current = false,
         }
     }
+    // A still-installed retired skill is stale state the next install clears —
+    // report it as outdated so the setup modal (and the Dojo re-install button)
+    // re-offer the install that prunes it.
+    for name in RETIRED_SKILLS {
+        if root.join(name).join("SKILL.md").is_file() {
+            all_current = false;
+            any_outdated = true;
+        }
+    }
     SkillStatus {
         installed: all_current,
         skill_path: root
@@ -221,6 +253,15 @@ pub fn install_under(root: &std::path::Path) -> Result<SkillStatus, String> {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         fs::write(&path, skill.content).map_err(|e| e.to_string())?;
+    }
+    // Prune retired skill dirs (see `RETIRED_SKILLS`). Shape check first: only
+    // a dir that actually holds a SKILL.md is an installed skill — a same-named
+    // dir without one is not ours to delete.
+    for name in RETIRED_SKILLS {
+        let dir = root.join(name);
+        if dir.join("SKILL.md").is_file() {
+            fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+        }
     }
     Ok(get_status_under(root))
 }
@@ -265,6 +306,16 @@ mod tests {
             redline.content.contains("REDLINE_RESOLUTIONS"),
             "redline SKILL.md is missing the resolution-block contract"
         );
+        // v13 restored the presentation push (deleted in the v2 slim) plus the
+        // which-diagram-when hint — the lines that make plans render rich.
+        assert!(
+            redline.content.contains("polished artifact"),
+            "redline SKILL.md lost the presentation-push paragraph"
+        );
+        assert!(
+            redline.content.contains("Which format when"),
+            "redline SKILL.md lost the which-diagram-when hint"
+        );
     }
 
     #[test]
@@ -273,6 +324,19 @@ mod tests {
         // The sidecar skill must teach the rich formats and the read-only rule.
         assert!(sidecar.content.contains("mermaid"));
         assert!(sidecar.content.contains("ExitPlanMode"));
+        // v3: the chart decision menu must survive future slimming, and the
+        // enumeration-grounding contract (counts derived from the material,
+        // never padded) is what keeps "am I missing anything?" answers honest.
+        assert!(
+            sidecar
+                .content
+                .contains("Decision menu — pick the lightest format"),
+            "sidecar SKILL.md lost the chart decision menu"
+        );
+        assert!(
+            sidecar.content.contains("pad to a round number"),
+            "sidecar SKILL.md lost the enumeration-grounding contract"
+        );
     }
 
     #[test]
@@ -479,6 +543,51 @@ mod tests {
     }
 
     #[test]
+    fn orchestrate_skill_teaches_the_run_contract() {
+        let orch = SKILLS.iter().find(|s| s.name == "orchestrate").unwrap();
+        // The execution contract's load-bearing phrases. Each needle guards a
+        // rule whose loss corrupts the run: scope discipline, the no-stash
+        // preflight, the uncommitted-diff review, the exit report preceding
+        // the review, and the only-the-orchestrator-reviews rule.
+        for needle in [
+            "rawPlanMarkdown",
+            "rl:blk-",
+            "scope contract",
+            "nothing more",
+            "git stash",
+            "git status --porcelain",
+            "machine-checkable",
+            "worktree isolation",
+            "sequentially",           // the no-Workflow fallback
+            "uncommitted",
+            "/v1/orchestration/report",
+            "planSessionId",
+            "scriptPath",
+            "workflowRan",
+            "planSection",
+            "**before** opening the review", // report precedes the review
+            "Only the orchestrator session",
+            "after the workflow returns",
+            "source=uncommitted&plan=",
+            "REDLINE_DAEMON_TOKEN",
+            "model overrides",
+            // v2: the work-graph alternative — fan out over the ready
+            // frontier instead of re-decomposing, claim-before-build /
+            // close-after-verify, and the law that unverified items stay
+            // open for the next run.
+            "/v1/work/ready?project=",
+            "Claim before building, close after verifying",
+            "Items the run cannot verify stay",
+            "Work outlives the run that discovered it",
+        ] {
+            assert!(
+                orch.content.contains(needle),
+                "orchestrate SKILL.md is missing `{needle}`"
+            );
+        }
+    }
+
+    #[test]
     fn version_constants_match_frontmatter() {
         // Each skill's `version` const and its SKILL.md `version:` field must not
         // drift — a bump in one without the other breaks upgrade detection.
@@ -560,6 +669,67 @@ mod tests {
         assert!(!status.installed);
         assert!(!status.outdated);
         // Nothing was created — no cleanup needed.
+    }
+
+    /// The retired list drives `fs::remove_dir_all` under the user's skills
+    /// root — a shipped name landing on it would make install delete what it
+    /// just wrote (and, worse, a user-owned dir is only one typo away).
+    #[test]
+    fn retired_names_never_overlap_shipped() {
+        for name in RETIRED_SKILLS {
+            assert!(
+                !SKILLS.iter().any(|s| s.name == *name),
+                "`{name}` is both shipped and retired"
+            );
+        }
+    }
+
+    #[test]
+    fn install_removes_a_retired_orphan() {
+        let root = tmpdir();
+        let orphan = skill_md(&root, "redline");
+        fs::create_dir_all(orphan.parent().unwrap()).unwrap();
+        fs::write(&orphan, "stale v8 contract").unwrap();
+
+        let status = install_under(&root).unwrap();
+        assert!(status.installed, "pruning happens before status is computed");
+        assert!(
+            !root.join("redline").exists(),
+            "install must remove the retired `redline` dir"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn status_flags_a_retired_orphan_as_outdated() {
+        let root = tmpdir();
+        install_under(&root).unwrap();
+        let orphan = skill_md(&root, "loop-orchestrator");
+        fs::create_dir_all(orphan.parent().unwrap()).unwrap();
+        fs::write(&orphan, "retired contract").unwrap();
+
+        let status = get_status_under(&root);
+        assert!(!status.installed, "a retired orphan must break `installed`");
+        assert!(status.outdated, "a retired orphan must set `outdated`");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A retired-*named* dir with no SKILL.md fails the shape check: it is not
+    /// an installed skill, so it is not ours to delete or to flag.
+    #[test]
+    fn retired_dir_without_skill_md_is_left_alone() {
+        let root = tmpdir();
+        let dir = root.join("redline-review");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("notes.txt"), "not a skill").unwrap();
+
+        let status = install_under(&root).unwrap();
+        assert!(status.installed, "a non-skill dir must not affect status");
+        assert!(
+            dir.join("notes.txt").exists(),
+            "a dir without SKILL.md must never be deleted"
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

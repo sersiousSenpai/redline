@@ -17,6 +17,9 @@ export function useMission() {
   );
   const [missions, setMissions] = useState<Mission[]>([]);
   const [findings, setFindings] = useState<MissionFinding[]>([]);
+  // True once the first `mission_list` has resolved — lets the mount-restore
+  // gate distinguish "mission not loaded YET" from "mission no longer exists".
+  const [missionsLoaded, setMissionsLoaded] = useState(false);
 
   const activeMission =
     missions.find((m) => m.missionId === activeMissionId) ?? null;
@@ -24,8 +27,11 @@ export function useMission() {
   const refreshMissions = useCallback(async () => {
     try {
       setMissions(await invoke<Mission[]>("mission_list"));
+      setMissionsLoaded(true);
     } catch {
-      /* ignore — empty list is a fine fallback */
+      /* ignore — empty list is a fine fallback; loaded stays false so the
+         mount-restore gate keeps waiting rather than declaring the mission
+         gone on a transient failure */
     }
   }, []);
 
@@ -46,23 +52,20 @@ export function useMission() {
     void refreshMissions();
   }, [refreshMissions]);
 
-  // Mirror the active mission to the backend (for the daemon) and load its pins
-  // whenever the active mission (or its goal) changes. `null` clears the mirror.
+  // Mirror the active mission to the backend (for the daemon) and load its
+  // pins. Keyed on the PERSISTED id — restored synchronously by
+  // usePersistedState — never on the derived `activeMission`, which is null
+  // until `mission_list` resolves: keying on that pushed `null` on every
+  // BrowserPane remount and blinded the daemon (browse/linked/orchestrator
+  // spawned with zero mission awareness). The backend looks up fresh
+  // title/goal/status from the DB by id; a goal edit is folded into the
+  // mirror by `mission_set_goal` itself.
   useEffect(() => {
-    void invoke("mission_set_active", {
-      missionId: activeMission?.missionId ?? null,
-      title: activeMission?.title ?? null,
-      goal: activeMission?.goal ?? null,
-      status: activeMission?.status ?? null,
-    }).catch(() => {});
-    void refreshFindings(activeMission?.missionId ?? null);
-  }, [
-    activeMission?.missionId,
-    activeMission?.goal,
-    activeMission?.title,
-    activeMission?.status,
-    refreshFindings,
-  ]);
+    void invoke("mission_set_active", { missionId: activeMissionId }).catch(
+      () => {},
+    );
+    void refreshFindings(activeMissionId);
+  }, [activeMissionId, refreshFindings]);
 
   const startMission = useCallback(
     async (title: string, goal: string): Promise<Mission | null> => {
@@ -182,6 +185,7 @@ export function useMission() {
      *  BrowserPane can restore a mission's tabs on mount. */
     activeMissionId,
     missions,
+    missionsLoaded,
     findings,
     /** browseIds that have contributed at least one pin — drives the stronger
      *  tab aura ("you've already mined this tab"). */

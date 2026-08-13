@@ -12,7 +12,8 @@ export type MainSurface =
   | "drafter"
   | "review"
   | "servers"
-  | "memory";
+  | "memory"
+  | "runs";
 
 export const MAIN_SURFACE_KEY = "redline.mainSurface";
 export const DOC_PINNED_KEY = "redline.doc.pinned";

@@ -222,6 +222,12 @@ interface VoicePanelProps {
   /** Working dir for a drafter session (plan sessions resolve their own from
    *  the SessionStore). */
   cwd?: string | null;
+  /** Drafter sessions only: a getter for the LIVE markdown mirror straight
+   *  from the open editor. Sent with each turn so the backend can flush the
+   *  DB mirror before the agent reads it — the `markdown` prop alone is
+   *  debounce-lagged. Returning undefined (e.g. the drafter pane is closed)
+   *  falls back to the `markdown` prop. */
+  liveMarkdown?: (() => string | undefined) | null;
   /** Reports whether a discussion is actually going on here — a non-empty
    *  transcript, or a turn in flight. The host uses it to decide whether an
    *  incoming plan may steal focus: interrupting a live conversation to jump to
@@ -247,6 +253,7 @@ function VoicePanelBase({
   markdown,
   sections,
   cwd,
+  liveMarkdown = null,
   onActivityChange,
   onClose,
 }: VoicePanelProps) {
@@ -261,6 +268,8 @@ function VoicePanelBase({
   // session on every revision change.
   const markdownRef = useRef(markdown);
   markdownRef.current = markdown;
+  const liveMarkdownRef = useRef(liveMarkdown);
+  liveMarkdownRef.current = liveMarkdown;
   const [error, setError] = useState<string | null>(null);
   const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
   const [streaming, setStreaming] = useState("");
@@ -577,8 +586,20 @@ function VoicePanelBase({
       // This turn is now live: accept its streamed events until it completes,
       // errors, or the user interrupts it.
       turnLiveRef.current = true;
+      // Drafter sessions carry the LIVE editor markdown so the backend can
+      // flush the DB mirror before the agent's mid-turn re-read; plan
+      // sessions send null (their doc lives elsewhere).
+      const draftMarkdown = sessionId.startsWith("drafter:")
+        ? (liveMarkdownRef.current?.() ?? markdownRef.current ?? null)
+        : null;
+      const args = {
+        sessionId,
+        text,
+        label: label ?? null,
+        draftMarkdown,
+      };
       try {
-        await invoke("voice_send", { sessionId, text, label: label ?? null });
+        await invoke("voice_send", args);
       } catch (e) {
         if (!String(e).includes("not started")) throw e;
         await invoke("voice_session_start", {
@@ -586,7 +607,7 @@ function VoicePanelBase({
           planMarkdown: markdownRef.current,
           cwd: cwd ?? null,
         });
-        await invoke("voice_send", { sessionId, text, label: label ?? null });
+        await invoke("voice_send", args);
       }
     },
     [sessionId],

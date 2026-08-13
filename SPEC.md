@@ -578,7 +578,7 @@ headless `claude` agent spawned **per turn**:
 ```
 claude -p "<prompt>" --output-format stream-json --include-partial-messages
   --verbose --permission-mode default
-  --tools Read,Grep,Glob,WebFetch,WebSearch,Bash
+  --tools Read,Grep,Glob,WebFetch,WebSearch,Bash,Skill
   --allowedTools WebSearch WebFetch "Bash(curl -s http://127.0.0.1:7676/*)"
   --strict-mcp-config
 ```

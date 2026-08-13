@@ -14,7 +14,6 @@
 //! — the memchat analog of draft_chat's doc hash — so the agent knows whether
 //! the record grew since its last turn.
 
-use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -22,29 +21,32 @@ use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, ChildStderr, ChildStdout};
+use tokio::process::{ChildStderr, ChildStdout};
 
 use crate::browse::{is_context_overflow, is_transient};
 use crate::claude_proc::{bridge_args, classify_line, resolve_claude_bin, StreamLine};
 use crate::db::Database;
 use crate::state::{now_millis, MemChatMessage};
+use crate::turn::{self, PartialBuf, QueuedTurn, SendOutcome, SendSlot, TurnStatus, Turns};
 
 /// The one Ask thread's id. The schema is keyed (multi-thread-ready) but the
 /// surface holds a single global conversation, so the id is a constant.
 pub const MEMCHAT_ID: &str = "memchat";
 
-struct MemChatProc {
-    child: Child,
+/// Everything a queued Ask send needs to start later. The record-state
+/// header, session resume, and prompt framing are all resolved at START time
+/// (`start_memchat_turn`), not enqueue time — a drained turn must resume the
+/// session the turn ahead of it just established.
+pub struct QueuedMemChatSend {
+    text: String,
 }
 
-type MemChatRegistry = Arc<Mutex<HashMap<String, MemChatProc>>>;
-
-/// Registry of running Ask turns, keyed by thread id. Cloned into managed
-/// Tauri state; the mutex is only held for tiny critical sections, never
-/// across `.await`.
+/// Registry of running Ask turns, keyed by thread id, on the shared
+/// `turn::Turns` contract (atomic slot reservation + probeable partial
+/// buffer). Cloned into managed Tauri state.
 #[derive(Clone)]
 pub struct MemChatState {
-    procs: MemChatRegistry,
+    turns: Arc<Turns<QueuedMemChatSend>>,
     db: Arc<Database>,
     claude_bin: Arc<OnceLock<String>>,
 }
@@ -52,7 +54,7 @@ pub struct MemChatState {
 impl MemChatState {
     pub fn new(db: Arc<Database>) -> Self {
         Self {
-            procs: Arc::new(Mutex::new(HashMap::new())),
+            turns: Arc::new(Turns::new()),
             db,
             claude_bin: Arc::new(OnceLock::new()),
         }
@@ -67,13 +69,7 @@ impl MemChatState {
 
     /// Kill every running Ask turn. Backs app teardown.
     pub fn kill_all(&self) {
-        let drained: Vec<MemChatProc> = {
-            let mut guard = self.procs.lock().unwrap();
-            guard.drain().map(|(_, p)| p).collect()
-        };
-        for mut proc in drained {
-            let _ = proc.child.start_kill();
-        }
+        self.turns.kill_all();
     }
 }
 
@@ -82,6 +78,11 @@ impl MemChatState {
 /// First turn: the Ask role, the read routes, the Role-B retrieval contract,
 /// and the citation-chip contract. All retrieval is through the local bridge's
 /// read-only routes — the agent holds no snapshot of the record.
+///
+/// CACHE-STABLE ORDERING — the entire block above the user's question is
+/// invariant, so every first turn shares a byte-identical cacheable prefix;
+/// keep any future variable content BELOW the invariant block. Guarded by
+/// `first_turn_invariant_prefix_is_byte_stable`.
 fn build_first_turn_prompt(user_text: &str) -> String {
     let mut p = String::from(
         "You are the ASK agent on Redline's Memory surface — the user's window \
@@ -169,6 +170,10 @@ fn build_followup_prompt(record_grew: bool, user_text: &str) -> String {
 struct MemChatDelta {
     thread_id: String,
     text: String,
+    /// This delta's position in the turn's stream — `memchat_turn_status`
+    /// reports the seq already folded into `partial`, and the frontend drops
+    /// any delta at or below that watermark.
+    seq: u64,
 }
 
 #[derive(Clone, Serialize)]
@@ -192,41 +197,82 @@ struct MemChatCancelled {
     thread_id: String,
 }
 
+/// A queued send left the queue and became the streaming turn — the frontend
+/// flips its bubble's "Queued" chip off.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MemChatQueueAdvanced {
+    thread_id: String,
+    message_id: String,
+}
+
 // --- Commands -----------------------------------------------------------------
 
 /// Send a turn to the Ask agent. First turn teaches the role + retrieval +
 /// citation contracts; follow-ups carry the record-state header. Streaming
-/// happens via `memchat-*` events — this returns once the child is spawned.
+/// happens via `memchat-*` events — this returns once the child is spawned,
+/// or with `queued: true` when the send opted in (`queue`) and landed behind
+/// an in-flight turn.
 #[tauri::command]
 pub async fn memchat_send(
     chat: tauri::State<'_, MemChatState>,
     app: AppHandle,
     text: String,
-) -> Result<(), String> {
+    queue: Option<bool>,
+) -> Result<SendOutcome, String> {
     if text.trim().is_empty() {
         return Err("empty message".to_string());
     }
-    {
-        let guard = chat.procs.lock().unwrap();
-        if guard.contains_key(MEMCHAT_ID) {
-            return Err("the memory agent is still replying".to_string());
-        }
-    }
+    let message_id = uuid::Uuid::new_v4().to_string();
+    let payload = QueuedMemChatSend { text: text.clone() };
 
-    let prior_session = chat.db.get_mem_chat_session(MEMCHAT_ID);
-    // The record-state watermark — the memchat analog of the draft doc hash.
-    let head_seq = chat.db.max_ledger_seq().unwrap_or(0);
-    let record_grew = chat
-        .db
-        .get_mem_chat_last_seq(MEMCHAT_ID)
-        .map(|s| s != head_seq)
-        .unwrap_or(true);
+    // Atomic reservation; early `?` returns release it via the guard's Drop.
+    // Only opted-in sends queue — the busy error stays for everything else.
+    let (slot, payload) = if queue.unwrap_or(false) {
+        let turn = QueuedTurn {
+            message_id: message_id.clone(),
+            text: text.clone(),
+            queued_at: now_millis(),
+        };
+        match chat.turns.begin_or_enqueue(MEMCHAT_ID, turn, payload) {
+            SendSlot::Began(slot, payload) => (slot, payload),
+            SendSlot::Enqueued => {
+                // Persist the queued user row so a remount restores the
+                // bubble; the reader's drain flips it to `complete`.
+                let user_msg = MemChatMessage {
+                    id: message_id.clone(),
+                    thread_id: MEMCHAT_ID.to_string(),
+                    role: "user".to_string(),
+                    body: text,
+                    status: "queued".to_string(),
+                    created_at: now_millis(),
+                };
+                chat.db
+                    .insert_mem_chat_message(&user_msg)
+                    .map_err(|e| format!("failed to persist message: {e}"))?;
+                return Ok(SendOutcome {
+                    started: false,
+                    queued: true,
+                    message_id,
+                });
+            }
+            SendSlot::QueueFull => {
+                return Err("the queue is full — wait for the current reply".to_string())
+            }
+        }
+    } else {
+        let slot = chat
+            .turns
+            .begin(MEMCHAT_ID)
+            .map_err(|_| "the memory agent is still replying".to_string())?;
+        (slot, payload)
+    };
 
     let user_msg = MemChatMessage {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: message_id.clone(),
         thread_id: MEMCHAT_ID.to_string(),
         role: "user".to_string(),
-        body: text.clone(),
+        body: text,
         status: "complete".to_string(),
         created_at: now_millis(),
     };
@@ -234,82 +280,121 @@ pub async fn memchat_send(
         .insert_mem_chat_message(&user_msg)
         .map_err(|e| format!("failed to persist message: {e}"))?;
 
-    let prompt = match &prior_session {
-        None => build_first_turn_prompt(&text),
-        Some(_) => build_followup_prompt(record_grew, &text),
-    };
+    start_memchat_turn(app, chat.inner().clone(), payload, slot).await?;
+    Ok(SendOutcome {
+        started: true,
+        queued: false,
+        message_id,
+    })
+}
 
-    // Polis ledger: the Ask thread is itself part of the record it reads —
-    // first turn with thread provenance, follow-ups claimed out of the global
-    // hook capture stream.
-    if prior_session.is_none() {
-        crate::ledger::record_agent_prompt(
-            &chat.db,
-            crate::ledger::PromptSource::RustFirstTurn,
-            "memchat",
-            &prompt,
-            None,
-            None,
-            None,
-            Some(crate::ledger::ThreadRef {
-                thread_kind: "memchat",
-                thread_id: MEMCHAT_ID.to_string(),
-                parent_session_id: None,
-            }),
-            crate::seat::model_for("memory"),
-        );
-    } else {
-        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
-    }
+/// Everything a turn needs after its user row is persisted: prompt framing,
+/// ledger capture, spawn, attach, reader. Runs on the direct send path AND on
+/// the reader's queue drain — which is why session/watermark reads happen
+/// here, at start time. Boxed return: see `turn::BoxStartFuture`.
+fn start_memchat_turn(
+    app: AppHandle,
+    chat: MemChatState,
+    payload: QueuedMemChatSend,
+    slot: turn::SlotGuard<QueuedMemChatSend>,
+) -> turn::BoxStartFuture {
+    Box::pin(async move {
+        let QueuedMemChatSend { text } = payload;
+        let prior_session = chat.db.get_mem_chat_session(MEMCHAT_ID);
+        // The record-state watermark — the memchat analog of the draft doc hash.
+        let head_seq = chat.db.max_ledger_seq().unwrap_or(0);
+        let record_grew = chat
+            .db
+            .get_mem_chat_last_seq(MEMCHAT_ID)
+            .map(|s| s != head_seq)
+            .unwrap_or(true);
 
-    // The agent has been pointed at the record as of now; store the watermark
-    // its header described.
-    let _ = chat.db.set_mem_chat_last_seq(MEMCHAT_ID, head_seq);
+        let prompt = match &prior_session {
+            None => build_first_turn_prompt(&text),
+            Some(_) => build_followup_prompt(record_grew, &text),
+        };
 
-    let args = bridge_args("memory", prompt, prior_session.as_deref());
-    // Memory is global, not per-project — HOME keeps Read/Grep/Glob scoped
-    // away from whatever repo happens to be open.
-    let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+        // Polis ledger: the Ask thread is itself part of the record it reads —
+        // first turn with thread provenance, follow-ups claimed out of the global
+        // hook capture stream.
+        if prior_session.is_none() {
+            crate::ledger::record_agent_prompt(
+                &chat.db,
+                crate::ledger::PromptSource::RustFirstTurn,
+                "memchat",
+                &prompt,
+                None,
+                None,
+                None,
+                Some(crate::ledger::ThreadRef {
+                    thread_kind: "memchat",
+                    thread_id: MEMCHAT_ID.to_string(),
+                    parent_session_id: None,
+                }),
+                crate::seat::model_for("memory"),
+            );
+        } else {
+            crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+        }
 
-    let claude_bin = chat.claude_bin().await?;
-    let mut cmd = crate::claude_proc::claude_command_for_seat("memory", &claude_bin);
-    let mut child = cmd
-        .current_dir(&cwd)
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                format!(
-                    "could not find the `claude` CLI (looked for `{claude_bin}`). \
-                     Install Claude Code, or launch Redline from a terminal \
-                     so it inherits your shell's PATH."
-                )
-            } else {
-                format!("failed to spawn claude: {e}")
-            }
-        })?;
-    let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
-    let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
+        // The agent has been pointed at the record as of now; store the watermark
+        // its header described.
+        let _ = chat.db.set_mem_chat_last_seq(MEMCHAT_ID, head_seq);
 
-    {
-        chat.procs
-            .lock()
-            .unwrap()
-            .insert(MEMCHAT_ID.to_string(), MemChatProc { child });
-    }
+        let args = bridge_args("memory", prompt, prior_session.as_deref());
+        // Memory is global, not per-project — HOME keeps Read/Grep/Glob scoped
+        // away from whatever repo happens to be open.
+        let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
 
-    tauri::async_runtime::spawn(read_memchat(
-        app,
-        chat.db.clone(),
-        chat.procs.clone(),
-        stdout,
-        stderr,
-    ));
-    Ok(())
+        let claude_bin = chat.claude_bin().await?;
+        let mut cmd = crate::claude_proc::claude_command_for_seat("memory", &claude_bin);
+        let mut child = cmd
+            .current_dir(&cwd)
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    format!(
+                        "could not find the `claude` CLI (looked for `{claude_bin}`). \
+                         Install Claude Code, or launch Redline from a terminal \
+                         so it inherits your shell's PATH."
+                    )
+                } else {
+                    format!("failed to spawn claude: {e}")
+                }
+            })?;
+        let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
+        let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
+
+        let buf = slot.buf();
+        let token = slot.token();
+        if let Err(mut child) = slot.attach(child) {
+            // Cancelled during the spawn window.
+            let _ = child.start_kill();
+            let _ = app.emit(
+                "memchat-cancelled",
+                MemChatCancelled {
+                    thread_id: MEMCHAT_ID.to_string(),
+                },
+            );
+            return Ok(());
+        }
+
+        tauri::async_runtime::spawn(read_memchat(app, chat, buf, token, stdout, stderr));
+        Ok(())
+    })
+}
+
+/// Snapshot of the Ask thread's turn for a remounting MemoryAsk panel:
+/// whether a reply is streaming, since when, and the partial text streamed so
+/// far (with its delta `seq` watermark).
+#[tauri::command]
+pub fn memchat_turn_status(chat: tauri::State<'_, MemChatState>) -> TurnStatus {
+    chat.turns.status(MEMCHAT_ID)
 }
 
 /// The Ask thread's persisted turns, oldest-first.
@@ -322,23 +407,40 @@ pub fn memchat_thread(
         .map_err(|e| format!("failed to load thread: {e}"))
 }
 
-/// Cancel the in-flight turn (the reader emits `memchat-cancelled`).
+/// Cancel the in-flight turn (the reader emits `memchat-cancelled`). Queued
+/// sends stay queued — the reader's terminal drain advances them.
 #[tauri::command]
 pub fn memchat_cancel(chat: tauri::State<'_, MemChatState>) -> Result<(), String> {
-    let proc = { chat.procs.lock().unwrap().remove(MEMCHAT_ID) };
-    if let Some(mut proc) = proc {
-        let _ = proc.child.start_kill();
+    if let Some(mut child) = chat.turns.take(MEMCHAT_ID).and_then(|p| p.child) {
+        let _ = child.start_kill();
     }
     Ok(())
 }
 
-/// "New conversation": kill any in-flight turn, drop the thread rows and the
-/// resumable session. The turns already captured in the lake stay there.
+/// Remove a queued send (the bubble's ×). Returns its text so the composer
+/// can restore it; `None` when the send already advanced. The persisted
+/// queued row goes with it.
+#[tauri::command]
+pub fn memchat_unqueue(
+    chat: tauri::State<'_, MemChatState>,
+    message_id: String,
+) -> Result<Option<String>, String> {
+    let Some(turn) = chat.turns.unqueue(MEMCHAT_ID, &message_id) else {
+        return Ok(None);
+    };
+    if let Err(e) = chat.db.delete_thread_message("memchat", &message_id) {
+        tracing::warn!(error = %e, "failed to delete the unqueued memchat row");
+    }
+    Ok(Some(turn.text))
+}
+
+/// "New conversation": kill any in-flight turn, drop any queued sends, the
+/// thread rows and the resumable session. The turns already captured in the
+/// lake stay there.
 #[tauri::command]
 pub fn memchat_clear(chat: tauri::State<'_, MemChatState>) -> Result<(), String> {
-    let proc = { chat.procs.lock().unwrap().remove(MEMCHAT_ID) };
-    if let Some(mut proc) = proc {
-        let _ = proc.child.start_kill();
+    if let Some(mut child) = chat.turns.discard(MEMCHAT_ID).and_then(|p| p.child) {
+        let _ = child.start_kill();
     }
     chat.db
         .delete_mem_chat(MEMCHAT_ID)
@@ -354,11 +456,13 @@ pub fn memchat_kill_all(chat: tauri::State<'_, MemChatState>) {
 
 async fn read_memchat(
     app: AppHandle,
-    db: Arc<Database>,
-    procs: MemChatRegistry,
+    chat: MemChatState,
+    buf: Arc<Mutex<PartialBuf>>,
+    token: u64,
     stdout: ChildStdout,
     stderr: ChildStderr,
 ) {
+    let db = chat.db.clone();
     let stdout_fut = async {
         let mut lines = BufReader::new(stdout).lines();
         let mut session: Option<String> = None;
@@ -373,11 +477,14 @@ async fn read_memchat(
             match classify_line(&v) {
                 StreamLine::Init(sid) => session = Some(sid),
                 StreamLine::Delta(text) => {
+                    // Append-before-emit: see `turn::push_delta`.
+                    let seq = turn::push_delta(&buf, &text);
                     let _ = app.emit(
                         "memchat-delta",
                         MemChatDelta {
                             thread_id: MEMCHAT_ID.to_string(),
                             text,
+                            seq,
                         },
                     );
                 }
@@ -405,70 +512,98 @@ async fn read_memchat(
     let ((session, final_text, errored, saw_json), stderr_text) =
         tokio::join!(stdout_fut, stderr_fut);
 
-    let proc = { procs.lock().unwrap().remove(MEMCHAT_ID) };
+    // Reap the proc + pop the queue in ONE critical section, BEFORE emitting
+    // the terminal event. Token-matched: a reader outliving a cancel must
+    // neither steal a successor turn's proc nor drain its queue.
+    let (proc, next) = chat.turns.finish_and_pop(MEMCHAT_ID, token);
     let cancelled = proc.is_none() && final_text.is_none();
-    let exit_ok = match proc {
-        Some(mut p) => p.child.wait().await.map(|s| s.success()).unwrap_or(false),
+    let exit_ok = match proc.and_then(|p| p.child) {
+        Some(mut child) => child.wait().await.map(|s| s.success()).unwrap_or(false),
         None => false,
     };
 
-    if cancelled {
-        let _ = app.emit(
-            "memchat-cancelled",
-            MemChatCancelled {
-                thread_id: MEMCHAT_ID.to_string(),
-            },
-        );
-        return;
-    }
-    if let Some(err) = errored {
-        let why = describe_turn_error(&db, &err);
-        finish_error(&app, &db, &why);
-        return;
-    }
-    if let Some(text) = final_text {
-        if text.trim().is_empty() {
-            finish_error(&app, &db, "claude produced an empty reply");
-            return;
+    'terminal: {
+        if cancelled {
+            let _ = app.emit(
+                "memchat-cancelled",
+                MemChatCancelled {
+                    thread_id: MEMCHAT_ID.to_string(),
+                },
+            );
+            break 'terminal;
         }
-        if let Some(sid) = &session {
-            if let Err(e) = db.set_mem_chat_session(MEMCHAT_ID, sid) {
-                tracing::warn!(error = %e, "failed to persist memchat session id");
+        if let Some(err) = errored {
+            let why = describe_turn_error(&db, &err);
+            finish_error(&app, &db, &why);
+            break 'terminal;
+        }
+        if let Some(text) = final_text {
+            if text.trim().is_empty() {
+                finish_error(&app, &db, "claude produced an empty reply");
+                break 'terminal;
             }
-        }
-        let msg = MemChatMessage {
-            id: uuid::Uuid::new_v4().to_string(),
-            thread_id: MEMCHAT_ID.to_string(),
-            role: "assistant".to_string(),
-            body: text.clone(),
-            status: "complete".to_string(),
-            created_at: now_millis(),
-        };
-        if let Err(e) = db.insert_mem_chat_message(&msg) {
-            tracing::warn!(error = %e, "failed to persist assistant message");
-        }
-        // Companion journal: the Ask agent completed a turn.
-        let _ = db.append_journal("agent_turn", Some("memchat"), Some(MEMCHAT_ID), None, None);
-        let _ = app.emit(
-            "memchat-done",
-            MemChatDone {
+            if let Some(sid) = &session {
+                if let Err(e) = db.set_mem_chat_session(MEMCHAT_ID, sid) {
+                    tracing::warn!(error = %e, "failed to persist memchat session id");
+                }
+            }
+            let msg = MemChatMessage {
+                id: uuid::Uuid::new_v4().to_string(),
                 thread_id: MEMCHAT_ID.to_string(),
-                message_id: msg.id,
-                body: text,
-            },
-        );
-        return;
+                role: "assistant".to_string(),
+                body: text.clone(),
+                status: "complete".to_string(),
+                created_at: now_millis(),
+            };
+            if let Err(e) = db.insert_mem_chat_message(&msg) {
+                tracing::warn!(error = %e, "failed to persist assistant message");
+            }
+            // Companion journal: the Ask agent completed a turn.
+            let _ = db.append_journal("agent_turn", Some("memchat"), Some(MEMCHAT_ID), None, None);
+            let _ = app.emit(
+                "memchat-done",
+                MemChatDone {
+                    thread_id: MEMCHAT_ID.to_string(),
+                    message_id: msg.id,
+                    body: text,
+                },
+            );
+            break 'terminal;
+        }
+
+        let why = if !exit_ok && !stderr_text.trim().is_empty() {
+            let detail: String = stderr_text.trim().chars().take(500).collect();
+            format!("claude exited abnormally: {detail}")
+        } else if !saw_json {
+            "claude produced no parseable output".to_string()
+        } else {
+            "claude ended without producing a reply".to_string()
+        };
+        finish_error(&app, &db, &why);
     }
 
-    let why = if !exit_ok && !stderr_text.trim().is_empty() {
-        let detail: String = stderr_text.trim().chars().take(500).collect();
-        format!("claude exited abnormally: {detail}")
-    } else if !saw_json {
-        "claude produced no parseable output".to_string()
-    } else {
-        "claude ended without producing a reply".to_string()
-    };
-    finish_error(&app, &db, &why);
+    // Drain: `finish_and_pop` already re-reserved the slot for the queue
+    // head, so no concurrent send can slip in between the terminal above and
+    // the start below.
+    if let Some((queued, payload, slot)) = next {
+        if let Err(e) = db.set_thread_message_status("memchat", &queued.message_id, "complete") {
+            tracing::warn!(error = %e, "failed to flip a drained memchat row");
+        }
+        let _ = app.emit(
+            "memchat-queue-advanced",
+            MemChatQueueAdvanced {
+                thread_id: MEMCHAT_ID.to_string(),
+                message_id: queued.message_id.clone(),
+            },
+        );
+        if let Err(e) = start_memchat_turn(app.clone(), chat.clone(), payload, slot).await {
+            // The slot released via the guard's Drop. Flip the row so the UI
+            // offers "wasn't sent — resend"; no chain-drain (predictable
+            // failure behavior beats a cascade).
+            let _ = db.set_thread_message_status("memchat", &queued.message_id, "unsent");
+            finish_error(&app, &db, &format!("your queued message wasn't sent: {e}"));
+        }
+    }
 }
 
 /// Same recovery policy as the browse/draft agents: explicit context overflow
@@ -544,6 +679,29 @@ mod tests {
         assert!(p.contains("Never start a line with `#`"));
         // The user's question, quoted.
         assert!(p.contains("> what did I decide about the loop engine?"));
+    }
+
+    /// Two first turns with different user questions share a byte-identical
+    /// prefix spanning the whole invariant block — the cache-stable ordering
+    /// contract (the only variable content is the question itself).
+    #[test]
+    fn first_turn_invariant_prefix_is_byte_stable() {
+        fn common_prefix<'a>(a: &'a str, b: &str) -> &'a str {
+            let n = a
+                .bytes()
+                .zip(b.bytes())
+                .take_while(|(x, y)| x == y)
+                .count();
+            &a[..n]
+        }
+        let a = build_first_turn_prompt("what did I decide about X?");
+        let b = build_first_turn_prompt("entirely different question");
+        let shared = common_prefix(&a, &b);
+        // The shared prefix must reach the END of the invariant block — the
+        // formatting contract closes it, right before "The user asks:".
+        assert!(shared.contains("Lead with the answer, then the evidence."));
+        assert!(shared.contains("The user asks:"));
+        assert!(!shared.contains("what did I decide about X?"));
     }
 
     #[test]

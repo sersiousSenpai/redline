@@ -3,6 +3,7 @@
 import { memo, useEffect, useRef, useState } from "react";
 import {
   Copy,
+  Link2,
   MessageSquare,
   PenLine,
   Pin,
@@ -11,16 +12,12 @@ import {
   X,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { captureSnapshotOrCached } from "../lib/domSnapshot";
-import type {
-  BrowseCancelledEvent,
-  BrowseDeltaEvent,
-  BrowseDoneEvent,
-  BrowseErrorEvent,
-  BrowseMessage,
-} from "../types";
+import type { BrowseMessage } from "../types";
+import { useAgentTurn } from "../hooks/useAgentTurn";
+import { usePersistedState } from "../theme/usePersistedState";
 import { MarkdownView } from "./MarkdownView";
+import { QueuedChip, UnsentNote } from "./QueuedChip";
 import { WorkingIndicator } from "./WorkingIndicator";
 
 interface BrowserChatProps {
@@ -50,16 +47,19 @@ interface BrowserChatProps {
   onSendToDrafter?: (markdown: string) => void;
   /** Pin an assistant reply to the active mission ("I like this part"). Present
    *  only when a mission is active; the parent attaches the source tab. */
-  onAddToMission?: (markdown: string) => void;
+  onAddToMission?: (markdown: string) => void | Promise<boolean>;
+  /** Continue THIS tab chat as the spanning Linked discussion — a fork, not a
+   *  move: the tab chat stays intact, its context carries into the new linked
+   *  chat. Present once there's a conversation worth carrying. */
+  onContinueAsLinked?: () => void;
+  /** A linked discussion already exists — the header button offers a choice
+   *  ("continue as new" vs "open existing") instead of converting silently. */
+  linkedExists?: boolean;
+  onOpenExistingLinked?: () => void;
   /** Tandem agent mode is on. Sent to the agent so it opens the best page and
    *  surfaces a rateable sources block, and gates the per-source thumbs UI. */
   tandem?: boolean;
 }
-
-type ChatStatus = "idle" | "streaming" | "error";
-
-let tmpSeq = 0;
-const tmpId = () => `btmp-${++tmpSeq}`;
 
 const ZOOM_KEY = "redline.browseZoom";
 const clampZoom = (z: number) => Math.min(1.6, Math.max(0.8, z));
@@ -139,14 +139,18 @@ export const BrowserChat = memo(function BrowserChat({
   onSendToRedline,
   onSendToDrafter,
   onAddToMission,
+  onContinueAsLinked,
+  linkedExists,
+  onOpenExistingLinked,
   tandem,
 }: BrowserChatProps) {
-  const [messages, setMessages] = useState<BrowseMessage[]>([]);
-  const [liveText, setLiveText] = useState("");
-  const [status, setStatus] = useState<ChatStatus>("idle");
-  const [draft, setDraft] = useState("");
-  const [loaded, setLoaded] = useState(false);
+  // Composer draft survives tab switches and app restarts (the component is
+  // keyed by browseId, so each tab's discussion keeps its own).
+  const [draft, setDraft] = usePersistedState<string>(`rl.chatDraft.browse.${browseId}`, "");
   const [zoom, setZoom] = useState(loadZoom);
+  // The header's "continue across tabs" choice popover (shown only when a
+  // linked discussion already exists).
+  const [linkedMenuOpen, setLinkedMenuOpen] = useState(false);
   // Per-source thumbs verdicts for this tab's thread (url → +1 / -1), restored
   // from the backend so ratings survive a reload. Only meaningful in tandem mode.
   const [feedback, setFeedback] = useState<Record<string, number>>({});
@@ -155,10 +159,51 @@ export const BrowserChat = memo(function BrowserChat({
   // the user is parked at (or near) the bottom — scroll up to read mid-stream
   // and we leave you where you are, like ChatGPT / Claude desktop.
   const stickRef = useRef(true);
-  // Snapshot capture is async; guard it against being sent for the wrong tab if
-  // the user switches mid-capture.
-  const browseIdRef = useRef(browseId);
-  browseIdRef.current = browseId;
+
+  // The turn lifecycle — persisted thread, live stream, mid-turn remount
+  // restore (partial text + spinner), self-heal — lives in the shared hook,
+  // keyed by browseId: switching tabs rebinds it; a turn left streaming keeps
+  // running backend-side and is picked up loss-free on return.
+  const { messages, liveText, status, startedAt, loaded, send, cancel, unqueue, clear } =
+    useAgentTurn<BrowseMessage>({
+      surface: "browse",
+      key: browseId,
+      idField: "browseId",
+      historyCmd: "get_browse_thread",
+      historyArgs: { browseId },
+      sendFailPrefix: "Couldn't reach the browse agent",
+      buildSendArgs: async (text): Promise<Record<string, unknown>> => {
+        // The backend treats a turn as "first" until the agent session is
+        // saved, which only happens on a *successful* reply — so keep sending
+        // a snapshot until then (e.g. if the opening turn errored), matching
+        // that contract.
+        const firstTurn = !messages.some(
+          (m: BrowseMessage) => m.role === "assistant" && m.status === "complete",
+        );
+        // First turn embeds a live DOM snapshot so the agent is grounded
+        // without a mandatory round-trip; follow-ups rely on its /snapshot
+        // tool. Live snapshot if the tab is up; otherwise the cached one (a
+        // suspended discussion tab still grounds the first turn). A miss just
+        // means a slower first answer. The hook drops the send if the tab
+        // switched mid-capture.
+        const snapshot = firstTurn ? await captureSnapshotOrCached(label) : undefined;
+        return {
+          browseId,
+          text,
+          snapshot,
+          cwd: projectDir ?? null,
+          tandem: tandem ?? false,
+        };
+      },
+      makeMessage: ({ id, role, body, status }) => ({
+        id,
+        browseId,
+        role,
+        body,
+        status,
+        createdAt: Date.now(),
+      }),
+    });
 
   // Restore this tab's source thumbs on mount / tab switch.
   useEffect(() => {
@@ -200,79 +245,6 @@ export const BrowserChat = memo(function BrowserChat({
     });
   }
 
-  // Load persisted turns + subscribe to this tab's browse events. Re-runs when
-  // the active tab changes (the parent keys this component by browseId).
-  useEffect(() => {
-    let alive = true;
-    setLoaded(false);
-    setMessages([]);
-    setLiveText("");
-    setStatus("idle");
-
-    void invoke<BrowseMessage[]>("get_browse_thread", { browseId })
-      .then((rows) => {
-        if (!alive) return;
-        setMessages(rows);
-        setLoaded(true);
-      })
-      .catch(() => {
-        if (alive) setLoaded(true);
-      });
-
-    const mine = (p: { browseId: string }) => p.browseId === browseId;
-
-    const deltaP = listen<BrowseDeltaEvent>("browse-delta", (e) => {
-      if (!alive || !mine(e.payload)) return;
-      setStatus("streaming");
-      setLiveText((t) => t + e.payload.text);
-    });
-    const doneP = listen<BrowseDoneEvent>("browse-done", (e) => {
-      if (!alive || !mine(e.payload)) return;
-      setMessages((m) => [
-        ...m,
-        {
-          id: e.payload.messageId,
-          browseId,
-          role: "assistant",
-          body: e.payload.body,
-          status: "complete",
-          createdAt: Date.now(),
-        },
-      ]);
-      setLiveText("");
-      setStatus("idle");
-    });
-    const errorP = listen<BrowseErrorEvent>("browse-error", (e) => {
-      if (!alive || !mine(e.payload)) return;
-      setMessages((m) => [
-        ...m,
-        {
-          id: tmpId(),
-          browseId,
-          role: "assistant",
-          body: e.payload.error,
-          status: "error",
-          createdAt: Date.now(),
-        },
-      ]);
-      setLiveText("");
-      setStatus("error");
-    });
-    const cancelP = listen<BrowseCancelledEvent>("browse-cancelled", (e) => {
-      if (!alive || !mine(e.payload)) return;
-      setLiveText("");
-      setStatus("idle");
-    });
-
-    return () => {
-      alive = false;
-      void deltaP.then((un) => un());
-      void doneP.then((un) => un());
-      void errorP.then((un) => un());
-      void cancelP.then((un) => un());
-    };
-  }, [browseId]);
-
   // Re-pin to the bottom when the active tab changes (fresh thread load).
   useEffect(() => {
     stickRef.current = true;
@@ -293,74 +265,9 @@ export const BrowserChat = memo(function BrowserChat({
     stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
   }
 
-  async function send(text: string) {
-    const trimmed = text.trim();
-    if (!trimmed || status === "streaming") return;
-    // The backend treats a turn as "first" until the agent session is saved,
-    // which only happens on a *successful* reply — so keep sending a snapshot
-    // until then (e.g. if the opening turn errored), matching that contract.
-    const firstTurn = !messages.some(
-      (m) => m.role === "assistant" && m.status === "complete",
-    );
-    // Sending a turn jumps you to the bottom to see your message + the reply
-    // begin; from there the scroll listener takes over if you scroll up.
-    stickRef.current = true;
-    setMessages((m) => [
-      ...m,
-      {
-        id: tmpId(),
-        browseId,
-        role: "user",
-        body: trimmed,
-        status: "complete",
-        createdAt: Date.now(),
-      },
-    ]);
-    setLiveText("");
-    setStatus("streaming");
-
-    // First turn embeds a live DOM snapshot so the agent is grounded without a
-    // mandatory round-trip; follow-ups rely on its /snapshot tool.
-    let snapshot: string | undefined;
-    if (firstTurn) {
-      // Live snapshot if the tab is up; otherwise the cached one (a suspended
-      // discussion tab still grounds the first turn). A miss just means a
-      // slower first answer.
-      snapshot = await captureSnapshotOrCached(label);
-      if (browseIdRef.current !== browseId) return; // tab switched mid-capture
-    }
-
-    void invoke("browse_send", {
-      browseId,
-      text: trimmed,
-      snapshot,
-      cwd: projectDir ?? null,
-      tandem: tandem ?? false,
-    }).catch((err) => {
-      setStatus("error");
-      setMessages((m) => [
-        ...m,
-        {
-          id: tmpId(),
-          browseId,
-          role: "assistant",
-          body: `Couldn't reach the browse agent: ${err}`,
-          status: "error",
-          createdAt: Date.now(),
-        },
-      ]);
-    });
-  }
-
-  function cancel() {
-    void invoke("browse_cancel", { browseId }).catch(() => {});
-  }
-
   function discard() {
     void invoke("browse_discard", { browseId }).catch(() => {});
-    setMessages([]);
-    setLiveText("");
-    setStatus("idle");
+    clear();
     setDraft("");
   }
 
@@ -413,6 +320,60 @@ export const BrowserChat = memo(function BrowserChat({
           </span>
         )}
         <div className="flex items-center gap-1 ml-auto">
+          {onContinueAsLinked && messages.length > 0 && (
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => {
+                  // With no existing linked chat there's nothing to choose —
+                  // convert directly. Otherwise offer the choice.
+                  if (!linkedExists) onContinueAsLinked();
+                  else setLinkedMenuOpen((o) => !o);
+                }}
+                title="Continue across tabs — turn this chat into the Linked discussion (this tab's chat is kept)"
+                className="px-1 leading-none hover:opacity-100 opacity-60"
+                style={{ color: "var(--color-ink-muted)" }}
+              >
+                <Link2 size={12} strokeWidth={2} />
+              </button>
+              {linkedMenuOpen && (
+                <div
+                  className="absolute right-0 top-full mt-1 z-20 flex flex-col"
+                  style={{
+                    background: "var(--color-paper)",
+                    border: "1px solid var(--color-rule)",
+                    borderRadius: "6px",
+                    boxShadow: "0 4px 14px rgba(0,0,0,0.18)",
+                    minWidth: "13rem",
+                    padding: "3px",
+                  }}
+                >
+                  <button
+                    type="button"
+                    className="text-left rounded px-2 py-1.5 hover:opacity-80"
+                    style={{ fontSize: "11px", color: "var(--color-ink)" }}
+                    onClick={() => {
+                      setLinkedMenuOpen(false);
+                      onContinueAsLinked();
+                    }}
+                  >
+                    Continue this chat as a new Linked discussion
+                  </button>
+                  <button
+                    type="button"
+                    className="text-left rounded px-2 py-1.5 hover:opacity-80"
+                    style={{ fontSize: "11px", color: "var(--color-ink)" }}
+                    onClick={() => {
+                      setLinkedMenuOpen(false);
+                      onOpenExistingLinked?.();
+                    }}
+                  >
+                    Open the existing Linked discussion
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
           <button
             type="button"
             onClick={() => adjustZoom(-0.1)}
@@ -479,6 +440,15 @@ export const BrowserChat = memo(function BrowserChat({
               showSources={!!tandem}
               feedback={feedback}
               onVerdict={setVerdict}
+              onUnqueue={() => {
+                void unqueue(m.id).then((text) => {
+                  if (text) setDraft((prev) => (prev.trim() ? `${text}\n\n${prev}` : text));
+                });
+              }}
+              onResend={() => {
+                stickRef.current = true;
+                send(m.body);
+              }}
             />
           ))
         )}
@@ -489,7 +459,7 @@ export const BrowserChat = memo(function BrowserChat({
               onOpenLink={onOpenLink}
             />
           ) : (
-            <WorkingIndicator />
+            <WorkingIndicator startedAt={startedAt ?? undefined} />
           ))}
       </div>
 
@@ -499,7 +469,10 @@ export const BrowserChat = memo(function BrowserChat({
           setDraft={setDraft}
           streaming={status === "streaming"}
           onSend={() => {
-            void send(draft);
+            // Sending a turn jumps you to the bottom to see your message + the
+            // reply begin; from there the scroll listener takes over.
+            stickRef.current = true;
+            send(draft);
             setDraft("");
           }}
           onStop={cancel}
@@ -518,18 +491,24 @@ function MessageBubble({
   showSources,
   feedback,
   onVerdict,
+  onUnqueue,
+  onResend,
 }: {
   msg: BrowseMessage;
   onOpenLink?: (url: string) => void;
   onSendToRedline?: (markdown: string) => void;
   onSendToDrafter?: (markdown: string) => void;
-  onAddToMission?: (markdown: string) => void;
+  onAddToMission?: (markdown: string) => void | Promise<boolean>;
   showSources?: boolean;
   feedback?: Record<string, number>;
   onVerdict?: (source: Source, verdict: number) => void;
+  onUnqueue?: () => void;
+  onResend?: () => void;
 }) {
   const isUser = msg.role === "user";
   const isError = msg.status === "error";
+  const isQueued = isUser && msg.status === "queued";
+  const isUnsent = isUser && msg.status === "unsent";
   // In tandem mode a reply may carry a trailing sources block; split it off so
   // the JSON never renders and the sources get their own rateable strip.
   const { text, sources } =
@@ -538,7 +517,10 @@ function MessageBubble({
       : { text: msg.body, sources: [] as Source[] };
   const showActions = !isUser && !isError && text.trim().length > 0;
   return (
-    <div className="flex flex-col gap-0.5 group/msg">
+    <div
+      className="flex flex-col gap-0.5 group/msg"
+      style={isQueued || isUnsent ? { opacity: 0.65 } : undefined}
+    >
       <span
         style={{
           fontSize: "9px",
@@ -564,6 +546,8 @@ function MessageBubble({
       ) : (
         <MarkdownView body={text} compact rich onLinkClick={onOpenLink} />
       )}
+      {isQueued && <QueuedChip onUnqueue={onUnqueue} />}
+      {isUnsent && <UnsentNote onResend={onResend} />}
       {sources.length > 0 && (
         <SourcesStrip
           sources={sources}
@@ -690,10 +674,10 @@ function MessageActions({
   body: string;
   onSendToRedline?: (markdown: string) => void;
   onSendToDrafter?: (markdown: string) => void;
-  onAddToMission?: (markdown: string) => void;
+  onAddToMission?: (markdown: string) => void | Promise<boolean>;
 }) {
   const [copied, setCopied] = useState(false);
-  const [pinned, setPinned] = useState(false);
+  const [pinned, setPinned] = useState<"idle" | "ok" | "failed">("idle");
   const copy = () => {
     void navigator.clipboard?.writeText(body).then(() => {
       setCopied(true);
@@ -701,9 +685,12 @@ function MessageActions({
     });
   };
   const pin = () => {
-    onAddToMission?.(body);
-    setPinned(true);
-    window.setTimeout(() => setPinned(false), 1400);
+    // Truthful feedback: a pin that didn't reach the DB must not flash
+    // "Pinned ✓" — that silence is how a broken pin flow goes unnoticed.
+    void Promise.resolve(onAddToMission?.(body)).then((ok) => {
+      setPinned(ok === false ? "failed" : "ok");
+      window.setTimeout(() => setPinned("idle"), 1400);
+    });
   };
   const actionStyle: React.CSSProperties = {
     fontSize: "10px",
@@ -733,8 +720,10 @@ function MessageActions({
           title="Pin this reply to the active mission"
           style={{ ...actionStyle, color: "var(--color-info)" }}
         >
-          {pinned ? (
+          {pinned === "ok" ? (
             "Pinned ✓"
+          ) : pinned === "failed" ? (
+            "Pin failed ✗"
           ) : (
             <span className="inline-flex items-center gap-1">
               <Pin size={10} strokeWidth={2} /> Add to mission
@@ -841,12 +830,12 @@ function Composer({
         onKeyDown={(e) => {
           if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
-            if (!streaming) onSend();
+            // Sending mid-stream queues the message behind the reply.
+            onSend();
           }
         }}
-        placeholder="Ask about this page…"
+        placeholder={streaming ? "Type ahead — sends queue behind the reply…" : "Ask about this page…"}
         rows={2}
-        disabled={streaming}
         className="flex-1 rounded px-2 py-1"
         style={{
           fontSize: "calc(12px * var(--rl-discussion-zoom, 1))",
@@ -858,10 +847,11 @@ function Composer({
           overflow: "hidden",
         }}
       />
-      {streaming ? (
+      {streaming && (
         <button
           type="button"
           onClick={onStop}
+          title="Stop the current reply (queued messages still send)"
           className="rounded px-2 py-1 font-medium"
           style={{
             background: "var(--color-bg-elevated)",
@@ -872,22 +862,22 @@ function Composer({
         >
           Stop
         </button>
-      ) : (
-        <button
-          type="button"
-          onClick={onSend}
-          disabled={!draft.trim()}
-          className="rounded px-2 py-1 font-medium"
-          style={{
-            background: "var(--color-info)",
-            color: "var(--color-on-accent)",
-            fontSize: "11px",
-            opacity: draft.trim() ? 1 : 0.5,
-          }}
-        >
-          Send
-        </button>
       )}
+      <button
+        type="button"
+        onClick={onSend}
+        disabled={!draft.trim()}
+        title={streaming ? "Queue this message — it sends when the reply finishes" : undefined}
+        className="rounded px-2 py-1 font-medium"
+        style={{
+          background: "var(--color-info)",
+          color: "var(--color-on-accent)",
+          fontSize: "11px",
+          opacity: draft.trim() ? 1 : 0.5,
+        }}
+      >
+        Send
+      </button>
     </div>
   );
 }

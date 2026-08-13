@@ -14,15 +14,14 @@
 //! in headless mode. The first turn embeds a DOM snapshot for instant
 //! grounding; later turns rely on the live `/v1/browser/snapshot` tool.
 
-use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::Serialize;
 use serde_json::Value;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, ChildStderr, ChildStdout};
+use tokio::process::{ChildStderr, ChildStdout};
 
 use crate::claude_proc::{
     bridge_args, classify_line, mission_context_block, resolve_claude_bin,
@@ -30,21 +29,26 @@ use crate::claude_proc::{
 };
 use crate::db::Database;
 use crate::state::{now_millis, BrowseMessage};
+use crate::turn::{self, PartialBuf, QueuedTurn, SendOutcome, SendSlot, TurnStatus, Turns};
 
-/// One in-flight browse turn. Like `fork::ForkProc`, the registry owns the
-/// whole `Child`; `start_kill()` is a synchronous non-blocking SIGKILL.
-struct BrowseProc {
-    child: Child,
+/// Everything a queued browse send needs to start later. The session resume
+/// and prompt framing are resolved at START time (`start_browse_turn`), not
+/// enqueue time — a drained turn must resume the session the turn ahead of it
+/// just established. The snapshot IS captured at enqueue time: it describes
+/// the page the user was looking at when they typed.
+pub struct QueuedBrowseSend {
+    text: String,
+    snapshot: Option<String>,
+    cwd: Option<String>,
+    tandem: Option<bool>,
 }
 
-type BrowseRegistry = Arc<Mutex<HashMap<String, BrowseProc>>>;
-
-/// Registry of running browse turns, keyed by `browse_id` (the per-tab UUID).
-/// Cloned into managed Tauri state. The `std::sync::Mutex` is only ever held
-/// for a tiny `lock → mutate → drop` critical section, never across `.await`.
+/// Registry of running browse turns, keyed by `browse_id` (the per-tab UUID),
+/// on the shared `turn::Turns` contract (atomic slot reservation + probeable
+/// partial buffer). Cloned into managed Tauri state.
 #[derive(Clone)]
 pub struct BrowseState {
-    procs: BrowseRegistry,
+    turns: Arc<Turns<QueuedBrowseSend>>,
     db: Arc<Database>,
     /// Absolute path to the `claude` binary, resolved lazily on first use —
     /// same TCC reasoning as `fork::ForkState`.
@@ -54,7 +58,7 @@ pub struct BrowseState {
 impl BrowseState {
     pub fn new(db: Arc<Database>) -> Self {
         Self {
-            procs: Arc::new(Mutex::new(HashMap::new())),
+            turns: Arc::new(Turns::new()),
             db,
             claude_bin: Arc::new(OnceLock::new()),
         }
@@ -77,21 +81,14 @@ impl BrowseState {
     }
 
     /// Whether a browse turn is currently streaming for this tab's discussion
-    /// thread. Used to pin a tab live (don't suspend it mid-turn). Same tiny
-    /// lock-and-read critical section as the in-flight guard in `send`.
+    /// thread. Used to pin a tab live (don't suspend it mid-turn).
     pub fn is_running(&self, browse_id: &str) -> bool {
-        self.procs.lock().unwrap().contains_key(browse_id)
+        self.turns.is_running(browse_id)
     }
 
     /// Kill every running browse turn. Backs `browse_kill_all` and app teardown.
     pub fn kill_all(&self) {
-        let drained: Vec<BrowseProc> = {
-            let mut guard = self.procs.lock().unwrap();
-            guard.drain().map(|(_, p)| p).collect()
-        };
-        for mut proc in drained {
-            let _ = proc.child.start_kill();
-        }
+        self.turns.kill_all();
     }
 
     /// "Check in with a colleague": run THIS tab's browse agent to completion
@@ -117,15 +114,12 @@ impl BrowseState {
             return Err("nothing to ask the colleague".to_string());
         }
 
-        // Same per-tab in-flight invariant as `browse_send`.
-        {
-            let guard = self.procs.lock().unwrap();
-            if guard.contains_key(&browse_id) {
-                return Err(
-                    "that tab is busy with its own reply — try again in a moment".to_string(),
-                );
-            }
-        }
+        // Same per-tab in-flight invariant as `browse_send` — the reservation
+        // holds the slot across the whole spawn, and an early `?` return
+        // releases it via the guard's Drop.
+        let slot = self.turns.begin(&browse_id).map_err(|_| {
+            "that tab is busy with its own reply — try again in a moment".to_string()
+        })?;
 
         let prior_session = self.db.get_browse_session(&browse_id);
 
@@ -193,26 +187,37 @@ impl BrowseState {
         let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
         let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
 
-        {
-            self.procs
-                .lock()
-                .unwrap()
-                .insert(browse_id.clone(), BrowseProc { child });
+        let buf = slot.buf();
+        let token = slot.token();
+        if let Err(mut child) = slot.attach(child) {
+            // Cancelled during the spawn window — the reservation is gone.
+            let _ = child.start_kill();
+            let _ = app.emit(
+                "browse-cancelled",
+                BrowseCancelled {
+                    browse_id: browse_id.clone(),
+                },
+            );
+            return Err("the consult was cancelled".to_string());
         }
 
         // Drive inline behind a ceiling so a stuck colleague can't block the
         // linked agent's curl forever.
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(180),
-            drive_browse_stream(&app, &browse_id, stdout, stderr),
+            drive_browse_stream(&app, &browse_id, &buf, stdout, stderr),
         )
         .await;
 
         let (session, final_text, errored, saw_json, stderr_text) = match outcome {
             Ok(v) => v,
             Err(_) => {
-                if let Some(mut p) = self.procs.lock().unwrap().remove(&browse_id) {
-                    let _ = p.child.start_kill();
+                if let Some(mut child) = self
+                    .turns
+                    .take_owned(&browse_id, token)
+                    .and_then(|p| p.child)
+                {
+                    let _ = child.start_kill();
                 }
                 let _ = self.db.record_friction(
                     "turn_timeout",
@@ -226,10 +231,12 @@ impl BrowseState {
             }
         };
 
-        let proc = { self.procs.lock().unwrap().remove(&browse_id) };
+        // Token-matched: a consult draining its stream after a cancel must
+        // not reap a successor turn started in the meantime.
+        let proc = self.turns.take_owned(&browse_id, token);
         let cancelled = proc.is_none() && final_text.is_none();
-        let exit_ok = match proc {
-            Some(mut p) => p.child.wait().await.map(|s| s.success()).unwrap_or(false),
+        let exit_ok = match proc.and_then(|p| p.child) {
+            Some(mut child) => child.wait().await.map(|s| s.success()).unwrap_or(false),
             None => false,
         };
 
@@ -300,6 +307,10 @@ impl BrowseState {
 struct BrowseDelta {
     browse_id: String,
     text: String,
+    /// This delta's position in the turn's stream — `browse_turn_status`
+    /// reports the seq already folded into `partial`, and the frontend drops
+    /// any delta at or below that watermark.
+    seq: u64,
 }
 
 #[derive(Clone, Serialize)]
@@ -321,6 +332,15 @@ struct BrowseError {
 #[serde(rename_all = "camelCase")]
 struct BrowseCancelled {
     browse_id: String,
+}
+
+/// A queued send left the queue and became the streaming turn — the frontend
+/// flips its bubble's "Queued" chip off.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowseQueueAdvanced {
+    browse_id: String,
+    message_id: String,
 }
 
 /// The first turn's prompt: the agent's role, the live DOM snapshot for instant
@@ -365,6 +385,13 @@ fn build_pref_line(db: &Database) -> Option<String> {
     Some(line)
 }
 
+/// CACHE-STABLE ORDERING — all INVARIANT text (role intro, tool docs, the
+/// skill reference, the tandem-mode contract) forms one stable prefix, and
+/// every VARIABLE section (mission block, page snapshot, learned prefs, the
+/// user's message) comes after it. Two first turns differing only in variable
+/// inputs share a byte-identical prefix, which is what lets the model-side
+/// prompt cache hit across sessions. Same information as before — only the
+/// order is pinned. Guarded by `first_turn_invariant_prefix_is_byte_stable`.
 fn build_first_turn_prompt(
     snapshot: Option<&str>,
     user_text: &str,
@@ -376,14 +403,6 @@ fn build_first_turn_prompt(
         "You are helping the user with the web page open in Redline's embedded \
          browser. You can both discuss the page and drive the browser tab.\n\n",
     );
-    p.push_str(&mission_context_block(mission));
-    if let Some(snap) = snapshot {
-        if !snap.trim().is_empty() {
-            p.push_str("Here is a snapshot of the page the user is currently viewing:\n\n");
-            p.push_str(snap.trim());
-            p.push_str("\n\n");
-        }
-    }
     p.push_str(
         "You can act on the live browser tab by calling these local endpoints \
          with curl (already permitted — no approval needed). Put the URL \
@@ -510,6 +529,17 @@ fn build_first_turn_prompt(
              block. If the question is conversational and no page helps, skip the \
              navigation and omit the block.\n\n",
         );
+    }
+    // --- variable content below; nothing invariant may follow ---
+    p.push_str(&mission_context_block(mission));
+    if let Some(snap) = snapshot {
+        if !snap.trim().is_empty() {
+            p.push_str("Here is a snapshot of the page the user is currently viewing:\n\n");
+            p.push_str(snap.trim());
+            p.push_str("\n\n");
+        }
+    }
+    if tandem {
         if let Some(prefs) = prefs {
             if !prefs.trim().is_empty() {
                 p.push_str(prefs.trim());
@@ -530,39 +560,83 @@ fn build_first_turn_prompt(
 
 /// Send a turn to a tab's browse agent. The first turn starts a fresh `claude`
 /// session (capturing its id); later turns resume it. Streaming happens via
-/// `browse-*` events — this returns as soon as the child is spawned.
+/// `browse-*` events — this returns as soon as the child is spawned, or with
+/// `queued: true` when the send opted in (`queue`) and landed behind an
+/// in-flight turn.
 #[tauri::command]
 pub async fn browse_send(
     browse: tauri::State<'_, BrowseState>,
-    active_mission: tauri::State<'_, crate::ActiveMission>,
-    active_surface: tauri::State<'_, crate::ActiveSurface>,
     app: AppHandle,
     browse_id: String,
     text: String,
     snapshot: Option<String>,
     cwd: Option<String>,
     tandem: Option<bool>,
-) -> Result<(), String> {
+    queue: Option<bool>,
+) -> Result<SendOutcome, String> {
     if text.trim().is_empty() {
         return Err("empty message".to_string());
     }
+    let message_id = uuid::Uuid::new_v4().to_string();
+    let payload = QueuedBrowseSend {
+        text: text.clone(),
+        snapshot,
+        cwd,
+        tandem,
+    };
 
-    // Reject a second concurrent turn for the same tab.
-    {
-        let guard = browse.procs.lock().unwrap();
-        if guard.contains_key(&browse_id) {
-            return Err("a reply is still streaming for this tab".to_string());
+    // The reservation is atomic and spans the whole spawn; early `?` returns
+    // release it via the guard's Drop, so a failed send can't strand a
+    // phantom "streaming" tab. Only opted-in sends queue behind a busy slot —
+    // the busy error stays for everything else (it is load-bearing flow
+    // control for the consult paths).
+    let (slot, payload) = if queue.unwrap_or(false) {
+        let turn = QueuedTurn {
+            message_id: message_id.clone(),
+            text: text.clone(),
+            queued_at: now_millis(),
+        };
+        match browse.turns.begin_or_enqueue(&browse_id, turn, payload) {
+            SendSlot::Began(slot, payload) => (slot, payload),
+            SendSlot::Enqueued => {
+                // Persist the queued user row so a remount restores the
+                // bubble; the reader's drain flips it to `complete`.
+                let user_msg = BrowseMessage {
+                    id: message_id.clone(),
+                    browse_id,
+                    role: "user".to_string(),
+                    body: text,
+                    status: "queued".to_string(),
+                    created_at: now_millis(),
+                };
+                browse
+                    .db
+                    .insert_browse_message(&user_msg)
+                    .map_err(|e| format!("failed to persist message: {e}"))?;
+                return Ok(SendOutcome {
+                    started: false,
+                    queued: true,
+                    message_id,
+                });
+            }
+            SendSlot::QueueFull => {
+                return Err("the queue is full — wait for the current reply".to_string())
+            }
         }
-    }
-
-    let prior_session = browse.db.get_browse_session(&browse_id);
+    } else {
+        let slot = browse
+            .turns
+            .begin(&browse_id)
+            .map_err(|_| "a reply is still streaming for this tab".to_string())?;
+        (slot, payload)
+    };
 
     // Persist the user turn (a terminal row).
     let user_msg = BrowseMessage {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: message_id.clone(),
         browse_id: browse_id.clone(),
         role: "user".to_string(),
-        body: text.clone(),
+        body: text,
         status: "complete".to_string(),
         created_at: now_millis(),
     };
@@ -571,165 +645,197 @@ pub async fn browse_send(
         .insert_browse_message(&user_msg)
         .map_err(|e| format!("failed to persist message: {e}"))?;
 
-    // First turn wraps the message with the snapshot + tool docs; follow-ups
-    // are verbatim (the resumed session already carries that context). In tandem
-    // mode the first turn also carries the learned source-preference line so the
-    // agent biases its page picks toward domains the user has thumbed up.
-    let tandem = tandem.unwrap_or(false);
-    // When this tab lives inside an active mission, bake the goal in so the
-    // per-tab agent orients its help to what the user is researching.
-    let mission = active_mission.active_goal();
-    let prompt = match &prior_session {
-        None => {
-            let prefs = if tandem {
-                build_pref_line(&browse.db)
-            } else {
-                None
-            };
-            build_first_turn_prompt(
-                snapshot.as_deref(),
-                &text,
-                tandem,
-                prefs.as_deref(),
-                mission.as_ref().map(|(t, g)| (t.as_str(), g.as_str())),
-            )
-        }
-        Some(_) => text.clone(),
-    };
+    start_browse_turn(app, browse.inner().clone(), browse_id, payload, slot).await?;
+    Ok(SendOutcome {
+        started: true,
+        queued: false,
+        message_id,
+    })
+}
 
-    // Polis ledger: record the first-turn page-discussion prompt WITH its
-    // thread provenance (this tab's browse_id + resolved parent), and link the
-    // new thread into the session tree; keep every agent turn out of the
-    // global-hook capture stream.
-    if prior_session.is_none() {
-        let surface = active_surface.kind_and_id();
-        let parent = crate::ledger::resolve_parent(
-            None,
-            active_mission.active_id().as_deref(),
-            surface.as_ref().map(|(k, i)| (k.as_str(), i.as_str())),
-            "browse",
-        );
-        if let Some((pk, pid)) = &parent {
-            let _ = crate::ledger::record_session_link(&browse.db, "browse", &browse_id, pk, pid);
-        }
-        crate::ledger::record_agent_prompt(
-            &browse.db,
-            crate::ledger::PromptSource::RustFirstTurn,
-            "browse",
-            &prompt,
-            cwd.clone(),
-            None,
-            None,
-            Some(crate::ledger::ThreadRef {
-                thread_kind: "browse",
-                thread_id: browse_id.clone(),
-                parent_session_id: parent
-                    .filter(|(pk, _)| pk == "session")
-                    .map(|(_, pid)| pid),
-            }),
-            crate::seat::model_for("browse"),
-        );
-    } else {
-        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
-    }
+/// Everything a turn needs after its user row is persisted: prompt framing,
+/// ledger capture, args, spawn, attach, reader. Runs on the direct send path
+/// AND on the reader's queue drain — which is why the session resume is read
+/// here, at start time: a drained turn must resume the session the turn
+/// ahead of it just established. Boxed return: see `turn::BoxStartFuture`.
+fn start_browse_turn(
+    app: AppHandle,
+    browse: BrowseState,
+    browse_id: String,
+    payload: QueuedBrowseSend,
+    slot: turn::SlotGuard<QueuedBrowseSend>,
+) -> turn::BoxStartFuture {
+    Box::pin(async move {
+        let QueuedBrowseSend {
+            text,
+            snapshot,
+            cwd,
+            tandem,
+        } = payload;
+        // The drain path has no command-injected State params — reach the shared
+        // singletons through the app handle instead.
+        let active_mission = app.state::<crate::ActiveMission>();
+        let active_surface = app.state::<crate::ActiveSurface>();
 
-    // The agent gets Bash so it can curl the browser endpoints. `--tools` only
-    // makes a tool *available*; headless `-p` then auto-denies anything not in
-    // `--allowedTools` (there's no one to approve a prompt). So the allow-list
-    // below is what actually lets WebSearch/WebFetch run and scopes Bash to the
-    // daemon's `curl -s http://127.0.0.1:7676/*` — pinned here so the bridge no
-    // longer depends on the global `~/.claude/settings.json` rule (that rule
-    // stays a redundant backstop). Read/Grep/Glob are auto-approved, so they
-    // need no allow entry. MCP is stripped. Never plan mode.
-    let mut args: Vec<String> = vec![
-        "-p".to_string(),
-        prompt,
-        "--output-format".to_string(),
-        "stream-json".to_string(),
-        "--include-partial-messages".to_string(),
-        "--verbose".to_string(),
-        "--permission-mode".to_string(),
-        "default".to_string(),
-        "--tools".to_string(),
-        "Read,Grep,Glob,WebFetch,WebSearch,Bash".to_string(),
-        "--allowedTools".to_string(),
-        "WebSearch".to_string(),
-        "WebFetch".to_string(),
+        let prior_session = browse.db.get_browse_session(&browse_id);
+
+        // First turn wraps the message with the snapshot + tool docs; follow-ups
+        // are verbatim (the resumed session already carries that context). In tandem
+        // mode the first turn also carries the learned source-preference line so the
+        // agent biases its page picks toward domains the user has thumbed up.
+        let tandem = tandem.unwrap_or(false);
+        // When this tab lives inside an active mission, bake the goal in so the
+        // per-tab agent orients its help to what the user is researching.
+        let mission = active_mission.active_goal();
+        let prompt = match &prior_session {
+            None => {
+                let prefs = if tandem {
+                    build_pref_line(&browse.db)
+                } else {
+                    None
+                };
+                build_first_turn_prompt(
+                    snapshot.as_deref(),
+                    &text,
+                    tandem,
+                    prefs.as_deref(),
+                    mission.as_ref().map(|(t, g)| (t.as_str(), g.as_str())),
+                )
+            }
+            Some(_) => text.clone(),
+        };
+
+        // Polis ledger: record the first-turn page-discussion prompt WITH its
+        // thread provenance (this tab's browse_id + resolved parent), and link the
+        // new thread into the session tree; keep every agent turn out of the
+        // global-hook capture stream.
+        if prior_session.is_none() {
+            let surface = active_surface.kind_and_id();
+            let parent = crate::ledger::resolve_parent(
+                None,
+                active_mission.active_id().as_deref(),
+                surface.as_ref().map(|(k, i)| (k.as_str(), i.as_str())),
+                "browse",
+            );
+            if let Some((pk, pid)) = &parent {
+                let _ = crate::ledger::record_session_link(&browse.db, "browse", &browse_id, pk, pid);
+            }
+            crate::ledger::record_agent_prompt(
+                &browse.db,
+                crate::ledger::PromptSource::RustFirstTurn,
+                "browse",
+                &prompt,
+                cwd.clone(),
+                None,
+                None,
+                Some(crate::ledger::ThreadRef {
+                    thread_kind: "browse",
+                    thread_id: browse_id.clone(),
+                    parent_session_id: parent
+                        .filter(|(pk, _)| pk == "session")
+                        .map(|(_, pid)| pid),
+                }),
+                crate::seat::model_for("browse"),
+            );
+        } else {
+            crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+        }
+
+        // The agent gets Bash so it can curl the browser endpoints. `--tools` only
+        // makes a tool *available*; headless `-p` then auto-denies anything not in
+        // `--allowedTools` (there's no one to approve a prompt). So the allow-list
+        // below is what actually lets WebSearch/WebFetch run and scopes Bash to the
+        // daemon's `curl -s http://127.0.0.1:7676/*` — pinned here so the bridge no
+        // longer depends on the global `~/.claude/settings.json` rule (that rule
+        // stays a redundant backstop). Read/Grep/Glob are auto-approved, so they
+        // need no allow entry. MCP is stripped. Never plan mode.
         // Three prefix rules for the same localhost bridge. The matcher is a
         // literal command-prefix glob, so a quoted URL (`curl -s 'http://…`) does
         // NOT match the unquoted rule. Cross-tab routes carry a `?tab=` query the
         // agent single-quotes to protect the shell `?`/`&` — without the quoted
         // variants those reads fall through to headless auto-deny ("bounced for
-        // approval"). All three stay scoped to 127.0.0.1:7676; only quoting widens.
-        "Bash(curl -s http://127.0.0.1:7676/*)".to_string(),
-        "Bash(curl -s 'http://127.0.0.1:7676/*)".to_string(),
-        "Bash(curl -s \"http://127.0.0.1:7676/*)".to_string(),
-        "--strict-mcp-config".to_string(),
-    ];
-    args.extend(crate::seat::flag_args("browse"));
-    if let Some(sid) = &prior_session {
-        args.push("--resume".to_string());
-        args.push(sid.clone());
-    }
+        // approval"). All three stay scoped to 127.0.0.1:7676; only quoting
+        // widens. The whole block rides the canonical `BRIDGE_INVARIANT_ARGS`
+        // ordering so the argv prefix stays byte-stable across surfaces.
+        let mut args: Vec<String> = vec!["-p".to_string(), prompt];
+        args.extend(
+            crate::claude_proc::BRIDGE_INVARIANT_ARGS
+                .iter()
+                .map(|s| s.to_string()),
+        );
+        args.extend(crate::seat::flag_args("browse"));
+        if let Some(sid) = &prior_session {
+            args.push("--resume".to_string());
+            args.push(sid.clone());
+        }
 
-    // Widen the read boundary to span ALL the user's known projects, not just
-    // the single active-folder `cwd`. Each `--add-dir` puts a project inside the
-    // workspace so Read/Grep/Glob "just work" there — this is what lets the agent
-    // readily look at code in any project while the user researches in the
-    // browser. Re-supplied every turn (alongside `--resume`) so the set stays
-    // current. Bounded by `code::MAX_PROJECTS`.
-    for dir in crate::code::project_dirs(&browse.db) {
-        args.push("--add-dir".to_string());
-        args.push(dir);
-    }
+        // Widen the read boundary to span ALL the user's known projects, not just
+        // the single active-folder `cwd`. Each `--add-dir` puts a project inside the
+        // workspace so Read/Grep/Glob "just work" there — this is what lets the agent
+        // readily look at code in any project while the user researches in the
+        // browser. Re-supplied every turn (alongside `--resume`) so the set stays
+        // current. Bounded by `code::MAX_PROJECTS`.
+        for dir in crate::code::project_dirs(&browse.db) {
+            args.push("--add-dir".to_string());
+            args.push(dir);
+        }
 
-    // The agent's cwd scopes Read/Grep/Glob; default to $HOME when the tab has
-    // no associated project folder.
-    let cwd = cwd
-        .filter(|c| !c.trim().is_empty())
-        .or_else(|| std::env::var("HOME").ok())
-        .unwrap_or_else(|| "/".to_string());
+        // The agent's cwd scopes Read/Grep/Glob; default to $HOME when the tab has
+        // no associated project folder.
+        let cwd = cwd
+            .filter(|c| !c.trim().is_empty())
+            .or_else(|| std::env::var("HOME").ok())
+            .unwrap_or_else(|| "/".to_string());
 
-    let claude_bin = browse.claude_bin().await?;
-    let mut cmd = crate::claude_proc::claude_command_for_seat("browse", &claude_bin);
-    let mut child = cmd
-        .current_dir(&cwd)
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                format!(
-                    "could not find the `claude` CLI (looked for `{claude_bin}`). \
-                     Install Claude Code, or launch Redline from a terminal \
-                     so it inherits your shell's PATH."
-                )
-            } else {
-                format!("failed to spawn claude: {e}")
-            }
-        })?;
-    let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
-    let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
+        let claude_bin = browse.claude_bin().await?;
+        let mut cmd = crate::claude_proc::claude_command_for_seat("browse", &claude_bin);
+        let mut child = cmd
+            .current_dir(&cwd)
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    format!(
+                        "could not find the `claude` CLI (looked for `{claude_bin}`). \
+                         Install Claude Code, or launch Redline from a terminal \
+                         so it inherits your shell's PATH."
+                    )
+                } else {
+                    format!("failed to spawn claude: {e}")
+                }
+            })?;
+        let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
+        let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
 
-    {
-        browse
-            .procs
-            .lock()
-            .unwrap()
-            .insert(browse_id.clone(), BrowseProc { child });
-    }
-    tauri::async_runtime::spawn(read_browse(
-        app,
-        browse.db.clone(),
-        browse.procs.clone(),
-        browse_id,
-        stdout,
-        stderr,
-    ));
-    Ok(())
+        let buf = slot.buf();
+        let token = slot.token();
+        if let Err(mut child) = slot.attach(child) {
+            // Cancelled during the spawn window — kill the fresh child and settle
+            // the frontend the same way a mid-stream cancel would.
+            let _ = child.start_kill();
+            let _ = app.emit("browse-cancelled", BrowseCancelled { browse_id });
+            return Ok(());
+        }
+        tauri::async_runtime::spawn(read_browse(
+            app, browse, buf, token, browse_id, stdout, stderr,
+        ));
+        Ok(())
+    })
+}
+
+/// Snapshot of this tab's turn for a remounting BrowserChat: whether a reply
+/// is streaming, since when, and the partial text streamed so far (with its
+/// delta `seq`, the frontend's dedupe watermark).
+#[tauri::command]
+pub fn browse_turn_status(
+    browse: tauri::State<'_, BrowseState>,
+    browse_id: String,
+) -> TurnStatus {
+    browse.turns.status(&browse_id)
 }
 
 /// Load a tab's persisted browse turns, oldest first.
@@ -745,29 +851,46 @@ pub fn get_browse_thread(
 }
 
 /// Kill the in-flight turn for a tab, if any. `read_browse` then sees the key
-/// already gone and emits `browse-cancelled`.
+/// already gone and emits `browse-cancelled`. Queued sends stay queued — the
+/// reader's terminal drain advances them.
 #[tauri::command]
 pub fn browse_cancel(
     browse: tauri::State<'_, BrowseState>,
     browse_id: String,
 ) -> Result<(), String> {
-    let proc = { browse.procs.lock().unwrap().remove(&browse_id) };
-    if let Some(mut proc) = proc {
-        let _ = proc.child.start_kill();
+    if let Some(mut child) = browse.turns.take(&browse_id).and_then(|p| p.child) {
+        let _ = child.start_kill();
     }
     Ok(())
 }
 
-/// Discard a tab's whole thread: kill any in-flight turn, delete its persisted
-/// messages, and forget its agent session.
+/// Remove a queued send (the bubble's ×). Returns its text so the composer
+/// can restore it; `None` when the send already advanced. The persisted
+/// queued row goes with it.
+#[tauri::command]
+pub fn browse_unqueue(
+    browse: tauri::State<'_, BrowseState>,
+    browse_id: String,
+    message_id: String,
+) -> Result<Option<String>, String> {
+    let Some(turn) = browse.turns.unqueue(&browse_id, &message_id) else {
+        return Ok(None);
+    };
+    if let Err(e) = browse.db.delete_thread_message("browse", &message_id) {
+        tracing::warn!(error = %e, "failed to delete the unqueued browse row");
+    }
+    Ok(Some(turn.text))
+}
+
+/// Discard a tab's whole thread: kill any in-flight turn, drop any queued
+/// sends, delete its persisted messages, and forget its agent session.
 #[tauri::command]
 pub fn browse_discard(
     browse: tauri::State<'_, BrowseState>,
     browse_id: String,
 ) -> Result<(), String> {
-    let proc = { browse.procs.lock().unwrap().remove(&browse_id) };
-    if let Some(mut proc) = proc {
-        let _ = proc.child.start_kill();
+    if let Some(mut child) = browse.turns.discard(&browse_id).and_then(|p| p.child) {
+        let _ = child.start_kill();
     }
     browse
         .db
@@ -793,6 +916,7 @@ pub fn browse_kill_all(browse: tauri::State<'_, BrowseState>) -> Result<(), Stri
 async fn drive_browse_stream(
     app: &AppHandle,
     browse_id: &str,
+    buf: &Mutex<PartialBuf>,
     stdout: ChildStdout,
     stderr: ChildStderr,
 ) -> (Option<String>, Option<String>, Option<String>, bool, String) {
@@ -814,11 +938,14 @@ async fn drive_browse_stream(
             match classify_line(&v) {
                 StreamLine::Init(sid) => session = Some(sid),
                 StreamLine::Delta(text) => {
+                    // Append-before-emit: see `turn::push_delta`.
+                    let seq = turn::push_delta(buf, &text);
                     let _ = app.emit(
                         "browse-delta",
                         BrowseDelta {
                             browse_id: browse_id.to_string(),
                             text,
+                            seq,
                         },
                     );
                 }
@@ -850,80 +977,122 @@ async fn drive_browse_stream(
 
 /// Drive one browse turn: stream stdout JSONL → `browse-delta` events, then
 /// reap the child and emit a terminal `browse-done` / `browse-error` /
-/// `browse-cancelled`. Mirrors `fork::read_fork`.
+/// `browse-cancelled`, and drain the send queue. Mirrors `fork::read_fork`.
 async fn read_browse(
     app: AppHandle,
-    db: Arc<Database>,
-    procs: BrowseRegistry,
+    browse: BrowseState,
+    buf: Arc<Mutex<PartialBuf>>,
+    token: u64,
     browse_id: String,
     stdout: ChildStdout,
     stderr: ChildStderr,
 ) {
+    let db = browse.db.clone();
     let (session, final_text, errored, saw_json, stderr_text) =
-        drive_browse_stream(&app, &browse_id, stdout, stderr).await;
+        drive_browse_stream(&app, &browse_id, &buf, stdout, stderr).await;
 
-    let proc = { procs.lock().unwrap().remove(&browse_id) };
+    // Reap the proc + pop the queue in ONE critical section, BEFORE emitting
+    // the terminal event. Token-matched: a reader outliving a cancel must
+    // neither steal a successor turn's proc nor drain its queue.
+    let (proc, next) = browse.turns.finish_and_pop(&browse_id, token);
     let cancelled = proc.is_none() && final_text.is_none();
-    let exit_ok = match proc {
-        Some(mut p) => p.child.wait().await.map(|s| s.success()).unwrap_or(false),
+    let exit_ok = match proc.and_then(|p| p.child) {
+        Some(mut child) => child.wait().await.map(|s| s.success()).unwrap_or(false),
         None => false,
     };
 
-    if cancelled {
-        let _ = app.emit("browse-cancelled", BrowseCancelled { browse_id });
-        return;
-    }
-    if let Some(err) = errored {
-        // Transient API errors keep the session and ask for a retry; only an
-        // explicit context overflow resets the session to start fresh.
-        let why = describe_turn_error(&db, &browse_id, &err);
-        finish_error(&app, &db, &browse_id, &why);
-        return;
-    }
-    if let Some(text) = final_text {
-        if text.trim().is_empty() {
-            finish_error(&app, &db, &browse_id, "claude produced an empty reply");
-            return;
+    'terminal: {
+        if cancelled {
+            let _ = app.emit(
+                "browse-cancelled",
+                BrowseCancelled {
+                    browse_id: browse_id.clone(),
+                },
+            );
+            break 'terminal;
         }
-        // Persist the session id so the next turn resumes (not re-spawns).
-        if let Some(sid) = &session {
-            if let Err(e) = db.set_browse_session(&browse_id, sid) {
-                tracing::warn!(error = %e, "failed to persist browse session id");
+        if let Some(err) = errored {
+            // Transient API errors keep the session and ask for a retry; only an
+            // explicit context overflow resets the session to start fresh.
+            let why = describe_turn_error(&db, &browse_id, &err);
+            finish_error(&app, &db, &browse_id, &why);
+            break 'terminal;
+        }
+        if let Some(text) = final_text {
+            if text.trim().is_empty() {
+                finish_error(&app, &db, &browse_id, "claude produced an empty reply");
+                break 'terminal;
             }
+            // Persist the session id so the next turn resumes (not re-spawns).
+            if let Some(sid) = &session {
+                if let Err(e) = db.set_browse_session(&browse_id, sid) {
+                    tracing::warn!(error = %e, "failed to persist browse session id");
+                }
+            }
+            let msg = BrowseMessage {
+                id: uuid::Uuid::new_v4().to_string(),
+                browse_id: browse_id.clone(),
+                role: "assistant".to_string(),
+                body: text.clone(),
+                status: "complete".to_string(),
+                created_at: now_millis(),
+            };
+            if let Err(e) = db.insert_browse_message(&msg) {
+                tracing::warn!(error = %e, "failed to persist assistant message");
+            }
+            // Companion journal: this tab's agent completed a turn.
+            let _ = db.append_journal("agent_turn", Some("browse"), Some(&browse_id), None, None);
+            let _ = app.emit(
+                "browse-done",
+                BrowseDone {
+                    browse_id: browse_id.clone(),
+                    message_id: msg.id,
+                    body: text,
+                },
+            );
+            break 'terminal;
         }
-        let msg = BrowseMessage {
-            id: uuid::Uuid::new_v4().to_string(),
-            browse_id: browse_id.clone(),
-            role: "assistant".to_string(),
-            body: text.clone(),
-            status: "complete".to_string(),
-            created_at: now_millis(),
+
+        let why = if !exit_ok && !stderr_text.trim().is_empty() {
+            let detail: String = stderr_text.trim().chars().take(500).collect();
+            format!("claude exited abnormally: {detail}")
+        } else if !saw_json {
+            "claude produced no parseable output".to_string()
+        } else {
+            "claude ended without producing a reply".to_string()
         };
-        if let Err(e) = db.insert_browse_message(&msg) {
-            tracing::warn!(error = %e, "failed to persist assistant message");
-        }
-        // Companion journal: this tab's agent completed a turn.
-        let _ = db.append_journal("agent_turn", Some("browse"), Some(&browse_id), None, None);
-        let _ = app.emit(
-            "browse-done",
-            BrowseDone {
-                browse_id,
-                message_id: msg.id,
-                body: text,
-            },
-        );
-        return;
+        finish_error(&app, &db, &browse_id, &why);
     }
 
-    let why = if !exit_ok && !stderr_text.trim().is_empty() {
-        let detail: String = stderr_text.trim().chars().take(500).collect();
-        format!("claude exited abnormally: {detail}")
-    } else if !saw_json {
-        "claude produced no parseable output".to_string()
-    } else {
-        "claude ended without producing a reply".to_string()
-    };
-    finish_error(&app, &db, &browse_id, &why);
+    // Drain: `finish_and_pop` already re-reserved the slot for the queue
+    // head, so no concurrent send can slip in between the terminal above and
+    // the start below.
+    if let Some((queued, payload, slot)) = next {
+        if let Err(e) = db.set_thread_message_status("browse", &queued.message_id, "complete") {
+            tracing::warn!(error = %e, "failed to flip a drained browse row");
+        }
+        let _ = app.emit(
+            "browse-queue-advanced",
+            BrowseQueueAdvanced {
+                browse_id: browse_id.clone(),
+                message_id: queued.message_id.clone(),
+            },
+        );
+        if let Err(e) =
+            start_browse_turn(app.clone(), browse.clone(), browse_id.clone(), payload, slot).await
+        {
+            // The slot released via the guard's Drop. Flip the row so the UI
+            // offers "wasn't sent — resend"; no chain-drain (predictable
+            // failure behavior beats a cascade).
+            let _ = db.set_thread_message_status("browse", &queued.message_id, "unsent");
+            finish_error(
+                &app,
+                &db,
+                &browse_id,
+                &format!("your queued message wasn't sent: {e}"),
+            );
+        }
+    }
 }
 
 /// Whether a failed turn's error is an EXPLICIT context-length signature — the
@@ -1124,6 +1293,94 @@ mod tests {
         let msg = describe_turn_error(&db, "tab-2", "prompt is too long: 1200000 tokens");
         assert!(msg.to_lowercase().contains("reset"));
         assert_eq!(db.get_browse_session("tab-2"), None);
+    }
+
+    /// The status probe is what lets a remounted BrowserChat rediscover an
+    /// in-flight turn (and its partial reply text) after a surface switch —
+    /// it must mirror the registry exactly: streaming with the buffered
+    /// partial while the entry exists, idle the moment it's taken.
+    #[test]
+    fn turn_status_streams_with_partial_while_registered_and_idles_after_take() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let state = BrowseState::new(Arc::new(Database::open_in_memory().unwrap()));
+            assert!(!state.turns.status("tab-1").streaming);
+
+            let slot = state.turns.begin("tab-1").unwrap();
+            let buf = slot.buf();
+            let child = tokio::process::Command::new("sleep")
+                .arg("30")
+                .kill_on_drop(true)
+                .spawn()
+                .expect("spawn sleep");
+            slot.attach(child).expect("attach onto live reservation");
+            turn::push_delta(&buf, "partial reply ");
+            turn::push_delta(&buf, "text");
+
+            let live = state.turns.status("tab-1");
+            assert!(live.streaming);
+            assert!(live.started_at.is_some());
+            assert_eq!(live.partial.as_deref(), Some("partial reply text"));
+            assert_eq!(live.seq, 2);
+            assert!(state.is_running("tab-1"));
+            // Scoping holds: another tab reads idle.
+            assert!(!state.turns.status("tab-2").streaming);
+
+            if let Some(mut child) = state.turns.take("tab-1").and_then(|p| p.child) {
+                let _ = child.start_kill();
+            }
+            let done = state.turns.status("tab-1");
+            assert!(!done.streaming);
+            assert_eq!(done.partial, None);
+            assert_eq!(done.seq, 0);
+        });
+    }
+
+    /// Two first turns with different VARIABLE inputs (snapshot, mission,
+    /// user text) must share a byte-identical prefix spanning the whole
+    /// invariant block — the cache-stable ordering contract.
+    #[test]
+    fn first_turn_invariant_prefix_is_byte_stable() {
+        fn common_prefix<'a>(a: &'a str, b: &str) -> &'a str {
+            let n = a
+                .bytes()
+                .zip(b.bytes())
+                .take_while(|(x, y)| x == y)
+                .count();
+            &a[..n]
+        }
+        let a = build_first_turn_prompt(
+            Some(r#"{"url":"https://one.example","title":"One"}"#),
+            "first question",
+            false,
+            None,
+            None,
+        );
+        let b = build_first_turn_prompt(
+            Some(r#"{"url":"https://two.example","title":"Two"}"#),
+            "second question, entirely different",
+            false,
+            None,
+            Some(("Mission", "a goal")),
+        );
+        let shared = common_prefix(&a, &b);
+        // The shared prefix must reach the END of the invariant block — the
+        // skill reference is its last line.
+        assert!(shared.contains("Follow the `browse` skill"));
+        assert!(shared.contains("keep browser actions purposeful."));
+        // And every variable section sits after it.
+        assert!(!shared.contains("first question"));
+        assert!(!shared.contains("MISSION is currently active"));
+        // Tandem mode widens the invariant prefix but stays stable within
+        // itself.
+        let t1 = build_first_turn_prompt(None, "q1", true, Some("prefers wikipedia"), None);
+        let t2 = build_first_turn_prompt(Some("{}"), "q2", true, None, None);
+        let tshared = common_prefix(&t1, &t2);
+        assert!(tshared.contains("TANDEM AGENT MODE is ON"));
+        assert!(!tshared.contains("prefers wikipedia"));
     }
 
     #[test]

@@ -15,6 +15,7 @@ export interface SurfaceInfo {
     | "review"
     | "servers"
     | "memory"
+    | "runs"
     | "terminal"
     | "welcome";
   id: string | null;
@@ -30,6 +31,7 @@ export interface SurfaceInputs {
   reviewOpen: boolean;
   serversOpen: boolean;
   memoryOpen: boolean;
+  runsOpen: boolean;
   /** The active plan review session, when one is selected. */
   activeId: string | null;
   planTitle: string | null;
@@ -99,6 +101,18 @@ export function deriveActiveSurface(s: SurfaceInputs): SurfaceInfo {
       kind: "memory",
       id: null,
       label: "Memory",
+      detail: null,
+      projectPath: null,
+    };
+  }
+  if (s.runsOpen) {
+    // The Orchestration Monitor spans every orchestrated run — machine-scoped
+    // like Localhost and Memory.
+    return {
+      ...base,
+      kind: "runs",
+      id: null,
+      label: "Runs",
       detail: null,
       projectPath: null,
     };

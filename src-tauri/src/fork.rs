@@ -14,7 +14,6 @@
 //! `fork-cancelled` close a turn. `thread_messages` rows are written only
 //! when a turn finishes — live streaming is frontend-only state.
 
-use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -22,13 +21,14 @@ use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, ChildStderr, ChildStdout};
+use tokio::process::{ChildStderr, ChildStdout};
 
 use crate::claude_proc::{classify_line, resolve_claude_bin, StreamLine};
 use crate::db::Database;
 use crate::state::{
     now_millis, CommentAttachment, CommentKind, ReviewAnnotation, SessionStore, ThreadMessage,
 };
+use crate::turn::{self, PartialBuf, TurnStatus, Turns};
 
 /// Where a thread's resumable fork-session id is persisted: plan comments
 /// store it on their `comments` row; review annotations on their
@@ -52,25 +52,13 @@ fn fork_key(session_id: &str, comment_id: &str) -> String {
     format!("{session_id}\u{0}{comment_id}")
 }
 
-/// One in-flight forked `claude` turn. `tokio::process::Child::start_kill()`
-/// is a synchronous, non-blocking SIGKILL, so no separate kill handle is
-/// needed — the registry owns the whole `Child`.
-struct ForkProc {
-    child: Child,
-    /// Unix-ms when this turn was registered — surfaced by
-    /// `fork_thread_status` so a remounted thread can restore its elapsed
-    /// counter after a session switch.
-    started_at: i64,
-}
-
-type ForkRegistry = Arc<Mutex<HashMap<String, ForkProc>>>;
-
-/// Registry of running fork turns, keyed by `fork_key`. Cloned into managed
-/// Tauri state. The `std::sync::Mutex` is only ever held for a tiny
-/// `lock → mutate → drop` critical section — never across an `.await`.
+/// Registry of running fork turns, keyed by `fork_key`, on the shared
+/// `turn::Turns` contract (atomic slot reservation + probeable partial
+/// buffer + `started_at` for the elapsed counter). Cloned into managed Tauri
+/// state.
 #[derive(Clone)]
 pub struct ForkState {
-    procs: ForkRegistry,
+    turns: Arc<Turns<()>>,
     db: Arc<Database>,
     /// Absolute path to the `claude` binary, resolved lazily on first fork
     /// use — a Finder-launched app inherits a minimal PATH and cannot find it
@@ -83,7 +71,7 @@ pub struct ForkState {
 impl ForkState {
     pub fn new(db: Arc<Database>) -> Self {
         Self {
-            procs: Arc::new(Mutex::new(HashMap::new())),
+            turns: Arc::new(Turns::new()),
             db,
             claude_bin: Arc::new(OnceLock::new()),
         }
@@ -106,15 +94,10 @@ impl ForkState {
             return Err("nothing to ask the colleague".to_string());
         }
         let key = format!("consult\u{0}{session_id}");
-        {
-            let guard = self.procs.lock().unwrap();
-            if guard.contains_key(&key) {
-                return Err(
-                    "that plan session is already being consulted — try again in a moment"
-                        .to_string(),
-                );
-            }
-        }
+        // Atomic reservation; early `?` returns release it via the guard's Drop.
+        let slot = self.turns.begin(&key).map_err(|_| {
+            "that plan session is already being consulted — try again in a moment".to_string()
+        })?;
         let framed = format!(
             "You are an ephemeral read-only fork of this planning session. The \
              user's COMPANION — their global cross-surface discussion — is \
@@ -144,17 +127,10 @@ impl ForkState {
             .map_err(|e| format!("failed to spawn claude: {e}"))?;
         let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
         let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
-        {
-            self.procs
-                .lock()
-                .unwrap()
-                .insert(
-                key.clone(),
-                ForkProc {
-                    child,
-                    started_at: now_millis(),
-                },
-            );
+        if let Err(mut child) = slot.attach(child) {
+            // Cancelled during the spawn window — the reservation is gone.
+            let _ = child.start_kill();
+            return Err("the consult was cancelled".to_string());
         }
 
         let outcome = tokio::time::timeout(
@@ -162,12 +138,12 @@ impl ForkState {
             crate::claude_proc::collect_turn(stdout, stderr),
         )
         .await;
-        let proc = { self.procs.lock().unwrap().remove(&key) };
+        let proc = self.turns.take(&key).and_then(|p| p.child);
         let outcome = match outcome {
             Ok(o) => o,
             Err(_) => {
-                if let Some(mut p) = proc {
-                    let _ = p.child.start_kill();
+                if let Some(mut child) = proc {
+                    let _ = child.start_kill();
                 }
                 let _ = self.db.record_friction(
                     "turn_timeout",
@@ -178,8 +154,8 @@ impl ForkState {
                 return Err("the colleague took too long to respond".to_string());
             }
         };
-        if let Some(mut p) = proc {
-            let _ = p.child.wait().await;
+        if let Some(mut child) = proc {
+            let _ = child.wait().await;
         }
         if let Some(err) = outcome.errored {
             return Err(err);
@@ -209,13 +185,7 @@ impl ForkState {
     /// Kill every running fork. Backs the `fork_kill_all` command and the
     /// app-teardown hook so no `claude` child is left orphaned.
     pub fn kill_all(&self) {
-        let drained: Vec<ForkProc> = {
-            let mut guard = self.procs.lock().unwrap();
-            guard.drain().map(|(_, p)| p).collect()
-        };
-        for mut proc in drained {
-            let _ = proc.child.start_kill();
-        }
+        self.turns.kill_all();
     }
 }
 
@@ -227,6 +197,10 @@ struct ForkDelta {
     session_id: String,
     comment_id: String,
     text: String,
+    /// This delta's position in the turn's stream — `fork_thread_status`
+    /// reports the seq already folded into `partial`, and the frontend drops
+    /// any delta at or below that watermark.
+    seq: u64,
 }
 
 #[derive(Clone, Serialize)]
@@ -373,7 +347,7 @@ fn discussion_fork_args(seat: &str, prompt: String) -> Vec<String> {
         "--permission-mode".to_string(),
         "default".to_string(),
         "--tools".to_string(),
-        "Read,Grep,Glob,WebFetch,WebSearch,Bash".to_string(),
+        crate::claude_proc::HEADLESS_TOOLS.to_string(),
         "--allowedTools".to_string(),
         "WebSearch".to_string(),
         "WebFetch".to_string(),
@@ -413,13 +387,13 @@ pub async fn fork_thread_send(
     let turn_attachments = attachments.unwrap_or_default();
     let key = fork_key(&session_id, &comment_id);
 
-    // Reject a second concurrent turn for the same comment.
-    {
-        let guard = fork.procs.lock().unwrap();
-        if guard.contains_key(&key) {
-            return Err("a reply is still streaming for this comment".to_string());
-        }
-    }
+    // Reject a second concurrent turn for the same comment. The reservation
+    // is atomic and spans the whole spawn; early `?` returns release it via
+    // the guard's Drop.
+    let slot = fork
+        .turns
+        .begin(&key)
+        .map_err(|_| "a reply is still streaming for this comment".to_string())?;
 
     // Resolve the comment + cwd from the in-memory store; the prior fork id
     // from the DB (never a possibly-stale in-memory copy).
@@ -551,23 +525,25 @@ pub async fn fork_thread_send(
     let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
     let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
 
-    // Register the running child, then start the reader. lock → insert → drop.
-    {
-        fork.procs
-            .lock()
-            .unwrap()
-            .insert(
-                key.clone(),
-                ForkProc {
-                    child,
-                    started_at: now_millis(),
-                },
-            );
+    // Attach the running child to the reservation, then start the reader.
+    let buf = slot.buf();
+    if let Err(mut child) = slot.attach(child) {
+        // Cancelled during the spawn window.
+        let _ = child.start_kill();
+        let _ = app.emit(
+            "fork-cancelled",
+            ForkCancelled {
+                session_id,
+                comment_id,
+            },
+        );
+        return Ok(());
     }
     tauri::async_runtime::spawn(read_fork(
         app,
         fork.db.clone(),
-        fork.procs.clone(),
+        fork.turns.clone(),
+        buf,
         key,
         session_id,
         comment_id,
@@ -662,12 +638,11 @@ pub async fn review_thread_send(
         return Err("empty message".to_string());
     }
     let key = fork_key(&review_id, &annotation_id);
-    {
-        let guard = fork.procs.lock().unwrap();
-        if guard.contains_key(&key) {
-            return Err("a reply is still streaming for this annotation".to_string());
-        }
-    }
+    // Atomic reservation; early `?` returns release it via the guard's Drop.
+    let slot = fork
+        .turns
+        .begin(&key)
+        .map_err(|_| "a reply is still streaming for this annotation".to_string())?;
 
     let session = fork
         .db
@@ -764,22 +739,24 @@ pub async fn review_thread_send(
     let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
     let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
 
-    {
-        fork.procs
-            .lock()
-            .unwrap()
-            .insert(
-                key.clone(),
-                ForkProc {
-                    child,
-                    started_at: now_millis(),
-                },
-            );
+    let buf = slot.buf();
+    if let Err(mut child) = slot.attach(child) {
+        // Cancelled during the spawn window.
+        let _ = child.start_kill();
+        let _ = app.emit(
+            "fork-cancelled",
+            ForkCancelled {
+                session_id: review_id,
+                comment_id: annotation_id,
+            },
+        );
+        return Ok(());
     }
     tauri::async_runtime::spawn(read_fork(
         app,
         fork.db.clone(),
-        fork.procs.clone(),
+        fork.turns.clone(),
+        buf,
         key,
         review_id,
         annotation_id,
@@ -841,12 +818,11 @@ pub async fn review_question_send(
         return Err("empty message".to_string());
     }
     let key = fork_key(&review_id, &question_id);
-    {
-        let guard = fork.procs.lock().unwrap();
-        if guard.contains_key(&key) {
-            return Err("a reply is still streaming for this question".to_string());
-        }
-    }
+    // Atomic reservation; early `?` returns release it via the guard's Drop.
+    let slot = fork
+        .turns
+        .begin(&key)
+        .map_err(|_| "a reply is still streaming for this question".to_string())?;
 
     let session = fork
         .db
@@ -932,22 +908,24 @@ pub async fn review_question_send(
     let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
     let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
 
-    {
-        fork.procs
-            .lock()
-            .unwrap()
-            .insert(
-                key.clone(),
-                ForkProc {
-                    child,
-                    started_at: now_millis(),
-                },
-            );
+    let buf = slot.buf();
+    if let Err(mut child) = slot.attach(child) {
+        // Cancelled during the spawn window.
+        let _ = child.start_kill();
+        let _ = app.emit(
+            "fork-cancelled",
+            ForkCancelled {
+                session_id: review_id,
+                comment_id: question_id,
+            },
+        );
+        return Ok(());
     }
     tauri::async_runtime::spawn(read_fork(
         app,
         fork.db.clone(),
-        fork.procs.clone(),
+        fork.turns.clone(),
+        buf,
         key,
         review_id,
         question_id,
@@ -967,9 +945,8 @@ pub fn review_thread_discard(
     annotation_id: String,
 ) -> Result<(), String> {
     let key = fork_key(&review_id, &annotation_id);
-    let proc = { fork.procs.lock().unwrap().remove(&key) };
-    if let Some(mut proc) = proc {
-        let _ = proc.child.start_kill();
+    if let Some(mut child) = fork.turns.take(&key).and_then(|p| p.child) {
+        let _ = child.start_kill();
     }
     fork.db
         .delete_thread(&review_id, &annotation_id)
@@ -1065,12 +1042,11 @@ pub async fn draft_thread_send(
         return Err("empty message".to_string());
     }
     let key = fork_key(&draft_id, &comment_id);
-    {
-        let guard = fork.procs.lock().unwrap();
-        if guard.contains_key(&key) {
-            return Err("a reply is still streaming for this comment".to_string());
-        }
-    }
+    // Atomic reservation; early `?` returns release it via the guard's Drop.
+    let slot = fork
+        .turns
+        .begin(&key)
+        .map_err(|_| "a reply is still streaming for this comment".to_string())?;
 
     let comment = fork
         .db
@@ -1165,22 +1141,24 @@ pub async fn draft_thread_send(
     let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
     let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
 
-    {
-        fork.procs
-            .lock()
-            .unwrap()
-            .insert(
-                key.clone(),
-                ForkProc {
-                    child,
-                    started_at: now_millis(),
-                },
-            );
+    let buf = slot.buf();
+    if let Err(mut child) = slot.attach(child) {
+        // Cancelled during the spawn window.
+        let _ = child.start_kill();
+        let _ = app.emit(
+            "fork-cancelled",
+            ForkCancelled {
+                session_id: draft_id,
+                comment_id,
+            },
+        );
+        return Ok(());
     }
     tauri::async_runtime::spawn(read_fork(
         app,
         fork.db.clone(),
-        fork.procs.clone(),
+        fork.turns.clone(),
+        buf,
         key,
         draft_id,
         comment_id,
@@ -1200,9 +1178,8 @@ pub fn draft_thread_discard(
     comment_id: String,
 ) -> Result<(), String> {
     let key = fork_key(&draft_id, &comment_id);
-    let proc = { fork.procs.lock().unwrap().remove(&key) };
-    if let Some(mut proc) = proc {
-        let _ = proc.child.start_kill();
+    if let Some(mut child) = fork.turns.take(&key).and_then(|p| p.child) {
+        let _ = child.start_kill();
     }
     fork.db
         .delete_thread(&draft_id, &comment_id)
@@ -1222,44 +1199,29 @@ pub fn get_thread(
         .map_err(|e| format!("failed to load thread: {e}"))
 }
 
-/// Snapshot of whether a thread has a turn in flight right now.
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ForkThreadStatus {
-    pub streaming: bool,
-    pub started_at: Option<i64>,
-}
-
 /// Core lookup shared by the command and its test.
-fn thread_status_in(procs: &ForkRegistry, scope_id: &str, item_id: &str) -> ForkThreadStatus {
-    let guard = procs.lock().unwrap();
-    match guard.get(&fork_key(scope_id, item_id)) {
-        Some(p) => ForkThreadStatus {
-            streaming: true,
-            started_at: Some(p.started_at),
-        },
-        None => ForkThreadStatus {
-            streaming: false,
-            started_at: None,
-        },
-    }
+fn thread_status_in(turns: &Turns<()>, scope_id: &str, item_id: &str) -> TurnStatus {
+    turns.status(&fork_key(scope_id, item_id))
 }
 
-/// Whether a discussion thread has a turn streaming right now, and since
-/// when. Generic over all four fork families — plan comments, review
-/// annotations, review questions, drafter comments — because they share one
-/// registry keyed by `fork_key(scope, item)`. Streaming state is otherwise
-/// component-local in the frontend: switching sessions unmounts the thread,
-/// and a remount would look idle mid-turn (silent thinking stretches emit no
-/// deltas) until the send path rejected with "a reply is still streaming".
-/// The thread components seed from this on mount instead.
+/// Whether a discussion thread has a turn streaming right now, since when,
+/// and the reply text streamed so far (`partial` + its delta `seq`
+/// watermark — the turn-contract extension; existing callers only read
+/// `streaming`/`startedAt` and are unaffected). Generic over all four fork
+/// families — plan comments, review annotations, review questions, drafter
+/// comments — because they share one registry keyed by
+/// `fork_key(scope, item)`. Streaming state is otherwise component-local in
+/// the frontend: switching sessions unmounts the thread, and a remount would
+/// look idle mid-turn (silent thinking stretches emit no deltas) until the
+/// send path rejected with "a reply is still streaming". The thread
+/// components seed from this on mount instead.
 #[tauri::command]
 pub fn fork_thread_status(
     fork: tauri::State<'_, ForkState>,
     scope_id: String,
     item_id: String,
-) -> ForkThreadStatus {
-    thread_status_in(&fork.procs, &scope_id, &item_id)
+) -> TurnStatus {
+    thread_status_in(&fork.turns, &scope_id, &item_id)
 }
 
 /// Kill the in-flight turn for a comment, if any. `read_fork` then sees the
@@ -1271,9 +1233,8 @@ pub fn fork_thread_cancel(
     comment_id: String,
 ) -> Result<(), String> {
     let key = fork_key(&session_id, &comment_id);
-    let proc = { fork.procs.lock().unwrap().remove(&key) };
-    if let Some(mut proc) = proc {
-        let _ = proc.child.start_kill();
+    if let Some(mut child) = fork.turns.take(&key).and_then(|p| p.child) {
+        let _ = child.start_kill();
     }
     Ok(())
 }
@@ -1287,9 +1248,8 @@ pub fn fork_thread_discard(
     comment_id: String,
 ) -> Result<(), String> {
     let key = fork_key(&session_id, &comment_id);
-    let proc = { fork.procs.lock().unwrap().remove(&key) };
-    if let Some(mut proc) = proc {
-        let _ = proc.child.start_kill();
+    if let Some(mut child) = fork.turns.take(&key).and_then(|p| p.child) {
+        let _ = child.start_kill();
     }
     fork.db
         .delete_thread(&session_id, &comment_id)
@@ -1318,7 +1278,8 @@ pub fn fork_kill_all(fork: tauri::State<'_, ForkState>) -> Result<(), String> {
 async fn read_fork(
     app: AppHandle,
     db: Arc<Database>,
-    procs: ForkRegistry,
+    turns: Arc<Turns<()>>,
+    buf: Arc<Mutex<PartialBuf>>,
     key: String,
     session_id: String,
     comment_id: String,
@@ -1345,12 +1306,15 @@ async fn read_fork(
             match classify_line(&v) {
                 StreamLine::Init(sid) => fork_session = Some(sid),
                 StreamLine::Delta(text) => {
+                    // Append-before-emit: see `turn::push_delta`.
+                    let seq = turn::push_delta(&buf, &text);
                     let _ = app.emit(
                         "fork-delta",
                         ForkDelta {
                             session_id: session_id.clone(),
                             comment_id: comment_id.clone(),
                             text,
+                            seq,
                         },
                     );
                 }
@@ -1378,18 +1342,14 @@ async fn read_fork(
     let ((fork_session, final_text, errored, saw_json), stderr_text) =
         tokio::join!(stdout_fut, stderr_fut);
 
-    // Reap: pull the entry, then await the child. lock → remove → drop, no
-    // `.await` inside the block. The key being gone before we removed it
-    // means cancel/discard/kill_all already pulled it.
-    let proc = { procs.lock().unwrap().remove(&key) };
+    // Reap: pull the entry, then await the child. The key being gone before
+    // we removed it means cancel/discard/kill_all already pulled it. Removal
+    // happens BEFORE the terminal event — the (Phase 3) queue drain fires at
+    // terminal time and must pass the busy guard.
+    let proc = turns.take(&key);
     let cancelled = proc.is_none() && final_text.is_none();
-    let exit_ok = match proc {
-        Some(mut p) => p
-            .child
-            .wait()
-            .await
-            .map(|s| s.success())
-            .unwrap_or(false),
+    let exit_ok = match proc.and_then(|p| p.child) {
+        Some(mut child) => child.wait().await.map(|s| s.success()).unwrap_or(false),
         None => false,
     };
 
@@ -1566,10 +1526,13 @@ mod tests {
         assert!(args.iter().any(|a| a == "--strict-mcp-config"));
         assert!(!args.iter().any(|a| a == "plan"), "must never be plan mode");
 
-        // The `--tools` set: Bash is present (for curl) but no write/plan tools.
+        // The `--tools` set: Bash is present (for curl) and Skill so the fork
+        // can actually load its skill body, but no write/plan tools. Pin the
+        // spawn site to the shared const so the two can't drift apart.
         let tools_idx = args.iter().position(|a| a == "--tools").unwrap();
         let tools = &args[tools_idx + 1];
-        assert_eq!(tools, "Read,Grep,Glob,WebFetch,WebSearch,Bash");
+        assert_eq!(tools, "Read,Grep,Glob,WebFetch,WebSearch,Bash,Skill");
+        assert_eq!(*tools, crate::claude_proc::HEADLESS_TOOLS);
         for forbidden in ["Edit", "Write", "ExitPlanMode", "NotebookEdit", "Task"] {
             assert!(
                 !tools.split(',').any(|t| t == forbidden),
@@ -1627,41 +1590,42 @@ mod tests {
     fn thread_status_streams_while_registered_and_idles_after_removal() {
         // The status command is what lets a remounted thread rediscover an
         // in-flight turn after a session switch — it must mirror the registry
-        // exactly: streaming (with the start stamp) while the entry exists,
-        // idle the moment it's removed.
+        // exactly: streaming (with the start stamp and buffered partial)
+        // while the entry exists, idle the moment it's removed.
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         rt.block_on(async {
-            let procs: ForkRegistry = Arc::new(Mutex::new(HashMap::new()));
-            let idle = thread_status_in(&procs, "scope-1", "item-1");
+            let turns: Arc<Turns<()>> = Arc::new(Turns::new());
+            let idle = thread_status_in(&turns, "scope-1", "item-1");
             assert!(!idle.streaming);
             assert_eq!(idle.started_at, None);
+            assert_eq!(idle.partial, None);
 
+            let key = fork_key("scope-1", "item-1");
+            let slot = turns.begin(&key).expect("begin");
+            let buf = slot.buf();
             let child = tokio::process::Command::new("sleep")
                 .arg("30")
                 .kill_on_drop(true)
                 .spawn()
                 .expect("spawn sleep");
-            let key = fork_key("scope-1", "item-1");
-            procs.lock().unwrap().insert(
-                key.clone(),
-                ForkProc {
-                    child,
-                    started_at: 1234,
-                },
-            );
+            slot.attach(child).expect("attach onto live reservation");
+            turn::push_delta(&buf, "so far");
 
-            let live = thread_status_in(&procs, "scope-1", "item-1");
+            let live = thread_status_in(&turns, "scope-1", "item-1");
             assert!(live.streaming);
-            assert_eq!(live.started_at, Some(1234));
+            assert!(live.started_at.is_some());
+            assert_eq!(live.partial.as_deref(), Some("so far"));
+            assert_eq!(live.seq, 1);
             // Scoping holds: the same item id in another scope reads idle.
-            assert!(!thread_status_in(&procs, "scope-2", "item-1").streaming);
+            assert!(!thread_status_in(&turns, "scope-2", "item-1").streaming);
 
-            let mut p = procs.lock().unwrap().remove(&key).unwrap();
-            let _ = p.child.start_kill();
-            let done = thread_status_in(&procs, "scope-1", "item-1");
+            if let Some(mut child) = turns.take(&key).and_then(|p| p.child) {
+                let _ = child.start_kill();
+            }
+            let done = thread_status_in(&turns, "scope-1", "item-1");
             assert!(!done.streaming);
             assert_eq!(done.started_at, None);
         });

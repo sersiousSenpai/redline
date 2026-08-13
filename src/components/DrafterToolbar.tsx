@@ -23,6 +23,7 @@ import {
   MessageSquare,
   Minus,
   MoveVertical,
+  PenLine,
   Redo2,
   Strikethrough,
   Table as TableIcon,
@@ -47,6 +48,17 @@ interface DrafterToolbarProps {
   sidecarOpen?: boolean;
   onToggleSidecar?: () => void;
   commentCount?: number;
+  /** Word's Editing/Suggesting switch. Suggesting paints the user's own
+   *  keystrokes as tracked changes; Editing is plain typing. */
+  suggesting?: boolean;
+  onSetSuggesting?: (on: boolean) => void;
+  /** Review rows in the mode menu: settle/revert EVERY pending user run. */
+  hasUserRuns?: boolean;
+  onResolveAllMine?: (keep: boolean) => void;
+  /** ✦ co-authoring: send the caret's paragraph to the doc agent as an
+   *  instruction (the toolbar twin of ⌘↵). */
+  onGenerate?: () => void;
+  canGenerate?: boolean;
 }
 
 const ICON = 16;
@@ -472,6 +484,12 @@ export function DrafterToolbar({
   sidecarOpen = false,
   onToggleSidecar,
   commentCount = 0,
+  suggesting = false,
+  onSetSuggesting,
+  hasUserRuns = false,
+  onResolveAllMine,
+  onGenerate,
+  canGenerate = false,
 }: DrafterToolbarProps) {
   const disabled = !editor;
 
@@ -1080,6 +1098,130 @@ export function DrafterToolbar({
           <Eraser size={ICON} strokeWidth={STROKE} />
         </ToolButton>
       </Group>
+
+      {/* ✦ co-authoring: send the caret's paragraph to the doc agent as an
+          instruction — it consumes the paragraph and drafts in its place. */}
+      {onGenerate && (
+        <Group>
+          <span
+            className="rl-tipwrap"
+            data-tip="Write an instruction as a paragraph, then send it to the agent — it drafts in its place (⌘↵)"
+          >
+            <button
+              type="button"
+              aria-label="Generate from this paragraph"
+              disabled={disabled || !canGenerate}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={onGenerate}
+              className="rl-ribbon-btn"
+              style={{
+                ...btnBase,
+                width: "auto",
+                gap: "4px",
+                padding: "0 8px",
+                fontSize: "12px",
+                color: "var(--color-info)",
+                opacity: disabled || !canGenerate ? 0.35 : 1,
+                cursor: disabled || !canGenerate ? "default" : "pointer",
+                whiteSpace: "nowrap",
+              }}
+            >
+              ✦ Generate
+            </button>
+          </span>
+        </Group>
+      )}
+
+      {/* Editing / Suggesting — Word's mode switch. Suggesting turns the
+          user's own keystrokes into tracked runs (Keep/Revert in place). */}
+      {onSetSuggesting && (
+        <Group>
+          <RibbonMenu
+            title="Editing mode — whether your edits are tracked"
+            label={
+              <span
+                className="flex items-center gap-1"
+                style={
+                  suggesting ? { color: "var(--color-info)" } : undefined
+                }
+              >
+                <PenLine size={13} strokeWidth={STROKE} />
+                {suggesting ? "Suggesting" : "Editing"}
+              </span>
+            }
+            minWidth={104}
+          >
+            {(close) => (
+              <>
+                <MenuRow
+                  active={!suggesting}
+                  onClick={() => {
+                    onSetSuggesting(false);
+                    close();
+                  }}
+                >
+                  <span>
+                    Editing
+                    <span
+                      style={{
+                        display: "block",
+                        fontSize: "10.5px",
+                        color: "var(--color-ink-muted)",
+                      }}
+                    >
+                      Your edits change the text directly
+                    </span>
+                  </span>
+                </MenuRow>
+                <MenuRow
+                  active={suggesting}
+                  onClick={() => {
+                    onSetSuggesting(true);
+                    close();
+                  }}
+                >
+                  <span>
+                    Suggesting
+                    <span
+                      style={{
+                        display: "block",
+                        fontSize: "10.5px",
+                        color: "var(--color-ink-muted)",
+                      }}
+                    >
+                      Your edits land as tracked changes
+                    </span>
+                  </span>
+                </MenuRow>
+                {onResolveAllMine && (
+                  <>
+                    <div className="rl-menu-sep" />
+                    <div className="rl-menu-heading">Review</div>
+                    <MenuRow
+                      disabled={!hasUserRuns}
+                      onClick={() => {
+                        onResolveAllMine(true);
+                        close();
+                      }}
+                    >
+                      Keep all my changes
+                    </MenuRow>
+                    <MenuRow
+                      disabled={!hasUserRuns}
+                      onClick={() => {
+                        onResolveAllMine(false);
+                        close();
+                      }}
+                    >
+                      Revert all my changes
+                    </MenuRow>
+                  </>
+                )}
+              </>
+            )}
+          </RibbonMenu>
+        </Group>
+      )}
 
       {/* Comments — the sidecar toggle, with a count badge when any exist. */}
       {onToggleSidecar && (

@@ -14,6 +14,17 @@ export const DOC_MIN_FRAC = 0.2;
 export function docMinFor(winWidth: number): number {
   return Math.max(DOC_MIN, Math.round(winWidth * DOC_MIN_FRAC));
 }
+/** Minimum useful document-strip HEIGHT above the terminal dock — the vertical
+ *  twin of DOC_MIN/docMinFor, for the dock's tile-driven growth. `docMinFor`
+ *  is a *width* rule and the wrong instrument for a vertical cap. */
+export const DOC_MIN_H = 220;
+/** On tall windows the absolute floor reads squeezed shut; scale it. */
+export const DOC_MIN_H_FRAC = 0.2;
+/** The effective document floor above the dock for a window: the larger of
+ *  the absolute minimum and the window fraction. */
+export function docMinHFor(winHeight: number): number {
+  return Math.max(DOC_MIN_H, Math.round(winHeight * DOC_MIN_H_FRAC));
+}
 /** Width of one pane gutter — the strip of hull canvas between two plates.
  *  The gutter IS the divider: PaneDivider's layout box spans it, transparent at
  *  rest so the canvas shows through, painting a slim bar only on hover/drag. */
@@ -132,6 +143,46 @@ export function canonicalLayout(
     docPinned: false,
     splitRatio: 0.5,
   };
+}
+
+/** The live layout flags that define the shell's SHAPE — which plates are
+ *  open, fullscreen, pinned, and which surface owns the pane. Widths are
+ *  deliberately not part of this: see isLayoutAtRest. */
+export interface RestingShapeInput {
+  sidebarCollapsed: boolean;
+  paneCollapsed: boolean;
+  paneFullscreen: boolean;
+  termCollapsed: boolean;
+  termFullscreen: boolean;
+  docPinned: boolean;
+  surface: string;
+}
+
+/** Is the live layout already at the canonical resting shape? Drives the
+ *  snap-back toggle: at rest, ⌘⇧0 closes the panes instead of re-snapping
+ *  (messy → canonical → closed → canonical…). Derived, never stored — a
+ *  stored "closed" bit would go stale the moment another flow forces a pane
+ *  open (plan intercepts call setPaneCollapsed(false) directly).
+ *
+ *  Shape flags ONLY, compared against the `canonical` object's fields (not
+ *  literals, so this can never drift from canonicalLayout — including the
+ *  short-window case where canonical itself folds the terminal). Widths are
+ *  deliberately excluded: a 5px divider nudge must not flip the button's
+ *  meaning from "snap back" to "close everything". A width-drifted layout
+ *  gets one "free" re-snap before the close — which is the right UX. */
+export function isLayoutAtRest(
+  current: RestingShapeInput,
+  canonical: CanonicalLayout,
+): boolean {
+  return (
+    current.sidebarCollapsed === canonical.sidebarCollapsed &&
+    current.paneCollapsed === canonical.paneCollapsed &&
+    current.paneFullscreen === canonical.paneFullscreen &&
+    current.termCollapsed === canonical.termCollapsed &&
+    current.termFullscreen === canonical.termFullscreen &&
+    current.docPinned === canonical.docPinned &&
+    current.surface === canonical.surface
+  );
 }
 
 export interface PaneLayoutInput {

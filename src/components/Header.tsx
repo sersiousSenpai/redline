@@ -342,13 +342,15 @@ export function Header({
             />
           )}
           {/* Snap-back (⌘⇧0): the layout cluster's escape hatch — return
-              every plate to the canonical resting shape. Quiet glyph; the
+              every plate to the canonical resting shape; pressed again from
+              rest it closes the panes (full-bleed document). A momentary
+              action, not a mode, so no `active` prop. Quiet glyph; the
               tour will point here, so it carries a stable anchor. */}
           <span data-tour="snapback" className="flex">
             <Button
               onClick={onSnapBack}
-              title="Snap the layout back to its resting shape (⌘⇧0)"
-              ariaLabel="Snap the layout back to its resting shape"
+              title="Snap the layout to its resting shape — again to close the panes (⌘⇧0)"
+              ariaLabel="Snap the layout to its resting shape — again to close the panes"
               icon="⌂"
             />
           </span>
@@ -360,8 +362,8 @@ export function Header({
             iconMono
           />
         </div>
-        {/* The ambient memory pill — header chrome, no longer buried in the
-            Settings dropdown (Memory is a main surface now). */}
+        {/* The ambient memory pill — Memory's one entry point (deliberately
+            not a main-radio button; the pill opens the surface). */}
         {memoryEnabled && (
           <MemoryStatusPill
             onOpenMemory={onOpenMemory}

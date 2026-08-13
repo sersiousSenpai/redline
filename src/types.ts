@@ -261,6 +261,198 @@ export interface SessionSummary {
   heldTerminalId?: string | null;
   /** Persisted attach state; "detached" needs a restore before submit/approve. */
   attachState: AttachState;
+  /** Orchestrated-run lifecycle (orchestrating | running | in_code_review |
+   *  landed | stalled); null for plain Approves. Drives the run chip. */
+  runState?: string | null;
+}
+
+/** Mirrors Rust's `db::PlanRunRow` — one orchestrated run's durable record:
+ *  the orchestrator's exit report (claims), the workflow script path, and the
+ *  human resolution that closes the run. */
+export interface PlanRun {
+  planSessionId: string;
+  /** The verbatim report body (JSON: {summary, subtasks:[{title, planSection,
+   *  verified, skipped, notes}], ...}). Parsed by the RunReport GUI. */
+  reportJson: string;
+  scriptPath: string | null;
+  workflowRan: boolean;
+  /** resolved | needs_follow_up | abandoned; null = awaiting the human mark. */
+  resolution: string | null;
+  resolutionNote: string | null;
+  resolvedAt: number | null;
+  createdAt: number;
+}
+
+/** Mirrors Rust's `db::OrchestrationRow` — one orchestrated launch's
+ *  live-monitor anchor, written at the ingest-claim beacon. Discovery fields
+ *  are null until the run watcher finds them on disk. */
+export interface OrchestrationRow {
+  planSessionId: string;
+  claudeSessionId: string;
+  transcriptPath: string;
+  cwd: string | null;
+  startedAt: number;
+  runId: string | null;
+  transcriptDir: string | null;
+  scriptPath: string | null;
+  /** 'workflow' | 'sequential'; null until the watcher knows. */
+  mode: string | null;
+  /** The dock terminal tab the run was launched into (captured at launch,
+   *  folded in at the ingest claim); null for pre-column rows. */
+  terminalId: string | null;
+  /** Joined from sessions.run_state (never stored on the row itself). */
+  runState: string | null;
+}
+
+/** Mirrors Rust's `runwatch::PhaseInfo`. */
+export interface RunPhase {
+  title: string;
+  detail: string | null;
+}
+
+/** Mirrors Rust's `runwatch::RunTotals`. */
+export interface RunTotals {
+  /** Upper bound from script call sites — "~N planned", not a promise. */
+  plannedAgents: number | null;
+  running: number;
+  done: number;
+  failed: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+  toolCalls: number;
+  filesChanged: string[];
+  /** Agents whose observed model is the seat's configured FALLBACK rather
+   *  than its primary — the run kept going degraded instead of failing. */
+  degraded?: number;
+}
+
+/** Mirrors Rust's `runwatch::AgentTile` — one subagent's live card. */
+export interface AgentTile {
+  agentId: string;
+  label: string | null;
+  /** "manifest" (authoritative) | "script" (heuristic) | "preview". The UI
+   *  shows a `~` marker whenever this is not "manifest". */
+  labelSource: string;
+  phase: string | null;
+  model: string | null;
+  effort: string | null;
+  /** The observed model is the seat's configured FALLBACK, not its primary
+   *  (`--fallback-model` kicked in) — graceful degradation, surfaced. */
+  degraded?: boolean;
+  /** running | done | failed | cached. */
+  state: string;
+  startedAt: number | null;
+  lastActivityAt: number | null;
+  durationMs: number | null;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  toolCalls: number;
+  lastToolName: string | null;
+  promptPreview: string | null;
+  resultPreview: string | null;
+  filesChanged: string[];
+  transcriptBytes: number;
+}
+
+/** Mirrors Rust's `runwatch::ManifestInfo` — completion-time authority. */
+export interface RunManifestInfo {
+  status: string;
+  durationMs: number | null;
+  summary: string | null;
+  agentCount: number | null;
+  totalTokens: number | null;
+  totalToolCalls: number | null;
+}
+
+/** Mirrors Rust's `runwatch::RunSnapshot` — the Orchestration Monitor's one
+ *  data shape, folded live from the Workflow artifact set. */
+export interface RunSnapshot {
+  planSessionId: string;
+  claudeSessionId: string;
+  runState: string | null;
+  startedAt: number;
+  updatedAt: number;
+  seq: number;
+  /** "pending" (no Workflow launch seen yet) | "workflow" | "sequential". */
+  mode: string;
+  runId: string | null;
+  workflowName: string | null;
+  workflowDescription: string | null;
+  phases: RunPhase[];
+  scriptPath: string | null;
+  transcriptDir: string | null;
+  totals: RunTotals;
+  agents: AgentTile[];
+  manifest: RunManifestInfo | null;
+  reportFiled: boolean;
+  dirsMissing: boolean;
+  /** Honest degradation trail, rendered as muted lines. */
+  notes: string[];
+}
+
+/** Mirrors Rust's `work::WorkItem` — one row of the durable work graph.
+ *  Provenance (`originKind`/`originId`) is a breadcrumb, never ownership;
+ *  `projectPath` is a filterable facet. */
+export interface WorkItem {
+  id: string;
+  title: string;
+  body: string | null;
+  /** open | claimed | closed | held. */
+  status: string;
+  /** P0-style: 0 = drop everything, larger = calmer; 2 = normal. */
+  priority: number;
+  /** task | bug | question | message. */
+  kind: string;
+  assignee: string | null;
+  claimedAt: number | null;
+  leaseExpiresAt: number | null;
+  closedAt: number | null;
+  closeReason: string | null;
+  deferUntil: number | null;
+  originKind: string | null;
+  originId: string | null;
+  projectPath: string | null;
+  pinned: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Mirrors Rust's `work::WorkEdge` — one typed edge between items. */
+export interface WorkEdge {
+  fromId: string;
+  toId: string;
+  /** blocks | parent-child | discovered-from | relates-to | duplicates |
+   *  supersedes | replies-to. */
+  type: string;
+  createdBy: string | null;
+  createdAt: number;
+}
+
+/** Mirrors Rust's `work::WorkGraphRollup` — the `get_work_graph` command's
+ *  one read: every non-closed item, deduped edges, and the unfiltered ready
+ *  frontier's ids. Read-only: the graph is consumed by agents over the
+ *  routes; this shape only makes it visible. */
+export interface WorkGraph {
+  items: WorkItem[];
+  edges: WorkEdge[];
+  readyIds: string[];
+}
+
+/** One event from `orchestration_agent_tail` (thinking elided). */
+export type AgentTailEvent =
+  | { kind: "text"; text: string }
+  | { kind: "toolUse"; name: string; summary: string }
+  | { kind: "toolResult"; summary: string };
+
+/** Mirrors Rust's `runwatch::AgentTailResult`. */
+export interface AgentTailResult {
+  events: AgentTailEvent[];
+  nextCursor: number;
+  truncated: boolean;
 }
 
 /** One entry in a directory listing from the `list_dir` command. `path` is
@@ -404,11 +596,44 @@ export interface ThreadMessage {
   attachments?: CommentAttachment[];
 }
 
+// --- Shared turn contract (mirrors src-tauri/src/turn.rs) --------------------
+
+/** One send waiting behind an in-flight turn. */
+export interface QueuedTurn {
+  messageId: string;
+  text: string;
+  queuedAt: number;
+}
+
+/** What a `*_send` resolves to: the turn started now, or queued behind the
+ *  in-flight one. `messageId` is the persisted user row either way — the
+ *  optimistic bubble reconciles onto it. */
+export interface SendOutcome {
+  started: boolean;
+  queued: boolean;
+  messageId: string;
+}
+
+/** What a remounting chat panel learns from a `*_turn_status` probe: whether a
+ *  turn is streaming, since when, the reply text streamed so far, and how many
+ *  deltas that text folds in (`seq`). The frontend drops any delta event with
+ *  `seq <=` this watermark — the backend appends before it emits, so the
+ *  probed text plus the surviving deltas is exactly the full stream. */
+export interface TurnStatus {
+  streaming: boolean;
+  startedAt: number | null;
+  partial: string | null;
+  seq: number;
+  queued: QueuedTurn[];
+}
+
 /** A chunk of streaming assistant text for a comment's fork thread. */
 export interface ForkDeltaEvent {
   sessionId: SessionId;
   commentId: string;
   text: string;
+  /** This delta's position in the turn's stream (see `TurnStatus.seq`). */
+  seq: number;
 }
 
 /** A fork turn finished — `body` is the authoritative full reply. */
@@ -450,6 +675,8 @@ export interface BrowseMessage {
 export interface BrowseDeltaEvent {
   browseId: string;
   text: string;
+  /** This delta's position in the turn's stream (see `TurnStatus.seq`). */
+  seq: number;
 }
 
 /** A browse turn finished — `body` is the authoritative full reply. */
@@ -555,6 +782,8 @@ export interface MissionMessage {
 export interface MissionDeltaEvent {
   missionId: string;
   text: string;
+  /** This delta's position in the turn's stream (see `TurnStatus.seq`). */
+  seq: number;
 }
 
 /** An orchestrator turn finished — `body` is the authoritative full reply. */
@@ -617,6 +846,8 @@ export interface CompanionMessage {
 export interface CompanionDeltaEvent {
   companionId: string;
   text: string;
+  /** This delta's position in the turn's stream (see `TurnStatus.seq`). */
+  seq: number;
 }
 
 /** A Companion turn finished — `body` is the authoritative full reply. */
@@ -657,7 +888,7 @@ export interface DraftComment {
 export interface LinkedMessage {
   id: string;
   linkedId: string;
-  /** "user" | "assistant". */
+  /** "user" | "assistant" | "system" (a conversion divider row). */
   role: string;
   body: string;
   /** "complete" | "error". */
@@ -673,6 +904,8 @@ export interface LinkedMessage {
 export interface LinkedDeltaEvent {
   linkedId: string;
   text: string;
+  /** This delta's position in the turn's stream (see `TurnStatus.seq`). */
+  seq: number;
 }
 
 /** A linked turn finished — `body` is the authoritative full reply. */
@@ -712,6 +945,8 @@ export interface MemChatMessage {
 export interface MemChatDeltaEvent {
   threadId: string;
   text: string;
+  /** This delta's position in the turn's stream (see `TurnStatus.seq`). */
+  seq: number;
 }
 
 /** An Ask turn finished — `body` is the authoritative full reply. */
@@ -877,6 +1112,15 @@ export interface ReviewQuestion {
 }
 
 /** Live git state behind the review pane's status strip (`push_status`). */
+/** Mirrors Rust's `hook::WorkflowAvailability` — the locally detectable ways
+ *  native multi-agent workflows can be silently disabled (settings flag, env
+ *  kill-switch). The plan-tier toggle is not detectable; the launch toast
+ *  covers that gap. */
+export interface WorkflowAvailability {
+  disabledInSettings: boolean;
+  disabledInEnv: boolean;
+}
+
 export interface GitStatus {
   /** Current branch; null = detached HEAD. */
   branch: string | null;
@@ -982,6 +1226,13 @@ export interface AiReviewDoneEvent {
   important: number;
   nits: number;
   preExisting: number;
+  /** Shadow attention-router verdict — closed vocabulary, no third tier.
+   *  Informational only: recorded + shown in a banner, acted on by nothing. */
+  verdict?: "auto" | "attend";
+  verdictReason?: string;
+  verdictSignals?: string[];
+  verdictBar?: number;
+  verdictCitedSeq?: number | null;
 }
 export interface AiReviewErrorEvent {
   reviewId: string;

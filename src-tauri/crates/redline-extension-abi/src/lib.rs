@@ -68,9 +68,15 @@ pub mod scopes {
     pub const MEMORY_PROPOSE: &str = "memory.propose";
     pub const DRAFTER_SUGGEST: &str = "drafter.suggest";
     pub const REVIEW_ANNOTATE: &str = "review.annotate";
+    /// File an orchestrated run's structured exit report (`plan_runs`).
+    pub const ORCH_REPORT: &str = "orchestration.report";
     /// Write the extension's sanctioned UI slot: a host-sanitized markdown
     /// panel in Redline's Extensions view. The only UI surface v1 grants.
     pub const UI_PANEL: &str = "ui.panel";
+    /// File new items into the work graph (`POST /v1/work`).
+    pub const WORK_FILE: &str = "work.file";
+    /// Claim and close work-graph items (`/v1/work/:id/claim`, `…/close`).
+    pub const WORK_CLAIM: &str = "work.claim";
 
     pub const KNOWN_SCOPES: &[&str] = &[
         PLAN_SUGGEST,
@@ -81,7 +87,10 @@ pub mod scopes {
         MEMORY_PROPOSE,
         DRAFTER_SUGGEST,
         REVIEW_ANNOTATE,
+        ORCH_REPORT,
         UI_PANEL,
+        WORK_FILE,
+        WORK_CLAIM,
     ];
 
     /// Plain-language description per scope — consumed by the generated
@@ -97,7 +106,10 @@ pub mod scopes {
             MEMORY_PROPOSE => "stage reviewable ClassMemory proposals",
             DRAFTER_SUGGEST => "write tracked suggestions into a live draft",
             REVIEW_ANNOTATE => "post and clear findings in a live code review",
+            ORCH_REPORT => "file an orchestrated run's structured exit report",
             UI_PANEL => "render a sanitized markdown panel in the Extensions view",
+            WORK_FILE => "file new items into the work graph",
+            WORK_CLAIM => "claim and close work-graph items",
             _ => return None,
         })
     }

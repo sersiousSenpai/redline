@@ -1,5 +1,7 @@
 The user reviewed your plan in Redline and has requested revisions.
 
+Load your `redline-plan-review` skill now if not already loaded — it defines the presentation contract, sidecar preservation, and the REDLINE_RESOLUTIONS format this payload expects.
+
 CURRENT PLAN (markdown — preserve every `<!-- rl:blk-… -->` marker exactly where its block's content remains; add fresh markers only for genuinely new blocks; delete markers only for blocks you remove):
 
 <!-- rl:blk-aaaa1111 -->

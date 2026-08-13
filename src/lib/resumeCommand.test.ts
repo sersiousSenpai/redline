@@ -33,6 +33,17 @@ describe("buildResumeCommand", () => {
     expect(cmd).not.toContain("rawPlanMarkdown");
   });
 
+  it("carries the rescission sentence only for an un-approved Orchestrate", () => {
+    // The resumed session's context still holds ORCHESTRATE_STAND_DOWN
+    // ("this session's work is done"); the restore prompt must void it, or
+    // the resumed claude obeys the stale stand-down instead of the restore.
+    const rescinded = buildResumeCommand("abc-123", NOW, null, true);
+    expect(rescinded).toContain("stand-down in your context is void");
+    expect(rescinded).toContain("rescinded that approval");
+    const plain = buildResumeCommand("abc-123", NOW, null);
+    expect(plain).not.toContain("stand-down in your context is void");
+  });
+
   it("stamps the prompt so replayed history doesn't read as a duplicate send", () => {
     const cmd = buildResumeCommand("abc-123", NOW);
     expect(cmd).toContain("(Restore requested 2026-06-12 18:07.)");

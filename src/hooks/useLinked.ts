@@ -48,6 +48,36 @@ export function useLinked() {
     }
   }, [refreshLinked, setActiveLinkedId]);
 
+  /** Convert a per-tab chat into a linked discussion — a FORK, not a move:
+   *  the tab's own thread and session stay untouched; the linked chat's first
+   *  turn resumes the tab session with `--fork-session`, and the visible
+   *  history is copied behind a divider. Makes the new discussion active. */
+  const convertFromBrowse = useCallback(
+    async (args: {
+      browseId: string;
+      tabN?: number | null;
+      tabTitle?: string | null;
+      tabUrl?: string | null;
+      title?: string | null;
+    }): Promise<Linked | null> => {
+      try {
+        const l = await invoke<Linked>("linked_create_from_browse", {
+          browseId: args.browseId,
+          tabN: args.tabN ?? null,
+          tabTitle: args.tabTitle ?? null,
+          tabUrl: args.tabUrl ?? null,
+          title: args.title ?? null,
+        });
+        await refreshLinked();
+        setActiveLinkedId(l.linkedId);
+        return l;
+      } catch {
+        return null;
+      }
+    },
+    [refreshLinked, setActiveLinkedId],
+  );
+
   const resumeLinked = useCallback(
     (linkedId: string) => {
       setActiveLinkedId(linkedId);
@@ -78,6 +108,7 @@ export function useLinked() {
     activeLinkedId,
     linkedSessions,
     startLinked,
+    convertFromBrowse,
     resumeLinked,
     closeLinked,
     deleteLinked,

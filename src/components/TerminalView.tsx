@@ -7,10 +7,13 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
+import type { WebglAddon } from "@xterm/addon-webgl";
 import { loadXterm, xtermMods, type XtermMods } from "../lib/xtermLoader";
 import { contrastRatio, luminance, mix } from "../theme/derive";
 import { getTheme, type AnsiSlot } from "../theme/themes";
 import { isResizing, onResizeSession } from "../lib/resizeSession";
+import type { HandoffDeps } from "../lib/terminalHandoff";
+import { enqueuePtyOp, enqueuePtyOpChecked } from "../lib/ptyFence";
 import {
   createResizeScheduler,
   isUsableTermSize,
@@ -34,9 +37,11 @@ interface TerminalViewProps {
    *  one "what is running in here" signal a terminal volunteers. Fires only on
    *  an actual title sequence, never per output chunk. */
   onTitle?: (id: string, title: string) => void;
-  /** Called when the user clicks into this pane — lets the host mark which of
-   *  two split panes is the focused/"active" terminal. */
-  onPaneFocus?: () => void;
+  /** Called with this terminal's id when the user clicks into its pane — lets
+   *  the host focus the tile that shows it. Carries the id so ONE stable
+   *  callback serves every tile in the grid (a per-tile closure would re-mint
+   *  N functions per render and defeat the fleet's memo). */
+  onPaneFocus?: (id: string) => void;
 }
 
 // POSIX single-quote escaping so paths with spaces/quotes paste safely.
@@ -67,20 +72,178 @@ const COL_FIT_DUTY = 6;
  *  reflows a few times during a drag rather than appearing frozen. */
 const COL_FIT_MIN_GAP_MS = 120;
 
-const ptyLifecycle = new Map<string, Promise<unknown>>();
-export function enqueuePtyOp(
-  id: string,
-  op: () => Promise<unknown>,
-): Promise<unknown> {
-  const prev = ptyLifecycle.get(id) ?? Promise.resolve();
-  const next = prev.then(op, op).catch(() => {});
-  ptyLifecycle.set(id, next);
-  // Prune the entry once this tail settles (identity-checked: a later op may
-  // have chained past us) so closed terminals don't accumulate in the map.
-  void next.finally(() => {
-    if (ptyLifecycle.get(id) === next) ptyLifecycle.delete(id);
+/** Ceiling on simultaneously live WebGL renderers. WebKit caps live WebGL
+ *  contexts per process (~16), and at the cap it loses the OLDEST context
+ *  rather than refusing the new one — so an unbounded "one context per mounted
+ *  terminal" degrades the longest-lived terminals silently, exactly as a long
+ *  session starts tiling many at once. Contexts are therefore tied to
+ *  *visibility* (created on show, disposed on hide), which bounds them to the
+ *  tile count, and this ceiling backstops even that: a terminal past it keeps
+ *  xterm's DOM renderer — a deliberate fallback instead of a context loss that
+ *  never comes back. */
+const MAX_WEBGL = 8;
+let liveWebglContexts = 0;
+
+// The fence lives in src/lib/ptyFence.ts (pure, unit-tested); re-exported
+// here so existing importers keep their path.
+export { enqueuePtyOp };
+
+// --- spawn signal + output tap (the verified-handoff seams) -----------------
+//
+// `openSessionTerminal` returns before React commits the tab, let alone before
+// `pty_spawn` forks a shell — so a caller that wants to type into a fresh
+// terminal used to guess with a bare setTimeout, and a write that raced the
+// spawn vanished without a trace. These two exports replace the guess: a real
+// spawn promise, and an observation tap over the shell's output. Entries are
+// keyed by tab id and tiny (a promise + an 8 KB tail); terminals per app
+// session number in the dozens, so they are kept for the id's lifetime rather
+// than risking a StrictMode teardown pruning an entry a waiter still holds.
+
+interface SpawnDeferred {
+  promise: Promise<void>;
+  resolve: () => void;
+  reject: (e: unknown) => void;
+}
+
+const ptySpawned = new Map<string, SpawnDeferred>();
+
+/** The lazily-created deferred for a tab's `pty_spawn` — creatable *before*
+ *  the TerminalView for that id exists, so a caller that asks first simply
+ *  waits for the mount to catch up. */
+function spawnDeferred(id: string): SpawnDeferred {
+  let d = ptySpawned.get(id);
+  if (!d) {
+    let resolve!: () => void;
+    let reject!: (e: unknown) => void;
+    const promise = new Promise<void>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    // A rejected spawn must not surface as an unhandled rejection when no
+    // caller is awaiting it (most tabs are opened by the user, not a handoff).
+    promise.catch(() => {});
+    d = { promise, resolve, reject };
+    ptySpawned.set(id, d);
+  }
+  return d;
+}
+
+/** Resolves when `pty_spawn` for `id` settles OK; rejects on spawn error or
+ *  after `timeoutMs`. The tty line discipline buffers input written from the
+ *  moment the PTY exists, so once this resolves a command can go immediately —
+ *  the old 900 ms rc-file guess was never the real requirement. */
+export function whenPtySpawned(id: string, timeoutMs: number): Promise<void> {
+  const d = spawnDeferred(id);
+  return new Promise<void>((resolve, reject) => {
+    const timer = window.setTimeout(
+      () => reject(new Error(`terminal ${id} did not spawn within ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+    d.promise.then(
+      () => {
+        window.clearTimeout(timer);
+        resolve();
+      },
+      (e) => {
+        window.clearTimeout(timer);
+        reject(e instanceof Error ? e : new Error(String(e)));
+      },
+    );
   });
-  return next;
+}
+
+/** Rolling output tails, kept only for tabs some caller has ever observed —
+ *  decoding every chunk of every terminal would be pure waste. */
+const OUTPUT_TAIL_BYTES = 8 * 1024;
+interface OutputTap {
+  tail: string;
+  decoder: TextDecoder;
+  waiters: {
+    re: RegExp;
+    resolve: (matched: boolean) => void;
+    timer: number;
+  }[];
+}
+const ptyOutputTaps = new Map<string, OutputTap>();
+
+/** Feed one raw output chunk into the tap for `id`, if anyone is observing.
+ *  Called from the onOutput handler for BOTH the visible and hidden paths —
+ *  this is a tap, not a change to the ack/flow-control path. */
+function tapPtyOutput(id: string, bytes: Uint8Array) {
+  const tap = ptyOutputTaps.get(id);
+  if (!tap) return;
+  tap.tail = (tap.tail + tap.decoder.decode(bytes, { stream: true })).slice(
+    -OUTPUT_TAIL_BYTES,
+  );
+  if (tap.waiters.length === 0) return;
+  tap.waiters = tap.waiters.filter((w) => {
+    if (!w.re.test(tap.tail)) return true;
+    window.clearTimeout(w.timer);
+    w.resolve(true);
+    return false;
+  });
+}
+
+/** The house `HandoffDeps` wiring: the spawn signal + output tap above, the
+ *  checked write and liveness commands below. One shared instance so every
+ *  "open a terminal and type into it" call site (App, TerminalTabs) runs the
+ *  same verified path. The journal is a no-op here — the Orchestrate flow
+ *  overlays its own session-scoped journal. */
+export const tauriHandoffDeps: HandoffDeps = {
+  whenSpawned: whenPtySpawned,
+  isLive: (id) => invoke<boolean>("pty_is_live", { id }),
+  // The write rides the SAME per-id fence as spawn/kill/resize. Without it,
+  // dev StrictMode's double-mount queues [spawn₁, kill₁, spawn₂] and the
+  // handoff's write — released by spawn₁'s signal — races kill₁: when it wins
+  // the backend truthfully reports delivery into the doomed first shell, and
+  // the user watches the second come up empty (the lost-restore bug). Fenced,
+  // the write serializes behind the churn and lands in the surviving shell;
+  // rejection ("terminal not running") still reaches the handoff.
+  writeChecked: (id, data) =>
+    enqueuePtyOpChecked(id, () => invoke("pty_write_checked", { id, data })),
+  awaitOutput: (id, match, timeoutMs) => awaitPtyOutput(id, match, timeoutMs),
+  journal: () => {},
+  sleep: (ms) => new Promise((res) => window.setTimeout(res, ms)),
+};
+
+/** Resolve `true` when `match` appears in the tab's output (tested against a
+ *  bounded rolling tail that starts accumulating at first observation),
+ *  `false` on timeout — never rejects, so callers can treat a missed marker
+ *  as "fall back to a settle" rather than an abort. */
+export function awaitPtyOutput(
+  id: string,
+  match: RegExp,
+  timeoutMs: number,
+): Promise<boolean> {
+  let tap = ptyOutputTaps.get(id);
+  if (!tap) {
+    tap = { tail: "", decoder: new TextDecoder(), waiters: [] };
+    ptyOutputTaps.set(id, tap);
+  }
+  if (match.test(tap.tail)) return Promise.resolve(true);
+  const forTap = tap;
+  return new Promise<boolean>((resolve) => {
+    const waiter = {
+      re: match,
+      resolve,
+      timer: window.setTimeout(() => {
+        forTap.waiters = forTap.waiters.filter((w) => w !== waiter);
+        resolve(false);
+      }, timeoutMs),
+    };
+    forTap.waiters.push(waiter);
+  });
+}
+
+// Programmatic terminal reveals (runDevServer, plan launch/restore) open the
+// dock without the user asking to type in it. Every visible pane's reveal
+// effect ends in term.focus(), which would yank the caret away — from the
+// embedded browser page especially, whose native webview loses first-responder
+// to the main webview the moment any DOM element takes focus. Call this right
+// before a programmatic reveal; the window covers mount + rAF of every pane.
+let suppressRevealFocusUntil = 0;
+export function suppressTerminalRevealFocus(ms = 1500) {
+  suppressRevealFocusUntil = performance.now() + ms;
 }
 
 // xterm.js's built-in defaults (the Tango palette), spelled out so the dark
@@ -348,7 +511,7 @@ export const TerminalView = memo(function TerminalView({
   useEffect(() => {
     const host = hostRef.current;
     if (!host || !xt) return;
-    const { Terminal, FitAddon, WebglAddon } = xt;
+    const { Terminal, FitAddon } = xt;
 
     const term = new Terminal({
       fontFamily:
@@ -371,18 +534,6 @@ export const TerminalView = memo(function TerminalView({
     // and listener it owns.
     term.onTitleChange((title) => onTitleRef.current?.(id, title));
 
-    // GPU renderer: offloads cell rendering to WebGL so a fast stream doesn't
-    // peg the main thread compositing the DOM. WebGL can fail to init on some
-    // GPUs/contexts and the context can be lost at runtime — both cases fall
-    // back to xterm's default renderer rather than breaking the terminal.
-    try {
-      const webgl = new WebglAddon();
-      webgl.onContextLoss(() => webgl.dispose());
-      term.loadAddon(webgl);
-    } catch {
-      /* no WebGL here — xterm's default renderer stays active */
-    }
-
     // Per-terminal raw-byte output stream. One Channel = one subscriber (this
     // tab) → no N-tab event fan-out, no id filtering, no base64. Bytes arrive
     // as an ArrayBuffer; write them straight to xterm. The write callback is our
@@ -391,6 +542,9 @@ export const TerminalView = memo(function TerminalView({
     const onOutput = new Channel<ArrayBuffer>();
     onOutput.onmessage = (buf) => {
       const bytes = new Uint8Array(buf);
+      // Observation tap first (no-op unless someone awaits this tab's
+      // output), so hidden tabs are observable too.
+      tapPtyOutput(id, bytes);
       // Hidden tab: stash the raw bytes (bounded) and ack immediately so the
       // backend keeps flowing — but pay no parse cost until the tab is shown.
       if (!visibleRef.current) {
@@ -422,12 +576,16 @@ export const TerminalView = memo(function TerminalView({
         cols: term.cols || 80,
         rows: term.rows || 24,
         onOutput,
-      }).catch((e) => {
-        // Skip the writeln if this mount was already torn down (StrictMode).
-        if (termRef.current === term) {
-          term.writeln(`\r\n[redline: failed to start shell: ${e}]`);
-        }
-      }),
+      }).then(
+        () => spawnDeferred(id).resolve(),
+        (e) => {
+          spawnDeferred(id).reject(e);
+          // Skip the writeln if this mount was already torn down (StrictMode).
+          if (termRef.current === term) {
+            term.writeln(`\r\n[redline: failed to start shell: ${e}]`);
+          }
+        },
+      ),
     );
 
     const dataSub = term.onData((d) => {
@@ -505,9 +663,20 @@ export const TerminalView = memo(function TerminalView({
     // was backgrounded can leave the xterm renderer stale and the pane
     // unfocused. Re-fit, repaint and refocus on every window-focus regain so
     // the terminal never strands the user.
+    // Refocus only when the terminal actually held the caret at blur — the
+    // regain must not yank typing away from wherever the user really was.
+    // Two gates: activeElement-in-host at blur (user was in another DOM
+    // surface, e.g. an editor), and document.hasFocus() at regain (macOS
+    // restored first-responder to the browser child webview, so the main
+    // webview never got key back — focusing now would steal it).
+    let heldFocusAtBlur = false;
     const focusPromise = getCurrentWindow().onFocusChanged(
       ({ payload: focused }) => {
-        if (!focused || !visibleRef.current) return;
+        if (!focused) {
+          heldFocusAtBlur = host.contains(document.activeElement);
+          return;
+        }
+        if (!visibleRef.current) return;
         requestAnimationFrame(() => {
           const term = termRef.current;
           if (!term) return;
@@ -515,7 +684,7 @@ export const TerminalView = memo(function TerminalView({
           if (term.cols > 0 && term.rows > 0) {
             term.refresh(0, term.rows - 1);
           }
-          term.focus();
+          if (heldFocusAtBlur && document.hasFocus()) term.focus();
         });
       },
     );
@@ -540,6 +709,50 @@ export const TerminalView = memo(function TerminalView({
     // at most once (null → loaded), and the body doesn't run until it has.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [xt]);
+
+  // GPU renderer: offloads cell rendering to WebGL so a fast stream doesn't
+  // peg the main thread compositing the DOM. Scoped to VISIBILITY, not mount —
+  // a hidden terminal paints nothing, and holding a context for it is what
+  // walks the app into WebKit's process-wide cap (see MAX_WEBGL). The show
+  // transition already pays for a full repaint (the [visible] effect's
+  // `term.refresh`), so the renderer swap costs nothing extra. WebGL can also
+  // fail to init or lose its context at runtime — every path falls back to
+  // xterm's default renderer rather than breaking the terminal, and the next
+  // show transition tries again.
+  useEffect(() => {
+    if (!visible || !xt) return;
+    const term = termRef.current;
+    if (!term) return;
+    if (liveWebglContexts >= MAX_WEBGL) return;
+    let addon: WebglAddon;
+    try {
+      addon = new xt.WebglAddon();
+    } catch {
+      return; /* no WebGL here — xterm's default renderer stays active */
+    }
+    liveWebglContexts++;
+    // Shared by context loss and the hide/unmount cleanup, which can both fire
+    // for one addon — the counter must move exactly once either way.
+    let dropped = false;
+    const drop = () => {
+      if (dropped) return;
+      dropped = true;
+      liveWebglContexts--;
+      try {
+        addon.dispose();
+      } catch {
+        /* already torn down with the terminal */
+      }
+    };
+    addon.onContextLoss(drop);
+    try {
+      term.loadAddon(addon);
+    } catch {
+      drop();
+      return;
+    }
+    return drop;
+  }, [visible, xt]);
 
   // Re-theme in place when the app theme changes.
   useEffect(() => {
@@ -584,7 +797,9 @@ export const TerminalView = memo(function TerminalView({
         // can come back with a stale xterm render surface.
         term.refresh(0, term.rows - 1);
       }
-      term?.focus();
+      // Explicit user opens (caret, footer, ⇧↓, tab switch) focus the
+      // terminal; programmatic reveals arm the suppress window and don't.
+      if (performance.now() >= suppressRevealFocusUntil) term?.focus();
     });
     return () => cancelAnimationFrame(raf);
   }, [visible, id, drainPending, applyFit]);
@@ -596,7 +811,7 @@ export const TerminalView = memo(function TerminalView({
       // xterm focus even if xterm's own mousedown handling is in a bad state
       // after a background/visibility cycle.
       onPointerDown={() => {
-        onPaneFocus?.();
+        onPaneFocus?.(id);
         termRef.current?.focus();
       }}
       style={{

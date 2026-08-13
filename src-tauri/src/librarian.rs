@@ -78,6 +78,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::claude_proc::{classify_line, resolve_claude_bin, StreamLine};
 use crate::context::FrictionDigest;
+use crate::db::Database;
 use crate::ledger;
 
 /// One prioritized next-action the Librarian surfaces.
@@ -283,20 +284,99 @@ fn matching_brace(bytes: &[u8], start: usize) -> Option<usize> {
 }
 
 // ---------------------------------------------------------------------------
+// The checklist producer — advisory lines become durable work items
+// ---------------------------------------------------------------------------
+
+/// Producers wave: every parsed `ChecklistItem` files a durable work item
+/// instead of living only in the strip's local render. The rank maps onto
+/// the P0-style priority column (rank 1 stays urgent 1, rank 2 normal 2,
+/// deeper ranks settle at calm 3 — 0 is reserved for a human's own "drop
+/// everything"); the category and detail ride the body. Provenance is
+/// `origin_kind="librarian_run"` with NO origin id — a survey run has no
+/// durable row, and the dedupe deliberately spans runs: the next survey
+/// re-deriving the same backlog line skips it while an item with that exact
+/// title still stands unclosed. The Librarian seat produced these, so its
+/// `items_filed` moves by the count filed. Advisory-only stays true: filing
+/// state directs no agent — the frontier is read, never dispatched, by this
+/// module.
+pub fn file_checklist_items(db: &Database, result: &LibrarianResult) -> usize {
+    /// Ledger actor + seat whose `items_filed` accrues.
+    const LIBRARIAN_ACTOR: &str = "librarian";
+    let mut filed = 0usize;
+    for item in &result.checklist {
+        let priority = item.priority.clamp(1, 3);
+        let mut body = format!("[{}] {}", item.category, item.detail.trim());
+        if let Some(count) = item.count {
+            body.push_str(&format!("\nMagnitude: {count}"));
+        }
+        if let Some(action) = item.action.as_deref() {
+            body.push_str(&format!("\nSuggested surface action: {action}"));
+        }
+        match db.file_produced_work_item(
+            &item.title,
+            Some(&body),
+            "task",
+            "open",
+            priority,
+            "librarian_run",
+            None, // no durable run id — dedupe spans runs by design
+            None,
+            None,
+            LIBRARIAN_ACTOR,
+        ) {
+            Ok(Some(_)) => filed += 1,
+            Ok(None) => {} // the same backlog line still stands from a prior run
+            Err(e) => tracing::warn!(
+                title = %item.title, error = %e,
+                "failed to file a librarian checklist work item"
+            ),
+        }
+    }
+    if filed > 0 {
+        if let Err(e) = db.upsert_seat_stat(LIBRARIAN_ACTOR, None, filed as i64) {
+            tracing::warn!(error = %e, "failed to bump librarian items_filed");
+        }
+    }
+    filed
+}
+
+// ---------------------------------------------------------------------------
 // Spawn + drive (mirrors classmem::run_classifier)
 // ---------------------------------------------------------------------------
 
-/// Run the Librarian headless to completion and return its final text + session
-/// id. Same tool surface / MCP-stripped spawn as the classifier; the digest is
-/// baked into `prompt` so the core loop never depends on the agent curling.
-/// Registers the prompt with the agent-prompt guard first so the headless `-p`
-/// doesn't leak into the lake via the global hook.
+/// The argv a Librarian spawn builds — pure, exposed so the resume-arg
+/// construction is testable without spawning anything.
+pub fn librarian_argv(prompt: String, prior: Option<&str>) -> Vec<String> {
+    crate::claude_proc::bridge_args("librarian", prompt, prior)
+}
+
+/// Run the Librarian with its standing thread (P3 continuity): resume the
+/// persisted `redline.seatThread.librarian` session so this run knows what
+/// yesterday's survey said, persist the new session id on success, and fall
+/// back to a fresh session (overwriting the stored id) if the resume fails.
+/// Returns the final text + session id.
 pub async fn run_librarian(cwd: &str, prompt: String) -> Result<(String, Option<String>), String> {
+    crate::seat::run_with_thread("librarian", None, |prior| {
+        run_librarian_once(cwd, prompt.clone(), prior)
+    })
+    .await
+}
+
+/// One Librarian attempt, headless to completion. Same tool surface /
+/// MCP-stripped spawn as the classifier; the digest is baked into `prompt` so
+/// the core loop never depends on the agent curling. Registers the prompt with
+/// the agent-prompt guard first so the headless `-p` doesn't leak into the
+/// lake via the global hook.
+async fn run_librarian_once(
+    cwd: &str,
+    prompt: String,
+    prior: Option<String>,
+) -> Result<(String, Option<String>), String> {
     let claude_bin = tokio::task::spawn_blocking(resolve_claude_bin)
         .await
         .map_err(|e| e.to_string())?;
     ledger::register_agent_prompt(&ledger::body_hash(&prompt));
-    let args = crate::claude_proc::bridge_args("librarian", prompt, None);
+    let args = librarian_argv(prompt, prior.as_deref());
     let mut cmd = crate::claude_proc::claude_command_for_seat("librarian", &claude_bin);
     let mut child = cmd
         .current_dir(cwd)
@@ -415,6 +495,19 @@ That's it."#;
         assert_eq!(r.summary, "All clear.");
     }
 
+    /// P3 continuity: a stored thread rides the argv as a terminal `--resume`;
+    /// a fresh run carries none. Pure over the built argv — no spawn.
+    #[test]
+    fn resume_arg_construction_is_terminal_and_optional() {
+        let _guard = crate::seat::store_guard();
+        let args = librarian_argv("p".to_string(), Some("sid-9"));
+        let i = args.iter().position(|a| a == "--resume").expect("--resume present");
+        assert_eq!(args[i + 1], "sid-9");
+        assert_eq!(i + 2, args.len(), "the resume tail stays terminal");
+        let fresh = librarian_argv("p".to_string(), None);
+        assert!(!fresh.iter().any(|a| a == "--resume"));
+    }
+
     #[test]
     fn prompt_bakes_the_digest_and_states_the_contract() {
         let p = build_librarian_prompt("## Friction digest (GROUND TRUTH)\n- backlog: 42\n");
@@ -424,5 +517,90 @@ That's it."#;
         assert!(p.contains("librarian` skill"));
         // Never invites fabricating the deferred signal.
         assert!(p.contains("un-exported"));
+    }
+
+    // --- the checklist producer ---------------------------------------------
+
+    fn checklist(items: &[(i64, &str, &str)]) -> LibrarianResult {
+        LibrarianResult {
+            summary: "survey".to_string(),
+            checklist: items
+                .iter()
+                .map(|(priority, category, title)| ChecklistItem {
+                    priority: *priority,
+                    category: category.to_string(),
+                    title: title.to_string(),
+                    detail: "do the thing".to_string(),
+                    action: Some("organize".to_string()),
+                    count: Some(7),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn checklist_items_file_with_run_provenance_and_mapped_priority() {
+        let db = Database::open_in_memory().unwrap();
+        let result = checklist(&[
+            (1, "held_proposal", "1 collapse held for review"),
+            (5, "unstructured_backlog", "412 events unstructured"),
+        ]);
+        assert_eq!(file_checklist_items(&db, &result), 2);
+        let items = db.list_work_items(None, None, 50).unwrap();
+        assert_eq!(items.len(), 2);
+        let urgent = items
+            .iter()
+            .find(|i| i.title == "1 collapse held for review")
+            .unwrap();
+        assert_eq!(urgent.priority, 1, "rank 1 stays urgent");
+        assert_eq!(urgent.origin_kind.as_deref(), Some("librarian_run"));
+        assert_eq!(urgent.origin_id, None, "a survey run has no durable id");
+        assert_eq!(urgent.kind, "task");
+        assert_eq!(urgent.status, "open");
+        let body = urgent.body.as_deref().unwrap();
+        assert!(body.contains("[held_proposal]"), "category rides the body");
+        assert!(body.contains("Magnitude: 7"));
+        let calm = items
+            .iter()
+            .find(|i| i.title == "412 events unstructured")
+            .unwrap();
+        assert_eq!(calm.priority, 3, "deep ranks settle at calm 3");
+        // The seat's items_filed became real.
+        assert_eq!(db.get_seat_stat("librarian").unwrap().items_filed, 2);
+        assert!(db.verify_ledger_chain().unwrap().ok, "chain intact");
+    }
+
+    #[test]
+    fn rederiving_the_same_backlog_dedupes_against_still_open_items() {
+        let db = Database::open_in_memory().unwrap();
+        let run1 = checklist(&[(1, "held_proposal", "1 collapse held for review")]);
+        assert_eq!(file_checklist_items(&db, &run1), 1);
+        // The next survey re-derives the same line (rank drifted — the title
+        // is the stable key): nothing re-files while the item stands open.
+        let run2 = checklist(&[
+            (2, "held_proposal", "1 collapse held for review"),
+            (1, "stalled_review", "15 comments unresolved 19 days"),
+        ]);
+        assert_eq!(file_checklist_items(&db, &run2), 1, "only the new line files");
+        assert_eq!(db.list_work_items(None, None, 50).unwrap().len(), 2);
+        // Close the standing item and the SAME line may honestly recur.
+        let id = db
+            .find_unclosed_work_item("librarian_run", None, Some("1 collapse held for review"))
+            .unwrap()
+            .unwrap()
+            .id;
+        db.close_work_item(&id, Some("done"), ledger::now_millis())
+            .unwrap();
+        assert_eq!(file_checklist_items(&db, &run1), 1);
+        // items_filed accumulated across the three filings.
+        assert_eq!(db.get_seat_stat("librarian").unwrap().items_filed, 3);
+    }
+
+    #[test]
+    fn an_empty_checklist_files_nothing_and_touches_no_seat() {
+        let db = Database::open_in_memory().unwrap();
+        assert_eq!(file_checklist_items(&db, &LibrarianResult::default()), 0);
+        assert!(db.list_work_items(None, None, 50).unwrap().is_empty());
+        assert!(db.get_seat_stat("librarian").is_none());
     }
 }

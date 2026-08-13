@@ -463,7 +463,7 @@ pub async fn voice_session_start(
         "--permission-mode".to_string(),
         "default".to_string(),
         "--tools".to_string(),
-        "Read,Grep,Glob,WebFetch,WebSearch,Bash".to_string(),
+        crate::claude_proc::HEADLESS_TOOLS.to_string(),
         "--allowedTools".to_string(),
         "WebSearch".to_string(),
         "WebFetch".to_string(),
@@ -593,9 +593,34 @@ pub async fn voice_send(
     session_id: String,
     text: String,
     label: Option<String>,
+    draft_markdown: Option<String>,
 ) -> Result<(), String> {
     if text.trim().is_empty() {
         return Err("empty message".to_string());
+    }
+    // Drafter-keyed sessions: flush the caller's LIVE markdown into the DB
+    // mirror before the turn goes out, exactly like `draft_chat_send` does.
+    // The agent re-reads `/v1/drafter/:id/doc` mid-turn, and without this it
+    // would see the debounce-lagged mirror instead of what's on screen.
+    if let Some(draft_id) = drafter_key_id(&session_id) {
+        if let Some(md) = draft_markdown.as_deref().filter(|m| !m.trim().is_empty()) {
+            // Keep the stored project_path — this writer only knows markdown,
+            // and the upsert would otherwise null the project out.
+            let project = voice
+                .db
+                .get_draft(draft_id)
+                .ok()
+                .flatten()
+                .and_then(|(_, p, _, _)| p);
+            let title = crate::draft_title_from_markdown(md);
+            if let Err(e) =
+                voice
+                    .db
+                    .upsert_draft(draft_id, title.as_deref(), project.as_deref(), md, None)
+            {
+                tracing::warn!(error = %e, "voice_send failed to flush the draft mirror");
+            }
+        }
     }
     // Captured before `text` is folded into the first-turn preamble below.
     let display = label.unwrap_or_else(|| text.clone());

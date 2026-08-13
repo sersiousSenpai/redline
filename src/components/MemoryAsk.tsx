@@ -2,19 +2,15 @@
 // Copyright 2026 Yusuf Al-Bazian
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 
-import type {
-  MemChatCancelledEvent,
-  MemChatDeltaEvent,
-  MemChatDoneEvent,
-  MemChatErrorEvent,
-  MemChatMessage,
-} from "../types";
+import type { MemChatMessage } from "../types";
 import type { ClassNode } from "../lib/classTree";
 import type { TimelineFocus } from "../lib/timeline";
 import { extractCitations } from "../lib/memcite";
+import { useAgentTurn } from "../hooks/useAgentTurn";
+import { usePersistedState } from "../theme/usePersistedState";
 import { MarkdownView } from "./MarkdownView";
+import { QueuedChip, UnsentNote } from "./QueuedChip";
 import { WorkingIndicator } from "./WorkingIndicator";
 
 // The Memory surface's Ask tab (Second Brain P4): ONE persisted conversation
@@ -23,22 +19,15 @@ import { WorkingIndicator } from "./WorkingIndicator";
 // agent actually wrote (`#seq`, `[[Class]]`) become chips that jump the
 // Timeline to that evidence via `onCite` — the surface owns the tab switch.
 
-type ChatStatus = "idle" | "streaming" | "error";
-
-let tmpSeq = 0;
-const tmpId = () => `mtmp-${++tmpSeq}`;
-
 interface MemoryAskProps {
   /** Focus the Timeline on cited evidence (the surface switches tabs). */
   onCite: (focus: TimelineFocus) => void;
 }
 
 export function MemoryAsk({ onCite }: MemoryAskProps) {
-  const [messages, setMessages] = useState<MemChatMessage[]>([]);
-  const [liveText, setLiveText] = useState("");
-  const [status, setStatus] = useState<ChatStatus>("idle");
-  const [draft, setDraft] = useState("");
-  const [loaded, setLoaded] = useState(false);
+  // Composer draft survives surface switches and app restarts (the Ask
+  // thread is a singleton, so one key).
+  const [draft, setDraft] = usePersistedState<string>("rl.chatDraft.memchat", "");
   const [notice, setNotice] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
@@ -46,69 +35,35 @@ export function MemoryAsk({ onCite }: MemoryAskProps) {
   // cached for the session — chip resolution, not a browsing surface.
   const treeRef = useRef<ClassNode[] | null>(null);
 
-  useEffect(() => {
-    let alive = true;
-    void invoke<MemChatMessage[]>("memchat_thread")
-      .then((rows) => {
-        if (!alive) return;
-        setMessages(rows);
-        setLoaded(true);
-      })
-      .catch(() => {
-        if (alive) setLoaded(true);
-      });
-
-    const deltaP = listen<MemChatDeltaEvent>("memchat-delta", (e) => {
-      if (!alive) return;
-      setStatus("streaming");
-      setLiveText((t) => t + e.payload.text);
-    });
-    const doneP = listen<MemChatDoneEvent>("memchat-done", (e) => {
-      if (!alive) return;
-      setMessages((m) => [
-        ...m,
-        {
-          id: e.payload.messageId,
-          threadId: e.payload.threadId,
-          role: "assistant",
-          body: e.payload.body,
-          status: "complete",
-          createdAt: Date.now(),
-        },
-      ]);
-      setLiveText("");
-      setStatus("idle");
-    });
-    const errorP = listen<MemChatErrorEvent>("memchat-error", (e) => {
-      if (!alive) return;
-      setMessages((m) => [
-        ...m,
-        {
-          id: tmpId(),
-          threadId: e.payload.threadId,
-          role: "assistant",
-          body: e.payload.error,
-          status: "error",
-          createdAt: Date.now(),
-        },
-      ]);
-      setLiveText("");
-      setStatus("error");
-    });
-    const cancelP = listen<MemChatCancelledEvent>("memchat-cancelled", () => {
-      if (!alive) return;
-      setLiveText("");
-      setStatus("idle");
-    });
-
-    return () => {
-      alive = false;
-      void deltaP.then((un) => un());
-      void doneP.then((un) => un());
-      void errorP.then((un) => un());
-      void cancelP.then((un) => un());
-    };
-  }, []);
+  // The turn lifecycle — persisted thread, live stream, mid-turn remount
+  // restore (partial text + spinner), self-heal — lives in the shared hook.
+  // The Ask thread is a singleton (`threadId` is the constant "memchat").
+  const {
+    messages,
+    liveText,
+    status,
+    startedAt,
+    loaded,
+    send: sendTurn,
+    cancel,
+    unqueue,
+    clear: clearLocal,
+  } = useAgentTurn<MemChatMessage>({
+    surface: "memchat",
+    key: "memchat",
+    idField: null,
+    historyCmd: "memchat_thread",
+    sendFailPrefix: "Couldn't reach the memory agent",
+    buildSendArgs: (text) => ({ text }),
+    makeMessage: ({ id, role, body, status }) => ({
+      id,
+      threadId: "memchat",
+      role,
+      body,
+      status,
+      createdAt: Date.now(),
+    }),
+  });
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -123,42 +78,12 @@ export function MemoryAsk({ onCite }: MemoryAskProps) {
 
   const send = useCallback(
     (text: string) => {
-      const trimmed = text.trim();
-      if (!trimmed || status === "streaming") return;
       stickRef.current = true;
       setNotice(null);
-      setMessages((m) => [
-        ...m,
-        {
-          id: tmpId(),
-          threadId: "memchat",
-          role: "user",
-          body: trimmed,
-          status: "complete",
-          createdAt: Date.now(),
-        },
-      ]);
-      setLiveText("");
-      setStatus("streaming");
-      void invoke("memchat_send", { text: trimmed }).catch((err) => {
-        setStatus("error");
-        setMessages((m) => [
-          ...m,
-          {
-            id: tmpId(),
-            threadId: "memchat",
-            role: "assistant",
-            body: `Couldn't reach the memory agent: ${err}`,
-            status: "error",
-            createdAt: Date.now(),
-          },
-        ]);
-      });
+      sendTurn(text);
     },
-    [status],
+    [sendTurn],
   );
-
-  const cancel = () => void invoke("memchat_cancel").catch(() => {});
 
   const clear = useCallback(() => {
     if (
@@ -169,13 +94,11 @@ export function MemoryAsk({ onCite }: MemoryAskProps) {
       return;
     void invoke("memchat_clear")
       .then(() => {
-        setMessages([]);
-        setLiveText("");
-        setStatus("idle");
+        clearLocal();
         setNotice(null);
       })
       .catch((e) => setNotice(String(e)));
-  }, []);
+  }, [clearLocal]);
 
   // A class chip names a title; the Timeline filters by node id. Resolve
   // through the accepted tree (cached), case-insensitively.
@@ -278,7 +201,18 @@ export function MemoryAsk({ onCite }: MemoryAskProps) {
             <AskEmptyState onAsk={send} />
           ) : (
             messages.map((m) => (
-              <AskBubble key={m.id} msg={m} onCite={onCite} onCiteClass={citeClass} />
+              <AskBubble
+                key={m.id}
+                msg={m}
+                onCite={onCite}
+                onCiteClass={citeClass}
+                onUnqueue={() => {
+                  void unqueue(m.id).then((text) => {
+                    if (text) setDraft((prev) => (prev.trim() ? `${text}\n\n${prev}` : text));
+                  });
+                }}
+                onResend={() => send(m.body)}
+              />
             ))
           )}
           {status === "streaming" &&
@@ -291,7 +225,7 @@ export function MemoryAsk({ onCite }: MemoryAskProps) {
                 </div>
               </div>
             ) : (
-              <WorkingIndicator />
+              <WorkingIndicator startedAt={startedAt ?? undefined} />
             ))}
         </div>
       </div>
@@ -312,15 +246,17 @@ export function MemoryAsk({ onCite }: MemoryAskProps) {
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
-                if (status !== "streaming") {
-                  send(draft);
-                  setDraft("");
-                }
+                // Sending mid-stream queues the question behind the reply.
+                send(draft);
+                setDraft("");
               }
             }}
-            placeholder="What did I decide about…"
+            placeholder={
+              status === "streaming"
+                ? "Type ahead — questions queue behind the reply…"
+                : "What did I decide about…"
+            }
             rows={2}
-            disabled={status === "streaming"}
             style={{
               flex: 1,
               minWidth: 0,
@@ -334,11 +270,12 @@ export function MemoryAsk({ onCite }: MemoryAskProps) {
               borderRadius: 8,
             }}
           />
-          {status === "streaming" ? (
+          {status === "streaming" && (
             <button
               type="button"
               className="font-sans"
               onClick={cancel}
+              title="Stop the current reply (queued questions still send)"
               style={{
                 fontSize: "11px",
                 padding: "6px 14px",
@@ -351,29 +288,33 @@ export function MemoryAsk({ onCite }: MemoryAskProps) {
             >
               Stop
             </button>
-          ) : (
-            <button
-              type="button"
-              className="font-sans"
-              onClick={() => {
-                send(draft);
-                setDraft("");
-              }}
-              disabled={!draft.trim()}
-              style={{
-                fontSize: "11px",
-                padding: "6px 14px",
-                borderRadius: 8,
-                cursor: "pointer",
-                border: "none",
-                background: "var(--color-info)",
-                color: "var(--color-on-accent)",
-                opacity: draft.trim() ? 1 : 0.5,
-              }}
-            >
-              Ask
-            </button>
           )}
+          <button
+            type="button"
+            className="font-sans"
+            onClick={() => {
+              send(draft);
+              setDraft("");
+            }}
+            disabled={!draft.trim()}
+            title={
+              status === "streaming"
+                ? "Queue this question — it sends when the reply finishes"
+                : undefined
+            }
+            style={{
+              fontSize: "11px",
+              padding: "6px 14px",
+              borderRadius: 8,
+              cursor: "pointer",
+              border: "none",
+              background: "var(--color-info)",
+              color: "var(--color-on-accent)",
+              opacity: draft.trim() ? 1 : 0.5,
+            }}
+          >
+            Ask
+          </button>
         </div>
       </div>
     </div>
@@ -402,16 +343,25 @@ function AskBubble({
   msg,
   onCite,
   onCiteClass,
+  onUnqueue,
+  onResend,
 }: {
   msg: MemChatMessage;
   onCite: (focus: TimelineFocus) => void;
   onCiteClass: (title: string) => void;
+  onUnqueue?: () => void;
+  onResend?: () => void;
 }) {
   const isUser = msg.role === "user";
   const isError = msg.status === "error";
+  const isQueued = isUser && msg.status === "queued";
+  const isUnsent = isUser && msg.status === "unsent";
   const cites = !isUser && !isError ? extractCitations(msg.body) : { seqs: [], classes: [] };
   return (
-    <div className="flex flex-col gap-0.5">
+    <div
+      className="flex flex-col gap-0.5"
+      style={isQueued || isUnsent ? { opacity: 0.65 } : undefined}
+    >
       <RoleTag role={msg.role} />
       {isError ? (
         <div
@@ -427,6 +377,8 @@ function AskBubble({
       ) : (
         <MarkdownView body={msg.body} compact rich={!isUser} />
       )}
+      {isQueued && <QueuedChip onUnqueue={onUnqueue} />}
+      {isUnsent && <UnsentNote onResend={onResend} />}
       {(cites.seqs.length > 0 || cites.classes.length > 0) && (
         <div
           className="font-sans"

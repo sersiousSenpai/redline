@@ -88,6 +88,9 @@ function fixTransaction(state: EditorState): Transaction | null {
   }
   if (tr.steps.length === 0) return null;
   tr.setMeta("addToHistory", false);
+  // Derived write: id stamping must pass TrackChangesInput's lock filter and
+  // never be repainted as a user edit in Suggesting mode.
+  tr.setMeta("rl-sync", true);
   return tr;
 }
 

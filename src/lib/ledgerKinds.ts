@@ -48,6 +48,11 @@ export const KIND_LABEL: Record<string, string> = {
   supersede: "Supersede",
   observation: "Observation",
   note: "Note",
+  work_file: "Work filed",
+  work_claim: "Work claimed",
+  work_close: "Work closed",
+  moot_turn: "Moot turn",
+  router_verdict: "Router verdict",
 };
 
 export const KIND_COLOR: Record<string, string> = {
@@ -67,6 +72,11 @@ export const KIND_COLOR: Record<string, string> = {
   supersede: "#c65d21",
   observation: "#3f9e8f",
   note: "#e3b341",
+  work_file: "#4a9e82",
+  work_claim: "#c78f2f",
+  work_close: "#57a04b",
+  moot_turn: "#9a6fd0",
+  router_verdict: "#8f8fb8",
 };
 
 export function kindLabel(kind: string): string {

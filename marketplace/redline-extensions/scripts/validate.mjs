@@ -28,7 +28,10 @@ const KNOWN_SCOPES = [
   "memory.propose",
   "drafter.suggest",
   "review.annotate",
+  "orchestration.report",
   "ui.panel",
+  "work.file",
+  "work.claim",
 ];
 
 const KNOWN_EVENTS = [

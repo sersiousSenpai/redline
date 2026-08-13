@@ -126,15 +126,20 @@ export function PanelFooter({
 }
 
 /** Place a fixed panel under `anchor`, clamped inside the viewport.
- *  `align: "right"` hangs it off the anchor's right edge (an overflow menu). */
+ *  `align: "right"` hangs it off the anchor's right edge (an overflow menu).
+ *  `width` must be the width the panel will actually render at — a style-only
+ *  override on the panel would desync this clamp from the real width and hang
+ *  the panel off the right edge, which is exactly what PANEL_WIDTH being a
+ *  shared constant exists to prevent. */
 export function placeUnder(
   anchor: HTMLElement | null,
   align: "left" | "right",
+  width: number = PANEL_WIDTH,
 ): CSSProperties | null {
   const r = anchor?.getBoundingClientRect();
   if (!r) return null;
-  const raw = align === "left" ? r.left : r.right - PANEL_WIDTH;
-  const left = Math.max(8, Math.min(raw, window.innerWidth - PANEL_WIDTH - 8));
+  const raw = align === "left" ? r.left : r.right - width;
+  const left = Math.max(8, Math.min(raw, window.innerWidth - width - 8));
   return { left: `${left}px`, top: `${r.bottom + 6}px` };
 }
 
@@ -144,11 +149,12 @@ export function placeUnder(
 export function placeOver(
   anchor: HTMLElement | null,
   align: "left" | "right",
+  width: number = PANEL_WIDTH,
 ): CSSProperties | null {
   const r = anchor?.getBoundingClientRect();
   if (!r) return null;
-  const raw = align === "left" ? r.left : r.right - PANEL_WIDTH;
-  const left = Math.max(8, Math.min(raw, window.innerWidth - PANEL_WIDTH - 8));
+  const raw = align === "left" ? r.left : r.right - width;
+  const left = Math.max(8, Math.min(raw, window.innerWidth - width - 8));
   return { left: `${left}px`, bottom: `${window.innerHeight - r.top + 6}px` };
 }
 
@@ -256,11 +262,14 @@ export function useHoverPopover(anchorRef: React.RefObject<HTMLElement | null>) 
 
 /** Click-toggled popover. `side: "above"` is for bottom-anchored triggers
  *  (the drafter footer) — the panel hangs upward instead of off the bottom of
- *  the viewport. */
+ *  the viewport. `width` (default PANEL_WIDTH) is threaded through both the
+ *  placement clamp and the panel's style so the two can never disagree —
+ *  never override `width` in Panel's `style` directly. */
 export function useClickPopover(
   anchorRef: React.RefObject<HTMLElement | null>,
   align: "left" | "right",
   side: "below" | "above" = "below",
+  width: number = PANEL_WIDTH,
 ) {
   const [open, setOpen] = useState(false);
   const [style, setStyle] = useState<CSSProperties>({});
@@ -276,10 +285,11 @@ export function useClickPopover(
     }
     const pos =
       side === "above"
-        ? placeOver(anchorRef.current, align)
-        : placeUnder(anchorRef.current, align);
+        ? placeOver(anchorRef.current, align, width)
+        : placeUnder(anchorRef.current, align, width);
     if (!pos) return;
-    setStyle(pos);
+    // Panel spreads this style LAST, so the width here wins over its default.
+    setStyle({ ...pos, width: `${width}px` });
     setOpen(true);
   };
 

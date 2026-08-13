@@ -1,13 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { describe, it, expect } from "vitest";
-import { kindLabel, describeVerdict } from "./ledgerKinds";
+import { kindLabel, describeVerdict, KIND_LABEL, KIND_COLOR } from "./ledgerKinds";
 
 describe("kindLabel", () => {
   it("maps known ledger kinds to human labels", () => {
     expect(kindLabel("prompt")).toBe("Prompt");
     expect(kindLabel("review_verdict")).toBe("Review verdict");
     expect(kindLabel("source_trust")).toBe("Source trust");
+  });
+
+  it("covers the work-graph and machine-record kinds", () => {
+    expect(kindLabel("work_file")).toBe("Work filed");
+    expect(kindLabel("work_claim")).toBe("Work claimed");
+    expect(kindLabel("work_close")).toBe("Work closed");
+    expect(kindLabel("moot_turn")).toBe("Moot turn");
+    expect(kindLabel("router_verdict")).toBe("Router verdict");
+  });
+
+  it("gives every labeled kind a color (and vice versa)", () => {
+    expect(Object.keys(KIND_COLOR).sort()).toEqual(Object.keys(KIND_LABEL).sort());
+    for (const c of Object.values(KIND_COLOR)) expect(c).toMatch(/^#[0-9a-f]{6}$/);
   });
 
   it("falls back to the raw kind for anything unknown", () => {

@@ -34,10 +34,26 @@ pub struct CommitDraft {
     pub pr_body: String,
 }
 
-/// Headless argv: same read-only posture as `ai_review.rs` —
-/// `bypassPermissions` is safe for the same stated reason: no write-capable
-/// tool exists in the surface.
+/// Headless argv: a true ONE-SHOT — the prompt already carries everything
+/// (capped diff, 15-commit style log, reviewer notes), so the tool belt is
+/// empty: `--tools ""` leaves the model nothing to explore with and no
+/// invitation to spend agentic turns before answering. `bypassPermissions`
+/// stays safe for the same reason as before: no write-capable tool exists in
+/// the surface (now no tool at all).
 fn ai_commit_args() -> Vec<String> {
+    ai_commit_args_with(
+        crate::seat::model_for("ai_commit"),
+        crate::seat::flag_args("ai_commit"),
+    )
+}
+
+/// Pure argv builder ("must be fast" seam, unit-tested without the global
+/// seat store): when the `ai_commit` seat is unconfigured, default the spawn
+/// to `--model haiku` — the seat's own description says a fast good-enough
+/// draft beats a slow perfect one, and the bare CLI default is the big
+/// model. A configured seat's flags always win (they arrive via
+/// `seat_flags`, so no `--model haiku` is appended beside them).
+fn ai_commit_args_with(seat_model: Option<String>, seat_flags: Vec<String>) -> Vec<String> {
     let mut args: Vec<String> = [
         "-p",
         "--output-format",
@@ -47,7 +63,7 @@ fn ai_commit_args() -> Vec<String> {
         "--permission-mode",
         "bypassPermissions",
         "--tools",
-        "Read,Grep,Glob",
+        "",
         "--no-session-persistence",
         "--json-schema",
         COMMIT_SCHEMA,
@@ -55,7 +71,11 @@ fn ai_commit_args() -> Vec<String> {
     .into_iter()
     .map(str::to_string)
     .collect();
-    args.extend(crate::seat::flag_args("ai_commit"));
+    args.extend(seat_flags);
+    if seat_model.is_none() {
+        args.push("--model".to_string());
+        args.push("haiku".to_string());
+    }
     args
 }
 
@@ -65,7 +85,20 @@ fn build_prompt(
     recent_log: &str,
     annotation_bodies: &[String],
 ) -> String {
+    // The same over-cap fallback as ai_review's build_prompt: past the cap
+    // the model gets the file list + hunk map instead of megabytes of diff.
+    // (Here it can't go read the files — the tool belt is empty — so the
+    // note tells it to draft from the map, not to explore.)
     let rendered = crate::ai_review::render_diff(diff);
+    let (rendered, oversize_note) = if rendered.len() > crate::ai_review::MAX_PROMPT_DIFF_BYTES {
+        (
+            crate::ai_review::render_file_list(diff),
+            "The diff was too large to inline — below is the file list and \
+             hunk map only; draft from it.\n",
+        )
+    } else {
+        (rendered, "")
+    };
     let mut p = format!(
         "You are drafting a commit for another engineer's reviewed changes in \
          the repository at {repo}. You have read-only access.\n\n\
@@ -96,8 +129,9 @@ fn build_prompt(
         }
     }
     p.push_str(&format!(
-        "Respond with ONLY the JSON the schema requires.\n\n\
-         THE CHANGE BEING COMMITTED:\n\n{rendered}"
+        "Respond with ONLY the JSON the schema requires. The material below is \
+         all the context there is — do not read files; respond immediately.\n\n\
+         {oversize_note}THE CHANGE BEING COMMITTED:\n\n{rendered}"
     ));
     p
 }
@@ -211,16 +245,55 @@ mod tests {
     use serde_json::Value;
 
     #[test]
-    fn args_are_read_only_and_schema_carrying() {
-        let args = ai_commit_args();
+    fn args_are_toolless_one_shot_and_schema_carrying() {
+        let args = ai_commit_args_with(None, Vec::new());
         let joined = args.join(" ");
         assert!(joined.contains("--permission-mode bypassPermissions"));
-        assert!(joined.contains("--tools Read,Grep,Glob"));
+        // A true one-shot: the tool belt is EMPTY — the prompt carries
+        // everything and extra agentic turns are pure latency.
+        let tools_idx = args.iter().position(|a| a == "--tools").unwrap();
+        assert_eq!(args[tools_idx + 1], "", "the tool list must be empty");
+        assert!(!joined.contains("Read,Grep,Glob"), "no explore surface");
         assert!(!joined.contains("Bash"), "no shell surface");
         assert!(!joined.contains("Edit"), "no write surface");
         assert!(joined.contains("--json-schema"));
         assert!(joined.contains("--no-session-persistence"));
         assert!(serde_json::from_str::<Value>(COMMIT_SCHEMA).is_ok());
+    }
+
+    #[test]
+    fn unconfigured_seat_defaults_to_haiku_and_a_configured_seat_wins() {
+        // Unconfigured: the latency-sensitive default kicks in.
+        let default_args = ai_commit_args_with(None, Vec::new());
+        let joined = default_args.join(" ");
+        assert!(joined.ends_with("--model haiku"), "got: {joined}");
+
+        // Configured seat: its flags arrive verbatim and suppress the default.
+        let configured = ai_commit_args_with(
+            Some("opus".to_string()),
+            vec!["--model".to_string(), "opus".to_string()],
+        );
+        let joined = configured.join(" ");
+        assert!(joined.contains("--model opus"));
+        assert!(!joined.contains("haiku"), "seat config must win: {joined}");
+    }
+
+    #[test]
+    fn oversize_diff_falls_back_to_file_list() {
+        use crate::review::parse_unified_diff;
+        let mut diff = parse_unified_diff(
+            "diff --git a/x.rs b/x.rs\n--- a/x.rs\n+++ b/x.rs\n@@ -1 +1 @@\n-a\n+b\n",
+        );
+        // Inflate one line past the cap — the prompt must swap to the file
+        // list + hunk map and stay small (the latency bug A1 fixes).
+        diff[0].hunks[0].lines[0].text =
+            "x".repeat(crate::ai_review::MAX_PROMPT_DIFF_BYTES + 1);
+        let p = build_prompt("/repo", &diff, "abc fix: earlier thing", &[]);
+        assert!(p.contains("too large to inline"));
+        assert!(p.contains("FILE: x.rs"));
+        assert!(p.len() < crate::ai_review::MAX_PROMPT_DIFF_BYTES);
+        // The one-shot instruction still stands in the fallback shape.
+        assert!(p.contains("do not read files; respond immediately"));
     }
 
     #[test]

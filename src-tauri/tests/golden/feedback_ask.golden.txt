@@ -1,5 +1,7 @@
 The user reviewed your plan in Redline and has requested revisions.
 
+Load your `redline-plan-review` skill now if not already loaded — it defines the presentation contract, sidecar preservation, and the REDLINE_RESOLUTIONS format this payload expects.
+
 ORIGINAL PLAN ANCHORS (for reference):
 - §A: Alpha
 - §A.1: Sub

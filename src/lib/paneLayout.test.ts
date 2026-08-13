@@ -17,8 +17,10 @@ import {
   canonicalLayout,
   computePaneLayout,
   docMinFor,
+  isLayoutAtRest,
   voicePaneMaxW,
   type PaneLayoutInput,
+  type RestingShapeInput,
 } from "./paneLayout";
 
 // The shell's two constants are load-bearing for the plate look: the gutter is
@@ -238,5 +240,54 @@ describe("canonicalLayout", () => {
     );
     // The same 500 is fine on a wide window.
     expect(canonicalLayout(1800, 900, { sidebar: 500 }).sidebarWidth).toBe(500);
+  });
+});
+
+// The snap-back toggle's derived "am I already canonical?" check. Shape flags
+// only — widths never flip the button's meaning from re-snap to close.
+describe("isLayoutAtRest", () => {
+  const atRest = (winH = 900): RestingShapeInput => {
+    const c = canonicalLayout(1440, winH);
+    return {
+      sidebarCollapsed: c.sidebarCollapsed,
+      paneCollapsed: c.paneCollapsed,
+      paneFullscreen: c.paneFullscreen,
+      termCollapsed: c.termCollapsed,
+      termFullscreen: c.termFullscreen,
+      docPinned: c.docPinned,
+      surface: c.surface,
+    };
+  };
+
+  it("matches the exact canonical shape", () => {
+    expect(isLayoutAtRest(atRest(), canonicalLayout(1440, 900))).toBe(true);
+  });
+
+  it("any flipped shape flag breaks rest", () => {
+    const canonical = canonicalLayout(1440, 900);
+    const flips: Partial<RestingShapeInput>[] = [
+      { sidebarCollapsed: true },
+      { paneCollapsed: true },
+      { paneFullscreen: true },
+      { termCollapsed: true },
+      { termFullscreen: true },
+      { docPinned: true },
+      { surface: "browser" },
+    ];
+    for (const flip of flips) {
+      expect(isLayoutAtRest({ ...atRest(), ...flip }, canonical)).toBe(false);
+    }
+  });
+
+  it("tracks the short-window canonical, where the dock folds", () => {
+    const winH = CANONICAL_TERM_COLLAPSE_H - 1;
+    const canonical = canonicalLayout(1440, winH);
+    // Canonical itself folds the terminal here, so a collapsed dock IS rest…
+    expect(isLayoutAtRest(atRest(winH), canonical)).toBe(true);
+    expect(atRest(winH).termCollapsed).toBe(true);
+    // …and an open one is not.
+    expect(
+      isLayoutAtRest({ ...atRest(winH), termCollapsed: false }, canonical),
+    ).toBe(false);
   });
 });

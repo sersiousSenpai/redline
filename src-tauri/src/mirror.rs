@@ -428,6 +428,7 @@ mod tests {
             status: crate::state::SessionStatus::InReview,
             attach_state: crate::state::AttachState::Idle,
             updated_at: 1,
+            run_state: None,
         })
         .unwrap();
         for i in 0..n {

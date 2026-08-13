@@ -50,6 +50,18 @@ it, that's the discussion to have before merging.
    its own `std::thread` (the PTY pump) is also fine — the gotcha is *only*
    synchronous work inside the command body.
 
+5. **The number of *visible* terminals is a budget dimension.** The tile grid
+   puts up to seven live xterms on screen at once, all sharing the one main
+   thread — a variable the user controls directly. Each stream is individually
+   batched and ACK-backpressured (rule 3), so overload degrades per-stream (a
+   busy terminal falls behind) rather than freezing the app, but anything that
+   scales *per visible terminal* must be batched or bounded: the cwd poll is
+   one `pty_cwds` subprocess per tick for the whole fleet (never one `lsof`
+   per pane), and WebGL renderers are visibility-scoped and capped at
+   `MAX_WEBGL` (surplus tiles keep xterm's DOM renderer) so WebKit's
+   process-wide context cap can never silently evict the oldest terminal's
+   context.
+
 ## Guards in CI
 
 These are cheap regression nets, not a substitute for the rules above:

@@ -7,7 +7,7 @@ description: >-
   pipeline (tables, mermaid diagrams, fenced code, callouts). Covers when to use
   prose vs a table vs a flowchart/architecture/sequence diagram vs a chart, with
   strict-mode mermaid snippets, and the read-only / no-ExitPlanMode rules.
-version: 2
+version: 3
 ---
 
 # Redline sidecar discussions
@@ -98,6 +98,22 @@ Open with the **direct answer** in the first one or two sentences — the
 recommendation, the verdict, the tradeoff. *Then* add supporting structure if it
 earns its place. This is a discussion bubble in a narrow side pane, not a plan:
 keep it tight, and never bury the answer underneath a diagram or table.
+
+## Enumeration grounding — counts come from the material
+
+For "am I missing anything?" / "what gaps do you see?"-style questions, the
+enumeration must be **derived, not performed**:
+
+- **The item count comes from the material.** Survey the plan/code first, then
+  report exactly what the survey found — never a template's worth of items, and
+  never pad to a round number (a reflexive "six things" is a tell).
+- **Every item cites its source** — the plan section (§B.2), file, or line it
+  came from — so the reviewer can check it in place.
+- **Label speculation as speculation.** An item you inferred but didn't verify
+  is marked as such, not blended in with the grounded ones.
+- **"Nothing material" is a complete, valid answer** when the survey comes up
+  empty — say what you reviewed ("nothing material — reviewed §A–§D") rather
+  than inventing items to seem thorough.
 
 ## Decision menu — pick the lightest format that adds signal
 

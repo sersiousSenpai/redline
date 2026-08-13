@@ -51,6 +51,17 @@ mod tests {
         assert_async_command(src, "repoicon.rs", "repo_icon");
     }
 
+    /// The cwd polls fork `lsof` — per call for `pty_cwd`, once for the whole
+    /// fleet for `pty_cwds` (the batched twin the tile grid polls every tick).
+    /// A subprocess fork on the WebView main thread is exactly perf-budget
+    /// rule 4.
+    #[test]
+    fn heavy_pty_cwd_commands_stay_async() {
+        let src = include_str!("pty.rs");
+        assert_async_command(src, "pty.rs", "pty_cwd");
+        assert_async_command(src, "pty.rs", "pty_cwds");
+    }
+
     /// The Localhost dashboard's scan forks three subprocesses and reads
     /// project roots off disk, on a poll — squarely the shape that must never
     /// run on the WebView main thread.

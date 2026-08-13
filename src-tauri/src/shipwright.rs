@@ -38,6 +38,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::claude_proc::{classify_line, resolve_claude_bin, StreamLine};
 use crate::codehealth::CodeDigest;
+use crate::db::Database;
 use crate::ledger;
 
 /// Hard cap on findings per run. The cap exists because reviewing them costs
@@ -334,30 +335,111 @@ pub fn findings_to_markdown(result: &ShipwrightResult, digest: &CodeDigest) -> S
 }
 
 // ---------------------------------------------------------------------------
+// The findings producer — fresh findings become durable work items
+// ---------------------------------------------------------------------------
+
+/// Producers wave: NEWLY-INSERTED findings file durable work items,
+/// `origin_kind="shipwright_finding"` / `origin_id=<finding id>` (provenance,
+/// never ownership). The caller hands over only the `(id, finding)` pairs
+/// `insert_shipwright_finding` actually wrote — its `(category, summary)`
+/// dedupe, which also covers DISMISSED findings, is the idempotency
+/// backbone: a dismissed finding or a re-worded duplicate never reaches this
+/// function, and a finding already filed never files twice (the provenance
+/// triple here is the belt). Rank maps onto the priority column exactly as
+/// the Librarian's does. The Shipwright seat produced these, so its
+/// `items_filed` moves by the count filed. Returns how many items filed.
+pub fn file_finding_items(db: &Database, fresh: &[(String, &Finding)], repo: &str) -> usize {
+    /// Ledger actor + seat whose `items_filed` accrues.
+    const SHIPWRIGHT_ACTOR: &str = "shipwright";
+    let mut filed = 0usize;
+    for (finding_id, f) in fresh {
+        let priority = f.priority.clamp(1, 3);
+        let mut body = format!("[{}] {}", f.category, f.proposal.trim());
+        if !f.evidence.trim().is_empty() {
+            body.push_str(&format!("\n\nEvidence: {}", f.evidence.trim()));
+        }
+        if !f.guard.trim().is_empty() {
+            body.push_str(&format!("\nGuard: {}", f.guard.trim()));
+        }
+        if !f.files.is_empty() {
+            body.push_str(&format!("\nFiles: {}", f.files.join(", ")));
+        }
+        match db.file_produced_work_item(
+            &f.title,
+            Some(&body),
+            "task",
+            "open",
+            priority,
+            "shipwright_finding",
+            Some(finding_id),
+            Some(repo),
+            None,
+            SHIPWRIGHT_ACTOR,
+        ) {
+            Ok(Some(_)) => filed += 1,
+            Ok(None) => {} // the belt: this finding's item already stands
+            Err(e) => tracing::warn!(
+                finding = %finding_id, error = %e,
+                "failed to file a shipwright-finding work item"
+            ),
+        }
+    }
+    if filed > 0 {
+        if let Err(e) = db.upsert_seat_stat(SHIPWRIGHT_ACTOR, None, filed as i64) {
+            tracing::warn!(error = %e, "failed to bump shipwright items_filed");
+        }
+    }
+    filed
+}
+
+// ---------------------------------------------------------------------------
 // Spawn + drive
 // ---------------------------------------------------------------------------
 
-/// Run the Shipwright headless to completion and return its final text + session
-/// id. The digest is baked into `prompt` so the core loop never depends on the
-/// agent curling. Registers the prompt with the agent-prompt guard first so the
-/// headless `-p` doesn't leak into the lake via the global hook.
-///
-/// `prior_session` resumes an earlier run — the delta from the Librarian that
-/// makes L1 iteration and consult check-ins possible.
+/// The argv a Shipwright spawn builds — pure, exposed so the resume-arg
+/// construction is testable without spawning anything.
+pub fn shipwright_argv(repo: &str, prompt: String, prior: Option<&str>) -> Vec<String> {
+    let mut args = crate::claude_proc::bridge_args("shipwright", prompt, prior);
+    // Read the repo. `cwd` alone isn't enough for a headless spawn to have the
+    // tree in scope — `browse.rs` learned this for its code-access grant.
+    args.push("--add-dir".to_string());
+    args.push(repo.to_string());
+    args
+}
+
+/// Run the Shipwright with its standing thread (P3 continuity). The caller's
+/// in-memory `prior_session` (fresher within one app run) takes precedence;
+/// otherwise the persisted `redline.seatThread.shipwright` id is resumed, so
+/// the thread now survives an app restart too. The new session id is
+/// persisted on success; a failed resume falls back to one fresh attempt and
+/// overwrites the stored id.
 pub async fn run_shipwright(
     repo: &str,
     prompt: String,
     prior_session: Option<&str>,
 ) -> Result<(String, Option<String>), String> {
+    crate::seat::run_with_thread(
+        "shipwright",
+        prior_session.map(str::to_string),
+        |prior| run_shipwright_once(repo, prompt.clone(), prior),
+    )
+    .await
+}
+
+/// One Shipwright attempt, headless to completion. The digest is baked into
+/// `prompt` so the core loop never depends on the agent curling. Registers the
+/// prompt with the agent-prompt guard first so the headless `-p` doesn't leak
+/// into the lake via the global hook.
+async fn run_shipwright_once(
+    repo: &str,
+    prompt: String,
+    prior: Option<String>,
+) -> Result<(String, Option<String>), String> {
     let claude_bin = tokio::task::spawn_blocking(resolve_claude_bin)
         .await
         .map_err(|e| e.to_string())?;
     ledger::register_agent_prompt(&ledger::body_hash(&prompt));
-    let mut args = crate::claude_proc::bridge_args("shipwright", prompt, prior_session);
-    // Read the repo. `cwd` alone isn't enough for a headless spawn to have the
-    // tree in scope — `browse.rs` learned this for its code-access grant.
-    args.push("--add-dir".to_string());
-    args.push(repo.to_string());
+    let args = shipwright_argv(repo, prompt, prior.as_deref());
     let mut cmd = crate::claude_proc::claude_command_for_seat("shipwright", &claude_bin);
     let mut child = cmd
         .current_dir(repo)
@@ -487,6 +569,21 @@ That's the lot."#;
         assert_eq!(r.summary, "Healthy tree.");
     }
 
+    /// P3 continuity: the resume id rides the argv, and the repo grant
+    /// (`--add-dir`) is present either way. Pure over the built argv.
+    #[test]
+    fn argv_carries_the_repo_grant_and_the_optional_resume() {
+        let _guard = crate::seat::store_guard();
+        let args = shipwright_argv("/repo", "p".to_string(), Some("sid-7"));
+        let r = args.iter().position(|a| a == "--resume").expect("--resume present");
+        assert_eq!(args[r + 1], "sid-7");
+        let d = args.iter().position(|a| a == "--add-dir").unwrap();
+        assert_eq!(args[d + 1], "/repo");
+        let fresh = shipwright_argv("/repo", "p".to_string(), None);
+        assert!(!fresh.iter().any(|a| a == "--resume"));
+        assert!(fresh.iter().any(|a| a == "--add-dir"));
+    }
+
     #[test]
     fn the_prompt_bakes_the_digest_and_states_every_discipline() {
         let p = build_shipwright_prompt(
@@ -547,5 +644,100 @@ That's the lot."#;
         // An empty run says so honestly rather than producing a blank document.
         let empty = findings_to_markdown(&ShipwrightResult::default(), &digest);
         assert!(empty.contains("healthy tree"));
+    }
+
+    // --- the findings producer ----------------------------------------------
+
+    fn finding(title: &str) -> Finding {
+        Finding {
+            priority: 1,
+            category: "ci_coverage".into(),
+            title: title.to_string(),
+            evidence: "1112 tests, 1 workflow".into(),
+            proposal: "Add a CI workflow".into(),
+            guard: "the workflow run itself".into(),
+            files: vec![".github/workflows/ci.yml".into()],
+            effort: Some("small".into()),
+        }
+    }
+
+    /// Persist a finding row the way `shipwright_agent` does, returning the
+    /// id when it was genuinely new (`None` = the dedupe swallowed it).
+    fn insert_row(db: &Database, f: &Finding, dismissed: bool) -> Option<String> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let inserted = db
+            .insert_shipwright_finding(&crate::db::ShipwrightFinding {
+                id: id.clone(),
+                run_id: "run-1".into(),
+                category: f.category.clone(),
+                summary: f.title.clone(),
+                evidence: Some(f.evidence.clone()),
+                proposal: Some(f.proposal.clone()),
+                guard: Some(f.guard.clone()),
+                files: None,
+                status: "pending".into(),
+                dismissed: false,
+                draft_id: None,
+                created_at: ledger::now_millis(),
+                resolved_at: None,
+            })
+            .unwrap();
+        if dismissed {
+            if let Some(id) = inserted.as_deref() {
+                db.resolve_shipwright_finding(id, "dismissed", None).unwrap();
+            }
+        }
+        inserted
+    }
+
+    #[test]
+    fn fresh_findings_file_with_finding_provenance_and_seat_credit() {
+        let db = Database::open_in_memory().unwrap();
+        let f = finding("No test workflow");
+        let fid = insert_row(&db, &f, false).expect("fresh finding inserts");
+        assert_eq!(file_finding_items(&db, &[(fid.clone(), &f)], "/repo"), 1);
+        let items = db.list_work_items(None, None, 50).unwrap();
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(item.title, "No test workflow");
+        assert_eq!(item.origin_kind.as_deref(), Some("shipwright_finding"));
+        assert_eq!(item.origin_id.as_deref(), Some(fid.as_str()));
+        assert_eq!(item.project_path.as_deref(), Some("/repo"));
+        assert_eq!(item.priority, 1);
+        assert_eq!(item.status, "open");
+        let body = item.body.as_deref().unwrap();
+        assert!(body.contains("[ci_coverage]"));
+        assert!(body.contains("Evidence: 1112 tests"));
+        assert!(body.contains("Guard: the workflow"));
+        assert_eq!(db.get_seat_stat("shipwright").unwrap().items_filed, 1);
+        // The origin label arm resolves the finding id to its headline.
+        assert_eq!(
+            db.thread_label("shipwright_finding", &fid).as_deref(),
+            Some("No test workflow")
+        );
+        assert!(db.verify_ledger_chain().unwrap().ok, "chain intact");
+    }
+
+    #[test]
+    fn a_finding_never_files_twice_and_dismissed_wordings_never_resurface() {
+        let db = Database::open_in_memory().unwrap();
+        let f = finding("No test workflow");
+        let fid = insert_row(&db, &f, false).unwrap();
+        assert_eq!(file_finding_items(&db, &[(fid.clone(), &f)], "/repo"), 1);
+        // The belt: re-filing the same finding id files nothing.
+        assert_eq!(file_finding_items(&db, &[(fid, &f)], "/repo"), 0);
+        assert_eq!(db.list_work_items(None, None, 50).unwrap().len(), 1);
+        // The backbone: the identical wording re-inserted is swallowed by the
+        // finding dedupe, so the caller has nothing to hand the filer — and a
+        // DISMISSED wording behaves the same way.
+        assert!(insert_row(&db, &f, false).is_none());
+        let g = finding("drafter_set_doc is sync");
+        let gid = insert_row(&db, &g, true).expect("inserts, then dismissed");
+        assert!(
+            insert_row(&db, &g, false).is_none(),
+            "a dismissed wording never comes back as fresh"
+        );
+        let _ = gid;
+        assert_eq!(db.get_seat_stat("shipwright").unwrap().items_filed, 1);
     }
 }

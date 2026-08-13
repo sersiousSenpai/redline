@@ -154,6 +154,11 @@ pub struct ReviewSession {
     /// Last-activity timestamp (revision/comment/thread message/status
     /// change) — the sidebar orders sessions by it, newest first.
     pub updated_at: i64,
+    /// Orchestrated-run lifecycle (orchestrating | running | in_code_review |
+    /// landed | stalled). `None` for plain Approves — deliberately separate
+    /// from the frozen three-value `status` so reconciliation and the
+    /// liveness watchdog stay untouched.
+    pub run_state: Option<String>,
 }
 
 /// A lightweight per-revision projection for the sidebar's revisions tree —
@@ -198,6 +203,8 @@ pub struct SessionSummary {
     pub attach_state: AttachState,
     /// Last-activity timestamp — `list()` sorts by it, newest first.
     pub updated_at: i64,
+    /// Orchestrated-run lifecycle chip state; `None` for plain Approves.
+    pub run_state: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1070,6 +1077,48 @@ impl SessionStore {
         }
     }
 
+    /// Record an orchestrated run's lifecycle transition, in memory and on
+    /// disk (the db setter also journals it). Returns whether the state
+    /// actually changed, so callers emit the chip event only on a real
+    /// transition.
+    pub fn set_run_state(&self, session_id: &str, state: &str) -> bool {
+        let changed = match self.db.set_run_state(session_id, state) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(error = %e, "failed to persist run state");
+                false
+            }
+        };
+        if changed {
+            let mut map = self.inner.lock().unwrap();
+            if let Some(session) = map.get_mut(session_id) {
+                session.run_state = Some(state.to_string());
+            }
+        }
+        changed
+    }
+
+    /// Return a session's run columns to NULL, in memory and on disk — the
+    /// rollback for a handoff that never delivered ("the click was not
+    /// evidence of a run"). `set_run_state` takes `&str` and structurally
+    /// cannot write NULL; this is the only way back.
+    pub fn clear_run_state(&self, session_id: &str) -> bool {
+        let changed = match self.db.clear_run_state(session_id) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(error = %e, "failed to clear run state");
+                false
+            }
+        };
+        if changed {
+            let mut map = self.inner.lock().unwrap();
+            if let Some(session) = map.get_mut(session_id) {
+                session.run_state = None;
+            }
+        }
+        changed
+    }
+
     /// Record the session's attach state (held / detached / idle), in memory
     /// and on disk. Callable with just a session id so the detach drop-guard
     /// can persist without cloning a session.
@@ -1144,6 +1193,7 @@ impl SessionStore {
                 status: SessionStatus::InReview,
                 attach_state: AttachState::Idle,
                 updated_at: now,
+                run_state: None,
             };
             if let Err(e) = self.db.upsert_session(&s) {
                 tracing::error!(error = %e, "failed to persist session");
@@ -1306,6 +1356,7 @@ impl SessionStore {
                     held_terminal_id: None,
                     attach_state: s.attach_state,
                     updated_at: s.updated_at,
+                    run_state: s.run_state.clone(),
                 }
             })
             .collect();
@@ -1729,6 +1780,148 @@ impl SessionStore {
                 let _ = self
                     .db
                     .append_journal("approval", Some("plan"), Some(session_id), None, None);
+                // Producers wave: the approved plan's to-dos become durable
+                // work items (one per top-level section, parented under the
+                // plan itself). Strictly best-effort — filing logs on failure
+                // and NEVER blocks or fails the status change.
+                self.file_approval_work_items(session);
+            }
+        }
+    }
+
+    /// File the approved plan as durable work items: one `held` umbrella item
+    /// for the plan itself plus one `open` child per top-level section (the
+    /// house markdown conventions — a section = a top-level heading unit,
+    /// already parsed into `Revision::sections`). The umbrella files `held`
+    /// (the intake linkage precedent: an organizational node is parked
+    /// context, never claimable work) so only the sections enter the ready
+    /// frontier; when the plan has no parseable sections the single fallback
+    /// item files `open` instead — it IS the work. Never zero items, never a
+    /// crash in the approval path.
+    ///
+    /// Idempotency: the umbrella's title carries the plan version, and the
+    /// whole filing is skipped while an unclosed umbrella with that exact
+    /// `(origin_kind="session", origin_id=<session id>, title)` triple stands
+    /// — approving the SAME version twice files nothing new, while a later
+    /// version files its own set. Origin is PROVENANCE, never ownership.
+    fn file_approval_work_items(&self, session: &ReviewSession) {
+        /// Ledger actor + edge author for approval-filed items. A human act —
+        /// no seat's `items_filed` is incremented here.
+        const APPROVAL_ACTOR: &str = "plan-approval";
+        let sid = session.session_id.as_str();
+        let (version, plan_md, sections): (u32, Option<&str>, &[Section]) =
+            match session.revisions.last() {
+                Some(r) => (
+                    r.version_number,
+                    Some(r.raw_plan_markdown.as_str()),
+                    &r.sections,
+                ),
+                None => (0, None, &[]),
+            };
+        // The house plan shape is a single `#` title over `##` work sections
+        // — when the parse yields exactly that, the `##` units are the plan's
+        // real to-dos; a plan with several top-level headings files those
+        // directly.
+        let sections: &[Section] = match sections {
+            [only] if !only.children.is_empty() => &only.children,
+            other => other,
+        };
+        let plan_title = plan_md
+            .and_then(parser::plan_title_from_markdown)
+            .unwrap_or_else(|| session.project_name.clone());
+        let parent_title = format!("Plan v{version} approved: {plan_title}");
+        // This version's child titles, ordinal-prefixed exactly as they file
+        // below (the dedupe triple keys on the title).
+        let child_titles: Vec<String> = sections
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let core = s.title.trim();
+                if core.is_empty() {
+                    format!("{}. (untitled section)", i + 1)
+                } else {
+                    format!("{}. {}", i + 1, core)
+                }
+            })
+            .collect();
+        // Skip while this version's filing stands in ANY form: the unclosed
+        // umbrella, or any unclosed child of this version. The umbrella may
+        // close first (children still open) — re-approving then must not
+        // mint a second, childless held umbrella over the standing children.
+        // A lookup FAULT also skips (with a warn): without the idempotency
+        // answer, filing could duplicate.
+        for title in std::iter::once(&parent_title).chain(child_titles.iter()) {
+            match self
+                .db
+                .find_unclosed_work_item("session", Some(sid), Some(title))
+            {
+                Ok(Some(_)) => return, // this version's filing already stands
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        session_id = %sid, error = %e,
+                        "approval idempotency lookup failed; skipping the filing"
+                    );
+                    return;
+                }
+            }
+        }
+        let parent_status = if sections.is_empty() { "open" } else { "held" };
+        let parent_body = if sections.is_empty() {
+            // Unparseable / section-less plan: ONE item carries the whole
+            // (sidecar-stripped) plan body — never zero.
+            plan_md.map(parser::strip_sidecar_lines)
+        } else {
+            Some(format!(
+                "Approved plan session {sid} (v{version}). The plan's \
+                 top-level sections are filed as child items; this umbrella \
+                 stays held so only the sections enter the ready frontier."
+            ))
+        };
+        let parent_id = match self.db.file_produced_work_item(
+            &parent_title,
+            parent_body.as_deref(),
+            "task",
+            parent_status,
+            2,
+            "session",
+            Some(sid),
+            Some(&session.project_path),
+            None,
+            APPROVAL_ACTOR,
+        ) {
+            Ok(Some(id)) => id,
+            Ok(None) => return, // an identical filing raced us in
+            Err(e) => {
+                tracing::warn!(
+                    session_id = %sid, error = %e,
+                    "failed to file the approved-plan work item"
+                );
+                return;
+            }
+        };
+        for (s, title) in sections.iter().zip(child_titles.iter()) {
+            // The ordinal prefix (already baked into `child_titles`) keeps
+            // duplicate section titles distinct (the dedupe triple keys on
+            // the title) and orders the frontier the way the plan reads.
+            let body = parser::strip_sidecar_lines(&s.body_markdown);
+            let body = (!body.trim().is_empty()).then_some(body);
+            if let Err(e) = self.db.file_produced_work_item(
+                title,
+                body.as_deref(),
+                "task",
+                "open",
+                2,
+                "session",
+                Some(sid),
+                Some(&session.project_path),
+                Some(&parent_id),
+                APPROVAL_ACTOR,
+            ) {
+                tracing::warn!(
+                    session_id = %sid, error = %e,
+                    "failed to file a plan-section work item"
+                );
             }
         }
     }
@@ -2076,5 +2269,198 @@ mod tests {
     fn submission_mode_block_delete_is_revise() {
         let batch = [comment(CommentKind::BlockDelete, None)];
         assert_eq!(SubmissionMode::infer(&batch), SubmissionMode::Revise);
+    }
+
+    // --- the approval producer: sections become durable work items ----------
+
+    fn store_with_plan(md: &str) -> SessionStore {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let store = SessionStore::new(db);
+        store.upsert_plan(
+            "sess-appr",
+            "/tmp/proj",
+            md.to_string(),
+            parser::parse_plan(md),
+            true,
+            false,
+        );
+        store
+    }
+
+    const PLAN_MD: &str = "# Ship the widget\n\n\
+        Intro line.\n\n\
+        ## Build the frobnicator\n\nDo the build.\n\n\
+        ## Test it\n\nRun the suite.\n";
+
+    #[test]
+    fn approval_files_one_open_item_per_top_level_section_under_a_held_umbrella() {
+        let store = store_with_plan(PLAN_MD);
+        let db = store.database();
+        store.set_status("sess-appr", SessionStatus::Approved);
+
+        // The umbrella: version-keyed title, held, session provenance.
+        let parent = db
+            .find_unclosed_work_item("session", Some("sess-appr"), None)
+            .unwrap()
+            .expect("the approval filed items");
+        // House shape: one `#` title over `##` sections — the `##` units are
+        // the to-dos, so ONE root umbrella files with a child per `##`.
+        let all = db.list_work_items(None, None, 50).unwrap();
+        let roots: Vec<_> = all.iter().filter(|i| !i.id.contains('.')).collect();
+        assert_eq!(roots.len(), 1);
+        let umbrella = roots[0];
+        assert!(umbrella.title.starts_with("Plan v1 approved:"), "{}", umbrella.title);
+        assert!(umbrella.title.contains("Ship the widget"));
+        assert_eq!(umbrella.status, "held");
+        assert_eq!(umbrella.kind, "task");
+        assert_eq!(umbrella.origin_kind.as_deref(), Some("session"));
+        assert_eq!(umbrella.origin_id.as_deref(), Some("sess-appr"));
+        assert_eq!(umbrella.project_path.as_deref(), Some("/tmp/proj"));
+        assert_eq!(parent.origin_id, umbrella.origin_id);
+
+        // One open child per `##` unit, ordinal-prefixed, edged.
+        let mut children: Vec<_> = all.iter().filter(|i| i.id.contains('.')).collect();
+        children.sort_by(|a, b| a.title.cmp(&b.title));
+        assert_eq!(children.len(), 2, "two `##` heading units in this plan");
+        assert_eq!(children[0].title, "1. Build the frobnicator");
+        assert_eq!(children[1].title, "2. Test it");
+        for child in &children {
+            assert!(child.id.starts_with(&umbrella.id));
+            assert_eq!(child.status, "open");
+            assert_eq!(child.origin_kind.as_deref(), Some("session"));
+            assert_eq!(child.origin_id.as_deref(), Some("sess-appr"));
+            assert_eq!(child.project_path.as_deref(), Some("/tmp/proj"));
+            let edges = db.list_work_edges_touching(&child.id).unwrap();
+            assert!(edges
+                .iter()
+                .any(|e| e.edge_type == "parent-child" && e.from_id == umbrella.id));
+        }
+        assert_eq!(
+            children[0].body.as_deref().map(str::trim),
+            Some("Do the build."),
+            "the section body rides the item"
+        );
+
+        // Frontier law: children claimable, the held umbrella not.
+        let ready = db
+            .list_ready_work_items(None, now_millis(), 50)
+            .unwrap();
+        let ids: Vec<&str> = ready.iter().map(|i| i.id.as_str()).collect();
+        for child in &children {
+            assert!(ids.contains(&child.id.as_str()));
+        }
+        assert!(!ids.contains(&umbrella.id.as_str()));
+
+        // A human act: no seat's items_filed moves.
+        assert!(db.list_seat_stats().unwrap().is_empty());
+        // And the chain stays verifiable after the filing.
+        assert!(db.verify_ledger_chain().unwrap().ok, "chain intact");
+    }
+
+    #[test]
+    fn approving_the_same_version_twice_files_nothing_new() {
+        let store = store_with_plan(PLAN_MD);
+        let db = store.database();
+        store.set_status("sess-appr", SessionStatus::Approved);
+        let count = db.list_work_items(None, None, 100).unwrap().len();
+        assert!(count >= 1);
+        // Approved → InReview → Approved again (a restore-shaped round trip):
+        // the same version's filing already stands, so nothing duplicates.
+        store.set_status("sess-appr", SessionStatus::InReview);
+        store.set_status("sess-appr", SessionStatus::Approved);
+        assert_eq!(db.list_work_items(None, None, 100).unwrap().len(), count);
+    }
+
+    #[test]
+    fn reapproval_after_umbrella_close_mints_no_childless_second_umbrella() {
+        let store = store_with_plan(PLAN_MD);
+        let db = store.database();
+        store.set_status("sess-appr", SessionStatus::Approved);
+        let all = db.list_work_items(None, None, 100).unwrap();
+        let umbrella = all
+            .iter()
+            .find(|i| !i.id.contains('.'))
+            .expect("the umbrella filed")
+            .clone();
+        let count = all.len();
+        // The umbrella closes while its children stand open…
+        assert!(db
+            .close_work_item(&umbrella.id, Some("done"), now_millis())
+            .unwrap());
+        // …and the SAME version is re-approved (a restore-shaped round trip).
+        store.set_status("sess-appr", SessionStatus::InReview);
+        store.set_status("sess-appr", SessionStatus::Approved);
+        // No second umbrella: the standing open children ARE this version's
+        // filing — refiling would mint a held umbrella with zero children
+        // (every child dedupes away against the open originals).
+        let after = db.list_work_items(None, None, 100).unwrap();
+        assert_eq!(after.len(), count, "nothing refiled");
+        assert!(
+            after.iter().all(|i| i.status != "held"),
+            "no childless held umbrella stands: {:?}",
+            after
+                .iter()
+                .filter(|i| i.status == "held")
+                .map(|i| &i.title)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_sectionless_plan_falls_back_to_one_open_item_and_approval_survives() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let store = SessionStore::new(db.clone());
+        // No headings at all — `sections` parses empty (the fallback path).
+        store.upsert_plan(
+            "sess-flat",
+            "/tmp/proj",
+            "just prose, no headings".to_string(),
+            Vec::new(),
+            true,
+            false,
+        );
+        store.set_status("sess-flat", SessionStatus::Approved);
+        // The status change went through regardless.
+        assert_eq!(
+            store.get("sess-flat").unwrap().status,
+            SessionStatus::Approved
+        );
+        // ONE item — never zero — and it is OPEN (it IS the work).
+        let all = db.list_work_items(None, None, 50).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].status, "open");
+        assert!(all[0].title.starts_with("Plan v1 approved:"));
+        assert_eq!(all[0].origin_kind.as_deref(), Some("session"));
+        assert_eq!(all[0].origin_id.as_deref(), Some("sess-flat"));
+        assert_eq!(
+            all[0].body.as_deref(),
+            Some("just prose, no headings"),
+            "the whole plan body rides the fallback item"
+        );
+    }
+
+    #[test]
+    fn a_later_version_files_its_own_set() {
+        let store = store_with_plan(PLAN_MD);
+        let db = store.database();
+        store.set_status("sess-appr", SessionStatus::Approved);
+        let v1_count = db.list_work_items(None, None, 100).unwrap().len();
+        // A revision arrives (v2, new content) and is approved in turn.
+        store.set_status("sess-appr", SessionStatus::InReview);
+        let v2 = "# Ship the widget v2\n\n## Brand new work\n\nDo it.\n";
+        store.upsert_plan(
+            "sess-appr",
+            "/tmp/proj",
+            v2.to_string(),
+            parser::parse_plan(v2),
+            false,
+            false,
+        );
+        store.set_status("sess-appr", SessionStatus::Approved);
+        let all = db.list_work_items(None, None, 100).unwrap();
+        assert!(all.len() > v1_count, "the new version filed its own items");
+        assert!(all
+            .iter()
+            .any(|i| i.title.starts_with("Plan v2 approved:")));
     }
 }

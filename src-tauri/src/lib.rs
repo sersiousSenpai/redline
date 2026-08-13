@@ -28,6 +28,8 @@ mod fsbrowse;
 mod fswatch;
 mod highlight;
 mod hook;
+mod intake;
+mod moot;
 mod keeper;
 mod ledger;
 mod linked;
@@ -46,10 +48,12 @@ mod parser;
 mod perf_guard;
 mod pty;
 mod push;
+mod queue;
 mod repoicon;
 mod resolutions;
 mod review;
 mod review_feedback;
+mod runwatch;
 #[cfg(target_os = "macos")]
 mod scroller_guard;
 mod seat;
@@ -58,14 +62,16 @@ mod skill;
 mod state;
 mod thumbs;
 mod tts;
+mod turn;
 mod update;
 mod userconfig;
 mod voice;
+mod work;
 mod worktree;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 
 use axum::{
@@ -130,6 +136,43 @@ fn restore_target_id(raw_plan: &str) -> Option<String> {
     let end = raw_plan[start..].find("-->")?;
     let id = raw_plan[start..start + end].trim();
     (!id.is_empty()).then(|| id.to_string())
+}
+
+/// `Some(target)` only when the plan body is *nothing but* a restore
+/// sentinel — the handshake contract in `src/lib/resumeCommand.ts` is "write
+/// exactly `<!-- REDLINE_RESTORE:<id> -->` as your plan file's contents", so
+/// that is what we match. `Some(None)` for the bare form, `None` for any real
+/// plan that merely *mentions* the sentinel. A bare `.contains()` here once
+/// classified a 200-line plan that quoted the sentinel in an evidence table
+/// as a restore handshake and waved it through uncaptured — any plan
+/// documenting Redline's own restore protocol was silently unreviewable.
+fn restore_handshake(raw_plan: &str) -> Option<Option<String>> {
+    let body = raw_plan.trim();
+    let rest = body.strip_prefix(REDLINE_RESTORE_PREFIX)?;
+    let close = rest.find("-->")?;
+    if !rest[close + "-->".len()..].trim().is_empty() {
+        return None; // content after the sentinel — a real plan
+    }
+    let inner = rest[..close].trim();
+    if !inner.is_empty() && !inner.starts_with(':') {
+        return None; // `<!-- REDLINE_RESTORESOMETHING -->` is not the handshake
+    }
+    Some(restore_target_id(body))
+}
+
+/// The only id shape `rekey_session` may consume from hook input: a lowercase
+/// UUID (8-4-4-4-12 hex), the shape of every claude session id — the
+/// `valid_agent_id` discipline from runwatch. A rekey relocates a live review
+/// wholesale (rows, comments, attachment paths), so it must require both a
+/// sentinel-only body and a syntactically valid id; prose in a plan body must
+/// never be able to move another session's data.
+fn valid_session_uuid(id: &str) -> bool {
+    let b = id.as_bytes();
+    b.len() == 36
+        && b.iter().enumerate().all(|(i, &c)| match i {
+            8 | 13 | 18 | 23 => c == b'-',
+            _ => c.is_ascii_digit() || (b'a'..=b'f').contains(&c),
+        })
 }
 
 /// Interception mode, persisted to the `app_settings` table and mirrored in memory.
@@ -500,7 +543,10 @@ impl Drop for DetachGuard {
 /// appear. Mirror the `submit_review` send-failure path: persist Detached, tell
 /// the UI, refresh the tray. Called right before returning the "no plan is
 /// waiting" error so the frontend's `isDetachError` recovery (refresh summaries
-/// → derived `detached`) has real state to pick up.
+/// → derived `detached`) has real state to pick up. The keeper bus's
+/// `review-staleness-sweep` watch also calls this periodically (seen-twice,
+/// conservative cadence), so the inconsistency reconciles even when no user
+/// action trips over it.
 fn mark_session_detached(app: &AppHandle, store: &SessionStore, session_id: &str) {
     store.set_attach_state(session_id, AttachState::Detached);
     // The claude process behind this session is gone (or unverifiable); drop its
@@ -587,13 +633,14 @@ fn feedback_deny_reason(mode: SubmissionMode, session_id: &str) -> String {
     match mode {
         SubmissionMode::Revise => format!(
             "✅ Plan returned to Redline for revision — your feedback is loaded and nothing \
-             failed. Read it with `curl -s {url}`, then produce the revised plan and call \
-             ExitPlanMode again."
+             failed. Read it with `curl -s {url}`, then produce the revised plan per your \
+             `redline-plan-review` skill and call ExitPlanMode again."
         ),
         SubmissionMode::Ask => format!(
             "✅ Returned to Redline — the reviewer has questions about the plan and is NOT \
-             requesting changes. Read them with `curl -s {url}`, then call ExitPlanMode again \
-             with the plan body unchanged and your answers in the REDLINE_RESOLUTIONS block."
+             requesting changes. Read them with `curl -s {url}`, then, per your \
+             `redline-plan-review` skill, call ExitPlanMode again with the plan body \
+             unchanged and your answers in the REDLINE_RESOLUTIONS block."
         ),
     }
 }
@@ -724,6 +771,102 @@ fn watchdog_step(
     }
 }
 
+/// Advance an orchestrated run's lifecycle chip and tell the UI — the one
+/// emission seam every beacon (click, ingest claim, review start, review
+/// feedback, stall, resolution) shares. The store setter journals and
+/// reports whether the state actually changed; only a real transition emits.
+fn advance_run_state(app: &AppHandle, store: &SessionStore, session_id: &str, state: &str) {
+    if store.set_run_state(session_id, state) {
+        let _ = app.emit(
+            "run-state-changed",
+            SessionEvent {
+                session_id: session_id.to_string(),
+            },
+        );
+    }
+}
+
+/// Where the review-feedback beacon walks the run chip: an approval is the
+/// human sign-off that ends the run (`landed`); a feedback round hands the
+/// work back to the orchestrator (`running`).
+fn review_verdict_run_state(approve: bool) -> &'static str {
+    if approve {
+        "landed"
+    } else {
+        "running"
+    }
+}
+
+/// What a no-held-curl review submit does — the pure seam behind
+/// `submit_review_feedback`'s parked (overnight) branch. Valid only when a
+/// durable review→plan link exists AND the plan's chip still says
+/// `awaiting_review`; then an approve LANDS the review (chip walks
+/// `awaiting_review` → `landed`, still-unresolved annotations file as work
+/// items) while a feedback verdict holds the park (chip unchanged, nothing
+/// files — the annotations stay stored for the follow-up session).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParkedVerdict {
+    /// No parked review behind this id — reject the submit.
+    NotParked,
+    /// Approve: chip → `landed`; unresolved annotations file. Only here.
+    Land,
+    /// Feedback: chip stays `awaiting_review`; nothing files.
+    Hold,
+}
+
+fn parked_verdict(link_present: bool, run_state: Option<&str>, approve: bool) -> ParkedVerdict {
+    if !link_present || run_state != Some("awaiting_review") {
+        ParkedVerdict::NotParked
+    } else if approve {
+        ParkedVerdict::Land
+    } else {
+        ParkedVerdict::Hold
+    }
+}
+
+/// How long after the Orchestrate click we wait for ANY beacon before calling
+/// the run stalled. The first beacon (the ingest claim → `running`) normally
+/// arrives within seconds of the typed prompt landing.
+const ORCHESTRATE_STALL_WINDOW: Duration = Duration::from_secs(5 * 60);
+
+/// Pure step for the stall watchdog (the `watchdog_step` seam, one-shot
+/// variant): fire only when the chip still reads `orchestrating` — no ingest
+/// claim, no review, no report ever arrived. Any other value means a beacon
+/// landed (or the run was never orchestrated) and the watchdog retires.
+fn orchestrate_stall_should_fire(run_state: Option<&str>) -> bool {
+    run_state == Some("orchestrating")
+}
+
+/// One-shot stall detection for an orchestrated launch, in the
+/// `arm_revise_watchdog` shape. A later beacon simply overwrites `stalled`
+/// (`set_run_state` enforces no ordering — the beacons are the truth), so a
+/// false positive from a slow launch self-corrects.
+///
+/// Kept at its call sites as cheap belt-and-braces: the durable detector is
+/// now the keeper bus's `orchestrate-stall-sweep` watch, which periodically
+/// walks ANY session sitting in `orchestrating` past the window to `stalled`
+/// — including one whose one-shot task died with a restart. This one-shot
+/// merely catches the common case a sweep-cadence earlier.
+fn arm_orchestrate_stall_watchdog(app: AppHandle, store: SessionStore, session_id: String) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(ORCHESTRATE_STALL_WINDOW).await;
+        let state = store.database().get_run_state(&session_id);
+        if orchestrate_stall_should_fire(state.as_deref()) {
+            tracing::info!(session_id = %session_id, "orchestrate stall watchdog fired");
+            advance_run_state(&app, &store, &session_id, "stalled");
+        }
+    });
+}
+
+/// review_id → plan session id for orchestrated runs: written when the
+/// orchestrator's review curl carries `?plan=`, read by the feedback path to
+/// cycle the run chip back to `running`. In-memory only — a held review
+/// never survives a restart, and the durable record lives in `plan_runs`.
+fn orchestration_review_links() -> &'static StdMutex<HashMap<String, String>> {
+    static G: OnceLock<StdMutex<HashMap<String, String>>> = OnceLock::new();
+    G.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
 /// Safety net for a revise whose feedback was delivered into a held POST that
 /// Claude had already abandoned: spawn a task that, after `REVISE_WATCHDOG`,
 /// checks whether Claude actually picked the feedback up. "Picked up" means
@@ -747,60 +890,92 @@ fn arm_revise_watchdog(
     session_id: String,
 ) {
     let armed_gen = revise_watch.bump(&session_id);
-    tauri::async_runtime::spawn(async move {
-        loop {
-            tokio::time::sleep(REVISE_WATCHDOG).await;
+    schedule_revise_probe(app, store, pending, revise_watch, last_pid, session_id, armed_gen);
+}
 
-            let has_plan = pending.has(&session_id);
-            let gen_ok = revise_watch.current(&session_id) == armed_gen;
-            let in_review = matches!(
-                store.get(&session_id).map(|s| s.status),
-                Some(SessionStatus::InReview)
-            );
-            // Only probe the process when the cheap checks haven't already
-            // settled it — keeps a single `ps` per live, still-waiting session.
-            let liveness = if has_plan || !gen_ok || !in_review {
-                None
-            } else if let Some(proc) = last_pid.get(&session_id) {
-                Some(
-                    tokio::task::spawn_blocking(move || proc.is_alive())
-                        .await
-                        .unwrap_or(false),
-                )
-            } else {
-                None
-            };
+/// One probe of the revise watchdog, scheduled through the keeper's watch bus
+/// as an event-armed one-shot (`keeper::schedule_once`) — deliberately NOT a
+/// periodic bus watch: it is armed by a submit, fires once after
+/// `REVISE_WATCHDOG` (the bus's 30s tick quantizes the delay upward by at
+/// most one tick; the window was always deliberately generous), and on
+/// `ReArm` simply schedules the next probe. The semantics — the
+/// `watchdog_step` decision table, the generation guard, and the liveness
+/// probe (a live `claude` is busy or blocked, never declared dead) — are
+/// unchanged from the old self-sleeping task.
+fn schedule_revise_probe(
+    app: AppHandle,
+    store: SessionStore,
+    pending: PendingResponses,
+    revise_watch: ReviseWatch,
+    last_pid: LastClaudePid,
+    session_id: String,
+    armed_gen: u64,
+) {
+    keeper::schedule_once(
+        format!("revise-watchdog:{session_id}"),
+        REVISE_WATCHDOG,
+        move || {
+            Box::pin(async move {
+                let has_plan = pending.has(&session_id);
+                let gen_ok = revise_watch.current(&session_id) == armed_gen;
+                let in_review = matches!(
+                    store.get(&session_id).map(|s| s.status),
+                    Some(SessionStatus::InReview)
+                );
+                // Only probe the process when the cheap checks haven't already
+                // settled it — keeps a single `ps` per live, still-waiting
+                // session.
+                let liveness = if has_plan || !gen_ok || !in_review {
+                    None
+                } else if let Some(proc) = last_pid.get(&session_id) {
+                    Some(
+                        tokio::task::spawn_blocking(move || proc.is_alive())
+                            .await
+                            .unwrap_or(false),
+                    )
+                } else {
+                    None
+                };
 
-            match watchdog_step(has_plan, gen_ok, in_review, liveness) {
-                WatchdogStep::Stop => return,
-                WatchdogStep::ReArm => {
-                    // Alive: busy re-planning or blocked on a permission prompt.
-                    // Sleep another window; we'll detach if it later dies.
-                    tracing::debug!(
-                        session_id = %session_id,
-                        "revise watchdog: claude still alive (busy or blocked on a \
-                         permission prompt) — re-arming"
-                    );
-                    continue;
+                match watchdog_step(has_plan, gen_ok, in_review, liveness) {
+                    WatchdogStep::Stop => {}
+                    WatchdogStep::ReArm => {
+                        // Alive: busy re-planning or blocked on a permission
+                        // prompt. Schedule another window; we'll detach if it
+                        // later dies.
+                        tracing::debug!(
+                            session_id = %session_id,
+                            "revise watchdog: claude still alive (busy or blocked on a \
+                             permission prompt) — re-arming"
+                        );
+                        schedule_revise_probe(
+                            app,
+                            store,
+                            pending,
+                            revise_watch,
+                            last_pid,
+                            session_id,
+                            armed_gen,
+                        );
+                    }
+                    WatchdogStep::Detach => {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            "revise watchdog: no new plan and claude not alive — feedback \
+                             likely lost, marking detached"
+                        );
+                        let _ = store.database().record_friction(
+                            "revise_watchdog",
+                            Some("plan"),
+                            Some(&session_id),
+                            Some("no new plan and claude not alive — feedback likely lost"),
+                        );
+                        mark_session_detached(&app, &store, &session_id);
+                    }
                 }
-                WatchdogStep::Detach => {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        "revise watchdog: no new plan and claude not alive — feedback \
-                         likely lost, marking detached"
-                    );
-                    let _ = store.database().record_friction(
-                        "revise_watchdog",
-                        Some("plan"),
-                        Some(&session_id),
-                        Some("no new plan and claude not alive — feedback likely lost"),
-                    );
-                    mark_session_detached(&app, &store, &session_id);
-                    return;
-                }
-            }
-        }
-    });
+            }) as keeper::OneShotFut
+        },
+    );
 }
 
 /// Whether the daemon successfully bound `127.0.0.1:7676`. False means another
@@ -903,6 +1078,16 @@ impl ActiveMission {
     /// browser-family threads created while a mission is running.
     pub fn active_id(&self) -> Option<String> {
         self.0.lock().unwrap().as_ref().map(|i| i.mission_id.clone())
+    }
+    /// Refresh the mirrored title/goal when the edited mission is the active
+    /// one, so a goal edit reaches the daemon without a frontend re-push (the
+    /// frontend mirror is id-driven and only re-pushes on identity change).
+    pub fn update_goal_if_active(&self, mission_id: &str, title: &str, goal: &str) {
+        let mut guard = self.0.lock().unwrap();
+        if let Some(info) = guard.as_mut().filter(|i| i.mission_id == mission_id) {
+            info.title = title.to_string();
+            info.goal = goal.to_string();
+        }
     }
 }
 
@@ -1164,6 +1349,69 @@ fn refresh_tray(app: &AppHandle, store: &SessionStore) {
     }
 }
 
+/// Payload of `plan-passed-through`: an inbound plan answered `allow` without
+/// being captured for review. Surfaced in the UI because a skipped capture
+/// otherwise renders identically to "the user never submitted a plan".
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlanPassedThroughEvent {
+    session_id: String,
+    reason: String,
+}
+
+/// Every `handle_plan` early return that answers `allow` without capturing
+/// the plan goes through here: record it as friction and announce it to the
+/// UI. Silent success is the failure mode that hid the sentinel-prose bug —
+/// an error-shaped outcome must never be indistinguishable from a capture.
+fn plan_passed_through(
+    app_state: &AppState,
+    session_id: &str,
+    reason: &str,
+) -> Json<HookResponse> {
+    let _ = app_state.store.database().record_friction(
+        "plan_passed_through",
+        Some("plan"),
+        Some(session_id),
+        Some(reason),
+    );
+    if let Err(e) = app_state.app_handle.emit(
+        "plan-passed-through",
+        PlanPassedThroughEvent {
+            session_id: session_id.to_string(),
+            reason: reason.to_string(),
+        },
+    ) {
+        tracing::warn!(error = %e, "failed to emit plan-passed-through");
+    }
+    Json(allow_response(reason))
+}
+
+/// Steps 3→4 of the interception chain: register the held POST (superseding a
+/// stale hold for the same session) with the dock terminal it resolved to.
+/// Factored out of `handle_plan` so the capture→hold→indicator seam is
+/// testable with an injected terminal id — the lsof/ps resolver (step 2) has
+/// its own coverage and stays out of unit tests.
+fn register_hold(
+    pending: &PendingResponses,
+    session_id: &str,
+    terminal_id: Option<String>,
+) -> (oneshot::Receiver<HookResponse>, u64) {
+    match pending.register(session_id, terminal_id.clone()) {
+        Some(pair) => pair,
+        None => {
+            if let Some(stale) = pending.take(session_id) {
+                tracing::warn!(session_id = %session_id, "superseding a stale held POST for this session");
+                let _ = stale.send(allow_response(
+                    "Superseded by a newer plan from the same session.",
+                ));
+            }
+            pending
+                .register(session_id, terminal_id)
+                .expect("pending slot freed above")
+        }
+    }
+}
+
 async fn handle_plan(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     State(app_state): State<AppState>,
@@ -1211,8 +1459,37 @@ async fn handle_plan(
     // capture it as a plan; that would spawn a phantom review revision.
     if app_state.fork.is_known_fork_session(&session_id) {
         tracing::info!(session_id = %session_id, "ignoring ExitPlanMode POST from a known fork session");
-        return Json(allow_response(
+        return plan_passed_through(
+            &app_state,
+            &session_id,
             "This plan came from a Redline discussion-thread fork; it was not captured for review.",
+        );
+    }
+
+    // A7: a claude session linked as an orchestrator (the ingest claim wrote
+    // `session → plan session` lineage) must never mint a review session of
+    // its own. It was launched to EXECUTE an approved plan; an ExitPlanMode
+    // from it would open a brand-new review in that repo and hold the
+    // orchestrator for up to 12 hours behind a review nobody asked for.
+    if let Some(plan_sid) = app_state
+        .store
+        .database()
+        .orchestrator_parent_session(&session_id)
+    {
+        tracing::warn!(
+            session_id = %session_id, plan_session = %plan_sid,
+            "refusing ExitPlanMode from an orchestrator session"
+        );
+        let _ = app_state.store.database().record_friction(
+            "orchestrator_plan_refused",
+            Some("plan"),
+            Some(&session_id),
+            Some(&plan_sid),
+        );
+        return Json(deny_response(
+            "✅ You are the orchestrator for a plan already approved in Redline. Do NOT \
+             plan or call ExitPlanMode — execute the approved plan as your launch prompt \
+             instructs, then file the exit report and open the code review.",
         ));
     }
 
@@ -1225,8 +1502,17 @@ async fn handle_plan(
     // rest of this handler — and every future revision from this terminal — sees
     // the held plan under the live session and restores it, instead of capturing
     // the placeholder as a brand-new plan.
-    if let Some(target) = restore_target_id(&raw_plan) {
-        if target != session_id
+    // The sentinel decision, made ONCE on the anchored contract: `Some` only
+    // when the body is nothing but the sentinel. Every restore branch below
+    // consumes this — never a substring probe over the plan body.
+    let restore_sentinel = restore_handshake(&raw_plan);
+    if let Some(Some(target)) = restore_sentinel.clone() {
+        if !valid_session_uuid(&target) {
+            tracing::warn!(
+                session_id = %session_id, target = %target,
+                "restore sentinel carries a malformed session id — refusing to rekey"
+            );
+        } else if target != session_id
             && !app_state.store.has_session(&session_id)
             && app_state.store.rekey_session(&target, &session_id)
         {
@@ -1310,7 +1596,7 @@ async fn handle_plan(
     // applies to a session that has a revision to re-present.
     let restore_armed = app_state.store.take_restore(&session_id);
     let restore_requested =
-        (restore_armed || raw_plan.contains(REDLINE_RESTORE_PREFIX)) && !ask_round_trip;
+        (restore_armed || restore_sentinel.is_some()) && !ask_round_trip;
     let restored = restore_requested && session_existed;
 
     // A restore sentinel that we still couldn't bind to any held plan — the
@@ -1318,15 +1604,17 @@ async fn handle_plan(
     // under the incoming id either. The body is only the placeholder, so
     // persisting it would mint a phantom v1 rendering the literal sentinel
     // instead of a plan. Refuse and store nothing; nothing was lost.
-    if raw_plan.contains(REDLINE_RESTORE_PREFIX) && !session_existed {
+    if restore_sentinel.is_some() && !session_existed {
         tracing::warn!(
             session_id = %session_id,
             "restore sentinel matched no held plan — refusing to persist the placeholder"
         );
-        return Json(allow_response(
+        return plan_passed_through(
+            &app_state,
+            &session_id,
             "Redline couldn't restore this plan: no held plan matched. The original \
              review session may have been deleted. Re-open the plan from Redline.",
-        ));
+        );
     }
 
     // Ask-mode was expected but Claude modified the plan anyway. Surface
@@ -1507,24 +1795,7 @@ async fn handle_plan(
     // Orphan fix: if a prior held POST for this session is still pending (Claude
     // re-entered plan mode, retried, or the earlier hold was abandoned), release
     // the stale waiter cleanly instead of leaving it hung, then take over.
-    let (mut rx, token) = match app_state
-        .pending
-        .register(&session_id, held_terminal_id.clone())
-    {
-        Some(pair) => pair,
-        None => {
-            if let Some(stale) = app_state.pending.take(&session_id) {
-                tracing::warn!(session_id = %session_id, "superseding a stale held POST for this session");
-                let _ = stale.send(allow_response(
-                    "Superseded by a newer plan from the same session.",
-                ));
-            }
-            app_state
-                .pending
-                .register(&session_id, held_terminal_id)
-                .expect("pending slot freed above")
-        }
-    };
+    let (mut rx, token) = register_hold(&app_state.pending, &session_id, held_terminal_id);
     // If this request is cancelled (the held connection drops before a decision),
     // the guard removes our orphaned sender and notifies the UI. On the normal
     // decision path the sender was already taken, so the guard is a no-op.
@@ -1797,6 +2068,56 @@ async fn handle_prompts_ingest(
                 }
                 backfill_model_from_hook(&db, &v, sid);
             }
+        }
+        // The Orchestrate handoff, same seam: when the skipped body was an
+        // Orchestrate launch, this hook fire is the first moment the
+        // orchestrator session's claude id is known — link it under the plan
+        // session it executes, and flip the run chip to `running` (the claim
+        // itself proves the orchestrator came up, so the beacon fires even if
+        // the payload carried no session id for the lineage row).
+        if let Some(plan_sid) = ledger::claim_orchestration_prompt(&bh) {
+            if let Some(sid) = claude_session_id.as_deref().filter(|s| !s.is_empty()) {
+                let db = app_state.store.database();
+                if let Err(e) =
+                    ledger::record_session_link(&db, "session", sid, "session", &plan_sid)
+                {
+                    tracing::warn!(error = %e, "failed to link orchestrator session to its plan session");
+                }
+                // The one moment the orchestrator's transcript path is in
+                // hand: anchor the run for the live monitor and start its
+                // watcher. Runs execute in arbitrary project dirs — the path
+                // must come from the payload, never be assumed under a
+                // Redline project key.
+                if let Some(tp) = v
+                    .get("transcript_path")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|p| !p.is_empty())
+                {
+                    // Fold the launch-time terminal stash into the durable
+                    // row (B5) — the one moment the row exists to hold it.
+                    let launch_terminal = app_state
+                        .app_handle
+                        .try_state::<LaunchedTerminals>()
+                        .and_then(|l| l.get(&plan_sid));
+                    match db.upsert_orchestration(
+                        &plan_sid,
+                        sid,
+                        tp,
+                        cwd.as_deref(),
+                        launch_terminal.as_deref(),
+                    ) {
+                        Ok(()) => runwatch::start(
+                            &app_state.app_handle,
+                            app_state.store.clone(),
+                            plan_sid.clone(),
+                        ),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "failed to anchor orchestration for the run monitor")
+                        }
+                    }
+                }
+            }
+            advance_run_state(&app_state.app_handle, &app_state.store, &plan_sid, "running");
         }
         return (StatusCode::OK, Json(serde_json::json!({ "skipped": "agent_dup" })))
             .into_response();
@@ -2393,6 +2714,21 @@ async fn run_server(state: AppState) {
                 .post(handle_review_annotations_add)
                 .delete(handle_review_annotations_clear),
         )
+        // Orchestrated runs: the orchestrator session POSTs its structured
+        // exit report here when the workflow ends, before opening the review.
+        .route(
+            "/v1/orchestration/report",
+            post(handle_orchestration_report),
+        )
+        // Work graph (`work.rs` state plane): the durable item/edge store any
+        // agent files into and claims from. Reads are open like every other
+        // read surface; the writes carry the two work scopes. The handlers
+        // live in `work.rs` — tables, queries, and routes only (no spawning).
+        .route("/v1/work/ready", get(work::handle_work_ready))
+        .route("/v1/work/:id", get(work::handle_work_get))
+        .route("/v1/work", post(work::handle_work_file))
+        .route("/v1/work/:id/claim", post(work::handle_work_claim))
+        .route("/v1/work/:id/close", post(work::handle_work_close))
         // WASM extension surface (Elevation B3): the installed-extensions
         // snapshot (status, strikes, panel) and the one sanctioned UI slot —
         // an extension replaces its own sanitized markdown panel. The panel
@@ -3468,7 +3804,9 @@ async fn handle_global_agents(State(app_state): State<AppState>) -> axum::respon
         })
         .collect();
 
-    // Missions / linked / drafts / companions / voice from the DB.
+    // Missions / linked / drafts / companions / voice from the DB. Busy flags
+    // read each surface's turn registry — honest, not hardcoded.
+    let mission_state = handle.state::<mission::MissionState>();
     let missions: Vec<serde_json::Value> = db
         .list_missions()
         .unwrap_or_default()
@@ -3480,10 +3818,11 @@ async fn handle_global_agents(State(app_state): State<AppState>) -> axum::respon
                 "label": m.title,
                 "status": m.status,
                 "consultable": true,
-                "busy": false,
+                "busy": mission_state.turn_active(&m.mission_id),
             })
         })
         .collect();
+    let linked_state = handle.state::<linked::LinkedState>();
     let linkeds: Vec<serde_json::Value> = db
         .list_linked()
         .unwrap_or_default()
@@ -3495,7 +3834,7 @@ async fn handle_global_agents(State(app_state): State<AppState>) -> axum::respon
                 "label": l.title,
                 "status": l.status,
                 "consultable": true,
-                "busy": false,
+                "busy": linked_state.is_running(&l.linked_id),
             })
         })
         .collect();
@@ -3588,6 +3927,17 @@ struct ReviewStartQ {
     source: Option<String>,
     base: Option<String>,
     sha: Option<String>,
+    /// Orchestrated runs: the plan session this review closes out. Links the
+    /// review to the run chip (`in_code_review` on open, back to `running` on
+    /// a feedback round). Absent for every ordinary review.
+    plan: Option<String>,
+    /// Deferred mode (`defer=1`): PARK the review instead of holding — the
+    /// row is created (round bumped, annotations re-anchored) and the call
+    /// returns immediately; the human resolves it in the morning through the
+    /// existing pane. Queued overnight runs use this with `source=runBranch`,
+    /// whose diff is durable on the run's committed branch. With `plan=`, the
+    /// run chip walks to `awaiting_review`.
+    defer: Option<String>,
 }
 
 /// Server-side cap on a held review curl. Deliberately just under Claude
@@ -3671,6 +4021,57 @@ async fn handle_review_start(
             );
     }
 
+    // Deferred (parked) mode — the overnight queue's morning handoff: the
+    // review row exists (round bumped, annotations re-anchored) and the call
+    // returns IMMEDIATELY instead of holding. No pane-open emit at 3am; the
+    // run chip (`awaiting_review`) is the morning's discovery surface, and
+    // the human resolves the review through the existing pane. The diff is
+    // durable because a queued run ends committed to its run branch and this
+    // review's source reads that branch.
+    if matches!(
+        q.defer.as_deref().map(str::trim),
+        Some("1") | Some("true")
+    ) {
+        let _ = db.append_journal(
+            "review_parked",
+            Some("review"),
+            Some(&session.review_id),
+            Some(&session.repo_path),
+            Some(&format!("round {}", session.round)),
+        );
+        if let Some(plan_sid) = q.plan.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            // Both links: the in-memory map (this boot's verdict path) and
+            // the durable queue entry (survives the overnight restart).
+            orchestration_review_links()
+                .lock()
+                .unwrap()
+                .insert(session.review_id.clone(), plan_sid.to_string());
+            queue::note_parked(&db, plan_sid, &session.review_id);
+            advance_run_state(
+                &app_state.app_handle,
+                &app_state.store,
+                plan_sid,
+                "awaiting_review",
+            );
+        }
+        tracing::info!(
+            review_id = %session.review_id,
+            round = session.round,
+            files = files.len(),
+            "review parked (deferred mode) — returning immediately"
+        );
+        return (
+            StatusCode::OK,
+            format!(
+                "Review parked for the morning as review {} (round {}). The reviewer will go \
+                 through it in Redline's review pane when they are back — do not wait for \
+                 feedback; finish your exit report and end the session.\n",
+                session.review_id, session.round
+            ),
+        )
+            .into_response();
+    }
+
     // Bind the review to the dock terminal whose claude sent this curl (the
     // intercept-strip ancestry walk). Off-runtime: lsof/ps shell-outs block.
     let terminal_id = {
@@ -3717,6 +4118,22 @@ async fn handle_review_start(
         Some(&format!("round {}", session.round)),
     );
 
+    // Orchestrated run: remember which plan session this review closes out
+    // and flip its chip to `in_code_review`. Re-registered every round (the
+    // link map is in-memory; the review outlives any single curl).
+    if let Some(plan_sid) = q.plan.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        orchestration_review_links()
+            .lock()
+            .unwrap()
+            .insert(session.review_id.clone(), plan_sid.to_string());
+        advance_run_state(
+            &app_state.app_handle,
+            &app_state.store,
+            plan_sid,
+            "in_code_review",
+        );
+    }
+
     let (rx, token) = app_state.pending_reviews.register(&session.review_id);
     let _guard = ReviewDetachGuard {
         pending: app_state.pending_reviews.clone(),
@@ -3759,6 +4176,7 @@ fn review_hold_active(
 #[tauri::command]
 fn submit_review_feedback(
     app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
     review_state: tauri::State<'_, review::ReviewState>,
     pending: tauri::State<'_, PendingReviews>,
     review_id: String,
@@ -3769,14 +4187,69 @@ fn submit_review_feedback(
     // already landed — don't commit it again); an older push was already
     // reported in an earlier round's reply.
     let held_since = pending.held_since(&review_id);
-    let tx = pending.take(&review_id).ok_or(
-        "no agent is waiting on this review — run /redline-code-review in the terminal first",
-    )?;
+    let Some(tx) = pending.take(&review_id) else {
+        // Parked (overnight) review: no curl is held — the queued run ended
+        // hours ago with its diff committed to the run branch. The human's
+        // morning verdict still lands: an approve walks the chip through the
+        // SAME mapping a held review uses (`awaiting_review` → `landed`; no
+        // ordering is enforced). A feedback verdict keeps `awaiting_review` —
+        // the annotations are stored for the follow-up session; nothing is
+        // running to hand them to.
+        let db = review_state.db.clone();
+        let plan_sid = orchestration_review_links()
+            .lock()
+            .unwrap()
+            .get(&review_id)
+            .cloned()
+            .or_else(|| queue::parked_plan_for_review(&db, &review_id));
+        let run_state = plan_sid.as_deref().and_then(|sid| db.get_run_state(sid));
+        let verdict = parked_verdict(plan_sid.is_some(), run_state.as_deref(), approve);
+        if verdict == ParkedVerdict::NotParked {
+            return Err(
+                "no agent is waiting on this review — run /redline-code-review in the \
+                 terminal first"
+                    .to_string(),
+            );
+        }
+        let plan_sid = plan_sid.expect("parked implies a plan link");
+        if verdict == ParkedVerdict::Land {
+            advance_run_state(&app, &store, &plan_sid, review_verdict_run_state(true));
+            // Producers wave: a parked approval LANDS the review — file every
+            // still-unresolved annotation as a durable work item.
+            let filed = review::file_unresolved_annotations(&db, &review_id);
+            if filed > 0 {
+                tracing::info!(
+                    review_id = %review_id, filed,
+                    "parked review landing filed unresolved annotations as work items"
+                );
+            }
+        }
+        let _ = db.append_journal(
+            "review_resolved_parked",
+            Some("review"),
+            Some(&review_id),
+            Some(if approve { "approve" } else { "feedback" }),
+            None,
+        );
+        tracing::info!(review_id = %review_id, approve, "parked review resolved (no held curl)");
+        return Ok(());
+    };
     let push = review_state
         .db
         .latest_push_for_review(&review_id)
         .filter(|p| held_since.is_some_and(|t| p.created_at >= t));
     let payload = if approve {
+        // Producers wave: the approval LANDS the review — any annotation
+        // still unresolved files as a durable work item instead of dropping
+        // (it would otherwise never reach the agent: the approve payload
+        // carries no annotations).
+        let filed = review::file_unresolved_annotations(&review_state.db, &review_id);
+        if filed > 0 {
+            tracing::info!(
+                review_id = %review_id, filed,
+                "review landing filed unresolved annotations as work items"
+            );
+        }
         let msg = approve_message
             .filter(|m| !m.trim().is_empty())
             .unwrap_or_else(|| review_feedback::DEFAULT_APPROVE_MESSAGE.to_string());
@@ -3819,6 +4292,20 @@ fn submit_review_feedback(
         text
     };
     tracing::info!(review_id = %review_id, approve, "submit_review_feedback fired");
+    // Orchestrated run: a feedback round hands the work back to the
+    // orchestrator — cycle the chip to `running`. An approval is the human
+    // sign-off that ends the run's review — the chip walks to `landed` so no
+    // "in code review" indication lingers once the reviewer has accepted.
+    {
+        let plan_sid = orchestration_review_links()
+            .lock()
+            .unwrap()
+            .get(&review_id)
+            .cloned();
+        if let Some(plan_sid) = plan_sid {
+            advance_run_state(&app, &store, &plan_sid, review_verdict_run_state(approve));
+        }
+    }
     tx.send(payload).map_err(|_| {
         "the review curl is no longer listening — re-run /redline-code-review".to_string()
     })
@@ -3837,6 +4324,241 @@ fn dismiss_review(
     tracing::info!(review_id = %review_id, "review dismissed");
     tx.send(format!("{}\n", review_feedback::DISMISS_MESSAGE))
         .map_err(|_| "the review curl is no longer listening".to_string())
+}
+
+// --- orchestration exit report (`POST /v1/orchestration/report`) -------------
+
+/// The orchestrator's exit report — its *claims*. Stored verbatim in
+/// `plan_runs`; the report GUI pairs the claims against ground truth Redline
+/// observed independently (diff stats, review rounds, elapsed since launch).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OrchestrationReportBody {
+    plan_session_id: String,
+    #[serde(default)]
+    script_path: Option<String>,
+    #[serde(default)]
+    workflow_ran: bool,
+    /// Read by the GUI from the verbatim-stored body; deserialized here only
+    /// so the documented shape lives in code.
+    #[allow(dead_code)]
+    #[serde(default)]
+    summary: String,
+    /// `[{title, planSection, verified, skipped, notes}]` — kept as raw JSON
+    /// (the whole body is stored verbatim; the GUI is the schema's consumer).
+    #[serde(default)]
+    subtasks: Vec<serde_json::Value>,
+}
+
+/// Pure parse seam for the report route (unit-tested without axum).
+fn parse_orchestration_report(v: &serde_json::Value) -> Result<OrchestrationReportBody, String> {
+    let body: OrchestrationReportBody =
+        serde_json::from_value(v.clone()).map_err(|e| format!("bad report body: {e}"))?;
+    if body.plan_session_id.trim().is_empty() {
+        return Err("planSessionId is required".to_string());
+    }
+    Ok(body)
+}
+
+/// Producers wave: subtasks the exit report says were NOT delivered
+/// (`verified == false` or `skipped == true`) survive as open work items,
+/// `origin_kind="plan_run"` / `origin_id=<plan session id>` (provenance,
+/// never ownership), title from the subtask title, body from its notes. The
+/// parse stays tolerant — a subtask missing its title or both flags is
+/// skipped, never a failed ingestion — and a re-POSTed report is idempotent
+/// (the filing helper dedupes on the provenance triple). The orchestrator
+/// seat produced these, so its `items_filed` moves by the count filed.
+fn file_exit_report_items(
+    db: &db::Database,
+    plan_sid: &str,
+    subtasks: &[serde_json::Value],
+    project_path: Option<&str>,
+) -> usize {
+    /// Ledger actor + edge author for exit-report filings.
+    const REPORT_ACTOR: &str = "orchestrator-report";
+    let mut filed = 0usize;
+    for v in subtasks {
+        let Some(title) = v
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        else {
+            continue; // tolerate: a titleless claim files nothing
+        };
+        let verified = v.get("verified").and_then(serde_json::Value::as_bool);
+        let skipped = v.get("skipped").and_then(serde_json::Value::as_bool);
+        if verified.is_none() && skipped.is_none() {
+            continue; // tolerate: not enough shape to judge delivery
+        }
+        if verified.unwrap_or(true) && !skipped.unwrap_or(false) {
+            continue; // delivered — nothing survives
+        }
+        let notes = v
+            .get("notes")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|n| !n.is_empty());
+        let section = v
+            .get("planSection")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let mut body = if skipped == Some(true) {
+            "Skipped by the orchestrated run.".to_string()
+        } else {
+            "Ran but was NOT verified by the orchestrated run.".to_string()
+        };
+        if let Some(sec) = section {
+            body.push_str(&format!(" Plan section: {sec}."));
+        }
+        if let Some(n) = notes {
+            body.push_str(&format!("\n\n{n}"));
+        }
+        match db.file_produced_work_item(
+            title,
+            Some(&body),
+            "task",
+            "open",
+            2,
+            "plan_run",
+            Some(plan_sid),
+            project_path,
+            None,
+            REPORT_ACTOR,
+        ) {
+            Ok(Some(_)) => filed += 1,
+            Ok(None) => {} // a re-POSTed report — already standing
+            Err(e) => tracing::warn!(
+                plan_session_id = %plan_sid, error = %e,
+                "failed to file an exit-report work item"
+            ),
+        }
+    }
+    if filed > 0 {
+        // items_filed becomes real for the orchestrator seat.
+        if let Err(e) = db.upsert_seat_stat("orchestrator", None, filed as i64) {
+            tracing::warn!(error = %e, "failed to bump orchestrator items_filed");
+        }
+    }
+    filed
+}
+
+/// `POST /v1/orchestration/report` — the orchestrator session files its
+/// structured exit report when the workflow ends, BEFORE opening the human
+/// review (the skill's contract; the RunReport GUI opens on this event).
+/// Token-protected: the orchestrator's PTY inherits `REDLINE_DAEMON_TOKEN`.
+async fn handle_orchestration_report(
+    State(app_state): State<AppState>,
+    Json(v): Json<serde_json::Value>,
+) -> axum::response::Response {
+    let body = match parse_orchestration_report(&v) {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    let plan_sid = body.plan_session_id.trim().to_string();
+    if !app_state.store.has_session(&plan_sid) {
+        return (
+            StatusCode::NOT_FOUND,
+            format!("no plan session {plan_sid}"),
+        )
+            .into_response();
+    }
+    let db = app_state.store.database();
+    if let Err(e) = db.upsert_plan_run(
+        &plan_sid,
+        &v.to_string(),
+        body.script_path.as_deref(),
+        body.workflow_ran,
+    ) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+    }
+    // Producers wave: undelivered subtasks survive the report as open items
+    // instead of living only inside the verbatim-stored claim blob.
+    let project_path = app_state.store.get(&plan_sid).map(|s| s.project_path);
+    let filed = file_exit_report_items(&db, &plan_sid, &body.subtasks, project_path.as_deref());
+    if filed > 0 {
+        tracing::info!(
+            plan_session_id = %plan_sid, filed,
+            "exit report filed undelivered subtasks as work items"
+        );
+    }
+    let _ = db.append_journal(
+        "orchestration_report",
+        Some("session"),
+        Some(&plan_sid),
+        Some(if body.workflow_ran {
+            "workflow"
+        } else {
+            "sequential"
+        }),
+        Some(&format!("{} subtask(s)", body.subtasks.len())),
+    );
+    tracing::info!(
+        plan_session_id = %plan_sid,
+        workflow_ran = body.workflow_ran,
+        subtasks = body.subtasks.len(),
+        "orchestration exit report filed"
+    );
+    // Tell the UI a report landed (App opens the RunReport container). The
+    // run-state chip itself moves on the review-start beacon, not here.
+    let _ = app_state.app_handle.emit(
+        "orchestration-report",
+        SessionEvent {
+            session_id: plan_sid,
+        },
+    );
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
+}
+
+/// The stored run record for a plan session — RunReport's data source.
+#[tauri::command]
+fn get_plan_run(
+    store: tauri::State<'_, SessionStore>,
+    plan_session_id: String,
+) -> Option<db::PlanRunRow> {
+    store.database().get_plan_run(&plan_session_id)
+}
+
+/// The human verdict that closes an orchestrated run. `resolved` is the only
+/// mark that advances the chip (→ `landed`); `needs_follow_up` / `abandoned`
+/// are recorded and the chip stays visibly unresolved. Never inferred from
+/// dismissing the review — this is a deliberate act.
+#[tauri::command]
+fn resolve_plan_run(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    plan_session_id: String,
+    resolution: String,
+    note: Option<String>,
+) -> Result<bool, String> {
+    let allowed = ["resolved", "needs_follow_up", "abandoned"];
+    if !allowed.contains(&resolution.as_str()) {
+        return Err(format!("unknown resolution `{resolution}`"));
+    }
+    let db = store.database();
+    let ok = db
+        .resolve_plan_run(&plan_session_id, &resolution, note.as_deref())
+        .map_err(|e| e.to_string())?;
+    if ok {
+        let _ = db.append_journal(
+            "run_resolution",
+            Some("session"),
+            Some(&plan_session_id),
+            Some(&resolution),
+            note.as_deref(),
+        );
+        if resolution == "resolved" {
+            advance_run_state(&app, &store, &plan_session_id, "landed");
+        }
+        let _ = app.emit(
+            "run-state-changed",
+            SessionEvent {
+                session_id: plan_session_id.clone(),
+            },
+        );
+    }
+    Ok(ok)
 }
 
 // --- external annotations API (`/v1/reviews/annotations`) -------------------
@@ -4898,39 +5620,54 @@ fn browser_set_active(active: tauri::State<'_, ActiveBrowser>, label: Option<Str
 
 /// Mirror the active research mission into the backend so the daemon's
 /// `/v1/mission/*` routes can answer the orchestrator agent. Called by
-/// `BrowserPane` when the active mission changes / its goal is edited / it's
-/// archived (`None` = no active mission). The pins are loaded from the DB on
-/// demand, so only the mission's identity + goal need mirroring here.
+/// `BrowserPane` when the active mission ID changes (`None` = no active
+/// mission). ID-driven: the title/goal/status are looked up fresh from the DB
+/// here — the frontend used to send them from its `missions` list, which is
+/// empty until `mission_list` resolves, so every BrowserPane remount wiped the
+/// mirror for a tick and mission-blind browse/linked agents spawned in that
+/// window. The pins are loaded from the DB on demand, so only the mission's
+/// identity needs mirroring.
 #[tauri::command]
 fn mission_set_active(
     active: tauri::State<'_, ActiveMission>,
     store: tauri::State<'_, SessionStore>,
     mission_id: Option<String>,
-    title: Option<String>,
-    goal: Option<String>,
-    status: Option<String>,
 ) {
     let prev = active.active_id();
-    let next = mission_id.filter(|id| !id.trim().is_empty());
-    // Companion journal: a mission became active (identity change only —
-    // goal/title edits stay quiet).
-    if let Some(id) = next.as_ref().filter(|id| prev.as_deref() != Some(id)) {
-        let _ = store.database().append_journal(
-            "mission_active",
-            Some("browser"),
-            Some(id),
-            title.as_deref(),
-            None,
-        );
-    }
-    active.set(next.map(|id| {
-        ActiveMissionInfo {
-            mission_id: id,
-            title: title.unwrap_or_default(),
-            goal: goal.unwrap_or_default(),
-            status: status.unwrap_or_else(|| "active".to_string()),
+    let Some(id) = mission_id.filter(|id| !id.trim().is_empty()) else {
+        active.set(None);
+        return;
+    };
+    match store.database().get_mission(&id) {
+        Ok(Some(m)) => {
+            // Companion journal: a mission became active (identity change only
+            // — re-pushes of the same id stay quiet).
+            if prev.as_deref() != Some(id.as_str()) {
+                let _ = store.database().append_journal(
+                    "mission_active",
+                    Some("browser"),
+                    Some(&id),
+                    Some(&m.title),
+                    None,
+                );
+            }
+            active.set(Some(ActiveMissionInfo {
+                mission_id: id,
+                title: m.title,
+                goal: m.goal,
+                status: m.status,
+            }));
         }
-    }));
+        Ok(None) => {
+            eprintln!("[mission] set_active: unknown mission id {id}; clearing mirror");
+            active.set(None);
+        }
+        Err(e) => {
+            // Transient DB error: keep whatever the mirror held rather than
+            // blinding a possibly-fine active mission.
+            eprintln!("[mission] set_active: lookup failed for {id}: {e}");
+        }
+    }
 }
 
 /// Mirror the browser pane's full tab list into the backend so the daemon's
@@ -5170,16 +5907,22 @@ fn list_sessions(
     pending: tauri::State<'_, PendingResponses>,
 ) -> Vec<SessionSummary> {
     let mut sessions = store.list();
-    for s in &mut sessions {
+    fold_pending_into_summaries(&mut sessions, &pending);
+    sessions
+}
+
+/// Step 4 of the interception chain: overlay the live held-sender map onto the
+/// persisted summaries. A live sender is ground truth — never let a lagging
+/// persisted state show "detached" while a POST is actually held. Factored out
+/// of `list_sessions` so the capture→hold→indicator seam is unit-testable.
+fn fold_pending_into_summaries(sessions: &mut [SessionSummary], pending: &PendingResponses) {
+    for s in sessions.iter_mut() {
         s.held = pending.has(&s.session_id);
-        // A live sender is ground truth — never let a lagging persisted state
-        // show "detached" while a POST is actually held.
         if s.held {
             s.attach_state = AttachState::Held;
             s.held_terminal_id = pending.terminal_of(&s.session_id);
         }
     }
-    sessions
 }
 
 /// Session-state side effects of an inbound plan POST, recorded before the
@@ -6159,6 +6902,404 @@ fn approve_plan(
     );
     refresh_tray(&app, &store);
     Ok(())
+}
+
+/// The deny reason `orchestrate_plan` sends into the held ExitPlanMode. One
+/// calm ✅ line in the `feedback_deny_reason` register — Claude Code renders
+/// deny reasons in a red Error box, so it leads with a defusing sentence —
+/// that stands the original session down: the plan is approved, but a
+/// *separate* orchestrated session executes it.
+const ORCHESTRATE_STAND_DOWN: &str = "✅ Plan approved in Redline — the reviewer is \
+     executing it in a separate orchestrated session. Do NOT implement this plan, do \
+     not revise it, and do not call ExitPlanMode again. Acknowledge briefly and end \
+     your turn; this session's work is done.";
+
+/// Approve-and-stand-down: the Orchestrate path. Body mirrors `approve_plan`
+/// (pending.take → Approved → send → Idle → events) with two differences: the
+/// held ExitPlanMode gets a **deny** carrying the stand-down text, and the
+/// launch lands in the context journal. The original session was launched
+/// `--permission-mode plan`, so the deny keeps it read-only — even a
+/// disobedient model cannot collide with the orchestrator, where an allow
+/// would exit plan mode and guarantee a collision. `pending_feedback` /
+/// `expected_modes` stay unset and the revise watchdog is not armed (only
+/// `submit_review` arms it; a stale one self-stops once status ≠ InReview).
+/// The state-machine core of `orchestrate_plan`, split from the
+/// AppHandle-dependent side effects (journal, events, tray, detach marking)
+/// so the approve/deny mechanics are unit-testable — same seam as
+/// `delete_session_inner`.
+fn orchestrate_plan_inner(
+    store: &SessionStore,
+    pending: &PendingResponses,
+    expected_modes: &ExpectedModes,
+    session_id: &str,
+) -> Result<(), String> {
+    let Some(tx) = pending.take(session_id) else {
+        return Err("no plan is currently waiting for review on this session".to_string());
+    };
+    let _ = expected_modes.take(session_id);
+    store.set_status(session_id, SessionStatus::Approved);
+    // Ignore send failure like `approve_plan` does: a dead receiver means the
+    // original session already went away — no collision is possible, and the
+    // orchestration is still valid.
+    let _ = tx.send(deny_response(ORCHESTRATE_STAND_DOWN));
+    store.set_attach_state(session_id, AttachState::Idle);
+    Ok(())
+}
+
+#[tauri::command]
+fn orchestrate_plan(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    pending: tauri::State<'_, PendingResponses>,
+    expected_modes: tauri::State<'_, ExpectedModes>,
+    session_id: String,
+) -> Result<(), String> {
+    if let Err(e) = orchestrate_plan_inner(&store, &pending, &expected_modes, &session_id) {
+        // Same drop-guard/sweep gap as `approve_plan`: surface the detached
+        // banner + Restore instead of leaving Orchestrate a silent no-op.
+        mark_session_detached(&app, &store, &session_id);
+        return Err(e);
+    }
+    tracing::info!(session_id = %session_id, "orchestrate_plan fired");
+    let _ = store.database().append_journal(
+        "orchestrate_launch",
+        Some("session"),
+        Some(&session_id),
+        None,
+        None,
+    );
+    // Run lifecycle: the click is the first beacon; the stall watchdog fires
+    // `stalled` if no further beacon (ingest claim → `running`) ever arrives.
+    advance_run_state(&app, &store, &session_id, "orchestrating");
+    arm_orchestrate_stall_watchdog(app.clone(), (*store).clone(), session_id.clone());
+    let _ = app.emit(
+        "session-status-changed",
+        SessionEvent {
+            session_id: session_id.clone(),
+        },
+    );
+    refresh_tray(&app, &store);
+    Ok(())
+}
+
+/// Record an Orchestrate launch at click time, before the orchestrator's
+/// prompt is typed into its PTY. The orchestrator session doesn't exist yet
+/// (claude hasn't spawned), so this only arms the two ledger guards: the
+/// agent guard (the typed prompt is launch boilerplate, not a lake prompt —
+/// the hook fire claims-and-skips it) and the orchestration guard (that same
+/// hook fire is the first moment the new claude session id is known, and
+/// links it under the plan session it executes).
+#[tauri::command]
+fn record_orchestration_launch(
+    launched: tauri::State<'_, LaunchedTerminals>,
+    prompt: String,
+    plan_session_id: String,
+    terminal_id: Option<String>,
+) -> Result<(), String> {
+    let body = prompt.trim().to_string();
+    if body.is_empty() || plan_session_id.trim().is_empty() {
+        return Err("orchestrate launch needs a prompt and a plan session id".to_string());
+    }
+    let bh = ledger::body_hash(&body);
+    ledger::register_agent_prompt(&bh);
+    // A retry re-arms both guards deliberately: `register_*` is a plain
+    // insert, so re-registering after a claim or a `GUARD_TTL` expiry
+    // genuinely re-arms — a reviewer who takes >5 min on the workflow card
+    // must still get their `orchestrations` row.
+    ledger::register_orchestration_prompt(&bh, plan_session_id.trim());
+    if let Some(tid) = terminal_id.as_deref().filter(|t| !t.trim().is_empty()) {
+        launched.set(plan_session_id.trim(), tid);
+    }
+    Ok(())
+}
+
+/// The Orchestrate launch modal's workflows-disabled probe (hook.rs owns the
+/// `~/.claude/settings.json` read).
+#[tauri::command]
+fn workflow_availability() -> hook::WorkflowAvailability {
+    hook::workflow_availability()
+}
+
+/// Write the launch modal's checked Bash allow rules before the orchestrator
+/// spawns (workflow subagents inherit the allowlist; unallowlisted Bash
+/// queues permission prompts mid-fan-out).
+#[tauri::command]
+fn apply_orchestrate_allows(rules: Vec<String>) -> Result<(), String> {
+    hook::apply_orchestrate_allows(&rules)
+}
+
+/// Terminal tabs orchestrated runs were launched into, keyed by plan session
+/// id. In-memory (a tab id is meaningless across restarts); folded into the
+/// `orchestrations` row when the ingest claim writes it, so a run's tab
+/// survives even though the row doesn't exist until the claim. Written at
+/// launch precisely so a FAILED handoff still leaves a trace of its tab.
+#[derive(Clone, Default)]
+struct LaunchedTerminals(Arc<StdMutex<HashMap<String, String>>>);
+
+impl LaunchedTerminals {
+    fn set(&self, plan_sid: &str, terminal_id: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .insert(plan_sid.to_string(), terminal_id.to_string());
+    }
+    fn get(&self, plan_sid: &str) -> Option<String> {
+        self.0.lock().unwrap().get(plan_sid).cloned()
+    }
+    fn clear(&self, plan_sid: &str) {
+        self.0.lock().unwrap().remove(plan_sid);
+    }
+}
+
+/// The durable half of `reset_run` — both run rows, the run columns, and the
+/// stale review link — everything that needs no AppHandle, so the idempotency
+/// contract is unit-testable. Safe on a session that never ran.
+fn reset_run_rows(store: &SessionStore, session_id: &str) {
+    let db = store.database();
+    let _ = db.delete_orchestration(session_id);
+    let _ = db.delete_plan_run(session_id);
+    store.clear_run_state(session_id);
+    // The process-global review→plan link map has no other eviction; a stale
+    // entry would walk the NEXT run's chip from a dead review.
+    orchestration_review_links()
+        .lock()
+        .unwrap()
+        .retain(|_, sid| sid != session_id);
+}
+
+/// Everything `reset_run` undoes, in one idempotent sweep: the watcher, both
+/// run rows, the run columns, the stale review link, and the launch-tab
+/// stash. Safe on a session with no run at all. Emits `run-state-changed`
+/// unconditionally so the Runs surface drops any stale tiles.
+fn reset_run_inner(app: &AppHandle, store: &SessionStore, session_id: &str) {
+    runwatch::stop(app, session_id);
+    reset_run_rows(store, session_id);
+    if let Some(launched) = app.try_state::<LaunchedTerminals>() {
+        launched.clear(session_id);
+    }
+    let _ = app.emit(
+        "run-state-changed",
+        SessionEvent {
+            session_id: session_id.to_string(),
+        },
+    );
+}
+
+/// B1: clear a run without touching the approval — the rollback for a handoff
+/// that never delivered, and the first half of "run it again".
+#[tauri::command]
+fn reset_run(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    session_id: String,
+) -> Result<(), String> {
+    reset_run_inner(&app, &store, &session_id);
+    let _ = store.database().append_journal(
+        "run_reset",
+        Some("session"),
+        Some(&session_id),
+        None,
+        None,
+    );
+    tracing::info!(session_id = %session_id, "run reset");
+    Ok(())
+}
+
+/// B2 (backend half): re-enter the run lifecycle for an already-approved
+/// plan. Deliberately NOT `orchestrate_plan_inner` — that requires a held
+/// `oneshot::Sender` which no longer exists after the original approval,
+/// which is exactly why re-running was impossible. The frontend follows this
+/// with the same record-launch → seats → verified-handoff sequence as a
+/// first launch.
+#[tauri::command]
+fn relaunch_run(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    session_id: String,
+) -> Result<(), String> {
+    let session = store
+        .get(&session_id)
+        .ok_or_else(|| "no such session".to_string())?;
+    if session.status != SessionStatus::Approved {
+        return Err("only an approved plan can be re-launched".to_string());
+    }
+    reset_run_inner(&app, &store, &session_id);
+    let _ = store.database().append_journal(
+        "orchestrate_relaunch",
+        Some("session"),
+        Some(&session_id),
+        None,
+        None,
+    );
+    advance_run_state(&app, &store, &session_id, "orchestrating");
+    arm_orchestrate_stall_watchdog(app.clone(), (*store).clone(), session_id.clone());
+    Ok(())
+}
+
+/// B3: back to review — for "the plan itself was wrong", not "delivery
+/// failed". The approval is reversed by ledger supersession (never a
+/// delete — the hash chain stays intact); the session lands Detached, which
+/// lights the existing banner + Restore button, the only real path back to a
+/// live claude session.
+/// The state-machine core of `unapprove_plan`, split from the
+/// AppHandle-dependent side effects (watcher stop, events, tray) so the
+/// approval reversal is unit-testable — the `orchestrate_plan_inner` seam.
+fn unapprove_plan_inner(store: &SessionStore, session_id: &str) -> Result<(), String> {
+    let session = store
+        .get(session_id)
+        .ok_or_else(|| "no such session".to_string())?;
+    if session.status != SessionStatus::Approved {
+        return Err("session is not approved".to_string());
+    }
+    let db = store.database();
+    // Ledger first, while the approval is still the current claim.
+    if let Some(approval_seq) = db.latest_approval_seq(session_id) {
+        let seq_str = approval_seq.to_string();
+        match ledger::record_decision(
+            &db,
+            ledger::DecisionInput {
+                kind: ledger::EventKind::Reopen,
+                author: None,
+                session_id: Some(session_id),
+                ref_kind: "session",
+                ref_id: session_id,
+                payload_hash: ledger::decision_payload_hash(&[
+                    ("status", "in_review"),
+                    ("session", session_id),
+                    ("supersedes", &seq_str),
+                ]),
+            },
+        ) {
+            Ok(Some(new_seq)) => {
+                if let Err(e) = db.record_approval_supersession(
+                    approval_seq,
+                    new_seq,
+                    "approval rescinded by the reviewer",
+                ) {
+                    tracing::warn!(error = %e, "failed to record approval supersession");
+                }
+            }
+            // An identical rescission of this approval is already recorded.
+            Ok(None) => {}
+            Err(e) => tracing::warn!(error = %e, "failed to record un-approve decision"),
+        }
+    }
+    // `set_status` early-returns on no-op and only fires its ledger/journal
+    // side effects on the Approved branch, so the reverse direction here is
+    // side-effect-free by construction.
+    store.set_status(session_id, SessionStatus::InReview);
+    // Never fake Held: `list_sessions` overrides attach state from the live
+    // sender map, and no POST is held. Detached is honest — it lights the
+    // banner + Restore button, the only real path back to a live session.
+    store.set_attach_state(session_id, AttachState::Detached);
+    let _ = db.append_journal(
+        "approval_rescinded",
+        Some("session"),
+        Some(session_id),
+        None,
+        None,
+    );
+    Ok(())
+}
+
+#[tauri::command]
+fn unapprove_plan(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    session_id: String,
+) -> Result<(), String> {
+    unapprove_plan_inner(&store, &session_id)?;
+    reset_run_inner(&app, &store, &session_id);
+    let _ = app.emit(
+        "session-status-changed",
+        SessionEvent {
+            session_id: session_id.clone(),
+        },
+    );
+    refresh_tray(&app, &store);
+    Ok(())
+}
+
+/// B4: abort a live run. Terminal chip value `abandoned`; the watcher exits
+/// (excluded from `is_live_run_state`) and boot rehydration skips it. Does
+/// NOT kill the orchestrator process — returns the launch tab id (when known)
+/// so the caller can name the tab to close instead.
+#[tauri::command]
+fn stand_down_run(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    session_id: String,
+) -> Result<Option<String>, String> {
+    runwatch::stop(&app, &session_id);
+    advance_run_state(&app, &store, &session_id, "abandoned");
+    let db = store.database();
+    // Keep the RunReport bar in agreement with the chip when a report exists.
+    let _ = db.resolve_plan_run(
+        &session_id,
+        "abandoned",
+        Some("stood down from the run monitor"),
+    );
+    let _ = db.append_journal(
+        "run_stand_down",
+        Some("session"),
+        Some(&session_id),
+        None,
+        None,
+    );
+    let terminal = app
+        .try_state::<LaunchedTerminals>()
+        .and_then(|l| l.get(&session_id))
+        .or_else(|| db.get_orchestration(&session_id).and_then(|r| r.terminal_id));
+    Ok(terminal)
+}
+
+/// A4: the handoff's delivery probe — polled by the frontend after typing the
+/// orchestrator prompt; *leaving* `orchestrating` is the proof the ingest
+/// claim fired (the only evidence a run actually started).
+#[tauri::command]
+fn get_run_state(store: tauri::State<'_, SessionStore>, session_id: String) -> Option<String> {
+    store.database().get_run_state(&session_id)
+}
+
+/// A6: handoff breadcrumbs. There is no log file (`tracing` is stdout-only),
+/// so each handoff stage lands in the context journal — the Companion feed
+/// gets it for free and a stuck run is readable straight out of
+/// `context_journal`.
+const HANDOFF_STAGES: [&str; 4] = [
+    "handoff_spawned",
+    "handoff_launch_written",
+    "handoff_prompt_written",
+    "handoff_failed",
+];
+
+#[tauri::command]
+fn record_handoff_event(
+    store: tauri::State<'_, SessionStore>,
+    session_id: String,
+    stage: String,
+    detail: Option<String>,
+) -> Result<(), String> {
+    if !HANDOFF_STAGES.contains(&stage.as_str()) {
+        return Err(format!("unknown handoff stage: {stage}"));
+    }
+    store
+        .database()
+        .append_journal(
+            &stage,
+            Some("session"),
+            Some(&session_id),
+            detail.as_deref(),
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// The launch modal's inferred allow-rule candidates for a project (repo
+/// markers → build/test Bash rules).
+#[tauri::command]
+fn orchestrate_allow_candidates(project_path: String) -> Vec<String> {
+    hook::orchestrate_allow_candidates(std::path::Path::new(&project_path))
 }
 
 #[tauri::command]
@@ -7850,20 +8991,23 @@ fn draft_suggestion_resolve(
 #[derive(Deserialize)]
 struct DraftSuggestionReq {
     op: String,
-    #[serde(default)]
+    // The contract teaches snake_case, but agents were long taught `blockId`/
+    // `agentId` (and some models emit camelCase reflexively) — accept both so
+    // a block-addressed op never 400s on casing alone.
+    #[serde(default, alias = "blockId")]
     block_id: Option<String>,
     #[serde(default)]
     original: Option<String>,
     #[serde(default)]
     markdown: String,
-    #[serde(default)]
+    #[serde(default, alias = "agentId")]
     agent_id: Option<String>,
     #[serde(default)]
     body: Option<String>,
     /// Set by a sidecar comment-thread agent — scopes its writes to the
     /// comment's anchored block (a thread about one paragraph must never
     /// rewrite the whole prompt). The main discussion agent omits it.
-    #[serde(default)]
+    #[serde(default, alias = "commentId")]
     comment_id: Option<String>,
 }
 
@@ -7968,7 +9112,14 @@ async fn librarian_agent(
     let prompt = librarian::build_librarian_prompt_from_digest(&digest);
     let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
     let (text, _session) = librarian::run_librarian(&cwd, prompt).await?;
-    Ok(librarian::parse_checklist(&text))
+    let result = librarian::parse_checklist(&text);
+    // Producers wave: the checklist lands as durable work items (deduped
+    // against the still-open backlog); the advisory strip renders unchanged.
+    let filed = librarian::file_checklist_items(&db, &result);
+    if filed > 0 {
+        tracing::info!(filed, "librarian checklist filed as work items");
+    }
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -8063,6 +9214,7 @@ async fn shipwright_agent(
 
     let now = ledger::now_millis();
     let mut duplicates = 0usize;
+    let mut fresh: Vec<(String, &shipwright::Finding)> = Vec::new();
     for f in &result.findings {
         let row = db::ShipwrightFinding {
             id: uuid::Uuid::new_v4().to_string(),
@@ -8081,9 +9233,17 @@ async fn shipwright_agent(
         };
         match db.insert_shipwright_finding(&row) {
             Ok(None) => duplicates += 1,
-            Ok(Some(_)) => {}
+            Ok(Some(id)) => fresh.push((id, f)),
             Err(e) => tracing::warn!(error = %e, "failed to persist a Shipwright finding"),
         }
+    }
+    // Producers wave: non-dismissed NEWLY-INSERTED findings file durable work
+    // items — the `(category, summary)` finding dedupe (covering dismissed
+    // findings too) is the idempotency backbone, so a duplicate or dismissed
+    // finding never reaches the filer.
+    let filed = shipwright::file_finding_items(&db, &fresh, &repo);
+    if filed > 0 {
+        tracing::info!(filed, "shipwright findings filed as work items");
     }
     let _ = db.append_journal(
         "shipwright_run",
@@ -9021,7 +10181,7 @@ fn install_skill() -> Result<SkillStatus, String> {
         tracing::info!(
             path = %status.skill_path,
             version = status.version,
-            "installed Redline skills (redline + sidecar)"
+            "installed the Redline skill bundle (and pruned any retired skill dirs)"
         );
     }
     result
@@ -9084,6 +10244,27 @@ pub fn run() {
             accept_agent_suggestion,
             submit_review,
             approve_plan,
+            orchestrate_plan,
+            record_orchestration_launch,
+            workflow_availability,
+            apply_orchestrate_allows,
+            orchestrate_allow_candidates,
+            reset_run,
+            relaunch_run,
+            unapprove_plan,
+            stand_down_run,
+            get_run_state,
+            record_handoff_event,
+            get_plan_run,
+            resolve_plan_run,
+            queue::queue_start,
+            queue::queue_stop,
+            queue::queue_status,
+            queue::queue_get_config,
+            queue::queue_set_config,
+            runwatch::orchestration_snapshot,
+            runwatch::list_orchestrations,
+            runwatch::orchestration_agent_tail,
             accept_resolution,
             reopen_resolution,
             attach_discussion,
@@ -9099,6 +10280,8 @@ pub fn run() {
             seat_preflight,
             apply_seat_picks,
             revert_seat_assignment,
+            seat::get_seat_roster,
+            work::get_work_graph,
             userconfig::get_workspace,
             userconfig::save_workspace,
             get_relay_config,
@@ -9127,10 +10310,13 @@ pub fn run() {
             pty::pty_spawn,
             pty::pty_ack,
             pty::pty_write,
+            pty::pty_write_checked,
+            pty::pty_is_live,
             pty::pty_resize,
             pty::pty_kill,
             pty::pty_kill_all,
             pty::pty_cwd,
+            pty::pty_cwds,
             fsbrowse::list_dir,
             fsbrowse::read_text_file,
             fsbrowse::read_file_base64,
@@ -9155,8 +10341,10 @@ pub fn run() {
             fork::review_thread_discard,
             fork::fork_kill_all,
             browse::browse_send,
+            browse::browse_turn_status,
             browse::get_browse_thread,
             browse::browse_cancel,
+            browse::browse_unqueue,
             browse::browse_discard,
             browse::browse_kill_all,
             mission::mission_create,
@@ -9171,12 +10359,17 @@ pub fn run() {
             mission::mission_send,
             mission::get_mission_thread,
             mission::mission_cancel,
+            mission::mission_unqueue,
+            mission::mission_turn_status,
             mission::mission_kill_all,
             linked::linked_create,
             linked::linked_list,
             linked::linked_get_thread,
+            linked::linked_create_from_browse,
             linked::linked_send,
             linked::linked_cancel,
+            linked::linked_unqueue,
+            linked::linked_turn_status,
             linked::linked_delete,
             linked::linked_set_tabs,
             linked::linked_get_tabs,
@@ -9260,6 +10453,8 @@ pub fn run() {
             surface_set_active,
             drafter_set_doc,
             drafter_get_doc,
+            intake::intake_triage,
+            moot::moot_start,
             record_render_crash,
             bookshelf::bookshelf_list,
             bookshelf::bookshelf_migrate_local,
@@ -9280,6 +10475,8 @@ pub fn run() {
             bookshelf::draft_source_list,
             bookshelf::draft_source_delete,
             draft_chat::draft_chat_send,
+            draft_chat::draft_instruct,
+            draft_chat::draft_turn_status,
             draft_chat::get_draft_chat_thread,
             draft_chat::draft_chat_cancel,
             draft_chat::draft_chat_discard,
@@ -9290,8 +10487,10 @@ pub fn run() {
             fork::draft_thread_send,
             fork::draft_thread_discard,
             memchat::memchat_send,
+            memchat::memchat_turn_status,
             memchat::memchat_thread,
             memchat::memchat_cancel,
+            memchat::memchat_unqueue,
             memchat::memchat_clear,
             memchat::memchat_kill_all,
             companion::companion_create,
@@ -9299,6 +10498,7 @@ pub fn run() {
             companion::companion_get_thread,
             companion::companion_delete,
             companion::companion_send,
+            companion::companion_turn_status,
             companion::companion_cancel,
             companion::companion_kill_all,
             draft_suggestions_pending,
@@ -9437,38 +10637,25 @@ pub fn run() {
                 Database::open(&db_path).expect("failed to open sqlite database"),
             );
 
-            // Polis backup: one snapshot now (so a backup always exists), then
-            // every 6h on a background thread. Also snapshots on quit.
-            {
-                let db_bak = db.clone();
-                let dir_bak = data_dir.clone();
-                snapshot_database(&db_bak, &dir_bak, LEDGER_BACKUP_KEEP);
-                std::thread::spawn(move || loop {
-                    std::thread::sleep(std::time::Duration::from_secs(6 * 3600));
-                    snapshot_database(&db_bak, &dir_bak, LEDGER_BACKUP_KEEP);
-                });
-            }
+            // Polis backup: one snapshot now (so a backup always exists). The
+            // 6h cadence is re-homed onto the keeper's watch bus (the
+            // `ledger-backup` watch) — no thread of its own anymore. Also
+            // snapshots on quit.
+            snapshot_database(&db, &data_dir, LEDGER_BACKUP_KEEP);
 
             // Polis portable mirror (Phase 4): a continuous, one-way markdown
             // mirror of the ledger into the user-chosen directory. Off until a
-            // dir is set (`redline.mirrorDir`); syncs on startup, then every 2
-            // minutes. Best-effort and non-blocking — a mirror hiccup never
-            // touches the app or the chain (the ledger stays source of truth).
+            // dir is set (`redline.mirrorDir`). One startup sync here (off the
+            // setup thread — it touches the filesystem); the 120s cadence is
+            // re-homed onto the keeper's watch bus (the `mirror-sync` watch).
+            // Best-effort and non-blocking — a mirror hiccup never touches the
+            // app or the chain (the ledger stays source of truth).
             {
                 let db_mir = db.clone();
-                std::thread::spawn(move || loop {
+                std::thread::spawn(move || {
                     mirror::sync_if_enabled(&db_mir);
-                    std::thread::sleep(std::time::Duration::from_secs(120));
                 });
             }
-
-            // Memory as plumbing: the background keeper. It waits for the app to
-            // go idle, then autonomously organizes the lake into the ClassMemory
-            // catalog and compacts cold prompt bodies to gists — no buttons, no
-            // configs, one quiet pill. Async (the classifier/summarizer are), so
-            // it rides the Tauri runtime, not a std thread. Best-effort: every
-            // step logs on error and never brings the loop down.
-            keeper::spawn(app.handle().clone(), db.clone());
 
             let settings = Settings::load(db.clone());
             app.manage(settings.clone());
@@ -9542,6 +10729,11 @@ pub fn run() {
             // store. Plain DB handle — no agent process of its own.
             app.manage(review::ReviewState::new(db.clone()));
             app.manage(ai_review::AiReviewState::new(db.clone()));
+            // Overnight queue (P0): runtime flag only — never armed at
+            // boot; it starts on an explicit `queue_start` or the keeper's
+            // ready-depth nudge over opted-in repos (both go through the
+            // same `queue_start` ignition).
+            app.manage(queue::QueueRuntime::new());
 
             // Voice agent (spoken plan discussion). One persistent `claude`
             // session per plan; same lazy-`claude` reasoning as the fork state.
@@ -9595,6 +10787,18 @@ pub fn run() {
             // the store exists and before the daemon starts serving.
             db::install_friction_sink(store.database());
 
+            // Run watchers for the Orchestration Monitor. Rehydrate one per
+            // still-live orchestrated run — the durable `orchestrations`
+            // anchor is what survives a restart mid-run.
+            app.manage(runwatch::RunWatchState::new());
+            if let Ok(rows) = store.database().list_orchestrations() {
+                for row in rows {
+                    if runwatch::is_live_run_state(row.run_state.as_deref()) {
+                        runwatch::start(app.handle(), store.clone(), row.plan_session_id);
+                    }
+                }
+            }
+
             let pending = PendingResponses::new();
             app.manage(pending.clone());
 
@@ -9609,6 +10813,30 @@ pub fn run() {
 
             app.manage(ReviseWatch::new());
             app.manage(LastClaudePid::default());
+            app.manage(LaunchedTerminals::default());
+
+            // Memory as plumbing + the watch bus: the background keeper. One
+            // 30s loop, two duties — the idle-gated memory passes (organize /
+            // compact / observe: no buttons, no configs, one quiet pill) and
+            // the watch bus that re-homes the app's background timers (mirror
+            // sync, ledger backup, orchestrate-stall sweep, review-staleness
+            // sweep, the ready-depth queue nudge) plus the scheduled one-shots
+            // (`keeper::schedule_once`, which the revise watchdog rides).
+            // Spawned HERE, after the store, the held-POST map, and EVERY
+            // managed state a bus act can reach — the staleness act calls
+            // `mark_session_detached`, which does `app.state::<LastClaudePid>()`
+            // and would panic if that manage raced this spawn. Anything a
+            // keeper act touches must be managed above this line. Async (the
+            // classifier / summarizer are), so it rides the Tauri runtime,
+            // not a std thread. Best-effort: every step logs on error and
+            // never brings the loop down.
+            keeper::spawn(keeper::WatchCtx {
+                app: app.handle().clone(),
+                db: store.database(),
+                store: store.clone(),
+                pending: pending.clone(),
+                data_dir: data_dir.clone(),
+            });
 
             let daemon_status = DaemonStatus::new();
             app.manage(daemon_status.clone());
@@ -9961,6 +11189,27 @@ mod tests {
     use super::*;
     use crate::db::Database;
 
+    /// The suggestions endpoint teaches snake_case but agents long saw
+    /// `blockId`/`agentId` — both casings must deserialize, or block ops 400
+    /// on casing alone.
+    #[test]
+    fn draft_suggestion_req_accepts_both_casings() {
+        let snake: DraftSuggestionReq = serde_json::from_str(
+            r#"{"op":"replace_block","block_id":"blk-1","agent_id":"a","comment_id":"c","markdown":"x"}"#,
+        )
+        .unwrap();
+        assert_eq!(snake.block_id.as_deref(), Some("blk-1"));
+        assert_eq!(snake.agent_id.as_deref(), Some("a"));
+        assert_eq!(snake.comment_id.as_deref(), Some("c"));
+        let camel: DraftSuggestionReq = serde_json::from_str(
+            r#"{"op":"replace_block","blockId":"blk-1","agentId":"a","commentId":"c","markdown":"x"}"#,
+        )
+        .unwrap();
+        assert_eq!(camel.block_id.as_deref(), Some("blk-1"));
+        assert_eq!(camel.agent_id.as_deref(), Some("a"));
+        assert_eq!(camel.comment_id.as_deref(), Some("c"));
+    }
+
     /// Golden: the exact UserPromptSubmit payload captured from claude 2.1.199
     /// (docs/protocol-verification.md). The submitted text is at `prompt` — NOT
     /// `user_input` as the public docs claim. Building against `user_input`
@@ -10270,9 +11519,98 @@ mod tests {
         // Empty id and non-restore bodies → no target.
         assert_eq!(restore_target_id("<!-- REDLINE_RESTORE: -->"), None);
         assert_eq!(restore_target_id("# A real plan\n\nbody"), None);
-        // Both forms are detected as restore handshakes by the prefix.
-        assert!("<!-- REDLINE_RESTORE:x -->".contains(REDLINE_RESTORE_PREFIX));
-        assert!("<!-- REDLINE_RESTORE -->".contains(REDLINE_RESTORE_PREFIX));
+    }
+
+    #[test]
+    fn restore_handshake_matches_only_sentinel_only_bodies() {
+        // The handshake contract: the body IS the sentinel ("write exactly
+        // `…` as your plan file's contents"). Both forms, whitespace-tolerant.
+        assert_eq!(restore_handshake("<!-- REDLINE_RESTORE -->"), Some(None));
+        assert_eq!(restore_handshake("  <!-- REDLINE_RESTORE -->\n"), Some(None));
+        assert_eq!(
+            restore_handshake("<!-- REDLINE_RESTORE:abc-123 -->"),
+            Some(Some("abc-123".to_string()))
+        );
+        // Empty id degrades to the bare form, mirroring restore_target_id.
+        assert_eq!(restore_handshake("<!-- REDLINE_RESTORE: -->"), Some(None));
+
+        // A real plan that merely MENTIONS the sentinel — the bug this
+        // anchoring exists to kill: a plan documenting the restore protocol
+        // (quoting the sentinel in an evidence table) must be captured, not
+        // classified as a handshake and waved through.
+        assert_eq!(
+            restore_handshake(
+                "# Fix the restore path\n\nThe hook wrote `<!-- REDLINE_RESTORE -->` at 16:18:28.\n"
+            ),
+            None
+        );
+        assert_eq!(
+            restore_handshake(
+                "<!-- REDLINE_RESTORE:57b38664-9fa4-4b71-a5a2-fe88f70ac1b9 -->\n\n# Then a plan follows\n"
+            ),
+            None,
+            "sentinel followed by real content is a plan, not a handshake"
+        );
+        // A different comment that shares the prefix is not the handshake.
+        assert_eq!(restore_handshake("<!-- REDLINE_RESTOREX -->"), None);
+        assert_eq!(restore_handshake("# A real plan\n\nbody"), None);
+    }
+
+    #[test]
+    fn rekey_gate_requires_a_well_formed_session_uuid() {
+        // The rekey moves a live review's rows wholesale; hook-input prose
+        // must never reach it with anything but a real claude session id.
+        assert!(valid_session_uuid("57b38664-9fa4-4b71-a5a2-fe88f70ac1b9"));
+        assert!(!valid_session_uuid("57B38664-9FA4-4B71-A5A2-FE88F70AC1B9")); // uppercase
+        assert!(!valid_session_uuid("abc-123")); // prose-shaped
+        assert!(!valid_session_uuid("57b386649fa44b71a5a2fe88f70ac1b9")); // no dashes
+        assert!(!valid_session_uuid("../../etc/passwd"));
+        assert!(!valid_session_uuid(""));
+    }
+
+    #[test]
+    fn captured_plan_registers_pending_entry_with_terminal() {
+        // 0d: the capture→hold→indicator seam, end to end (steps 1→3→4 with
+        // the terminal resolver injected; step 2's lsof/ps walk has its own
+        // coverage). A plan that merely MENTIONS the restore sentinel takes
+        // the capture path — restore_handshake says "not a handshake" — and
+        // the hold it registers exposes its terminal to the summaries the
+        // InterceptStrip reads.
+        let body =
+            "# A plan about restores\n\nQuoting `<!-- REDLINE_RESTORE:57b38664-9fa4-4b71-a5a2-fe88f70ac1b9 -->` as evidence.\n";
+        assert_eq!(restore_handshake(body), None, "must be captured, not passed through");
+
+        let store = make_store();
+        let pending = PendingResponses::new();
+        store.upsert_plan("s1", "/tmp/d", body.to_string(), reparse_sections(body), true, false);
+        let (_rx, _token) = register_hold(&pending, "s1", Some("tab-a".to_string()));
+        assert_eq!(pending.terminal_of("s1"), Some("tab-a".to_string()));
+
+        let mut sessions = store.list();
+        fold_pending_into_summaries(&mut sessions, &pending);
+        let s = sessions.iter().find(|s| s.session_id == "s1").expect("summary");
+        assert!(s.held, "captured plan must be held");
+        assert_eq!(s.attach_state, AttachState::Held);
+        assert_eq!(
+            s.held_terminal_id.as_deref(),
+            Some("tab-a"),
+            "the strip's tab binding must survive the fold into summaries"
+        );
+
+        // A sentinel-only body is still a handshake (the restore path).
+        assert!(restore_handshake("<!-- REDLINE_RESTORE -->").is_some());
+    }
+
+    #[test]
+    fn register_hold_supersedes_a_stale_held_post() {
+        // The orphan fix moved into register_hold: a second POST for the same
+        // session releases the stale waiter cleanly, then takes over.
+        let pending = PendingResponses::new();
+        let (rx1, _t1) = register_hold(&pending, "s1", None);
+        let (_rx2, _t2) = register_hold(&pending, "s1", Some("tab-b".to_string()));
+        let stale = rx1.blocking_recv().expect("stale waiter must be answered");
+        assert_eq!(stale.hook_specific_output.permission_decision, "allow");
+        assert_eq!(pending.terminal_of("s1"), Some("tab-b".to_string()));
     }
 
     #[test]
@@ -10315,6 +11653,445 @@ mod tests {
             "reason should mention deletion, got: {}",
             resp.hook_specific_output.permission_decision_reason
         );
+    }
+
+    #[test]
+    fn orchestrate_plan_inner_denies_with_stand_down_and_approves() {
+        let store = make_store();
+        let pending = PendingResponses::new();
+        let expected_modes = ExpectedModes::new();
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("s1", "/tmp/d", md.to_string(), reparse_sections(md), true, false);
+        let (rx, _token) = pending.register("s1", None).expect("register");
+        expected_modes.set("s1", SubmissionMode::Ask);
+
+        orchestrate_plan_inner(&store, &pending, &expected_modes, "s1")
+            .expect("orchestrate with a held sender must succeed");
+
+        // The held ExitPlanMode got a DENY carrying the stand-down text — the
+        // session was launched in plan mode, so a deny keeps it read-only.
+        let resp = rx.blocking_recv().expect("oneshot must have been sent");
+        assert_eq!(resp.hook_specific_output.permission_decision, "deny");
+        assert_eq!(
+            resp.hook_specific_output.permission_decision_reason,
+            ORCHESTRATE_STAND_DOWN
+        );
+        // Redline-side state matches a plain Approve.
+        let session = store.get("s1").expect("session exists");
+        assert_eq!(session.status, SessionStatus::Approved);
+        assert_eq!(session.attach_state, AttachState::Idle);
+        // The in-flight Ask mode was drained like approve_plan drains it.
+        assert!(expected_modes.take("s1").is_none());
+        // The pending slot is consumed — no double-fire window.
+        assert!(pending.take("s1").is_none());
+    }
+
+    #[test]
+    fn orchestrate_plan_inner_errs_without_held_sender() {
+        let store = make_store();
+        let pending = PendingResponses::new();
+        let expected_modes = ExpectedModes::new();
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("s1", "/tmp/d", md.to_string(), reparse_sections(md), true, false);
+
+        let err = orchestrate_plan_inner(&store, &pending, &expected_modes, "s1")
+            .expect_err("no held sender → Err (the command marks Detached)");
+        assert!(err.contains("no plan"), "got: {err}");
+    }
+
+    #[test]
+    fn orchestrate_stall_step_fires_only_on_orchestrating() {
+        // Only a run that never produced a beacon past the click is stalled;
+        // any later state (or no orchestration at all) retires the watchdog.
+        assert!(orchestrate_stall_should_fire(Some("orchestrating")));
+        for s in [
+            None,
+            Some("running"),
+            Some("in_code_review"),
+            Some("landed"),
+            Some("stalled"),
+        ] {
+            assert!(!orchestrate_stall_should_fire(s), "must not fire on {s:?}");
+        }
+    }
+
+    /// P0 (overnight queue): a queued run parks at `awaiting_review`, and the
+    /// morning approve walks it to `landed` through the EXISTING verdict
+    /// mapping — `set_run_state` enforces no ordering, but this pins it.
+    #[test]
+    fn awaiting_review_parks_and_approve_walks_to_landed() {
+        // Deliberately NOT live: no watcher wakes for a parked run.
+        assert!(!runwatch::is_live_run_state(Some("awaiting_review")));
+        // The verdict mapping is state-free: approve → landed.
+        assert_eq!(review_verdict_run_state(true), "landed");
+        assert_eq!(review_verdict_run_state(false), "running");
+        let store = make_store();
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("s1", "/tmp/d", md.to_string(), reparse_sections(md), true, false);
+        // The park (queued run ended, review deferred)…
+        assert!(store.set_run_state("s1", "awaiting_review"));
+        assert_eq!(
+            store.database().get_run_state("s1").as_deref(),
+            Some("awaiting_review")
+        );
+        // …and the morning approve, via the same mapping a held review uses.
+        assert!(store.set_run_state("s1", review_verdict_run_state(true)));
+        assert_eq!(store.database().get_run_state("s1").as_deref(), Some("landed"));
+    }
+
+    /// The parked (no-held-curl) verdict seam behind `submit_review_feedback`:
+    /// the landed-walk + unresolved-annotation filing happen ONLY on an
+    /// approve of a linked, still-awaiting review; a feedback verdict holds
+    /// the park; a missing link or a walked-on chip rejects outright.
+    #[test]
+    fn parked_verdict_lands_only_on_approve() {
+        use ParkedVerdict::*;
+        assert_eq!(parked_verdict(true, Some("awaiting_review"), true), Land);
+        assert_eq!(parked_verdict(true, Some("awaiting_review"), false), Hold);
+        // No durable review→plan link (the destroyed-state failure): reject
+        // regardless of the verdict.
+        assert_eq!(parked_verdict(false, Some("awaiting_review"), true), NotParked);
+        assert_eq!(parked_verdict(false, Some("awaiting_review"), false), NotParked);
+        // A chip that already walked on (or never parked) is not a parked
+        // review — approve must not re-land it, feedback must not hold it.
+        for rs in [Some("landed"), Some("running"), Some("stalled"), None] {
+            assert_eq!(parked_verdict(true, rs, true), NotParked, "run_state {rs:?}");
+            assert_eq!(parked_verdict(true, rs, false), NotParked, "run_state {rs:?}");
+        }
+
+        // Driven against a seeded awaiting_review session: only the Land
+        // verdict walks the chip; Hold leaves the park standing.
+        let store = make_store();
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("s1", "/tmp/d", md.to_string(), reparse_sections(md), true, false);
+        assert!(store.set_run_state("s1", "awaiting_review"));
+        let verdict_for = |approve: bool| {
+            parked_verdict(
+                true,
+                store.database().get_run_state("s1").as_deref(),
+                approve,
+            )
+        };
+        // Feedback first: the park holds, nothing walks.
+        assert_eq!(verdict_for(false), Hold);
+        assert_eq!(
+            store.database().get_run_state("s1").as_deref(),
+            Some("awaiting_review")
+        );
+        // Approve: Land → the chip resolves awaiting_review → landed.
+        assert_eq!(verdict_for(true), Land);
+        assert!(store.set_run_state("s1", review_verdict_run_state(true)));
+        assert_eq!(store.database().get_run_state("s1").as_deref(), Some("landed"));
+        // And a re-submit against the landed chip is no longer parked.
+        assert_eq!(verdict_for(true), NotParked);
+    }
+
+    #[test]
+    fn store_run_state_transitions_update_memory_and_db() {
+        let store = make_store();
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("s1", "/tmp/d", md.to_string(), reparse_sections(md), true, false);
+
+        assert!(store.set_run_state("s1", "orchestrating"));
+        assert!(
+            !store.set_run_state("s1", "orchestrating"),
+            "same value → no transition (no event, no journal)"
+        );
+        assert!(store.set_run_state("s1", "running"));
+        // Both the in-memory summary (the chip's source) and the DB agree.
+        let summary = store.list().into_iter().find(|s| s.session_id == "s1").unwrap();
+        assert_eq!(summary.run_state.as_deref(), Some("running"));
+        assert_eq!(store.database().get_run_state("s1").as_deref(), Some("running"));
+        // Unknown session: quietly false.
+        assert!(!store.set_run_state("ghost", "running"));
+        // One journal line per REAL transition.
+        let journal = store.database().list_journal_since(0, 100).unwrap();
+        let n = journal.iter().filter(|r| r.kind == "run_state").count();
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn plan_runs_report_resolve_get_round_trip() {
+        let store = make_store();
+        let db = store.database();
+        assert!(db.get_plan_run("s1").is_none());
+        assert!(
+            !db.resolve_plan_run("s1", "resolved", None).unwrap(),
+            "no report row → nothing to resolve"
+        );
+
+        db.upsert_plan_run("s1", r#"{"summary":"x"}"#, Some("/tmp/wf.js"), true)
+            .unwrap();
+        let run = db.get_plan_run("s1").unwrap();
+        assert!(run.workflow_ran);
+        assert_eq!(run.script_path.as_deref(), Some("/tmp/wf.js"));
+        assert!(run.resolution.is_none());
+
+        assert!(db
+            .resolve_plan_run("s1", "needs_follow_up", Some("check X"))
+            .unwrap());
+        let run = db.get_plan_run("s1").unwrap();
+        assert_eq!(run.resolution.as_deref(), Some("needs_follow_up"));
+        assert_eq!(run.resolution_note.as_deref(), Some("check X"));
+        assert!(run.resolved_at.is_some());
+
+        // A re-run's fresh report reopens the human verdict.
+        db.upsert_plan_run("s1", r#"{"summary":"y"}"#, None, false).unwrap();
+        let run = db.get_plan_run("s1").unwrap();
+        assert!(!run.workflow_ran);
+        assert!(run.script_path.is_none());
+        assert!(run.resolution.is_none(), "re-report resets the resolution");
+    }
+
+    #[test]
+    fn orchestrations_anchor_discovery_round_trip() {
+        let store = make_store();
+        let db = store.database();
+        assert!(db.get_orchestration("s1").is_none());
+        // Discovery before an anchor is a no-op, not an insert.
+        db.update_orchestration_discovery("s1", Some("wf_x"), None, None, None)
+            .unwrap();
+        assert!(db.get_orchestration("s1").is_none());
+
+        db.upsert_orchestration("s1", "claude-1", "/t/p1.jsonl", Some("/proj"), Some("tab-1"))
+            .unwrap();
+        let row = db.get_orchestration("s1").unwrap();
+        assert_eq!(row.claude_session_id, "claude-1");
+        assert_eq!(row.transcript_path, "/t/p1.jsonl");
+        assert_eq!(row.terminal_id.as_deref(), Some("tab-1"));
+        assert!(row.run_id.is_none());
+
+        db.update_orchestration_discovery("s1", Some("wf_a"), Some("/t/p1/wf"), None, Some("sequential"))
+            .unwrap();
+        // Partial update: passed values win (the sequential→workflow mode
+        // upgrade), omitted columns keep what was discovered.
+        db.update_orchestration_discovery("s1", None, None, Some("/t/s.js"), Some("workflow"))
+            .unwrap();
+        let row = db.get_orchestration("s1").unwrap();
+        assert_eq!(row.run_id.as_deref(), Some("wf_a"));
+        assert_eq!(row.transcript_dir.as_deref(), Some("/t/p1/wf"));
+        assert_eq!(row.script_path.as_deref(), Some("/t/s.js"));
+        assert_eq!(row.mode.as_deref(), Some("workflow"));
+
+        // Re-run: the anchor overwrites and discovery resets — but a re-run
+        // with no fresh terminal keeps the launch tab it already knew.
+        db.upsert_orchestration("s1", "claude-2", "/t/p2.jsonl", None, None).unwrap();
+        let row = db.get_orchestration("s1").unwrap();
+        assert_eq!(row.claude_session_id, "claude-2");
+        assert!(row.run_id.is_none(), "re-run resets discovery");
+        assert!(row.mode.is_none());
+        assert_eq!(
+            row.terminal_id.as_deref(),
+            Some("tab-1"),
+            "an omitted terminal must not wipe the recorded launch tab"
+        );
+
+        db.upsert_orchestration("s0", "claude-0", "/t/p0.jsonl", None, None).unwrap();
+        let rows = db.list_orchestrations().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].plan_session_id, "s0", "newest launch first");
+    }
+
+    #[test]
+    fn clear_run_state_nulls_columns_and_journals() {
+        let store = make_store();
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("s1", "/tmp/d", md.to_string(), reparse_sections(md), true, false);
+        let db = store.database();
+
+        assert!(store.set_run_state("s1", "orchestrating"));
+        assert_eq!(db.get_run_state("s1").as_deref(), Some("orchestrating"));
+
+        assert!(store.clear_run_state("s1"), "a set state must clear");
+        assert_eq!(db.get_run_state("s1"), None, "run_state back to NULL");
+        assert!(!store.clear_run_state("s1"), "clearing NULL is a no-op");
+        // The in-memory mirror follows the DB.
+        assert!(store.get("s1").unwrap().run_state.is_none());
+        // Journalled as `run_state: cleared` so the Companion feed sees it.
+        let journal = db.list_journal_since(0, 100).unwrap();
+        assert!(
+            journal.iter().any(|e| e.kind == "run_state" && e.label.as_deref() == Some("cleared")),
+            "clear must journal"
+        );
+        // `set_run_state` after a clear works normally (NULL → value).
+        assert!(store.set_run_state("s1", "orchestrating"));
+        assert_eq!(db.get_run_state("s1").as_deref(), Some("orchestrating"));
+    }
+
+    #[test]
+    fn reset_run_rows_is_idempotent_and_safe_on_a_session_that_never_ran() {
+        let store = make_store();
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("s1", "/tmp/d", md.to_string(), reparse_sections(md), true, false);
+        let db = store.database();
+
+        // Never ran: nothing to delete, nothing to clear — must not panic.
+        reset_run_rows(&store, "s1");
+        assert_eq!(db.get_run_state("s1"), None);
+
+        // A full run's traces all go.
+        store.set_run_state("s1", "running");
+        db.upsert_orchestration("s1", "claude-1", "/t/p.jsonl", None, Some("tab-1"))
+            .unwrap();
+        db.upsert_plan_run("s1", r#"{"summary":"x"}"#, None, true).unwrap();
+        orchestration_review_links()
+            .lock()
+            .unwrap()
+            .insert("rev-test-reset".to_string(), "s1".to_string());
+
+        reset_run_rows(&store, "s1");
+        assert_eq!(db.get_run_state("s1"), None);
+        assert!(db.get_orchestration("s1").is_none());
+        assert!(db.get_plan_run("s1").is_none());
+        assert!(
+            !orchestration_review_links().lock().unwrap().values().any(|v| v == "s1"),
+            "the stale review link must be evicted"
+        );
+        // Twice in a row is fine.
+        reset_run_rows(&store, "s1");
+    }
+
+    #[test]
+    fn unapprove_plan_supersedes_the_approval_and_keeps_the_chain_intact() {
+        let store = make_store();
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("s1", "/tmp/d", md.to_string(), reparse_sections(md), true, false);
+        let db = store.database();
+
+        // Not approved yet → refused.
+        assert!(unapprove_plan_inner(&store, "s1").is_err());
+
+        store.set_status("s1", SessionStatus::Approved);
+        let approval_seq = db.latest_approval_seq("s1").expect("approval event recorded");
+
+        unapprove_plan_inner(&store, "s1").expect("un-approve an approved session");
+        let s = store.get("s1").unwrap();
+        assert_eq!(s.status, SessionStatus::InReview);
+        assert_eq!(s.attach_state, AttachState::Detached, "never fake Held");
+
+        // The reversal is a supersession, never a delete: the approval event
+        // is still in the chain, now superseded by the reopen decision.
+        let map = db.supersessions_for_seqs(&[approval_seq]).unwrap();
+        let new_seq = *map.get(&approval_seq).expect("approval must be superseded");
+        assert!(new_seq > approval_seq);
+        let verdict = db.verify_ledger_chain().unwrap();
+        assert!(
+            verdict.ok,
+            "the hash chain must still verify after the rescission (first bad: {:?})",
+            verdict.first_bad_seq
+        );
+
+        // Double un-approve: no longer approved → refused, and nothing broke.
+        assert!(unapprove_plan_inner(&store, "s1").is_err());
+    }
+
+    #[test]
+    fn orchestrator_parent_session_only_matches_the_orchestrate_lineage() {
+        // A7's gate: `session → session` links are written exclusively by the
+        // Orchestrate ingest claim, so their presence IS "this is an
+        // orchestrator" — and nothing else may trip it.
+        let store = make_store();
+        let db = store.database();
+        db.insert_session_link("session", "orch-1", "session", "plan-1", 1)
+            .unwrap();
+        db.insert_session_link("session", "drafted-1", "drafter", "d-1", 2)
+            .unwrap();
+        db.insert_session_link("voice", "plan-2", "session", "plan-2", 3)
+            .unwrap();
+        assert_eq!(
+            db.orchestrator_parent_session("orch-1").as_deref(),
+            Some("plan-1")
+        );
+        assert_eq!(db.orchestrator_parent_session("drafted-1"), None);
+        assert_eq!(db.orchestrator_parent_session("plan-2"), None);
+        assert_eq!(db.orchestrator_parent_session("unknown"), None);
+    }
+
+    #[test]
+    fn orchestration_report_body_parses_and_validates() {
+        let v = serde_json::json!({
+            "planSessionId": "s1",
+            "scriptPath": "/Users/me/.claude/projects/x/wf.js",
+            "workflowRan": true,
+            "summary": "done",
+            "subtasks": [
+                {"title": "t", "planSection": "A1", "verified": true, "skipped": false, "notes": ""}
+            ]
+        });
+        let b = parse_orchestration_report(&v).unwrap();
+        assert_eq!(b.plan_session_id, "s1");
+        assert!(b.workflow_ran);
+        assert_eq!(b.subtasks.len(), 1);
+
+        // Only planSessionId is required; everything else defaults.
+        let b = parse_orchestration_report(&serde_json::json!({"planSessionId": "s2"})).unwrap();
+        assert!(!b.workflow_ran);
+        assert!(b.script_path.is_none());
+        assert!(b.subtasks.is_empty());
+
+        assert!(parse_orchestration_report(&serde_json::json!({"planSessionId": "  "})).is_err());
+        assert!(parse_orchestration_report(&serde_json::json!({})).is_err());
+    }
+
+    /// Producers wave: undelivered subtasks survive the exit report as open
+    /// work items — tolerant parse, plan_run provenance, idempotent re-POST,
+    /// orchestrator seat credit.
+    #[test]
+    fn exit_report_files_undelivered_subtasks_as_work_items() {
+        let db = db::Database::open_in_memory().unwrap();
+        let subtasks = vec![
+            // Delivered — never files.
+            serde_json::json!({"title": "done one", "verified": true, "skipped": false}),
+            // Unverified — files, notes ride the body.
+            serde_json::json!({"title": "flaky one", "verified": false, "skipped": false,
+                               "planSection": "B2", "notes": "verify step timed out"}),
+            // Skipped — files.
+            serde_json::json!({"title": "skipped one", "verified": true, "skipped": true}),
+            // Tolerance: no title / no flags / non-object → all skipped quietly.
+            serde_json::json!({"verified": false}),
+            serde_json::json!({"title": "shapeless"}),
+            serde_json::json!("not an object"),
+        ];
+        let filed = file_exit_report_items(&db, "plan-9", &subtasks, Some("/tmp/proj"));
+        assert_eq!(filed, 2);
+        let items = db.list_work_items(None, None, 50).unwrap();
+        assert_eq!(items.len(), 2);
+        for item in &items {
+            assert_eq!(item.origin_kind.as_deref(), Some("plan_run"));
+            assert_eq!(item.origin_id.as_deref(), Some("plan-9"));
+            assert_eq!(item.project_path.as_deref(), Some("/tmp/proj"));
+            assert_eq!(item.kind, "task");
+            assert_eq!(item.status, "open");
+        }
+        let flaky = items.iter().find(|i| i.title == "flaky one").unwrap();
+        let body = flaky.body.as_deref().unwrap();
+        assert!(body.contains("NOT verified"));
+        assert!(body.contains("Plan section: B2"));
+        assert!(body.contains("verify step timed out"));
+        assert!(items.iter().any(|i| i.title == "skipped one"));
+        // The orchestrator seat's items_filed became real…
+        assert_eq!(db.get_seat_stat("orchestrator").unwrap().items_filed, 2);
+        // …and a re-POSTed report files nothing new (idempotent).
+        assert_eq!(
+            file_exit_report_items(&db, "plan-9", &subtasks, Some("/tmp/proj")),
+            0
+        );
+        assert_eq!(db.list_work_items(None, None, 50).unwrap().len(), 2);
+        assert_eq!(db.get_seat_stat("orchestrator").unwrap().items_filed, 2);
+        assert!(db.verify_ledger_chain().unwrap().ok, "chain intact");
+    }
+
+    #[test]
+    fn orchestrate_stand_down_reads_calm_and_forbids_reexecution() {
+        // The deny reason renders inside Claude Code's red Error box — it must
+        // lead with the defusing ✅ and carry the three prohibitions.
+        assert!(ORCHESTRATE_STAND_DOWN.starts_with("✅"));
+        for needle in ["Do NOT implement", "do not revise", "ExitPlanMode"] {
+            assert!(
+                ORCHESTRATE_STAND_DOWN.contains(needle),
+                "stand-down text is missing `{needle}`"
+            );
+        }
     }
 
     #[tokio::test]
@@ -10675,6 +12452,9 @@ mod tests {
         assert!(!revise.contains("FEEDBACK:"));
         assert!(!revise.contains("CURRENT PLAN"));
         assert!(!revise.contains('\n'), "reason must be one line, got: {revise}");
+        // Both arms name the skill — the deny reason is one of the two places
+        // the plan session ever hears the contract exists.
+        assert!(revise.contains("redline-plan-review"));
 
         let ask = feedback_deny_reason(SubmissionMode::Ask, "abc-123");
         // Ask keeps its load-bearing "do not change the plan body" contract.
@@ -10684,5 +12464,6 @@ mod tests {
             "curl -s http://127.0.0.1:7676/v1/sessions/abc-123/feedback"
         ));
         assert!(!ask.contains('\n'), "reason must be one line, got: {ask}");
+        assert!(ask.contains("redline-plan-review"));
     }
 }

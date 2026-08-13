@@ -68,10 +68,16 @@ Unregistered routes fail closed: a route added to the router without a `ROUTE_TA
 | GET | `/v1/journal/recent` | open | Context-journal delta (Companion passive awareness) | ?since=... | JSON journal entries |
 | GET | `/v1/drafter/:draft_id/doc` | open | The live draft's markdown mirror | draft id in path | JSON {blocks/markdown} |
 | POST | `/v1/drafter/:draft_id/suggestions` | token: `drafter.suggest` | Write a tracked suggestion into the draft (append/replace_block/insert_after/delete_block) | JSON suggestion op | JSON accepted suggestion (or staleness error) |
-| GET | `/v1/reviews/start` | hook contract | Code-review hold: captures the diff, opens the review pane, HOLDS until the reviewer submits | ?repo=&base=... from the /redline-code-review skill | held; resolves to structured line-anchored feedback |
+| GET | `/v1/reviews/start` | hook contract | Code-review hold: captures the diff, opens the review pane, HOLDS until the reviewer submits | ?repo=&base=... from the /redline-code-review skill; defer=1 parks the review for the morning (queued overnight runs) | held; resolves to structured line-anchored feedback (deferred: returns immediately) |
 | GET | `/v1/reviews/annotations` | open | List external annotations on a live review | ?repo= known project | JSON annotation list |
 | POST | `/v1/reviews/annotations` | token: `review.annotate` | Post a finding into a live review (external local tools) | JSON schema-only body with required source tag | JSON created annotation |
 | DELETE | `/v1/reviews/annotations` | token: `review.annotate` | Clear a source's annotations from a live review | ?repo=&source=... | JSON cleared count |
+| POST | `/v1/orchestration/report` | token: `orchestration.report` | File an orchestrated run's structured exit report (claims paired against observed ground truth in the RunReport GUI) | JSON {planSessionId, scriptPath, workflowRan, summary, subtasks:[{title, planSection, verified, skipped, notes}]} | JSON {ok} |
+| GET | `/v1/work/ready` | open | The work graph's claimable frontier, urgent-first: open items whose defer time has passed, with no deferred ancestor up the parent chain and no unclosed blocker | ?project=&limit=... | JSON {items:[work item, ...]} |
+| GET | `/v1/work/:id` | open | One work item plus every typed edge touching it | item id in path | JSON {item, edges:[{fromId, toId, type, ...}]} |
+| POST | `/v1/work` | token: `work.file` | File a new work item (task / bug / question / message); `parent` mints a child id and records the parent-child edge | JSON {title, body?, kind?, priority?, status?, parent?, originKind?, originId?, projectPath?, pinned?, deferUntil?, author?} | JSON {item} with the minted hierarchical id |
+| POST | `/v1/work/:id/claim` | token: `work.claim` | Claim an open work item: sets the assignee and a lease; 409 when it is not open | JSON {assignee, leaseSeconds?} | JSON {item} as claimed |
+| POST | `/v1/work/:id/close` | token: `work.claim` | Close a work item with a recorded reason; 409 when already closed | JSON {reason?, author?} | JSON {item} as closed |
 | GET | `/v1/extensions` | open | Installed extensions with live status (kind, scopes, events, strikes, panel) | — | JSON extension list |
 | POST | `/v1/extensions/:name/panel` | token: `ui.panel` | Replace the extension's sanitized markdown panel (the sanctioned UI slot; `name` must match the bearer's grant) | JSON {markdown} | JSON {ok} |
 
@@ -85,5 +91,8 @@ Unregistered routes fail closed: a route added to the router without a `ROUTE_TA
 - `memory.propose` — `POST /v1/memory/proposals`
 - `drafter.suggest` — `POST /v1/drafter/:draft_id/suggestions`
 - `review.annotate` — `POST /v1/reviews/annotations`, `DELETE /v1/reviews/annotations`
+- `orchestration.report` — `POST /v1/orchestration/report`
 - `ui.panel` — `POST /v1/extensions/:name/panel`
+- `work.file` — `POST /v1/work`
+- `work.claim` — `POST /v1/work/:id/claim`, `POST /v1/work/:id/close`
 

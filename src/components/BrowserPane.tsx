@@ -257,6 +257,11 @@ interface BrowserPaneProps {
    *  the listener subscribes and be lost. `nonce` makes a repeat request for the
    *  SAME url still count as a new one. */
   openRequest?: { url: string; nonce: number } | null;
+  /** Called once the pane has acted on `openRequest`, so the owner clears it.
+   *  Without this the request outlives its click: `lastOpenNonceRef` resets on
+   *  every mount, so each browser-surface re-entry replayed the stale request
+   *  and appended another tab. */
+  onOpenRequestConsumed?: () => void;
   /** Opaque token that changes whenever a SURROUNDING App pane toggles (comment
    *  pane, sidebar, doc-split orientation/visibility). These reflow the slot
    *  without a drag — and a `ResizeObserver` on the slot doesn't reliably catch
@@ -281,6 +286,7 @@ function BrowserPaneBase({
   onSendToDrafter,
   onSynthesizeToDrafter,
   openRequest = null,
+  onOpenRequestConsumed,
   layoutKey,
 }: BrowserPaneProps) {
   const slotRef = useRef<HTMLDivElement | null>(null);
@@ -464,10 +470,25 @@ function BrowserPaneBase({
   const activeMissionIdRef = useRef<string | null>(null);
   activeMissionIdRef.current = mission.activeMission?.missionId ?? null;
   // True during a full workspace swap, so the persistence effect doesn't write
-  // the transient mid-swap tab state to a bucket.
+  // the transient mid-swap tab state to a bucket. Cleared by the `[tabs]`
+  // effect itself when the swapped-in set (held in `swapCommitRef`) commits —
+  // NOT synchronously at the end of the swap, which ran before that effect and
+  // re-enabled persistence one commit too early (mission tabs leaking into the
+  // regular bucket, and vice versa).
   const swappingRef = useRef(false);
+  const swapCommitRef = useRef<Tab[] | null>(null);
   // Mount-time mission-tab restore runs at most once.
   const initDoneRef = useRef(false);
+  // While a persisted mission's workspace hasn't been swapped in yet, this
+  // pane is showing the REGULAR bucket's tabs under a mission-owned session —
+  // persisting or mirroring that state would write the wrong tab set to the
+  // mission bucket / the daemon. Seeded from the raw persisted id (available
+  // synchronously, unlike the mission list) and cleared when the restore
+  // resolves — by swapping, or by discovering the mission no longer exists.
+  const missionRestorePendingRef = useRef<boolean | null>(null);
+  if (missionRestorePendingRef.current === null) {
+    missionRestorePendingRef.current = mission.activeMissionId !== null;
+  }
   // Debounce timer for saving the active mission's tab workspace.
   const missionTabsTimerRef = useRef<number | null>(null);
   const [chatRatio, setChatRatio] = usePersistedState<number>(
@@ -561,9 +582,22 @@ function BrowserPaneBase({
   // agent's `/v1/browser/tabs` registry + cross-tab routes can resolve a tab
   // selector to a webview label / discussion thread.
   useEffect(() => {
-    // Suppress while a workspace swap is mid-flight (the swap saves buckets
-    // explicitly; persisting the transient state would cross-contaminate them).
-    if (!swappingRef.current) {
+    // A persisted mission's workspace hasn't been swapped in yet: these are
+    // the regular bucket's tabs on a mission-owned session. Don't persist
+    // them to any bucket AND don't mirror them to the daemon — the mission's
+    // agents would act on the wrong tab set.
+    if (missionRestorePendingRef.current) return;
+    if (swappingRef.current) {
+      // Swap mid-flight: skip bucket persistence (the swap saves buckets
+      // explicitly; persisting the transient state would cross-contaminate
+      // them). The swap is complete when ITS tab set commits — matched by
+      // identity — which is where the flag clears; that commit itself is
+      // still skipped.
+      if (tabs === swapCommitRef.current) {
+        swappingRef.current = false;
+        swapCommitRef.current = null;
+      }
+    } else {
       const descs = tabs.map((t) => ({
         id: t.id,
         url: t.url,
@@ -586,8 +620,8 @@ function BrowserPaneBase({
         }
       }
     }
-    // Always mirror the live tab list to the daemon, so the orchestrator and
-    // page agents see the current tabs (independent of which bucket persists).
+    // Mirror the live tab list to the daemon, so the orchestrator and page
+    // agents see the current tabs (independent of which bucket persists).
     void invoke("browser_set_tabs", {
       list: tabs.map((t) => ({
         id: t.id,
@@ -606,9 +640,14 @@ function BrowserPaneBase({
       () => {},
     );
     // Remember the active tab so a remount (document-pane toggle) restores it.
-    // Skip while a mission owns the workspace or a swap is mid-flight — those
-    // buckets aren't the global regular-browsing one.
-    if (!activeMissionIdRef.current && !swappingRef.current) {
+    // Skip while a mission owns the workspace, a swap is mid-flight, or a
+    // mission restore is still pending — those states aren't the global
+    // regular-browsing one.
+    if (
+      !activeMissionIdRef.current &&
+      !swappingRef.current &&
+      !missionRestorePendingRef.current
+    ) {
       try {
         localStorage.setItem(ACTIVE_KEY, activeId);
       } catch {
@@ -1207,6 +1246,20 @@ function BrowserPaneBase({
     url: string = HOME,
     opts: { anchorDiscussion?: boolean } = {},
   ) => {
+    // Opening an already-open URL foregrounds that tab instead of stacking a
+    // duplicate — "Open" on a Localhost card (and any replayed request) would
+    // otherwise accumulate tabs. Blank tabs are exempt: "+" on HOME is an
+    // intentional second empty tab.
+    if (url !== HOME) {
+      const existing = tabsRef.current.find((t) => t.url === url);
+      if (existing) {
+        ensureLive(existing.id);
+        touchMru(existing.id);
+        setActiveId(existing.id);
+        if (!opts.anchorDiscussion) setDiscussionId(existing.id);
+        return;
+      }
+    }
     if (tabsRef.current.length >= MAX_TABS) return;
     const id = `t${seqRef.current++}`;
     const tab: Tab = {
@@ -1333,6 +1386,11 @@ function BrowserPaneBase({
     liveIntentRef.current = new Set([active.id]);
     mruRef.current = [active.id];
     lastRectRef.current = null;
+    // The swap ends when THIS array commits — the `[tabs]` effect matches it
+    // by identity and clears `swappingRef` there. Resetting synchronously
+    // here re-enabled persistence before that effect ran, leaking the
+    // swapped-in tabs into the outgoing bucket.
+    swapCommitRef.current = newSet;
     setTabs(newSet);
     setActiveId(active.id);
     setDiscussionId(active.id);
@@ -1340,7 +1398,6 @@ function BrowserPaneBase({
     setLiveVersion((v) => v + 1);
     if (target.kind === "mission") mission.resumeMission(target.id);
     else mission.closeMission();
-    swappingRef.current = false;
   };
 
   // Start a new mission. From regular browsing the current tabs carry in (and
@@ -1387,6 +1444,23 @@ function BrowserPaneBase({
     await swapWorkspace({ kind: "regular" });
   };
 
+  // Convert a tab's page chat into the linked discussion — a fork, not a
+  // move (the tab chat and its session are kept) — then land in the linked
+  // panel, which shows the copied history behind a divider.
+  const continueTabAsLinked = async (tab: Tab) => {
+    const n = tabsRef.current.findIndex((t) => t.id === tab.id) + 1 || null;
+    const l = await linked.convertFromBrowse({
+      browseId: tab.browseId,
+      tabN: n,
+      tabTitle: tab.title,
+      tabUrl: tab.url,
+    });
+    if (l) {
+      setChatOpen(true);
+      setChatTab("linked");
+    }
+  };
+
   const deleteMissionFlow = async (id: string) => {
     // Leave the mission first (without saving — its tabs are being discarded).
     if (id === activeMissionIdRef.current) await swapWorkspace({ kind: "regular" });
@@ -1395,20 +1469,33 @@ function BrowserPaneBase({
 
   // On mount, if a mission was active last session, reopen its tab workspace
   // (once the mission list resolves). User-initiated activations happen after
-  // this runs, so they don't double-swap.
+  // this runs, so they don't double-swap. Until this resolves,
+  // `missionRestorePendingRef` keeps the regular bucket's mounted tabs out of
+  // persistence and the daemon mirror.
   useEffect(() => {
     if (initDoneRef.current) return;
     const pendingId = mission.activeMissionId;
     if (!pendingId) {
       initDoneRef.current = true;
+      missionRestorePendingRef.current = false;
       return;
     }
     if (mission.activeMission) {
       initDoneRef.current = true;
+      // swapWorkspace raises `swappingRef` synchronously, so clearing the
+      // restore gate here opens no unguarded window.
+      missionRestorePendingRef.current = false;
       void swapWorkspace({ kind: "mission", id: pendingId });
+    } else if (mission.missionsLoaded) {
+      // The persisted mission no longer exists — resolve to regular browsing
+      // rather than wedging the gate (which would silence persistence and
+      // the daemon mirror forever).
+      initDoneRef.current = true;
+      missionRestorePendingRef.current = false;
+      mission.closeMission();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mission.activeMissionId, mission.activeMission]);
+  }, [mission.activeMissionId, mission.activeMission, mission.missionsLoaded]);
 
   // Cmd+W (native File ▸ Close Tab) closes the active tab. A menu accelerator
   // fires even while the native webview has focus — which a JS keydown listener
@@ -1546,12 +1633,18 @@ function BrowserPaneBase({
 
   // An in-app request to open a URL (Localhost dashboard "Open"). Keyed on the
   // nonce so the same URL asked for twice opens twice, and so a re-render with
-  // an unchanged request doesn't re-open anything.
+  // an unchanged request doesn't re-open anything. Consumption is reported
+  // back so the owner clears the request — the nonce guard alone can't
+  // survive a remount (the ref resets), and a stale request replayed on every
+  // surface re-entry.
   const lastOpenNonceRef = useRef(0);
+  const onOpenRequestConsumedRef = useRef(onOpenRequestConsumed);
+  onOpenRequestConsumedRef.current = onOpenRequestConsumed;
   useEffect(() => {
     if (!openRequest || openRequest.nonce === lastOpenNonceRef.current) return;
     lastOpenNonceRef.current = openRequest.nonce;
     openTabRef.current(openRequest.url, {});
+    onOpenRequestConsumedRef.current?.();
   }, [openRequest]);
 
   // The browse agent switches the user into an existing tab by emitting
@@ -2082,11 +2175,12 @@ function BrowserPaneBase({
             if (chatOpen && chatTab === "linked") {
               setChatOpen(false);
             } else {
+              // No lazy create here: with no active linked discussion the
+              // panel shows the empty state, whose primary action can carry
+              // the current tab's chat across (converting is a real choice,
+              // not a silent side effect of opening the panel).
               setChatOpen(true);
               setChatTab("linked");
-              // No goal to collect — a linked discussion is just a spanning
-              // conversation, so create one lazily on first open.
-              if (!linked.activeLinked) void linked.startLinked();
             }
           }}
         >
@@ -2202,7 +2296,12 @@ function BrowserPaneBase({
                     onSendToDrafter={onSendToDrafter}
                   />
                 ) : (
-                  <LinkedEmptyState onStart={() => void linked.startLinked()} />
+                  <LinkedEmptyState
+                    onStart={() => void linked.startLinked()}
+                    onContinueFromTab={() => void continueTabAsLinked(discussionTab)}
+                    tabBrowseId={discussionTab.browseId}
+                    tabTitle={discussionTab.title}
+                  />
                 )
               ) : chatTab === "mission" ? (
                 mission.activeMission ? (
@@ -2244,10 +2343,20 @@ function BrowserPaneBase({
                   onOpenLink={(url) => openTab(url)}
                   onSendToRedline={onSendToRedline}
                   onSendToDrafter={onSendToDrafter}
+                  onContinueAsLinked={() => void continueTabAsLinked(discussionTab)}
+                  linkedExists={linked.linkedSessions.length > 0}
+                  onOpenExistingLinked={() => {
+                    if (linked.activeLinkedId === null && linked.linkedSessions[0]) {
+                      linked.resumeLinked(linked.linkedSessions[0].linkedId);
+                    }
+                    setChatTab("linked");
+                  }}
                   onAddToMission={
                     mission.activeMission
                       ? (body) =>
-                          void mission.addFinding({
+                          // Returns whether the pin reached the DB, so the
+                          // button can say "Pin failed" instead of lying.
+                          mission.addFinding({
                             body,
                             browseId: discussionTab.browseId,
                             sourceUrl: discussionTab.url,
@@ -2331,8 +2440,37 @@ function DiscussionSwitcher({
   );
 }
 
-/** Shown in the Linked tab before a linked discussion is created. */
-function LinkedEmptyState({ onStart }: { onStart: () => void }) {
+/** Shown in the Linked tab before a linked discussion is created. When the
+ *  current tab already has a page discussion going, the PRIMARY action is to
+ *  continue that chat as the linked one (a fork — the tab chat is kept);
+ *  starting empty stays available beneath it. */
+function LinkedEmptyState({
+  onStart,
+  onContinueFromTab,
+  tabBrowseId,
+  tabTitle,
+}: {
+  onStart: () => void;
+  onContinueFromTab?: () => void;
+  tabBrowseId?: string;
+  tabTitle?: string;
+}) {
+  // Only offer the continuation when there is a conversation to carry.
+  const [tabHasThread, setTabHasThread] = useState(false);
+  useEffect(() => {
+    setTabHasThread(false);
+    if (!tabBrowseId || !onContinueFromTab) return;
+    let alive = true;
+    void invoke<unknown[]>("get_browse_thread", { browseId: tabBrowseId })
+      .then((rows) => {
+        if (alive) setTabHasThread(rows.length > 0);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabBrowseId]);
   return (
     <div className="flex flex-col items-center justify-center h-full gap-3 px-6 text-center">
       <Link2 size={28} strokeWidth={1.5} style={{ color: "var(--color-ink-muted)" }} />
@@ -2341,11 +2479,34 @@ function LinkedEmptyState({ onStart }: { onStart: () => void }) {
         Switch tabs and keep talking — it carries the thread and checks in with a
         tab's own discussion when it needs to go deep.
       </p>
+      {tabHasThread && onContinueFromTab && (
+        <button
+          type="button"
+          onClick={onContinueFromTab}
+          className="rounded px-3 py-1.5 font-medium"
+          style={{ fontSize: "12px", background: "var(--color-info)", color: "var(--color-on-accent)" }}
+        >
+          Continue {tabTitle ? `“${tabTitle}”` : "this tab's chat"} as Linked
+        </button>
+      )}
       <button
         type="button"
         onClick={onStart}
         className="rounded px-3 py-1.5 font-medium"
-        style={{ fontSize: "12px", background: "var(--color-info)", color: "var(--color-on-accent)" }}
+        style={
+          tabHasThread && onContinueFromTab
+            ? {
+                fontSize: "12px",
+                background: "var(--color-paper)",
+                color: "var(--color-ink)",
+                border: "1px solid var(--color-rule)",
+              }
+            : {
+                fontSize: "12px",
+                background: "var(--color-info)",
+                color: "var(--color-on-accent)",
+              }
+        }
       >
         Start a linked discussion
       </button>

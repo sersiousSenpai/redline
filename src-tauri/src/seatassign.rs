@@ -246,6 +246,20 @@ pub const SEAT_FACTS: &[SeatFact] = &[
         note: None,
     },
     SeatFact {
+        seat: "orchestrator",
+        label: "Plan orchestrator",
+        role: "Visible terminal session that executes an approved plan as a \
+               multi-agent workflow. Every workflow subagent inherits the session \
+               model, so this pick multiplies across the whole fan-out (up to 16 \
+               concurrent agents).",
+        traits: &["interactive", "long_context"],
+        note: Some(
+            "Left unset this seat spawns with `--model sonnet` (never the bare CLI \
+             default) — a big model here multiplies across every concurrent \
+             subagent. Say so in the rationale if you propose raising it.",
+        ),
+    },
+    SeatFact {
         seat: "fork_plan",
         label: "Plan sidecar threads",
         role: "Read-only fork answering one reviewer comment on a plan section. \
@@ -295,6 +309,12 @@ const SEAT_HINTS: &[(&str, &str)] = &[
         "seatassign",
         "This agent. Left on Default it runs on a fast tier; a change here takes \
          effect on its next run.",
+    ),
+    (
+        "orchestrator",
+        "The Orchestrate terminal session. Left on Default it launches with \
+         sonnet — every workflow subagent inherits this model, so the cost \
+         multiplies across the fan-out.",
     ),
     (
         "fork_plan",
@@ -946,6 +966,9 @@ pub fn merge_pick(current: &SeatConfig, pick: &SeatPick) -> SeatConfig {
         backend: current.backend.clone(),
         binary_path: current.binary_path.clone(),
         extra_flags: current.extra_flags.clone(),
+        // Roster metadata (P3) is the user's, not the pick agent's.
+        charter: current.charter.clone(),
+        trigger: current.trigger.clone(),
     }
 }
 
@@ -1051,14 +1074,54 @@ impl SeatAssignState {
     }
 }
 
-/// Run the Seat Assignment agent headless to completion and return its final
-/// text. Registers the prompt with the agent-prompt guard first so the headless
-/// `-p` doesn't leak into the lake via the global `UserPromptSubmit` hook.
+/// The argv a Seat Assignment spawn builds — pure, exposed so the resume-arg
+/// construction is testable without spawning anything. The fast utility
+/// default only applies when the user has configured nothing for the seat,
+/// and the resume tail stays terminal (the convention `bridge_args` keeps).
+pub fn assigner_argv(prompt: String, prior: Option<&str>) -> Vec<String> {
+    let mut args = crate::claude_proc::bridge_args("seatassign", prompt, None);
+    if seat::flag_args("seatassign").is_empty() {
+        args.extend([
+            "--model".to_string(),
+            DEFAULT_MODEL.to_string(),
+            "--effort".to_string(),
+            DEFAULT_EFFORT.to_string(),
+        ]);
+    }
+    if let Some(sid) = prior {
+        args.push("--resume".to_string());
+        args.push(sid.to_string());
+    }
+    args
+}
+
+/// Run the Seat Assignment agent with its standing thread (P3 continuity):
+/// resume the persisted `redline.seatThread.seatassign` session so this run
+/// remembers the charts it proposed before, persist the new session id on
+/// success, and fall back to a fresh session (overwriting the stored id) if
+/// the resume fails. A user cancel or a stall never auto-retries.
 pub async fn run_seat_assigner(
     state: &SeatAssignState,
     cwd: &str,
     prompt: String,
 ) -> Result<String, String> {
+    let (text, _sid) = crate::seat::run_with_thread("seatassign", None, |prior| {
+        run_seat_assigner_once(state, cwd, prompt.clone(), prior)
+    })
+    .await?;
+    Ok(text)
+}
+
+/// One Seat Assignment attempt, headless to completion; returns the final
+/// text + session id. Registers the prompt with the agent-prompt guard first
+/// so the headless `-p` doesn't leak into the lake via the global
+/// `UserPromptSubmit` hook.
+async fn run_seat_assigner_once(
+    state: &SeatAssignState,
+    cwd: &str,
+    prompt: String,
+    prior: Option<String>,
+) -> Result<(String, Option<String>), String> {
     // The guard holds the single run slot for the WHOLE run, including the
     // pre-spawn window below, and clears it on every exit path.
     let Some((run_id, _guard)) = state.begin() else {
@@ -1068,17 +1131,7 @@ pub async fn run_seat_assigner(
         .await
         .map_err(|e| e.to_string())?;
     ledger::register_agent_prompt(&ledger::body_hash(&prompt));
-    let mut args = crate::claude_proc::bridge_args("seatassign", prompt, None);
-    // `bridge_args` already appended the seat's own flags; only fall back to
-    // the fast utility default when the user has configured nothing.
-    if seat::flag_args("seatassign").is_empty() {
-        args.extend([
-            "--model".to_string(),
-            DEFAULT_MODEL.to_string(),
-            "--effort".to_string(),
-            DEFAULT_EFFORT.to_string(),
-        ]);
-    }
+    let args = assigner_argv(prompt, prior.as_deref());
     let mut cmd = crate::claude_proc::claude_command_for_seat("seatassign", &claude_bin);
     let mut child = cmd
         .current_dir(cwd)
@@ -1114,18 +1167,25 @@ pub async fn run_seat_assigner(
             let mut reader = BufReader::new(stdout).lines();
             let mut final_text: Option<String> = None;
             let mut errored: Option<String> = None;
+            let mut session: Option<String> = None;
             while let Ok(Some(line)) = reader.next_line().await {
                 last_activity.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
                 let Ok(v) = serde_json::from_str::<Value>(&line) else {
                     continue;
                 };
                 match classify_line(&v) {
-                    StreamLine::Final { text, .. } => final_text = Some(text),
+                    StreamLine::Init(sid) => session = Some(sid),
+                    StreamLine::Final { text, session_id } => {
+                        final_text = Some(text);
+                        if let Some(sid) = session_id {
+                            session = Some(sid);
+                        }
+                    }
                     StreamLine::Failed(msg) => errored = Some(msg),
                     _ => {}
                 }
             }
-            (final_text, errored)
+            (final_text, errored, session)
         }
     };
     let stderr_fut = async {
@@ -1143,7 +1203,7 @@ pub async fn run_seat_assigner(
     tokio::pin!(read_fut);
 
     let mut stalled = false;
-    let ((final_text, errored), errbuf) = loop {
+    let ((final_text, errored, session), errbuf) = loop {
         tokio::select! {
             res = &mut read_fut => break res,
             _ = tokio::time::sleep(Duration::from_secs(5)) => {
@@ -1182,7 +1242,7 @@ pub async fn run_seat_assigner(
         return Err(msg);
     }
     match final_text {
-        Some(t) => Ok(t),
+        Some(t) => Ok((t, session)),
         None => Err(if errbuf.trim().is_empty() {
             "the Seat Assignment agent produced no output".to_string()
         } else {
@@ -1444,6 +1504,8 @@ That's it."#;
             backend: Some("claude-code".to_string()),
             binary_path: Some("/opt/claude".to_string()),
             extra_flags: Some(vec!["--verbose-tools".to_string()]),
+            charter: Some("owns marketplace CI".to_string()),
+            trigger: Some("on demand".to_string()),
         };
         let pick = SeatPick {
             seat: "browse".to_string(),
@@ -1466,6 +1528,9 @@ That's it."#;
             merged.extra_flags.as_deref(),
             Some(["--verbose-tools".to_string()].as_slice())
         );
+        // Roster metadata (P3) is the user's — picks never touch it.
+        assert_eq!(merged.charter.as_deref(), Some("owns marketplace CI"));
+        assert_eq!(merged.trigger.as_deref(), Some("on demand"));
     }
 
     #[test]
@@ -1589,6 +1654,35 @@ That's it."#;
         assert!(state.begin().is_none());
         drop(guard);
         assert!(state.begin().is_some(), "the slot frees when the run ends");
+    }
+
+    /// P3 continuity: the resume tail stays terminal — AFTER the utility
+    /// default flags — and the default flags yield to a configured seat.
+    #[test]
+    fn assigner_argv_keeps_resume_terminal_and_defaults_conditional() {
+        let _guard = seat::store_guard();
+        seat::set_seat_for_test("seatassign", None);
+        let args = assigner_argv("p".to_string(), Some("sid-5"));
+        let m = args.iter().position(|a| a == "--model").unwrap();
+        assert_eq!(args[m + 1], DEFAULT_MODEL);
+        let r = args.iter().position(|a| a == "--resume").unwrap();
+        assert_eq!(args[r + 1], "sid-5");
+        assert_eq!(r + 2, args.len(), "the resume tail stays terminal");
+        assert!(m < r, "seat flags precede the resume tail");
+
+        // A configured seat suppresses the utility default entirely.
+        seat::set_seat_for_test(
+            "seatassign",
+            Some(SeatConfig {
+                model: Some("opus".to_string()),
+                ..SeatConfig::default()
+            }),
+        );
+        let args = assigner_argv("p".to_string(), None);
+        assert!(!args.iter().any(|a| a == DEFAULT_MODEL));
+        assert!(args.iter().any(|a| a == "opus"));
+        assert!(!args.iter().any(|a| a == "--resume"));
+        seat::set_seat_for_test("seatassign", None);
     }
 
     #[test]

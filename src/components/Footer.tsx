@@ -9,11 +9,14 @@ interface FooterProps {
   sessionReady: boolean;
   canSubmit: boolean;
   canApprove: boolean;
+  /** Same gating as canApprove — Orchestrate is approve + multi-agent execute. */
+  canOrchestrate: boolean;
   waiting: boolean;
   /** The in-flight submit was an Ask batch — Claude is answering, not revising. */
   waitingAsk: boolean;
   onSubmit: () => void;
   onApprove: () => void;
+  onOrchestrate: () => void;
   /** Terminal dock collapsed (and not fullscreen) — show a peek segment. */
   termCollapsed: boolean;
   termTabCount: number;
@@ -26,10 +29,12 @@ export function Footer({
   sessionReady,
   canSubmit,
   canApprove,
+  canOrchestrate,
   waiting,
   waitingAsk,
   onSubmit,
   onApprove,
+  onOrchestrate,
   termCollapsed,
   termTabCount,
   termHasUnseen,
@@ -200,6 +205,29 @@ export function Footer({
                 {submitCaption}
               </span>
             )}
+          </span>
+        </Button>
+        {/* Visually subordinate sibling to Approve: same gating, but the plan
+            is executed by a fresh orchestrated session (the original session
+            is stood down read-only), so the label carries the mechanism. */}
+        <Button
+          size="sm"
+          onClick={onOrchestrate}
+          disabled={!canOrchestrate || waiting}
+          className="font-medium"
+          title="Approve the plan and execute it as a multi-agent workflow in a new terminal"
+        >
+          <span className="flex flex-col items-center leading-tight">
+            <span>Orchestrate</span>
+            <span
+              style={{
+                fontSize: "10px",
+                fontWeight: 400,
+                color: "var(--color-ink-muted)",
+              }}
+            >
+              approve + multi-agent execute
+            </span>
           </span>
         </Button>
         <Button

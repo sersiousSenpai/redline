@@ -8,6 +8,8 @@ import {
   computeRevisionDisplay,
   latestDisplayVersion,
 } from "../lib/revisionVersions";
+import { orderSessions } from "../lib/sessionOrder";
+import { isLiveRunState } from "../lib/orchestration";
 
 interface SessionSidebarProps {
   sessions: SessionSummary[];
@@ -38,7 +40,25 @@ interface SessionSidebarProps {
    *  live discussion suppresses that (see App's `plan-received` handler), this
    *  pulsing dot is what keeps the arrival discoverable. Cleared on select. */
   unseenIds?: ReadonlySet<string>;
+  /** Open the RunReport container for an orchestrated run (chip click). */
+  onOpenRunReport?: (sessionId: string) => void;
 }
+
+/** Chip palette for the orchestrated-run lifecycle. `stalled` warns; `landed`
+ *  closes green; the in-flight states read as info. */
+const RUN_STATE_COLORS: Record<string, string> = {
+  orchestrating: "var(--color-info)",
+  running: "var(--color-info)",
+  in_code_review: "var(--color-warning)",
+  // The overnight queue's parked run: committed to its branch, the review
+  // waits on YOUR morning verdict — the same deliberate needs-you hue as an
+  // in-flight code review, never the muted fallback.
+  awaiting_review: "var(--color-warning)",
+  landed: "var(--color-success)",
+  stalled: "var(--color-warning, #b45309)",
+  // A stand-down: deliberate and terminal — muted, not alarming.
+  abandoned: "var(--color-ink-muted)",
+};
 
 const STATUS_COLORS: Record<SessionSummary["status"], string> = {
   in_review: "var(--color-warning)",
@@ -73,6 +93,7 @@ function SessionSidebarBase({
   onSelectRevision,
   viewedVersionNumber,
   unseenIds,
+  onOpenRunReport,
 }: SessionSidebarProps) {
   // Which sessions are expanded to show their revision tree. The active
   // session auto-expands so its history is visible the moment it's selected.
@@ -96,6 +117,12 @@ function SessionSidebarBase({
       else next.add(id);
       return next;
     });
+
+  // The open plan reads from the top of the list; everyone else keeps the
+  // backend's last-edited order. Keys are sessionIds, so the reorder is a
+  // cheap DOM move, and the auto-expand effect above keys off activeId, not
+  // position.
+  const ordered = orderSessions(sessions, activeId);
 
   return (
     <div
@@ -133,7 +160,7 @@ function SessionSidebarBase({
         </div>
       ) : (
         <ul>
-          {sessions.map((s) => (
+          {ordered.map((s) => (
             <SessionRow
               key={s.sessionId}
               session={s}
@@ -149,6 +176,7 @@ function SessionSidebarBase({
               onDelete={() => onDelete(s.sessionId)}
               onExport={onExport}
               onSelectRevision={onSelectRevision}
+              onOpenRunReport={onOpenRunReport}
             />
           ))}
         </ul>
@@ -272,6 +300,7 @@ function SessionRow({
   onDelete,
   onExport,
   onSelectRevision,
+  onOpenRunReport,
 }: {
   session: SessionSummary;
   active: boolean;
@@ -287,6 +316,7 @@ function SessionRow({
   onDelete: () => void;
   onExport: (sessionId: string, versionNumber: number) => void;
   onSelectRevision: (sessionId: string, versionNumber: number | null) => void;
+  onOpenRunReport?: (sessionId: string) => void;
 }) {
   const [confirming, setConfirming] = useState(false);
   const display = computeRevisionDisplay(session.revisions);
@@ -320,6 +350,23 @@ function SessionRow({
         >
           {expanded ? "▾" : "▸"}
         </button>
+      )}
+      {/* How many plan versions live under the caret — the same number as the
+          v{n} pill (restores don't advance it), so the two can never disagree.
+          Single-revision rows show nothing: no tree to reveal, and a
+          universal "1" is noise. */}
+      {expandable && (
+        <span
+          aria-hidden="true"
+          className="absolute left-1 top-6 z-10 px-1 font-mono"
+          style={{
+            color: "var(--color-ink-muted)",
+            fontSize: "8px",
+            pointerEvents: "none",
+          }}
+        >
+          {badgeVersion}
+        </span>
       )}
       {confirming ? (
         <div
@@ -406,6 +453,11 @@ function SessionRow({
         style={{
           borderColor: "var(--color-rule)",
           background: active ? "var(--color-bg-elevated)" : "transparent",
+          // Inset stripe, not a border: the 2px accent must not shift the
+          // row's text alignment against its neighbours.
+          boxShadow: active
+            ? "inset 2px 0 0 var(--color-accent)"
+            : undefined,
         }}
       >
         <div className="flex items-center justify-between gap-2 mb-1">
@@ -492,6 +544,37 @@ function SessionRow({
             >
               detached
             </span>
+          )}
+          {/* Orchestrated-run lifecycle chip — the Runs monitor's one entry
+              point (deliberately contextual: it exists only while a session
+              has a run). Clicking a live run opens the live monitor; a
+              finished run reopens its report. An abandoned/needs-follow-up
+              run keeps its last state visible — only a Resolved mark walks
+              it to `landed`. */}
+          {session.runState && (
+            <button
+              type="button"
+              title={`Orchestrated run: ${session.runState.replace(/_/g, " ")} — click to ${
+                isLiveRunState(session.runState) ? "watch it live" : "open the run report"
+              }`}
+              onClick={(e) => {
+                e.stopPropagation();
+                onOpenRunReport?.(session.sessionId);
+              }}
+              style={{
+                color: RUN_STATE_COLORS[session.runState] ?? "var(--color-ink-muted)",
+                border: `1px solid ${RUN_STATE_COLORS[session.runState] ?? "var(--color-ink-muted)"}`,
+                borderRadius: "9999px",
+                padding: "0 6px",
+                fontSize: "9px",
+                fontWeight: 600,
+                textTransform: "uppercase",
+                letterSpacing: "0.06em",
+                cursor: "pointer",
+              }}
+            >
+              {session.runState.replace(/_/g, " ")}
+            </button>
           )}
           {pending > 0 && (
             <span

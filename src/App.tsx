@@ -37,6 +37,7 @@ import {
   seedStep,
   type LandingPhase,
 } from "./lib/landing";
+import { isLiveRunState } from "./lib/orchestration";
 import { Footer } from "./components/Footer";
 import { Header } from "./components/Header";
 import { Button } from "./components/ui/Button";
@@ -87,6 +88,15 @@ import { AskModeViolationBanner } from "./components/AskModeViolationBanner";
 import { ResolutionWarningBanner } from "./components/ResolutionWarningBanner";
 import { SelectionMenu } from "./components/SelectionMenu";
 import { SessionSidebar } from "./components/SessionSidebar";
+import {
+  suppressTerminalRevealFocus,
+  tauriHandoffDeps,
+} from "./components/TerminalView";
+import {
+  deliverToTerminal,
+  orchestrateHandoff,
+  type OrchestrateDeps,
+} from "./lib/terminalHandoff";
 import { SidebarTabStrip } from "./components/SidebarTabStrip";
 import { PlanToc } from "./components/PlanToc";
 import { FileTree } from "./components/FileTree";
@@ -106,6 +116,13 @@ import type { DrafterSaveState } from "./components/PromptDrafter";
 import ReviewPanel from "./components/ReviewPanel";
 import { MemoryInspector } from "./components/MemoryInspector";
 import { MemorySurface } from "./components/MemorySurface";
+// Off the boot path like the drafter: the Runs surface only matters once an
+// orchestrated run exists, so its chunk loads on first open.
+const OrchestrationSurface = lazy(() =>
+  import("./components/OrchestrationSurface").then((m) => ({
+    default: m.OrchestrationSurface,
+  })),
+);
 import ReviewDiscussionPane from "./components/ReviewDiscussionPane";
 import { ServersPane } from "./components/ServersPane";
 import { useReview } from "./hooks/useReview";
@@ -204,10 +221,20 @@ import {
   VOICE_PANE_W,
   canonicalLayout,
   computePaneLayout,
+  isLayoutAtRest,
   voicePaneMaxW,
   type PaneLayout,
 } from "./lib/paneLayout";
+import { dockHeightForTiles } from "./lib/tileGrid";
 import { SNAPBACK_SETTLE_MS } from "./lib/boot";
+import {
+  clearDrafterShadow,
+  drafterShadowKey,
+  readDrafterShadow,
+  resolveDraftOpen,
+  type DrafterSessionEntry,
+  type DrafterShadow,
+} from "./lib/drafterCache";
 import { useBootChoreography } from "./hooks/useBootChoreography";
 /** Toggle the curtain attribute only on a real flip — `setAttribute` with an
  *  unchanged value still invalidates style, and this runs every drag frame. */
@@ -243,7 +270,11 @@ import {
   isResizing,
   onResizeSession,
 } from "./lib/resizeSession";
-import { buildPlanLaunchCommand } from "./lib/planLaunchCommand";
+import {
+  buildOrchestrateLaunchCommand,
+  buildOrchestratePrompt,
+  buildPlanLaunchCommand,
+} from "./lib/planLaunchCommand";
 import { guessProjectForPlan } from "./lib/guessProject";
 import {
   listSources,
@@ -260,6 +291,7 @@ import type { JSONContent } from "@tiptap/react";
 import type {
   Comment,
   CommentType,
+  GitStatus,
   HookStatus,
   InterceptionMode,
   ModeEvent,
@@ -271,7 +303,10 @@ import type {
   Section,
   SessionSummary,
   SkillStatus,
+  WorkflowAvailability,
 } from "./types";
+import { OrchestrateLaunchModal } from "./components/OrchestrateLaunchModal";
+import { RunReport } from "./components/RunReport";
 
 // Upgrade pre-quick-switch persisted pane state (four booleans → one surface
 // value + a doc pin) exactly once, before the first usePersistedState read.
@@ -322,38 +357,6 @@ interface ToastSpec {
   message: string;
   tone?: "success" | "info";
   action?: { label: string; onAction: () => void };
-}
-
-// --- Drafter crash shadow ---------------------------------------------------
-// A synchronous localStorage copy of the open document, written on every flush
-// BEFORE the async DB invoke, cleared once the write confirms. Deliberately
-// localStorage — but strictly as a crash journal, never primary storage (which
-// is exactly what the Bookshelf moved away from). Bounded to the open document.
-interface DrafterShadow {
-  json: JSONContent;
-  markdown: string;
-  at: number;
-}
-
-const drafterShadowKey = (id: string) => `redline.drafter.shadow.${id}`;
-
-function readDrafterShadow(id: string): DrafterShadow | null {
-  try {
-    const raw = localStorage.getItem(drafterShadowKey(id));
-    if (!raw) return null;
-    const s = JSON.parse(raw) as DrafterShadow;
-    return s && typeof s.at === "number" && s.json ? s : null;
-  } catch {
-    return null;
-  }
-}
-
-function clearDrafterShadow(id: string): void {
-  try {
-    localStorage.removeItem(drafterShadowKey(id));
-  } catch {
-    /* nothing to clear, or storage unavailable — either way it's gone */
-  }
 }
 
 // A round control used by the floating document pill (zoom ±, width toggle).
@@ -560,6 +563,7 @@ function App() {
   const reviewOpen = mainSurface === "review";
   const serversOpen = mainSurface === "servers";
   const memoryOpen = mainSurface === "memory";
+  const runsOpen = mainSurface === "runs";
   const docVisible = mainSurface === "document" || docPinned;
   const [splitVertical, setSplitVertical] = usePersistedState(
     "redline.split.vertical",
@@ -692,11 +696,21 @@ function App() {
     () => new Set(),
   );
   // The document itself lives in the DB now (the Bookshelf owns it) — this is
-  // just the loaded copy for the open document. `drafterDocReady` gates the
-  // editor's mount: TipTap captures `content` once, at creation, so mounting
-  // before the read resolves would open a blank document over a real one.
-  const [drafterDoc, setDrafterDoc] = useState<JSONContent | null>(null);
-  const [drafterDocReady, setDrafterDocReady] = useState(false);
+  // just the loaded copy for the open document, TAGGED with the id it belongs
+  // to. The tag is the editor's mount gate: TipTap captures `content` once, at
+  // creation, so mounting before the right doc is in hand would open a blank
+  // (or someone else's) document over a real one — `forId` makes the
+  // transient doc-switch hazard unrepresentable rather than merely guarded.
+  const [drafterLoaded, setDrafterLoaded] = useState<{
+    forId: string;
+    doc: JSONContent | null;
+  } | null>(null);
+  // Latest content ever on screen per draft id, for this app run. Written on
+  // every persist flush; consulted before the DB on every open. In-session,
+  // in-memory ≥ DB always — during the persist retry window the DB is behind,
+  // and refetching there would resurrect the stale-remount data loss plus
+  // spurious recovery prompts (see lib/drafterCache).
+  const drafterSessionCache = useRef(new Map<string, DrafterSessionEntry>());
   const [drafterProject, setDrafterProject] = usePersistedState<string | null>(
     "redline.drafter.project",
     null,
@@ -708,6 +722,11 @@ function App() {
     "redline.drafter.draftId",
     null,
   );
+  // Render-fresh mirror for the persist handler: an outgoing doc's unmount
+  // flush runs with its OLD closure (its own id — correct for the cache and
+  // shadow), but must not clobber the INCOMING doc's `drafterLoaded`.
+  const drafterDraftIdRef = useRef(drafterDraftId);
+  drafterDraftIdRef.current = drafterDraftId;
   useEffect(() => {
     if (!drafterDraftId) setDrafterDraftId(crypto.randomUUID());
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -741,21 +760,35 @@ function App() {
       setDrafterDraftId(next[Math.min(idx, next.length - 1)] ?? null);
     }
   };
-  // Load the open document from the DB, after the one-time localStorage
+  // Open the active document: the in-session cache first (the latest content
+  // ever on screen this run — a DB refetch during the persist retry window
+  // would be BEHIND the screen), then the DB, after the one-time localStorage
   // migration has had its chance to put it there. The migration is idempotent
   // (its flag is a DB setting) and runs before the first read, so the very
   // first launch on a migrated build still opens the user's existing draft.
+  // There is no separate loading flag: `drafterLoaded.forId` not matching the
+  // active id IS the loading state.
   const bookshelfMigrated = useRef(false);
   useEffect(() => {
     if (!drafterDraftId) return;
+    const forId = drafterDraftId;
+    const entry = drafterSessionCache.current.get(forId) ?? null;
+    if (entry) {
+      // Seen this session — reopen exactly what was on screen, synchronously:
+      // no fetch, no "Opening…" flash, and never a recovery prompt (the
+      // shadow may be mid-flight, but the cache is what it shadows).
+      setDrafterLoaded({ forId, doc: entry.json });
+      if (entry.projectPath) setDrafterProject(entry.projectPath);
+      setDrafterSaveState(null);
+      return;
+    }
     let alive = true;
-    setDrafterDocReady(false);
     void (async () => {
       if (!bookshelfMigrated.current) {
         bookshelfMigrated.current = true;
         await migrateLegacyDraft();
       }
-      const loaded = await loadDraftDoc(drafterDraftId).catch(() => null);
+      const loaded = await loadDraftDoc(forId).catch(() => null);
       if (!alive) return;
       let parsed: JSONContent | null = null;
       try {
@@ -780,8 +813,12 @@ function App() {
       // Crash recovery: a shadow newer than the DB row means the app died
       // between a keystroke and its write landing. Offer the shadow; either
       // answer clears it (declined = the user chose the stored copy).
-      const shadow = readDrafterShadow(drafterDraftId);
-      if (shadow && shadow.at > (loaded?.updatedAt ?? 0)) {
+      const shadow = readDrafterShadow(forId);
+      if (
+        shadow &&
+        resolveDraftOpen(entry, loaded?.updatedAt ?? 0, shadow.at) ===
+          "shadow-prompt"
+      ) {
         if (
           window.confirm(
             "Recover unsaved changes? This document has edits that didn't reach the database before the app last closed.",
@@ -791,19 +828,18 @@ function App() {
           const project = loaded?.projectPath ?? null;
           // Land the recovered body now; the shadow clears only once the DB
           // write is confirmed.
-          void persistDraftDoc(drafterDraftId, shadow.markdown, shadow.json, project)
-            .then(() => clearDrafterShadow(drafterDraftId))
+          void persistDraftDoc(forId, shadow.markdown, shadow.json, project)
+            .then(() => clearDrafterShadow(forId))
             .catch(() => {});
         } else {
-          clearDrafterShadow(drafterDraftId);
+          clearDrafterShadow(forId);
         }
       }
-      setDrafterDoc(parsed);
+      setDrafterLoaded({ forId, doc: parsed });
       if (loaded?.projectPath) setDrafterProject(loaded.projectPath);
       // The save indicator describes the OPEN document — don't carry the
       // previous one's "Saved · 2s ago" across a switch.
       setDrafterSaveState(null);
-      setDrafterDocReady(true);
     })();
     return () => {
       alive = false;
@@ -830,6 +866,20 @@ function App() {
   const [drafterVoiceOpen, setDrafterVoiceOpen] = useState(false);
   const [drafterMarkdown, setDrafterMarkdown] = useState("");
   const [drafterSections, setDrafterSections] = useState<Section[]>([]);
+  // The open drafter's LIVE markdown getter — serialized on demand, so the
+  // voice panel's per-turn mirror flush sends what's on screen rather than
+  // the debounce-lagged `drafterMarkdown` above. Null while no editor is up.
+  const drafterLiveMdRef = useRef<(() => string) | null>(null);
+  const registerDrafterLiveMarkdown = useCallback(
+    (get: (() => string) | null) => {
+      drafterLiveMdRef.current = get;
+    },
+    [],
+  );
+  const getDrafterLiveMarkdown = useCallback(
+    () => drafterLiveMdRef.current?.(),
+    [],
+  );
   // Persist the open document: the TipTap fidelity source AND the markdown
   // mirror agents read via /v1/drafter/:id/doc, in one write on the drafter's
   // debounce (400ms idle, 2s max-wait). Three guarantees layered on the write:
@@ -857,6 +907,19 @@ function App() {
         );
       } catch {
         /* quota / private mode — the DB write below is still the real path */
+      }
+      // The in-session cache rides the same flush, unconditionally under the
+      // flush's OWN id — an outgoing doc's unmount flush lands under that doc
+      // (onPersist carries its closure), which is exactly right. The
+      // `drafterLoaded` mirror is guarded by the live id so that same flush
+      // can never clobber the incoming doc's mount.
+      drafterSessionCache.current.set(id, {
+        json,
+        projectPath: drafterProject,
+        at: Date.now(),
+      });
+      if (drafterDraftIdRef.current === id) {
+        setDrafterLoaded({ forId: id, doc: json });
       }
       const seq = ++drafterSaveSeq.current;
       if (drafterRetryTimer.current !== null) {
@@ -950,6 +1013,42 @@ function App() {
     return () => {
       alive = false;
       void p.then((un) => un());
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // Orchestrated runs: which plan session's RunReport container wraps the
+  // review surface (null = the plain review pane). Opened by the exit-report
+  // event or by clicking a run chip in the sessions pane.
+  const [runReportFor, setRunReportFor] = useState<string | null>(null);
+  // A verified Orchestrate handoff that failed — the persistent error banner
+  // with Retry / Copy launch command / Open terminal manually. The state was
+  // already rolled back (reset_run) by the time this is set.
+  const [handoffFailure, setHandoffFailure] = useState<{
+    sessionId: string;
+    stage: string;
+    reason: string;
+    launchCmd: string;
+    prompt: string;
+    projectPath: string | null;
+  } | null>(null);
+  // Sessions whose approval was rescinded (unapprove_plan) this app session —
+  // their restore prompt carries the "your stand-down is void" sentence so a
+  // resumed claude doesn't obey a stale ORCHESTRATE_STAND_DOWN in its context.
+  const [rescindedIds, setRescindedIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  useEffect(() => {
+    let alive = true;
+    // The orchestrator filed its exit report → open the RunReport container
+    // (the review-requested event that follows lands inside it).
+    const rep = listen<{ sessionId: string }>("orchestration-report", (e) => {
+      if (!alive) return;
+      setRunReportFor(e.payload.sessionId);
+      selectSurfaceRef.current("review");
+    });
+    return () => {
+      alive = false;
+      void rep.then((un) => un());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1088,15 +1187,19 @@ function App() {
     false,
   );
   // A3 snap-back: one gesture returns the shell to its canonical resting
-  // arrangement — the shape a fresh install's doors open onto. Values go
-  // through the proven persisted setters, so persistence and the
-  // state→geometry pass follow for free; `data-rl-snapback` rides <html>
-  // for ~320ms so the discrete jumps travel as one short fold (no resize
-  // session is open, so the data-rl-resizing suppression can't fight it;
-  // reduced motion never sets the attribute). Voice is deliberately
-  // untouched — voice is first-class, and snap-back must never kill an
-  // active discussion. A hand-edited workspace.json `layout` block adjusts
-  // the target (GUI–file duality; see workspaceLayout).
+  // arrangement — the shape a fresh install's doors open onto — and a second
+  // gesture from rest CLOSES the panes (full-bleed document). The cycle is
+  // messy → canonical → closed → canonical…, with "at rest" derived from the
+  // live flags (isLayoutAtRest), never stored, so it can't go stale when
+  // other flows force panes open. Values go through the proven persisted
+  // setters, so persistence and the state→geometry pass follow for free;
+  // `data-rl-snapback` rides <html> for ~320ms so the discrete jumps travel
+  // as one short fold (no resize session is open, so the data-rl-resizing
+  // suppression can't fight it; reduced motion never sets the attribute).
+  // Voice is deliberately untouched — voice is first-class, and snap-back
+  // must never kill an active discussion. A hand-edited workspace.json
+  // `layout` block adjusts the target (GUI–file duality; see
+  // workspaceLayout).
   const snapBackTimer = useRef(0);
   const snapBack = useCallback(() => {
     const target = canonicalLayout(
@@ -1104,6 +1207,31 @@ function App() {
       window.innerHeight,
       workspaceLayout(workspace),
     );
+    if (
+      isLayoutAtRest(
+        {
+          sidebarCollapsed,
+          paneCollapsed,
+          paneFullscreen,
+          termCollapsed,
+          termFullscreen,
+          docPinned,
+          surface: mainSurface,
+        },
+        target,
+      )
+    ) {
+      // Already canonical → close. Intentionally instant, with NO
+      // data-rl-snapback attribute: collapsing unmounts the sidebar/pane
+      // clips, so the settle transition would have nothing to animate and
+      // the snap-glow would fire on vanishing plates. Widths and heights
+      // stay persisted for the next reopen; everything-closed is not
+      // at-rest, so the next press snaps back and the cycle completes.
+      setSidebarCollapsed(true);
+      setPaneCollapsed(true);
+      setTermCollapsed(true);
+      return;
+    }
     if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
       const html = document.documentElement;
       html.setAttribute("data-rl-snapback", "");
@@ -1135,9 +1263,28 @@ function App() {
     setTermCollapsed,
     setTermFullscreen,
     setDocPinned,
+    // The at-rest check reads the live flags; snapBackRef exists precisely so
+    // the mount-once ⌘⇧0 listener sees this fresh closure.
+    sidebarCollapsed,
+    paneCollapsed,
+    paneFullscreen,
+    termCollapsed,
+    termFullscreen,
+    docPinned,
+    mainSurface,
   ]);
   snapBackRef.current = snapBack;
   const [termTabCount, setTermTabCount] = useState(1);
+  // The dock's GRID, distinct from the tab count — 9 tabs / 2 tiles is
+  // normal. Drives dock growth and the browser-pane resync key.
+  const [termTiles, setTermTiles] = useState({ count: 1, rows: 1 });
+  const handleTileCountChange = useCallback(
+    (count: number, rows: number) =>
+      setTermTiles((prev) =>
+        prev.count === count && prev.rows === rows ? prev : { count, rows },
+      ),
+    [],
+  );
   const [termHasUnseen, setTermHasUnseen] = useState(false);
   const [activeTermId, setActiveTermId] = useState<string | null>(null);
 
@@ -2066,6 +2213,31 @@ function App() {
       min: 120,
     });
 
+  // Tile-driven dock growth: ADDING a tile grows the dock to that tile
+  // count's floor (dockHeightForTiles only ever grows — a dock dragged
+  // taller keeps its height, and removing a tile never yanks it shorter;
+  // shrinking is the user's job via the divider or the collapse caret) and
+  // uncollapses it (precedent: plan intercepts call setPaneCollapsed(false)
+  // directly). It never touches termFullscreen. The divider's own max is
+  // looser than this cap, so growth can never exceed what a manual drag
+  // allows.
+  const prevTileCountRef = useRef(1);
+  useEffect(() => {
+    const prev = prevTileCountRef.current;
+    prevTileCountRef.current = termTiles.count;
+    if (termTiles.count <= prev) return;
+    const next = dockHeightForTiles(
+      termTiles.count,
+      { width: winWidth, height: window.innerHeight },
+      termHeight,
+    );
+    if (next !== termHeight) setTermHeight(next);
+    if (termCollapsed) setTermCollapsed(false);
+    // Growth fires on the tile-count edge only — height/collapse are read
+    // fresh but must not re-trigger it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [termTiles.count]);
+
   const [selection, clearSelection] = useTextSelection(
     documentRef,
     composing === null,
@@ -2147,8 +2319,29 @@ function App() {
         invoke<HookStatus>("get_hook_status").then(setHookStatus, (err) =>
           console.error("get_hook_status failed", err),
         ),
-        invoke<SkillStatus>("get_skill_status").then(setSkillStatus, (err) =>
-          console.error("get_skill_status failed", err),
+        invoke<SkillStatus>("get_skill_status").then(
+          (status) => {
+            // `outdated` means present-but-stale (content drift after an app
+            // update, or a retired orphan dir) — the user already consented
+            // to the install once via the setup modal, so refresh silently
+            // instead of re-raising it. First-run (not installed, not
+            // outdated) still gets the unskippable modal. No modal flash:
+            // `setupModalActive` requires a non-null status, which stays
+            // null until this whole chain resolves. On install failure fall
+            // back to the fetched status so the modal still catches it.
+            if (!status.outdated) {
+              setSkillStatus(status);
+              return;
+            }
+            return invoke<SkillStatus>("install_skill").then(
+              setSkillStatus,
+              (err) => {
+                console.error("install_skill failed", err);
+                setSkillStatus(status);
+              },
+            );
+          },
+          (err) => console.error("get_skill_status failed", err),
         ),
         invoke<InterceptionMode>("get_interception_mode").then(
           setMode,
@@ -2364,6 +2557,28 @@ function App() {
         }
       },
     );
+    // Run-lifecycle beacons repaint the sessions-pane chip.
+    const runStateUnlisten = listen<{ sessionId: string }>(
+      "run-state-changed",
+      () => {
+        void refreshSummaries();
+      },
+    );
+    // 0d: a plan was answered `allow` without being captured. A skipped
+    // capture otherwise renders identically to "no plan was ever submitted" —
+    // which is how the sentinel-prose bug survived undetected — so say so.
+    const passedThroughUnlisten = listen<{ sessionId: string; reason: string }>(
+      "plan-passed-through",
+      (e) => {
+        setToast({
+          message:
+            `A plan from session ${e.payload.sessionId.slice(0, 8)}… was passed ` +
+            `through WITHOUT capture: ${e.payload.reason}`,
+          tone: "info",
+        });
+        setTimeout(() => setToast(null), 15000);
+      },
+    );
     const modeUnlisten = listen<ModeEvent>("mode-changed", (e) => {
       setMode(e.payload.mode);
     });
@@ -2391,6 +2606,8 @@ function App() {
       void bindFailedUnlisten.then((u) => u());
       void commentsUnlisten.then((u) => u());
       void statusUnlisten.then((u) => u());
+      void runStateUnlisten.then((u) => u());
+      void passedThroughUnlisten.then((u) => u());
       void modeUnlisten.then((u) => u());
       void decisionUnlisten.then((u) => u());
     };
@@ -2645,6 +2862,7 @@ function App() {
     reviewOpen,
     serversOpen,
     memoryOpen,
+    runsOpen,
     activeId,
     planTitle: activeSummary?.planTitle ?? null,
     planProject: activeSummary?.projectPath ?? null,
@@ -3221,6 +3439,9 @@ function App() {
   // restored (which clears `detached` on the next plan-received POST).
   const canSubmit = pendingComments.length > 0 && !detached;
   const canApprove = !!session && session.status !== "approved" && !detached;
+  // Orchestrate shares Approve's gating exactly: after either fires,
+  // status=approved disables both — no double-fire window.
+  const canOrchestrate = canApprove;
 
   // Bidirectional focus: when the editor (or anything else) sets a focused
   // comment id, scroll the matching sidebar card into view. The editor side
@@ -3415,6 +3636,282 @@ function App() {
     }
   };
 
+  // Orchestrate preflight: gather the modal's three duties (dirty tree via
+  // push_status, inferred Bash allow rules, workflows-disabled probe) and
+  // show the launch modal. A push_status error just means "not a known repo"
+  // — skip the git duty, keep the rest.
+  const [orchestrateModal, setOrchestrateModal] = useState<{
+    gitStatus: GitStatus | null;
+    workflowsDisabled: boolean;
+    allowRules: string[];
+  } | null>(null);
+  const openOrchestrateModal = async () => {
+    if (!session || busy) return;
+    const repo = session.projectPath || null;
+    const [git, avail, rules] = await Promise.all([
+      repo
+        ? invoke<GitStatus>("push_status", { repo }).catch(() => null)
+        : Promise.resolve(null),
+      invoke<WorkflowAvailability>("workflow_availability").catch(() => null),
+      repo
+        ? invoke<string[]>("orchestrate_allow_candidates", {
+            projectPath: repo,
+          }).catch(() => [])
+        : Promise.resolve([]),
+    ]);
+    setOrchestrateModal({
+      gitStatus: git,
+      workflowsDisabled: !!(
+        avail &&
+        (avail.disabledInSettings || avail.disabledInEnv)
+      ),
+      allowRules: rules ?? [],
+    });
+  };
+
+  // The verified Orchestrate delivery (Part A): open a terminal, arm the
+  // lineage guards WITH the tab id, then run the checked handoff — real spawn
+  // signal, checked writes, claude-ready marker, and the ingest-claim
+  // confirmation with re-armed retries. On any failure the run state is
+  // rolled back to NULL (the click was not evidence of a run) and a
+  // persistent error banner replaces the old unconditional success toast.
+  const deliverOrchestrator = async (
+    sessionId: string,
+    projectPath: string | null,
+  ) => {
+    const prompt = buildOrchestratePrompt(sessionId);
+    const seats = await invoke<{
+      seats: Record<string, { model?: string }>;
+    }>("get_agent_seats").catch(() => null);
+    // Unset seat → sonnet, never the CLI default: every workflow subagent
+    // inherits the session model, so an unset default would mean the big
+    // model × up-to-16 concurrent agents.
+    const model = seats?.seats?.orchestrator?.model?.trim() || "sonnet";
+    const launchCmd = buildOrchestrateLaunchCommand(projectPath, model);
+    suppressTerminalRevealFocus();
+    setTermFullscreen(false);
+    setTermCollapsed(false);
+    const id = terminalsRef.current?.openSessionTerminal(projectPath) ?? null;
+    const fail = async (stage: string, reason: string) => {
+      await invoke("reset_run", { sessionId }).catch(() => {});
+      setHandoffFailure({
+        sessionId,
+        stage,
+        reason,
+        launchCmd,
+        prompt,
+        projectPath,
+      });
+      void refreshSummaries();
+    };
+    // Arm the lineage guards BEFORE the prompt can reach the hook — carrying
+    // the tab id so a failed handoff still leaves a trace of its terminal.
+    const rearm = () =>
+      invoke("record_orchestration_launch", {
+        prompt,
+        planSessionId: sessionId,
+        terminalId: id,
+      }).then(() => undefined);
+    await rearm().catch((err) =>
+      console.error("record_orchestration_launch failed", err),
+    );
+    if (!id) {
+      await fail("spawn", "no terminal tab could be opened");
+      return;
+    }
+    const deps: OrchestrateDeps = {
+      ...tauriHandoffDeps,
+      journal: (stage, detail) => {
+        void invoke("record_handoff_event", {
+          sessionId,
+          stage,
+          detail: detail ?? null,
+        }).catch(() => {});
+      },
+      getRunState: (sid) =>
+        invoke<string | null>("get_run_state", { sessionId: sid }),
+      rearm,
+    };
+    const result = await orchestrateHandoff(
+      deps,
+      id,
+      sessionId,
+      launchCmd,
+      prompt,
+    );
+    if (result.ok) {
+      setHandoffFailure((cur) =>
+        cur?.sessionId === sessionId ? null : cur,
+      );
+      // The tab is load-bearing: a workflow resumes only within its session.
+      setToast(
+        "Orchestrator is running below ↓ Approve the workflow card when it " +
+          "appears, and keep that terminal tab open until the run finishes — " +
+          "closing it loses the run (--resume won't bring it back).",
+      );
+      setTimeout(() => setToast(null), 10000);
+    } else {
+      await fail(result.stage, result.reason);
+    }
+  };
+
+  // Launch confirmed: approve-with-stand-down, then the verified typed
+  // handoff. The Workflow opt-in is gated on input ORIGIN, so the prompt is
+  // delivered as typed keystrokes into a bare `claude` — never as an argv
+  // positional.
+  const launchOrchestrator = async (checkedRules: string[]) => {
+    const s = session;
+    setOrchestrateModal(null);
+    if (!s || busy) return;
+    setBusy(true);
+    try {
+      if (checkedRules.length > 0) {
+        // Best-effort: a failed allow write costs permission prompts mid-run,
+        // not correctness.
+        await invoke("apply_orchestrate_allows", {
+          rules: checkedRules,
+        }).catch((err) =>
+          console.error("apply_orchestrate_allows failed", err),
+        );
+      }
+      await invoke("orchestrate_plan", { sessionId: s.sessionId });
+    } catch (err) {
+      console.error("orchestrate_plan failed", err);
+      if (isDetachError(err)) {
+        setDetachDismissed(false);
+        void refreshSummaries();
+      } else alert(`Orchestrate failed: ${err}`);
+      setBusy(false);
+      return;
+    }
+    setBusy(false);
+    // The delivery runs unawaited (its claim confirmation can take ~20 s per
+    // attempt); it reports through the success toast or the failure banner.
+    void deliverOrchestrator(s.sessionId, s.projectPath || null);
+  };
+
+  // B2: run an already-approved plan again after a failed (or abandoned)
+  // delivery — reset + orchestrating happen backend-side; the delivery half
+  // is the same verified handoff as a first launch.
+  const relaunchOrchestrator = async (sessionId: string) => {
+    const summary = summaries.find((x) => x.sessionId === sessionId);
+    setHandoffFailure((cur) => (cur?.sessionId === sessionId ? null : cur));
+    try {
+      await invoke("relaunch_run", { sessionId });
+    } catch (err) {
+      setToast(`Re-launch failed: ${err}`);
+      setTimeout(() => setToast(null), 6000);
+      return;
+    }
+    void deliverOrchestrator(sessionId, summary?.projectPath || null);
+  };
+
+  // B1: clear a wedged run without touching the approval.
+  const resetRunFor = async (sessionId: string) => {
+    try {
+      await invoke("reset_run", { sessionId });
+      setHandoffFailure((cur) => (cur?.sessionId === sessionId ? null : cur));
+      void refreshSummaries();
+    } catch (err) {
+      setToast(`Reset failed: ${err}`);
+      setTimeout(() => setToast(null), 6000);
+    }
+  };
+
+  // B3: rescind the approval — back to review, detached, ledger supersession
+  // backend-side. The rescinded set feeds the restore prompt's "your
+  // stand-down is void" sentence.
+  const unapproveSession = async (sessionId: string) => {
+    try {
+      await invoke("unapprove_plan", { sessionId });
+      setRescindedIds((prev) => {
+        const next = new Set(prev);
+        next.add(sessionId);
+        return next;
+      });
+      setHandoffFailure((cur) => (cur?.sessionId === sessionId ? null : cur));
+      setRunReportFor((cur) => (cur === sessionId ? null : cur));
+      void refreshSummaries();
+      setToast(
+        "Approval rescinded — the session is back in review. Restore reattaches it.",
+      );
+      setTimeout(() => setToast(null), 7000);
+    } catch (err) {
+      setToast(`Un-approve failed: ${err}`);
+      setTimeout(() => setToast(null), 6000);
+    }
+  };
+
+  // B4: abort a live run. Never kills the orchestrator process — names (and
+  // offers to show) the terminal tab to close instead.
+  const standDownRun = async (sessionId: string) => {
+    try {
+      const terminal = await invoke<string | null>("stand_down_run", {
+        sessionId,
+      });
+      setHandoffFailure((cur) => (cur?.sessionId === sessionId ? null : cur));
+      void refreshSummaries();
+      if (terminal) {
+        setToast({
+          message:
+            "Run stood down — close its terminal tab to stop the orchestrator.",
+          tone: "info",
+          action: {
+            label: "Show tab",
+            onAction: () => {
+              setToast(null);
+              setTermCollapsed(false);
+              terminalsRef.current?.selectTab(terminal);
+            },
+          },
+        });
+      } else {
+        setToast(
+          "Run stood down — the orchestrator (if it is running) keeps going until its terminal is closed.",
+        );
+      }
+      setTimeout(() => setToast(null), 10000);
+    } catch (err) {
+      setToast(`Stand down failed: ${err}`);
+      setTimeout(() => setToast(null), 6000);
+    }
+  };
+
+  // A5: the single-step verified handoff shared by every "open a terminal
+  // and type a command" path — spawn-verified, write-checked, loud on
+  // failure. Replaces the identical blind setTimeout(pty_write, 900) pattern
+  // that let a failed delivery render as success. The failure toast is
+  // persistent (Dismiss, never a timer): a spawn timeout surfaces at +15s,
+  // after the user has already looked away — an 8s auto-dismiss is how these
+  // failures kept escaping diagnosis. With a sessionId the handoff also
+  // journals its breadcrumbs (handoff_spawned/…/handoff_failed), same trail
+  // as Orchestrate.
+  const typeIntoTerminal = (
+    id: string,
+    data: string,
+    failNote: string,
+    sessionId?: string | null,
+  ) => {
+    const journal = (stage: string, detail?: string) => {
+      if (!sessionId) return;
+      void invoke("record_handoff_event", {
+        sessionId,
+        stage,
+        detail: detail ?? null,
+      }).catch(() => {});
+    };
+    const deps = sessionId ? { ...tauriHandoffDeps, journal } : tauriHandoffDeps;
+    void deliverToTerminal(deps, id, [{ stage: "launch", data }]).then((r) => {
+      if (!r.ok) {
+        journal("handoff_failed", `${r.stage}: ${r.reason}`);
+        setToast({
+          message: `${failNote} (${r.stage}): ${r.reason}`,
+          action: { label: "Dismiss", onAction: () => setToast(null) },
+        });
+      }
+    });
+  };
+
   // One-click recovery for a detached plan: open a terminal in the session's
   // project dir and resume the exact Claude Code conversation with an initial,
   // user-attested prompt that re-presents the plan. Because the resumed session
@@ -3423,19 +3920,26 @@ function App() {
   const restorePlanSession = () => {
     if (!session) return;
     const cwd = session.projectPath || null;
-    const cmd = `${buildResumeCommand(session.sessionId, new Date(), cwd)}\r`;
+    const cmd = `${buildResumeCommand(
+      session.sessionId,
+      new Date(),
+      cwd,
+      rescindedIds.has(session.sessionId),
+    )}\r`;
     // Arm a one-shot restore so the resumed session's re-presented plan is
     // labeled "vN restored" rather than counted as a fresh version/thread.
     void invoke("arm_restore", { sessionId: session.sessionId });
+    suppressTerminalRevealFocus();
     setTermFullscreen(false);
     setTermCollapsed(false);
     const id = terminalsRef.current?.openSessionTerminal(cwd) ?? null;
     if (id) {
-      // Let the freshly-spawned shell finish its rc files before the command
-      // lands; the PTY line-buffers anything typed earlier regardless.
-      window.setTimeout(() => {
-        void invoke("pty_write", { id, data: cmd });
-      }, 900);
+      typeIntoTerminal(
+        id,
+        cmd,
+        "Couldn't type the resume command",
+        session.sessionId,
+      );
     }
     // Hide the banner while the resume runs; the re-presented plan flips
     // attachState back to held, which clears the derived state for real.
@@ -3460,8 +3964,8 @@ function App() {
 
   // Send the drafted prompt to a *fresh* Claude Code plan session: spawn a
   // terminal in the chosen project and launch `claude --permission-mode plan`
-  // seeded with the prompt — the same spawn → 900ms → write pattern as
-  // restorePlanSession (let the shell's rc files settle before the command lands).
+  // seeded with the prompt — the same spawn-verified handoff as
+  // restorePlanSession (no timing guess; the write is checked).
   const launchPromptDraft = (markdown: string, projectPath: string | null) => {
     const trimmed = markdown.trim();
     if (!trimmed) return;
@@ -3475,33 +3979,30 @@ function App() {
       draftId: drafterDraftId,
     });
     const cmd = `${buildPlanLaunchCommand(trimmed, projectPath)}\r`;
+    suppressTerminalRevealFocus();
     setTermFullscreen(false);
     setTermCollapsed(false);
     const id = terminalsRef.current?.openSessionTerminal(projectPath) ?? null;
     if (id) {
-      window.setTimeout(() => {
-        void invoke("pty_write", { id, data: cmd });
-      }, 900);
+      typeIntoTerminal(id, cmd, "Couldn't type the plan launch");
     }
     setToast("Launching plan in the terminal below ↓");
     setTimeout(() => setToast(null), 4000);
   };
 
   // "Run" on a Localhost card: bring a dev server back without hunting for the
-  // command. Same spawn → 900ms → write choreography as launchPromptDraft (let
-  // the freshly-spawned shell finish its rc files before the command lands).
+  // command. Same spawn-verified handoff as launchPromptDraft.
   // No `cd` prefix — openSessionTerminal spawns the PTY *in* that directory,
   // and prefixing one would break on a path the shell would need quoted.
   const runDevServer = (projectPath: string, runCommand: string) => {
     const cmd = runCommand.trim();
     if (!cmd) return;
+    suppressTerminalRevealFocus();
     setTermFullscreen(false);
     setTermCollapsed(false);
     const id = terminalsRef.current?.openSessionTerminal(projectPath) ?? null;
     if (id) {
-      window.setTimeout(() => {
-        void invoke("pty_write", { id, data: `${cmd}\r` });
-      }, 900);
+      typeIntoTerminal(id, `${cmd}\r`, "Couldn't start the dev server");
     }
     setToast("Starting the dev server in the terminal below ↓");
     setTimeout(() => setToast(null), 4000);
@@ -3565,11 +4066,11 @@ function App() {
   // right project when the user ships it with "Send to Claude Code". Shared by
   // the mission "→ Drafter" and browser "Open in Drafter" paths.
   //
-  // Mints a real Bookshelf document and opens it BY ID. The old in-place
-  // `setDrafterDoc` seeding never changed `drafterDraftId`, so it never
-  // remounted the editor — it only appeared to work because the body happened
-  // to be unmounted when the surface was deselected, and with multiple open
-  // documents it breaks outright.
+  // Mints a real Bookshelf document and opens it BY ID. The old in-place doc
+  // seeding never changed `drafterDraftId`, so it never remounted the editor —
+  // it only appeared to work because the body happened to be unmounted when
+  // the surface was deselected, and with multiple open documents it breaks
+  // outright.
   const openDrafterWithMarkdown = async (markdown: string) => {
     if (!markdown.trim()) return;
     let json: JSONContent;
@@ -3593,8 +4094,15 @@ function App() {
       setDrafterDraftId(id); // the load effect reads it back and remounts
     } catch {
       // The mint failed (DB unavailable?) — fall back to seeding the open
-      // document in place so the content is at least on screen.
-      setDrafterDoc(json);
+      // document in place so the content is at least on screen. Seed the
+      // session cache too, so navigating away doesn't lose the brief.
+      const forId = drafterDraftId ?? "";
+      drafterSessionCache.current.set(forId, {
+        json,
+        projectPath: project,
+        at: Date.now(),
+      });
+      setDrafterLoaded({ forId, doc: json });
     }
     selectSurface("drafter");
   };
@@ -3607,6 +4115,25 @@ function App() {
     setToast("Mission brief opened in the drafter ✍️");
     setTimeout(() => setToast(null), 4000);
   };
+
+  // The synthesize handoff listens at APP level, not in MissionChat: the
+  // orchestrator keeps synthesizing after the user switches surfaces, and the
+  // brief must still open the Drafter when the panel that requested it is
+  // long unmounted. The backend owns the pending-synthesize flag and emits
+  // this exactly once per synthesis turn.
+  const seedDrafterFromMissionRef = useRef(seedDrafterFromMission);
+  seedDrafterFromMissionRef.current = seedDrafterFromMission;
+  useEffect(() => {
+    const p = listen<{ missionId: string; body: string }>(
+      "mission-synthesize-done",
+      (e) => {
+        void seedDrafterFromMissionRef.current(e.payload.body);
+      },
+    );
+    return () => {
+      void p.then((un) => un());
+    };
+  }, []);
 
   // "Open in Drafter" from a browser page-discussion reply — same seeding, with
   // the target repo pre-guessed, so the user reviews + picks the repo there.
@@ -3625,7 +4152,12 @@ function App() {
     // whichever terminal runs it, should land as "vN restored".
     void invoke("arm_restore", { sessionId: session.sessionId });
     void navigator.clipboard?.writeText(
-      buildResumeCommand(session.sessionId, new Date(), session.projectPath || null),
+      buildResumeCommand(
+        session.sessionId,
+        new Date(),
+        session.projectPath || null,
+        rescindedIds.has(session.sessionId),
+      ),
     );
     setToast("Resume command copied — paste it into a shell prompt");
     setTimeout(() => setToast(null), 4000);
@@ -3928,6 +4460,9 @@ function App() {
   // while any curtain is up, exactly like under modals and drags.
   // And hidden while the boot doors are mid-flight: the native webview
   // ignores DOM transforms and would paint over the moving plates.
+  // Terminal fullscreen covers the whole work area in DOM (absolute inset-0)
+  // without changing the browser slot's rect, so the only fix is hiding the
+  // native webview — it would otherwise paint above the fullscreen terminal.
   const browserVisible =
     !bootAnimating &&
     !browserOverlayActive &&
@@ -3935,6 +4470,7 @@ function App() {
     !isDragging &&
     !termDragging &&
     !splitDragging &&
+    !termFullscreen &&
     !liveFlags.curtain &&
     openMenuCount === 0;
 
@@ -4278,6 +4814,22 @@ function App() {
               }}
               viewedVersionNumber={viewedVersionNumber}
               unseenIds={unseenPlanIds}
+              onOpenRunReport={(sessionId) => {
+                // The run chip is the Runs monitor's one entry point: a live
+                // run opens the live monitor (selecting the session so the
+                // monitor lands on ITS run); a finished run reopens the
+                // report, as before.
+                const chipRunState =
+                  summaries.find((s) => s.sessionId === sessionId)?.runState ??
+                  null;
+                if (isLiveRunState(chipRunState)) {
+                  if (sessionId !== activeId) setActiveId(sessionId);
+                  selectSurface("runs");
+                } else {
+                  setRunReportFor(sessionId);
+                  selectSurface("review");
+                }
+              }}
             />
           ) : (
             <div className="flex-1 overflow-y-auto" style={{ background: "var(--color-paper)" }}>
@@ -4708,11 +5260,21 @@ function App() {
                 // mounts only when the browser surface is selected, so an event
                 // emitted at selection time would beat its own listener.
                 openRequest={browserOpenRequest}
+                // Cleared once acted on — a request that lingers replays on
+                // every remount (the pane's nonce guard resets with it).
+                onOpenRequestConsumed={() => setBrowserOpenRequest(null)}
                 // Re-sync the native webview whenever a surrounding pane toggles
                 // and reflows the slot without a drag (e.g. closing the comment
                 // pane, which otherwise leaves the webview stranded at its old
                 // size with a gap of blank space).
-                layoutKey={`${paneCollapsed}|${sidebarCollapsed}|${docVisible}|${splitVertical}|${liveFlags.curtain}|${voiceDocked}`}
+                // Terminal state is part of the key: discrete opens (divider
+                // caret, footer button, ⇧↓, programmatic runDevServer/restore)
+                // reflow the slot with no drag, and without a re-sync the
+                // native webview keeps painting at its old taller rect over
+                // the terminal dock. The GRID key (tile count + rows) stands
+                // where tab count used to: a new terminal that lands untiled
+                // changes no geometry, while a tile row changes everything.
+                layoutKey={`${paneCollapsed}|${sidebarCollapsed}|${docVisible}|${splitVertical}|${liveFlags.curtain}|${voiceDocked}|${termCollapsed}|${termHeight}|${termFullscreen}|${termTiles.count}x${termTiles.rows}`}
               />
             );
             const drafterBody = drafterShelfOpen ? (
@@ -4727,7 +5289,11 @@ function App() {
                 onCloseDoc={closeDrafterDoc}
                 onClose={() => setDrafterShelfOpen(false)}
               />
-            ) : !drafterDocReady ? (
+            ) : drafterLoaded === null ||
+              drafterLoaded.forId !== drafterDraftId ? (
+              // The loaded doc belonging to a DIFFERENT id is the same state
+              // as not loaded at all — the gate makes mounting the wrong
+              // body unrepresentable during a doc switch.
               <EmptyState
                 title="Opening the document…"
                 body="Reading it from your Bookshelf."
@@ -4748,7 +5314,7 @@ function App() {
                   // `content` is captured once, at editor creation.
                   key={drafterDraftId ?? ""}
                   draftId={drafterDraftId ?? ""}
-                  doc={drafterDoc}
+                  doc={drafterLoaded.doc}
                   onPersist={drafterPersist}
                   projectOptions={projectOptions}
                   selectedProject={drafterProject}
@@ -4766,6 +5332,7 @@ function App() {
                   sourceCount={drafterSourceCount}
                   saveState={drafterSaveState}
                   consumeSeed={consumeLandingSeed}
+                  registerLiveMarkdown={registerDrafterLiveMarkdown}
                   documentsMenu={
                     <DocumentsMenu
                       openIds={drafterOpenIds}
@@ -4779,7 +5346,26 @@ function App() {
                 />
               </Suspense>
             );
-            const reviewBody = (
+            // An orchestrated run wraps the review pane in its RunReport
+            // container (claims vs ground truth above, resolution bar below);
+            // closing the container falls back to the plain review pane.
+            const runReportSummary = runReportFor
+              ? summaries.find((s) => s.sessionId === runReportFor) ?? null
+              : null;
+            const reviewBody = runReportFor ? (
+              <RunReport
+                planSessionId={runReportFor}
+                planTitle={runReportSummary?.planTitle ?? null}
+                repoPath={runReportSummary?.projectPath ?? null}
+                review={codeReview}
+                projectOptions={projectOptions}
+                onClose={() => setRunReportFor(null)}
+                onResolved={() => void refreshSummaries()}
+                canRelaunch={runReportSummary?.status === "approved"}
+                onRelaunch={(sid) => void relaunchOrchestrator(sid)}
+                onStandDown={(sid) => void standDownRun(sid)}
+              />
+            ) : (
               <ReviewPanel
                 review={codeReview}
                 projectOptions={projectOptions}
@@ -4804,6 +5390,23 @@ function App() {
                 activeSessionName={session?.projectName ?? null}
               />
             );
+            const runsBody = (
+              <Suspense fallback={<EmptyState title="Runs" body="Opening the monitor…" />}>
+                <OrchestrationSurface
+                  active={runsOpen}
+                  summaries={summaries}
+                  activePlanSessionId={activeId}
+                  onOpenRunReport={(sid) => {
+                    setRunReportFor(sid);
+                    selectSurface("review");
+                  }}
+                  onRetryLaunch={(sid) => void relaunchOrchestrator(sid)}
+                  onResetRun={(sid) => void resetRunFor(sid)}
+                  onUnapprove={(sid) => void unapproveSession(sid)}
+                  onStandDown={(sid) => void standDownRun(sid)}
+                />
+              </Suspense>
+            );
             // Exactly one surface owns the pane; a non-document surface splits
             // against the document only while the doc pin is on, with the exact
             // same SplitPane (orientation toggle, ratio and fold-to-edge
@@ -4819,7 +5422,9 @@ function App() {
                       ? serversBody
                       : mainSurface === "memory"
                         ? memoryBody
-                        : null;
+                        : mainSurface === "runs"
+                          ? runsBody
+                          : null;
             if (secondaryBody && docPinned)
               return (
                 <SplitPane
@@ -4971,6 +5576,7 @@ function App() {
                       markdown={drafterMarkdown}
                       sections={drafterSections}
                       cwd={drafterProject}
+                      liveMarkdown={getDrafterLiveMarkdown}
                       onClose={() => setDrafterVoiceOpen(false)}
                     />
                   )}
@@ -5581,6 +6187,7 @@ function App() {
             fullscreen={termFullscreen}
             onFullscreenChange={setTermFullscreen}
             onTabsChange={setTermTabCount}
+            onTileCountChange={handleTileCountChange}
             onActivityChange={setTermHasUnseen}
             collapsed={termFullscreen ? false : termCollapsed}
             onActiveTabChange={setActiveTermId}
@@ -5617,10 +6224,12 @@ function App() {
         sessionReady={sessionReady}
         canSubmit={canSubmit}
         canApprove={canApprove}
+        canOrchestrate={canOrchestrate}
         waiting={waiting}
         waitingAsk={waitingAsk}
         onSubmit={submitReview}
         onApprove={approvePlan}
+        onOrchestrate={() => void openOrchestrateModal()}
         termCollapsed={termCollapsed && !termFullscreen}
         termTabCount={termTabCount}
         termHasUnseen={termHasUnseen}
@@ -5668,6 +6277,16 @@ function App() {
           onCancel={() => setSendConfirm(null)}
         />
       )}
+      {orchestrateModal && (
+        <OrchestrateLaunchModal
+          projectPath={session?.projectPath || null}
+          gitStatus={orchestrateModal.gitStatus}
+          workflowsDisabled={orchestrateModal.workflowsDisabled}
+          allowRules={orchestrateModal.allowRules}
+          onLaunch={(rules) => void launchOrchestrator(rules)}
+          onCancel={() => setOrchestrateModal(null)}
+        />
+      )}
       {toast &&
         (typeof toast === "string" ? (
           <ApproveToast message={toast} />
@@ -5678,6 +6297,92 @@ function App() {
             action={toast.action}
           />
         ))}
+      {/* A5: a failed Orchestrate handoff is persistent and actionable —
+          never a 10-second toast. The run state was already rolled back to
+          NULL when this appears; the plan stays approved. */}
+      {handoffFailure && (
+        <div
+          className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 rounded shadow-lg px-4 py-3"
+          style={{
+            background: "var(--color-bg-elevated)",
+            border: "1px solid var(--color-danger, #d33)",
+            color: "var(--color-ink)",
+            fontSize: "12px",
+            maxWidth: "560px",
+          }}
+        >
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>
+            Orchestrate handoff failed at {handoffFailure.stage}
+          </div>
+          <div
+            style={{ color: "var(--color-ink-muted)", marginBottom: 8 }}
+          >
+            {handoffFailure.reason} — the plan is still approved; the run was
+            rolled back.
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button
+              type="button"
+              onClick={() =>
+                void relaunchOrchestrator(handoffFailure.sessionId)
+              }
+              className="rounded px-2 py-1"
+              style={{
+                border: "1px solid var(--color-info)",
+                color: "var(--color-info)",
+                fontWeight: 600,
+                cursor: "pointer",
+              }}
+            >
+              Retry
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                void navigator.clipboard?.writeText(
+                  `${handoffFailure.launchCmd}\n${handoffFailure.prompt}`,
+                );
+                setToast("Launch command + prompt copied");
+                setTimeout(() => setToast(null), 4000);
+              }}
+              className="rounded px-2 py-1"
+              style={{
+                border: "1px solid var(--color-rule)",
+                cursor: "pointer",
+              }}
+            >
+              Copy launch command
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setTermCollapsed(false);
+                terminalsRef.current?.openSessionTerminal(
+                  handoffFailure.projectPath,
+                );
+              }}
+              className="rounded px-2 py-1"
+              style={{
+                border: "1px solid var(--color-rule)",
+                cursor: "pointer",
+              }}
+            >
+              Open terminal manually
+            </button>
+            <button
+              type="button"
+              onClick={() => setHandoffFailure(null)}
+              className="rounded px-2 py-1"
+              style={{
+                color: "var(--color-ink-muted)",
+                cursor: "pointer",
+              }}
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
       {inviteOpen && (
         <InviteDialog
           sharing={collabShare}

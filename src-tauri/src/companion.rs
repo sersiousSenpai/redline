@@ -19,7 +19,6 @@
 //!    prefixed with the delta since its last turn ("while you were away") —
 //!    identical warmth to a background watcher at zero background token cost.
 
-use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -27,7 +26,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, ChildStderr, ChildStdout};
+use tokio::process::{ChildStderr, ChildStdout};
 
 use crate::browse::{is_context_overflow, is_transient};
 use crate::claude_proc::{
@@ -36,20 +35,15 @@ use crate::claude_proc::{
 };
 use crate::db::{Database, JournalRow};
 use crate::state::{now_millis, Companion, CompanionMessage};
+use crate::turn::{self, PartialBuf, TurnStatus, Turns};
 use crate::SurfaceInfo;
 
-struct CompanionProc {
-    child: Child,
-}
-
-type CompanionRegistry = Arc<Mutex<HashMap<String, CompanionProc>>>;
-
-/// Registry of running companion turns, keyed by `companion_id`. Cloned into
-/// managed Tauri state; the mutex is only held for tiny critical sections,
-/// never across `.await`.
+/// Registry of running companion turns, keyed by `companion_id`, on the
+/// shared `turn::Turns` contract (atomic slot reservation + probeable partial
+/// buffer). Cloned into managed Tauri state.
 #[derive(Clone)]
 pub struct CompanionState {
-    procs: CompanionRegistry,
+    turns: Arc<Turns<()>>,
     db: Arc<Database>,
     claude_bin: Arc<OnceLock<String>>,
 }
@@ -57,7 +51,7 @@ pub struct CompanionState {
 impl CompanionState {
     pub fn new(db: Arc<Database>) -> Self {
         Self {
-            procs: Arc::new(Mutex::new(HashMap::new())),
+            turns: Arc::new(Turns::new()),
             db,
             claude_bin: Arc::new(OnceLock::new()),
         }
@@ -72,13 +66,7 @@ impl CompanionState {
 
     /// Kill every running companion turn. Backs app teardown.
     pub fn kill_all(&self) {
-        let drained: Vec<CompanionProc> = {
-            let mut guard = self.procs.lock().unwrap();
-            guard.drain().map(|(_, p)| p).collect()
-        };
-        for mut proc in drained {
-            let _ = proc.child.start_kill();
-        }
+        self.turns.kill_all();
     }
 }
 
@@ -89,6 +77,10 @@ impl CompanionState {
 struct CompanionDelta {
     companion_id: String,
     text: String,
+    /// This delta's position in the turn's stream — `companion_turn_status`
+    /// reports the seq already folded into `partial`, and the frontend drops
+    /// any delta at or below that watermark.
+    seq: u64,
 }
 
 #[derive(Clone, Serialize)]
@@ -342,6 +334,12 @@ pub fn build_first_turn_prompt(
     user_text: &str,
     mission: Option<(&str, &str)>,
 ) -> String {
+    // CACHE-STABLE ORDERING — ALL invariant text (role intro, skill
+    // reference, routes, the formatting/write contract) forms one stable
+    // prefix; every variable section (mission, surface, journal delta, user
+    // text) comes after it. Same information, pinned order — two first turns
+    // share a byte-identical cacheable prefix. Guarded by
+    // `first_turn_invariant_prefix_is_byte_stable`.
     let mut p = String::from(
         "You are the user's COMPANION in Redline: ONE continuous discussion that \
          follows them across every surface of the app — plan reviews, the Prompt \
@@ -352,6 +350,17 @@ pub fn build_first_turn_prompt(
          everything you've seen, referring back to earlier surfaces by name.\n\n\
          Follow your `companion` skill if you have it.\n\n",
     );
+    p.push_str(routes_block());
+    p.push_str(
+        "\nFORMATTING — your replies render through Redline's markdown pipeline \
+         (tables, strict-mode mermaid, fenced code, callouts). Never raw HTML. \
+         You observe by default and WRITE only at the user's explicit \
+         direction, through the write routes above — everything you write is a \
+         staged, reviewable artifact, never a silent change; confirm an \
+         ambiguous target in one line first. Never edit files, never produce a \
+         plan, never call ExitPlanMode.\n\n",
+    );
+    // --- variable content below; nothing invariant may follow ---
     p.push_str(&mission_context_block(mission));
     p.push_str(&format!(
         "The user is currently on {}.\n\n",
@@ -364,17 +373,7 @@ pub fn build_first_turn_prompt(
              something to recite back unless asked.\n\n",
         );
     }
-    p.push_str(routes_block());
-    p.push_str(
-        "\nFORMATTING — your replies render through Redline's markdown pipeline \
-         (tables, strict-mode mermaid, fenced code, callouts). Never raw HTML. \
-         You observe by default and WRITE only at the user's explicit \
-         direction, through the write routes above — everything you write is a \
-         staged, reviewable artifact, never a silent change; confirm an \
-         ambiguous target in one line first. Never edit files, never produce a \
-         plan, never call ExitPlanMode.\n\n\
-         The user says:\n",
-    );
+    p.push_str("The user says:\n");
     for line in user_text.lines() {
         p.push_str("> ");
         p.push_str(line);
@@ -456,9 +455,8 @@ pub fn companion_delete(
     companion: tauri::State<'_, CompanionState>,
     companion_id: String,
 ) -> Result<(), String> {
-    let proc = { companion.procs.lock().unwrap().remove(&companion_id) };
-    if let Some(mut proc) = proc {
-        let _ = proc.child.start_kill();
+    if let Some(mut child) = companion.turns.take(&companion_id).and_then(|p| p.child) {
+        let _ = child.start_kill();
     }
     companion
         .db
@@ -488,12 +486,11 @@ pub async fn companion_send(
     if text.trim().is_empty() {
         return Err("empty message".to_string());
     }
-    {
-        let guard = companion.procs.lock().unwrap();
-        if guard.contains_key(&companion_id) {
-            return Err("the companion is still replying".to_string());
-        }
-    }
+    // Atomic reservation; early `?` returns release it via the guard's Drop.
+    let slot = companion
+        .turns
+        .begin(&companion_id)
+        .map_err(|_| "the companion is still replying".to_string())?;
 
     let prior_session = companion.db.get_companion_session(&companion_id);
     let surface = active_surface.get();
@@ -592,17 +589,18 @@ pub async fn companion_send(
     let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
     let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
 
-    {
-        companion
-            .procs
-            .lock()
-            .unwrap()
-            .insert(companion_id.clone(), CompanionProc { child });
+    let buf = slot.buf();
+    if let Err(mut child) = slot.attach(child) {
+        // Cancelled during the spawn window.
+        let _ = child.start_kill();
+        let _ = app.emit("companion-cancelled", CompanionCancelled { companion_id });
+        return Ok(());
     }
     tauri::async_runtime::spawn(read_companion(
         app,
         companion.db.clone(),
-        companion.procs.clone(),
+        companion.turns.clone(),
+        buf,
         companion_id,
         surface,
         stdout,
@@ -611,14 +609,24 @@ pub async fn companion_send(
     Ok(())
 }
 
+/// Snapshot of this companion's turn for a remounting panel: whether a reply
+/// is streaming, since when, and the partial text streamed so far (with its
+/// delta `seq` watermark).
+#[tauri::command]
+pub fn companion_turn_status(
+    companion: tauri::State<'_, CompanionState>,
+    companion_id: String,
+) -> TurnStatus {
+    companion.turns.status(&companion_id)
+}
+
 #[tauri::command]
 pub fn companion_cancel(
     companion: tauri::State<'_, CompanionState>,
     companion_id: String,
 ) -> Result<(), String> {
-    let proc = { companion.procs.lock().unwrap().remove(&companion_id) };
-    if let Some(mut proc) = proc {
-        let _ = proc.child.start_kill();
+    if let Some(mut child) = companion.turns.take(&companion_id).and_then(|p| p.child) {
+        let _ = child.start_kill();
     }
     Ok(())
 }
@@ -630,10 +638,12 @@ pub fn companion_kill_all(companion: tauri::State<'_, CompanionState>) {
 
 // --- Reader ---------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn read_companion(
     app: AppHandle,
     db: Arc<Database>,
-    procs: CompanionRegistry,
+    turns: Arc<Turns<()>>,
+    buf: Arc<Mutex<PartialBuf>>,
     companion_id: String,
     surface: SurfaceInfo,
     stdout: ChildStdout,
@@ -654,11 +664,14 @@ async fn read_companion(
         match classify_line(&v) {
             StreamLine::Init(sid) => session = Some(sid),
             StreamLine::Delta(text) => {
+                // Append-before-emit: see `turn::push_delta`.
+                let seq = turn::push_delta(&buf, &text);
                 let _ = app.emit(
                     "companion-delta",
                     CompanionDelta {
                         companion_id: companion_id.clone(),
                         text,
+                        seq,
                     },
                 );
             }
@@ -678,10 +691,12 @@ async fn read_companion(
         stderr_text.push('\n');
     }
 
-    let proc = { procs.lock().unwrap().remove(&companion_id) };
+    // Remove the proc BEFORE emitting the terminal event — the (Phase 3)
+    // queue drain fires at terminal time and must pass the busy guard.
+    let proc = turns.take(&companion_id);
     let cancelled = proc.is_none() && final_text.is_none();
-    let exit_ok = match proc {
-        Some(mut p) => p.child.wait().await.map(|s| s.success()).unwrap_or(false),
+    let exit_ok = match proc.and_then(|p| p.child) {
+        Some(mut child) => child.wait().await.map(|s| s.success()).unwrap_or(false),
         None => false,
     };
 
@@ -911,6 +926,43 @@ mod tests {
         // The old blanket read-only line is gone in favor of the new contract.
         assert!(p.contains("WRITE only at the user's explicit"));
         assert!(p.contains("staged, reviewable artifact"));
+    }
+
+    /// Two first turns with different VARIABLE inputs (surface, journal
+    /// delta, mission, user text) share a byte-identical prefix spanning the
+    /// whole invariant block — the cache-stable ordering contract.
+    #[test]
+    fn first_turn_invariant_prefix_is_byte_stable() {
+        fn common_prefix<'a>(a: &'a str, b: &str) -> &'a str {
+            let n = a
+                .bytes()
+                .zip(b.bytes())
+                .take_while(|(x, y)| x == y)
+                .count();
+            &a[..n]
+        }
+        let a = build_first_turn_prompt(
+            &surface("plan", Some("Plan A"), None),
+            "WHILE YOU WERE AWAY — delta one\n",
+            "question one",
+            None,
+        );
+        let b = build_first_turn_prompt(
+            &surface("drafter", None, None),
+            "",
+            "another question",
+            Some(("Research", "Find the best DB")),
+        );
+        let shared = common_prefix(&a, &b);
+        // The shared prefix must reach the END of the invariant block — the
+        // formatting/write contract closes it.
+        assert!(shared.contains("`companion` skill"));
+        assert!(shared.contains("/v1/global/consult"));
+        assert!(shared.contains("never call ExitPlanMode."));
+        // And every variable section sits after it.
+        assert!(!shared.contains("The user is currently on"));
+        assert!(!shared.contains("WHILE YOU WERE AWAY"));
+        assert!(!shared.contains("question one"));
     }
 
     #[test]

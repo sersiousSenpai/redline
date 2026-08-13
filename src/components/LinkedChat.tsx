@@ -2,18 +2,12 @@
 // Copyright 2026 Yusuf Al-Bazian
 import { useEffect, useRef, useState } from "react";
 import { Copy, Link2, PenLine, X } from "lucide-react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import type {
-  Linked,
-  LinkedCancelledEvent,
-  LinkedDeltaEvent,
-  LinkedDoneEvent,
-  LinkedErrorEvent,
-  LinkedMessage,
-} from "../types";
+import type { Linked, LinkedMessage } from "../types";
 import { captureSnapshotOrCached } from "../lib/domSnapshot";
+import { useAgentTurn } from "../hooks/useAgentTurn";
+import { usePersistedState } from "../theme/usePersistedState";
 import { MarkdownView } from "./MarkdownView";
+import { QueuedChip, UnsentNote } from "./QueuedChip";
 import { WorkingIndicator } from "./WorkingIndicator";
 
 interface LinkedChatProps {
@@ -39,11 +33,6 @@ interface LinkedChatProps {
   onSendToDrafter?: (markdown: string) => void;
 }
 
-type ChatStatus = "idle" | "streaming" | "error";
-
-let tmpSeq = 0;
-const tmpId = () => `ltmp-${++tmpSeq}`;
-
 /** The little per-turn header for a message: a user turn shows which tab it was
  *  on ("🔗 tab 2 — Example"); an assistant turn is just "Linked". Pure so it can
  *  be unit-tested without mounting the component. */
@@ -68,11 +57,9 @@ export function LinkedChat({
   onSendToDrafter,
 }: LinkedChatProps) {
   const linkedId = linked.linkedId;
-  const [messages, setMessages] = useState<LinkedMessage[]>([]);
-  const [liveText, setLiveText] = useState("");
-  const [status, setStatus] = useState<ChatStatus>("idle");
-  const [draft, setDraft] = useState("");
-  const [loaded, setLoaded] = useState(false);
+  // Composer draft survives surface switches and app restarts (the component
+  // is keyed by linkedId, so each discussion keeps its own).
+  const [draft, setDraft] = usePersistedState<string>(`rl.chatDraft.linked.${linkedId}`, "");
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
   // The current tab, held in a ref so the streaming reply's assistant bubble can
@@ -81,88 +68,56 @@ export function LinkedChat({
   const tabRef = useRef(tab);
   tabRef.current = tab;
 
-  // Load persisted turns + subscribe to this discussion's events. Keyed on
-  // `linkedId` ONLY — switching tabs must NOT tear down the stream.
-  useEffect(() => {
-    let alive = true;
-    setLoaded(false);
-    setMessages([]);
-    setLiveText("");
-    setStatus("idle");
-
-    void invoke<LinkedMessage[]>("linked_get_thread", { linkedId })
-      .then((rows) => {
-        if (!alive) return;
-        setMessages(rows);
-        setLoaded(true);
-      })
-      .catch(() => {
-        if (alive) setLoaded(true);
-      });
-
-    const mine = (p: { linkedId: string }) => p.linkedId === linkedId;
-
-    const deltaP = listen<LinkedDeltaEvent>("linked-delta", (e) => {
-      if (!alive || !mine(e.payload)) return;
-      setStatus("streaming");
-      setLiveText((t) => t + e.payload.text);
-    });
-    const doneP = listen<LinkedDoneEvent>("linked-done", (e) => {
-      if (!alive || !mine(e.payload)) return;
-      const t = tabRef.current;
-      setMessages((m) => [
-        ...m,
-        {
-          id: e.payload.messageId,
+  // The turn lifecycle — persisted thread, live stream, mid-turn remount
+  // restore (partial text + spinner), self-heal — lives in the shared hook.
+  // Keyed on `linkedId` ONLY — switching tabs must NOT tear down the stream.
+  const { messages, liveText, status, startedAt, loaded, send, cancel, unqueue } =
+    useAgentTurn<LinkedMessage>({
+      surface: "linked",
+      key: linkedId,
+      idField: "linkedId",
+      historyCmd: "linked_get_thread",
+      historyArgs: { linkedId },
+      sendFailPrefix: "Couldn't reach the linked discussion",
+      buildSendArgs: async (text) => {
+        const t = tabRef.current;
+        // A fresh snapshot every turn (unlike BrowserChat's first-turn-only) —
+        // the tab changes turn-to-turn, so re-ground the agent each time.
+        let snapshot: string | undefined;
+        if (t.label) {
+          try {
+            snapshot = await captureSnapshotOrCached(t.label);
+          } catch {
+            /* the agent can /snapshot itself if there's none */
+          }
+        }
+        return {
           linkedId,
-          role: "assistant",
-          body: e.payload.body,
-          status: "complete",
+          text,
+          tabN: t.n,
+          tabBrowseId: t.browseId,
+          tabUrl: t.url,
+          tabTitle: t.title,
+          snapshot,
+          cwd: projectDir ?? null,
+        };
+      },
+      makeMessage: ({ id, role, body, status }) => {
+        const t = tabRef.current;
+        return {
+          id,
+          linkedId,
+          role,
+          body,
+          status,
           tabBrowseId: t.browseId,
           tabN: t.n,
           tabTitle: t.title,
           tabUrl: t.url,
           createdAt: Date.now(),
-        },
-      ]);
-      setLiveText("");
-      setStatus("idle");
+        };
+      },
     });
-    const errorP = listen<LinkedErrorEvent>("linked-error", (e) => {
-      if (!alive || !mine(e.payload)) return;
-      const t = tabRef.current;
-      setMessages((m) => [
-        ...m,
-        {
-          id: tmpId(),
-          linkedId,
-          role: "assistant",
-          body: e.payload.error,
-          status: "error",
-          tabBrowseId: t.browseId,
-          tabN: t.n,
-          tabTitle: t.title,
-          tabUrl: t.url,
-          createdAt: Date.now(),
-        },
-      ]);
-      setLiveText("");
-      setStatus("error");
-    });
-    const cancelP = listen<LinkedCancelledEvent>("linked-cancelled", (e) => {
-      if (!alive || !mine(e.payload)) return;
-      setLiveText("");
-      setStatus("idle");
-    });
-
-    return () => {
-      alive = false;
-      void deltaP.then((un) => un());
-      void doneP.then((un) => un());
-      void errorP.then((un) => un());
-      void cancelP.then((un) => un());
-    };
-  }, [linkedId]);
 
   useEffect(() => {
     stickRef.current = true;
@@ -177,73 +132,6 @@ export function LinkedChat({
     const el = scrollRef.current;
     if (!el) return;
     stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-  }
-
-  async function send(text: string) {
-    const trimmed = text.trim();
-    if (!trimmed || status === "streaming") return;
-    const t = tabRef.current;
-    stickRef.current = true;
-    setMessages((m) => [
-      ...m,
-      {
-        id: tmpId(),
-        linkedId,
-        role: "user",
-        body: trimmed,
-        status: "complete",
-        tabBrowseId: t.browseId,
-        tabN: t.n,
-        tabTitle: t.title,
-        tabUrl: t.url,
-        createdAt: Date.now(),
-      },
-    ]);
-    setLiveText("");
-    setStatus("streaming");
-
-    // A fresh snapshot every turn (unlike BrowserChat's first-turn-only) — the
-    // tab changes turn-to-turn, so re-ground the agent each time.
-    let snapshot: string | undefined;
-    if (t.label) {
-      try {
-        snapshot = await captureSnapshotOrCached(t.label);
-      } catch {
-        /* the agent can /snapshot itself if there's none */
-      }
-    }
-
-    void invoke("linked_send", {
-      linkedId,
-      text: trimmed,
-      tabN: t.n,
-      tabBrowseId: t.browseId,
-      tabUrl: t.url,
-      tabTitle: t.title,
-      snapshot,
-      cwd: projectDir ?? null,
-    }).catch((err) => {
-      setStatus("error");
-      setMessages((m) => [
-        ...m,
-        {
-          id: tmpId(),
-          linkedId,
-          role: "assistant",
-          body: `Couldn't reach the linked discussion: ${err}`,
-          status: "error",
-          tabBrowseId: t.browseId,
-          tabN: t.n,
-          tabTitle: t.title,
-          tabUrl: t.url,
-          createdAt: Date.now(),
-        },
-      ]);
-    });
-  }
-
-  function cancel() {
-    void invoke("linked_cancel", { linkedId }).catch(() => {});
   }
 
   return (
@@ -270,15 +158,51 @@ export function LinkedChat({
             check in with a tab's own discussion when I need to go deep.
           </div>
         ) : (
-          messages.map((m) => (
-            <MessageBubble key={m.id} msg={m} onOpenLink={onOpenLink} onSendToRedline={onSendToRedline} onSendToDrafter={onSendToDrafter} />
-          ))
+          messages.map((m) =>
+            m.role === "system" ? (
+              // A conversion marker ("Continued from tab N — Title"): the rows
+              // above it were copied from the tab's own chat; below it the
+              // discussion spans all tabs.
+              <div key={m.id} className="flex items-center gap-2 my-1" aria-hidden>
+                <span className="flex-1" style={{ borderTop: "1px solid var(--color-rule)" }} />
+                <span
+                  className="truncate"
+                  style={{
+                    fontSize: "10px",
+                    fontWeight: 600,
+                    color: "var(--color-ink-muted)",
+                    maxWidth: "80%",
+                  }}
+                >
+                  {m.body}
+                </span>
+                <span className="flex-1" style={{ borderTop: "1px solid var(--color-rule)" }} />
+              </div>
+            ) : (
+              <MessageBubble
+                key={m.id}
+                msg={m}
+                onOpenLink={onOpenLink}
+                onSendToRedline={onSendToRedline}
+                onSendToDrafter={onSendToDrafter}
+                onUnqueue={() => {
+                  void unqueue(m.id).then((text) => {
+                    if (text) setDraft((prev) => (prev.trim() ? `${text}\n\n${prev}` : text));
+                  });
+                }}
+                onResend={() => {
+                  stickRef.current = true;
+                  send(m.body);
+                }}
+              />
+            ),
+          )
         )}
         {status === "streaming" &&
           (liveText ? (
             <StreamingBubble text={liveText} onOpenLink={onOpenLink} />
           ) : (
-            <WorkingIndicator />
+            <WorkingIndicator startedAt={startedAt ?? undefined} />
           ))}
       </div>
 
@@ -288,7 +212,8 @@ export function LinkedChat({
           setDraft={setDraft}
           streaming={status === "streaming"}
           onSend={() => {
-            void send(draft);
+            stickRef.current = true;
+            send(draft);
             setDraft("");
           }}
           onStop={cancel}
@@ -349,19 +274,28 @@ function MessageBubble({
   onOpenLink,
   onSendToRedline,
   onSendToDrafter,
+  onUnqueue,
+  onResend,
 }: {
   msg: LinkedMessage;
   onOpenLink?: (url: string) => void;
   onSendToRedline?: (markdown: string) => void;
   onSendToDrafter?: (markdown: string) => void;
+  onUnqueue?: () => void;
+  onResend?: () => void;
 }) {
   const isUser = msg.role === "user";
   const isError = msg.status === "error";
+  const isQueued = isUser && msg.status === "queued";
+  const isUnsent = isUser && msg.status === "unsent";
   const showActions = !isUser && !isError && msg.body.trim().length > 0;
   // Per-turn tab tag: which tab this message was on.
   const tabLabel = tabChipLabel(msg);
   return (
-    <div className="flex flex-col gap-0.5 group/msg">
+    <div
+      className="flex flex-col gap-0.5 group/msg"
+      style={isQueued || isUnsent ? { opacity: 0.65 } : undefined}
+    >
       <span
         style={{
           fontSize: "9px",
@@ -382,6 +316,8 @@ function MessageBubble({
       ) : (
         <MarkdownView body={msg.body} compact rich onLinkClick={onOpenLink} />
       )}
+      {isQueued && <QueuedChip onUnqueue={onUnqueue} />}
+      {isUnsent && <UnsentNote onResend={onResend} />}
       {showActions && (
         <MessageActions
           body={msg.body}
@@ -509,12 +445,12 @@ function Composer({
         onKeyDown={(e) => {
           if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
-            if (!streaming) onSend();
+            // Sending mid-stream queues the message behind the reply.
+            onSend();
           }
         }}
-        placeholder="Ask across your tabs…"
+        placeholder={streaming ? "Type ahead — sends queue behind the reply…" : "Ask across your tabs…"}
         rows={2}
-        disabled={streaming}
         className="flex-1 rounded px-2 py-1"
         style={{
           fontSize: "12px",
@@ -526,26 +462,27 @@ function Composer({
           overflow: "hidden",
         }}
       />
-      {streaming ? (
+      {streaming && (
         <button
           type="button"
           onClick={onStop}
+          title="Stop the current reply (queued messages still send)"
           className="rounded px-2 py-1 font-medium"
           style={{ background: "var(--color-bg-elevated)", border: "1px solid var(--color-rule)", color: "var(--color-ink)", fontSize: "11px" }}
         >
           Stop
         </button>
-      ) : (
-        <button
-          type="button"
-          onClick={onSend}
-          disabled={!draft.trim()}
-          className="rounded px-2 py-1 font-medium"
-          style={{ background: "var(--color-info)", color: "var(--color-on-accent)", fontSize: "11px", opacity: draft.trim() ? 1 : 0.5 }}
-        >
-          Send
-        </button>
       )}
+      <button
+        type="button"
+        onClick={onSend}
+        disabled={!draft.trim()}
+        title={streaming ? "Queue this message — it sends when the reply finishes" : undefined}
+        className="rounded px-2 py-1 font-medium"
+        style={{ background: "var(--color-info)", color: "var(--color-on-accent)", fontSize: "11px", opacity: draft.trim() ? 1 : 0.5 }}
+      >
+        Send
+      </button>
     </div>
   );
 }

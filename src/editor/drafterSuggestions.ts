@@ -5,6 +5,10 @@ import { Fragment, type Node as PMNode } from "@tiptap/pm/model";
 
 import { diffWords } from "./wordDiff";
 import { planMarkdownToDoc, serializeBlockToMarkdown } from "./markdown";
+import {
+  isPendingSuggestionMark,
+  USER_AUTHOR,
+} from "./extensions/TrackChanges";
 
 /**
  * Agent write-suggestions in the Prompt Drafter — the drafter-side twin of
@@ -19,6 +23,12 @@ import { planMarkdownToDoc, serializeBlockToMarkdown } from "./markdown";
  *  - `replace_block` on a paragraph→paragraph rewrite paints an inline
  *    word-diff; structured targets (lists/code/tables) fall back to "insert
  *    the new blocks after + strike the old one", accept deletes the old.
+ *
+ * Every transaction dispatched here carries `rl-sync` meta: these are derived
+ * writes (suggestion materialization + verdicts), and with TrackChangesInput
+ * registered in the drafter that meta is what keeps them from being repainted
+ * as user insertions in Suggesting mode and from being rejected by the
+ * pending-suggestion block lock.
  */
 
 export interface DraftSuggestionRow {
@@ -92,8 +102,9 @@ export function applyDraftSuggestion(
   if (s.op === "append") {
     if (!parsed || parsed.childCount === 0) return "stale";
     if (docIsEmpty(editor)) {
-      // Whole-cloth draft into an empty doc: applies directly.
-      editor.commands.setContent(parsed.toJSON());
+      // Whole-cloth draft into an empty doc: applies directly. Chained so the
+      // rl-sync meta rides the same transaction as the content swap.
+      editor.chain().setMeta("rl-sync", true).setContent(parsed.toJSON()).run();
       return "applied";
     }
     const end = editor.state.doc.content.size;
@@ -101,6 +112,7 @@ export function applyDraftSuggestion(
     tr.insert(end, Fragment.fromArray(childArray(parsed)));
     markInserted(editor, tr, end, tr.doc.content.size, s);
     tr.setMeta("addToHistory", false);
+    tr.setMeta("rl-sync", true);
     editor.view.dispatch(tr);
     return "proposed";
   }
@@ -116,6 +128,7 @@ export function applyDraftSuggestion(
     tr.insert(to, Fragment.fromArray(childArray(parsed)));
     markInserted(editor, tr, to, to + insertedSize(parsed), s);
     tr.setMeta("addToHistory", false);
+    tr.setMeta("rl-sync", true);
     editor.view.dispatch(tr);
     return "proposed";
   }
@@ -154,6 +167,7 @@ export function applyDraftSuggestion(
       const tr = editor.state.tr;
       tr.replaceWith(from, to, para);
       tr.setMeta("addToHistory", false);
+      tr.setMeta("rl-sync", true);
       editor.view.dispatch(tr);
       return "proposed";
     }
@@ -163,6 +177,7 @@ export function applyDraftSuggestion(
     tr.insert(to, Fragment.fromArray(childArray(parsed)));
     markInserted(editor, tr, to, to + insertedSize(parsed), s);
     tr.setMeta("addToHistory", false);
+    tr.setMeta("rl-sync", true);
     editor.view.dispatch(tr);
     const reAt = s.blockId ? findBlock(editor, s.blockId) : null;
     if (reAt) strikeBlock(editor, reAt, s);
@@ -206,12 +221,15 @@ function strikeBlock(
   );
   if (tr.steps.length === 0) return false;
   tr.setMeta("addToHistory", false);
+  tr.setMeta("rl-sync", true);
   editor.view.dispatch(tr);
   return true;
 }
 
-/** Text leaves carrying a mark of `suggestionId`, absolute ranges. */
-function suggestionLeaves(
+/** Text leaves carrying a pending mark of `suggestionId`, absolute ranges.
+ *  Exported for the drafter's re-drain guard: a persisted doc already carries
+ *  the marks of an unresolved suggestion, so a mount must not re-apply it. */
+export function suggestionLeaves(
   editor: Editor,
   suggestionId: string,
 ): { from: number; to: number; kind: "ins" | "del" }[] {
@@ -249,6 +267,7 @@ export function acceptDraftSuggestion(
       if (!at) return false;
       const tr = editor.state.tr;
       tr.delete(at.pos, at.pos + at.node.nodeSize);
+      tr.setMeta("rl-sync", true);
       editor.view.dispatch(tr);
       return true;
     }
@@ -273,6 +292,7 @@ export function acceptDraftSuggestion(
   }
   // A structured replace struck the whole old block; accepting must remove it
   // even if some of its leaves carried no mark (mark boundaries).
+  tr.setMeta("rl-sync", true);
   editor.view.dispatch(tr);
   return true;
 }
@@ -287,12 +307,103 @@ export function rejectDraftSuggestion(
 ): boolean {
   const leaves = suggestionLeaves(editor, s.id);
   if (leaves.length === 0) return s.op === "delete_block";
+  return revertLeaves(editor, leaves);
+}
+
+/** Reject's shared mechanics: pending insertions removed, pending deletions
+ *  unstruck — the document reads as before the proposal. */
+function revertLeaves(
+  editor: Editor,
+  leaves: { from: number; to: number; kind: "ins" | "del" }[],
+): boolean {
   const schema = editor.schema;
   const tr = editor.state.tr;
   for (const leaf of leaves.sort((a, b) => b.from - a.from)) {
     if (leaf.kind === "ins") tr.delete(leaf.from, leaf.to);
     else tr.removeMark(leaf.from, leaf.to, schema.marks.rl_del);
   }
+  tr.setMeta("rl-sync", true);
   editor.view.dispatch(tr);
   return true;
+}
+
+/** Keep's shared mechanics: struck text really deleted, inserted text turned
+ *  plain — a kept user edit is just ordinary typing (unlike agent accepts,
+ *  which keep `accepted` provenance). */
+function settleLeaves(
+  editor: Editor,
+  leaves: { from: number; to: number; kind: "ins" | "del" }[],
+): boolean {
+  const schema = editor.schema;
+  const tr = editor.state.tr;
+  for (const leaf of leaves.sort((a, b) => b.from - a.from)) {
+    if (leaf.kind === "del") tr.delete(leaf.from, leaf.to);
+    else tr.removeMark(leaf.from, leaf.to, schema.marks.rl_ins);
+  }
+  tr.setMeta("rl-sync", true);
+  editor.view.dispatch(tr);
+  return true;
+}
+
+/**
+ * Settle the user's OWN pending tracked run (Suggesting-mode typing). No DB
+ * row exists for user runs — this is pure document surgery.
+ */
+export function acceptUserSuggestion(
+  editor: Editor,
+  suggestionId: string,
+): boolean {
+  const leaves = suggestionLeaves(editor, suggestionId);
+  if (leaves.length === 0) return false;
+  return settleLeaves(editor, leaves);
+}
+
+/** Revert the user's OWN pending tracked run: insertions removed, strikes
+ *  lifted — the document reads as before the edit. */
+export function rejectUserSuggestion(
+  editor: Editor,
+  suggestionId: string,
+): boolean {
+  const leaves = suggestionLeaves(editor, suggestionId);
+  if (leaves.length === 0) return false;
+  return revertLeaves(editor, leaves);
+}
+
+/** Every text leaf carrying a pending USER-authored run, absolute ranges. */
+function userPendingLeaves(
+  editor: Editor,
+): { from: number; to: number; kind: "ins" | "del" }[] {
+  const leaves: { from: number; to: number; kind: "ins" | "del" }[] = [];
+  editor.state.doc.descendants((n, pos) => {
+    if (!n.isText) return true;
+    const mine = n.marks.filter(
+      (m) =>
+        isPendingSuggestionMark(m) &&
+        (m.attrs.authorId ?? USER_AUTHOR) === USER_AUTHOR,
+    );
+    if (mine.length === 0) return true;
+    const kind = mine.some((m) => m.type.name === "rl_ins") ? "ins" : "del";
+    leaves.push({ from: pos, to: pos + n.nodeSize, kind });
+    return true;
+  });
+  return leaves;
+}
+
+/** The Review menu's "Keep all my changes": settle every pending user run. */
+export function acceptAllUserSuggestions(editor: Editor): boolean {
+  const leaves = userPendingLeaves(editor);
+  if (leaves.length === 0) return false;
+  return settleLeaves(editor, leaves);
+}
+
+/** The Review menu's "Revert all my changes". */
+export function rejectAllUserSuggestions(editor: Editor): boolean {
+  const leaves = userPendingLeaves(editor);
+  if (leaves.length === 0) return false;
+  return revertLeaves(editor, leaves);
+}
+
+/** Whether any pending user-authored run exists (gates the Review rows). */
+export function hasPendingUserSuggestions(editor: Editor): boolean {
+  return userPendingLeaves(editor).length > 0;
 }

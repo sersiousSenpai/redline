@@ -437,6 +437,40 @@ pub fn pty_write_bytes(state: &PtyState, id: &str, bytes: &[u8]) -> Result<(), S
     Ok(())
 }
 
+/// The verified twin of `pty_write`: an unregistered id is an ERROR, not a
+/// silent no-op. Every *programmatic* injection (the Orchestrate handoff,
+/// plan launches, restore) goes through this — a write into a terminal that
+/// does not exist must be distinguishable from one that landed. The soft
+/// `pty_write`/`pty_write_bytes` contract stays untouched for the best-effort
+/// auto-continue inject and user keystrokes.
+#[tauri::command]
+pub fn pty_write_checked(
+    state: tauri::State<'_, PtyState>,
+    id: String,
+    data: String,
+) -> Result<(), String> {
+    pty_write_bytes_checked(&state, &id, data.as_bytes())
+}
+
+/// Internal helper behind `pty_write_checked`, callable from Rust and tests.
+pub fn pty_write_bytes_checked(state: &PtyState, id: &str, bytes: &[u8]) -> Result<(), String> {
+    let Some(session) = session_of(state, id) else {
+        return Err(format!("terminal {id} is not running"));
+    };
+    let mut s = lock_ok(&session);
+    s.writer
+        .write_all(bytes)
+        .map_err(|e| format!("pty write failed: {e}"))?;
+    s.writer.flush().ok();
+    Ok(())
+}
+
+/// Registry membership — the handoff's spawn probe.
+#[tauri::command]
+pub fn pty_is_live(state: tauri::State<'_, PtyState>, id: String) -> bool {
+    session_of(&state, &id).is_some()
+}
+
 #[tauri::command(async)]
 pub fn pty_resize(
     state: tauri::State<'_, PtyState>,
@@ -594,6 +628,69 @@ pub fn pty_cwd(state: tauri::State<'_, PtyState>, id: String) -> Option<String> 
         .filter(|p| !p.is_empty())
 }
 
+/// Batched twin of `pty_cwd`: the live cwds of every requested terminal in ONE
+/// `lsof` fork. The frontend polls every *visible* tile each tick, and the tile
+/// menu refreshes the whole fleet on open — per-id `pty_cwd` calls made that one
+/// subprocess per terminal per tick (the exact regression the old two-pane cap
+/// existed to contain). Ids with no live session, no pid, or no `lsof` answer
+/// are simply absent from the map — absence is the "keep your last-known label"
+/// signal, never an error.
+#[tauri::command(async)]
+pub fn pty_cwds(
+    state: tauri::State<'_, PtyState>,
+    ids: Vec<String>,
+) -> HashMap<String, String> {
+    let mut pid_to_id: HashMap<u32, String> = HashMap::new();
+    for id in ids {
+        if let Some(session) = session_of(&state, &id) {
+            if let Some(pid) = lock_ok(&session).pid {
+                pid_to_id.insert(pid, id);
+            }
+        }
+    }
+    if pid_to_id.is_empty() {
+        return HashMap::new();
+    }
+    let pid_list = pid_to_id
+        .keys()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    // Don't gate on exit status: lsof exits non-zero when ANY listed pid is
+    // already gone, while still printing the groups for the live ones.
+    let Ok(output) = std::process::Command::new("lsof")
+        .args(["-a", "-p", &pid_list, "-d", "cwd", "-Fpn"])
+        .output()
+    else {
+        return HashMap::new();
+    };
+    parse_lsof_cwds(&String::from_utf8_lossy(&output.stdout))
+        .into_iter()
+        .filter_map(|(pid, path)| pid_to_id.get(&pid).map(|id| (id.clone(), path)))
+        .collect()
+}
+
+/// Demultiplex `lsof -Fpn` output into pid → cwd. Groups arrive as `p<pid>` /
+/// `fcwd` / `n<path>` lines; the `p` field scopes every following `n` until the
+/// next `p`. `f` lines (and anything else) are skipped, an `n` before any `p`
+/// is dropped rather than misattributed.
+fn parse_lsof_cwds(output: &str) -> HashMap<u32, String> {
+    let mut out = HashMap::new();
+    let mut current_pid: Option<u32> = None;
+    for line in output.lines() {
+        if let Some(pid) = line.strip_prefix('p') {
+            current_pid = pid.trim().parse().ok();
+        } else if let Some(path) = line.strip_prefix('n') {
+            if let Some(pid) = current_pid {
+                if !path.is_empty() {
+                    out.insert(pid, path.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -605,6 +702,18 @@ mod tests {
         // error or panic — `submit_review` should still succeed.
         let state = PtyState::new();
         assert!(pty_write_bytes(&state, "no-such-tab", b"3\r").is_ok());
+    }
+
+    #[test]
+    fn pty_write_bytes_checked_errors_for_missing_id() {
+        // The verified twin: a programmatic injection into a terminal that
+        // does not exist must fail loudly — this indistinguishability is what
+        // let the Orchestrate handoff evaporate silently.
+        let state = PtyState::new();
+        let err = pty_write_bytes_checked(&state, "no-such-tab", b"claude\r")
+            .expect_err("missing id must be an error");
+        assert!(err.contains("no-such-tab"), "got: {err}");
+        assert!(err.contains("not running"), "got: {err}");
     }
 
     #[test]
@@ -683,6 +792,33 @@ mod tests {
         assert_eq!(*lock_ok(&m), 7);
         *lock_ok(&m) += 1;
         assert_eq!(*lock_ok(&m), 8);
+    }
+
+    #[test]
+    fn lsof_cwds_demultiplexes_on_the_p_field() {
+        // One `lsof -a -p a,b,c -d cwd -Fpn` answers for the whole fleet; the
+        // parser must scope each `n<path>` to the `p<pid>` group it follows.
+        let lsof = "p100\nfcwd\nn/Users/dev/redline\np200\nfcwd\nn/Users/dev/api\n";
+        let map = parse_lsof_cwds(lsof);
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get(&100).map(String::as_str), Some("/Users/dev/redline"));
+        assert_eq!(map.get(&200).map(String::as_str), Some("/Users/dev/api"));
+    }
+
+    #[test]
+    fn lsof_cwds_tolerates_missing_groups_and_garbage() {
+        // A pid that died between the registry snapshot and the fork simply has
+        // no group; stray lines and an `n` with no preceding `p` must be
+        // dropped, never misattributed or panicked on.
+        let map = parse_lsof_cwds("n/orphan/path\np300\nfcwd\nn/Users/dev/polis\nu501\n");
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get(&300).map(String::as_str), Some("/Users/dev/polis"));
+        // Empty output (every pid gone) → empty map, not an error.
+        assert!(parse_lsof_cwds("").is_empty());
+        // Unparseable pid poisons its group, not the whole parse.
+        let map = parse_lsof_cwds("pXYZ\nn/never/attributed\np400\nn/real\n");
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get(&400).map(String::as_str), Some("/real"));
     }
 
     #[test]

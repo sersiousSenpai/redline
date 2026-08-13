@@ -6,7 +6,7 @@ description: >-
   [feedback], or [question], rl:blk- block-identity sidecars, or a
   REDLINE_RESOLUTIONS block. Covers presentation-aware plan markdown,
   preserving sidecars, and emitting resolutions.
-version: 12
+version: 13
 ---
 
 # Redline review protocol
@@ -43,7 +43,9 @@ ignore.
 
 ## 1. Write presentation-aware markdown — never raw HTML
 
-Redline renders plans with a real markdown pipeline:
+Redline renders plans with a real markdown pipeline: document-grade typography,
+syntax-highlighted code, and rendered diagrams. Lean on that so a plan reads
+like a polished artifact, not a chat message:
 
 - **Language-tag every fenced code block** (` ```rust `, ` ```ts `, ` ```bash `)
   — they are syntax-highlighted.
@@ -54,6 +56,11 @@ Redline renders plans with a real markdown pipeline:
   drive the section outline (§A, §A.1, …) reviewers navigate and anchor
   comments to. Don't skip levels.
 - **Use blockquotes (`>`)** for callouts.
+
+Which format when: `flowchart` → a process or architecture; `sequenceDiagram`
+→ actor/component interactions; a markdown table → an option comparison;
+`pie`/`xychart-beta` → a proportion or trend. A plan section that argues
+structure, flow, or trade-offs usually deserves one of these.
 
 **Never emit raw HTML** for layout or styling — Redline's renderer, diff
 engine, and block-identity system operate on markdown, and an HTML plan cannot

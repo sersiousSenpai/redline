@@ -49,6 +49,11 @@ pub enum DiffSource {
     LastCommit,
     VsBase,
     CommitSha,
+    /// A queued (overnight) run's parked branch: `base` names the run branch
+    /// (`redline/run/<plan8>`); the diff is `HEAD...branch` — merge-base to
+    /// branch tip — so it re-resolves identically in the morning even though
+    /// the working tree kept moving overnight. The VsBase shape, flipped.
+    RunBranch,
 }
 
 impl DiffSource {
@@ -60,6 +65,7 @@ impl DiffSource {
             DiffSource::LastCommit => "lastCommit",
             DiffSource::VsBase => "vsBase",
             DiffSource::CommitSha => "commitSha",
+            DiffSource::RunBranch => "runBranch",
         }
     }
 }
@@ -203,6 +209,13 @@ async fn resolve_diff_text(
         DiffSource::CommitSha => {
             let s = code::safe_token(sha.ok_or("commitSha requires a sha")?)?;
             git_raw(dir, &["show", "--format=", "-U3", "--no-color", s], &[]).await?
+        }
+        DiffSource::RunBranch => {
+            let b = code::safe_token(base.ok_or("runBranch requires the run branch as base")?)?;
+            // Three-dot from HEAD = merge-base(HEAD, branch) → branch tip:
+            // exactly the run's committed work, wherever HEAD is by morning.
+            let range = format!("HEAD...{b}");
+            git_raw(dir, &["diff", "-U3", "--no-color", &range], &[]).await?
         }
     };
     // Untracked files exist only in the working tree, so only working-tree
@@ -774,6 +787,112 @@ pub async fn review_open(
     open_or_continue_review(&state.db, &repo, source, base.as_deref(), sha.as_deref())
 }
 
+/// Producers wave: when a review LANDS (the human approves — the sign-off
+/// that ends the loop), every annotation that never got a resolution files a
+/// durable work item instead of silently dropping. `kind` follows the
+/// annotation's conventional-comment label (`question` → question, else
+/// task); the title carries `file:line` plus the comment gist; provenance is
+/// `origin_kind="review"` / `origin_id=<review session id>` (a breadcrumb,
+/// never ownership — edges connect items, so a discovered-from edge to a
+/// review is structurally impossible and the origin pair carries the link).
+/// Resolved annotations never file; re-running is idempotent (the filing
+/// helper dedupes on the provenance triple). A human act — no seat's
+/// `items_filed` moves here. Returns how many items filed.
+pub(crate) fn file_unresolved_annotations(db: &Database, review_id: &str) -> usize {
+    /// Ledger actor + edge author for review-landing filings.
+    const REVIEW_ACTOR: &str = "review-landing";
+    let Some(session) = db.get_code_review(review_id) else {
+        return 0;
+    };
+    let annotations = match db.list_review_annotations(review_id) {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::warn!(review_id = %review_id, error = %e, "annotation list failed; nothing filed");
+            return 0;
+        }
+    };
+    let mut filed = 0usize;
+    for a in &annotations {
+        if a.status == "orphaned" {
+            // Its anchor left the diff. The feedback payload deliberately
+            // excludes orphans (`review_feedback.rs`) — landing must not
+            // file what the loop never surfaced.
+            continue;
+        }
+        if a
+            .resolution
+            .as_deref()
+            .is_some_and(|r| !r.trim().is_empty())
+        {
+            continue; // resolved/accepted never files
+        }
+        let kind = if a.label.as_deref() == Some("question") {
+            "question"
+        } else {
+            "task"
+        };
+        let gist = annotation_gist(&a.body);
+        let title = match a.scope.as_str() {
+            "line" => format!("{}:{} — {}", a.file_path, a.start_line, gist),
+            "file" => format!("{} — {}", a.file_path, gist),
+            _ => gist.clone(),
+        };
+        let mut body = a.body.trim().to_string();
+        if !a.quoted_text.trim().is_empty() {
+            body.push_str(&format!(
+                "\n\n> {}",
+                a.quoted_text.trim().replace('\n', "\n> ")
+            ));
+        }
+        if let Some(sug) = a
+            .suggestion_replacement
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            body.push_str(&format!("\n\nSuggested replacement:\n{}", sug.trim()));
+        }
+        body.push_str(&format!(
+            "\n\n(review {review_id} round {}, annotation {})",
+            a.round, a.id
+        ));
+        match db.file_produced_work_item(
+            &title,
+            Some(&body),
+            kind,
+            "open",
+            2,
+            "review",
+            Some(review_id),
+            Some(&session.repo_path),
+            None,
+            REVIEW_ACTOR,
+        ) {
+            Ok(Some(_)) => filed += 1,
+            Ok(None) => {} // already standing from an earlier landing
+            Err(e) => {
+                tracing::warn!(
+                    review_id = %review_id, annotation = %a.id, error = %e,
+                    "failed to file an unresolved-annotation work item"
+                );
+            }
+        }
+    }
+    filed
+}
+
+/// First line of an annotation body, capped for a work-item title.
+fn annotation_gist(body: &str) -> String {
+    let first = body.trim().lines().next().unwrap_or("").trim();
+    if first.is_empty() {
+        return "(no comment text)".to_string();
+    }
+    let mut g: String = first.chars().take(80).collect();
+    if first.chars().count() > 80 {
+        g.push('…');
+    }
+    g
+}
+
 /// Cheap content fingerprint of the resolved diff text (djb2), for the
 /// pane's staleness poll: "has the working tree changed under this diff?"
 /// Untracked files ride along because `resolve_diff_text` already includes
@@ -948,6 +1067,17 @@ async fn file_contents_for(
             (
                 spec_content(dir, &format!("{s}~1:{old_p}")).await,
                 spec_content(dir, &format!("{s}:{path}")).await,
+            )
+        }
+        DiffSource::RunBranch => {
+            let b = code::safe_token(base.ok_or("runBranch requires the run branch as base")?)?;
+            let mb = git_raw(dir, &["merge-base", "HEAD", b], &[])
+                .await?
+                .trim()
+                .to_string();
+            (
+                spec_content(dir, &format!("{mb}:{old_p}")).await,
+                spec_content(dir, &format!("{b}:{path}")).await,
             )
         }
     };
@@ -1436,6 +1566,7 @@ diff --git a/x b/x
             (DiffSource::LastCommit, "lastCommit"),
             (DiffSource::VsBase, "vsBase"),
             (DiffSource::CommitSha, "commitSha"),
+            (DiffSource::RunBranch, "runBranch"),
         ] {
             assert_eq!(src.as_str(), tag);
             assert_eq!(
@@ -1443,6 +1574,42 @@ diff --git a/x b/x
                 format!("\"{tag}\"")
             );
         }
+    }
+
+    /// The parked (deferred / overnight) review's row shape: an ordinary
+    /// `review_sessions` row whose source is the run-branch reader — the
+    /// branch name rides in `base_ref`, so the morning pane re-resolves the
+    /// same diff through the same machinery as any other review.
+    #[test]
+    fn parked_run_branch_review_row_shape() {
+        let db = Database::open_in_memory().unwrap();
+        let s = open_or_continue_review(
+            &db,
+            "/tmp/repo",
+            DiffSource::RunBranch,
+            Some("redline/run/abcd1234"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(s.source, "runBranch");
+        assert_eq!(s.base_ref.as_deref(), Some("redline/run/abcd1234"));
+        assert_eq!(s.round, 1);
+        assert!(s.commit_sha.is_none());
+        // Durable: the stored row round-trips the same shape.
+        let got = db.get_code_review(&s.review_id).unwrap();
+        assert_eq!(got.source, "runBranch");
+        assert_eq!(got.base_ref.as_deref(), Some("redline/run/abcd1234"));
+        assert_eq!(got.repo_path, "/tmp/repo");
+        // A re-park continues the SAME review session (round model intact).
+        let again = open_or_continue_review(
+            &db,
+            "/tmp/repo",
+            DiffSource::RunBranch,
+            Some("redline/run/abcd1234"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(again.review_id, s.review_id);
     }
 
     #[test]
@@ -1936,5 +2103,135 @@ diff --git a/src/main.rs b/src/main.rs
         // origin/HEAD is a pointer, not a base.
         assert_eq!(b.remote, vec!["origin/main"]);
         assert_eq!(b.head.as_deref(), Some("main"));
+    }
+
+    // --- the review-landing producer -----------------------------------------
+
+    /// A review session row plus a mixed annotation set: resolved, unresolved
+    /// line comment, unresolved question, unresolved general note.
+    fn seeded_review_db() -> Database {
+        let db = Database::open_in_memory().unwrap();
+        db.upsert_code_review(&CodeReviewSession {
+            review_id: "rev-land".to_string(),
+            repo_path: "/tmp/repo".to_string(),
+            source: "uncommitted".to_string(),
+            base_ref: None,
+            commit_sha: None,
+            terminal_id: None,
+            round: 2,
+            created_at: 1,
+        })
+        .unwrap();
+        // The shared `ann` fixture anchors to review "rev-1" — rekey to this
+        // session so `list_review_annotations("rev-land")` actually sees them.
+        let ann = |quoted: &str, start: i64, end: i64| {
+            let mut a = ann(quoted, start, end);
+            a.review_id = "rev-land".to_string();
+            a
+        };
+        // rc-001: resolved — must never file.
+        let resolved = ann("let a = 1;", 10, 10);
+        db.insert_review_annotation(&resolved).unwrap();
+        // rc-002: unresolved line comment.
+        let mut open_line = ann("call();", 11, 11);
+        open_line.id = "rc-002".to_string();
+        open_line.resolution = None;
+        open_line.body = "This call races the lock.\nSecond line.".to_string();
+        db.insert_review_annotation(&open_line).unwrap();
+        // rc-003: unresolved, labeled question, file scope.
+        let mut question = ann("", 0, 0);
+        question.id = "rc-003".to_string();
+        question.resolution = Some("   ".to_string()); // blank = unresolved
+        question.label = Some("question".to_string());
+        question.scope = "file".to_string();
+        question.body = "Why is this synchronous?".to_string();
+        db.insert_review_annotation(&question).unwrap();
+        // rc-004: unresolved general note with a suggestion.
+        let mut general = ann("", 0, 0);
+        general.id = "rc-004".to_string();
+        general.resolution = None;
+        general.scope = "general".to_string();
+        general.file_path = String::new();
+        general.body = "Consider a guard test.".to_string();
+        general.suggestion_replacement = Some("assert!(guard());".to_string());
+        db.insert_review_annotation(&general).unwrap();
+        // rc-005: unresolved but ORPHANED — its anchor left the diff; the
+        // feedback payload excludes it and landing must too.
+        let mut orphan = ann("gone();", 90, 90);
+        orphan.id = "rc-005".to_string();
+        orphan.resolution = None;
+        orphan.status = "orphaned".to_string();
+        orphan.body = "Orphaned note.".to_string();
+        db.insert_review_annotation(&orphan).unwrap();
+        db
+    }
+
+    #[test]
+    fn landing_files_only_unresolved_annotations_with_review_provenance() {
+        let db = seeded_review_db();
+        let filed = file_unresolved_annotations(&db, "rev-land");
+        assert_eq!(filed, 3, "resolved rc-001 and orphaned rc-005 never file");
+        let items = db.list_work_items(None, None, 50).unwrap();
+        assert_eq!(items.len(), 3);
+        assert!(
+            items.iter().all(|i| !i.title.contains("Orphaned note.")),
+            "an orphaned annotation must not land as a work item"
+        );
+        for item in &items {
+            assert_eq!(item.origin_kind.as_deref(), Some("review"));
+            assert_eq!(item.origin_id.as_deref(), Some("rev-land"));
+            assert_eq!(item.project_path.as_deref(), Some("/tmp/repo"));
+            assert_eq!(item.status, "open");
+        }
+        // Line scope: `file:line — gist` title, first body line only.
+        let line = items
+            .iter()
+            .find(|i| i.title.starts_with("src/main.rs:11"))
+            .expect("line-scoped item");
+        assert_eq!(line.kind, "task");
+        assert!(line.title.contains("This call races the lock."));
+        assert!(!line.title.contains("Second line."), "gist = first line");
+        let body = line.body.as_deref().unwrap();
+        assert!(body.contains("Second line."));
+        assert!(body.contains("> call();"), "quoted context rides the body");
+        // The question label steers the kind.
+        let q = items
+            .iter()
+            .find(|i| i.title.starts_with("src/main.rs — Why"))
+            .expect("file-scoped question");
+        assert_eq!(q.kind, "question");
+        // General scope: gist-only title, suggestion in the body.
+        let g = items
+            .iter()
+            .find(|i| i.title == "Consider a guard test.")
+            .expect("general item");
+        assert!(g.body.as_deref().unwrap().contains("assert!(guard());"));
+        // The chain stays verifiable after the filing.
+        assert!(db.verify_ledger_chain().unwrap().ok, "chain intact");
+    }
+
+    #[test]
+    fn landing_twice_is_idempotent_and_unknown_review_files_nothing() {
+        let db = seeded_review_db();
+        assert_eq!(file_unresolved_annotations(&db, "rev-land"), 3);
+        assert_eq!(
+            file_unresolved_annotations(&db, "rev-land"),
+            0,
+            "a second landing re-files nothing"
+        );
+        assert_eq!(db.list_work_items(None, None, 50).unwrap().len(), 3);
+        assert_eq!(file_unresolved_annotations(&db, "rev-ghost"), 0);
+        // A human act: no seat stat moved.
+        assert!(db.list_seat_stats().unwrap().is_empty());
+    }
+
+    #[test]
+    fn annotation_gist_caps_and_falls_back() {
+        assert_eq!(annotation_gist("  short note \nmore"), "short note");
+        assert_eq!(annotation_gist("   "), "(no comment text)");
+        let long = "x".repeat(120);
+        let g = annotation_gist(&long);
+        assert_eq!(g.chars().count(), 81, "80 chars + ellipsis");
+        assert!(g.ends_with('…'));
     }
 }

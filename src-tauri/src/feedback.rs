@@ -8,8 +8,16 @@ use crate::state::{Comment, CommentKind, CommentStatus, Section, SubmissionMode}
 /// Load-bearing anti-injection preface (protocol-verification Exp. a/a3):
 /// MUST remain the first bytes of every payload, byte-identical across
 /// Ask and Revise modes. Asserted by the `starts_with` checks in tests.
+/// Extend by APPENDING only — the original first sentence is the attested
+/// prefix those tests (and the goldens) pin. The second sentence points the
+/// session at its skill: the plan session is the one Redline-spawned context
+/// that is never handed a skill-loading prompt line, so the payload itself
+/// names the contract it expects.
 const PAYLOAD_PREFACE: &str =
-    "The user reviewed your plan in Redline and has requested revisions.\n\n";
+    "The user reviewed your plan in Redline and has requested revisions.\n\n\
+     Load your `redline-plan-review` skill now if not already loaded — it defines the \
+     presentation contract, sidecar preservation, and the REDLINE_RESOLUTIONS format \
+     this payload expects.\n\n";
 
 /// Dispatcher — pick the payload shape for the inferred submission mode.
 pub fn serialize_payload(

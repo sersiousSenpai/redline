@@ -6,12 +6,19 @@ import { afterEach, describe, expect, it } from "vitest";
 import { drafterExtensions } from "./extensions/drafterExtensions";
 import { planDocToMarkdown } from "./markdown/serializer";
 import {
+  acceptAllUserSuggestions,
   acceptDraftSuggestion,
+  acceptUserSuggestion,
   applyDraftSuggestion,
   docIsEmpty,
+  hasPendingUserSuggestions,
+  rejectAllUserSuggestions,
   rejectDraftSuggestion,
+  rejectUserSuggestion,
+  suggestionLeaves,
   type DraftSuggestionRow,
 } from "./drafterSuggestions";
+import { USER_AUTHOR } from "./extensions/TrackChanges";
 
 const editors: Editor[] = [];
 function makeEditor(content?: object): Editor {
@@ -170,5 +177,223 @@ describe("applyDraftSuggestion", () => {
         suggestion({ op: "replace_block", blockId: "blk-gone", markdown: "x" }),
       ),
     ).toBe("stale");
+  });
+
+  it("suggestionLeaves finds a proposed run (the re-drain guard primitive)", () => {
+    const editor = makeEditor({ type: "doc", content: [para("existing")] });
+    const s = suggestion({ op: "append", markdown: "new tail" });
+    expect(suggestionLeaves(editor, s.id).length).toBe(0);
+    expect(applyDraftSuggestion(editor, s)).toBe("proposed");
+    expect(suggestionLeaves(editor, s.id).length).toBeGreaterThan(0);
+    expect(suggestionLeaves(editor, "sug-unknown").length).toBe(0);
+  });
+});
+
+// Text of every leaf carrying `markName`, concatenated.
+function markedText(editor: Editor, markName: string): string {
+  let out = "";
+  editor.state.doc.descendants((n) => {
+    if (n.isText && n.marks.some((m) => m.type.name === markName))
+      out += n.text ?? "";
+    return true;
+  });
+  return out;
+}
+
+describe("Suggesting mode (TrackChangesInput in the drafter)", () => {
+  it("starts in Editing: typing stays a plain edit", () => {
+    const editor = makeEditor({ type: "doc", content: [para("hello")] });
+    editor.commands.insertContentAt(3, "X");
+    expect(editor.state.doc.textContent).toBe("heXllo");
+    expect(markedText(editor, "rl_ins")).toBe("");
+  });
+
+  it("setSuggesting(true) paints typing as a pending USER insertion", () => {
+    const editor = makeEditor({ type: "doc", content: [para("hello")] });
+    editor.commands.setSuggesting(true);
+    editor.commands.insertContentAt(3, "XY");
+    const authors = new Set<string>();
+    editor.state.doc.descendants((n) => {
+      if (!n.isText) return true;
+      for (const m of n.marks)
+        if (m.type.name === "rl_ins") authors.add(m.attrs.authorId as string);
+      return true;
+    });
+    expect(markedText(editor, "rl_ins")).toBe("XY");
+    expect(authors).toEqual(new Set([USER_AUTHOR]));
+
+    // Flip back to Editing: typing is plain again.
+    editor.commands.setSuggesting(false);
+    editor.commands.insertContentAt(1, "Z");
+    expect(markedText(editor, "rl_ins")).toBe("XY");
+  });
+
+  it("agent suggestions are NOT repainted as user edits while Suggesting", () => {
+    const editor = makeEditor({ type: "doc", content: [para("existing")] });
+    editor.commands.setSuggesting(true);
+    applyDraftSuggestion(
+      editor,
+      suggestion({ op: "append", markdown: "tail" }),
+    );
+    const authors = new Set<string>();
+    editor.state.doc.descendants((n) => {
+      if (!n.isText) return true;
+      for (const m of n.marks)
+        if (m.type.name === "rl_ins") authors.add(m.attrs.authorId as string);
+      return true;
+    });
+    expect(authors).toEqual(new Set(["draft-agent"]));
+  });
+
+  it("strikeSelection strikes in place even in Editing mode", () => {
+    const editor = makeEditor({ type: "doc", content: [para("strike me")] });
+    editor.commands.setTextSelection({ from: 1, to: 7 });
+    expect(editor.commands.strikeSelection()).toBe(true);
+    expect(markedText(editor, "rl_del")).toBe("strike");
+    expect(editor.state.doc.textContent).toBe("strike me");
+  });
+
+  it("tracked marks attach to inline code (the excludes fix)", () => {
+    const editor = makeEditor({
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          content: [
+            { type: "text", text: "path/to.ts", marks: [{ type: "code" }] },
+          ],
+        },
+      ],
+    });
+    editor.commands.setTextSelection({ from: 1, to: 11 });
+    expect(editor.commands.strikeSelection()).toBe(true);
+    expect(markedText(editor, "rl_del")).toBe("path/to.ts");
+    // The code mark survives alongside the strike.
+    expect(markedText(editor, "code")).toBe("path/to.ts");
+  });
+});
+
+describe("user-run Keep/Revert", () => {
+  function userRunId(editor: Editor): string {
+    let sid: string | null = null;
+    editor.state.doc.descendants((n) => {
+      if (!n.isText) return true;
+      const m = n.marks.find(
+        (m) =>
+          (m.type.name === "rl_ins" || m.type.name === "rl_del") &&
+          m.attrs.suggestionId,
+      );
+      if (m) sid = m.attrs.suggestionId as string;
+      return true;
+    });
+    if (!sid) throw new Error("no user run in the doc");
+    return sid;
+  }
+
+  it("Keep settles an insertion to plain text", () => {
+    const editor = makeEditor({ type: "doc", content: [para("base")] });
+    editor.commands.setSuggesting(true);
+    editor.commands.insertContentAt(5, "XX");
+    const sid = userRunId(editor);
+    expect(acceptUserSuggestion(editor, sid)).toBe(true);
+    expect(editor.state.doc.textContent).toBe("baseXX");
+    expect(markedText(editor, "rl_ins")).toBe("");
+  });
+
+  it("Revert removes an insertion", () => {
+    const editor = makeEditor({ type: "doc", content: [para("base")] });
+    editor.commands.setSuggesting(true);
+    editor.commands.insertContentAt(5, "XX");
+    const sid = userRunId(editor);
+    expect(rejectUserSuggestion(editor, sid)).toBe(true);
+    expect(editor.state.doc.textContent).toBe("base");
+  });
+
+  it("Keep really deletes struck text; Revert lifts the strike", () => {
+    const editor = makeEditor({ type: "doc", content: [para("strike me")] });
+    editor.commands.setSuggesting(true);
+    editor.commands.setTextSelection({ from: 1, to: 7 });
+    editor.commands.strikeSelection();
+    const sid = userRunId(editor);
+    expect(rejectUserSuggestion(editor, sid)).toBe(true);
+    expect(editor.state.doc.textContent).toBe("strike me");
+    expect(markedText(editor, "rl_del")).toBe("");
+
+    editor.commands.setTextSelection({ from: 1, to: 7 });
+    editor.commands.strikeSelection();
+    expect(acceptUserSuggestion(editor, userRunId(editor))).toBe(true);
+    expect(editor.state.doc.textContent).toBe(" me");
+  });
+});
+
+describe("Keep all / Revert all my changes", () => {
+  it("settles every user run at once, leaving agent runs pending", () => {
+    const editor = makeEditor({
+      type: "doc",
+      content: [para("alpha"), para("beta")],
+    });
+    editor.commands.setSuggesting(true);
+    editor.commands.insertContentAt(6, "X"); // user run in block 1
+    // Block 2 ("beta") now opens at pos 8; its text runs 9..13 — strike "be".
+    editor.commands.setTextSelection({ from: 9, to: 11 });
+    editor.commands.strikeSelection(); // user strike
+    applyDraftSuggestion(
+      editor,
+      suggestion({ op: "append", markdown: "agent tail" }),
+    );
+    expect(hasPendingUserSuggestions(editor)).toBe(true);
+
+    expect(acceptAllUserSuggestions(editor)).toBe(true);
+    expect(hasPendingUserSuggestions(editor)).toBe(false);
+    // User insertion kept plain, user strike really deleted…
+    expect(editor.state.doc.textContent).toContain("alphaX");
+    expect(editor.state.doc.textContent).toContain("ta"); // "beta" minus "be"
+    expect(editor.state.doc.textContent).not.toContain("beta");
+    // …while the agent's proposal is still pending.
+    expect(markedText(editor, "rl_ins")).toContain("agent tail");
+  });
+
+  it("reverts every user run at once", () => {
+    const editor = makeEditor({ type: "doc", content: [para("alpha")] });
+    editor.commands.setSuggesting(true);
+    editor.commands.insertContentAt(6, "XYZ");
+    editor.commands.setTextSelection({ from: 1, to: 3 });
+    editor.commands.strikeSelection();
+    expect(rejectAllUserSuggestions(editor)).toBe(true);
+    expect(editor.state.doc.textContent).toBe("alpha");
+    expect(hasPendingUserSuggestions(editor)).toBe(false);
+  });
+
+  it("no-ops on a clean document", () => {
+    const editor = makeEditor({ type: "doc", content: [para("alpha")] });
+    expect(hasPendingUserSuggestions(editor)).toBe(false);
+    expect(acceptAllUserSuggestions(editor)).toBe(false);
+    expect(rejectAllUserSuggestions(editor)).toBe(false);
+  });
+});
+
+describe("block locking (pending agent suggestion)", () => {
+  it("filters user edits in a locked block but lets verdicts through", () => {
+    const editor = makeEditor({
+      type: "doc",
+      content: [para("locked content")],
+    });
+    const bid = blockIds(editor)[0]!;
+    const s = suggestion({
+      op: "replace_block",
+      blockId: bid,
+      original: "locked content",
+      markdown: "agent rewrite",
+    });
+    expect(applyDraftSuggestion(editor, s)).toBe("proposed");
+    editor.commands.setLockedBlocks([bid]);
+
+    const before = editor.state.doc.textContent;
+    editor.commands.insertContentAt(2, "Z");
+    expect(editor.state.doc.textContent).toBe(before);
+
+    // The verdict is a derived write (rl-sync) — the lock lets it through.
+    expect(acceptDraftSuggestion(editor, s)).toBe(true);
+    expect(editor.state.doc.textContent.trim()).toBe("agent rewrite");
   });
 });

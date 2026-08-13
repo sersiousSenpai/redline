@@ -27,6 +27,7 @@ export type ToggleableSurface =
   | "drafter"
   | "review"
   | "servers"
+  | "runs"
   | "voice"
   | "collab"
   | "memory";
@@ -40,6 +41,7 @@ export const TOGGLEABLE_SURFACES: readonly ToggleableSurface[] = [
   "drafter",
   "review",
   "servers",
+  "runs",
   "voice",
   "collab",
   "memory",
@@ -54,14 +56,19 @@ export interface SurfaceDescriptor {
 }
 
 /** The main-pane radio group, in default order. This IS today's hardcoded
- *  header tuple, relocated — the snapshot test pins it. */
+ *  header tuple, relocated — the snapshot test pins it. Deliberately NOT
+ *  every `MainSurface`: memory's entry is the ambient header pill — surfaces
+ *  earn a permanent header button only when they're a daily destination, not
+ *  per feature shipped. Runs earned its entry when the cross-project Work tab
+ *  moved in (a destination you visit without a live run); the run chip stays
+ *  as the contextual entry. */
 export const MAIN_SURFACE_DESCRIPTORS: readonly SurfaceDescriptor[] = [
   { id: "document", label: "Document", title: "Show the document" },
   { id: "browser", label: "Browser", title: "Switch to the browser" },
   { id: "drafter", label: "Prompt Drafter", title: "Draft a new prompt" },
   { id: "review", label: "Code Review", title: "Review code changes" },
   { id: "servers", label: "Localhost", title: "See your local dev servers" },
-  { id: "memory", label: "Memory", title: "Your prompt and decision history" },
+  { id: "runs", label: "Runs", title: "Monitor runs and the work graph" },
 ];
 
 /** Human-readable names for the surface checkboxes and context menus. */
@@ -70,6 +77,7 @@ export const SURFACE_LABELS: Record<ToggleableSurface, string> = {
   drafter: "Prompt Drafter",
   review: "Code Review",
   servers: "Localhost",
+  runs: "Runs",
   voice: "Voice",
   collab: "Live Session",
   memory: "Memory",
