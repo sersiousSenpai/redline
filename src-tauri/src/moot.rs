@@ -726,7 +726,7 @@ pub async fn moot_start(
             }
             // Keep the headless `-p` out of the lake (the global hook would
             // otherwise capture the baked prompt as a human one).
-            ledger::register_agent_prompt(&ledger::body_hash(&args[1]));
+            ledger::register_agent_prompt(&args[1]);
             match run_pass(&seat, args).await {
                 Ok(text) => {
                     // ON THE RECORD: the chain event carries a digest of the

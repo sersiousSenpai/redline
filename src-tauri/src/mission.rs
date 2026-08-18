@@ -141,7 +141,7 @@ impl MissionState {
             }
             Some(_) => framed.clone(),
         };
-        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+        crate::ledger::register_agent_prompt(&prompt);
 
         let args = crate::claude_proc::bridge_args("mission", prompt, prior_session.as_deref());
         let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
@@ -798,6 +798,7 @@ fn start_mission_turn(
                 crate::ledger::PromptSource::RustFirstTurn,
                 "mission",
                 &prompt,
+                Some(&text),
                 cwd.clone(),
                 None,
                 Some(mission_id.clone()),
@@ -809,7 +810,7 @@ fn start_mission_turn(
                 crate::seat::model_for("mission"),
             );
         } else {
-            crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+            crate::ledger::register_agent_prompt(&prompt);
         }
 
         // Same tool surface as the browse agent: Bash scoped to the localhost

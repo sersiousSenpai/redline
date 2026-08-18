@@ -194,6 +194,20 @@ pub async fn ai_commit_draft(
         .collect();
     let prompt = build_prompt(&session.repo_path, &diff, &recent_log, &annotation_bodies);
 
+    if crate::seat::backend_for("ai_commit") == "codex" {
+        let text = tokio::time::timeout(
+            DRAFT_TIMEOUT,
+            crate::codex_app_server::run_one_shot(
+                std::path::Path::new(&session.repo_path),
+                &prompt,
+                crate::seat::model_for("ai_commit").as_deref(),
+            ),
+        )
+        .await
+        .map_err(|_| format!("the Codex draft agent produced nothing for {}s — killed", DRAFT_TIMEOUT.as_secs()))??;
+        return parse_draft(&text);
+    }
+
     let bin = match cached_claude_bin().get() {
         Some(b) => b.clone(),
         None => {

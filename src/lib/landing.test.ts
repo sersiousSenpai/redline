@@ -139,6 +139,24 @@ describe("landing wiring", () => {
     expect(app).toContain("onNewPlan={openFrontDoor}");
   });
 
+  it("the door survives the sidebar going away — two entries outside it", () => {
+    // The sentence above is the whole point, and `onNewPlan` alone no longer
+    // makes it true: that row lives INSIDE the sessions sidebar, which is now
+    // masked on every non-document surface and collapsible on the document.
+    // Same failure, one layer out — so the guard follows it out.
+    //
+    // 1. The sidebar's divider is always in flow whatever the panel does, and
+    //    it carries the door's action while collapsed.
+    expect(app).toContain("onClick: openFrontDoor");
+    // 2. A real chord, so the door is reachable with no pointer at all.
+    expect(app).toContain("isNewPlanKey(e)");
+    expect(app).toContain("openFrontDoorRef.current()");
+    const keymap = readFileSync(join(process.cwd(), "src/lib/keymap.ts"), "utf8");
+    const binding = keymap.match(/\{[^{}]*id: "new-plan"[^{}]*\}/);
+    expect(binding).not.toBeNull();
+    expect(binding?.[0]).toContain("wired: true");
+  });
+
   it("the front door drains the seed in a LAYOUT effect — the losslessness guarantee", () => {
     // A passive effect would let the browser dispatch the next keydown
     // between focus and drain, reordering a character. The composer is

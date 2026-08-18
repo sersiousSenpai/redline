@@ -57,6 +57,16 @@ interface PaneDividerProps {
    *  column), where there is no hull to show through — paint a resting 1px
    *  hairline instead of the gutter's transparent rest state. */
   hairline?: boolean;
+  /** An extra action pinned to this divider, shown only while the pane is
+   *  COLLAPSED.
+   *
+   *  The sidebar uses it so "Plan a build" survives the sidebar going away.
+   *  The front door is the app's resting state, not a row that lives inside
+   *  one panel — and its only visible affordance was a row in the sessions
+   *  list, which is now closed on every non-document surface. This divider is
+   *  the one piece of the sidebar that is always in flow whatever the panel is
+   *  doing, so it is where an always-available entry belongs. */
+  action?: { glyph: string; label: string; onClick: () => void };
 }
 
 // Divider hosting a drag affordance (when expanded) and a collapse/expand
@@ -74,6 +84,7 @@ export function PaneDivider({
   onExitFullscreen,
   hideChevron = false,
   hairline = false,
+  action,
 }: PaneDividerProps) {
   const horizontal = orientation === "horizontal";
   const resizeCursor = horizontal ? "row-resize" : "col-resize";
@@ -121,6 +132,36 @@ export function PaneDivider({
   // cursor switch over the adjacent native scrollbar gutter.
   const overhang = 6;
   const collapsedNudge = collapsedCaretNudge(collapsed, orientation, side);
+  // The pill both buttons wear. Extracted so the action can't drift from the
+  // chevron it stacks against — two pills at the same x with different widths
+  // would read as a rendering bug, not a pair.
+  const pill: React.CSSProperties = {
+    position: "absolute",
+    top: "50%",
+    left: "50%",
+    width: horizontal ? "34px" : "18px",
+    height: horizontal ? "18px" : "34px",
+    fontSize: "11px",
+    lineHeight: 1,
+    background: "var(--color-bg-elevated)",
+    color: "var(--color-ink-muted)",
+    border: "1px solid var(--color-rule)",
+    cursor: "pointer",
+    // Above the adjacent column in every state. The curtain-edge divider
+    // wrappers sit at 26, so 27 keeps the caret on top of those too.
+    zIndex: 27,
+  };
+  const nudgeX = collapsedNudge ? `calc(-50% + ${collapsedNudge}px)` : "-50%";
+  // One pill (34px on its long axis) plus a 6px gap: the action sits just
+  // before the chevron along the divider's run, so the two never overlap in
+  // either orientation.
+  const STACK = 40;
+  // Only while collapsed — expanded, the sidebar's own "Plan a build" row is
+  // right there, and two entries to the same place is one too many. It also
+  // retires with the carets when the combined latch replaces them, and the
+  // curtain's absolutely-positioned copy of this divider passes no `action`,
+  // so it can never double-paint.
+  const showAction = !!action && collapsed && !fullscreen && !hideChevron;
   return (
     <div
       className={[
@@ -175,6 +216,23 @@ export function PaneDivider({
           touchAction: "none",
         }}
       />
+      {showAction && action && (
+        <button
+          type="button"
+          onClick={action.onClick}
+          title={action.label}
+          aria-label={action.label}
+          className="absolute flex items-center justify-center rounded-full shadow-sm"
+          style={{
+            ...pill,
+            transform: horizontal
+              ? `translate(calc(${nudgeX} - ${STACK}px), -50%)`
+              : `translate(${nudgeX}, calc(-50% - ${STACK}px))`,
+          }}
+        >
+          <span aria-hidden>{action.glyph}</span>
+        </button>
+      )}
       {!hideChevron && (
       <button
         type="button"
@@ -182,24 +240,7 @@ export function PaneDivider({
         title={buttonTitle}
         aria-label={buttonTitle}
         className="absolute flex items-center justify-center rounded-full shadow-sm"
-        style={{
-          top: "50%",
-          left: "50%",
-          transform: collapsedNudge
-            ? `translate(calc(-50% + ${collapsedNudge}px), -50%)`
-            : "translate(-50%, -50%)",
-          width: horizontal ? "34px" : "18px",
-          height: horizontal ? "18px" : "34px",
-          fontSize: "11px",
-          lineHeight: 1,
-          background: "var(--color-bg-elevated)",
-          color: "var(--color-ink-muted)",
-          border: "1px solid var(--color-rule)",
-          cursor: "pointer",
-          // Above the adjacent column in every state. The curtain-edge divider
-          // wrappers sit at 26, so 27 keeps the caret on top of those too.
-          zIndex: 27,
-        }}
+        style={{ ...pill, transform: `translate(${nudgeX}, -50%)` }}
       >
         <span
           style={{

@@ -106,6 +106,8 @@ export interface CommandDeps {
     toggleSidebar: () => void;
     toggleDiscussion: () => void;
     toggleTerminal: () => void;
+    /** Show / hide the periphery on an immersive (non-document) surface. */
+    toggleImmersive: () => void;
     setTheme: (name: string) => void;
     setFont: (name: string) => void;
     zoomReset: () => void;
@@ -121,10 +123,15 @@ export function buildCommands(deps: CommandDeps): PaletteCommand[] {
   const { actions } = deps;
   const commands: PaletteCommand[] = [];
 
+  // One name for one place. The sidebar row, the divider pill and this entry
+  // are three affordances for the same door, and three different labels for it
+  // read as three different features.
   commands.push({
     id: "draft-new",
-    title: "Draft a new plan",
+    title: "Plan a build",
+    detail: "The front door",
     group: "Plans",
+    keys: bindingKeys("new-plan"),
     run: actions.draftNewPlan,
   });
   for (const s of deps.sessions) {
@@ -175,6 +182,13 @@ export function buildCommands(deps: CommandDeps): PaletteCommand[] {
       group: "Layout",
       keys: bindingKeys("pane-terminal"),
       run: actions.toggleTerminal,
+    },
+    {
+      id: "toggle-immersive",
+      title: "Show / hide the panels on this surface",
+      group: "Layout",
+      keys: bindingKeys("immersive"),
+      run: actions.toggleImmersive,
     },
     {
       id: "zoom-reset",

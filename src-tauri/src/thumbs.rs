@@ -166,6 +166,28 @@ pub async fn browser_take_thumbnail(
     })
 }
 
+/// Capture a webview as PNG bytes, with the blank-frame retry, WITHOUT writing
+/// anything. The picture store (`shots.rs`) owns its own directory and its own
+/// naming, so it needs the pixels rather than a path — sharing
+/// `browser_take_thumbnail` would have put two writers back in one directory,
+/// which is the bug this program already had to fix once.
+pub async fn capture_shot(app: &AppHandle, label: &str, width: f64) -> Result<Vec<u8>, String> {
+    let width = width.clamp(MIN_WIDTH, MAX_WIDTH);
+    let mut shot = capture_png(app, label, width).await?;
+    if looks_blank(&shot.0, width) {
+        tokio::time::sleep(std::time::Duration::from_millis(BLANK_RETRY_MS)).await;
+        if let Ok(second) = capture_png(app, label, width).await {
+            if second.0.len() > shot.0.len() {
+                shot = second;
+            }
+        }
+    }
+    if shot.0.is_empty() || looks_blank(&shot.0, width) {
+        return Err("the page produced a blank snapshot".into());
+    }
+    Ok(shot.0)
+}
+
 /// Is this PNG almost certainly a blank frame?
 ///
 /// A uniform image is exactly what PNG compresses best, so a real screenshot and
@@ -311,11 +333,45 @@ pub fn thumbs_list(app: AppHandle) -> Result<Vec<ThumbEntry>, String> {
 /// Delete thumbnails whose key is no longer on any card, plus `.tmp` leftovers
 /// from a capture that crashed mid-write. Called at mount with the live key set,
 /// so the directory tracks the dashboard instead of growing forever.
+///
+/// `prefix` SCOPES the sweep to one owner's keyspace, and it is not optional in
+/// spirit. The `thumbs/` directory has more than one writer: the Localhost
+/// dashboard owns `p<port>-<hash>` keys and BrowserPane owns `tab-<id>` drag
+/// stand-ins. With a single flat keyspace and one caller passing only ITS keys,
+/// every dashboard mount silently deleted the other writer's files — the three
+/// `tab-*.png` on disk today were being destroyed on each visit. A caller that
+/// passes `None` still sweeps everything, so the parameter is a guard rail, not
+/// a fix on its own; the durable fix is that the shot store gets its own
+/// directory, which makes this class of bug structurally impossible.
+/// Whether one directory entry is the caller's to delete. Pure, so the scoping
+/// rule that stopped one writer erasing another's files is testable without a
+/// filesystem or an `AppHandle`.
+fn is_doomed(
+    name: &str,
+    keep: &std::collections::HashSet<&str>,
+    prefix: &str,
+    tmp_expired: bool,
+) -> bool {
+    if let Some(key) = name.strip_suffix(".png") {
+        // Outside the caller's keyspace → not the caller's to delete.
+        key.starts_with(prefix) && !keep.contains(key)
+    } else if name.ends_with(".png.tmp") {
+        tmp_expired
+    } else {
+        false
+    }
+}
+
 #[tauri::command(async)]
-pub fn thumbs_prune(app: AppHandle, keep_keys: Vec<String>) -> Result<usize, String> {
+pub fn thumbs_prune(
+    app: AppHandle,
+    keep_keys: Vec<String>,
+    prefix: Option<String>,
+) -> Result<usize, String> {
     let dir = thumbs_dir(&app)?;
     let keep: std::collections::HashSet<&str> =
         keep_keys.iter().map(|k| k.as_str()).collect();
+    let prefix = prefix.unwrap_or_default();
     let now = std::time::SystemTime::now();
     let mut removed = 0usize;
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -326,20 +382,15 @@ pub fn thumbs_prune(app: AppHandle, keep_keys: Vec<String>) -> Result<usize, Str
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        let doomed = if let Some(key) = name.strip_suffix(".png") {
-            !keep.contains(key)
-        } else if name.ends_with(".png.tmp") {
-            // Only sweep tmp files old enough to be certainly abandoned — a
-            // capture in flight owns its tmp file.
-            entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|m| now.duration_since(m).ok())
-                .is_some_and(|age| age.as_secs() > TMP_GRACE_SECS)
-        } else {
-            false
-        };
+        // Only sweep tmp files old enough to be certainly abandoned — a capture
+        // in flight owns its tmp file.
+        let tmp_expired = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|m| now.duration_since(m).ok())
+            .is_some_and(|age| age.as_secs() > TMP_GRACE_SECS);
+        let doomed = is_doomed(name, &keep, &prefix, tmp_expired);
         if doomed && std::fs::remove_file(&path).is_ok() {
             removed += 1;
         }
@@ -350,6 +401,35 @@ pub fn thumbs_prune(app: AppHandle, keep_keys: Vec<String>) -> Result<usize, Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A live bug: `thumbs/` has two writers — the Localhost dashboard
+    /// (`p<port>-<hash>`) and BrowserPane's drag stand-ins (`tab-<id>`) — and
+    /// the dashboard's mount-time prune passed only ITS keys with no scope, so
+    /// every dashboard visit deleted the browser's files. Three of them were on
+    /// disk when this was found.
+    #[test]
+    fn prune_never_reaches_outside_its_own_keyspace() {
+        let keep: std::collections::HashSet<&str> = ["p3000-abcd1234"].into_iter().collect();
+
+        // The dashboard's own sweep, scoped to `p`.
+        assert!(!is_doomed("p3000-abcd1234.png", &keep, "p", false), "a live card survives");
+        assert!(is_doomed("p9999-deadbeef.png", &keep, "p", false), "a dead card goes");
+        for other in ["tab-t116.png", "tab-t141.png", "tab-t143.png"] {
+            assert!(
+                !is_doomed(other, &keep, "p", false),
+                "{other} belongs to BrowserPane and must survive a dashboard prune"
+            );
+        }
+
+        // Tmp sweeping is orthogonal to the keyspace and still age-gated.
+        assert!(is_doomed("p3000-abcd1234.png.tmp", &keep, "p", true));
+        assert!(!is_doomed("p3000-abcd1234.png.tmp", &keep, "p", false), "in-flight tmp is owned");
+        assert!(!is_doomed("notes.txt", &keep, "p", true), "unrelated files are never touched");
+
+        // An empty prefix is still "everything" — the parameter is a guard rail,
+        // not a fix on its own.
+        assert!(is_doomed("tab-t116.png", &keep, "", false));
+    }
 
     #[test]
     fn a_blank_frame_is_told_apart_from_a_real_screenshot_by_size() {

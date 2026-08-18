@@ -161,6 +161,14 @@ pub const ROUTE_TABLE: &[RouteSpec] = &[
     },
     RouteSpec {
         method: "POST",
+        path: "/v1/codex/stop",
+        class: RouteClass::HookContract,
+        purpose: "Codex Plan-mode Stop hook: extracts the proposed plan and holds until review resolves",
+        request: "JSON Codex Stop payload {session_id, turn_id, permission_mode, last_assistant_message, ...}",
+        response: "{} to finish the turn, or {decision:\"block\", reason} to request revision",
+    },
+    RouteSpec {
+        method: "POST",
         path: "/v1/prompts/ingest",
         class: RouteClass::HookContract,
         purpose: "Polis lake capture: the global UserPromptSubmit hook POSTs its stdin payload (fail-open)",
@@ -374,6 +382,14 @@ pub const ROUTE_TABLE: &[RouteSpec] = &[
         purpose: "Batched retrieval read: node + subtree + links + notes + lexical hits in one call",
         request: "?q= term, ?node= node id, ?limit= n",
         response: "JSON answer pack (byte-bounded)",
+    },
+    RouteSpec {
+        method: "GET",
+        path: "/v1/memory/grep",
+        class: RouteClass::Open,
+        purpose: "Literal/regex search over the record — flags, paths, error strings, attributes",
+        request: "?q= literal (>= 3 chars, required), ?re= regex, ?case=1, ?scope=prompts/browse/all, ?limit= n",
+        response: "JSON {hits:[{kind, seq, ts, label, excerpt}]}; 400 with a reason when the literal is too short",
     },
     RouteSpec {
         method: "POST",
@@ -888,6 +904,7 @@ mod tests {
     fn open_and_hook_routes_need_no_token() {
         assert_eq!(authorize("/v1/browser/tabs", "GET", None), Ok(()));
         assert_eq!(authorize("/v1/plan", "POST", None), Ok(()));
+        assert_eq!(authorize("/v1/codex/stop", "POST", None), Ok(()));
         assert_eq!(authorize("/v1/reviews/start", "GET", None), Ok(()));
         assert_eq!(
             authorize("/v1/sessions/:session_id/feedback", "GET", None),

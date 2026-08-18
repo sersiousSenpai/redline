@@ -102,18 +102,43 @@ pub fn claude_command(claude_bin: &str) -> Command {
         cmd.env("PATH", format!("{}:{inherited}", bin_dir.display()));
     }
     cmd.env(crate::auth::ENV_DAEMON_TOKEN, crate::auth::daemon_token());
+    cmd.env(ENV_AGENT_SEAT, UNSEATED_AGENT);
     cmd
 }
+
+/// Marks a `claude` process as one Redline constructed the prompt for, so the
+/// capture hook — which fires for headless `-p` spawns exactly as it does for a
+/// human's keystroke — can label its POST and be skipped at ingest.
+///
+/// This is a *mechanism* the hash guard is not. The guard can only cover a body
+/// Rust predicts byte-exactly, once, inside a 300s TTL; the hook installed at
+/// `hook.rs::capture_command` is a **command**-type hook, so it runs inside the
+/// spawned `claude`'s own environment and simply reads this. A prompt the agent
+/// composes for itself mid-session — a `Task` sub-agent, a retry, a resumed turn
+/// — carries no predictable hash but does carry this variable. The guard stays
+/// as the belt to this brace.
+///
+/// Never set on the Redline process itself: a PTY terminal inherits the app's
+/// environment (`pty.rs`), and a human typing `claude` in a dock terminal is the
+/// one prompt stream the lake exists to capture.
+pub const ENV_AGENT_SEAT: &str = "REDLINE_AGENT_SEAT";
+
+/// The value for a Redline-spawned `claude` that is not a configurable Agent
+/// Seat (the voice transcript-cleanup child). Still machine text, still skipped;
+/// the distinct value keeps the ingest log honest about which is which.
+pub const UNSEATED_AGENT: &str = "unseated";
 
 /// `claude_command` with the seat's binary override applied: the seat's own
 /// `binaryPath`, else the global settings override, else the caller's cached
 /// `resolve_claude_bin()` result. Checked at every spawn (not just at cache
 /// time) so a settings change takes effect without a relaunch.
 pub fn claude_command_for_seat(seat: &str, default_bin: &str) -> Command {
-    match crate::seat::binary_for(seat) {
+    let mut cmd = match crate::seat::binary_for(seat) {
         Some(bin) => claude_command(&bin),
         None => claude_command(default_bin),
-    }
+    };
+    cmd.env(ENV_AGENT_SEAT, seat);
+    cmd
 }
 
 /// The `--tools` list every headless Redline agent spawns with. Passing
@@ -500,6 +525,55 @@ mod tests {
 
     fn parse(line: &str) -> StreamLine {
         classify_line(&serde_json::from_str::<Value>(line).unwrap())
+    }
+
+    /// Every Redline-spawned `claude` carries its seat in the environment, and
+    /// the seated form must WIN over the unseated default — the capture hook
+    /// reads exactly this variable to know a prompt is machine text.
+    ///
+    /// The value is read off the built `Command` rather than a live spawn, so
+    /// the test needs no `claude` on PATH.
+    #[test]
+    fn seat_spawn_stamps_the_agent_env() {
+        let seated = claude_command_for_seat("browse", "/nonexistent/claude");
+        let got: Vec<_> = seated
+            .as_std()
+            .get_envs()
+            .filter(|(k, _)| *k == std::ffi::OsStr::new(ENV_AGENT_SEAT))
+            .collect();
+        assert_eq!(got.len(), 1, "exactly one binding, not two fighting");
+        assert_eq!(got[0].1, Some(std::ffi::OsStr::new("browse")));
+
+        // A direct `claude_command` (the voice cleanup child) is still marked:
+        // it is machine text too, just not a configurable seat.
+        let plain = claude_command("/nonexistent/claude");
+        let got = plain
+            .as_std()
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new(ENV_AGENT_SEAT))
+            .expect("an unseated Redline spawn is still marked");
+        assert_eq!(got.1, Some(std::ffi::OsStr::new(UNSEATED_AGENT)));
+    }
+
+    /// The marker must never be set on Redline's OWN process: a PTY terminal
+    /// inherits the app environment (`pty.rs`), so a leak here would make every
+    /// prompt a human types into a dock terminal read as machine text and
+    /// silently stop being captured. The one prompt stream the lake exists for.
+    #[test]
+    fn the_agent_marker_is_never_set_on_the_app_process() {
+        assert!(
+            std::env::var(ENV_AGENT_SEAT).is_err(),
+            "{ENV_AGENT_SEAT} must be a per-Command variable, never a process one"
+        );
+        const SRC: &str = include_str!("claude_proc.rs");
+        for (ix, _) in SRC.match_indices("ENV_AGENT_SEAT") {
+            let line_start = SRC[..ix].rfind('\n').map(|n| n + 1).unwrap_or(0);
+            let line = &SRC[line_start..SRC[ix..].find('\n').map(|n| ix + n).unwrap_or(SRC.len())];
+            assert!(
+                !line.contains("std::env::set_var"),
+                "the marker is set on a Command, never on the process: {line}"
+            );
+        }
     }
 
     /// The label map is what a waiting user actually reads, so it is asserted

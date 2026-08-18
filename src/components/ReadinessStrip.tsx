@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { X } from "lucide-react";
 import { CopyChip } from "./CopyChip";
 import type { ReadinessItem } from "../lib/readiness";
+import { nextBlocker, staleBlocker } from "../lib/launch";
 
 // The front door's honesty strip. `deriveReadiness` yields ONLY faults, so a
 // well machine hands this an empty list and it renders nothing at all —
@@ -62,6 +63,59 @@ export function ReadinessBlock({
         <FixControl item={item} onFix={onFix} prominent />
       </div>
     </div>
+  );
+}
+
+/** A refused launch, wired: the blocker in the island, its fix, and — the part
+ *  that makes it feel like the machine is on your side — carrying the held ⏎
+ *  THROUGH when the fix resolves true. If something else was also blocking it
+ *  shows that instead of silently doing nothing.
+ *
+ *  Every launch surface renders exactly this. It lives in this file because it
+ *  composes `FixControl`, which is module-private, and because the file is
+ *  already on boot — so the second door costs nothing.
+ *
+ *  This is the piece that must never be dropped. Without it a surface runs the
+ *  identical `claude --permission-mode plan` with zero preflight and hands the
+ *  user a terminal spinning over nothing — the exact failure the Front Door was
+ *  built to eliminate, reintroduced one surface over. */
+export function BlockedLaunch({
+  blocked,
+  readiness,
+  onFix,
+  onShow,
+  onProceed,
+}: {
+  /** The item ⏎ was refused on, or null. */
+  blocked: ReadinessItem | null;
+  /** Live readiness — how a blocker fixed ELSEWHERE gets retired. */
+  readiness: ReadinessItem[];
+  onFix: (item: ReadinessItem) => Promise<boolean>;
+  /** Show a different blocker, or clear it. */
+  onShow: (item: ReadinessItem | null) => void;
+  /** The path is clear — carry the held launch through. */
+  onProceed: () => void;
+}) {
+  // A blocker that got fixed elsewhere must not keep sitting in the island
+  // telling the user about a fault that no longer exists.
+  useEffect(() => {
+    if (staleBlocker(readiness, blocked)) onShow(null);
+  }, [readiness, blocked, onShow]);
+
+  if (!blocked) return null;
+  return (
+    <ReadinessBlock
+      item={blocked}
+      onFix={async (item) => {
+        const ok = await onFix(item);
+        if (!ok) return false;
+        const next = nextBlocker(readiness, item.id);
+        onShow(next);
+        if (!next) onProceed();
+        return true;
+      }}
+      onDismiss={() => onShow(null)}
+    />
   );
 }
 

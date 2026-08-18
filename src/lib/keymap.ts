@@ -37,11 +37,23 @@ export interface KeyBinding {
 
 export const GLOBAL_KEYMAP: KeyBinding[] = [
   { id: "palette", keys: ["⌘", "K"], label: "Command palette", group: "Global", wired: true },
+  // The front door — the app's resting state, and the only path that clears
+  // the session selection. It had no chord at all, which was survivable while
+  // the sessions sidebar was always there carrying its row; it isn't, now that
+  // the sidebar closes on every non-document surface. ⌘N is left alone because
+  // Tauri/macOS read it as "new window".
+  { id: "new-plan", keys: ["⌘", "⇧", "N"], label: "Plan a build", group: "Global", wired: true },
   { id: "snap-back", keys: ["⌘", "⇧", "0"], label: "Snap the layout back", group: "Layout", wired: true },
   { id: "pane-sidebar", keys: ["⇧", "←"], label: "Show / hide the sidebar", group: "Layout", wired: false },
   { id: "pane-discussion", keys: ["⇧", "→"], label: "Show / hide the discussion pane", group: "Layout", wired: false },
   { id: "pane-terminal", keys: ["⇧", "↓"], label: "Show / hide the terminal", group: "Layout", wired: false },
   { id: "sidebar-tabs", keys: ["⇧", "↑"], label: "Switch sidebar tabs", group: "Layout", wired: false },
+  // Not a chord: on an immersive surface the periphery is hidden and the way
+  // back is the top-edge hull rail (or ⌘⇧0, which lands on the document).
+  // Documented here because the cheat sheet is where a user goes looking for
+  // "how do I get the panels back" — the REVIEW_KEYMAP below already uses
+  // gesture caps ("click", "drag") the same way.
+  { id: "immersive", keys: ["hover"], label: "Show the panels on an immersive surface", group: "Layout", wired: false },
   { id: "zoom-in", keys: ["⌘", "+"], label: "Zoom the document in", group: "Document", wired: false },
   { id: "zoom-out", keys: ["⌘", "−"], label: "Zoom the document out", group: "Document", wired: false },
   { id: "zoom-reset", keys: ["⌘", "0"], label: "Reset the zoom", group: "Document", wired: false },
@@ -77,6 +89,15 @@ export function isPaletteKey(e: KeyComboInfo): boolean {
 export function isSnapBackKey(e: KeyComboInfo): boolean {
   if (!(e.metaKey || e.ctrlKey)) return false;
   return e.shiftKey && e.code === "Digit0";
+}
+
+/** ⌘⇧N — back to the front door. `e.code` for the same reason as snap-back
+ *  (layout independence), and Alt excluded so ⌥⌘⇧N stays free. Plain ⌘N is
+ *  deliberately NOT matched: macOS and Tauri both read it as "new window". */
+export function isNewPlanKey(e: KeyComboInfo): boolean {
+  if (!(e.metaKey || e.ctrlKey)) return false;
+  if (e.altKey) return false;
+  return e.shiftKey && e.code === "KeyN";
 }
 
 // ---- Renderings -------------------------------------------------------------

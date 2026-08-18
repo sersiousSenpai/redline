@@ -521,14 +521,31 @@ pub fn uninstall_at(path: &std::path::Path) -> Result<HookStatus, String> {
 /// recognize *our* UserPromptSubmit entry when reading settings.json.
 const CAPTURE_INGEST_URL: &str = "http://127.0.0.1:7676/v1/prompts/ingest";
 
+/// The header the capture POST carries its spawning Agent Seat in, empty for a
+/// human's own session. Command-type hooks run inside the spawned `claude`'s
+/// environment, so the shell expands `REDLINE_AGENT_SEAT`
+/// (`claude_proc::ENV_AGENT_SEAT`) at fire time — which is how the ingest route
+/// tells Redline's own constructed prompts from the user's typing without having
+/// to predict a byte-exact body.
+pub const CAPTURE_AGENT_HEADER: &str = "X-Redline-Agent";
+
 /// The command-type hook body. Claude pipes the UserPromptSubmit JSON
 /// (`{session_id, cwd, prompt, prompt_id, …}` — verified against claude
 /// 2.1.199, see docs/protocol-verification.md) to this command's stdin;
 /// `--data-binary @-` forwards it verbatim to the ingest route. Always exits 0.
+///
+/// The agent header uses `"…"` (not `'…'`) deliberately: the shell must expand
+/// the variable. `${VAR:-}` keeps the header present-but-empty for a session
+/// Redline did not spawn, so the route reads one shape either way. Note this is
+/// a *label*, not an authorization — the route treats a non-empty value as "skip
+/// this, it's machine text", which is fail-safe: forging it can only cause a
+/// prompt to be dropped from your own lake, never to be read.
 fn capture_command() -> String {
     format!(
         "curl -s --max-time 1 -X POST -H 'Content-Type: application/json' \
-         --data-binary @- {CAPTURE_INGEST_URL} >/dev/null 2>&1; exit 0"
+         -H \"{CAPTURE_AGENT_HEADER}: ${{{}:-}}\" \
+         --data-binary @- {CAPTURE_INGEST_URL} >/dev/null 2>&1; exit 0",
+        crate::claude_proc::ENV_AGENT_SEAT
     )
 }
 
@@ -700,6 +717,60 @@ mod tests {
         assert!(!uninstall_capture_at(&path).unwrap());
         let json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(json.get("hooks").is_none(), "empty containers dropped");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The capture POST must label itself with the spawning Agent Seat, and it
+    /// must do so through a SHELL expansion — the hook runs inside the spawned
+    /// `claude`'s own environment, which is the whole reason this mechanism
+    /// reaches prompts the hash guard cannot predict. Single quotes would ship
+    /// the literal `${REDLINE_AGENT_SEAT:-}` to the daemon and mark every
+    /// human's prompt as machine text, so the quoting is the test.
+    #[test]
+    fn capture_hook_command_forwards_the_agent_header() {
+        let cmd = capture_command();
+        assert!(
+            cmd.contains(&format!("-H \"{CAPTURE_AGENT_HEADER}: $")),
+            "the header must be double-quoted so the shell expands it: {cmd}"
+        );
+        assert!(
+            cmd.contains("${REDLINE_AGENT_SEAT:-}"),
+            "and default to empty for a session Redline did not spawn: {cmd}"
+        );
+        assert!(
+            !cmd.contains(&format!("'{CAPTURE_AGENT_HEADER}")),
+            "single quotes would send the literal variable name: {cmd}"
+        );
+        // Still fail-open, still the same route.
+        assert!(cmd.contains(CAPTURE_INGEST_URL) && cmd.contains("exit 0"));
+    }
+
+    /// A stale command from an older build must self-heal on the next boot —
+    /// which is how the header reaches settings.json files installed before it
+    /// existed, with no migration and no user action.
+    #[test]
+    fn capture_install_rewrites_a_stale_command_in_place() {
+        let path = tmppath();
+        let stale = format!(
+            "curl -s --max-time 1 -X POST --data-binary @- {CAPTURE_INGEST_URL} >/dev/null 2>&1; exit 0"
+        );
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&json!({
+                "hooks": { "UserPromptSubmit": [
+                    { "hooks": [{ "type": "command", "command": stale, "timeout": 5 }] }
+                ]}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(install_capture_at(&path).unwrap());
+        let json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let ups = json["hooks"]["UserPromptSubmit"].as_array().unwrap();
+        assert_eq!(ups.len(), 1, "rewritten in place, not appended beside");
+        let cmd = ups[0]["hooks"][0]["command"].as_str().unwrap();
+        assert!(cmd.contains(CAPTURE_AGENT_HEADER), "stale command self-healed");
         let _ = std::fs::remove_file(&path);
     }
 

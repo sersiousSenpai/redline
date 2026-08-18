@@ -7,6 +7,11 @@ import {
   deriveTrails,
   fmtBytes,
   groupItems,
+  machineBytes,
+  corpusBannerText,
+  CORPUS_ROLES,
+  CORPUS_ROLE_LABEL,
+  CORPUS_ROLE_HINT,
   type TimelineItem,
 } from "./timeline";
 
@@ -31,12 +36,16 @@ function item(partial: Partial<TimelineItem>): TimelineItem {
     threadKind: null,
     model: null,
     preview: null,
+    bodyChars: null,
+    role: null,
     compacted: false,
     browseId: null,
     url: null,
     title: null,
     action: null,
     fromEventId: null,
+    shotKey: null,
+    caption: null,
     classNodeId: null,
     classTitle: null,
     starred: false,
@@ -207,5 +216,43 @@ describe("fmtBytes", () => {
     expect(fmtBytes(512)).toBe("512 B");
     expect(fmtBytes(12_600)).toBe("12.3 KB");
     expect(fmtBytes(4_300_000)).toBe("4.1 MB");
+  });
+});
+
+describe("corpus role facet", () => {
+  const real = [
+    // The live composition, measured 08/16.
+    { role: "agent", rows: 447, bytes: 5_747_000 },
+    { role: "system", rows: 110, bytes: 1_877_300 },
+    { role: "user", rows: 658, bytes: 212_500 },
+  ];
+
+  it("counts everything that is not the user's own words", () => {
+    expect(machineBytes(real)).toBe(5_747_000 + 1_877_300);
+    expect(machineBytes(undefined)).toBe(0);
+    expect(machineBytes([{ role: "user", rows: 1, bytes: 999 }])).toBe(0);
+  });
+
+  it("states the amount, that nothing was deleted, and where to look", () => {
+    const text = corpusBannerText(real, fmtBytes);
+    expect(text).toContain("7.3 MB");
+    // The reassurance is not optional — the honest version of this change is
+    // "reclassified", never "removed".
+    expect(text).toContain("Nothing was deleted");
+    expect(text).toContain("Whose words");
+  });
+
+  it("says nothing when there is nothing worth interrupting for", () => {
+    expect(corpusBannerText(undefined, fmtBytes)).toBeNull();
+    expect(corpusBannerText([{ role: "user", rows: 10, bytes: 5_000 }], fmtBytes)).toBeNull();
+    // Just under a megabyte of machine text is not worth a banner.
+    expect(corpusBannerText([{ role: "agent", rows: 3, bytes: 999_000 }], fmtBytes)).toBeNull();
+  });
+
+  it("labels each role in the user's terms, not the schema's", () => {
+    expect(CORPUS_ROLES).toEqual(["user", "agent", "system"]);
+    expect(CORPUS_ROLE_LABEL.user).toBe("Yours");
+    expect(CORPUS_ROLE_LABEL.agent).toBe("Redline's");
+    for (const r of CORPUS_ROLES) expect(CORPUS_ROLE_HINT[r].length).toBeGreaterThan(10);
   });
 });

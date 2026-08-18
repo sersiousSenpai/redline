@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import type { InterceptionMode, ReviewSession } from "../types";
@@ -26,25 +25,11 @@ import { MenuSurface } from "./ui/MenuSurface";
 import { Pill } from "./ui/Pill";
 import type { SoundConfig } from "../audio/beep";
 import { latestDisplayVersion } from "../lib/revisionVersions";
+import { beginWindowDrag, toggleWindowMaximize } from "../lib/windowDrag";
 
-// Programmatic window-drag. Tauri 2's data-tauri-drag-region attribute does
-// not reliably walk ancestors in this build — only exact mousedown targets
-// were dragging, leaving the header mostly inert. Instead, we listen on the
-// header itself and trigger startDragging() unless the mousedown originated
-// on an interactive control (buttons, selects, links, inputs). Double-click
-// invokes the platform's title-bar action (zoom on macOS).
-const INTERACTIVE_TAGS = new Set(["BUTTON", "A", "INPUT", "SELECT", "TEXTAREA"]);
-
-function isInteractive(target: EventTarget | null): boolean {
-  let el = target as HTMLElement | null;
-  while (el) {
-    if (INTERACTIVE_TAGS.has(el.tagName)) return true;
-    if (el.dataset?.noDrag === "true") return true;
-    if (el.tagName === "HEADER") return false;
-    el = el.parentElement;
-  }
-  return false;
-}
+// Programmatic window-drag (there is no native title bar — see windowDrag.ts).
+// Lives in lib/ because the immersive hull rail stands in for this header and
+// has to carry byte-identical behavior.
 
 // Header controls are the shared ui/Button primitive (text labels for primary
 // pane verbs — new users couldn't read the old bare-emoji buttons; low-traffic
@@ -235,15 +220,8 @@ export function Header({
   return (
     <header
       className="rl-app-header flex items-center justify-end gap-4 pl-20 pr-6 py-2"
-      onMouseDown={(e) => {
-        if (e.button !== 0) return;
-        if (isInteractive(e.target)) return;
-        void getCurrentWindow().startDragging();
-      }}
-      onDoubleClick={(e) => {
-        if (isInteractive(e.target)) return;
-        void getCurrentWindow().toggleMaximize();
-      }}
+      onMouseDown={beginWindowDrag}
+      onDoubleClick={toggleWindowMaximize}
     >
       <div className="flex items-center gap-3">
         <div className="flex items-center gap-1.5">

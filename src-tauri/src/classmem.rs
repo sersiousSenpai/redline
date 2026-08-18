@@ -722,7 +722,7 @@ pub fn build_classifier_prompt(
             it.surface.as_deref().unwrap_or("-"),
             it.body
                 .as_deref()
-                .map(|b| truncate_1line(b, 240))
+                .map(|b| head_tail_1line(b, CLASSIFIER_ITEM_HEAD, CLASSIFIER_ITEM_TAIL))
                 .unwrap_or_else(|| format!(
                     "[decision references {} {}]",
                     it.ref_kind.as_deref().unwrap_or("row"),
@@ -909,6 +909,26 @@ fn truncate_1line(s: &str, max: usize) -> String {
     }
 }
 
+/// Per-lake-item window in the classifier's baked delta. Head+tail rather than a
+/// head: a prompt opens with its ask and closes with its decision, and the head
+/// window was keeping the first while discarding the second. Widened from 240 to
+/// 500 total because Phase 1 freed the corpus budget it would have cost —
+/// agent prefaces no longer enter the delta at all.
+const CLASSIFIER_ITEM_HEAD: usize = 300;
+const CLASSIFIER_ITEM_TAIL: usize = 200;
+
+/// One-line window keeping both ends of a body. Collapses to a plain truncation
+/// when the text is short enough that both windows would overlap.
+fn head_tail_1line(s: &str, head: usize, tail: usize) -> String {
+    let one: Vec<char> = s.replace('\n', " ").chars().collect();
+    if one.len() <= head + tail {
+        return one.into_iter().collect();
+    }
+    let h: String = one[..head].iter().collect();
+    let t: String = one[one.len() - tail..].iter().collect();
+    format!("{h} … {t}")
+}
+
 /// Run the classifier headless to completion and return its final text. The tool
 /// surface matches the browse/mission agents (curl bridge to the localhost
 /// daemon so it can read `/v1/memory/*`), with MCP stripped. The delta corpus is
@@ -921,7 +941,7 @@ pub async fn run_classifier(cwd: &str, prompt: String) -> Result<(String, Option
     // UserPromptSubmit hook, so register its exact prompt with the dedup guard
     // BEFORE spawning — otherwise the hook would capture the classifier's own
     // (huge) prompt into the lake, and the next run would try to classify it.
-    ledger::register_agent_prompt(&ledger::body_hash(&prompt));
+    ledger::register_agent_prompt(&prompt);
     let args = crate::claude_proc::bridge_args("classifier", prompt, None);
     let mut cmd = crate::claude_proc::claude_command_for_seat("classifier", &claude_bin);
     let mut child = cmd

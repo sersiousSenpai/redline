@@ -137,6 +137,20 @@ body {
   background: var(--color-ink-muted);
 }
 
+/* Same deal one step further: the strip still SCROLLS — wheel, trackpad and
+   the drag-reorder hit test all need it, and every tab is flex-shrink:0 so a
+   row of them genuinely overflows — it just stops drawing a bar underneath.
+   `overflow: hidden` would have been the wrong fix twice over: it puts the
+   off-screen tabs out of reach, and it clips the mission glow that sits
+   outside a pinned tab's box. */
+.rl-hide-scroll-x {
+  scrollbar-width: none; /* Firefox */
+}
+.rl-hide-scroll-x::-webkit-scrollbar {
+  height: 0;
+  width: 0;
+}
+
 /* Theme-matched vertical scrollbar (document pane): the thumb is the theme's
    rule color so it blends with the chrome borders (terminal top edge, file
    pane left edge); a hair darker on hover for affordance. */
@@ -312,9 +326,14 @@ body {
    every theme regardless of which way the desk/paper tones fall. The --rl-*
    knobs are layout state (page geometry), kept overridable for later tuning. */
 .rl-page-workspace {
-  --rl-page-width: 816px; /* ≈ 8.5in @ 96dpi */
-  --rl-page-pad-x: 84px; /* generous Word-like side margins */
-  --rl-page-pad-y: 88px; /* ≈ 1in top/bottom */
+  /* Scaled by --rl-doc-zoom (⌘+/⌘−/⌘0), which is set on the surfaces' common
+     ancestor in App. The SHEET grows with the type, as Word does: a page that
+     stayed 816px while the words got bigger would just give you fewer words
+     per line, which is the opposite of what zoom is for. Declared here rather
+     than inherited because this element already owns the page geometry. */
+  --rl-page-width: calc(816px * var(--rl-doc-zoom, 1)); /* ≈ 8.5in @ 96dpi */
+  --rl-page-pad-x: calc(84px * var(--rl-doc-zoom, 1)); /* Word-like margins */
+  --rl-page-pad-y: calc(88px * var(--rl-doc-zoom, 1)); /* ≈ 1in top/bottom */
   --rl-page-gap: 28px; /* breathing room between page and the desk edges */
   --rl-page-desk: color-mix(in srgb, var(--color-paper) 92%, var(--color-ink) 8%);
   background: var(--rl-page-desk);
@@ -368,7 +387,13 @@ body {
    rather than one cramped strip. */
 .rl-ribbon {
   display: flex;
-  flex-wrap: wrap;
+  /* `nowrap` + `hidden`, driven by the measured fit in `useRibbonOverflow`.
+     Wrapping degraded UGLY rather than broken — a formatting bar silently
+     becoming two rows shoves the document down and reads as a layout bug. The
+     give-up order (lib/ribbonFit.ts) decides what leaves, and three groups
+     never do: Editing/Suggesting, ✦ Generate and Comments. */
+  flex-wrap: nowrap;
+  overflow: hidden;
   align-items: center;
   gap: 2px 4px;
   padding: 6px 8px;
@@ -388,6 +413,33 @@ body {
   border-right: none;
   margin-right: 0;
   padding-right: 0;
+}
+/* Given up to the overflow. `display: none` rather than visibility so it takes
+   no width — and the fit logic never re-measures a hidden group (it would
+   measure 0 and then "fit" forever). */
+.rl-ribbon-group[data-hidden="1"] {
+  display: none;
+}
+/* The ⋯ affordance appears only when something actually left, so a roomy
+   ribbon carries no dead control. Pure CSS: the fit writes one attribute on
+   the ribbon and never touches React state. */
+.rl-ribbon-more {
+  display: none;
+}
+.rl-ribbon[data-overflowing="1"] .rl-ribbon-more {
+  display: inline-flex;
+  margin-left: auto;
+}
+/* ⋯ pressed: show the rest, on a second row, because the user asked for it.
+   The distinction that matters is consent — the bar never grows a second row on
+   its own. Expanding does NOT re-measure the given-up groups away again: the
+   fit only ever writes `data-hidden`, and this outranks it. */
+.rl-ribbon[data-expanded="1"] {
+  flex-wrap: wrap;
+  overflow: visible;
+}
+.rl-ribbon[data-expanded="1"] .rl-ribbon-group[data-hidden="1"] {
+  display: inline-flex;
 }
 .rl-ribbon-btn:hover:not(:disabled),
 .rl-ribbon-trigger:hover:not(:disabled) {
@@ -926,6 +978,16 @@ p.rl-block-modified {
   height: 6px;
   border-radius: 50%;
   background: color-mix(in srgb, var(--color-info) 75%, transparent);
+  /* Load-bearing, and the reason the dot was invisible for so long: this rule
+     and the `[data-anchor-id]` debug label above target the SAME ::before on
+     the SAME element (every drafter block carries both attributes). This one
+     wins `content` and `left` on specificity but declared no `opacity`, so it
+     inherited the label's `opacity: 0` and only appeared on hover.
+
+     The trade: a changed block now shows the dot instead of its id label on
+     hover. Worth it — the dot is the product signal ("this block has a pending
+     change"), the label is a debug affordance. */
+  opacity: 1;
 }
 
 /* ✦ co-authoring: the block a doc-agent instruction targets, pulsing quietly
@@ -3323,9 +3385,27 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
   }
 }
 
-/* ── Front door ────────────────────────────────────────────────────────────
-   The document plate's resting state, and where Redline opens. One line of
-   type, one box.
+/* ── The launch surfaces (`.rl-fd-*`) ──────────────────────────────────────
+   Named for the Front Door, which is where this vocabulary was built — but it
+   has TWO consumers, deliberately:
+
+     1. `FrontDoor.tsx`  — the document plate's resting state, where Redline
+        opens. One line of type, one box.
+     2. `PromptDrafter.tsx` — the same act at the other scale. Its launch bar
+        is the same island, docked to the bottom of the page instead of
+        floating in the middle of one.
+
+   `ReadinessStrip.tsx` hardcodes nine of these classes and `ProjectPicker`
+   hands out the literal `"rl-fd-tool is-wide"`, so the namespace was already
+   shared before the Drafter arrived; renaming it to something surface-neutral
+   would be a 40-symbol rename across a surface with two documented paint
+   regressions (see the `.rl-frontdoor.is-in` note below), buying a name. What
+   makes these styles portable is that every value is `color-mix` over live
+   theme tokens — which is already true. Revisit at consumer three.
+
+   The `.rl-dl-*` sub-block near the end of this region holds the four things
+   whose GEOMETRY genuinely differs for a docked bar. Everything else is shared
+   verbatim, including the lift and planning states.
 
    The whole surface is ONE island — a glass slab that changes shape rather
    than a stack of controls that appear and disappear. It settles when idle,
@@ -3337,12 +3417,47 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
    all twelve themes instead of being a hardcoded slate that fights half of
    them. Motion honours prefers-reduced-motion at the bottom of the block. */
 
+/* The frame the door stands in. While the door is showing, the document
+   scroller stops being a scroller: the hero is a fixed composition, and a
+   composition that scrolls is one that didn't fit.
+
+   It used to size itself with `min-height: 70vh` — VIEWPORT units inside a box
+   that is never the viewport. The pane is `100vh − header − terminal dock −
+   footer`, and the dock alone defaults to 260px, so with the article's own
+   vertical padding on top the door demanded more height than it was given and
+   the scroller obliged. Flex owns the height now: the door fills its pane
+   exactly, and `justify-content: center` centres against the real box instead
+   of a guessed fraction of the window. */
+.rl-doorframe {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.rl-doorframe > .doc-article {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.rl-doorframe .rl-frontdoor {
+  flex: 1;
+  min-height: 0;
+}
+/* `width: 100%` is load-bearing, not belt-and-braces. Both of these carry
+   `margin-inline: auto`, and an auto cross-axis margin on a flex item cancels
+   `align-items: stretch` — so without an explicit width they would shrink to
+   fit their content instead of filling the pane up to their own max-width, and
+   the hero would come out narrower than it is anywhere else. */
+.rl-doorframe > .doc-article,
+.rl-doorframe .rl-frontdoor {
+  width: 100%;
+}
+
 .rl-frontdoor {
   /* Centred on its own measure regardless of the plate's wide/normal mode —
      a hero that hugs the left edge of a 1900px pane reads as a stray panel. */
   max-width: 42rem;
   margin-inline: auto;
-  min-height: 70vh;
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -3438,7 +3553,8 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
 
 /* ── The island ─────────────────────────────────────────────────────────── */
 
-.rl-fd-island {
+.rl-fd-island,
+.rl-dl-bar {
   position: relative;
   border-radius: 18px;
   padding: 14px 14px 12px;
@@ -3459,7 +3575,8 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
 }
 /* Lifted = focused, or carrying a sentence, or planning. The slab rises and
    picks up an accent ring — the shape IS the state. */
-.rl-fd-island.is-lifted {
+.rl-fd-island.is-lifted,
+.rl-dl-bar.is-lifted {
   transform: translateY(-2px);
   border-color: color-mix(in srgb, var(--color-info) 42%, transparent);
   background: color-mix(in srgb, var(--color-bg-elevated) 78%, transparent);
@@ -3468,8 +3585,59 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
     0 0 0 3px color-mix(in srgb, var(--color-info) 12%, transparent),
     0 18px 44px -18px rgba(0, 0, 0, 0.6);
 }
-.rl-fd-island.is-planning {
+.rl-fd-island.is-planning,
+.rl-dl-bar.is-planning {
   border-color: color-mix(in srgb, var(--color-info) 30%, transparent);
+}
+
+/* A refused ⏎.
+   Every refusal on this surface is a real condition correctly enforced, but
+   from the user's chair three of the four leave the composer looking untouched
+   and one is silent outright — so the key "did nothing" and the sentence "just
+   sits there". This is the answer to that sentence: the island flinches.
+
+   TWO class names for ONE animation, alternated by a nonce. A CSS animation
+   restarts only when its name changes, so re-adding the same class in the same
+   frame plays nothing — and pressing ⏎ a second time against the same blocker
+   is exactly the press that must not look ignored. `transform` is on the
+   island's own transition list, so the keyframes name it explicitly and hand
+   it back at the end (the `is-lifted` translate resumes untouched). */
+.rl-fd-island.is-refused {
+  animation: rl-fd-refuse 180ms cubic-bezier(0.36, 0.07, 0.19, 0.97);
+}
+.rl-fd-island.is-refused-alt {
+  animation: rl-fd-refuse-alt 180ms cubic-bezier(0.36, 0.07, 0.19, 0.97);
+}
+@keyframes rl-fd-refuse {
+  0%,
+  100% {
+    transform: translateX(0) translateY(-2px);
+  }
+  25% {
+    transform: translateX(-5px) translateY(-2px);
+  }
+  75% {
+    transform: translateX(5px) translateY(-2px);
+  }
+}
+@keyframes rl-fd-refuse-alt {
+  0%,
+  100% {
+    transform: translateX(0) translateY(-2px);
+  }
+  25% {
+    transform: translateX(-5px) translateY(-2px);
+  }
+  75% {
+    transform: translateX(5px) translateY(-2px);
+  }
+}
+/* The refusal with no panel of its own. Warning-toned, not error-toned:
+   nothing broke, the app declined. */
+.rl-fd-refused {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--color-warning, #b45309);
 }
 
 /* Content swapping inside the island rises into place instead of popping —
@@ -3498,7 +3666,12 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
   line-height: 1.55;
   padding: 4px 4px 0;
   min-height: 28px;
-  max-height: 300px;
+  /* The one scroller on this surface that IS intentional: past the cap the
+     composer scrolls its own text rather than growing the island off the top
+     of a short pane. The cap follows the measured pane height (see
+     FrontDoor.tsx's `inputCap`, published as `--rl-fd-input-max`); the literal
+     is the pre-measurement fallback and must stay equal to `inputCap`'s. */
+  max-height: var(--rl-fd-input-max, 300px);
   overflow-y: auto;
 }
 .rl-fd-input::placeholder {
@@ -3904,11 +4077,13 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
 
    The order things are given up in: display type shrinks, then the toolbar
    wraps, then the subtitle goes, then the chips. The composer is the last
-   thing standing, because it is the only thing here that is load-bearing. */
+   thing standing, because it is the only thing here that is load-bearing.
 
-.rl-frontdoor.is-compact {
-  min-height: 62vh;
-}
+   HEIGHT has its own ladder below (`is-short` / `is-squat`), from the same
+   observer, following the same give-up order. It has to exist separately
+   because the two squeezes are independent: dragging the terminal dock up
+   leaves the door as wide as ever and half as tall. */
+
 .rl-frontdoor.is-compact .rl-fd-title {
   font-size: 30px;
   letter-spacing: -0.015em;
@@ -3940,7 +4115,6 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
 }
 
 .rl-frontdoor.is-tight {
-  min-height: 0;
   padding-block: 24px;
 }
 .rl-frontdoor.is-tight .rl-fd-title {
@@ -3971,6 +4145,379 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
   );
 }
 
+/* ── Squat ──────────────────────────────────────────────────────────────────
+   The same ladder, on the other axis. The pane is `100vh − header − dock −
+   footer`, and the dock is user-draggable to nearly the whole window — so the
+   door is routinely handed 500px of height on a 1400px display, with its full
+   width intact. Widths degrade the type; heights degrade the ORBIT, because
+   what a short pane runs out of room for is the things around the island, not
+   the island.
+
+   Same give-up order, read top to bottom: the subtitle and the explainer link
+   first, then the eyebrow and the chips. The composer is the last thing
+   standing here too. */
+
+.rl-frontdoor.is-short .rl-fd-title {
+  font-size: 28px;
+  margin-bottom: 16px;
+}
+.rl-frontdoor.is-short .rl-fd-sub,
+.rl-frontdoor.is-short .rl-fd-how {
+  display: none;
+}
+.rl-frontdoor.is-short .rl-fd-suggest-wrap {
+  margin-top: 14px;
+}
+.rl-frontdoor.is-short .rl-fd-strip {
+  margin-top: 18px;
+}
+
+.rl-frontdoor.is-squat {
+  padding-block: 16px;
+}
+.rl-frontdoor.is-squat .rl-fd-eyebrow {
+  display: none;
+}
+.rl-frontdoor.is-squat .rl-fd-title {
+  font-size: 22px;
+  margin-bottom: 12px;
+}
+/* The chips are a way in, and a pane this short has no room to spare for one
+   — same reason `is-tight` retires them on the width axis. */
+.rl-frontdoor.is-squat .rl-fd-suggest-wrap {
+  display: none;
+}
+/* The fault strip is the one thing here that can be arbitrarily long (one row
+   per blocker), so it gets the bound rather than the composer. Its own
+   scroller, never the page's. */
+.rl-frontdoor.is-squat .rl-fd-strip {
+  max-height: 96px;
+  overflow-y: auto;
+  margin-top: 12px;
+}
+
+/* ── The portal, and the room behind it ─────────────────────────────────────
+   The Front Door is a glass island floating on ruled paper. The Drafter is the
+   same room at long-form scale, so it is made of the same two things: a desk
+   of ruled paper lit from behind, and a sheet of glass to write on.
+
+   This is what makes the opening work. The aperture animation (lib/morph.ts)
+   only has to move a shape — it never has to cross one material into another,
+   because both ends ARE the material. A glass island opening into a white
+   sheet of paper would land on a discontinuity no timing could hide.
+
+   Every value is `color-mix` over live tokens, exactly like the front door's,
+   so the room re-tints across all twelve themes rather than being a slate that
+   fights half of them. */
+/* ── The surface swap ───────────────────────────────────────────────────────
+   Two separate surfaces, stacked for the length of one spring: the Front Door
+   fading back, the Drafter springing out of the box the island occupied. The
+   layers overlap so the door can leave gracefully instead of vanishing in a
+   single frame — that whole-screen cut is what read as janky navigation. */
+.rl-swap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  /* Nothing inside may scroll the swap itself. A focus() during the flight
+     (the editor claiming the caret as it opens) asks the browser to bring that
+     element into view, and if this box can scroll it will — which moves the
+     whole animating surface under the animation. */
+  overflow: hidden;
+}
+.rl-swap-layer {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.rl-swap-in {
+  flex: 1;
+}
+/* The outgoing door is out of the flow entirely: it must not fight the
+   incoming surface for height while both are mounted, and it is on its way
+   out anyway. `inset: 0` gives it the pane's box, and the flex column inside
+   is what the document scroller it holds expects to be sized by. */
+.rl-swap-out {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+}
+.rl-swap-in {
+  z-index: 2;
+}
+
+/* The outgoing surface must not replay its own entrance while it leaves.
+   It is a fresh MOUNT — the tree shape changed, so React builds a new one —
+   and the Front Door opens with a 520ms rise from `translateY(8px)` at
+   opacity 0. Left alone it would fade in and lift while we are fading it out,
+   which is movement in the wrong direction at the worst moment. */
+.rl-swap-out .rl-frontdoor,
+.rl-swap-out .rl-frontdoor.is-in {
+  opacity: 1;
+  transform: none;
+  animation: none;
+}
+.rl-swap-out .rl-fd-morph,
+.rl-swap-out .rl-fd-island {
+  animation: none;
+  transition: none;
+}
+
+/* The editor arrives DURING the spring and grows with it. Its own entrance is
+   just a short fade so it resolves rather than pops — no movement of its own,
+   which would fight the transform already carrying it. */
+.rl-swap-in .rl-drafter-glass {
+  animation: rl-swap-doc-in 200ms cubic-bezier(0.4, 0, 0.2, 1) backwards;
+}
+@keyframes rl-swap-doc-in {
+  from {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rl-swap-in .rl-drafter-glass {
+    animation: none;
+  }
+}
+
+/* The blur is suspended for the flight.
+   A `backdrop-filter` under a transforming ancestor makes WebKit re-sample and
+   re-blur the backdrop every frame, at a changing scale — comfortably the most
+   expensive thing that could be happening during this animation, and it buys
+   nothing while the surface is in motion. Restored the moment it lands. */
+.rl-swap-in[data-springing="1"] .rl-page,
+.rl-swap-in[data-springing="1"] .rl-dl-bar {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+/* The desk: the front door's ruled paper and accent bloom, so the surface the
+   portal opens into is visibly the same place it opened from. */
+.rl-page-workspace--drafter {
+  position: relative;
+  background:
+    radial-gradient(
+      70% 42% at 50% 0%,
+      color-mix(in srgb, var(--color-info) 9%, transparent),
+      transparent 74%
+    ),
+    repeating-linear-gradient(
+      to bottom,
+      color-mix(in srgb, var(--color-ink) 6%, transparent) 0 1px,
+      transparent 1px 34px
+    ),
+    var(--color-bg);
+}
+
+/* The sheet: glass, and LIFTED off its desk.
+   The pairing is the same one the island already uses — `--color-bg` recessed
+   underneath, `--color-bg-elevated` lifted on top. The first version mixed the
+   desk toward `--color-ink`, which on a dark theme lightens it: the desk came
+   out brighter than the sheet and the page read as a hole punched in the
+   surface rather than a sheet resting on it.
+
+   Opacity is the legibility budget — this carries sustained serif body text,
+   so it sits far denser than the front door's island (which holds one line).
+   92% keeps the ruled desk reading as depth THROUGH the sheet without ever
+   competing with the words on it. */
+.rl-page-workspace--drafter .rl-page {
+  background: color-mix(in srgb, var(--color-bg-elevated) 92%, transparent);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  backdrop-filter: blur(20px) saturate(150%);
+  border: 1px solid color-mix(in srgb, var(--color-ink) 14%, transparent);
+  border-radius: 14px;
+  box-shadow:
+    0 1px 0 0 color-mix(in srgb, var(--color-ink) 8%, transparent) inset,
+    0 24px 56px -20px rgba(0, 0, 0, 0.6);
+  transition:
+    border-color 260ms ease,
+    box-shadow 320ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+/* Focused, the sheet picks up the island's accent ring — the same "this is
+   the thing you are using" signal the launch bar gives, on the same beat. */
+.rl-page-workspace--drafter:focus-within .rl-page {
+  border-color: color-mix(in srgb, var(--color-info) 30%, transparent);
+  box-shadow:
+    0 1px 0 0 color-mix(in srgb, var(--color-ink) 8%, transparent) inset,
+    0 0 0 3px color-mix(in srgb, var(--color-info) 9%, transparent),
+    0 22px 52px -20px rgba(0, 0, 0, 0.55);
+}
+
+/* The ribbon and the launch bar sit on the same glass, so the room is one
+   material top to bottom rather than a glass sheet in an opaque frame. */
+.rl-page-workspace--drafter,
+.rl-drafter-glass {
+  background-color: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rl-page-workspace--drafter .rl-page {
+    transition: none;
+  }
+}
+
+/* ── The Drafter's launch bar (`.rl-dl-*`) ──────────────────────────────────
+   The same island, docked. Only the four things whose GEOMETRY differs live
+   here; the glass, the lift, the tools, the CTA, the blocker and the planning
+   card are all the shared `.rl-fd-*` above, unchanged.
+
+   What differs, and why:
+     1. It is docked to the bottom of the pane, so it loses its bottom corners
+        and its bottom shadow — a floating slab sitting on an edge reads as a
+        mistake.
+     2. It has to GROW (≈46px → ≈96px) when it becomes the launch card, and the
+        scroll container above it reflows shorter. That is a grid-template-rows
+        animation on a wrapper, never a max-height: a fixed max-height is a lie
+        the moment the card wraps, and the overflow lands on the document. */
+.rl-dl-bar-wrap {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows 320ms cubic-bezier(0.16, 1, 0.3, 1);
+  padding: 0 12px 10px;
+  flex-shrink: 0;
+}
+.rl-dl-bar-wrap > * {
+  min-height: 0;
+}
+/* Docked: square off the edge it sits on, and drop the shadow that would
+   otherwise fall out of the pane. */
+.rl-dl-bar {
+  border-radius: 16px 16px 0 0;
+  padding: 8px 10px;
+  border-bottom: none;
+}
+/* The bar's own morph runs the shared rise, but its tools row must not wrap
+   into two lines at a narrow pane — the document is the thing that should get
+   the space. */
+.rl-dl-bar .rl-fd-tools {
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+/* The receipt's title behaves like the front door's prompt, but a document
+   title is one line, not a paragraph. */
+.rl-dl-bar .rl-fd-planning-prompt {
+  max-height: 3em;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+/* ── The blank page ─────────────────────────────────────────────────────────
+   Rendered INSIDE `.rl-page`, which already carries `position: relative` and
+   `cursor: text` and whose click handler lands the caret from anywhere — so a
+   click straight through this still starts typing. `pointer-events: none` on
+   the wrapper makes that literal; only the chips take the pointer back.
+
+   The entrance is a KEYFRAME, not a transition: a large element parked at a
+   transitioned opacity keeps its own WebKit compositing layer, and an 8-bit
+   layer over near-black quantizes into a visible hard-edged rectangle (the
+   documented regression at the top of this region). The EXIT is instant and
+   deliberately un-animated — ghost text fading out under your first three
+   keystrokes reads as a rendering bug, not as a flourish. */
+.rl-dl-open {
+  position: absolute;
+  /* The page's own padding vars, not a copy of their values — the sheet is
+     zoomable and the ghost text has to sit exactly where the first line will. */
+  left: var(--rl-page-pad-x);
+  right: var(--rl-page-pad-x);
+  top: var(--rl-page-pad-y);
+  pointer-events: none;
+  z-index: 1;
+  animation: rl-dl-open-in 420ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes rl-dl-open-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+.rl-dl-open .rl-fd-eyebrow,
+.rl-dl-open .rl-fd-sub {
+  text-align: left;
+}
+.rl-dl-open-title {
+  /* 30px, not the hero's 40: the sheet is 816px wide at 84px of padding, and
+     the hero's measure runs into the margin here. */
+  font-size: 30px;
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  color: color-mix(in srgb, var(--color-ink) 58%, transparent);
+}
+.rl-dl-open .rl-fd-suggestions {
+  justify-content: flex-start;
+  pointer-events: auto;
+}
+
+/* ── Anchored overlays ──────────────────────────────────────────────────────
+   The chip, the selection menu and the two composers all share one skin now.
+   It used to be four copies of the same inline style object, which is how they
+   drifted apart in the first place. */
+.rl-dl-overlay {
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-rule);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+}
+
+/* The Bookshelf, as a sheet OVER the document rather than instead of it.
+   Swapping the whole surface meant opening the shelf hid the document you were
+   writing — you lost your place to look something up. Same glass recipe as the
+   launch bar, so it reads as one material. */
+.rl-dl-shelf {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  overflow: auto;
+  padding: 16px;
+  background: color-mix(in srgb, var(--color-bg-elevated) 88%, transparent);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  backdrop-filter: blur(24px) saturate(160%);
+  animation: rl-fd-rise 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* The agent-suggestion strip: floated over the top of the page, never stacked
+   above it. Four banners used to sit in the layout flow and each one's arrival
+   pushed the document down under the reader's eyes. */
+.rl-dl-suggest-strip {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 24;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 32px);
+  margin-top: 0;
+}
+
+/* ⌘F floats; it never moves the page.
+   `.rl-search-box` is `position: sticky`, which is right where it lives in the
+   plan editor and wrong here: inside the drafter's scroll container it took
+   layout space and pushed the whole sheet down by its own height the moment the
+   bar opened. Overridden to `static` inside this absolutely-positioned wrapper
+   — the wrapper does the floating, so the box doesn't have to. */
+.rl-dl-findbar {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 25;
+}
+.rl-dl-findbar .rl-search-box {
+  position: static;
+  margin-left: 0;
+}
+
+/* A file is over the page. Same accent ring the island uses when it lifts, so
+   "this will take it" reads as one idea across the surface. */
+.rl-page.is-dropping {
+  outline: 2px dashed color-mix(in srgb, var(--color-info) 55%, transparent);
+  outline-offset: -6px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .rl-fd-suggest-wrap {
     transition: none;
@@ -3982,6 +4529,8 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
     animation: none;
   }
   .rl-fd-island,
+  .rl-dl-bar,
+  .rl-dl-bar-wrap,
   .rl-fd-go,
   .rl-fd-tool,
   .rl-fd-suggestion,
@@ -3989,7 +4538,8 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
   .rl-fd-how {
     transition: none;
   }
-  .rl-fd-island.is-lifted {
+  .rl-fd-island.is-lifted,
+  .rl-dl-bar.is-lifted {
     transform: none;
   }
   .rl-fd-go.is-armed {
@@ -3997,7 +4547,15 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
   }
   .rl-fd-morph,
   .rl-fd-menu,
-  .rl-fd-block {
+  .rl-fd-block,
+  .rl-dl-open {
+    animation: none;
+  }
+  /* The refusal nudge goes with the rest of the motion. The word it carries
+     (`.rl-fd-refused`, and the blocker panel) does not — that is the part
+     doing the actual telling. */
+  .rl-fd-island.is-refused,
+  .rl-fd-island.is-refused-alt {
     animation: none;
   }
   .rl-fd-tool.is-hot {

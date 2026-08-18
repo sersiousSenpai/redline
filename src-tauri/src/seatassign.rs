@@ -1130,7 +1130,7 @@ async fn run_seat_assigner_once(
     let claude_bin = tokio::task::spawn_blocking(resolve_claude_bin)
         .await
         .map_err(|e| e.to_string())?;
-    ledger::register_agent_prompt(&ledger::body_hash(&prompt));
+    ledger::register_agent_prompt(&prompt);
     let args = assigner_argv(prompt, prior.as_deref());
     let mut cmd = crate::claude_proc::claude_command_for_seat("seatassign", &claude_bin);
     let mut child = cmd

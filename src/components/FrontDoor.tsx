@@ -11,7 +11,7 @@ import {
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Check, CornerDownLeft, Mic, Plus, X } from "lucide-react";
 import { ProjectPicker, type ProjectOption } from "./ProjectPicker";
-import { ReadinessBlock, ReadinessStrip } from "./ReadinessStrip";
+import { BlockedLaunch, ReadinessStrip } from "./ReadinessStrip";
 import { WorkingIndicator } from "./WorkingIndicator";
 import { useMenuOverlay } from "./menuOverlay";
 import { useDictation } from "../lib/useDictation";
@@ -21,9 +21,9 @@ import {
   projectNameFromPrompt,
   submitAction,
   type LaunchDestination,
-  type ProjectChoice,
 } from "../lib/frontDoor";
-import { blockingItems, type ReadinessItem } from "../lib/readiness";
+import { attemptLaunch as gateLaunch, type ProjectChoice } from "../lib/launch";
+import type { ReadinessItem } from "../lib/readiness";
 
 // The front door. The document plate's resting state and where Redline opens:
 // one line of type, one box, and ⏎ starts a real plan-mode session in a real
@@ -67,6 +67,12 @@ export interface FrontDoorProps {
   /** Launch, optionally overriding the resolved project (used right after a
    *  folder is created, when the chip's state hasn't landed yet). */
   onLaunch: (projectOverride?: string) => void;
+  /** A ⏎ the LAUNCH path refused, after this component's own gate let it
+   *  through (App re-checks readiness at call time). Rendered here rather than
+   *  only as a toast: the fix button belongs where the user is already
+   *  looking, which is what an in-component refusal already does. Nonce-keyed
+   *  so the same blocker twice nudges twice. */
+  refusal: { item: ReadinessItem | null; reason: string | null; nonce: number } | null;
   onDrafter: () => void;
   /** Where ⏎ sends. Sticky and persisted — `Plan ▾` sets it. */
   destination: LaunchDestination;
@@ -99,6 +105,7 @@ export function FrontDoor(props: FrontDoorProps) {
     onFix,
     pending,
     onLaunch,
+    refusal,
     onDrafter,
     destination,
     onDestinationChange,
@@ -128,13 +135,21 @@ export function FrontDoor(props: FrontDoorProps) {
   //
   // Measured, not a media query: the pane is not the viewport, and container
   // queries need Safari 16 while the README still claims macOS 11.
+  //
+  // HEIGHT is measured for the same reason and it is the axis that actually
+  // bites: the pane is `100vh − header − terminal dock − footer`, and the dock
+  // is user-draggable to nearly the whole window. The door's job is to fit
+  // whatever it is handed, because the frame around it does not scroll.
   const [width, setWidth] = useState<number | null>(null);
+  const [height, setHeight] = useState<number | null>(null);
   useLayoutEffect(() => {
     const el = rootRef.current;
     if (!el) return;
     const ro = new ResizeObserver((entries) => {
-      const w = entries[0]?.contentRect.width;
-      if (w) setWidth(w);
+      const box = entries[0]?.contentRect;
+      if (!box) return;
+      if (box.width) setWidth(box.width);
+      if (box.height) setHeight(box.height);
     });
     ro.observe(el);
     return () => ro.disconnect();
@@ -143,6 +158,8 @@ export function FrontDoor(props: FrontDoorProps) {
   // compact flash before the observer fires would be worse than a late one.
   const compact = width !== null && width < 560;
   const tight = width !== null && width < 430;
+  const short = height !== null && height < 620;
+  const squat = height !== null && height < 460;
   // The blocker ⏎ was refused on, surfaced inside the island.
   const [blocked, setBlocked] = useState<ReadinessItem | null>(null);
   // The "build this in a new folder" offer: `launchAfter` distinguishes the
@@ -153,23 +170,61 @@ export function FrontDoor(props: FrontDoorProps) {
     launchAfter: boolean;
   } | null>(null);
   const [creating, setCreating] = useState(false);
-
-  const blocking = useMemo(() => blockingItems(readiness), [readiness]);
-  // A blocker that got fixed elsewhere must not keep sitting in the island
-  // telling the user about a fault that no longer exists.
+  // A refused ⏎ has to LOOK refused. Every refusal below is a real condition
+  // correctly enforced, but three of the four leave the composer looking
+  // untouched and one is silent outright — so from the user's chair the key
+  // did nothing and the sentence "just sits there". This is the one-shot
+  // nudge: a nonce bumped on every refusal, driving a short shake on the
+  // island. A keystroke that changes nothing on screen is the whole
+  // complaint.
+  // The nonce ALTERNATES the class rather than toggling one on and off. A CSS
+  // animation restarts only when the animation-name changes, so re-adding the
+  // same class in the same frame plays nothing — and the second ⏎ against the
+  // same blocker is precisely the press that must not look ignored. Two names,
+  // one keyframe set.
+  const [refusedNonce, setRefusedNonce] = useState(0);
+  // Why, when the reason isn't already rendered as a panel inside the island.
+  const [refusedWhy, setRefusedWhy] = useState<string | null>(null);
+  const refuse = useCallback((why?: string) => {
+    setRefusedNonce((n) => n + 1);
+    setRefusedWhy(why ?? null);
+  }, []);
+  // A refusal is a reaction to one keystroke, not furniture — same 6s as the
+  // toast it replaces. Keyed on the nonce so a second refusal restarts the
+  // clock instead of inheriting the first one's remainder.
   useEffect(() => {
-    if (blocked && !blocking.some((b) => b.id === blocked.id)) setBlocked(null);
-  }, [blocking, blocked]);
+    if (!refusedWhy) return;
+    const t = window.setTimeout(() => setRefusedWhy(null), 6000);
+    return () => window.clearTimeout(t);
+  }, [refusedWhy, refusedNonce]);
+  // A refusal from App's backstop gate. `blocked` gets the item so the fix
+  // button lands in the island exactly as an in-component block does.
+  const lastRefusal = useRef(refusal?.nonce ?? 0);
+  useEffect(() => {
+    if (!refusal || refusal.nonce === lastRefusal.current) return;
+    lastRefusal.current = refusal.nonce;
+    if (refusal.item) setBlocked(refusal.item);
+    refuse(refusal.reason ?? undefined);
+  }, [refusal, refuse]);
+
+  // The composer's growth cap, as ONE number. It was a hard 300 in the effect
+  // below AND a hard 300px in `.rl-fd-input`, which agreed only by accident and
+  // was wrong in the same way on a short pane: 300px of textarea inside a 420px
+  // pane leaves nothing for the island's own chrome, so the island grew past
+  // the frame. Follow the pane instead — 38% of it, floored at ~3 lines — and
+  // publish it so the stylesheet reads the same value rather than a copy.
+  const inputCap = height ? Math.max(88, Math.round(height * 0.38)) : 300;
 
   // Auto-grow. The island is one continuous shape, so the box follows the
-  // text instead of scrolling inside a fixed frame — up to a cap, after
-  // which it scrolls.
+  // text instead of scrolling inside a fixed frame — up to the cap, after
+  // which it scrolls. That inner scroller is the one on this surface that is
+  // intentional and it stays.
   useLayoutEffect(() => {
     const el = taRef.current;
     if (!el) return;
     el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 300)}px`;
-  }, [text, pending]);
+    el.style.height = `${Math.min(el.scrollHeight, inputCap)}px`;
+  }, [text, pending, inputCap]);
 
   // Type-to-start handoff. A LAYOUT effect, not a passive one: it must focus
   // and drain the seed buffer before the browser can dispatch the next
@@ -196,6 +251,8 @@ export function FrontDoor(props: FrontDoorProps) {
       onTextChange((prev) => (prev.trim() ? `${prev.trim()} ${spoken}` : spoken)),
   });
 
+  // The island's growth into the document editor. Declared here, above the
+  // send path, because `send` captures the FLIP's starting box on the gesture.
   const hasText = text.trim().length > 0;
   const canSubmit = hasText && !pending;
 
@@ -203,31 +260,48 @@ export function FrontDoor(props: FrontDoorProps) {
     if (!canSubmit) return;
     // Gate, in order: a blocker refuses outright and renders its fix where
     // the user is already looking; a first-run user with nowhere to build is
-    // offered a folder rather than dropped in $HOME.
+    // offered a folder rather than dropped in $HOME. Both paths nudge, because
+    // a panel appearing BELOW the composer is easy to miss when your eyes are
+    // on the sentence you just pressed ⏎ on.
     //
     // This gate is the PLAN route's alone. Opening the Drafter needs no
     // `claude`, no hook and no interception mode — refusing to open a
     // document because a plan couldn't be captured would be nonsense.
-    if (blocking.length > 0) {
-      setBlocked(blocking[0]);
+    const gate = gateLaunch(readiness);
+    if (gate.kind === "blocked") {
+      setBlocked(gate.item);
+      refuse();
       return;
     }
     if (projectOptions.length === 0 && !choice) {
       setOffer({ name: projectNameFromPrompt(text), launchAfter: true });
+      refuse();
       return;
     }
     setBlocked(null);
     setOffer(null);
+    setRefusedWhy(null);
     onLaunch();
-  }, [canSubmit, blocking, projectOptions.length, choice, text, onLaunch]);
+  }, [canSubmit, readiness, projectOptions.length, choice, text, onLaunch, refuse]);
 
   const send = useCallback(
     (to: LaunchDestination) => {
-      if (!canSubmit) return;
+      // The one genuinely SILENT branch. `canSubmit` is false for two very
+      // different reasons and only one of them is self-evident: an empty box
+      // explains itself, a launch already in flight does not — and that is the
+      // case where the sentence really is sitting in the composer with ⏎ doing
+      // nothing. (It can't be: the Planning card replaces the composer. But it
+      // is exactly the shape of the report, so it says so rather than
+      // swallowing the key.)
+      if (!canSubmit) {
+        if (pending) refuse("A plan is already launching.");
+        else if (!hasText) refuse();
+        return;
+      }
       if (to === "drafter") onDrafter();
       else attemptLaunch();
     },
-    [canSubmit, onDrafter, attemptLaunch],
+    [canSubmit, pending, hasText, refuse, onDrafter, attemptLaunch],
   );
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -309,6 +383,7 @@ export function FrontDoor(props: FrontDoorProps) {
     "rl-fd-island",
     lifted ? "is-lifted" : "",
     pending ? "is-planning" : "",
+    refusedNonce === 0 ? "" : refusedNonce % 2 ? "is-refused" : "is-refused-alt",
   ]
     .filter(Boolean)
     .join(" ");
@@ -318,12 +393,21 @@ export function FrontDoor(props: FrontDoorProps) {
     entered ? "is-in" : "",
     compact ? "is-compact" : "",
     tight ? "is-tight" : "",
+    short ? "is-short" : "",
+    squat ? "is-squat" : "",
   ]
     .filter(Boolean)
     .join(" ");
 
   return (
-    <div ref={rootRef} className={rootClass} data-tour="landing">
+    <div
+      ref={rootRef}
+      className={rootClass}
+      data-tour="landing"
+      // Published so `.rl-fd-input`'s max-height is the SAME number the
+      // auto-grow effect clamps to, rather than a copy that drifts.
+      style={{ "--rl-fd-input-max": `${inputCap}px` } as React.CSSProperties}
+    >
       <div className="rl-fd-paper" aria-hidden />
 
       {/* The stance, not another question — the composer's placeholder is
@@ -445,23 +529,22 @@ export function FrontDoor(props: FrontDoorProps) {
           </div>
         )}
 
-        {blocked && (
-          <ReadinessBlock
-            item={blocked}
-            onFix={async (item) => {
-              const ok = await onFix(item);
-              if (!ok) return false;
-              // Fixed in place — carry the user's ⏎ through rather than
-              // making them press it again. If something else was also
-              // blocking, show that instead of silently doing nothing.
-              const next = blocking.find((b) => b.id !== item.id);
-              setBlocked(next ?? null);
-              if (!next) onLaunch();
-              return true;
-            }}
-            onDismiss={() => setBlocked(null)}
-          />
+        {/* A refusal with no panel of its own — the only one that would
+            otherwise be completely silent. `role="status"` so a screen reader
+            hears the same thing the shake says. */}
+        {refusedWhy && !blocked && !offer && (
+          <div className="rl-fd-refused" role="status">
+            {refusedWhy}
+          </div>
         )}
+
+        <BlockedLaunch
+          blocked={blocked}
+          readiness={readiness}
+          onFix={onFix}
+          onShow={setBlocked}
+          onProceed={() => onLaunch()}
+        />
 
         {offer && (
           <NewProjectOffer

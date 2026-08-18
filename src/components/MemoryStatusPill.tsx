@@ -25,6 +25,32 @@ export interface MemoryStatus {
   lastCompactionTs: number | null;
   /** Structural proposals held awaiting human review (the escalation channel). */
   pendingProposals: number;
+  /** Corpus composition — rows and bytes per role. The number that was missing:
+   *  92.6% of the lake's searchable bytes were machine text and nothing
+   *  reported it, so the only symptom was that search "felt wrong". */
+  corpusRoles?: { role: string; rows: number; bytes: number }[];
+  corpusBytes?: number;
+  corpusUserBytes?: number;
+  /** Which tier wrote the surviving gists. A summarizer that silently stopped
+   *  running shows here as a rising `deterministic` count, instead of hiding
+   *  behind a healthy-looking reclaim number. */
+  keeperGistSource?: { agent: number; deterministic: number };
+  /** Cold compactions that are still reversible, and what the copies cost. */
+  archivedCount?: number;
+  archivedBytes?: number;
+  /** Ask turns that were handed a server-side prefetch, and how many of them
+   *  answered without curling — the honest A/B for the one-turn design. */
+  askPrefetch?: { hits: number; turns: number };
+  /** The semantic index. `pending` is reported beside `chunks` so a half-built
+   *  index is VISIBLE rather than silently degrading recall, and
+   *  `provider: "absent"` says the arm cannot run on this machine at all —
+   *  which is a fact about the machine, not about the user's history. */
+  embeddings?: {
+    provider: string;
+    model: string | null;
+    chunks: number;
+    pending: number;
+  };
 }
 
 /** Coarse "N ago" for the pill. Pure, so it's unit-tested. */

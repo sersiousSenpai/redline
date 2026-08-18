@@ -1,17 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { ProjectOption } from "../components/ProjectPicker";
 import {
-  composePrompt,
   frontDoorSuggestions,
-  launchStillLive,
   otherDestination,
   projectNameFromPrompt,
-  resolveLaunchProject,
   submitAction,
-  type ProjectChoice,
 } from "./frontDoor";
+
+// `launchStillLive`, `resolveLaunchProject` and `composePrompt` moved to
+// `launch.test.ts` with the functions themselves — they are every door's
+// property now, not this one's.
 
 const key = (
   k: string,
@@ -79,132 +80,11 @@ describe("submitAction", () => {
   });
 });
 
-describe("launchStillLive", () => {
-  it("is dead only when a REPORTED set omits the terminal", () => {
-    expect(launchStillLive("t1", ["t2", "t3"])).toBe(false);
-    expect(launchStillLive("t1", [])).toBe(false);
-  });
-
-  it("stays alive while the terminal is still open", () => {
-    expect(launchStillLive("t1", ["t1"])).toBe(true);
-    expect(launchStillLive("t1", ["t2", "t1"])).toBe(true);
-  });
-
-  it("treats an unreported dock as ignorance, not death", () => {
-    // The frames before the dock's first report would otherwise cancel every
-    // launch the instant it started.
-    expect(launchStillLive("t1", null)).toBe(true);
-  });
-
-  it("has nothing to track without a terminal id", () => {
-    expect(launchStillLive(null, [])).toBe(true);
-    expect(launchStillLive(null, null)).toBe(true);
-  });
-
-  it("a swap that keeps the count the same is still a death", () => {
-    // The reason a tab COUNT can't answer this: close one, open another, and
-    // the count never moved.
-    expect(launchStillLive("t1", ["t9"])).toBe(false);
-  });
-});
-
 describe("otherDestination", () => {
   it("is an involution — flipping twice returns you", () => {
     expect(otherDestination("plan")).toBe("drafter");
     expect(otherDestination("drafter")).toBe("plan");
     expect(otherDestination(otherDestination("plan"))).toBe("plan");
-  });
-});
-
-describe("resolveLaunchProject", () => {
-  const options: ProjectOption[] = [
-    { path: "/Users/me/redline", name: "redline", source: "session" },
-    { path: "/Users/me/qwallah", name: "qwallah", source: "folder" },
-  ];
-  const base = {
-    projectOptions: options,
-    openFolder: null as string | null,
-    lastDrafterProject: null as string | null,
-  };
-
-  it("obeys an explicit chip over everything else", () => {
-    const chip: ProjectChoice = { path: "/Users/me/other" };
-    expect(
-      resolveLaunchProject("fix a bug in redline", chip, {
-        ...base,
-        openFolder: "/Users/me/qwallah",
-        lastDrafterProject: "/Users/me/last",
-      }),
-    ).toBe("/Users/me/other");
-  });
-
-  it("treats an explicit Home pick as a real choice, not as 'unset'", () => {
-    // The distinction that matters: {path:null} must NOT fall through to the
-    // guess, or picking Home would snap back to a repo on the next keystroke.
-    expect(
-      resolveLaunchProject("fix a bug in redline", { path: null }, base),
-    ).toBeNull();
-  });
-
-  it("guesses the repo named in the prompt when the chip is untouched", () => {
-    expect(resolveLaunchProject("fix a bug in redline", null, base)).toBe(
-      "/Users/me/redline",
-    );
-  });
-
-  it("falls back to the open folder, then the last drafter project", () => {
-    expect(
-      resolveLaunchProject("add a toggle", null, {
-        ...base,
-        openFolder: "/Users/me/folder",
-        lastDrafterProject: "/Users/me/last",
-      }),
-    ).toBe("/Users/me/folder");
-    expect(
-      resolveLaunchProject("add a toggle", null, {
-        ...base,
-        lastDrafterProject: "/Users/me/last",
-      }),
-    ).toBe("/Users/me/last");
-  });
-
-  it("ends at Home when nothing resolves", () => {
-    expect(resolveLaunchProject("add a toggle", null, base)).toBeNull();
-  });
-
-  it("prefers the prompt's repo over the folder the user happens to browse", () => {
-    expect(
-      resolveLaunchProject("fix qwallah's login", null, {
-        ...base,
-        openFolder: "/Users/me/redline",
-      }),
-    ).toBe("/Users/me/qwallah");
-  });
-});
-
-describe("composePrompt", () => {
-  it("passes a bare prompt through, trimmed", () => {
-    expect(composePrompt("  add a toggle  ", [])).toBe("add a toggle");
-  });
-
-  it("appends attachments as a Context path list", () => {
-    expect(composePrompt("add a toggle", ["/a/b.ts", "/c/d.ts"])).toBe(
-      "add a toggle\n\nContext:\n- /a/b.ts\n- /c/d.ts",
-    );
-  });
-
-  it("dedupes and drops blank paths", () => {
-    expect(composePrompt("x", ["/a.ts", " ", "/a.ts", "  /b.ts  "])).toBe(
-      "x\n\nContext:\n- /a.ts\n- /b.ts",
-    );
-  });
-
-  it("returns empty for an empty prompt — there is nothing to launch", () => {
-    expect(composePrompt("   ", ["/a.ts"])).toBe("");
-  });
-
-  it("keeps multi-line prompts intact", () => {
-    expect(composePrompt("one\ntwo", [])).toBe("one\ntwo");
   });
 });
 
@@ -284,5 +164,50 @@ describe("projectNameFromPrompt", () => {
       expect(slug).not.toContain("/");
       expect(slug).not.toBe("..");
     }
+  });
+});
+
+// Source invariant — the front door already clears its composer on send; a
+// prompt left on screen after it shipped reads as "not sent yet" and invites
+// an accidental relaunch. Pinned here, house-style (cf. drafterCache.test.ts).
+describe("front door clear-on-send wiring", () => {
+  const app = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
+
+  it("launchFromFrontDoor clears text and attachments after handing them off", () => {
+    const fn = app.indexOf("const launchFromFrontDoor");
+    expect(fn).toBeGreaterThan(-1);
+    const launch = app.indexOf("launchPlan({", fn);
+    const text = app.indexOf('setFrontDoorText("")', fn);
+    const attachments = app.indexOf("setFrontDoorAttachments([])", fn);
+    expect(launch).toBeGreaterThan(fn);
+    expect(text).toBeGreaterThan(launch);
+    expect(attachments).toBeGreaterThan(launch);
+  });
+
+  it("it hands over a composer restore, so a dead launch gives the sentence back", () => {
+    const fn = app.indexOf("const launchFromFrontDoor");
+    const end = app.indexOf("const drafterFromFrontDoor", fn);
+    expect(app.slice(fn, end)).toContain('kind: "composer"');
+  });
+
+  it("the Drafter's launch owes nothing back — its document never left", () => {
+    // Decision 3, pinned. A `composer` restore here would mean the Drafter had
+    // taken the document away, which is the one thing it must never do.
+    const fn = app.indexOf("const launchFromDrafter");
+    const end = app.indexOf("const applyReadinessFix", fn);
+    expect(fn).toBeGreaterThan(-1);
+    const body = app.slice(fn, end);
+    expect(body).toContain('restore: { kind: "none" }');
+    expect(body).not.toContain("newDraft(");
+    expect(body).not.toContain("setDrafterDraftId(");
+  });
+
+  it("the drafter hand-off clears it too", () => {
+    const fn = app.indexOf("const drafterFromFrontDoor");
+    expect(fn).toBeGreaterThan(-1);
+    const text = app.indexOf('setFrontDoorText("")', fn);
+    const attachments = app.indexOf("setFrontDoorAttachments([])", fn);
+    expect(text).toBeGreaterThan(fn);
+    expect(attachments).toBeGreaterThan(text);
   });
 });

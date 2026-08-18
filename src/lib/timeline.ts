@@ -18,12 +18,25 @@ export interface TimelineItem extends LedgerEvent {
   threadKind: string | null;
   model: string | null;
   preview: string | null;
+  /** Full character count the preview was clipped from, so the row's "…" is
+   *  honest without shipping the bytes it stands for. */
+  bodyChars: number | null;
+  /** What kind of text this is — `user` (a human typed it), `agent` (Redline
+   *  constructed it), `system` (the CLI injected it). `null` for a non-prompt
+   *  event. */
+  role: string | null;
   compacted: boolean;
   browseId: string | null;
   url: string | null;
   title: string | null;
   action: string | null;
   fromEventId: number | null;
+  /** The picture of this page, when there is one. `null` covers three real
+   *  states — never captured, policy-denied, forgotten — so it is stored on
+   *  the row rather than derived from the content hash. */
+  shotKey: string | null;
+  /** A vision-tier description, for a page whose text didn't capture. */
+  caption: string | null;
   classNodeId: string | null;
   classTitle: string | null;
   /** P3: this event is starred (directly, or a `note` event whose row is). */
@@ -55,6 +68,56 @@ export interface LedgerFilters {
   threadId?: string;
   /** P5 Map focus — one browse tab's trail. */
   browseId?: string;
+  /** Corpus role. The Timeline defaults this to `user`, which is what makes
+   *  the reclassification visible rather than merely done: 92.6% of the lake's
+   *  bytes were Redline's own agent text and the CLI's injections, sharing a
+   *  list with the user's prompts. Flipping the chip shows them. */
+  role?: string;
+}
+
+/** The corpus-role facet's three values, in the order the chips render. `user`
+ *  is the default view — the lake exists to hold what the user said. */
+export const CORPUS_ROLES = ["user", "agent", "system"] as const;
+export type CorpusRole = (typeof CORPUS_ROLES)[number];
+
+/** What each role chip means, in the user's terms rather than the schema's. */
+export const CORPUS_ROLE_LABEL: Record<CorpusRole, string> = {
+  user: "Yours",
+  agent: "Redline's",
+  system: "System",
+};
+
+export const CORPUS_ROLE_HINT: Record<CorpusRole, string> = {
+  user: "Prompts you typed — the record's signal",
+  agent: "Prompts Redline constructed for its own agents",
+  system: "Task notifications and reminders the CLI injected",
+};
+
+/** How many bytes of the corpus are NOT the user's own words. Pure. */
+export function machineBytes(
+  roles: { role: string; bytes: number; rows?: number }[] | undefined,
+): number {
+  if (!roles) return 0;
+  return roles
+    .filter((r) => r.role !== "user")
+    .reduce((sum, r) => sum + r.bytes, 0);
+}
+
+/** The one-time banner's sentence, or `null` when there is nothing to say.
+ *
+ *  Shown once, because the reclassification happened once and a permanent
+ *  banner is just chrome. It states the amount, states plainly that nothing
+ *  was deleted, and points at the control that reveals it — a change this
+ *  large to what a search returns should not be discovered by noticing that
+ *  results look different. */
+export function corpusBannerText(
+  roles: { role: string; bytes: number; rows?: number }[] | undefined,
+  fmt: (bytes: number) => string,
+): string | null {
+  const machine = machineBytes(roles);
+  // Below a megabyte there is nothing worth interrupting anyone about.
+  if (machine < 1_000_000) return null;
+  return `${fmt(machine)} of Redline's own agent text and system notifications was reclassified out of your searchable history. Nothing was deleted — use “Whose words” to see it.`;
 }
 
 /** A jump into the Timeline from the Ask tab (citation chips) or the Map (a

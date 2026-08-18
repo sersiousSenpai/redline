@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
+import { useEditorState } from "@tiptap/react";
 import type { Editor } from "@tiptap/react";
 import type { CSSProperties, ReactNode } from "react";
 import {
@@ -22,6 +23,7 @@ import {
   ListOrdered,
   MessageSquare,
   Minus,
+  MoreHorizontal,
   MoveVertical,
   PenLine,
   Redo2,
@@ -31,16 +33,26 @@ import {
   Undo2,
 } from "lucide-react";
 
+import { InlineInputPopover, Panel, useClickPopover } from "./popover";
+import { fitRibbon } from "../lib/ribbonFit";
+import { rafCoalesce } from "../lib/raf";
 import { FONTS } from "../theme/fonts";
 import { applyLink } from "../editor/drafterInserts";
 
 // A persistent Word-style formatting ribbon for the Prompt Drafter. Every
 // control drives the live Tiptap editor through `editor.chain().focus()…` and
-// reflects its pressed state via `editor.isActive(...)` / stored mark attrs. The
-// host (PromptDrafter) uses `useEditor`, which re-renders on every transaction,
-// so this child re-reads active states automatically as the selection moves —
-// no manual subscription. Controls are real lucide icons (not glyphs), arranged
-// in labelled groups with a clearly visible active state.
+// reflects its pressed state through `useEditorState` — its OWN subscription,
+// which is load-bearing: this ribbon used to rely on the host re-rendering on
+// every ProseMirror transaction, and calling `editor.isActive(...)` fifteen
+// times from that render. The host stopped doing that (it walked a ~2,800-line
+// tree per keystroke, which was the literal jank), and a ribbon with no
+// subscription of its own would simply FREEZE — Bold stops lighting up, the
+// style dropdown stops tracking the caret. Strictly worse than the jank.
+//
+// The selector returns a flat object and `useEditorState` compares it with
+// `deepEqual`, so moving the caret inside one word re-renders nothing.
+// Controls are real lucide icons (not glyphs), arranged in labelled groups with
+// a clearly visible active state.
 
 interface DrafterToolbarProps {
   editor: Editor | null;
@@ -120,10 +132,92 @@ function ToolButton({
   );
 }
 
+/** Fit the ribbon to its pane. Measured, and driven entirely through DOM
+ *  attributes — never React state.
+ *
+ *  Measured because the alternative (a media query, or a width breakpoint) is a
+ *  guess: this is a PANE, not the viewport, and it can be any width from the
+ *  document column's 300px floor upward. Unmeasured reads as roomy, so the
+ *  first paint is the common case and there is no compact flash.
+ *
+ *  Attributes rather than state because this runs on every frame of a divider
+ *  drag, and a state flip here would re-render the ribbon — and the drafter —
+ *  sixty times a second. Same reason, stated the same way, as
+ *  `useTextClearance`.
+ *
+ *  Each group is measured ONCE, with everything mounted, and cached by id:
+ *  measuring a hidden group returns 0 and it would then "fit" forever. */
+function useRibbonOverflow() {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const widths = useRef(new Map<string, number>());
+  const hiddenRef = useRef<string[]>([]);
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+
+    const fit = () => {
+      const groups = [...el.querySelectorAll<HTMLElement>("[data-group]")];
+      for (const g of groups) {
+        const id = g.dataset.group;
+        if (!id) continue;
+        // Only measure while VISIBLE — a hidden group measures 0.
+        if (g.dataset.hidden !== "1") {
+          const w = g.getBoundingClientRect().width;
+          if (w > 0) widths.current.set(id, w + 8 /* gap */);
+        }
+      }
+      const measured = groups
+        .map((g) => g.dataset.group ?? "")
+        .filter((id) => widths.current.has(id))
+        .map((id) => ({ id, width: widths.current.get(id) as number }));
+      if (measured.length === 0) return;
+
+      const style = getComputedStyle(el);
+      const available =
+        el.clientWidth -
+        parseFloat(style.paddingLeft || "0") -
+        parseFloat(style.paddingRight || "0");
+      const { overflow } = fitRibbon(measured, available, hiddenRef.current);
+      hiddenRef.current = overflow;
+      const hidden = new Set(overflow);
+      for (const g of groups) {
+        const id = g.dataset.group;
+        if (!id) continue;
+        g.dataset.hidden = hidden.has(id) ? "1" : "0";
+      }
+      el.dataset.overflowing = overflow.length > 0 ? "1" : "0";
+    };
+
+    fit();
+    const onFrame = rafCoalesce(fit);
+    // Guarded: without an observer the ribbon stays at its first measurement,
+    // which is the roomy default. Degrading to "everything visible" is the
+    // right failure — crashing the whole formatting bar over a missing
+    // platform API is not.
+    if (typeof ResizeObserver === "undefined") return () => onFrame.cancel();
+    const ro = new ResizeObserver(() => onFrame());
+    ro.observe(el);
+    return () => {
+      onFrame.cancel();
+      ro.disconnect();
+    };
+  }, []);
+
+  return ref;
+}
+
 // A labelled cluster of related controls, separated from its neighbours by
 // spacing and a hairline — the Word "ribbon group" cue.
-function Group({ children }: { children: ReactNode }) {
-  return <div className="rl-ribbon-group">{children}</div>;
+//
+// `id` names it for the overflow law in lib/ribbonFit.ts. Groups leave as whole
+// units, never mid-group.
+function Group({ id, children }: { id?: string; children: ReactNode }) {
+  return (
+    <div className="rl-ribbon-group" data-group={id}>
+      {children}
+    </div>
+  );
 }
 
 // A reusable ribbon dropdown: a labelled trigger that opens a floating panel.
@@ -144,38 +238,34 @@ function RibbonMenu({
   disabled?: boolean;
   children: (close: () => void) => ReactNode;
 }) {
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node))
-        setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+  const btnRef = useRef<HTMLButtonElement | null>(null);
+  // `useClickPopover` + `Panel` instead of a raw `position: absolute; left: 0`
+  // panel, which fixes two bugs at once:
+  //
+  //  1. No collision detection — the right-most dropdowns ran straight out of a
+  //     narrow pane. `placeUnder` clamps them back in.
+  //  2. No `useMenuOverlay` registration — so EVERY ribbon dropdown was painted
+  //     over by the native browser webview whenever the browser surface was up
+  //     (the webview always paints above React DOM; `menuOverlay` is how the
+  //     rest of the app hides it while a menu is open). `useClickPopover` calls
+  //     it, which is most of why this moved.
+  //
+  // `.rl-ribbon-pop` keeps its skin and loses its positioning.
+  const pop = useClickPopover(btnRef, "left", "below", minWidth ?? 200);
 
   return (
-    <div ref={rootRef} style={{ position: "relative" }}>
+    <div style={{ position: "relative" }}>
       <span className="rl-tipwrap" data-tip={title}>
         <button
           type="button"
+          ref={btnRef}
           aria-label={title}
           aria-haspopup="menu"
-          aria-expanded={open}
+          aria-expanded={pop.open}
           disabled={disabled}
           onMouseDown={(e) => e.preventDefault()}
-          onClick={() => !disabled && setOpen((o) => !o)}
-          className={`rl-ribbon-trigger${open ? " rl-ribbon-btn--active" : ""}`}
+          onClick={() => !disabled && pop.toggle()}
+          className={`rl-ribbon-trigger${pop.open ? " rl-ribbon-btn--active" : ""}`}
           style={{
             minWidth: minWidth ? `${minWidth}px` : undefined,
             opacity: disabled ? 0.35 : 1,
@@ -186,15 +276,28 @@ function RibbonMenu({
           <ChevronDown size={13} strokeWidth={STROKE} style={{ opacity: 0.7 }} />
         </button>
       </span>
-      {open && (
-        <div
-          role="menu"
-          onMouseDown={(e) => e.preventDefault()}
-          className="rl-ribbon-pop"
-          style={{ minWidth: minWidth ? `${minWidth}px` : "160px" }}
+      {pop.open && (
+        <Panel
+          label={title}
+          {...pop.panelProps}
+          style={{
+            ...pop.panelProps.style,
+            // The skin comes from `.rl-ribbon-pop`; Panel's own border and
+            // background would double it.
+            border: "none",
+            background: "transparent",
+            boxShadow: "none",
+          }}
         >
-          {children(() => setOpen(false))}
-        </div>
+          <div
+            role="menu"
+            onMouseDown={(e) => e.preventDefault()}
+            className="rl-ribbon-pop"
+            style={{ position: "static", minWidth: "100%" }}
+          >
+            {children(pop.close)}
+          </div>
+        </Panel>
       )}
     </div>
   );
@@ -226,83 +329,6 @@ function MenuRow({
     >
       {children}
     </button>
-  );
-}
-
-// An anchored popover holding a single text input — the ribbon's replacement
-// for window.prompt, which WKWebView implements as a silent null. Unlike
-// RibbonMenu the panel must NOT suppress mousedown: the input has to take
-// focus. ProseMirror keeps the selection while the editor is blurred, and the
-// commit path re-focuses it.
-function RibbonInputPopover({
-  title,
-  placeholder,
-  initialValue,
-  onCommit,
-  onClose,
-}: {
-  title: string;
-  placeholder: string;
-  initialValue: string;
-  onCommit: (value: string) => void;
-  onClose: () => void;
-}) {
-  const [value, setValue] = useState(initialValue);
-  const rootRef = useRef<HTMLDivElement | null>(null);
-  const inputRef = useRef<HTMLInputElement | null>(null);
-
-  useEffect(() => {
-    inputRef.current?.focus();
-    inputRef.current?.select();
-  }, []);
-
-  useEffect(() => {
-    const onDown = (e: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node))
-        onClose();
-    };
-    document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
-  }, [onClose]);
-
-  return (
-    <div
-      ref={rootRef}
-      role="dialog"
-      aria-label={title}
-      className="rl-ribbon-pop"
-      style={{ minWidth: "240px", padding: "8px" }}
-    >
-      <div
-        style={{
-          fontSize: "11px",
-          color: "var(--color-ink-muted)",
-          marginBottom: "6px",
-        }}
-      >
-        {title}
-      </div>
-      <input
-        ref={inputRef}
-        type="text"
-        value={value}
-        placeholder={placeholder}
-        onChange={(e) => setValue(e.target.value)}
-        onKeyDown={(e) => {
-          e.stopPropagation();
-          if (e.key === "Enter") {
-            e.preventDefault();
-            onCommit(value);
-            onClose();
-          } else if (e.key === "Escape") {
-            e.preventDefault();
-            onClose();
-          }
-        }}
-        className="rl-search-input"
-        style={{ width: "100%" }}
-      />
-    </div>
   );
 }
 
@@ -505,58 +531,101 @@ export function DrafterToolbar({
     setInputPop({ kind: "link", initial: prev ?? "https://" });
   };
 
-  // Live reflections of the current selection for the dropdown labels.
-  const activeStyle = editor
-    ? PARAGRAPH_STYLES.find((s) => s.isActive(editor))
-    : undefined;
-  const activeFamily =
-    (editor?.getAttributes("textStyle").fontFamily as string | undefined) ??
-    "";
+  // ONE subscription for everything the ribbon reflects. Flat and primitive by
+  // design: `deepEqual` on a flat object of strings/booleans is what makes
+  // typing three characters inside one word cost zero ribbon renders.
+  const st = useEditorState({
+    editor,
+    selector: ({ editor: e }) => {
+      if (!e) return null;
+      const sel = e.state.selection as { node?: { type: { name: string } } };
+      return {
+        // Undo/Redo enablement rides the selector too. Read at render time it
+        // would freeze at whatever the history looked like on mount — Undo
+        // permanently disabled after the first keystroke, which is a worse
+        // failure than the jank it came from.
+        canUndo: e.can().undo(),
+        canRedo: e.can().redo(),
+        styleKey: PARAGRAPH_STYLES.find((s) => s.isActive(e))?.key ?? "",
+        family: (e.getAttributes("textStyle").fontFamily as string) ?? "",
+        size: (e.getAttributes("textStyle").fontSize as string) ?? "",
+        color: (e.getAttributes("textStyle").color as string) || "",
+        highlight: (e.getAttributes("highlight").color as string) || "",
+        bold: e.isActive("bold"),
+        italic: e.isActive("italic"),
+        underline: e.isActive("underline"),
+        strike: e.isActive("strike"),
+        code: e.isActive("code"),
+        link: e.isActive("link"),
+        inOrdered: e.isActive("orderedList"),
+        inBullet: e.isActive("bulletList"),
+        orderedStyle:
+          (e.getAttributes("orderedList").listStyle as string) || "decimal",
+        bulletStyle:
+          (e.getAttributes("bulletList").listStyle as string) || "disc",
+        inTable: e.isActive("table"),
+        // A table is the alignment target when the cursor is inside it OR the
+        // whole table is node-selected (via the move-handle).
+        tableSelected: sel?.node?.type?.name === "table",
+        tableAlign: (e.getAttributes("table").align as string) || "left",
+        alignLeft: e.isActive({ textAlign: "left" }),
+        alignCenter: e.isActive({ textAlign: "center" }),
+        alignRight: e.isActive({ textAlign: "right" }),
+        alignJustify: e.isActive({ textAlign: "justify" }),
+      };
+    },
+  });
+
+  const activeStyle = PARAGRAPH_STYLES.find((s) => s.key === st?.styleKey);
+  const activeFamily = st?.family ?? "";
   const activeFamilyLabel =
     FONTS.find((f) => f.stack === activeFamily)?.label ?? "Default";
-  const activeSizeRaw =
-    (editor?.getAttributes("textStyle").fontSize as string | undefined) ?? "";
+  const activeSizeRaw = st?.size ?? "";
   const activeSizeLabel = activeSizeRaw
     ? activeSizeRaw.replace("px", "")
     : "15";
-  const activeColor =
-    (editor?.getAttributes("textStyle").color as string | undefined) || "";
-  const activeHighlight =
-    (editor?.getAttributes("highlight").color as string | undefined) || "";
-  const inOrdered = !!editor?.isActive("orderedList");
-  const inBullet = !!editor?.isActive("bulletList");
-  const orderedStyle =
-    (editor?.getAttributes("orderedList").listStyle as string | undefined) ||
-    "decimal";
-  const bulletStyle =
-    (editor?.getAttributes("bulletList").listStyle as string | undefined) ||
-    "disc";
-  const inTable = !!editor?.isActive("table");
-  // A table is the alignment target when the cursor is inside it OR the whole
-  // table is node-selected (via the move-handle). In either case the ribbon's
-  // align buttons align the table on the page rather than the text.
-  const selection = editor?.state.selection as
-    | { node?: { type: { name: string } } }
-    | undefined;
-  const tableSelected = selection?.node?.type?.name === "table";
-  const tableContext = !!editor && (inTable || tableSelected);
-  const tableAlign =
-    (editor?.getAttributes("table").align as string | undefined) || "left";
+  const activeColor = st?.color ?? "";
+  const activeHighlight = st?.highlight ?? "";
+  const inOrdered = !!st?.inOrdered;
+  const inBullet = !!st?.inBullet;
+  const orderedStyle = st?.orderedStyle ?? "decimal";
+  const bulletStyle = st?.bulletStyle ?? "disc";
+  const inTable = !!st?.inTable;
+  const tableContext = !!editor && (inTable || !!st?.tableSelected);
+  const tableAlign = st?.tableAlign ?? "left";
+  const isAligned = (align: string) =>
+    align === "left"
+      ? !!st?.alignLeft
+      : align === "center"
+        ? !!st?.alignCenter
+        : align === "right"
+          ? !!st?.alignRight
+          : !!st?.alignJustify;
+
+  const ribbonRef = useRibbonOverflow();
+  // The ⋯ toggle. State is right here: it changes on a deliberate click, not
+  // on a drag frame.
+  const [expanded, setExpanded] = useState(false);
 
   return (
-    <div data-no-drag="true" className="rl-ribbon">
+    <div
+      data-no-drag="true"
+      className="rl-ribbon"
+      ref={ribbonRef}
+      data-expanded={expanded ? "1" : "0"}
+    >
       {/* History */}
-      <Group>
+      <Group id="history">
         <ToolButton
           title="Undo (⌘Z)"
-          disabled={disabled || !editor?.can().undo()}
+          disabled={disabled || !st?.canUndo}
           onClick={() => editor?.chain().focus().undo().run()}
         >
           <Undo2 size={ICON} strokeWidth={STROKE} />
         </ToolButton>
         <ToolButton
           title="Redo (⌘⇧Z)"
-          disabled={disabled || !editor?.can().redo()}
+          disabled={disabled || !st?.canRedo}
           onClick={() => editor?.chain().focus().redo().run()}
         >
           <Redo2 size={ICON} strokeWidth={STROKE} />
@@ -564,7 +633,7 @@ export function DrafterToolbar({
       </Group>
 
       {/* Paragraph style + font */}
-      <Group>
+      <Group id="style">
         <RibbonMenu
           title="Paragraph style"
           label={activeStyle?.label ?? "Normal"}
@@ -586,6 +655,13 @@ export function DrafterToolbar({
             ))
           }
         </RibbonMenu>
+      </Group>
+
+      {/* Type: font family + size. Split OUT of the paragraph-style group so
+          the give-up order can be honest — family and size are drafting AIDS
+          that don't survive the launch, while the paragraph style is semantics
+          that does. Combined, they could only ever leave as one unit. */}
+      <Group id="type">
         <RibbonMenu
           title="Font"
           label={activeFamilyLabel}
@@ -654,11 +730,11 @@ export function DrafterToolbar({
       </Group>
 
       {/* Inline marks */}
-      <Group>
+      <Group id="marks">
         <ToolButton
           title="Bold (⌘B)"
           disabled={disabled}
-          active={editor?.isActive("bold")}
+          active={st?.bold}
           onClick={() => editor?.chain().focus().toggleBold().run()}
         >
           <Bold size={ICON} strokeWidth={STROKE} />
@@ -666,7 +742,7 @@ export function DrafterToolbar({
         <ToolButton
           title="Italic (⌘I)"
           disabled={disabled}
-          active={editor?.isActive("italic")}
+          active={st?.italic}
           onClick={() => editor?.chain().focus().toggleItalic().run()}
         >
           <Italic size={ICON} strokeWidth={STROKE} />
@@ -674,7 +750,7 @@ export function DrafterToolbar({
         <ToolButton
           title="Underline (⌘U)"
           disabled={disabled}
-          active={editor?.isActive("underline")}
+          active={st?.underline}
           onClick={() => editor?.chain().focus().toggleUnderline().run()}
         >
           <UnderlineIcon size={ICON} strokeWidth={STROKE} />
@@ -682,7 +758,7 @@ export function DrafterToolbar({
         <ToolButton
           title="Strikethrough"
           disabled={disabled}
-          active={editor?.isActive("strike")}
+          active={st?.strike}
           onClick={() => editor?.chain().focus().toggleStrike().run()}
         >
           <Strikethrough size={ICON} strokeWidth={STROKE} />
@@ -690,7 +766,7 @@ export function DrafterToolbar({
         <ToolButton
           title="Inline code"
           disabled={disabled}
-          active={editor?.isActive("code")}
+          active={st?.code}
           onClick={() => editor?.chain().focus().toggleCode().run()}
         >
           <Code size={ICON} strokeWidth={STROKE} />
@@ -698,7 +774,7 @@ export function DrafterToolbar({
       </Group>
 
       {/* Color + highlight */}
-      <Group>
+      <Group id="color">
         <RibbonMenu
           title="Text color"
           label={
@@ -812,7 +888,7 @@ export function DrafterToolbar({
       </Group>
 
       {/* Alignment — aligns the whole table when one is selected, else text. */}
-      <Group>
+      <Group id="align">
         {(
           [
             ["left", AlignLeft],
@@ -833,7 +909,7 @@ export function DrafterToolbar({
               active={
                 isTableAlign
                   ? tableAlign === align
-                  : !tableContext && editor?.isActive({ textAlign: align })
+                  : !tableContext && isAligned(align)
               }
               onClick={() => {
                 if (!editor) return;
@@ -855,7 +931,7 @@ export function DrafterToolbar({
       </Group>
 
       {/* Lists + indent + spacing */}
-      <Group>
+      <Group id="lists">
         <RibbonMenu
           title="Bulleted list"
           label={<List size={ICON} strokeWidth={STROKE} />}
@@ -984,7 +1060,7 @@ export function DrafterToolbar({
       </Group>
 
       {/* Insert */}
-      <Group>
+      <Group id="insert">
         <RibbonMenu
           title="Table"
           label={<TableIcon size={ICON} strokeWidth={STROKE} />}
@@ -1062,13 +1138,13 @@ export function DrafterToolbar({
           <ToolButton
             title="Link"
             disabled={disabled}
-            active={editor?.isActive("link")}
+            active={st?.link}
             onClick={openLinkPop}
           >
             <LinkIcon size={ICON} strokeWidth={STROKE} />
           </ToolButton>
           {inputPop?.kind === "link" && (
-            <RibbonInputPopover
+            <InlineInputPopover
               title="Link URL — empty removes the link"
               placeholder="https://"
               initialValue={inputPop.initial}
@@ -1087,7 +1163,7 @@ export function DrafterToolbar({
       </Group>
 
       {/* Clear */}
-      <Group>
+      <Group id="clear">
         <ToolButton
           title="Clear formatting"
           disabled={disabled}
@@ -1102,7 +1178,7 @@ export function DrafterToolbar({
       {/* ✦ co-authoring: send the caret's paragraph to the doc agent as an
           instruction — it consumes the paragraph and drafts in its place. */}
       {onGenerate && (
-        <Group>
+        <Group id="generate">
           <span
             className="rl-tipwrap"
             data-tip="Write an instruction as a paragraph, then send it to the agent — it drafts in its place (⌘↵)"
@@ -1135,7 +1211,7 @@ export function DrafterToolbar({
       {/* Editing / Suggesting — Word's mode switch. Suggesting turns the
           user's own keystrokes into tracked runs (Keep/Revert in place). */}
       {onSetSuggesting && (
-        <Group>
+        <Group id="mode">
           <RibbonMenu
             title="Editing mode — whether your edits are tracked"
             label={
@@ -1225,7 +1301,7 @@ export function DrafterToolbar({
 
       {/* Comments — the sidecar toggle, with a count badge when any exist. */}
       {onToggleSidecar && (
-        <Group>
+        <Group id="comments">
           <ToolButton
             title={
               sidecarOpen
@@ -1261,6 +1337,21 @@ export function DrafterToolbar({
           </ToolButton>
         </Group>
       )}
+
+      {/* The rest, when the pane is too narrow to carry them. Shown only when
+          something actually left (pure CSS on `data-overflowing`), so a roomy
+          ribbon never carries a dead control. */}
+      <button
+        type="button"
+        aria-label={expanded ? "Hide the rest of the ribbon" : "Show the rest of the ribbon"}
+        aria-expanded={expanded}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => setExpanded((v) => !v)}
+        className={`rl-ribbon-btn rl-ribbon-more${expanded ? " rl-ribbon-btn--active" : ""}`}
+        style={btnBase}
+      >
+        <MoreHorizontal size={ICON} strokeWidth={STROKE} />
+      </button>
     </div>
   );
 }

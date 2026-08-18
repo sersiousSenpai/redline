@@ -365,7 +365,7 @@ pub async fn intake_triage(
     let (item, args) = prepare_triage(&db, &item_id)?;
     // Keep the headless `-p` out of the lake (the global hook would otherwise
     // capture the baked prompt as a human one).
-    ledger::register_agent_prompt(&ledger::body_hash(&args[1]));
+    ledger::register_agent_prompt(&args[1]);
     let markdown = run_triage(args).await?;
     land_triage(&db, &item, &markdown)
 }

@@ -6,6 +6,7 @@ import {
   REVIEW_KEYMAP,
   bindingKeys,
   globalShortcutGroups,
+  isNewPlanKey,
   isPaletteKey,
   isSnapBackKey,
   tourShortcuts,
@@ -66,15 +67,41 @@ describe("isSnapBackKey", () => {
   });
 });
 
+describe("isNewPlanKey", () => {
+  it("matches ⌘⇧N and Ctrl+⇧N via e.code", () => {
+    expect(
+      isNewPlanKey(combo({ key: "N", code: "KeyN", metaKey: true, shiftKey: true })),
+    ).toBe(true);
+    expect(
+      isNewPlanKey(combo({ key: "n", code: "KeyN", ctrlKey: true, shiftKey: true })),
+    ).toBe(true);
+  });
+  it("leaves plain ⌘N alone — macOS and Tauri read it as 'new window'", () => {
+    expect(isNewPlanKey(combo({ key: "n", code: "KeyN", metaKey: true }))).toBe(
+      false,
+    );
+  });
+  it("requires a command modifier, and ⌥ opts out", () => {
+    expect(isNewPlanKey(combo({ key: "N", code: "KeyN", shiftKey: true }))).toBe(
+      false,
+    );
+    expect(
+      isNewPlanKey(
+        combo({ code: "KeyN", metaKey: true, shiftKey: true, altKey: true }),
+      ),
+    ).toBe(false);
+  });
+});
+
 describe("the registry", () => {
   it("has unique ids", () => {
     const ids = GLOBAL_KEYMAP.map((b) => b.id);
     expect(new Set(ids).size).toBe(ids.length);
   });
-  it("wires exactly the two A5 globals — everything else is documentation", () => {
+  it("wires exactly the globals this module dispatches — the rest is documentation", () => {
     expect(
       GLOBAL_KEYMAP.filter((b) => b.wired).map((b) => b.id).sort(),
-    ).toEqual(["palette", "snap-back"]);
+    ).toEqual(["new-plan", "palette", "snap-back"]);
   });
   it("every binding renders: non-empty caps and label", () => {
     for (const b of GLOBAL_KEYMAP) {

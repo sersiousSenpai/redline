@@ -274,6 +274,13 @@ pub struct PromptFilters {
     pub parent_session_id: Option<String>,
     /// Exact-match filter on the recorded model (`prompts.model`).
     pub model: Option<String>,
+    /// Exact corpus-role filter (`user` | `agent` | `system`).
+    pub role: Option<String>,
+    /// Include `agent` rows — Redline's own constructed prefaces. Off by
+    /// default: they are 87% of the corpus by weight and answer nobody's
+    /// question, so a caller has to ask for them on purpose. An explicit
+    /// `role=agent` overrides this, because then the caller HAS asked.
+    pub include_agent: bool,
 }
 
 /// Clamp + default `GET /v1/context/prompts`'s `?limit=`.
@@ -452,19 +459,29 @@ pub struct ContextStats {
 /// moving, so a hit is never stale.
 pub fn build_stats_cached(db: &Database) -> ContextStats {
     use std::sync::{Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<Option<(i64, ContextStats)>>> = OnceLock::new();
+    /// Minimum wall-clock between two rebuilds, ON TOP of the head-seq key.
+    ///
+    /// The head key alone is exactly wrong during the one situation that
+    /// matters: a browse capture burst appends an event per page, so every
+    /// poll sees a new head and rebuilds the full five-axis aggregate — the
+    /// cache misses hardest precisely when the app is busiest. A 500 ms floor
+    /// keeps the numbers live to the eye while collapsing a burst into one
+    /// rebuild.
+    const DEBOUNCE_MS: i64 = 500;
+    static CACHE: OnceLock<Mutex<Option<(i64, i64, ContextStats)>>> = OnceLock::new();
     let cell = CACHE.get_or_init(|| Mutex::new(None));
     let head = db.max_ledger_seq().unwrap_or(0);
+    let now = now_millis();
     if let Ok(guard) = cell.lock() {
-        if let Some((at, stats)) = guard.as_ref() {
-            if *at == head {
+        if let Some((at, built_ms, stats)) = guard.as_ref() {
+            if *at == head || now - *built_ms < DEBOUNCE_MS {
                 return stats.clone();
             }
         }
     }
     let fresh = build_stats(db);
     if let Ok(mut guard) = cell.lock() {
-        *guard = Some((head, fresh.clone()));
+        *guard = Some((head, now, fresh.clone()));
     }
     fresh
 }
@@ -541,6 +558,10 @@ pub struct LedgerFilters {
     pub thread_id: Option<String>,
     /// Map focus: one browse tab's trail (`browse_events.browse_id`).
     pub browse_id: Option<String>,
+    /// Corpus-role facet (`user` | `agent` | `system`). The UI defaults it to
+    /// `user`; flipping it is how the reclassified machine text stays visible
+    /// rather than merely hidden. Non-prompt events are never excluded by it.
+    pub role: Option<String>,
 }
 
 pub fn clamp_ledger_limit(raw: Option<i64>) -> i64 {
@@ -561,8 +582,16 @@ pub struct TimelineItem {
     pub thread_kind: Option<String>,
     pub model: Option<String>,
     /// First `PREVIEW_CHARS` of the body (gist once compacted) — the list row.
-    /// The detail rail fetches the full text via `ledger_prompt_body`.
+    /// Clipped in SQL, so a 500-row page no longer carries megabytes of body
+    /// text across the lock to render 240-character rows. The detail rail
+    /// fetches the full text via `ledger_prompt_body`.
     pub preview: Option<String>,
+    /// Full length of the text `preview` was clipped from — what makes the
+    /// row's "…" honest without shipping the bytes it stands for.
+    pub body_chars: Option<i64>,
+    /// What kind of text this is (`user` | `agent` | `system`); `None` for a
+    /// non-prompt event.
+    pub role: Option<String>,
     /// The body was compacted away; `preview` shows the released gist.
     pub compacted: bool,
     pub browse_id: Option<String>,
@@ -571,6 +600,12 @@ pub struct TimelineItem {
     /// The browse verb (`navigate | select | submit | leave`).
     pub action: Option<String>,
     pub from_event_id: Option<i64>,
+    /// The picture of this page, when there is one. `None` covers three real
+    /// states — never captured, policy-denied, and the user forgot it — which
+    /// is why it is stored rather than derived from the content hash.
+    pub shot_key: Option<String>,
+    /// A vision-tier description, for a page whose text didn't capture.
+    pub caption: Option<String>,
     /// Accepted class filing (first link), for the class grouping + detail rail.
     pub class_node_id: Option<String>,
     pub class_title: Option<String>,
@@ -889,6 +924,21 @@ pub struct PackPromptHit {
     #[serde(flatten)]
     pub item: LakeItem,
     pub superseded_by: Option<i64>,
+    /// Other hits that collapsed into this one — same body, or the same framing
+    /// around a different question. Reported rather than hidden: "four copies"
+    /// and "one copy, three duplicates suppressed" are different facts about
+    /// the record, and the second is the true one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub duplicate_of: Vec<i64>,
+    /// Which stage of the query cascade found this: `and` (every term present)
+    /// or `or` (widened) or `like` (substring fallback).
+    pub stage: String,
+    /// Every arm that found this hit, with its rank and score there. A hit
+    /// found by two arms is stronger evidence than one found by either alone,
+    /// and a `semantic`-only hit is *associated* rather than asserted — see
+    /// [`Arm`] for the trust ordering.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub arms: Vec<ArmHit>,
 }
 
 /// One batched read that answers most memory questions: the resolved class
@@ -917,6 +967,16 @@ pub struct AnswerPack {
     pub notes: Vec<UserNote>,
     pub prompt_hits: Vec<PackPromptHit>,
     pub browse_hits: Vec<crate::db::BrowseHit>,
+    /// Literal/regex hits. Present only when the question LOOKS like it is
+    /// reaching for a literal (a flag, a path, an identifier, a quoted phrase)
+    /// — a trigram probe on every natural-language question would cost an index
+    /// scan to return noise.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub grep_hits: Vec<crate::db::GrepHit>,
+    /// Which arms ran, and what each returned. Read this before concluding
+    /// anything from an empty list: an arm that did not run is ABSENT, which is
+    /// a fact about the index rather than about the user's history.
+    pub arm_coverage: Vec<ArmCoverage>,
     /// Which lists the byte budget cut, so the agent knows to narrow rather
     /// than conclude the record is empty.
     pub truncated: Vec<String>,
@@ -957,10 +1017,13 @@ pub fn build_answer_pack(
     let mut over_cap: Vec<&str> = Vec::new();
     let node = resolved.map(|node| {
         let mut children = db.list_class_children(&node.id).unwrap_or_default();
-        let mut grandchildren: Vec<crate::classmem::ClassNode> = children
-            .iter()
-            .flat_map(|c| db.list_class_children(&c.id).unwrap_or_default())
-            .collect();
+        // ONE query for the whole generation, not one per child — the same
+        // N+1 the Timeline's filing probe had, in the route that is supposed
+        // to be the fast one. A node with 40 children cost 40 round trips
+        // through the connection lock to build a list the pack then caps.
+        // (`link_previews_for_seqs` is the idiom.)
+        let child_ids: Vec<String> = children.iter().map(|c| c.id.clone()).collect();
+        let mut grandchildren = db.list_class_children_for_parents(&child_ids).unwrap_or_default();
         if children.len() > node_cap {
             children.truncate(node_cap);
             over_cap.push("children");
@@ -1006,26 +1069,239 @@ pub fn build_answer_pack(
     let notes = query
         .map(|term| db.search_user_notes(term, limit).unwrap_or_default())
         .unwrap_or_default();
-    let prompt_items = query
+    let plan = query.and_then(crate::query::plan_fts_query);
+    let terms: Vec<String> = plan.as_ref().map(|p| p.terms.clone()).unwrap_or_default();
+
+    let mut ranked = query
         .map(|term| {
-            db.search_prompts_fts(term, limit).unwrap_or_else(|e| {
+            db.search_prompts_ranked(term, limit).unwrap_or_else(|e| {
                 tracing::warn!(error = %e, "answer-pack: prompt search failed");
                 Vec::new()
             })
         })
         .unwrap_or_default();
-    let hit_seqs: Vec<i64> = prompt_items.iter().map(|i| i.seq).collect();
-    let hit_superseded = db.supersessions_for_seqs(&hit_seqs).unwrap_or_default();
-    let prompt_hits: Vec<PackPromptHit> = prompt_items
-        .into_iter()
-        .map(|item| PackPromptHit {
-            superseded_by: hit_superseded.get(&item.seq).copied(),
-            item,
+
+    // --- the semantic arm, and the FUSE the pipeline is named for ------------
+    //
+    // The arm reaches what shares no words with the question. It runs last and
+    // it never replaces the lexical ordering — RRF fuses the two, so a hit both
+    // arms found rises and a hit only one found still appears.
+    //
+    // Its absence is a first-class state: `provider_kind() == Absent` means no
+    // on-device model (or a macOS below 14 with no sentence fallback either),
+    // and the pack SAYS so rather than returning a short list that reads as an
+    // empty history.
+    let semantic = query.and_then(|term| {
+        crate::embed::semantic_search(db, term, (limit * 3).max(24) as usize)
+    });
+    let semantic_prompt_hits: Vec<(i64, f64)> = semantic
+        .as_ref()
+        .map(|hits| {
+            hits.iter()
+                .filter(|h| h.target_kind == "prompt")
+                .map(|h| (h.target_id, h.score as f64))
+                .collect()
         })
-        .collect();
-    let browse_hits = query
-        .map(|term| db.search_browse_events(term, limit).unwrap_or_default())
         .unwrap_or_default();
+
+    // Fuse the two prompt rankings. Keys are ledger seqs for the lexical arm
+    // and prompt ids for the semantic one, so the semantic ids are resolved to
+    // seqs first — a fusion over two different id-spaces would silently agree
+    // with itself about nothing.
+    let arms_by_seq: std::collections::HashMap<i64, Vec<ArmHit>> = if semantic_prompt_hits.is_empty()
+    {
+        std::collections::HashMap::new()
+    } else {
+        let ids: Vec<i64> = semantic_prompt_hits.iter().map(|(id, _)| *id).collect();
+        let seq_of = db.seqs_for_prompt_ids(&ids).unwrap_or_default();
+        let lexical: Vec<(String, f64)> = ranked
+            .iter()
+            .enumerate()
+            .map(|(i, (it, _))| (it.seq.to_string(), -(i as f64)))
+            .collect();
+        let sem: Vec<(String, f64)> = semantic_prompt_hits
+            .iter()
+            .filter_map(|(id, s)| seq_of.get(id).map(|seq| (seq.to_string(), *s)))
+            .collect();
+        let fused = rrf_fuse(&[(Arm::Lexical, lexical), (Arm::Semantic, sem)]);
+
+        // Reorder the lexical results by the fused score, then append any
+        // semantic-only hits the lexical arm never saw. Appending rather than
+        // interleaving is deliberate: a hit no term matched is weaker evidence
+        // and should not displace one that did.
+        let order: std::collections::HashMap<i64, usize> = fused
+            .iter()
+            .enumerate()
+            .filter_map(|(rank, (k, _, _))| k.parse::<i64>().ok().map(|s| (s, rank)))
+            .collect();
+        ranked.sort_by_key(|(it, _)| order.get(&it.seq).copied().unwrap_or(usize::MAX));
+
+        let known: std::collections::HashSet<i64> = ranked.iter().map(|(it, _)| it.seq).collect();
+        let extra: Vec<i64> = fused
+            .iter()
+            .filter_map(|(k, _, _)| k.parse::<i64>().ok())
+            .filter(|s| !known.contains(s))
+            .take(limit as usize)
+            .collect();
+        if !extra.is_empty() {
+            if let Ok(items) = db.lake_items_for_seqs(&extra) {
+                ranked.extend(items.into_iter().map(|it| (it, crate::query::MatchStage::Or)));
+            }
+        }
+        fused
+            .into_iter()
+            .filter_map(|(k, arms, _)| k.parse::<i64>().ok().map(|s| (s, arms)))
+            .collect()
+    };
+
+    // fuse → DEDUP → CLIP → budget. The order is the fix: deduplicating after
+    // clipping cannot work, because a head clip makes near-duplicates
+    // byte-identical and clipping to a fixed 4,000 makes the budget's job
+    // impossible. The live probe returned four copies of one preface and then
+    // dropped every browse hit to fit them.
+    let prompt_hits = {
+        let bodies: Vec<String> = ranked
+            .iter()
+            .map(|(it, _)| it.body.clone().unwrap_or_default())
+            .collect();
+        let cands: Vec<crate::dedup::Candidate<'_>> = ranked
+            .iter()
+            .zip(bodies.iter())
+            .map(|((it, _), body)| crate::dedup::Candidate {
+                key: it.seq,
+                // The lake's own exact-identity key, already stored and indexed.
+                exact_hash: None,
+                text: body.as_str(),
+            })
+            .collect();
+        let verdicts = crate::dedup::dedup(&cands);
+        let survivors: Vec<usize> = verdicts
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| matches!(v, crate::dedup::Verdict::Keep { .. }))
+            .map(|(i, _)| i)
+            .collect();
+        // Per-hit budget is computed over the SURVIVORS, so suppressing
+        // duplicates buys the remaining hits more room rather than less.
+        let per_hit = crate::dedup::per_hit_budget(MAX_CONTEXT_BYTES, survivors.len());
+        let hit_seqs: Vec<i64> = survivors.iter().map(|i| ranked[*i].0.seq).collect();
+        let hit_superseded = db.supersessions_for_seqs(&hit_seqs).unwrap_or_default();
+        survivors
+            .into_iter()
+            .map(|i| {
+                let (item, stage) = ranked[i].clone();
+                let absorbed = match &verdicts[i] {
+                    crate::dedup::Verdict::Keep { absorbed } => absorbed.clone(),
+                    crate::dedup::Verdict::Duplicate { .. } => Vec::new(),
+                };
+                let mut item = item;
+                item.body = item
+                    .body
+                    .map(|b| crate::dedup::excerpt_around(&b, &terms, per_hit));
+                PackPromptHit {
+                    superseded_by: hit_superseded.get(&item.seq).copied(),
+                    duplicate_of: absorbed,
+                    stage: stage.as_str().to_string(),
+                    arms: arms_by_seq.get(&item.seq).cloned().unwrap_or_default(),
+                    item,
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+
+    // Browse events carry their own exact-identity key — `context_hash`, the
+    // sha256 of the normalized DOM — and 20% of them are exact duplicates today
+    // (829 rows, 665 distinct). Revisiting a page is a real signal about
+    // attention, but four identical copies of it are not four pieces of evidence.
+    let browse_hits = {
+        let raw = query
+            .map(|term| db.search_browse_events(term, limit).unwrap_or_default())
+            .unwrap_or_default();
+        let hashes = db
+            .context_hashes_for_browse_ids(&raw.iter().map(|h| h.id).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let texts: Vec<String> = raw
+            .iter()
+            .map(|h| format!("{} {}", h.title.clone().unwrap_or_default(), h.url))
+            .collect();
+        let cands: Vec<crate::dedup::Candidate<'_>> = raw
+            .iter()
+            .zip(texts.iter())
+            .map(|(h, t)| crate::dedup::Candidate {
+                key: h.seq.unwrap_or(h.id),
+                exact_hash: hashes.get(&h.id).map(String::as_str),
+                text: t.as_str(),
+            })
+            .collect();
+        let verdicts = crate::dedup::dedup(&cands);
+        raw.into_iter()
+            .zip(verdicts.iter())
+            .filter(|(_, v)| matches!(v, crate::dedup::Verdict::Keep { .. }))
+            .map(|(h, _)| h)
+            .collect::<Vec<_>>()
+    };
+
+    // The grep arm runs only when the question reaches for a literal. Its
+    // needle is the longest quoted phrase, else the longest term — the most
+    // specific thing the user actually typed.
+    let literal_query = matches!((&plan, query), (Some(p), Some(raw)) if crate::query::looks_literal(p, raw));
+    let grep_hits = match (&plan, query) {
+        (Some(plan), Some(raw)) if crate::query::looks_literal(plan, raw) => {
+            let needle = plan
+                .phrases
+                .iter()
+                .chain(plan.terms.iter())
+                .max_by_key(|t| t.chars().count())
+                .cloned()
+                .unwrap_or_default();
+            db.grep_memory(&needle, None, false, crate::db::GrepScope::All, limit)
+                .unwrap_or_default()
+        }
+        _ => Vec::new(),
+    };
+
+    // Every arm reports whether it RAN, not just what it returned.
+    let arm_coverage = vec![
+        ArmCoverage {
+            arm: Arm::Node,
+            ran: query.is_some() || node_id.is_some(),
+            hits: usize::from(node.is_some()) + matched.len(),
+            absent_because: None,
+        },
+        ArmCoverage {
+            arm: Arm::Note,
+            ran: query.is_some(),
+            hits: notes.len(),
+            absent_because: None,
+        },
+        ArmCoverage {
+            arm: Arm::Lexical,
+            ran: query.is_some(),
+            hits: prompt_hits.len() + browse_hits.len(),
+            absent_because: None,
+        },
+        ArmCoverage {
+            arm: Arm::Grep,
+            ran: !grep_hits.is_empty() || literal_query,
+            hits: grep_hits.len(),
+            absent_because: (!literal_query).then(|| {
+                "the question doesn't name a literal (a flag, a path, an identifier)".to_string()
+            }),
+        },
+        ArmCoverage {
+            arm: Arm::Semantic,
+            ran: semantic.is_some(),
+            hits: semantic.as_ref().map(Vec::len).unwrap_or(0),
+            absent_because: semantic.is_none().then(|| {
+                match crate::embed::provider_kind() {
+                    crate::embed::ProviderKind::Absent => {
+                        "no on-device embedding provider is available".to_string()
+                    }
+                    _ => "the semantic index is not built yet".to_string(),
+                }
+            }),
+        },
+    ];
 
     let mut pack = AnswerPack {
         head_seq,
@@ -1035,16 +1311,32 @@ pub fn build_answer_pack(
         notes,
         prompt_hits,
         browse_hits,
+        grep_hits,
+        arm_coverage,
         truncated: over_cap.into_iter().map(str::to_string).collect(),
     };
     enforce_pack_budget(&mut pack);
     pack
 }
 
-/// Trim the pack to `MAX_CONTEXT_BYTES`, cheapest evidence first. The order is
-/// the retrieval contract's priority read backwards: browse pages, then lake
-/// prompts, then the node's link list, and the user's own notes dead last —
-/// they are the one human-authored signal, so they are the last thing we drop.
+/// Trim the pack to `MAX_CONTEXT_BYTES` without ever letting one arm's results
+/// erase another's.
+///
+/// The old rule was "drop whole lists in a fixed order, cheapest first", and it
+/// had a failure mode the live probe hit exactly: browse hits were first in the
+/// order, so a pack bloated by four copies of one preface dropped **every
+/// page** before touching a single prompt. The user's question was answered
+/// from one kind of evidence because the other kind was cheaper to delete.
+///
+/// The rule now: **every arm that produced anything keeps at least one hit.**
+/// Above that floor, arms are trimmed in the same priority order (the user's
+/// own notes dead last — they are the one human-authored signal), still in
+/// proportional chunks, because each `size()` call re-serializes the pack and a
+/// pop-one loop over a long list would be quadratic on exactly the biggest
+/// packs. That chunking reasoning was sound and is kept verbatim.
+///
+/// An arm reduced to its floor is still reported in `truncated`: "one of many"
+/// and "one, that's all there was" are different answers.
 fn enforce_pack_budget(pack: &mut AnswerPack) {
     fn size(p: &AnswerPack) -> usize {
         serde_json::to_vec(p).map(|v| v.len()).unwrap_or(0)
@@ -1052,13 +1344,12 @@ fn enforce_pack_budget(pack: &mut AnswerPack) {
     if size(pack) <= MAX_CONTEXT_BYTES {
         return;
     }
-    // (name, current length, drop-n-from-the-tail). Dropping in proportional
-    // chunks rather than one at a time keeps this logarithmic in list length —
-    // each `size()` call re-serializes the whole pack, so a pop-one loop over a
-    // long list would be quadratic on exactly the biggest packs.
     type Len = fn(&AnswerPack) -> usize;
     type Drop = fn(&mut AnswerPack, usize);
-    let steps: [(&str, Len, Drop); 4] = [
+    /// Every arm that produced at least one hit keeps at least this many.
+    const ARM_FLOOR: usize = 1;
+
+    let steps: [(&str, Len, Drop); 5] = [
         ("browseHits", |p| p.browse_hits.len(), |p, n| {
             let keep = p.browse_hits.len().saturating_sub(n);
             p.browse_hits.truncate(keep);
@@ -1073,15 +1364,22 @@ fn enforce_pack_budget(pack: &mut AnswerPack) {
                 node.links.truncate(keep);
             }
         }),
+        ("grepHits", |p| p.grep_hits.len(), |p, n| {
+            let keep = p.grep_hits.len().saturating_sub(n);
+            p.grep_hits.truncate(keep);
+        }),
         ("notes", |p| p.notes.len(), |p, n| {
             let keep = p.notes.len().saturating_sub(n);
             p.notes.truncate(keep);
         }),
     ];
+
+    // Pass one: trim every arm down towards its floor, in priority order.
     for (name, len, drop) in steps {
         let mut cut = false;
-        while size(pack) > MAX_CONTEXT_BYTES && len(pack) > 0 {
-            drop(pack, (len(pack) / 4).max(1));
+        while size(pack) > MAX_CONTEXT_BYTES && len(pack) > ARM_FLOOR {
+            let over = len(pack) - ARM_FLOOR;
+            drop(pack, (over / 4).max(1).min(over));
             cut = true;
         }
         if cut && !pack.truncated.iter().any(|t| t == name) {
@@ -1090,6 +1388,336 @@ fn enforce_pack_budget(pack: &mut AnswerPack) {
         if size(pack) <= MAX_CONTEXT_BYTES {
             return;
         }
+    }
+
+    // Pass two: still over budget with every arm at its floor. Now the floor
+    // itself has to give — but only after every arm has been reduced to it, so
+    // what is lost is spread across the evidence rather than taken entirely
+    // from whichever arm happened to sort first.
+    for (name, len, drop) in steps {
+        while size(pack) > MAX_CONTEXT_BYTES && len(pack) > 0 {
+            drop(pack, 1);
+            if !pack.truncated.iter().any(|t| t == name) {
+                pack.truncated.push(name.to_string());
+            }
+        }
+        if size(pack) <= MAX_CONTEXT_BYTES {
+            return;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Arms and fusion
+// ---------------------------------------------------------------------------
+
+/// Which retrieval arm produced a hit. This is the auditability half of what
+/// replaced "no embedding model enters the product": a reader can always tell
+/// what KIND of evidence they are looking at.
+///
+/// The trust ordering is real and is stated in the retrieval contract:
+/// - `Node` — **curated**. A human accepted this class. It outranks everything.
+/// - `Note` — the user's own margin words. Human-authored, quoted verbatim.
+/// - `Lexical` — the terms are literally present.
+/// - `Grep` — an exact string match, with no relevance claim beyond "it's here".
+/// - `Semantic` — **associated**, not asserted. A vector said these are alike.
+///   A `Semantic`-only hit must be verified before being stated as fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Arm {
+    Node,
+    Note,
+    Lexical,
+    Grep,
+    Semantic,
+}
+
+impl Arm {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Arm::Node => "node",
+            Arm::Note => "note",
+            Arm::Lexical => "lexical",
+            Arm::Grep => "grep",
+            Arm::Semantic => "semantic",
+        }
+    }
+}
+
+/// One arm's contribution to a hit: which arm, where it ranked, what it scored.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArmHit {
+    pub arm: Arm,
+    pub rank: usize,
+    pub score: f64,
+}
+
+/// Reciprocal Rank Fusion's smoothing constant. 60 is the value from the
+/// original paper and it is not a tuning dial here: it flattens the difference
+/// between rank 1 and rank 2 enough that one arm's confident-but-wrong top hit
+/// cannot dominate three other arms' agreement.
+pub const RRF_K: f64 = 60.0;
+
+/// Fuse ranked lists into one ordering by Reciprocal Rank Fusion.
+///
+/// RRF over score-normalization deliberately: the arms' scores are not
+/// commensurable — bm25 is unbounded and negative-is-better, cosine is [-1,1],
+/// and a grep hit has no score at all. Ranks are the only thing they share.
+///
+/// Returns each key with the arms that found it, ordered by fused score.
+pub fn rrf_fuse(lists: &[(Arm, Vec<(String, f64)>)]) -> Vec<(String, Vec<ArmHit>, f64)> {
+    let mut fused: std::collections::HashMap<String, (Vec<ArmHit>, f64)> =
+        std::collections::HashMap::new();
+    for (arm, hits) in lists {
+        for (rank, (key, score)) in hits.iter().enumerate() {
+            let contribution = 1.0 / (RRF_K + (rank + 1) as f64);
+            let e = fused.entry(key.clone()).or_insert_with(|| (Vec::new(), 0.0));
+            e.0.push(ArmHit { arm: *arm, rank: rank + 1, score: *score });
+            e.1 += contribution;
+        }
+    }
+    let mut out: Vec<(String, Vec<ArmHit>, f64)> =
+        fused.into_iter().map(|(k, (arms, s))| (k, arms, s)).collect();
+    // Deterministic: fused score desc, then key — never wall-clock or hash order.
+    out.sort_by(|a, b| {
+        b.2.partial_cmp(&a.2)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    out
+}
+
+/// Which arms ran and what each returned — so an empty result reads as "the
+/// semantic index isn't built yet" rather than "you never thought about this".
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArmCoverage {
+    pub arm: Arm,
+    /// `true` when the arm ran at all. A `false` here is the honest third
+    /// state: absent, not empty.
+    pub ran: bool,
+    pub hits: usize,
+    /// Why it did not run, when it did not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub absent_because: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Inline prefetch rendering (one-turn Ask)
+// ---------------------------------------------------------------------------
+
+/// Byte ceiling for the prefetched-evidence block baked into an Ask prompt.
+/// Sized against `classmem::CATALOG_SNAPSHOT_MAX_BYTES`, which rides in the
+/// same prompt: prototyped over the live pack (`q=browser&limit=8`, 400-char
+/// bodies, one line per link) the render came to ~6 KB, so 12 KB is headroom
+/// rather than a target.
+pub const INLINE_PACK_MAX_BYTES: usize = 12_000;
+/// Hits per arm in a prefetch — deliberately below `ANSWER_PACK_LIMIT`. The
+/// prefetch is a first look, not the whole record; the agent can still curl for
+/// more, and the block tells it when that is worth doing.
+pub const INLINE_PACK_LIMIT: i64 = 8;
+/// Per-hit body window in the inline render, against the DB layer's 4,000. Eight
+/// hits at 4,000 would be the whole budget spent on one arm.
+pub const INLINE_BODY_CHARS: usize = 400;
+
+/// Render an answer pack as the compact evidence block that rides inside an Ask
+/// prompt, or `None` when there is nothing honest to say.
+///
+/// **`None` is a real answer here.** An empty block is strictly worse than
+/// silence: it reads to the model as "the record was searched and is empty",
+/// which is a claim about the user's history rather than about the query. So a
+/// query with no terms ("what can you do?") and a pack where every arm came
+/// back empty both render nothing at all, and the agent falls through to its
+/// normal retrieval — which is exactly today's behaviour, i.e. the downside of
+/// a prefetch miss is bounded at the status quo.
+///
+/// The block is **honest about itself**, and that is what makes the escape
+/// hatch safe. It names the terms that were searched, the basis on which a node
+/// resolved, and any list that was trimmed — so the model can tell "the record
+/// is empty on this" from "the prefetch looked in the wrong place", and knows
+/// when curling is worth a turn. Without that distinction a prefetch is just a
+/// confident way to be wrong.
+pub fn render_answer_pack_block(
+    pack: &AnswerPack,
+    plan: Option<&crate::query::FtsPlan>,
+    max_bytes: usize,
+) -> Option<String> {
+    let terms: Vec<String> = plan.map(|p| p.terms.clone()).unwrap_or_default();
+    if terms.is_empty() && plan.map(|p| p.phrases.is_empty()).unwrap_or(true) {
+        return None;
+    }
+    let empty = pack.node.is_none()
+        && pack.notes.is_empty()
+        && pack.prompt_hits.is_empty()
+        && pack.browse_hits.is_empty()
+        && pack.grep_hits.is_empty();
+    if empty {
+        return None;
+    }
+
+    let mut out = String::with_capacity(2048);
+    out.push_str(&format!(
+        "PREFETCHED EVIDENCE — assembled server-side from your question at seq {}.\n",
+        pack.head_seq
+    ));
+    out.push_str(&format!("Searched: {}.\n", terms.join(", ")));
+    if let Some(node) = &pack.node {
+        // Say WHY it resolved. "Resolved: [[X]]" alone is an assertion; naming
+        // the term that matched lets the model notice a wrong turn.
+        let basis = terms
+            .iter()
+            .find(|t| node.node.title.to_lowercase().contains(t.as_str()))
+            .map(|t| format!(" (matched \"{t}\" in the title)"))
+            .unwrap_or_default();
+        out.push_str(&format!("Resolved: [[{}]]{basis}.\n", node.node.title));
+    } else {
+        out.push_str("Resolved: no class matched — the lexical evidence below still stands.\n");
+    }
+    if !pack.truncated.is_empty() {
+        out.push_str(&format!("TRIMMED: {}.\n", pack.truncated.join(", ")));
+    }
+    out.push_str(
+        "If this answers the question, ANSWER — do not curl.\n\
+         Curl the answer-pack ONLY when this block is empty on the subject you need, names \
+         a node you want to descend into, or says it was TRIMMED.\n\n",
+    );
+
+    // The user's own words lead, exactly as in the pack itself.
+    if !pack.notes.is_empty() {
+        out.push_str("YOUR NOTES (human-authored — quote verbatim):\n");
+        for n in &pack.notes {
+            let star = if n.starred { "★ " } else { "" };
+            out.push_str(&format!(
+                "- {star}#{} {}\n",
+                n.seq.unwrap_or(0),
+                clip_line(&n.text, INLINE_BODY_CHARS)
+            ));
+        }
+        out.push('\n');
+    }
+    if let Some(node) = &pack.node {
+        if !node.children.is_empty() {
+            let kids: Vec<&str> = node.children.iter().map(|c| c.title.as_str()).collect();
+            out.push_str(&format!("Children of [[{}]]: {}\n\n", node.node.title, kids.join(" · ")));
+        }
+        if !node.links.is_empty() {
+            out.push_str("FILED UNDER IT:\n");
+            for l in &node.links {
+                let sup = l
+                    .superseded_by
+                    .map(|s| format!(" [superseded by #{s}]"))
+                    .unwrap_or_default();
+                out.push_str(&format!(
+                    "- #{} {}{sup}\n",
+                    l.link.target_id,
+                    clip_line(l.label.as_deref().unwrap_or("(no preview)"), 160)
+                ));
+            }
+            out.push('\n');
+        }
+        if !node.observations.is_empty() {
+            out.push_str("OBSERVATIONS (patterns, not facts — label them as such):\n");
+            for o in &node.observations {
+                out.push_str(&format!("- {}\n", clip_line(&o.summary, 200)));
+            }
+            out.push('\n');
+        }
+    }
+    if !pack.prompt_hits.is_empty() {
+        out.push_str("PROMPTS:\n");
+        for h in &pack.prompt_hits {
+            let sup = h
+                .superseded_by
+                .map(|s| format!(" [superseded by #{s}]"))
+                .unwrap_or_default();
+            let dupes = if h.duplicate_of.is_empty() {
+                String::new()
+            } else {
+                format!(" [+{} near-identical]", h.duplicate_of.len())
+            };
+            // Name the arms. A hit two arms found is stronger evidence than one
+            // either found alone, and a `semantic`-only hit is *associated*
+            // rather than asserted — the reader can only weigh that if it says.
+            let arms = if h.arms.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " ({})",
+                    h.arms.iter().map(|a| a.arm.as_str()).collect::<Vec<_>>().join("+")
+                )
+            };
+            out.push_str(&format!(
+                "- #{}{sup}{dupes}{arms} {}\n",
+                h.item.seq,
+                clip_line(h.item.body.as_deref().unwrap_or(""), INLINE_BODY_CHARS)
+            ));
+        }
+        out.push('\n');
+    }
+    if !pack.browse_hits.is_empty() {
+        out.push_str("PAGES:\n");
+        for b in &pack.browse_hits {
+            out.push_str(&format!(
+                "- #{} {} — {}\n",
+                b.seq.unwrap_or(0),
+                clip_line(b.title.as_deref().unwrap_or(""), 100),
+                b.url
+            ));
+        }
+        out.push('\n');
+    }
+    if !pack.grep_hits.is_empty() {
+        out.push_str("LITERAL MATCHES:\n");
+        for g in &pack.grep_hits {
+            out.push_str(&format!(
+                "- #{} {} {}\n",
+                g.seq.unwrap_or(0),
+                g.label,
+                clip_line(&g.excerpt, 160)
+            ));
+        }
+        out.push('\n');
+    }
+
+    // Clip at a line boundary, and SAY the block was clipped — a silently
+    // truncated evidence block is the same lie as a silently truncated pack.
+    if out.len() > max_bytes {
+        let cut = out
+            .char_indices()
+            .take_while(|(i, _)| *i < max_bytes.saturating_sub(80))
+            .map(|(i, _)| i)
+            .last()
+            .unwrap_or(0);
+        let cut = out[..cut].rfind('\n').unwrap_or(cut);
+        out.truncate(cut);
+        out.push_str("\n[prefetch clipped to fit — curl the answer-pack for the rest]\n");
+    }
+    Some(out)
+}
+
+/// One line, newlines flattened, clipped with an ellipsis.
+fn clip_line(s: &str, max: usize) -> String {
+    let one = s.replace('\n', " ");
+    if one.chars().count() <= max {
+        one
+    } else {
+        one.chars().take(max).collect::<String>() + "…"
+    }
+}
+
+/// The ticker line for a prefetched turn. `retrieval_status_label` narrates
+/// curls, and a prefetched turn makes none — so without this the surface would
+/// sit silent through the one part of the turn that used to show progress.
+///
+/// It reports a RESULT where the old ticker reported an ACTIVITY: "read
+/// Embedded browser + 16 items…" rather than "searching your memory…".
+pub fn prefetch_status_label(node: Option<&str>, hits: usize) -> String {
+    match (node, hits) {
+        (Some(title), 0) => format!("read {title}…"),
+        (Some(title), n) => format!("read {title} + {n} items…"),
+        (None, 0) => "nothing matched — asking anyway…".to_string(),
+        (None, n) => format!("read {n} items…"),
     }
 }
 
@@ -1331,7 +1959,8 @@ mod tests {
                 source: crate::ledger::PromptSource::Hook,
                 origin: crate::ledger::Origin::Redline,
                 surface: surface.to_string(),
-                role: None,
+                role: crate::ledger::CorpusRole::User,
+                user_text: None,
                 session_id: Some(format!("sess-{surface}")),
                 claude_session_id: Some(format!("cs-{body}")),
                 mission_id: None,
@@ -1387,7 +2016,8 @@ mod tests {
                 source: crate::ledger::PromptSource::RustFirstTurn,
                 origin: crate::ledger::Origin::Redline,
                 surface: "browse".to_string(),
-                role: None,
+                role: crate::ledger::CorpusRole::User,
+                user_text: None,
                 session_id: None,
                 claude_session_id: None,
                 mission_id: None,
@@ -1529,6 +2159,335 @@ mod tests {
         db.accept_class_node(id).unwrap();
     }
 
+    /// The inline block must be honest about itself — that property is what
+    /// makes "do not curl" safe to say. It names the terms searched, the basis
+    /// on which a node resolved, and any list that was trimmed.
+    #[test]
+    fn the_prefetch_block_states_what_it_searched_and_what_it_trimmed() {
+        let db = Database::open_in_memory().unwrap();
+        seed_class(&db, "n-browser", "Embedded browser");
+        seed_prompt(&db, "pty_plan", Some("/repo"), "the browser tab suspension design");
+
+        let q = "what did I decide about the browser tab suspension";
+        let plan = crate::query::plan_fts_query(q).unwrap();
+        let mut pack = build_answer_pack(&db, Some(q), None, INLINE_PACK_LIMIT);
+        pack.truncated.push("promptHits".to_string());
+        let block =
+            render_answer_pack_block(&pack, Some(&plan), INLINE_PACK_MAX_BYTES).expect("a block");
+
+        assert!(block.starts_with("PREFETCHED EVIDENCE"));
+        assert!(block.contains("Searched: decide, browser, tab, suspension."), "{block}");
+        assert!(block.contains("Resolved: [[Embedded browser]]"), "{block}");
+        assert!(block.contains("matched \"browser\" in the title"), "{block}");
+        assert!(block.contains("TRIMMED: promptHits."), "{block}");
+        // The escape hatch, stated in terms the model can act on.
+        assert!(block.contains("If this answers the question, ANSWER — do not curl."));
+        assert!(block.contains("says it was TRIMMED"));
+    }
+
+    /// An empty block is strictly worse than silence: it reads as "the record
+    /// was searched and is empty", which is a claim about the user's history
+    /// rather than about the query. Both empty cases must render `None`.
+    #[test]
+    fn an_empty_prefetch_renders_nothing_at_all() {
+        let db = Database::open_in_memory().unwrap();
+        // No terms at all.
+        let pack = build_answer_pack(&db, Some("what can you do?"), None, INLINE_PACK_LIMIT);
+        let plan = crate::query::plan_fts_query("what can you do?");
+        // (all-stopword queries DO produce terms — the interesting case is a
+        // query that plans to nothing)
+        assert!(crate::query::plan_fts_query("--- ///").is_none());
+        assert!(render_answer_pack_block(&pack, None, INLINE_PACK_MAX_BYTES).is_none());
+
+        // Terms, but every arm came back empty.
+        let plan = plan.unwrap();
+        let empty = build_answer_pack(&db, Some("zebra quagga"), None, INLINE_PACK_LIMIT);
+        assert!(render_answer_pack_block(&empty, Some(&plan), INLINE_PACK_MAX_BYTES).is_none());
+    }
+
+    /// A clipped block SAYS it was clipped — a silently truncated evidence
+    /// block is the same lie as a silently truncated pack.
+    #[test]
+    fn a_clipped_prefetch_block_admits_it() {
+        let db = Database::open_in_memory().unwrap();
+        for i in 0..20 {
+            let body: String = (0..200).map(|j| format!("loop t{i}w{j} ")).collect();
+            seed_prompt(&db, "pty_plan", Some("/repo"), &body);
+        }
+        let plan = crate::query::plan_fts_query("loop").unwrap();
+        let pack = build_answer_pack(&db, Some("loop"), None, INLINE_PACK_LIMIT);
+        let block = render_answer_pack_block(&pack, Some(&plan), 1_200).expect("a block");
+        assert!(block.len() <= 1_200, "{} bytes", block.len());
+        assert!(block.contains("[prefetch clipped to fit"), "{block}");
+    }
+
+    /// The ticker reports a RESULT where the old one reported an ACTIVITY.
+    #[test]
+    fn prefetch_status_reports_what_was_read() {
+        assert_eq!(
+            prefetch_status_label(Some("Embedded browser"), 16),
+            "read Embedded browser + 16 items…"
+        );
+        assert_eq!(prefetch_status_label(Some("Voice agent"), 0), "read Voice agent…");
+        assert_eq!(prefetch_status_label(None, 4), "read 4 items…");
+        // The honest empty case — never a silent ticker.
+        assert_eq!(prefetch_status_label(None, 0), "nothing matched — asking anyway…");
+    }
+
+    /// GOLDEN QUESTIONS — retrieval is the thing that regresses silently, so it
+    /// gets a fixture rather than a spot check. Each row is
+    /// `question → the node it must resolve → a seq that must be in the pack`.
+    /// A failure here means a planner or ranking change quietly stopped finding
+    /// something a user could previously ask for.
+    #[test]
+    fn golden_questions_resolve_and_cite() {
+        let db = Database::open_in_memory().unwrap();
+        seed_class(&db, "n-browser", "Embedded browser");
+        seed_class(&db, "n-keeper", "Memory keeper compaction");
+        seed_class(&db, "n-voice", "Voice agent");
+
+        // (body, surface) — the seq is the insertion order, 1-based.
+        let corpus = [
+            "the browser tab suspension keeps three webviews live at a time",
+            "keeper compaction releases cold prompt bodies into gists",
+            "the voice agent needs full-duplex AEC for barge-in",
+            "pass --allowedTools to every headless spawn in src-tauri/src/claude_proc.rs",
+            "compacting the ledger must never touch a user role row",
+        ];
+        for body in corpus {
+            seed_prompt(&db, "pty_plan", Some("/repo"), body);
+        }
+
+        let cases: &[(&str, Option<&str>, &[&str])] = &[
+            // A natural-language question must resolve its class — the exact
+            // shape that returned `node: null` on the live daemon.
+            (
+                "what did I decide about the browser tab suspension",
+                Some("Embedded browser"),
+                &["tab suspension"],
+            ),
+            // Porter: the question's inflection differs from the corpus's.
+            ("compacting cold bodies", Some("Memory keeper compaction"), &["compaction releases"]),
+            // A bare topic word.
+            ("voice", Some("Voice agent"), &["full-duplex AEC"]),
+            // A literal no tokenizer can hold — the grep arm's job.
+            ("--allowedTools", None, &["--allowedTools"]),
+            // A question about nothing in the record resolves nothing, and says
+            // so by being empty rather than by inventing a class.
+            ("zebra quagga", None, &[]),
+        ];
+
+        for (q, want_node, want_snippets) in cases {
+            let pack = build_answer_pack(&db, Some(q), None, INLINE_PACK_LIMIT);
+            match want_node {
+                Some(title) => assert_eq!(
+                    pack.node.as_ref().map(|n| n.node.title.as_str()),
+                    Some(*title),
+                    "{q:?} must resolve [[{title}]]"
+                ),
+                None => {}
+            }
+            let haystack = format!(
+                "{} {}",
+                pack.prompt_hits
+                    .iter()
+                    .filter_map(|h| h.item.body.clone())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                pack.grep_hits
+                    .iter()
+                    .map(|g| g.excerpt.clone())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            for snippet in *want_snippets {
+                assert!(
+                    haystack.contains(snippet),
+                    "{q:?} must surface {snippet:?}; got: {haystack}"
+                );
+            }
+            if want_snippets.is_empty() {
+                assert!(pack.prompt_hits.is_empty(), "{q:?} must find nothing: {:?}", pack.prompt_hits);
+            }
+        }
+    }
+
+    // --- THE THREE TAXONOMY INVARIANTS ------------------------------------
+    //
+    // These are what make a ranked fuzzy index — and now an embedding model —
+    // admissible in a product built on a human-curated catalog. In one line:
+    // **the arms decide what you READ; the tree decides what things ARE.**
+    // Each is a guard test rather than a comment, because the failure mode is
+    // silent: a retrieval change that starts writing to the catalog looks like
+    // better recall right up until the taxonomy is describing rankings.
+
+    /// **1. Node resolution never consults a lake ranking.** Classes come from
+    /// `class_nodes_fts` and the explicit `?node=` — human-accepted text only.
+    /// A bm25 or vector hit on a PROMPT can never create, rename, reparent or
+    /// reorder a class, however strongly it matches.
+    #[test]
+    fn answer_pack_node_arm_ignores_lake_hits() {
+        let db = Database::open_in_memory().unwrap();
+        seed_class(&db, "n-voice", "Voice agent");
+        // A prompt that screams "browser tab suspension" while NO class by that
+        // name exists. A lake-driven resolver would happily mint or promote one.
+        for _ in 0..5 {
+            seed_prompt(
+                &db,
+                "pty_plan",
+                Some("/repo"),
+                "browser tab suspension browser tab suspension design",
+            );
+        }
+        let before: Vec<String> = db
+            .list_class_nodes()
+            .unwrap()
+            .into_iter()
+            .map(|n| format!("{}|{}|{:?}", n.id, n.title, n.parent_id))
+            .collect();
+
+        let pack = build_answer_pack(&db, Some("browser tab suspension"), None, ANSWER_PACK_LIMIT);
+        // The lexical arm found the prompts…
+        assert!(!pack.prompt_hits.is_empty(), "the evidence is there");
+        // …and the node arm resolved NOTHING, because no human ever accepted a
+        // class by that name. An empty `node` beside full `promptHits` is the
+        // correct, honest shape.
+        assert!(
+            pack.node.is_none(),
+            "a lake hit must never conjure a class: {:?}",
+            pack.node.map(|n| n.node.title)
+        );
+
+        let after: Vec<String> = db
+            .list_class_nodes()
+            .unwrap()
+            .into_iter()
+            .map(|n| format!("{}|{}|{:?}", n.id, n.title, n.parent_id))
+            .collect();
+        assert_eq!(before, after, "retrieval must not have touched the catalog");
+    }
+
+    /// **2. No retrieval path writes to the catalog.** A source invariant, in
+    /// the `size_guard.rs` style: the modules that answer questions may read
+    /// the tree and may never mutate it. Enforced in source rather than by
+    /// review because a single well-meaning "let's file this while we're here"
+    /// would turn the taxonomy into a function of search behaviour.
+    #[test]
+    fn retrieval_modules_never_write_the_catalog() {
+        const RETRIEVAL: &[(&str, &str)] = &[
+            ("query.rs", include_str!("query.rs")),
+            ("dedup.rs", include_str!("dedup.rs")),
+            ("embed.rs", include_str!("embed.rs")),
+        ];
+        // Every catalog-mutating entry point on `Database`.
+        const WRITES: &[&str] = &[
+            "stage_proposal",
+            "accept_class_node",
+            "accept_all_pending",
+            "seed_class_roots",
+            "revert_link",
+            "clear_embeddings", // …and even the index's own reset is not theirs
+        ];
+        for (name, src) in RETRIEVAL {
+            for w in WRITES {
+                assert!(
+                    !src.contains(w),
+                    "{name} names `{w}` — retrieval reads the catalog, never writes it"
+                );
+            }
+        }
+    }
+
+    /// **3. The classifier's input is chain order, never a ranking.** What the
+    /// taxonomy is built FROM must stay the record's own sequence: feed it a
+    /// relevance-ordered slice and the tree starts describing what searches
+    /// well rather than what happened.
+    #[test]
+    fn classifier_delta_takes_no_query() {
+        const SRC: &str = include_str!("db.rs");
+        let body = SRC
+            .split_once("pub fn list_lake_items_since(")
+            .expect("the classifier's delta reader exists")
+            .1;
+        let sig_end = body.find(')').unwrap();
+        let signature = &body[..sig_end];
+        // Parameter NAMES, parsed — a substring check trips over `since_seq`.
+        let params: Vec<&str> = signature
+            .split(',')
+            .filter_map(|p| p.split(':').next())
+            .map(str::trim)
+            .filter(|p| !p.is_empty() && *p != "&self")
+            .collect();
+        for banned in ["q", "query", "term", "match"] {
+            assert!(
+                !params.contains(&banned),
+                "the classifier's delta must take no query parameter (`{banned}` in {params:?})"
+            );
+        }
+        // …and its body orders by seq, ascending, full stop.
+        let stmt_end = body.find("let rows =").unwrap_or(body.len());
+        let stmt = &body[..stmt_end];
+        assert!(stmt.contains("ORDER BY le.seq ASC"), "chain order is the contract");
+        assert!(!stmt.contains("bm25("), "no ranking may enter the classifier's input");
+    }
+
+    /// RRF fuses by RANK, not by score — the arms' scores are not
+    /// commensurable (bm25 is unbounded and negative-is-better, cosine is
+    /// [-1,1], grep has no score at all), so ranks are the only shared unit.
+    #[test]
+    fn rrf_rewards_agreement_between_arms() {
+        let lexical = vec![("a".to_string(), 9.0), ("b".to_string(), 8.0), ("c".to_string(), 7.0)];
+        let semantic = vec![("c".to_string(), 0.91), ("a".to_string(), 0.88)];
+        let fused = rrf_fuse(&[(Arm::Lexical, lexical), (Arm::Semantic, semantic)]);
+
+        // `a` is rank 1 and rank 2 — found by both, so it leads.
+        assert_eq!(fused[0].0, "a");
+        assert_eq!(fused[0].1.len(), 2, "both arms are recorded on the hit");
+        // `c` (ranks 3 and 1) beats `b` (rank 2 in one arm only): agreement
+        // across arms outweighs a better position in one of them.
+        let pos = |k: &str| fused.iter().position(|(x, _, _)| x == k).unwrap();
+        assert!(pos("c") < pos("b"), "two arms agreeing beats one arm ranking higher");
+
+        // Every hit names its arms with rank and score, so a `semantic`-only
+        // hit is visibly *associated* rather than asserted.
+        let b = &fused[pos("b")].1;
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].arm, Arm::Lexical);
+        assert_eq!(b[0].rank, 2);
+
+        // Deterministic on ties — never hash order.
+        let tie = rrf_fuse(&[
+            (Arm::Lexical, vec![("z".into(), 1.0)]),
+            (Arm::Semantic, vec![("y".into(), 1.0)]),
+        ]);
+        assert_eq!(tie.iter().map(|(k, _, _)| k.as_str()).collect::<Vec<_>>(), ["y", "z"]);
+        assert!(rrf_fuse(&[]).is_empty());
+    }
+
+    /// An arm that did not run says so. This is what stops an empty result
+    /// reading as "you never thought about this" when the truth is "the
+    /// semantic index isn't built yet".
+    #[test]
+    fn arm_coverage_distinguishes_absent_from_empty() {
+        let db = Database::open_in_memory().unwrap();
+        seed_prompt(&db, "pty_plan", Some("/repo"), "the loop executor");
+        let pack = build_answer_pack(&db, Some("loop"), None, ANSWER_PACK_LIMIT);
+
+        let arm = |a: Arm| pack.arm_coverage.iter().find(|c| c.arm == a).expect("every arm reports");
+        // The lexical arm ran and found something.
+        assert!(arm(Arm::Lexical).ran);
+        assert!(arm(Arm::Lexical).hits > 0);
+        // The grep arm did NOT run — and names the reason rather than looking
+        // like an arm that searched and found nothing.
+        let grep = arm(Arm::Grep);
+        assert!(!grep.ran);
+        assert!(grep.absent_because.as_deref().unwrap_or("").contains("literal"));
+        // The semantic arm's state depends on the machine; either way it is
+        // explicit, never a silent zero.
+        let sem = arm(Arm::Semantic);
+        assert_eq!(sem.ran, sem.absent_because.is_none());
+    }
+
     /// The pack's shape contract: the user's own words lead, the resolved node
     /// carries its subtree/links/observations, links carry `supersededBy`, and
     /// the whole thing stays inside the byte budget.
@@ -1622,14 +2581,18 @@ mod tests {
         assert!(empty.notes.is_empty());
     }
 
-    /// Over budget, the priority order runs backwards: pages go first, the
-    /// user's own notes go last.
+    /// Twenty large, GENUINELY DISTINCT prompts now fit inside the budget —
+    /// because the per-hit window is divided among them instead of each
+    /// claiming a flat 4,000 characters. Before Phase 3 this pack could not fit
+    /// and paid for it by dropping whole arms.
     #[test]
-    fn answer_pack_trims_pages_before_notes() {
+    fn answer_pack_fits_distinct_hits_without_dropping_an_arm() {
         let db = Database::open_in_memory().unwrap();
-        let big = "loop ".repeat(1_200); // ~6KB per prompt body
         for i in 0..20 {
-            seed_prompt(&db, "pty_plan", Some("/repo"), &format!("{big} {i}"));
+            // Distinct vocabulary per prompt, so nothing collapses as a
+            // near-duplicate: this measures the budget, not the deduper.
+            let big: String = (0..1_000).map(|j| format!("term{i}n{j} ")).collect();
+            seed_prompt(&db, "pty_plan", Some("/repo"), &format!("loop {big}"));
         }
         db.write_user_note(
             &NoteWrite {
@@ -1643,13 +2606,144 @@ mod tests {
         let pack = build_answer_pack(&db, Some("loop"), None, ANSWER_PACK_LIMIT_MAX);
         let bytes = serde_json::to_vec(&pack).unwrap().len();
         assert!(bytes <= MAX_CONTEXT_BYTES, "{bytes} bytes exceeds the budget");
-        assert!(
-            pack.truncated.contains(&"promptHits".to_string()),
-            "the lake arm must be what gets cut: {:?}",
-            pack.truncated
-        );
-        assert_eq!(pack.notes.len(), 1, "the user's own words survive the trim");
+        assert_eq!(pack.notes.len(), 1, "the user's own words survive");
         assert!(!pack.truncated.contains(&"notes".to_string()));
+        assert!(
+            pack.prompt_hits.len() >= 8,
+            "hits survive as excerpts rather than being dropped whole: {}",
+            pack.prompt_hits.len()
+        );
+    }
+
+    /// The live failure, replayed. `?q=keeper compaction` returned four copies
+    /// of the same ClassMemory boilerplate among eight top hits — each clipped
+    /// at 4,000 characters from the HEAD, which is exactly why they looked
+    /// identical — and the byte budget then dropped every browse hit to fit them.
+    #[test]
+    fn pack_never_returns_four_copies_of_one_preface() {
+        let db = Database::open_in_memory().unwrap();
+        let preface = "You are Redline's ClassMemory orchestrator. You organize the user's raw \
+                       prompt and decision lake into an emergent class tree. You are READ-ONLY \
+                       over the lake, and your organization is applied directly. "
+            .repeat(10);
+        // The same 6 KB framing wrapped around four different questions — the
+        // shape that produced the live result.
+        for q in [
+            "what did I decide about compaction?",
+            "what did I decide about the keeper?",
+            "what did I decide about gists?",
+            "what did I decide about cold prompts?",
+        ] {
+            seed_prompt(&db, "pty_plan", Some("/repo"), &format!("{preface}\n\nkeeper compaction — {q}"));
+        }
+        seed_prompt(&db, "pty_plan", Some("/repo"), "keeper compaction runs on the watch bus");
+
+        let pack = build_answer_pack(&db, Some("keeper compaction"), None, ANSWER_PACK_LIMIT_MAX);
+        let framed = pack
+            .prompt_hits
+            .iter()
+            .filter(|h| h.item.body.as_deref().is_some_and(|b| b.contains("ClassMemory orchestrator")))
+            .count();
+        assert!(
+            framed <= 1,
+            "four copies of one preface must collapse to one: {framed} survived"
+        );
+        // And the suppression is REPORTED, not silent.
+        assert!(
+            pack.prompt_hits.iter().any(|h| !h.duplicate_of.is_empty()),
+            "the collapsed copies must be named: {:?}",
+            pack.prompt_hits.iter().map(|h| &h.duplicate_of).collect::<Vec<_>>()
+        );
+        // The distinct prompt is not crowded out.
+        assert!(pack
+            .prompt_hits
+            .iter()
+            .any(|h| h.item.body.as_deref().is_some_and(|b| b.contains("watch bus"))));
+    }
+
+    /// The budget may starve nothing. The old rule dropped whole lists in a
+    /// fixed order, so a bloated `promptHits` cost the user EVERY page before a
+    /// single prompt was touched — which is what the live probe showed
+    /// (`browseHits: 0`, `truncated: [browseHits, promptHits]`).
+    #[test]
+    fn budget_keeps_one_hit_per_arm() {
+        let filler = "x".repeat(6_000);
+        let mut pack = AnswerPack {
+            head_seq: 1,
+            query: Some("q".into()),
+            node: None,
+            matched_nodes: Vec::new(),
+            notes: (0..30)
+                .map(|i| UserNote {
+                    id: i,
+                    seq: Some(i),
+                    target_kind: "none".into(),
+                    target_id: None,
+                    text: filler.clone(),
+                    starred: false,
+                    created_at: 0,
+                    updated_at: 0,
+                })
+                .collect(),
+            prompt_hits: (0..30)
+                .map(|i| PackPromptHit {
+                    item: LakeItem {
+                        seq: i,
+                        ts: 0,
+                        kind: "prompt".into(),
+                        ref_kind: None,
+                        ref_id: None,
+                        session_id: None,
+                        surface: None,
+                        origin: None,
+                        role: None,
+                        mission_id: None,
+                        project_path: None,
+                        body: Some(filler.clone()),
+                        thread_kind: None,
+                        thread_id: None,
+                        parent_session_id: None,
+                        model: None,
+                    },
+                    superseded_by: None,
+                    duplicate_of: Vec::new(),
+                    stage: "and".into(),
+                    arms: Vec::new(),
+                })
+                .collect(),
+            browse_hits: (0..30)
+                .map(|i| crate::db::BrowseHit {
+                    id: i,
+                    seq: Some(i),
+                    ts: 0,
+                    url: format!("https://example.com/{i}"),
+                    title: Some(filler.clone()),
+                    snippet: filler.clone(),
+                    score: 0.0,
+                    stage: "and".into(),
+                    shot_key: None,
+                    caption: None,
+                })
+                .collect(),
+            grep_hits: Vec::new(),
+            arm_coverage: Vec::new(),
+            truncated: Vec::new(),
+        };
+        enforce_pack_budget(&mut pack);
+
+        let bytes = serde_json::to_vec(&pack).unwrap().len();
+        assert!(bytes <= MAX_CONTEXT_BYTES, "{bytes} over budget");
+        assert!(!pack.browse_hits.is_empty(), "pages must not be erased outright");
+        assert!(!pack.prompt_hits.is_empty(), "prompts must not be erased outright");
+        assert!(!pack.notes.is_empty(), "the user's own words least of all");
+        // …and every arm that lost something says so.
+        for arm in ["browseHits", "promptHits"] {
+            assert!(
+                pack.truncated.iter().any(|t| t == arm),
+                "{arm} was trimmed and must report it: {:?}",
+                pack.truncated
+            );
+        }
     }
 
     /// A bulging class must not be able to make the pack quadratic: the link

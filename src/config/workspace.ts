@@ -97,10 +97,16 @@ export interface Workspace {
   landing?: string;
   /** Per-project overrides keyed by absolute project path. */
   projects?: Record<string, { landing?: string }>;
-  /** Optional snap-back target overrides in px, e.g.
-   *  `{"layout": {"sidebar": 280, "discussion": 360, "terminal": 300}}`.
-   *  Read leniently field-by-field — see workspaceLayout. */
-  layout?: { sidebar?: number; discussion?: number; terminal?: number };
+  /** Optional snap-back target overrides in px, plus the immersive opt-out,
+   *  e.g. `{"layout": {"sidebar": 280, "discussion": 360, "terminal": 300,
+   *  "immersive": false}}`. Read leniently field-by-field — see
+   *  workspaceLayout and workspaceImmersive. */
+  layout?: {
+    sidebar?: number;
+    discussion?: number;
+    terminal?: number;
+    immersive?: boolean;
+  };
   [key: string]: unknown;
 }
 
@@ -237,6 +243,19 @@ export function workspaceLayout(ws: Workspace): CanonicalOverrides {
   if (discussion !== undefined) out.discussion = discussion;
   if (terminal !== undefined) out.terminal = terminal;
   return out;
+}
+
+/** Is the immersive rule on? Non-document surfaces hide the periphery on
+ *  entry unless the manifest's `layout` block says otherwise. Same file-first
+ *  duality as the size overrides above (no GUI writer — the hand-edit IS the
+ *  interface), and the same leniency: only a literal `false` turns it off, so
+ *  a manifest that predates the feature, or one carrying a typo, keeps the
+ *  behavior on. This is the escape valve for a Code Review workflow that
+ *  depends on the discussion pane always being there. */
+export function workspaceImmersive(ws: Workspace): boolean {
+  const raw: unknown = ws.layout;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return true;
+  return (raw as Record<string, unknown>).immersive !== false;
 }
 
 // ---- Pure updaters (each backs one GUI gesture; all preserve unknown keys) --

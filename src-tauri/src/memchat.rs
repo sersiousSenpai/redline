@@ -105,16 +105,33 @@ impl MemChatState {
 /// in the prompt, and the skill is now only worth loading for questions about
 /// the taxonomy's SHAPE.
 ///
-/// CACHE-STABLE ORDERING — the entire block above the catalog is invariant, so
-/// every first turn shares a byte-identical cacheable prefix; the snapshot and
-/// the question sit BELOW it, in that order, so a growing catalog never
-/// invalidates the cached prefix. Guarded by
-/// `first_turn_invariant_prefix_is_byte_stable`.
+/// STABLE ORDERING — the entire block below is invariant, so every first turn
+/// shares a byte-identical prefix; the snapshot, the recap, the prefetched
+/// evidence and the question sit BELOW it, in that order.
+///
+/// CORRECTION to a standing assumption, then a correction to the correction.
+/// This ordering was long reasoned about as a *prompt cache* decision, and for
+/// most of its life it wasn't one: the invariant block measured 3,643 bytes
+/// ≈ 910 tokens, **below** the 1,024-token minimum cacheable prefix, so it
+/// bought nothing as a cache prefix. Adding the prefetch contract and the grep
+/// route pushed it to ≈ 1,160 tokens, which crosses that floor — so on an
+/// Opus/Sonnet-class seat the stability now genuinely does buy a cached prefix.
+/// On a Haiku-class seat (2,048-token floor) it still does not, and the memory
+/// seat is meant to be a fast model, so do not plan on the saving.
+///
+/// Either way the ordering is right for a reason that does not depend on any of
+/// that: **invariant content above, variable content below** puts the contract
+/// where it frames everything that follows, and keeps a growing catalog from
+/// shuffling the instructions. Salience first, caching as a bonus.
+/// `the_invariant_block_is_below_the_cacheable_prefix_threshold` tracks which
+/// side of the line it is on; `first_turn_invariant_prefix_is_byte_stable`
+/// pins that it is stable at all.
 fn build_first_turn_prompt(
     user_text: &str,
     snapshot: &str,
     head_seq: i64,
     recap: Option<&str>,
+    prefetch: Option<&str>,
 ) -> String {
     let mut p = String::from(
         "You are the ASK agent on Redline's Memory surface — the user's window \
@@ -139,6 +156,17 @@ fn build_first_turn_prompt(
          starred item outranks an unstarred sibling. Observations come last, \
          labeled as patterns (\"a pattern in your history suggests…\"), never \
          asserted as fact.\n\n\
+         PREFETCHED EVIDENCE — most turns arrive with a `PREFETCHED EVIDENCE` \
+         block below, assembled server-side from your question before you were \
+         spawned. It is the same batched read you would have made, already \
+         done. READ IT FIRST, and if it answers the question, ANSWER — do not \
+         curl. It states what it searched, what it resolved and on what basis, \
+         and whether anything was TRIMMED, so you can tell \"the record is \
+         empty on this\" from \"the prefetch looked in the wrong place\". Reach \
+         for a route below only when the block is absent, is empty on the \
+         subject you need, names a node you want to descend into, or says it \
+         was TRIMMED. Its absence means the question produced no search terms \
+         (or nothing matched) — not that the record is empty.\n\n\
          THE RECORD — read it through these local routes (already permitted — \
          no approval needed; put the URL immediately after `-s`).\n\n\
          PREFERRED — one batched read that answers most questions in a single \
@@ -149,6 +177,10 @@ fn build_first_turn_prompt(
          curl -s 'http://127.0.0.1:7676/v1/memory/answer-pack?q=<term>&node=<id>'\n\
          Read the pack, then ANSWER. Reach for the granular routes below only \
          when the pack is genuinely insufficient:\n\
+         - LITERALS — a flag, a path, an identifier, an error string: things no \
+         word index can hold. `q` is a substring and must be 3+ characters; \
+         `re` is an optional regex applied to what the index returned:\n  \
+         curl -s 'http://127.0.0.1:7676/v1/memory/grep?q=--allowedTools'\n\
          - The accepted class tree (scope with ?project=<path> or ?root=<id>):\n  \
          curl -s http://127.0.0.1:7676/v1/memory/tree\n\
          - One node: its children, its links into the lake (each carries the \
@@ -192,6 +224,17 @@ fn build_first_turn_prompt(
     if let Some(recap) = recap.filter(|r| !r.trim().is_empty()) {
         p.push_str(recap);
         if !recap.ends_with('\n') {
+            p.push('\n');
+        }
+    }
+    // The prefetch sits directly above the question — the closest thing to what
+    // it answers. Both existing guards still hold: the invariant prefix above
+    // is untouched, and the catalog < recap < question ordering is preserved
+    // with the evidence between the recap and the question.
+    if let Some(prefetch) = prefetch.filter(|b| !b.trim().is_empty()) {
+        p.push('\n');
+        p.push_str(prefetch);
+        if !prefetch.ends_with('\n') {
             p.push('\n');
         }
     }
@@ -277,9 +320,21 @@ impl RecordDelta {
 /// since the agent's last turn, say *how* — the seq window and the kind
 /// histogram — so a delta that can't touch the question costs no re-walk (the
 /// draft-chat doc-hash idiom applied to the lake instead of the doc).
-fn build_followup_prompt(delta: &RecordDelta, user_text: &str) -> String {
+fn build_followup_prompt(
+    delta: &RecordDelta,
+    user_text: &str,
+    prefetch: Option<&str>,
+) -> String {
+    // A follow-up gets a prefetch too: the subject usually shifts between
+    // turns, and the earlier turn's evidence is about the earlier question.
+    let evidence = prefetch
+        .filter(|b| !b.trim().is_empty())
+        .map(|b| format!("\n{b}\n"))
+        .unwrap_or_default();
     if !delta.grew() {
-        return format!("[The record is unchanged since your last turn.]\n\n{user_text}");
+        return format!(
+            "[The record is unchanged since your last turn.]\n{evidence}\n{user_text}"
+        );
     }
     // Count the rows the histogram actually saw, not the seq arithmetic — the
     // window is the authority on its own size.
@@ -299,7 +354,7 @@ fn build_followup_prompt(delta: &RecordDelta, user_text: &str) -> String {
         "[The record grew: +{count} events (seqs {}–{}{shape}). Re-query ONLY \
          if the question touches these; your earlier reads stand otherwise. \
          Your own previous question is normally one of the `prompt` events — \
-         this thread is part of the record it reads.]\n\n{user_text}",
+         this thread is part of the record it reads.]\n{evidence}\n{user_text}",
         delta.from_seq + 1,
         delta.to_seq,
     )
@@ -492,6 +547,59 @@ fn start_memchat_turn(
             },
         };
 
+        // SERVER-SIDE PREFETCH — the last round trip removed. The answer-pack
+        // route measures 40 ms end to end; all the remaining latency in an Ask
+        // turn was model turns, and the final one was the agent's own curl to a
+        // route we can just as well call here and inline the result of.
+        //
+        // A follow-up fragment ("and the beta?") borrows the previous turn's
+        // terms, because a fragment carries its subject implicitly and
+        // retrieving on two stopwords and one noun reads as an empty record.
+        let prior_user_text = thread
+            .iter()
+            .rev()
+            .find(|m| m.role == "user" && !m.body.trim().is_empty())
+            .map(|m| m.body.clone());
+        let plan = crate::query::plan_query_with_context(&text, prior_user_text.as_deref());
+        let prefetch = plan.as_ref().map(|plan| {
+            let pack = crate::context::build_answer_pack(
+                &chat.db,
+                Some(&text),
+                None,
+                crate::context::INLINE_PACK_LIMIT,
+            );
+            let block = crate::context::render_answer_pack_block(
+                &pack,
+                Some(plan),
+                crate::context::INLINE_PACK_MAX_BYTES,
+            );
+            let label = crate::context::prefetch_status_label(
+                pack.node.as_ref().map(|n| n.node.title.as_str()),
+                pack.notes.len()
+                    + pack.prompt_hits.len()
+                    + pack.browse_hits.len()
+                    + pack.grep_hits.len()
+                    + pack.node.as_ref().map(|n| n.links.len()).unwrap_or(0),
+            );
+            (block, label)
+        });
+        // The ticker: `retrieval_status_label` narrates curls, and a prefetched
+        // turn makes none. Emitted BEFORE the spawn — `agentTurn.ts`'s `send`
+        // reducer sets `phase:"streaming"` synchronously before `invoke`
+        // resolves, so the surface's clearing effect has already run by now and
+        // no frontend change is needed.
+        if let Some((_, label)) = &prefetch {
+            let _ = app.emit(
+                "memchat-status",
+                MemChatStatus {
+                    thread_id: MEMCHAT_ID.to_string(),
+                    label: label.clone(),
+                },
+            );
+        }
+        let prefetch_block = prefetch.and_then(|(b, _)| b);
+        let prefetched = prefetch_block.is_some();
+
         let prompt = match &prior_session {
             // First turn: bake the catalog in, so the agent's opening move can
             // be the answer-pack read instead of a tree walk.
@@ -510,9 +618,15 @@ fn start_memchat_turn(
                         tracing::warn!(error = %e, "memchat: catalog snapshot unavailable");
                         "(catalog unavailable — walk it with the tree route)\n".to_string()
                     });
-                build_first_turn_prompt(&text, &snapshot, head_seq, recap.as_deref())
+                build_first_turn_prompt(
+                    &text,
+                    &snapshot,
+                    head_seq,
+                    recap.as_deref(),
+                    prefetch_block.as_deref(),
+                )
             }
-            Some(_) => build_followup_prompt(&delta, &text),
+            Some(_) => build_followup_prompt(&delta, &text, prefetch_block.as_deref()),
         };
 
         // Polis ledger: the Ask thread is itself part of the record it reads —
@@ -524,6 +638,7 @@ fn start_memchat_turn(
                 crate::ledger::PromptSource::RustFirstTurn,
                 "memchat",
                 &prompt,
+                Some(&text),
                 None,
                 None,
                 None,
@@ -535,7 +650,7 @@ fn start_memchat_turn(
                 crate::seat::model_for("memory"),
             );
         } else {
-            crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+            crate::ledger::register_agent_prompt(&prompt);
         }
 
         // The agent has been pointed at the record as of now; store the
@@ -589,7 +704,9 @@ fn start_memchat_turn(
             return Ok(());
         }
 
-        tauri::async_runtime::spawn(read_memchat(app, chat, buf, token, stdout, stderr));
+        tauri::async_runtime::spawn(read_memchat(
+            app, chat, buf, token, stdout, stderr, prefetched,
+        ));
         Ok(())
     })
 }
@@ -663,6 +780,21 @@ pub fn memchat_kill_all(chat: tauri::State<'_, MemChatState>) {
 
 // --- Reader -----------------------------------------------------------------
 
+/// Is this tool call a read of the memory record? Used only to score the
+/// prefetch: a `Read` of a file or a `Grep` of the repo is the agent doing
+/// something else, and shouldn't count as a prefetch miss.
+fn is_memory_read(name: &str, input: &Value) -> bool {
+    if name != "Bash" {
+        return false;
+    }
+    let cmd = input.get("command").and_then(Value::as_str).unwrap_or("");
+    cmd.contains("/v1/memory/") || cmd.contains("/v1/context/")
+}
+
+/// `prefetched` says whether this turn was handed a server-side evidence block.
+/// With one, any memory curl the agent still makes is a prefetch MISS — the
+/// honest A/B, self-reported, and the only way a planner regression shows up as
+/// anything other than "Ask feels slower again".
 async fn read_memchat(
     app: AppHandle,
     chat: MemChatState,
@@ -670,6 +802,7 @@ async fn read_memchat(
     token: u64,
     stdout: ChildStdout,
     stderr: ChildStderr,
+    prefetched: bool,
 ) {
     let db = chat.db.clone();
     let stdout_fut = async {
@@ -678,6 +811,7 @@ async fn read_memchat(
         let mut final_text: Option<String> = None;
         let mut errored: Option<String> = None;
         let mut saw_json = false;
+        let mut requeried = false;
         while let Ok(Some(line)) = lines.next_line().await {
             let Ok(v) = serde_json::from_str::<Value>(&line) else {
                 continue;
@@ -687,6 +821,9 @@ async fn read_memchat(
             // tool_use rides an `assistant` line, which `classify_line`
             // (rightly) ignores — it carries no answer text.
             for (name, input) in crate::claude_proc::tool_uses(&v) {
+                if is_memory_read(&name, &input) {
+                    requeried = true;
+                }
                 let _ = app.emit(
                     "memchat-status",
                     MemChatStatus {
@@ -719,7 +856,7 @@ async fn read_memchat(
                 StreamLine::Ignore => {}
             }
         }
-        (session, final_text, errored, saw_json)
+        (session, final_text, errored, saw_json, requeried)
     };
     let stderr_fut = async {
         let mut buf = String::new();
@@ -730,7 +867,7 @@ async fn read_memchat(
         }
         buf
     };
-    let ((session, final_text, errored, saw_json), stderr_text) =
+    let ((session, final_text, errored, saw_json, requeried), stderr_text) =
         tokio::join!(stdout_fut, stderr_fut);
 
     // Reap the proc + pop the queue in ONE critical section, BEFORE emitting
@@ -781,6 +918,20 @@ async fn read_memchat(
             }
             // Companion journal: the Ask agent completed a turn.
             let _ = db.append_journal("agent_turn", Some("memchat"), Some(MEMCHAT_ID), None, None);
+            // …and whether the prefetch actually saved the turn it exists to
+            // save. Health reads this back as "Ask: prefetch answered 34 of 40
+            // turns." A miss costs exactly the one extra turn we pay today, so
+            // the downside is bounded at the status quo — but only if someone
+            // can see it happening.
+            if prefetched {
+                let _ = db.append_journal(
+                    "memchat_prefetch",
+                    Some("memchat"),
+                    Some(MEMCHAT_ID),
+                    Some(if requeried { "miss" } else { "hit" }),
+                    None,
+                );
+            }
             let _ = app.emit(
                 "memchat-done",
                 MemChatDone {
@@ -884,6 +1035,7 @@ mod tests {
             "- Loop Engineering [n-loop] (12 links)\n",
             4224,
             None,
+            None,
         );
         // The Ask role over the recorded history — never invented memory.
         assert!(p.contains("ASK agent"));
@@ -940,8 +1092,16 @@ mod tests {
                 .count();
             &a[..n]
         }
-        let a = build_first_turn_prompt("what did I decide about X?", "- A [a] (1 links)\n", 10, None);
-        let b = build_first_turn_prompt("entirely different question", "- B [b] (99 links)\n", 77, None);
+        let a =
+            build_first_turn_prompt("what did I decide about X?", "- A [a] (1 links)\n", 10, None, None);
+        let b = build_first_turn_prompt(
+            "entirely different question",
+            "- B [b] (99 links)\n",
+            77,
+            None,
+            // A prefetch block below the invariant prefix must not disturb it.
+            Some("PREFETCHED EVIDENCE — assembled server-side.\n"),
+        );
         let shared = common_prefix(&a, &b);
         // The shared prefix must reach the END of the invariant block — the
         // formatting contract closes it, right before the catalog.
@@ -955,6 +1115,44 @@ mod tests {
         assert!(!shared.contains("what did I decide about X?"));
         // Order below the block: catalog, THEN the question.
         assert!(a.find("YOUR CATALOG").unwrap() < a.find("The user asks:").unwrap());
+        // The prefetch rides between them, closest to what it answers.
+        let cat = b.find("YOUR CATALOG").unwrap();
+        let pre = b.find("PREFETCHED EVIDENCE — assembled server-side.").unwrap();
+        let q = b.find("The user asks:").unwrap();
+        assert!(cat < pre && pre < q, "catalog < prefetch < question");
+    }
+
+    /// The invariant block's SIZE, tracked — because which side of the
+    /// cacheable-prefix floor it sits on decides whether "keep it byte-stable"
+    /// is a caching argument or only a salience one, and it has been both.
+    ///
+    /// It sat at ≈ 910 tokens for a long time (below the 1,024-token floor,
+    /// buying nothing); the prefetch contract and the grep route pushed it over.
+    /// This test is where a future edit that pushes it back under — or past
+    /// Haiku's 2,048-token floor — gets noticed instead of quietly changing what
+    /// the doc comment on `build_first_turn_prompt` claims.
+    #[test]
+    fn the_invariant_block_is_below_the_cacheable_prefix_threshold() {
+        /// Anthropic's minimum cacheable prefix for Opus/Sonnet-class models.
+        const CACHEABLE_FLOOR_TOKENS: usize = 1024;
+        /// …and for Haiku-class, which the memory seat is meant to run on.
+        const HAIKU_FLOOR_TOKENS: usize = 2048;
+
+        let p = build_first_turn_prompt("q", "- A [a] (1 links)\n", 1, None, None);
+        let invariant = &p[..p.find("YOUR CATALOG").unwrap()];
+        let approx_tokens = invariant.len() / 4;
+        assert!(
+            approx_tokens >= CACHEABLE_FLOOR_TOKENS,
+            "the invariant block fell to ~{approx_tokens} tokens, back under the \
+             {CACHEABLE_FLOOR_TOKENS}-token floor — the caching argument for keeping it \
+             stable is gone again. Update the doc comment on `build_first_turn_prompt`."
+        );
+        assert!(
+            approx_tokens < HAIKU_FLOOR_TOKENS,
+            "the invariant block reached ~{approx_tokens} tokens and now clears even \
+             Haiku's {HAIKU_FLOOR_TOKENS}-token floor — worth saying so in the doc \
+             comment, and worth asking whether the contract has grown too long to read."
+        );
     }
 
     fn delta(from_seq: i64, to_seq: i64, kinds: &[(&str, i64)]) -> RecordDelta {
@@ -970,6 +1168,7 @@ mod tests {
         let grew = build_followup_prompt(
             &delta(4212, 4224, &[("browse_event", 8), ("prompt", 3), ("approval", 1)]),
             "and the beta?",
+            None,
         );
         // The count, the seq window, and the kind histogram — enough to decide
         // whether the delta can touch the question at all.
@@ -979,7 +1178,7 @@ mod tests {
         assert!(grew.contains("Re-query ONLY"));
         assert!(grew.ends_with("and the beta?"));
 
-        let same = build_followup_prompt(&delta(4224, 4224, &[]), "and the beta?");
+        let same = build_followup_prompt(&delta(4224, 4224, &[]), "and the beta?", None);
         assert!(same.contains("unchanged"));
         assert!(!same.contains("The record grew"));
     }
@@ -995,6 +1194,7 @@ mod tests {
                 crate::ledger::PromptSource::RustFirstTurn,
                 "memchat",
                 &format!("q{}", uuid::Uuid::new_v4()),
+                None,
                 None,
                 None,
                 None,
@@ -1147,7 +1347,7 @@ mod tests {
             msg("a1", "assistant", "You chose the executor.", 2),
         ];
         let recap = build_recap(&thread);
-        let p = build_first_turn_prompt("and the beta?", "- A [a] (1 links)\n", 42, Some(&recap));
+        let p = build_first_turn_prompt("and the beta?", "- A [a] (1 links)\n", 42, Some(&recap), None);
         assert!(p.contains("CONVERSATION SO FAR"));
         assert!(p.contains("You chose the executor."));
         let catalog = p.find("YOUR CATALOG").unwrap();
@@ -1155,7 +1355,7 @@ mod tests {
         let question = p.find("The user asks:").unwrap();
         assert!(catalog < recap_at && recap_at < question);
         // An unrotated first turn carries no recap block at all.
-        let plain = build_first_turn_prompt("and the beta?", "- A [a] (1 links)\n", 42, None);
+        let plain = build_first_turn_prompt("and the beta?", "- A [a] (1 links)\n", 42, None, None);
         assert!(!plain.contains("CONVERSATION SO FAR"));
     }
 
@@ -1173,6 +1373,7 @@ mod tests {
             crate::ledger::PromptSource::RustFirstTurn,
             "memchat",
             "what did I decide about X?",
+            None,
             None,
             None,
             None,

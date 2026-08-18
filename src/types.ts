@@ -531,6 +531,14 @@ export interface HookStatus {
   conflictingUrl: string | null;
 }
 
+export interface CodexHookStatus {
+  available: boolean;
+  installed: boolean;
+  hooksPath: string;
+  stopFound: boolean;
+  promptCaptureFound: boolean;
+}
+
 export interface SkillStatus {
   /** The skill file exists and matches the version Redline ships. */
   installed: boolean;
@@ -669,6 +677,41 @@ export interface BrowseMessage {
   /** "complete" | "error". */
   status: string;
   createdAt: number;
+}
+
+/** A browser tab's **working list** — the punch list built while clicking
+ *  around a running dev server, then handed to Claude Code or the Drafter in
+ *  one piece. Keyed on the same durable `browseId` as the tab's discussion.
+ *
+ *  `template` is a `ListTemplate["id"]` (src/lib/browseList.ts), stored as an
+ *  opaque string so adding a template never touches Rust. Read it back through
+ *  `templateFor`, which falls back rather than stranding a row. */
+export interface BrowseList {
+  browseId: string;
+  template: string;
+  title: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** One line of a `BrowseList`. `kind` is the template's own vocabulary. */
+export interface BrowseListItem {
+  id: string;
+  browseId: string;
+  kind: string;
+  body: string;
+  done: boolean;
+  sortIdx: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** A whole list in one payload — what `browse_list_get` returns. `null` from
+ *  that command means "no list yet" (→ the template chooser), which is NOT the
+ *  same as a list whose items are all gone. */
+export interface BrowseListView {
+  list: BrowseList;
+  items: BrowseListItem[];
 }
 
 /** A chunk of streaming assistant text for a tab's browse thread. */

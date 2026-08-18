@@ -478,7 +478,8 @@ mod tests {
                 source: crate::ledger::PromptSource::Hook,
                 origin: crate::ledger::Origin::Redline,
                 surface: "pty_plan".into(),
-                role: None,
+                role: crate::ledger::CorpusRole::User,
+                user_text: None,
                 session_id: Some("s1".into()),
                 claude_session_id: Some("cs1".into()),
                 mission_id: None,
@@ -497,7 +498,8 @@ mod tests {
                 source: crate::ledger::PromptSource::Hook,
                 origin: crate::ledger::Origin::Redline,
                 surface: "browse".into(),
-                role: None,
+                role: crate::ledger::CorpusRole::User,
+                user_text: None,
                 session_id: Some("s2".into()),
                 claude_session_id: Some("cs2".into()),
                 mission_id: None,
@@ -598,7 +600,7 @@ mod tests {
             .find(|e| e.kind == "prompt")
             .and_then(|e| e.prompt_id)
             .unwrap();
-        db.compact_prompt_body(pid, "gist of first prompt", "cold", "keeper")
+        db.compact_prompt_body(pid, "gist of first prompt", "cold", "agent", "keeper")
             .unwrap();
 
         // The already-built bundle still verifies (it carried its own bodies +

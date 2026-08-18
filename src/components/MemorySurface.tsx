@@ -20,6 +20,10 @@ import {
   groupItems,
   GROUPINGS,
   GROUPING_LABEL,
+  CORPUS_ROLES,
+  CORPUS_ROLE_HINT,
+  CORPUS_ROLE_LABEL,
+  corpusBannerText,
   type ContextStats,
   type Grouping,
   type LedgerFilters,
@@ -27,6 +31,7 @@ import {
   type TimelineItem,
   type TimelineRow,
 } from "../lib/timeline";
+import { useShotCache } from "../hooks/useShotCache";
 import { MemoryAsk } from "./MemoryAsk";
 import { MemoryMapTab } from "./MemoryMap";
 import { rootMasses, type MemoryMapData } from "../lib/memoryMap";
@@ -197,11 +202,14 @@ interface ThreadTreeView {
 function TimelineTab({
   focus,
   onClearFocus,
+  status,
 }: {
   /** A citation-chip jump from the Ask tab — narrows the query to its
    *  evidence until dismissed. */
   focus: TimelineFocus | null;
   onClearFocus: () => void;
+  /** For the one-time corpus-reclassification notice. */
+  status: MemoryStatus | null;
 }) {
   const [items, setItems] = useState<TimelineItem[]>([]);
   const [stats, setStats] = useState<ContextStats | null>(null);
@@ -219,6 +227,16 @@ function TimelineTab({
   const [fDay, setFDay] = useState<string | null>(null);
   const [fStarred, setFStarred] = useState(false);
   const [fNoted, setFNoted] = useState(false);
+  // The corpus-role lens. Defaults to `user` and persists, because the default
+  // IS the point: the lake's searchable text was 92.6% Redline's own agent
+  // prompts and the CLI's injections, and they were sharing a list with the
+  // things the user actually typed. Nothing is deleted — flipping this chip
+  // shows them, which is what makes the reclassification honest rather than
+  // just quiet.
+  const [fRole, setFRole] = usePersistedState<string>(
+    "redline.memory.roleFacet",
+    "user",
+  );
   const [q, setQ] = useState("");
   const [qDebounced, setQDebounced] = useState("");
   const [selected, setSelected] = useState<TimelineItem | null>(null);
@@ -227,6 +245,13 @@ function TimelineTab({
   const [noteDraft, setNoteDraft] = useState("");
   const [composerOpen, setComposerOpen] = useState(false);
   const [composerText, setComposerText] = useState("");
+  // The picture store. Loaded on SELECTION, never on mount of a row: the
+  // detail rail is the one place a shot is decoded, so exactly one is resident
+  // at a time regardless of how long the list is.
+  const { shots, load: loadShot, forget: forgetShot } = useShotCache();
+  useEffect(() => {
+    loadShot(selected?.shotKey);
+  }, [selected?.shotKey, loadShot]);
 
   useEffect(() => {
     const t = window.setTimeout(() => setQDebounced(q.trim()), 250);
@@ -243,6 +268,7 @@ function TimelineTab({
       ...(fDay ? dayBounds(fDay) : {}),
       ...(fStarred ? { starred: true } : {}),
       ...(fNoted ? { noted: true } : {}),
+      ...(fRole ? { role: fRole } : {}),
       ...(focus?.seqs?.length ? { seqs: focus.seqs } : {}),
       ...(focus?.classNodeId ? { classNode: focus.classNodeId } : {}),
       ...(focus?.sessionId ? { sessionId: focus.sessionId } : {}),
@@ -250,7 +276,7 @@ function TimelineTab({
       ...(focus?.browseId ? { browseId: focus.browseId } : {}),
       limit: PAGE,
     }),
-    [fKind, fAuthor, fSurface, fProject, qDebounced, fDay, fStarred, fNoted, focus],
+    [fKind, fAuthor, fSurface, fProject, qDebounced, fDay, fStarred, fNoted, fRole, focus],
   );
 
   const load = useCallback(async () => {
@@ -427,8 +453,50 @@ function TimelineTab({
 
   const projectName = (p: string) => p.split("/").filter(Boolean).pop() ?? p;
 
+  // The one-time reclassification notice. A change this large to what a search
+  // returns should not be discovered by noticing that the results look
+  // different — but it happened once, so a permanent banner would just be
+  // chrome. Dismissal persists.
+  const [bannerSeen, setBannerSeen] = usePersistedState<boolean>(
+    "redline.memory.corpusNoticeSeen",
+    false,
+  );
+  const banner = bannerSeen ? null : corpusBannerText(status?.corpusRoles, fmtBytes);
+
   return (
-    <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
+    <div style={{ display: "flex", flex: 1, minHeight: 0, flexDirection: "column" }}>
+      {banner && (
+        <div
+          className="font-sans"
+          style={{
+            flexShrink: 0,
+            display: "flex",
+            alignItems: "flex-start",
+            gap: 10,
+            padding: "8px 14px",
+            fontSize: 12,
+            lineHeight: 1.5,
+            borderBottom: "1px solid var(--color-rule)",
+            background:
+              "color-mix(in srgb, var(--color-info) 8%, var(--color-bg-elevated))",
+          }}
+        >
+          <span aria-hidden style={{ opacity: 0.7 }}>
+            ⌗
+          </span>
+          <span style={{ flex: 1 }}>{banner}</span>
+          <button
+            type="button"
+            className="font-sans"
+            onClick={() => setBannerSeen(true)}
+            title="Dismiss"
+            style={{ ...chipStyle(false), fontSize: 11, padding: "2px 10px", flexShrink: 0 }}
+          >
+            Got it
+          </button>
+        </div>
+      )}
+      <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
       {/* Facet rail */}
       <div
         className="rl-thin-scroll-y"
@@ -440,6 +508,30 @@ function TimelineTab({
           paddingBottom: 12,
         }}
       >
+        {/* Whose words — the primary lens, so it leads the rail. Exactly one
+            is always active: this is a view onto three disjoint corpora, not
+            an optional narrowing, and "all three at once" is the mixture the
+            record spent six weeks in. */}
+        <div style={{ padding: "10px 12px 2px" }}>
+          <div className="font-sans" style={{ ...eyebrowStyle, marginBottom: 6 }}>
+            Whose words
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+            {CORPUS_ROLES.map((r) => (
+              <button
+                key={r}
+                type="button"
+                className="font-sans"
+                onClick={() => setFRole(r)}
+                aria-pressed={fRole === r}
+                title={CORPUS_ROLE_HINT[r]}
+                style={chipStyle(fRole === r)}
+              >
+                {CORPUS_ROLE_LABEL[r]}
+              </button>
+            ))}
+          </div>
+        </div>
         <FacetSection
           title="Kind"
           entries={stats?.byKind ?? []}
@@ -841,6 +933,20 @@ function TimelineTab({
                       ✎
                     </span>
                   )}
+                  {/* A GLYPH, not a thumbnail. Rows are 30px tall and a
+                      960×560 PNG decodes to ~2.1 MB of bitmap whatever its CSS
+                      box says — twenty visible rows would be ~42 MB of decoded
+                      image to draw thirty-pixel squares. The picture lives in
+                      the detail rail, where exactly one decodes at a time. */}
+                  {it.shotKey && (
+                    <span
+                      aria-label="Has a picture"
+                      title="A screenshot of this page — open it in the detail rail"
+                      style={{ fontSize: 10, color: "var(--color-ink-muted)", flexShrink: 0 }}
+                    >
+                      ▣
+                    </span>
+                  )}
                   {it.compacted && (
                     <span style={{ fontSize: 10, color: "var(--color-ink-muted)", flexShrink: 0 }}>
                       gist
@@ -939,6 +1045,76 @@ function TimelineTab({
               ✕
             </button>
           </div>
+          {/* THE PICTURE, above the URL — the detail rail is the primary
+              surface for it. One shot, one decode at a time, at a size worth
+              looking at. */}
+          {selected.shotKey && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              {shots.get(selected.shotKey) ? (
+                <img
+                  src={shots.get(selected.shotKey)}
+                  alt={selected.title || selected.url || "Page screenshot"}
+                  style={{
+                    width: "100%",
+                    maxWidth: 292,
+                    borderRadius: 6,
+                    border: "1px solid var(--color-rule)",
+                    display: "block",
+                  }}
+                />
+              ) : (
+                <div
+                  className="font-sans"
+                  style={{
+                    height: 120,
+                    borderRadius: 6,
+                    border: "1px dashed var(--color-rule)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontSize: 11,
+                    color: "var(--color-ink-muted)",
+                  }}
+                >
+                  loading the picture…
+                </div>
+              )}
+              <button
+                type="button"
+                className="font-sans"
+                onClick={() => {
+                  const key = selected.shotKey;
+                  if (!key) return;
+                  void forgetShot(key).then(() => {
+                    // The rail updates immediately; the page reloads because
+                    // the same picture may have been on other rows too — it is
+                    // content-addressed, so forgetting it forgets it in every
+                    // tab that saw the page.
+                    setSelected((s) => (s ? { ...s, shotKey: null } : s));
+                    void load();
+                  });
+                }}
+                title="Delete this screenshot everywhere it appears"
+                style={{ ...chipStyle(false), fontSize: 11, alignSelf: "flex-start" }}
+              >
+                Forget this picture
+              </button>
+            </div>
+          )}
+          {/* A vision-tier description, shown as what it is. */}
+          {selected.caption && (
+            <div
+              className="font-sans"
+              style={{
+                fontSize: 12,
+                lineHeight: 1.5,
+                color: "var(--color-ink-muted)",
+                fontStyle: "italic",
+              }}
+            >
+              Described from the screenshot: {selected.caption}
+            </div>
+          )}
           <Field label="When" value={fmtTime(selected.ts)} />
           <Field label="Author" value={selected.author} />
           {selected.surface && <Field label="Surface" value={selected.surface} />}
@@ -1089,6 +1265,7 @@ function TimelineTab({
           )}
         </div>
       )}
+      </div>
     </div>
   );
 }
@@ -2041,6 +2218,217 @@ function TreemapCard({
   );
 }
 
+/** The picture store's controls: what's captured, what's blocked, and the
+ *  vision tier for pages whose text didn't capture.
+ *
+ *  The denylist gates the TEXT ROW AND THE PICTURE TOGETHER, and the copy says
+ *  so — a control that suppressed the screenshot while the full DOM stayed in
+ *  plaintext SQLite beside it would look like privacy without being it.
+ *
+ *  Captioning is a BUTTON, never a background job. `keeper.rs`'s rule is "crons
+ *  watch, models act": the count can appear on its own, sending screenshots to
+ *  a model cannot. */
+function PictureStoreCard({ card }: { card: React.CSSProperties }) {
+  const [backlog, setBacklog] = useState<{ withPictures: number; dark: number } | null>(null);
+  const [denylist, setDenylist] = useState<string | null>(null);
+  const [running, setRunning] = useState(false);
+  const [ran, setRan] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    void invoke<typeof backlog>("shots_caption_backlog").then(setBacklog).catch(() => {});
+    void invoke<{ denylist: string; enabled: boolean }>("shots_get_policy")
+      .then((p) => setDenylist(p.denylist))
+      .catch(() => setDenylist(""));
+  }, []);
+  useEffect(load, [load]);
+
+  const saveDenylist = (text: string) => {
+    setDenylist(text);
+    void invoke("shots_set_policy", { denylist: text }).catch(() => {});
+  };
+
+  const runCaptions = async () => {
+    setRunning(true);
+    try {
+      const r = await invoke<{ captioned: number; attempted: number }>("shots_caption_run", {
+        limit: 8,
+      });
+      setRan(`described ${r.captioned} of ${r.attempted}`);
+      load();
+    } catch (e) {
+      setRan(String(e));
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  return (
+    <div style={card}>
+      <div className="font-sans" style={eyebrowStyle}>
+        Pictures
+      </div>
+      <Field
+        label="Pages"
+        value={backlog ? `${backlog.withPictures.toLocaleString()} with a screenshot` : "—"}
+      />
+      {/* 12% of the corpus is dark and the light is already on disk — the
+          measurement that earns the vision tier rather than "vision is cool". */}
+      {backlog && backlog.dark > 0 && (
+        <>
+          <div
+            className="font-sans"
+            style={{ fontSize: 12, lineHeight: 1.5, color: "var(--color-ink-muted)" }}
+          >
+            {backlog.dark} {backlog.dark === 1 ? "page has" : "pages have"} a picture but no text —
+            a client-rendered app, an image, a dashboard. They're invisible to search as they are.
+          </div>
+          <button
+            type="button"
+            className="font-sans"
+            onClick={() => void runCaptions()}
+            disabled={running}
+            style={{ ...chipStyle(true), fontSize: 11, alignSelf: "flex-start" }}
+          >
+            {running ? "Describing…" : "Describe them from their screenshots"}
+          </button>
+        </>
+      )}
+      {ran && (
+        <div className="font-sans" style={{ fontSize: 11, color: "var(--color-ink-muted)" }}>
+          {ran}
+        </div>
+      )}
+      <div className="font-sans" style={{ ...eyebrowStyle, marginTop: 4 }}>
+        Never capture
+      </div>
+      <textarea
+        className="font-sans rl-thin-scroll-y"
+        value={denylist ?? ""}
+        onChange={(e) => saveDenylist(e.target.value)}
+        placeholder={"# one domain per line\n# mail.google.com"}
+        spellCheck={false}
+        rows={4}
+        style={{
+          fontSize: 11,
+          lineHeight: 1.5,
+          padding: "4px 6px",
+          border: "1px solid var(--color-rule)",
+          borderRadius: 4,
+          background: "var(--color-bg-elevated)",
+          color: "var(--color-ink)",
+          resize: "vertical",
+          fontFamily: "var(--font-mono, monospace)",
+        }}
+      />
+      <div
+        className="font-sans"
+        style={{ fontSize: 11, lineHeight: 1.5, color: "var(--color-ink-muted)" }}
+      >
+        Pages on these domains record <strong>neither text nor a picture</strong> — the words are
+        the sensitive part, and blocking only the screenshot would store the same thing while
+        looking like it didn't. Subdomains are covered.
+      </div>
+    </div>
+  );
+}
+
+/** The embedding-provider control.
+ *
+ *  Local is the default and stays the default. The cloud option exists because
+ *  the on-device model is weaker, but the trade is the user's to make with the
+ *  consequence stated plainly rather than buried: turning it on sends the text
+ *  of their own prompts and pages to a third party. The key is written straight
+ *  into `app_settings` and read only in Rust — it never comes back to this
+ *  component, and the network call is not made from the webview. */
+function SemanticProviderRow() {
+  const [cfg, setCfg] = useState<{
+    provider: string;
+    hasKey: boolean;
+    localAvailable: boolean;
+    localKind: string;
+  } | null>(null);
+  const [keyDraft, setKeyDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(() => {
+    void invoke<typeof cfg>("memory_embed_settings").then(setCfg).catch(() => {});
+  }, []);
+  useEffect(load, [load]);
+
+  if (!cfg) return null;
+  const cloud = cfg.provider === "openai";
+
+  const apply = async (provider: string, key?: string) => {
+    setBusy(true);
+    try {
+      await invoke("memory_set_embed_provider", { provider, key });
+      setKeyDraft("");
+      load();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <span className="font-sans" style={{ color: "var(--color-ink-muted)", fontSize: 12, flex: "0 0 92px" }}>
+          Embeddings
+        </span>
+        <button
+          type="button"
+          className="font-sans"
+          disabled={busy}
+          onClick={() => void apply("local")}
+          aria-pressed={!cloud}
+          title={
+            cfg.localAvailable
+              ? `On-device (${cfg.localKind}) — nothing leaves this machine`
+              : "No on-device model is available on this macOS version"
+          }
+          style={{ ...chipStyle(!cloud), fontSize: 11, padding: "2px 10px" }}
+        >
+          On device
+        </button>
+        <button
+          type="button"
+          className="font-sans"
+          disabled={busy}
+          onClick={() => void apply("openai", keyDraft || undefined)}
+          aria-pressed={cloud}
+          style={{ ...chipStyle(cloud), fontSize: 11, padding: "2px 10px" }}
+        >
+          OpenAI
+        </button>
+      </div>
+      <input
+        type="password"
+        className="font-sans"
+        value={keyDraft}
+        onChange={(e) => setKeyDraft(e.target.value)}
+        placeholder={cfg.hasKey ? "API key saved — paste to replace" : "OpenAI API key"}
+        style={{
+          fontSize: 11,
+          padding: "3px 6px",
+          border: "1px solid var(--color-rule)",
+          borderRadius: 4,
+          background: "var(--color-bg-elevated)",
+          color: "var(--color-ink)",
+        }}
+      />
+      <div
+        className="font-sans"
+        style={{ fontSize: 11, lineHeight: 1.5, color: "var(--color-ink-muted)" }}
+      >
+        {cloud
+          ? "The text of your prompts and the pages you browse is sent to OpenAI to be embedded. Switch back to on-device to stop that."
+          : "Embedding runs on this machine. Nothing is sent anywhere."}{" "}
+        Switching rebuilds the index — two models' vectors aren't comparable.
+      </div>
+    </div>
+  );
+}
+
 function HealthTab({
   status,
   activeSessionId,
@@ -2145,6 +2533,20 @@ function HealthTab({
                 : "—"
             }
           />
+          {/* The reclaim number reads as pure profit until you can see what it
+              cost and who wrote the summaries that replaced the words. */}
+          {status?.archivedCount != null && status.archivedCount > 0 && (
+            <Field
+              label="Recoverable"
+              value={`${status.archivedCount} archived · ${fmtBytes(status.archivedBytes ?? 0)}`}
+            />
+          )}
+          {status?.keeperGistSource && (
+            <Field
+              label="Gists by"
+              value={`${status.keeperGistSource.agent} summarizer · ${status.keeperGistSource.deterministic} fallback`}
+            />
+          )}
           <label
             className="font-sans"
             style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, cursor: "pointer" }}
@@ -2192,6 +2594,66 @@ function HealthTab({
             </>
           )}
         </div>
+
+        {/* What the record is actually MADE of. This card exists because its
+            absence was the whole problem: the lake's searchable text was 92.6%
+            Redline's own agent prompts and the CLI's injections, and nothing
+            anywhere reported it — so the only symptom was that search felt
+            wrong. Rows and bytes are both shown, deliberately: by count the
+            machine text is a third of the corpus, by weight it is nearly all
+            of it, and only the second number explains the search results. */}
+        {status?.corpusRoles && status.corpusRoles.length > 0 && (
+          <div style={card}>
+            <div className="font-sans" style={eyebrowStyle}>
+              What the record holds
+            </div>
+            {status.corpusRoles.map((r) => {
+              const pct = status.corpusBytes
+                ? Math.round((r.bytes / status.corpusBytes) * 100)
+                : 0;
+              const label =
+                CORPUS_ROLE_LABEL[r.role as keyof typeof CORPUS_ROLE_LABEL] ?? r.role;
+              return (
+                <Field
+                  key={r.role}
+                  label={label}
+                  value={`${r.rows.toLocaleString()} · ${fmtBytes(r.bytes)} (${pct}%)`}
+                />
+              );
+            })}
+            <div
+              className="font-sans"
+              style={{ fontSize: 11, lineHeight: 1.5, color: "var(--color-ink-muted)" }}
+            >
+              Only your own prompts are searched by default — the Timeline's
+              “Whose words” chip shows the rest. Nothing was deleted.
+            </div>
+            {status.askPrefetch && status.askPrefetch.turns > 0 && (
+              <Field
+                label="Ask"
+                value={`prefetch answered ${status.askPrefetch.hits} of ${status.askPrefetch.turns} turns`}
+              />
+            )}
+            {/* The semantic arm's own state. "absent" is a real answer here and
+                reads differently from "0 chunks": one means this machine can't
+                run the arm, the other means it hasn't yet. */}
+            {status.embeddings && (
+              <Field
+                label="Semantic"
+                value={
+                  status.embeddings.provider === "absent"
+                    ? "unavailable on this machine — the lexical arms still answer"
+                    : `${status.embeddings.chunks.toLocaleString()} chunks · ${
+                        status.embeddings.pending
+                      } pending · ${status.embeddings.provider}`
+                }
+              />
+            )}
+            <SemanticProviderRow />
+          </div>
+        )}
+
+        <PictureStoreCard card={card} />
       </div>
 
       {/* The Librarian attention strip (P6) — on-demand, advisory only. */}
@@ -2366,7 +2828,7 @@ export function MemorySurface({ activeSessionId, activeSessionName }: MemorySurf
       {tab === "ask" ? (
         <MemoryAsk onCite={cite} />
       ) : tab === "timeline" ? (
-        <TimelineTab focus={focus} onClearFocus={() => setFocus(null)} />
+        <TimelineTab focus={focus} onClearFocus={() => setFocus(null)} status={status} />
       ) : tab === "catalog" ? (
         <CatalogTab />
       ) : tab === "map" ? (

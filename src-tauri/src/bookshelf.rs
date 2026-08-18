@@ -656,6 +656,64 @@ mod tests {
     }
 
     #[test]
+    fn a_renamed_title_survives_every_mirror_writer() {
+        // FIVE writers mirror the document and every one re-derives a title
+        // from the markdown and passes it: the 400ms autosave, the ✦ turn, the
+        // Discuss pill, the one-shot migration, the moot's land. A call-site
+        // contract ("pass None to keep the name") is what `voice.rs` already
+        // broke by hand-rolling the same preservation for `project_path` and
+        // not generalizing it — so the pin lives on the row instead.
+        let db = Database::open_in_memory().unwrap();
+        db.upsert_draft("d1", Some("Goal"), None, "# Goal", Some("{}")).unwrap();
+        db.rename_draft("d1", "Q3 auth rewrite").unwrap();
+        for md in ["# Goal", "# Goal typed", "# Something else entirely"] {
+            db.upsert_draft("d1", crate::draft_title_from_markdown(md).as_deref(), None, md, None)
+                .unwrap();
+        }
+        // ...and the moot's reset-doc lander, which is the same write.
+        db.upsert_draft_reset_doc("d1", Some("Round 2 output"), None, "# Round 2 output")
+            .unwrap();
+        let row = db.list_drafts().unwrap().into_iter().find(|d| d.draft_id == "d1").unwrap();
+        assert_eq!(row.title.as_deref(), Some("Q3 auth rewrite"));
+    }
+
+    #[test]
+    fn an_empty_document_never_nulls_the_title() {
+        // `draft_title_from_markdown` returns None for an empty body, and the
+        // old unconditional `title = excluded.title` wrote that None straight
+        // over the name — so clearing a document erased what it was called.
+        let db = Database::open_in_memory().unwrap();
+        db.upsert_draft("d1", Some("Goal"), None, "# Goal", Some("{}")).unwrap();
+        assert_eq!(crate::draft_title_from_markdown(""), None);
+        db.upsert_draft("d1", None, None, "", None).unwrap();
+        let row = db.list_drafts().unwrap().into_iter().find(|d| d.draft_id == "d1").unwrap();
+        assert_eq!(row.title.as_deref(), Some("Goal"));
+    }
+
+    #[test]
+    fn an_unrenamed_title_still_follows_the_heading() {
+        // Derive-until-renamed is the behaviour worth keeping: a document the
+        // user never named should pick up whatever they typed as its heading.
+        let db = Database::open_in_memory().unwrap();
+        db.upsert_draft("d1", Some("Goal"), None, "# Goal", Some("{}")).unwrap();
+        db.upsert_draft("d1", Some("Ship auth"), None, "# Ship auth", None).unwrap();
+        let row = db.list_drafts().unwrap().into_iter().find(|d| d.draft_id == "d1").unwrap();
+        assert_eq!(row.title.as_deref(), Some("Ship auth"));
+    }
+
+    #[test]
+    fn upsert_draft_with_no_project_clears_it() {
+        // Pins that nobody "helpfully" adds a COALESCE beside the title guard.
+        // `project_path` must stay unconditional: a null means the user chose
+        // Home, and the picker has no other way to say so.
+        let db = Database::open_in_memory().unwrap();
+        db.upsert_draft("d1", Some("T"), Some("/repo/x"), "# T", Some("{}")).unwrap();
+        db.upsert_draft("d1", Some("T"), None, "# T", None).unwrap();
+        let (_, _, project) = db.get_draft_doc("d1").unwrap().unwrap();
+        assert_eq!(project, None, "an explicit Home must survive the write");
+    }
+
+    #[test]
     fn deleting_a_document_takes_its_sources_comments_and_thread() {
         let db = Database::open_in_memory().unwrap();
         db.upsert_draft("d1", Some("T"), None, "# T", Some("{}"))

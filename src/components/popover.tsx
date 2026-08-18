@@ -260,6 +260,110 @@ export function useHoverPopover(anchorRef: React.RefObject<HTMLElement | null>) 
   };
 }
 
+/** An anchored popover holding a single text input — the app's replacement for
+ *  `window.prompt`, which WKWebView implements as A SILENT NULL. Anywhere the
+ *  packaged app calls `window.prompt` the feature is simply dead: the user
+ *  types nothing, sees nothing, and the code reads a null it treats as
+ *  "cancelled".
+ *
+ *  Unlike a menu panel this must NOT suppress mousedown — the input has to take
+ *  focus. ProseMirror keeps its selection while the editor is blurred, and the
+ *  commit path re-focuses it. */
+export function InlineInputPopover({
+  title,
+  placeholder,
+  initialValue,
+  commitLabel,
+  onCommit,
+  onClose,
+}: {
+  title: string;
+  placeholder?: string;
+  initialValue: string;
+  /** Shown as a button beside the input. Omit for Enter-only (the ribbon's
+   *  original shape). */
+  commitLabel?: string;
+  onCommit: (value: string) => void;
+  onClose: () => void;
+}) {
+  const [value, setValue] = useState(initialValue);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+
+  const close = useCallback(() => onClose(), [onClose]);
+  useDismiss(true, close, [rootRef]);
+
+  const commit = () => {
+    onCommit(value);
+    onClose();
+  };
+
+  return (
+    <div
+      ref={rootRef}
+      role="dialog"
+      aria-label={title}
+      className="rl-ribbon-pop"
+      style={{ minWidth: "240px", padding: "8px" }}
+    >
+      <div
+        style={{
+          fontSize: "11px",
+          color: "var(--color-ink-muted)",
+          marginBottom: "6px",
+        }}
+      >
+        {title}
+      </div>
+      <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+        <input
+          ref={inputRef}
+          type="text"
+          value={value}
+          placeholder={placeholder}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => {
+            // The host may be an editor with its own global bindings.
+            e.stopPropagation();
+            if (e.key === "Enter") {
+              e.preventDefault();
+              commit();
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              onClose();
+            }
+          }}
+          className="rl-search-input"
+          style={{ width: "100%" }}
+        />
+        {commitLabel && (
+          <button
+            type="button"
+            onClick={commit}
+            disabled={!value.trim()}
+            className="rounded px-2 py-1"
+            style={{
+              fontSize: "11px",
+              whiteSpace: "nowrap",
+              background: "var(--color-info)",
+              color: "var(--color-on-accent)",
+              opacity: value.trim() ? 1 : 0.5,
+              cursor: value.trim() ? "pointer" : "default",
+            }}
+          >
+            {commitLabel}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /** Click-toggled popover. `side: "above"` is for bottom-anchored triggers
  *  (the drafter footer) — the panel hangs upward instead of off the bottom of
  *  the viewport. `width` (default PANEL_WIDTH) is threaded through both the

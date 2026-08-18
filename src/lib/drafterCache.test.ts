@@ -10,6 +10,8 @@ import {
   drafterShadowKey,
   readDrafterShadow,
   resolveDraftOpen,
+  resolveDrafterMountDoc,
+  writeDrafterFlush,
   type DrafterSessionEntry,
   type DrafterShadow,
   type ShadowStorage,
@@ -90,37 +92,165 @@ describe("drafter shadow helpers", () => {
   });
 });
 
-// Source invariants — the caching layer is pure, but the correctness claim
-// ("the editor never mounts with stale or foreign content") lives in App.tsx
-// wiring. These pin the contract, house-style (cf. landing.test.ts).
-describe("drafter cache wiring", () => {
+// The claim these cover — "the editor never mounts with stale or foreign
+// content", and "a flush writes the shadow before it can await" — used to be
+// pinned by `indexOf` assertions against App.tsx's SOURCE TEXT, which pass if
+// you merely reorder the comments. They existed because the contract lived
+// inside a 7,000-line component; the fix was extraction, and these are the real
+// tests the extraction bought.
+
+describe("resolveDrafterMountDoc", () => {
+  const cache = () => new Map<string, DrafterSessionEntry>();
+
+  it("prefers the session cache — it is strictly fresher than the load copy", () => {
+    // Written unconditionally on every flush; `drafterLoaded` was written only
+    // when the id still matched, so it can be behind by a whole document.
+    const c = cache();
+    const fresh: JSONContent = { type: "doc", content: [{ type: "paragraph" }] };
+    c.set("d1", { json: fresh, projectPath: null, at: 2 });
+    expect(
+      resolveDrafterMountDoc(c, { forId: "d1", doc }, "d1"),
+    ).toEqual({ doc: fresh });
+  });
+
+  it("falls back to the load copy before any flush this session", () => {
+    expect(resolveDrafterMountDoc(cache(), { forId: "d1", doc }, "d1")).toEqual({
+      doc,
+    });
+  });
+
+  it("never answers with another document's body", () => {
+    // The mount hazard the id tag exists to make unrepresentable: TipTap
+    // captures `content` once, at creation, so mounting the wrong body opens
+    // someone else's document over a real one with no way back.
+    const c = cache();
+    c.set("d2", { json: doc, projectPath: null, at: 1 });
+    expect(resolveDrafterMountDoc(c, { forId: "d2", doc }, "d1")).toBeNull();
+  });
+
+  it("is null when nothing is loaded yet — the host shows its loading state", () => {
+    expect(resolveDrafterMountDoc(cache(), null, "d1")).toBeNull();
+    expect(resolveDrafterMountDoc(cache(), { forId: "d1", doc }, null)).toBeNull();
+  });
+
+  it("survives a remount that changes no id — the whole reason it exists", () => {
+    // The shelf toggle, a surface switch and the pinned-doc toggle all remount
+    // the editor without changing the active id, so the load effect (keyed on
+    // that id) cannot re-run. The cache is what answers.
+    const c = cache();
+    const typed: JSONContent = { type: "doc", content: [{ type: "heading" }] };
+    c.set("d1", { json: typed, projectPath: null, at: 9 });
+    const stale = { forId: "d1", doc };
+    expect(resolveDrafterMountDoc(c, stale, "d1")).toEqual({ doc: typed });
+    expect(resolveDrafterMountDoc(c, stale, "d1")).toEqual({ doc: typed });
+  });
+});
+
+describe("writeDrafterFlush", () => {
+  const deps = () => {
+    const order: string[] = [];
+    const map = new Map<string, string>();
+    const cache = new Map<string, DrafterSessionEntry>();
+    return {
+      order,
+      cache,
+      storage: {
+        getItem: (k: string) => map.get(k) ?? null,
+        setItem: (k: string, v: string) => {
+          order.push("shadow");
+          map.set(k, v);
+        },
+        removeItem: (k: string) => void map.delete(k),
+      },
+      deps() {
+        return {
+          storage: this.storage,
+          cache: new Proxy(cache, {
+            get(t, p) {
+              if (p === "set") {
+                return (k: string, v: DrafterSessionEntry) => {
+                  order.push("cache");
+                  return t.set(k, v);
+                };
+              }
+              const v = Reflect.get(t, p);
+              return typeof v === "function" ? v.bind(t) : v;
+            },
+          }) as Map<string, DrafterSessionEntry>,
+          persist: async () => {
+            order.push("db");
+          },
+          now: () => 7,
+        };
+      },
+    };
+  };
+
+  it("writes the shadow, then the cache, then the DB — in that order", async () => {
+    const d = deps();
+    await writeDrafterFlush("d1", doc, "# hi", "/repo/x", d.deps());
+    expect(d.order).toEqual(["shadow", "cache", "db"]);
+  });
+
+  it("lands the shadow SYNCHRONOUSLY, before anything can await", () => {
+    // The guarantee: a hard kill between a keystroke and the DB write loses
+    // nothing. If the shadow moved behind the await it would be worthless.
+    const d = deps();
+    void writeDrafterFlush("d1", doc, "# hi", null, d.deps());
+    expect(d.order).toEqual(["shadow", "cache", "db"]);
+    expect(readDrafterShadow("d1", d.storage)).toEqual({
+      json: doc,
+      markdown: "# hi",
+      at: 7,
+    });
+  });
+
+  it("caches the project the flush actually wrote, not the one on screen", async () => {
+    const d = deps();
+    await writeDrafterFlush("d1", doc, "x", "/repo/x", d.deps());
+    expect(d.cache.get("d1")).toEqual({ json: doc, projectPath: "/repo/x", at: 7 });
+  });
+
+  it("still reaches the DB when storage is unavailable", async () => {
+    // Quota or private mode kills the shadow, never the write.
+    const order: string[] = [];
+    await writeDrafterFlush("d1", doc, "x", null, {
+      storage: {
+        getItem: () => null,
+        setItem: () => {
+          throw new Error("QuotaExceeded");
+        },
+        removeItem: () => {},
+      },
+      cache: new Map(),
+      persist: async () => void order.push("db"),
+      now: () => 1,
+    });
+    expect(order).toEqual(["db"]);
+  });
+});
+
+// The one claim that genuinely spans files and has no pure home: the editor's
+// mount goes through the resolver above rather than reading a prop the
+// component ignores after mount.
+describe("drafter mount wiring", () => {
   const app = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
 
-  it("the editor mount is gated on the loaded doc's id tag", () => {
-    const gate = app.indexOf("drafterLoaded.forId !== drafterDraftId");
-    const mount = app.indexOf("<PromptDrafter");
-    expect(gate).toBeGreaterThan(-1);
-    expect(mount).toBeGreaterThan(gate);
-    expect(app).toContain("doc={drafterLoaded");
-    // The keyed remount is load-bearing: TipTap captures content at creation.
+  it("mounts from resolveDrafterMountDoc, and the keyed remount survives", () => {
+    expect(app).toContain("resolveDrafterMountDoc(");
+    expect(app).toContain("doc={drafterMount.doc}");
+    // Load-bearing: TipTap captures content at creation.
     expect(app).toContain("key={drafterDraftId");
   });
 
-  it("drafterPersist: shadow first, then session cache, then the DB invoke", () => {
+  it("the persist no longer pushes a mount prop back at the editor", () => {
+    // The write-only feedback loop: `setDrafterLoaded` on every 400ms debounce,
+    // changing a prop `PromptDrafter` contractually ignores after mount and
+    // defeating its memo() for nothing.
     const persist = app.indexOf("const drafterPersist");
+    const end = app.indexOf("[drafterDraftId, drafterProject]", persist);
     expect(persist).toBeGreaterThan(-1);
-    const shadow = app.indexOf("drafterShadowKey(", persist);
-    const cache = app.indexOf("drafterSessionCache.current.set(", persist);
-    const db = app.indexOf("persistDraftDoc(", persist);
-    expect(shadow).toBeGreaterThan(persist);
-    expect(cache).toBeGreaterThan(shadow);
-    expect(db).toBeGreaterThan(cache);
-  });
-
-  it("the load effect consults the session cache before the DB", () => {
-    const cacheRead = app.indexOf("drafterSessionCache.current.get(");
-    const dbRead = app.indexOf("loadDraftDoc(");
-    expect(cacheRead).toBeGreaterThan(-1);
-    expect(dbRead).toBeGreaterThan(cacheRead);
+    expect(end).toBeGreaterThan(persist);
+    expect(app.slice(persist, end)).not.toContain("setDrafterLoaded(");
   });
 });

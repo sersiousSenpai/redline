@@ -36,6 +36,7 @@ import {
   type Shelf,
 } from "../lib/bookshelf";
 import { DocumentsMenu } from "./DocumentsMenu";
+import { InlineInputPopover, Panel, placeUnder } from "./popover";
 
 // The shelf: the folder tree plus the documents in it. Rendered *inside* the
 // document surface rather than as a fourth pane, so it inherits that pane's
@@ -125,6 +126,34 @@ export function BookshelfView({
   const [error, setError] = useState<string | null>(null);
   // The document being dragged onto a folder row, if any.
   const [dragDraft, setDragDraft] = useState<string | null>(null);
+  // Naming a folder or a document.
+  //
+  // This replaces THREE `window.prompt` calls. WKWebView implements
+  // `window.prompt` as a silent null — the codebase already documents this
+  // where the ribbon's link input was rewritten — so folder creation and both
+  // renames were simply DEAD in the packaged app: click, nothing happens, no
+  // error. Anchored under whichever control was clicked.
+  const [naming, setNaming] = useState<{
+    title: string;
+    initial: string;
+    at: { left: string; top: string };
+    commit: (value: string) => void;
+  } | null>(null);
+  const askName = (
+    e: { currentTarget: HTMLElement },
+    title: string,
+    initial: string,
+    commit: (value: string) => void,
+  ) => {
+    const at = placeUnder(e.currentTarget, "left", 264);
+    if (!at) return;
+    setNaming({
+      title,
+      initial,
+      at: at as { left: string; top: string },
+      commit,
+    });
+  };
   // The Shipwright run in flight, and the last run's one-line read.
   const [shipwrightBusy, setShipwrightBusy] = useState(false);
   const [shipwrightNote, setShipwrightNote] = useState<string | null>(null);
@@ -212,8 +241,14 @@ export function BookshelfView({
     const { kind, id } = pendingDelete;
     setPendingDelete(null);
     await run(() => (kind === "draft" ? deleteDraft(id) : deleteFolder(id)));
+    // Deleting the ROW is only half of it. Without this the deleted document
+    // keeps its place in the drafter's open set, keeps its tab in the documents
+    // menu, and gets reopened by the mount effect as a zombie whose row no
+    // longer exists. `onCloseDoc` already existed and was already threaded —
+    // the nested DocumentsMenu has been calling it all along.
+    if (kind === "draft") onCloseDoc?.(id);
     if (kind === "folder" && selectedFolder === id) setSelectedFolder(null);
-  }, [pendingDelete, run, selectedFolder]);
+  }, [pendingDelete, run, selectedFolder, onCloseDoc]);
 
   const renderFolder = (node: FolderNode, depth: number) => {
     const isOpen = expanded.has(node.folderId);
@@ -278,8 +313,10 @@ export function BookshelfView({
             title="Rename this folder"
             onClick={(e) => {
               e.stopPropagation();
-              const name = window.prompt("Rename folder", node.name);
-              if (name?.trim()) void run(() => renameFolder(node.folderId, name));
+              askName(e, "Rename folder", node.name, (name) => {
+                if (name.trim())
+                  void run(() => renameFolder(node.folderId, name));
+              });
             }}
             style={{ color: "var(--color-ink-muted)", cursor: "pointer" }}
           >
@@ -347,10 +384,12 @@ export function BookshelfView({
         <button
           type="button"
           className="flex items-center gap-1 rounded-sm px-2 py-1"
-          onClick={() => {
-            const name = window.prompt("New folder name", "Untitled folder");
-            if (name?.trim()) void run(() => createFolder(selectedFolder, name));
-          }}
+          onClick={(e) =>
+            askName(e, "New folder", "Untitled folder", (name) => {
+              if (name.trim())
+                void run(() => createFolder(selectedFolder, name));
+            })
+          }
           style={{
             fontSize: "11.5px",
             border: "1px solid var(--color-rule)",
@@ -589,11 +628,12 @@ export function BookshelfView({
                   type="button"
                   className="opacity-0 group-hover:opacity-100"
                   title="Rename this document"
-                  onClick={() => {
-                    const title = window.prompt("Rename document", draftLabel(d));
-                    if (title?.trim())
-                      void run(() => renameDraft(d.draftId, title));
-                  }}
+                  onClick={(e) =>
+                    askName(e, "Rename document", draftLabel(d), (title) => {
+                      if (title.trim())
+                        void run(() => renameDraft(d.draftId, title));
+                    })
+                  }
                   style={{ color: "var(--color-ink-muted)", cursor: "pointer" }}
                 >
                   <Pencil size={13} />
@@ -614,6 +654,28 @@ export function BookshelfView({
           )}
         </div>
       </div>
+
+      {naming && (
+        <Panel
+          label={naming.title}
+          panelRef={() => {}}
+          style={{
+            ...naming.at,
+            width: "264px",
+            border: "none",
+            background: "transparent",
+            boxShadow: "none",
+          }}
+        >
+          <InlineInputPopover
+            title={naming.title}
+            initialValue={naming.initial}
+            commitLabel="OK"
+            onCommit={naming.commit}
+            onClose={() => setNaming(null)}
+          />
+        </Panel>
+      )}
 
       {pendingDelete && (
         <div

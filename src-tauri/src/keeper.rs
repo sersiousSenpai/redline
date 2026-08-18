@@ -76,8 +76,19 @@ const SIZE_FLOOR_BYTES: i64 = 2048;
 const MAX_BATCH: usize = 40;
 /// Byte bound on the summarizer's baked-in corpus.
 const MAX_CORPUS_BYTES: usize = 60_000;
-/// Deterministic-fallback gist keeps this many leading characters.
-const GIST_HEAD_CHARS: usize = 240;
+/// Deterministic-fallback gist keeps this many leading characters…
+const GIST_HEAD_CHARS: usize = 200;
+/// …and this many trailing ones. A prompt states its ask at the top and lands
+/// its decision at the bottom; a pure head window keeps the first and throws the
+/// second away, which is why 47% of surviving gists read as an opening sentence
+/// and nothing else. Head+tail costs 80 characters and keeps both ends.
+const GIST_TAIL_CHARS: usize = 120;
+/// How long a machine-authored row (`agent`/`system`) stays warm. Measured in
+/// lake time against the newest event, like every other coldness here — never
+/// wall clock. Machine text has no class link to go cold *through*, so age is
+/// the only signal it has; a week is long enough that anything still on screen
+/// is untouched.
+const MACHINE_COLD_MS: i64 = 7 * 24 * 3600 * 1000;
 /// Run one observation pass per this many completed organize passes (the
 /// counter persists in settings so cadence survives restarts).
 const OBSERVE_EVERY_N_ORGANIZES: i64 = 5;
@@ -115,22 +126,30 @@ pub fn is_idle(last_pty_ms: i64, lake_newest_ms: i64, now_ms: i64, window_ms: i6
 pub struct PromptCand {
     pub prompt_id: i64,
     pub bytes: i64,
+    /// The corpus role (`user` / `agent` / `system`), NULL-safe. This is what
+    /// decides whether the row may be auto-compacted at all.
+    pub role: String,
     pub node_ids: Vec<String>,
 }
 
-/// Fold the flat `(prompt_id, bytes, node_id)` rows from
+/// Fold the flat `(prompt_id, bytes, role, node_id)` rows from
 /// `Database::list_compaction_candidates` into one `PromptCand` per prompt.
-pub fn group_candidates(rows: Vec<(i64, i64, String)>) -> Vec<PromptCand> {
+/// `node_id` is `None` for machine text, which has no class link to go cold
+/// through and qualifies on age instead.
+pub fn group_candidates(rows: Vec<(i64, i64, String, Option<String>)>) -> Vec<PromptCand> {
     let mut by_id: HashMap<i64, PromptCand> = HashMap::new();
-    for (id, bytes, node) in rows {
+    for (id, bytes, role, node) in rows {
         let e = by_id.entry(id).or_insert_with(|| PromptCand {
             prompt_id: id,
             bytes,
+            role,
             node_ids: Vec::new(),
         });
         e.bytes = e.bytes.max(bytes);
-        if !e.node_ids.contains(&node) {
-            e.node_ids.push(node);
+        if let Some(node) = node {
+            if !e.node_ids.contains(&node) {
+                e.node_ids.push(node);
+            }
         }
     }
     let mut out: Vec<PromptCand> = by_id.into_values().collect();
@@ -170,8 +189,18 @@ pub fn pin_protected_nodes(nodes: &[ClassNode]) -> HashSet<String> {
     protected
 }
 
-/// Select prompt ids to compact: big enough, linked into at least one COLD node,
-/// and not linked into any PROTECTED (pinned-subtree) node. Deterministic.
+/// Select prompt ids to compact: big enough, NOT the user's own words, not
+/// linked into any PROTECTED (pinned-subtree) node, and cold — either through a
+/// cold class node, or (for machine text, which has no class link) by the age
+/// gate the SQL already applied. Deterministic.
+///
+/// The role filter is the substantive change. Compaction had been functioning as
+/// a garbage collector for the capture leak: 224 rows compacted 3.6 MB → 60 KB,
+/// irrecoverably, and ~207 of those 224 were machine text that should never have
+/// been in the corpus at all. Reading that as "compaction works well" inverted
+/// it — what it was doing well was deleting a bug's output, while the same 59:1
+/// blade was pointed at the user's own prompts. Machine text is now the *only*
+/// automatic target; a user row leaves only by an explicit `memory_forget`.
 pub fn select_compaction_candidates(
     cands: &[PromptCand],
     cold_nodes: &HashSet<String>,
@@ -181,8 +210,9 @@ pub fn select_compaction_candidates(
     cands
         .iter()
         .filter(|c| c.bytes >= size_floor)
+        .filter(|c| c.role != "user")
         .filter(|c| !c.node_ids.iter().any(|n| protected.contains(n)))
-        .filter(|c| c.node_ids.iter().any(|n| cold_nodes.contains(n)))
+        .filter(|c| c.node_ids.is_empty() || c.node_ids.iter().any(|n| cold_nodes.contains(n)))
         .map(|c| c.prompt_id)
         .collect()
 }
@@ -190,6 +220,11 @@ pub fn select_compaction_candidates(
 // ---------------------------------------------------------------------------
 // Gist generation — tiered (agent summarizer, deterministic fallback)
 // ---------------------------------------------------------------------------
+
+/// Which tier wrote a gist, recorded on the row. The distinction only matters
+/// after the fact — which is exactly when it was unavailable.
+pub const GIST_SOURCE_AGENT: &str = "agent";
+pub const GIST_SOURCE_DETERMINISTIC: &str = "deterministic";
 
 /// One compaction the keeper will apply.
 #[derive(Debug, Clone, PartialEq)]
@@ -201,17 +236,26 @@ pub struct CompactionAction {
 
 /// Deterministic gist for when the agent summarizer is unavailable or its reply
 /// won't parse — compaction must never hard-depend on `claude` being installed.
-/// Keeps the leading `GIST_HEAD_CHARS` and records what was released.
+/// Keeps `GIST_HEAD_CHARS` from the front AND `GIST_TAIL_CHARS` from the back,
+/// and records what was released: the ask is at the top, the decision is at the
+/// bottom, and a head-only window silently kept one and destroyed the other.
+/// Short bodies collapse to a single window with no ellipsis in the middle.
 pub fn deterministic_gist(body: &str) -> String {
     let bytes = body.len();
-    let head: String = body
+    let flat: Vec<char> = body
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .chars()
-        .take(GIST_HEAD_CHARS)
         .collect();
-    format!("{head}… [compacted {bytes} bytes]")
+    let summary = if flat.len() <= GIST_HEAD_CHARS + GIST_TAIL_CHARS {
+        flat.iter().collect::<String>()
+    } else {
+        let head: String = flat[..GIST_HEAD_CHARS].iter().collect();
+        let tail: String = flat[flat.len() - GIST_TAIL_CHARS..].iter().collect();
+        format!("{head} … {tail}")
+    };
+    format!("{summary}… [compacted {bytes} bytes]")
 }
 
 /// Build the summarizer's first-turn prompt: the cold prompt bodies (byte-
@@ -346,7 +390,7 @@ pub async fn run_keeper_summarizer(cwd: &str, prompt: String) -> Result<String, 
     let claude_bin = tokio::task::spawn_blocking(resolve_claude_bin)
         .await
         .map_err(|e| e.to_string())?;
-    ledger::register_agent_prompt(&ledger::body_hash(&prompt));
+    ledger::register_agent_prompt(&prompt);
     let args = crate::claude_proc::bridge_args("keeper", prompt, None);
     let mut cmd = crate::claude_proc::claude_command_for_seat("keeper", &claude_bin);
     let mut child = cmd
@@ -402,7 +446,7 @@ pub async fn compaction_pass(db: &Database) -> Result<usize, String> {
     let protected = pin_protected_nodes(&nodes);
 
     let rows = db
-        .list_compaction_candidates(SIZE_FLOOR_BYTES)
+        .list_compaction_candidates(SIZE_FLOOR_BYTES, env.newest - MACHINE_COLD_MS)
         .map_err(|e| e.to_string())?;
     let cands = group_candidates(rows);
     let mut selected = select_compaction_candidates(&cands, &cold_nodes, &protected, SIZE_FLOOR_BYTES);
@@ -420,26 +464,26 @@ pub async fn compaction_pass(db: &Database) -> Result<usize, String> {
     // Tier 1: the agent summarizer acts. Tier 2 (fallback): deterministic gist
     // for any prompt the agent didn't cover (or if it failed entirely).
     let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-    let mut gists: HashMap<i64, (String, String)> = HashMap::new();
+    let mut gists: HashMap<i64, (String, String, &'static str)> = HashMap::new();
     match run_keeper_summarizer(&cwd, build_keeper_prompt(&bodies)).await {
         Ok(text) => {
             for a in parse_compaction_actions(&text) {
                 if body_map.contains_key(&a.prompt_id) {
-                    gists.insert(a.prompt_id, (a.gist, a.reason));
+                    gists.insert(a.prompt_id, (a.gist, a.reason, GIST_SOURCE_AGENT));
                 }
             }
         }
         Err(e) => tracing::info!(error = %e, "keeper summarizer unavailable — deterministic gists"),
     }
     for (id, body) in &bodies {
-        gists
-            .entry(*id)
-            .or_insert_with(|| (deterministic_gist(body), "cold".to_string()));
+        gists.entry(*id).or_insert_with(|| {
+            (deterministic_gist(body), "cold".to_string(), GIST_SOURCE_DETERMINISTIC)
+        });
     }
 
     let mut applied = 0usize;
-    for (id, (gist, reason)) in &gists {
-        match db.compact_prompt_body(*id, gist, reason, KEEPER_ACTOR) {
+    for (id, (gist, reason, source)) in &gists {
+        match db.compact_prompt_body(*id, gist, reason, source, KEEPER_ACTOR) {
             Ok(Some(_)) => applied += 1,
             Ok(None) => {} // raced / already compacted
             Err(e) => tracing::warn!(error = %e, prompt = id, "compact_prompt_body failed"),
@@ -717,6 +761,10 @@ pub(crate) const READY_DEPTH_THRESHOLD: usize = 3;
 /// Friction-filer cadence — deliberately conservative: recurring friction is
 /// a slow signal, so the bus considers filing at most every 6 hours.
 const FRICTION_FILE_EVERY: Duration = Duration::from_secs(6 * 3600);
+/// How often the semantic index catches up. Two minutes: frequent enough that
+/// a page you just read is searchable within a coffee refill, rare enough that
+/// an idle machine isn't running inference on a loop.
+const EMBED_INDEX_EVERY: Duration = Duration::from_secs(120);
 /// The documented friction threshold: a friction kind files ONE work item
 /// only once it has fired at least this many times inside the window.
 pub(crate) const FRICTION_FILE_THRESHOLD: i64 = 5;
@@ -1205,7 +1253,80 @@ pub(crate) static WATCHES: &[Watch] = &[
         predicate: friction_watch_predicate,
         act: friction_watch_act,
     },
+    Watch {
+        name: "shots-retention",
+        target_role: "keeper",
+        cadence: SHOTS_SWEEP_EVERY,
+        gate: always,
+        predicate: always,
+        act: shots_sweep_act,
+    },
+    Watch {
+        name: "embedding-index",
+        target_role: "keeper",
+        cadence: EMBED_INDEX_EVERY,
+        // IDLE-gated. Inference is the one background job here that competes
+        // for the Neural Engine and the CPU with whatever the user is doing;
+        // a retrieval index is never worth a stutter in the thing being
+        // indexed. It converges over quiet minutes instead.
+        gate: embed_watch_gate,
+        predicate: embed_watch_predicate,
+        act: embed_watch_act,
+    },
 ];
+
+// --- the picture store's retention (Phase 7) -------------------------------
+
+/// A bus entry, not a new timer — the bus is the one scheduling vocabulary.
+const SHOTS_SWEEP_EVERY: Duration = Duration::from_secs(6 * 3600);
+
+fn shots_sweep_act(ctx: &WatchCtx, _now: i64) {
+    let db = ctx.db.clone();
+    let app = ctx.app.clone();
+    tokio::task::spawn_blocking(move || {
+        let removed = crate::shots::sweep(&app, &db);
+        if removed > 0 {
+            tracing::info!(removed, "swept unreferenced/aged page shots");
+        }
+    });
+}
+
+// --- semantic index (Phase 6) ----------------------------------------------
+
+/// Targets embedded per tick. Bounded so a cold start spreads over minutes
+/// rather than pinning a core: the index is allowed to be late, never heavy.
+const EMBED_BATCH: usize = 16;
+
+fn embed_watch_gate(ctx: &WatchCtx, now: i64) -> bool {
+    if crate::embed::provider_for(&ctx.db).is_none() {
+        return false;
+    }
+    let lake_newest = ctx.db.lake_envelope().map(|e| e.newest).unwrap_or(0);
+    is_idle(crate::pty::last_pty_output_ms(), lake_newest, now, IDLE_WINDOW_MS)
+}
+
+/// Cheap: one COUNT against the same predicate the worker uses, so the watch
+/// never wakes a worker that would find nothing to do.
+fn embed_watch_predicate(ctx: &WatchCtx, _now: i64) -> bool {
+    let Some(p) = crate::embed::provider_for(&ctx.db) else { return false };
+    ctx.db
+        .embedding_stats(&p.model_id())
+        .map(|(_, pending)| pending > 0)
+        .unwrap_or(false)
+}
+
+fn embed_watch_act(ctx: &WatchCtx, _now: i64) {
+    let db = ctx.db.clone();
+    let app = ctx.app.clone();
+    tokio::task::spawn_blocking(move || {
+        let done = crate::embed::index_tick(&db, EMBED_BATCH);
+        if done > 0 {
+            tracing::info!(targets = done, "embedded a batch for the semantic arm");
+            // Health shows `pending`; a batch that lands should move it.
+            let _ = app.emit("memory-changed", ());
+        }
+    });
+}
 
 /// One bus pass: for each due watch, stamp the check, then gate → predicate
 /// → act. `last` maps watch name → last check stamp.
@@ -1433,15 +1554,20 @@ mod tests {
     #[test]
     fn group_candidates_folds_by_prompt_and_is_ordered() {
         let rows = vec![
-            (2, 100, "b".into()),
-            (1, 500, "a".into()),
-            (1, 500, "b".into()),
+            (2, 100, "user".into(), Some("b".into())),
+            (1, 500, "user".into(), Some("a".into())),
+            (1, 500, "user".into(), Some("b".into())),
+            // Machine text arrives with no class link at all — it is kept out of
+            // the classifier, so it can only ever go cold on age.
+            (3, 900, "agent".into(), None),
         ];
         let g = group_candidates(rows);
-        assert_eq!(g.len(), 2);
+        assert_eq!(g.len(), 3);
         assert_eq!(g[0].prompt_id, 1); // sorted
         assert_eq!(g[0].node_ids.len(), 2); // a + b folded
         assert_eq!(g[1].prompt_id, 2);
+        assert_eq!(g[2].role, "agent");
+        assert!(g[2].node_ids.is_empty(), "a NULL node_id folds to no link");
     }
 
     #[test]
@@ -1460,19 +1586,61 @@ mod tests {
     #[test]
     fn select_picks_cold_big_unpinned_and_skips_the_rest() {
         let cands = vec![
-            // cold + big + unprotected → picked
-            PromptCand { prompt_id: 1, bytes: 5000, node_ids: vec!["cold".into()] },
+            // cold + big + unprotected + machine → picked
+            PromptCand { prompt_id: 1, bytes: 5000, role: "agent".into(), node_ids: vec!["cold".into()] },
             // too small → skipped
-            PromptCand { prompt_id: 2, bytes: 100, node_ids: vec!["cold".into()] },
+            PromptCand { prompt_id: 2, bytes: 100, role: "agent".into(), node_ids: vec!["cold".into()] },
             // not cold → skipped
-            PromptCand { prompt_id: 3, bytes: 5000, node_ids: vec!["warm".into()] },
+            PromptCand { prompt_id: 3, bytes: 5000, role: "agent".into(), node_ids: vec!["warm".into()] },
             // pinned/protected → skipped even though cold+big
-            PromptCand { prompt_id: 4, bytes: 5000, node_ids: vec!["cold".into(), "pinned".into()] },
+            PromptCand {
+                prompt_id: 4,
+                bytes: 5000,
+                role: "agent".into(),
+                node_ids: vec!["cold".into(), "pinned".into()],
+            },
+            // unlinked machine text → picked (the SQL already applied the age
+            // gate; with no class link there is no node to be cold through)
+            PromptCand { prompt_id: 5, bytes: 5000, role: "system".into(), node_ids: vec![] },
         ];
         let cold: HashSet<String> = ["cold".to_string()].into_iter().collect();
         let protected: HashSet<String> = ["pinned".to_string()].into_iter().collect();
         let picked = select_compaction_candidates(&cands, &cold, &protected, SIZE_FLOOR_BYTES);
-        assert_eq!(picked, vec![1]);
+        assert_eq!(picked, vec![1, 5]);
+    }
+
+    /// The blade never points at the user's own words. Compaction had been
+    /// running as a garbage collector for the capture leak (~207 of 224
+    /// compacted rows were machine text), which made a 59:1 irrecoverable
+    /// release look like a success while the same mechanism was pointed at
+    /// prompts the user actually typed. A `user` row leaves only by an explicit
+    /// `memory_forget`.
+    #[test]
+    fn select_never_compacts_the_users_own_words() {
+        let cands = vec![
+            // Everything about this row says "compact me" except its role.
+            PromptCand { prompt_id: 1, bytes: 50_000, role: "user".into(), node_ids: vec!["cold".into()] },
+            // A NULL role reads as `user` upstream (COALESCE) and is equally safe.
+            PromptCand { prompt_id: 2, bytes: 50_000, role: "user".into(), node_ids: vec![] },
+            PromptCand { prompt_id: 3, bytes: 50_000, role: "agent".into(), node_ids: vec!["cold".into()] },
+        ];
+        let cold: HashSet<String> = ["cold".to_string()].into_iter().collect();
+        let picked =
+            select_compaction_candidates(&cands, &cold, &HashSet::new(), SIZE_FLOOR_BYTES);
+        assert_eq!(picked, vec![3], "only machine text is an automatic target");
+    }
+
+    /// The deterministic fallback keeps BOTH ends: a prompt states its ask at
+    /// the top and lands its decision at the bottom, and a head-only window
+    /// silently kept the first and destroyed the second.
+    #[test]
+    fn deterministic_gist_keeps_the_head_and_the_tail() {
+        let body = format!("THE-ASK {} THE-DECISION", "filler ".repeat(400));
+        let g = deterministic_gist(&body);
+        assert!(g.starts_with("THE-ASK"), "the opening ask survives: {g}");
+        assert!(g.contains("THE-DECISION"), "the closing decision survives: {g}");
+        assert!(g.contains(" … "), "the middle is elided, not the end");
+        assert!(g.chars().count() < body.chars().count());
     }
 
     #[test]

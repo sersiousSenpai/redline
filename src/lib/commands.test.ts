@@ -96,6 +96,7 @@ function deps(over: Partial<CommandDeps> = {}): CommandDeps {
       toggleSidebar: vi.fn(),
       toggleDiscussion: vi.fn(),
       toggleTerminal: vi.fn(),
+      toggleImmersive: vi.fn(),
       setTheme: vi.fn(),
       setFont: vi.fn(),
       zoomReset: vi.fn(),

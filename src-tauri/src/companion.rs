@@ -540,6 +540,7 @@ pub async fn companion_send(
             crate::ledger::PromptSource::RustFirstTurn,
             "companion",
             &prompt,
+            Some(&text),
             None,
             None,
             None,
@@ -551,7 +552,7 @@ pub async fn companion_send(
             crate::seat::model_for("companion"),
         );
     } else {
-        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+        crate::ledger::register_agent_prompt(&prompt);
     }
 
     // The delta is now folded into the conversation; advance the mark.

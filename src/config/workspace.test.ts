@@ -13,6 +13,7 @@ import {
   setSurfaceEnabled,
   surfaceEnabled,
   workspaceLayout,
+  workspaceImmersive,
   MAIN_SURFACE_DESCRIPTORS,
   TOGGLEABLE_SURFACES,
 } from "./workspace";
@@ -286,6 +287,27 @@ describe("layout overrides (snap-back canonical shape)", () => {
     expect(c.sidebarWidth).toBe(300);
     expect(c.termHeight).toBe(320);
     expect(c.paneWidth).toBe(320); // untouched field keeps its default
+  });
+
+  // The immersive opt-out shares the `layout` block with the size overrides
+  // but is a boolean, so each reader has to ignore the other's fields.
+  it("the immersive opt-out reads leniently and stays out of the size overrides", () => {
+    expect(workspaceImmersive({})).toBe(true);
+    expect(workspaceImmersive({ layout: "wide" } as never)).toBe(true);
+    expect(workspaceImmersive({ layout: null } as never)).toBe(true);
+    expect(workspaceImmersive({ layout: { sidebar: 280 } })).toBe(true);
+    // Only a literal false disables — a typo must not silently turn it off.
+    expect(workspaceImmersive({ layout: { immersive: "no" } } as never)).toBe(
+      true,
+    );
+    expect(workspaceImmersive({ layout: { immersive: 0 } } as never)).toBe(true);
+    expect(workspaceImmersive({ layout: { immersive: false } })).toBe(false);
+    // And the size reader ignores it.
+    const ws = parseWorkspace(
+      JSON.stringify({ layout: { sidebar: 280, immersive: false } }),
+    );
+    expect(workspaceLayout(ws)).toEqual({ sidebar: 280 });
+    expect(workspaceImmersive(ws)).toBe(false);
   });
 
   it("the layout block survives a GUI gesture's read-modify-write", () => {

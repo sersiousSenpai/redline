@@ -109,6 +109,27 @@ redline-extension-abi = { path = "crates/redline-extension-abi" }
 # sits behind `extension_host::Runtime`; a feature-gated JIT (`ext-jit`)
 # stays purely additive if an extension ever proves compute-bound.
 wasmi = "1.1"
+# Deflate for the compaction archive (`prompt_archive`): a cold compaction
+# releases a body at ~59:1 and used to be irrecoverable. Already present in the
+# dependency tree (via `png` → `tauri-utils`), so naming it here is a visibility
+# change, not a new build edge or a new binary-size line — verified against
+# Cargo.lock before adding, per the small-binary pillar.
+flate2 = "1"
+# The grep arm's regex VERIFIER — applied in Rust to the candidate set the
+# trigram index returned, never inside SQL.
+#
+# `regex-lite`, NOT `regex`, and the difference was measured rather than
+# assumed: `regex` IS already in the dependency tree (via `tauri-utils`), which
+# made it look free, but naming it as a direct dependency and actually calling
+# it pulled its DFA/meta engine and Unicode tables into our binary for
+# **+529 KB** (26.96 MB → 27.50 MB on an identical tree). Against ~1 MB of
+# headroom under the 28 MB ceiling, that is not a rounding error.
+#
+# `regex-lite` is also the right engine for the job on its merits: this pattern
+# runs over at most a few hundred short candidate strings that a trigram index
+# already narrowed, so a DFA's compile cost dominates any matching it saves.
+# Same API, backtracking engine, no Unicode tables.
+regex-lite = "0.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Local Whisper (whisper.cpp) speech-to-text as the higher-quality, pluggable
@@ -135,6 +156,17 @@ block2 = "0.6"
 # directives, so no `build.rs` linker lines are needed. Same objc2 0.6 family
 # already in the tree via wry/tauri.
 objc2-speech = "0.3.2"     # SFSpeechRecognizer + recognition request/result/task
+# On-device text embeddings for memory's semantic arm (`embed.rs`). An OS
+# SERVICE, not a bundled model: zero model bytes in the binary, assets managed
+# by macOS, inference on the Neural Engine. That is what retires the old "no
+# embedding model enters the product" law — its real concerns were binary size
+# and auditability, and both are met directly (measure with
+# `node scripts/check-size.mjs`; every hit is labelled with the arm that found
+# it). Default features off: we need the two embedding APIs and nothing else
+# from the Natural Language framework.
+objc2-natural-language = { version = "0.3.2", default-features = false, features = [
+    "std", "NLEmbedding", "NLContextualEmbedding", "NLLanguage", "block2",
+] }
 objc2-avf-audio = "0.3.2"  # AVAudioEngine mic tap + PCM buffers
 objc2-foundation = "0.3.2" # NSString/NSLocale/NSError bridging
 # Typed WKWebView + AppKit classes for the embedded browser's new-window

@@ -8,7 +8,6 @@ import {
   computeRevisionDisplay,
   latestDisplayVersion,
 } from "../lib/revisionVersions";
-import { orderSessions } from "../lib/sessionOrder";
 import { isLiveRunState } from "../lib/orchestration";
 
 interface SessionSidebarProps {
@@ -124,12 +123,14 @@ function SessionSidebarBase({
       return next;
     });
 
-  // The open plan reads from the top of the list; everyone else keeps the
-  // backend's last-edited order. Keys are sessionIds, so the reorder is a
-  // cheap DOM move, and the auto-expand effect above keys off activeId, not
-  // position.
-  const ordered = orderSessions(sessions, activeId);
-
+  // The list renders in the backend's `updated_at DESC` order, full stop.
+  // It used to hoist the open plan to index 0, which meant clicking a row
+  // teleported it out from under the cursor in the same frame (stable keys, so
+  // React performs a real DOM move with no transition) while the auto-expand
+  // effect grew a revision tree at the new top and shoved everything else
+  // down. Selection is already legible from the row itself — the inset accent
+  // stripe, the bolder title, the expanded tree — so moving it as well bought
+  // nothing and cost the one thing a list owes you: staying put.
   return (
     <div
       className="flex-1 overflow-y-auto rl-thin-scroll-y"
@@ -144,6 +145,11 @@ function SessionSidebarBase({
         <button
           type="button"
           onClick={onNewPlan}
+          // "I am on the front door" was communicated by background colour
+          // alone — invisible to a screen reader and to anyone who can't tell
+          // --color-anchor-bg from the paper. `aria-current` says it.
+          aria-current={activeId === null ? "page" : undefined}
+          title="Plan a build — the front door (⌘⇧N)"
           className="flex w-full items-center gap-2 px-3 py-2.5 border-b text-left"
           style={{
             borderColor: "var(--color-rule)",
@@ -195,7 +201,7 @@ function SessionSidebarBase({
         </div>
       ) : (
         <ul>
-          {ordered.map((s) => (
+          {sessions.map((s) => (
             <SessionRow
               key={s.sessionId}
               session={s}

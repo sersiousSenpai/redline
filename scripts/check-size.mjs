@@ -84,6 +84,15 @@ const checks = [
     name: "mcp proxy binary (src-tauri/target/release/redline-mcp)",
     actual: existsSync(mcpBinPath) ? statSync(mcpBinPath).size : null,
     limit: budget.mcpBinBytes,
+    // MEASURE THIS ONE ON ITS OWN FEATURE SET, or the number is meaningless:
+    //   cargo build --release -p redline-mcp     → 1.52 MB   (in budget)
+    //   cargo build --release  (whole workspace) → 5.30 MB   (321% — a lie)
+    // Cargo unifies features per invocation, so a workspace-wide build hands
+    // the proxy the APP's reqwest features (TLS, charset sniffing, proxy
+    // detection) on top of its own `default-features = false`. That is exactly
+    // the size lever this crate exists to hold, defeated by how it was built —
+    // not a regression. Verified 2026-08-16.
+    hint: "measure with `cargo build --release -p redline-mcp` — a workspace-wide build unifies the app's reqwest features into it",
   },
   {
     name: `boot-path JS (${boot ? boot.parts.join(" + ") : "dist/index.html entry + modulepreloads"})`,
@@ -101,7 +110,7 @@ const checks = [
 // total" and the standalone bundle is no longer built or shipped.
 
 let failed = false;
-for (const { name, actual, limit } of checks) {
+for (const { name, actual, limit, hint } of checks) {
   if (actual === null) {
     console.log(`SKIP  ${name} — not built`);
     if (strict) failed = true;
@@ -112,6 +121,9 @@ for (const { name, actual, limit } of checks) {
   console.log(
     `${ok ? " ok " : "OVER"}  ${name} — ${mb(actual)} of ${mb(limit)} (${pct}%)`,
   );
+  // A breach with a known measurement trap says so, so the next person
+  // debugs the number before debugging the code.
+  if (!ok && hint) console.log(`      ↳ ${hint}`);
   if (!ok) failed = true;
 }
 

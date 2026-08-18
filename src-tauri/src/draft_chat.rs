@@ -126,7 +126,7 @@ impl DraftChatState {
             ),
             Some(_) => framed.clone(),
         };
-        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+        crate::ledger::register_agent_prompt(&prompt);
 
         let args = bridge_args("drafter", prompt, prior_session.as_deref());
         let cwd = project_path
@@ -386,10 +386,31 @@ fn build_instruction_prompt(
 /// The write ops the suggestions endpoint accepts.
 pub const SUGGESTION_OPS: [&str; 4] = ["append", "replace_block", "insert_after", "delete_block"];
 
+/// The mirror text belonging to one block: everything between that block's
+/// `<!-- rl:blk-{bare} -->` sidecar and the next sidecar (or the end of the
+/// document). `None` when the block isn't in the mirror at all.
+///
+/// This is what makes the `original` staleness check mean anything. Checking
+/// `mirror.contains(original)` asks "does this text appear ANYWHERE in the
+/// document" — so an `original` that also appears in some other block passes
+/// validation while the targeted block has changed underneath it, and the agent
+/// writes over an edit it never saw. Short `original` values ("Ship auth.", a
+/// heading, a bullet) collide constantly.
+pub fn block_slice<'a>(mirror_markdown: &'a str, bare: &str) -> Option<&'a str> {
+    const MARK: &str = "<!-- rl:blk-";
+    let marker = format!("{MARK}{bare} -->");
+    let start = mirror_markdown.find(&marker)? + marker.len();
+    let rest = &mirror_markdown[start..];
+    Some(match rest.find(MARK) {
+        Some(next) => &rest[..next],
+        None => rest,
+    })
+}
+
 /// Validate a suggestion against the draft's CURRENT markdown mirror. Returns
 /// `Err((status, message))` with 400 for a malformed request and 409 for a
-/// staleness conflict (unknown block / `original` no longer present) — the
-/// agent's re-read-and-retry signal.
+/// staleness conflict (unknown block / `original` no longer present **in that
+/// block**) — the agent's re-read-and-retry signal.
 pub fn validate_suggestion(
     mirror_markdown: &str,
     op: &str,
@@ -412,15 +433,16 @@ pub fn validate_suggestion(
     // The mirror is serialized with sidecars, so a live block appears as
     // `<!-- rl:blk-XXXX -->`. Accept the id with or without the `blk-` prefix.
     let bare = bid.trim_start_matches("blk-");
-    let marker = format!("rl:blk-{bare}");
-    if !mirror_markdown.contains(&marker) {
+    let Some(slice) = block_slice(mirror_markdown, bare) else {
         return Err((
             409,
             format!("block `{bid}` is not in the current draft — re-read the doc and retry"),
         ));
-    }
+    };
     if let Some(orig) = original.map(str::trim).filter(|s| !s.is_empty()) {
-        if !mirror_markdown.contains(orig) {
+        // Scoped to the targeted block, not the whole mirror: the question is
+        // "is THIS block still what you read", and only the block can answer it.
+        if !slice.contains(orig) {
             return Err((
                 409,
                 "the block changed since you read it — re-read the doc and retry".to_string(),
@@ -466,126 +488,7 @@ struct DraftChatCancelled {
 
 // --- Commands -------------------------------------------------------------
 
-/// Send a turn to a draft's discussion agent. Flushes the caller-supplied live
-/// markdown into the mirror first (so the agent never reads a stale debounce),
-/// then spawns: first turn embeds the draft; follow-ups carry the doc-changed
-/// header. Streaming happens via `draft-chat-*` events.
-#[allow(clippy::too_many_arguments)]
-#[tauri::command]
-pub async fn draft_chat_send(
-    chat: tauri::State<'_, DraftChatState>,
-    active_mission: tauri::State<'_, crate::ActiveMission>,
-    app: AppHandle,
-    draft_id: String,
-    text: String,
-    draft_markdown: String,
-    project_path: Option<String>,
-    cwd: Option<String>,
-) -> Result<(), String> {
-    if text.trim().is_empty() {
-        return Err("empty message".to_string());
-    }
-    // Atomic reservation; early `?` returns release it via the guard's Drop.
-    let slot = chat
-        .turns
-        .begin(&draft_id)
-        .map_err(|_| "the draft agent is still replying".to_string())?;
-
-    // Server-side mirror flush: the agent reads the DB mirror mid-turn, so it
-    // must reflect exactly what the user sees at send time.
-    let title = crate::draft_title_from_markdown(&draft_markdown);
-    chat.db
-        .upsert_draft(
-            &draft_id,
-            title.as_deref(),
-            project_path.as_deref(),
-            &draft_markdown,
-            // Mirror only — never the document. The frontend owns `doc_json`.
-            None,
-        )
-        .map_err(|e| format!("failed to mirror the draft: {e}"))?;
-
-    let prior_session = chat.db.get_draft_chat_session(&draft_id);
-    let doc_hash = crate::ledger::body_hash(&draft_markdown);
-    let doc_changed = chat
-        .db
-        .get_draft_chat_doc_hash(&draft_id)
-        .map(|h| h != doc_hash)
-        .unwrap_or(true);
-
-    let user_msg = DraftChatMessage {
-        id: uuid::Uuid::new_v4().to_string(),
-        draft_id: draft_id.clone(),
-        role: "user".to_string(),
-        body: text.clone(),
-        status: "complete".to_string(),
-        created_at: now_millis(),
-    };
-    chat.db
-        .insert_draft_chat_message(&user_msg)
-        .map_err(|e| format!("failed to persist message: {e}"))?;
-
-    let mission = active_mission.active_goal();
-    let prompt = match &prior_session {
-        None => build_first_turn_prompt(
-            &draft_id,
-            title.as_deref(),
-            project_path.as_deref(),
-            &draft_markdown,
-            &text,
-            mission.as_ref().map(|(t, g)| (t.as_str(), g.as_str())),
-        ),
-        Some(_) => build_followup_prompt(&draft_id, doc_changed, &text),
-    };
-
-    // Polis ledger: first turn with thread provenance; the chat thread hangs
-    // under its draft in the session tree.
-    if prior_session.is_none() {
-        let _ = crate::ledger::record_session_link(
-            &chat.db,
-            "drafter_chat",
-            &draft_id,
-            "drafter",
-            &draft_id,
-        );
-        crate::ledger::record_agent_prompt(
-            &chat.db,
-            crate::ledger::PromptSource::RustFirstTurn,
-            "drafter_chat",
-            &prompt,
-            project_path.clone(),
-            None,
-            None,
-            Some(crate::ledger::ThreadRef {
-                thread_kind: "drafter_chat",
-                thread_id: draft_id.clone(),
-                parent_session_id: None,
-            }),
-            crate::seat::model_for("drafter"),
-        );
-    } else {
-        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
-    }
-
-    // The agent has now been pointed at the current doc (embedded or told to
-    // re-read); record the hash it will see.
-    let _ = chat.db.set_draft_chat_doc_hash(&draft_id, &doc_hash);
-
-    run_draft_turn(
-        &chat,
-        app,
-        slot,
-        draft_id,
-        prompt,
-        prior_session,
-        cwd,
-        project_path,
-        None,
-    )
-    .await
-}
-
-/// The shared spawn tail for `draft_chat_send` and `draft_instruct`: resolve
+/// The spawn tail for `draft_instruct`: resolve
 /// the CLI, spawn the turn (resuming `prior_session` when set), attach it to
 /// the caller's reservation, and wire the streaming reader. Streaming happens
 /// via `draft-chat-*`. An instruct turn passes its target block in
@@ -601,7 +504,7 @@ async fn run_draft_turn(
     prior_session: Option<String>,
     cwd: Option<String>,
     project_path: Option<String>,
-    instruct_block: Option<String>,
+    instruct: Option<InstructMeta>,
 ) -> Result<(), String> {
     let args = bridge_args("drafter", prompt, prior_session.as_deref());
     let cwd = cwd
@@ -642,11 +545,10 @@ async fn run_draft_turn(
         return Ok(());
     }
 
-    // The spawn is live — mark the ✦ target so a remounting PromptDrafter's
-    // `draft_turn_status` probe can restore the pulse. The reader owns the
-    // matching take at terminal time.
-    let instruct_nonce =
-        instruct_block.map(|block_id| chat.pending_instruct.set(&draft_id, block_id));
+    // The spawn is live — mark the ✦ instruction so a remounting PromptDrafter's
+    // `draft_turn_status` probe can restore both the pulse and Retry. The reader
+    // owns the matching take at terminal time.
+    let instruct_nonce = instruct.map(|meta| chat.pending_instruct.set(&draft_id, meta));
 
     tauri::async_runtime::spawn(read_draft_chat(
         app,
@@ -664,9 +566,8 @@ async fn run_draft_turn(
 
 /// Snapshot of this draft's discussion turn for a remounting PromptDrafter:
 /// whether a reply is streaming, since when, and the partial text streamed so
-/// far (with its delta `seq` watermark). `instruct` will name the in-flight
-/// ✦-instruction's target block once Phase 2 wires `pending_instruct`; until
-/// then it is always `None`.
+/// far (with its delta `seq` watermark), plus the in-flight ✦-instruction when
+/// there is one.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DraftTurnStatus {
@@ -675,12 +576,16 @@ pub struct DraftTurnStatus {
     pub instruct: Option<InstructMeta>,
 }
 
-/// The in-flight ✦-instruction's target, for restoring the block pulse after
-/// a remount (Phase 2d).
+/// The in-flight ✦-instruction, for restoring the block pulse after a remount.
+/// It carries the `instruction` as well as the target because the re-arm probe
+/// is the only thing that can put `lastInstruct` back — without it Retry is
+/// dead for any turn recovered across a remount, which is exactly the turn most
+/// likely to need it.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstructMeta {
     pub block_id: String,
+    pub instruction: String,
 }
 
 /// The per-draft ✦-instruction markers. Set after a successful spawn in
@@ -697,12 +602,12 @@ pub struct PendingInstructs {
 }
 
 impl PendingInstructs {
-    fn set(&self, draft_id: &str, block_id: String) -> u64 {
+    fn set(&self, draft_id: &str, meta: InstructMeta) -> u64 {
         let nonce = self.next_nonce.fetch_add(1, Ordering::Relaxed) + 1;
         self.inner
             .lock()
             .unwrap()
-            .insert(draft_id.to_string(), (InstructMeta { block_id }, nonce));
+            .insert(draft_id.to_string(), (meta, nonce));
         nonce
     }
 
@@ -836,6 +741,7 @@ pub async fn draft_instruct(
             crate::ledger::PromptSource::RustFirstTurn,
             "drafter_chat",
             &prompt,
+            Some(&instruction),
             project_path.clone(),
             None,
             None,
@@ -847,7 +753,7 @@ pub async fn draft_instruct(
             crate::seat::model_for("drafter"),
         );
     } else {
-        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+        crate::ledger::register_agent_prompt(&prompt);
     }
 
     let _ = chat.db.set_draft_chat_doc_hash(&draft_id, &doc_hash);
@@ -861,23 +767,18 @@ pub async fn draft_instruct(
         prior_session,
         cwd,
         project_path,
-        Some(block_id),
+        Some(InstructMeta {
+            block_id,
+            instruction: instruction.trim().to_string(),
+        }),
     )
     .await
 }
 
-/// A draft's persisted discussion thread, oldest-first.
-#[tauri::command]
-pub fn get_draft_chat_thread(
-    chat: tauri::State<'_, DraftChatState>,
-    draft_id: String,
-) -> Result<Vec<DraftChatMessage>, String> {
-    chat.db
-        .load_draft_chat_thread(&draft_id)
-        .map_err(|e| format!("failed to load thread: {e}"))
-}
-
-/// Cancel the in-flight turn for a draft (the reader emits `draft-chat-cancelled`).
+/// Cancel the in-flight ✦ turn for a draft (the reader emits
+/// `draft-chat-cancelled`). This is the ONLY way to stop a turn: without it the
+/// target block pulses, the draft's turn slot stays reserved against every other
+/// ✦, and the only exits are success, error, or app teardown.
 #[tauri::command]
 pub fn draft_chat_cancel(
     chat: tauri::State<'_, DraftChatState>,
@@ -887,22 +788,6 @@ pub fn draft_chat_cancel(
         let _ = child.start_kill();
     }
     Ok(())
-}
-
-/// Forget a draft's discussion: kill any in-flight turn, drop the thread rows
-/// and the resumable session. Explicit draft delete only — "New draft" keeps
-/// old rows as queryable history.
-#[tauri::command]
-pub fn draft_chat_discard(
-    chat: tauri::State<'_, DraftChatState>,
-    draft_id: String,
-) -> Result<(), String> {
-    if let Some(mut child) = chat.turns.take(&draft_id).and_then(|p| p.child) {
-        let _ = child.start_kill();
-    }
-    chat.db
-        .delete_draft_chat(&draft_id)
-        .map_err(|e| format!("failed to discard draft chat: {e}"))
 }
 
 #[tauri::command]
@@ -1280,7 +1165,13 @@ mod tests {
     fn pending_instruct_set_probed_and_taken_once() {
         let p = PendingInstructs::default();
         assert!(p.peek("d1").is_none());
-        let nonce = p.set("d1", "blk-a".to_string());
+        let nonce = p.set(
+            "d1",
+            InstructMeta {
+                block_id: "blk-a".to_string(),
+                instruction: "tighten".to_string(),
+            },
+        );
         assert_eq!(p.peek("d1").map(|m| m.block_id), Some("blk-a".to_string()));
         // Independent drafts don't see each other's markers.
         assert!(p.peek("d2").is_none());
@@ -1299,8 +1190,12 @@ mod tests {
         // on the same draft: A's terminal take carries A's nonce and must
         // leave B's marker untouched.
         let p = PendingInstructs::default();
-        let nonce_a = p.set("d1", "blk-a".to_string());
-        let nonce_b = p.set("d1", "blk-b".to_string());
+        let meta = |b: &str| InstructMeta {
+            block_id: b.to_string(),
+            instruction: format!("do {b}"),
+        };
+        let nonce_a = p.set("d1", meta("blk-a"));
+        let nonce_b = p.set("d1", meta("blk-b"));
         p.take("d1", nonce_a); // stale reader
         assert_eq!(
             p.peek("d1").map(|m| m.block_id),
@@ -1309,6 +1204,52 @@ mod tests {
         );
         p.take("d1", nonce_b);
         assert!(p.peek("d1").is_none());
+    }
+
+    #[test]
+    fn pending_instruct_carries_the_instruction_for_retry() {
+        // The re-arm probe restores the pulse from `block_id`; Retry needs the
+        // instruction itself, or it is dead for every turn recovered across a
+        // remount.
+        let p = PendingInstructs::default();
+        p.set(
+            "d1",
+            InstructMeta {
+                block_id: "blk-a".to_string(),
+                instruction: "tighten this paragraph".to_string(),
+            },
+        );
+        assert_eq!(
+            p.peek("d1").map(|m| m.instruction),
+            Some("tighten this paragraph".to_string())
+        );
+    }
+
+    #[test]
+    fn block_slice_is_bounded_by_the_next_sidecar() {
+        let mirror = "<!-- rl:blk-aaa -->\nfirst\n\n<!-- rl:blk-bbb -->\nsecond\n";
+        assert_eq!(block_slice(mirror, "aaa"), Some("\nfirst\n\n"));
+        assert_eq!(block_slice(mirror, "bbb"), Some("\nsecond\n"));
+        assert_eq!(block_slice(mirror, "zzz"), None);
+    }
+
+    #[test]
+    fn a_stale_original_that_appears_in_another_block_is_still_stale() {
+        // The whole point of scoping. `Ship auth.` is live in blk-bbb and gone
+        // from blk-aaa; a whole-mirror `contains` would wave this through and
+        // let the agent overwrite an edit it never read.
+        let mirror = "<!-- rl:blk-aaa -->\nrewritten\n\n<!-- rl:blk-bbb -->\nShip auth.\n";
+        assert_eq!(
+            validate_suggestion(mirror, "replace_block", Some("aaa"), Some("Ship auth."), "x")
+                .unwrap_err()
+                .0,
+            409
+        );
+        // ...and it remains valid against the block that actually holds it.
+        assert!(
+            validate_suggestion(mirror, "replace_block", Some("bbb"), Some("Ship auth."), "x")
+                .is_ok()
+        );
     }
 
     #[test]

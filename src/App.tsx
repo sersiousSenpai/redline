@@ -37,13 +37,20 @@ import {
   seedStep,
   type LandingPhase,
 } from "./lib/landing";
+import { type LaunchDestination } from "./lib/frontDoor";
 import {
+  attemptLaunch,
   composePrompt,
-  launchStillLive,
+  launchLiveness,
+  projectForDoc,
   resolveLaunchProject,
-  type LaunchDestination,
+  restoreInto,
+  type DocProjectChoice,
+  type LaunchOrigin,
+  type LaunchRestore,
+  type PendingLaunch,
   type ProjectChoice,
-} from "./lib/frontDoor";
+} from "./lib/launch";
 import {
   deriveReadiness,
   type PreflightStatus,
@@ -119,15 +126,29 @@ import { SplitPane } from "./components/SplitPane";
 // Same Tiptap/ProseMirror stack as PlanEditor — lazy for the same reason. The
 // landing's type-to-start seed keeps buffering in App's window listener until
 // the chunk mounts and consumeSeed runs, so the handoff stays lossless.
+/** The Drafter's chunk, as a promise we can also trigger early.
+ *
+ *  `lazy()` alone means the FIRST open pays for the fetch+parse while the
+ *  spring is already running: the animation measures and flies a Suspense
+ *  fallback, then the real editor swaps in mid-flight. That is exactly why the
+ *  first trip from the Front Door was janky and every one after it was smooth.
+ *  Warmed at idle once the shell has settled (see `warmDrafterChunk` below), so
+ *  by the time anyone presses ⏎ the first open is the same as the tenth. */
+const loadPromptDrafter = () => import("./components/PromptDrafter");
 const PromptDrafter = lazy(() =>
-  import("./components/PromptDrafter").then((m) => ({
-    default: m.PromptDrafter,
-  })),
+  loadPromptDrafter().then((m) => ({ default: m.PromptDrafter })),
 );
 import type { DrafterSaveState } from "./components/PromptDrafter";
 import ReviewPanel from "./components/ReviewPanel";
 import { MemoryInspector } from "./components/MemoryInspector";
-import { MemorySurface } from "./components/MemorySurface";
+// Off the boot path. `MemorySurface` is 85KB and structurally identical to the
+// surfaces already lazy here (the drafter, the voice panel) — it was static
+// only by omission, and boot JS sits at the budget ceiling.
+const MemorySurface = lazy(() =>
+  import("./components/MemorySurface").then((m) => ({
+    default: m.MemorySurface,
+  })),
+);
 // Off the boot path like the drafter: the Runs surface only matters once an
 // orchestrated run exists, so its chunk loads on first open.
 const OrchestrationSurface = lazy(() =>
@@ -177,6 +198,8 @@ import type { FontName } from "./theme/fonts";
 import { usePersistedState } from "./theme/usePersistedState";
 import { useResizablePane } from "./hooks/useResizablePane";
 import { useAutoExitFullscreen } from "./hooks/useAutoExitFullscreen";
+import { useEdgeReveal } from "./hooks/useEdgeReveal";
+import { ChromeSlot } from "./components/HullRail";
 import { PaneDivider } from "./components/PaneDivider";
 import { BoundaryFallback, ErrorBoundary } from "./components/ErrorBoundary";
 import { DiscussPill } from "./components/DiscussPill";
@@ -188,7 +211,7 @@ import { CommandPalette } from "./components/CommandPalette";
 import { playInterceptBeep, DEFAULT_SOUND } from "./audio/beep";
 import { buildResumeCommand } from "./lib/resumeCommand";
 import { buildCommands } from "./lib/commands";
-import { isPaletteKey, isSnapBackKey } from "./lib/keymap";
+import { isNewPlanKey, isPaletteKey, isSnapBackKey } from "./lib/keymap";
 import {
   TOC_RAIL_W,
   TOC_RAIL_W_WIDE,
@@ -209,10 +232,20 @@ import {
   setLanding,
   setSurfaceEnabled,
   surfaceEnabled,
+  workspaceImmersive,
   workspaceLayout,
   type ToggleableSurface,
   type Workspace,
 } from "./config/workspace";
+import {
+  effectiveShape,
+  isImmersive,
+  maskPanels,
+  panelMask,
+  panelsMasked,
+} from "./lib/immersive";
+import type { SwapRect } from "./lib/springSwap";
+import { SpringSwap } from "./components/SpringSwap";
 import { SurfacesPanel } from "./components/SurfacesPanel";
 import { NudgeCard } from "./components/NudgeCard";
 import {
@@ -241,9 +274,11 @@ import { dockHeightForTiles } from "./lib/tileGrid";
 import { SNAPBACK_SETTLE_MS } from "./lib/boot";
 import {
   clearDrafterShadow,
-  drafterShadowKey,
+  drafterModeKey,
   readDrafterShadow,
   resolveDraftOpen,
+  resolveDrafterMountDoc,
+  writeDrafterFlush,
   type DrafterSessionEntry,
   type DrafterShadow,
 } from "./lib/drafterCache";
@@ -289,12 +324,17 @@ import {
 } from "./lib/planLaunchCommand";
 import { guessProjectForPlan } from "./lib/guessProject";
 import {
+  deleteSource,
+  importSourceFile,
   listSources,
   loadDraftDoc,
+  loadShelf,
   migrateLegacyDraft,
   newDraft,
   persistDraftDoc,
   touchDraft,
+  type BookshelfDraft,
+  type DraftSource,
 } from "./lib/bookshelf";
 import { BookshelfView } from "./components/BookshelfView";
 import { DocumentsMenu } from "./components/DocumentsMenu";
@@ -303,6 +343,7 @@ import type { JSONContent } from "@tiptap/react";
 import type {
   Comment,
   CommentType,
+  CodexHookStatus,
   GitStatus,
   HookStatus,
   InterceptionMode,
@@ -461,6 +502,10 @@ function App() {
   const [toast, setToast] = useState<string | ToastSpec | null>(null);
   const [hookStatus, setHookStatus] = useState<HookStatus | null>(null);
   const [skillStatus, setSkillStatus] = useState<SkillStatus | null>(null);
+  const [codexHookStatus, setCodexHookStatus] =
+    useState<CodexHookStatus | null>(null);
+  const [codexSkillStatus, setCodexSkillStatus] =
+    useState<SkillStatus | null>(null);
   // First-run setup modal: "setup" until an in-app install fully succeeds,
   // then "done" shows the one-time what-now explainer until dismissed.
   const [setupPhase, setSetupPhase] = useState<"setup" | "done">("setup");
@@ -522,7 +567,12 @@ function App() {
     240,
     { debounceMs: 250 },
   );
-  const [sidebarCollapsed, setSidebarCollapsed] = usePersistedState(
+  // The six shape flags below are the PERSISTED preference — what the user
+  // last chose. On an immersive surface they are masked by `effectiveShape`
+  // into the derived names (`sidebarCollapsed`, …) further down, which is what
+  // every read site uses. Nothing masks the storage: immersive never writes,
+  // so leaving the surface simply lifts the overlay. See lib/immersive.ts.
+  const [sidebarCollapsedPref, setSidebarCollapsed] = usePersistedState(
     "redline.sidebar.collapsed",
     false,
   );
@@ -531,11 +581,11 @@ function App() {
     320,
     { debounceMs: 250 },
   );
-  const [paneCollapsed, setPaneCollapsed] = usePersistedState(
+  const [paneCollapsedPref, setPaneCollapsed] = usePersistedState(
     "redline.commentPane.collapsed",
     false,
   );
-  const [paneFullscreen, setPaneFullscreen] = usePersistedState(
+  const [paneFullscreenPref, setPaneFullscreen] = usePersistedState(
     "redline.commentPane.fullscreen",
     false,
   );
@@ -564,7 +614,7 @@ function App() {
     "redline.mainSurface",
     "document",
   );
-  const [docPinned, setDocPinned] = usePersistedState(
+  const [docPinnedPref, setDocPinned] = usePersistedState(
     "redline.doc.pinned",
     false,
   );
@@ -576,7 +626,11 @@ function App() {
   const serversOpen = mainSurface === "servers";
   const memoryOpen = mainSurface === "memory";
   const runsOpen = mainSurface === "runs";
-  const docVisible = mainSurface === "document" || docPinned;
+  // The user has explicitly reopened something on this visit to an immersive
+  // surface, so the mask is off until they leave. Declared here — above
+  // selectSurface — because entering a surface re-arms it. Never persisted:
+  // "was immersive" is exactly the stale bit this design refuses to store.
+  const [immersiveBroken, setImmersiveBroken] = useState(false);
   const [splitVertical, setSplitVertical] = usePersistedState(
     "redline.split.vertical",
     false,
@@ -594,6 +648,12 @@ function App() {
   const selectSurface = useCallback(
     (next: MainSurface) => {
       setSplitRatio(0.5);
+      // The entry edge for immersion. Every header click and every
+      // programmatic open funnels through here, so one line re-arms the mask
+      // on each entry — "re-entering always hides again". Transition-driven,
+      // not state-driven, exactly like useAutoExitFullscreen: the rule fires
+      // on the move and never fights the user afterwards.
+      setImmersiveBroken(false);
       if (next === "review" && mainSurface !== "review") {
         setDiscussionPinned("review");
       } else if (next !== "review" && mainSurface === "review") {
@@ -717,23 +777,60 @@ function App() {
     forId: string;
     doc: JSONContent | null;
   } | null>(null);
+  // A third loading state: the app died between a keystroke and its write, and
+  // the user has to choose which copy is the document. Rendered as a card in
+  // place of the body — the same shape the "Opening…" gate already is.
+  const [drafterRecovery, setDrafterRecovery] = useState<{
+    forId: string;
+    shadow: DrafterShadow;
+    /** What the database has. Chosen by "Discard". */
+    stored: JSONContent | null;
+    projectPath: string | null;
+  } | null>(null);
   // Latest content ever on screen per draft id, for this app run. Written on
   // every persist flush; consulted before the DB on every open. In-session,
   // in-memory ≥ DB always — during the persist retry window the DB is behind,
   // and refetching there would resurrect the stale-remount data loss plus
   // spurious recovery prompts (see lib/drafterCache).
   const drafterSessionCache = useRef(new Map<string, DrafterSessionEntry>());
-  const [drafterProject, setDrafterProject] = usePersistedState<string | null>(
-    "redline.drafter.project",
-    null,
-  );
+  // The open document's project, TAGGED with the document it belongs to.
+  //
+  // The untagged `string | null` this replaces conflated "the user explicitly
+  // chose Home" with "I haven't loaded this document yet" — which is exactly
+  // why the load effect guarded with `if (path)` and never reset, and why
+  // switching from a document in /repo/x to one with none permanently
+  // reassigned the second AND launched its prompt into the wrong cwd. Not
+  // persisted: it is a projection of the row, and the row is the truth.
+  const [drafterProject, setDrafterProject] = useState<DocProjectChoice>(null);
+  // The repo the last successful launch shipped into — through ANY door, which
+  // is why it is no longer `lastDrafterProject`. Seeds the next launch's
+  // resolution when nothing more specific answers.
+  const [lastLaunchProject, setLastLaunchProject] = usePersistedState<
+    string | null
+  >("redline.lastLaunchProject", null);
+  // One-time seed from the key this replaced, so an existing user's last repo
+  // isn't forgotten on upgrade. Runs once; a real launch overwrites it after.
+  const lastLaunchSeeded = useRef(false);
+  useEffect(() => {
+    if (lastLaunchSeeded.current) return;
+    lastLaunchSeeded.current = true;
+    if (lastLaunchProject !== null) return;
+    try {
+      const old = localStorage.getItem("redline.drafter.project");
+      const path = old ? (JSON.parse(old) as string | null) : null;
+      if (path) setLastLaunchProject(path);
+    } catch {
+      /* absent or unparseable — nothing to carry forward */
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── The front door ──────────────────────────────────────────────────────
   // All three of these are PERSISTED, not plain useState. A half-typed prompt
   // has to survive a surface switch, a pane toggle and a reload — a front door
   // that eats your sentence is exactly the small betrayal this whole surface
-  // exists to remove. `frontDoorPending` deliberately does NOT persist: a
-  // stale "Planning…" card must not outlive a restart.
+  // exists to remove. The pending launch itself deliberately does NOT
+  // persist: a stale "Planning…" card must not outlive a restart.
   const [frontDoorText, setFrontDoorText] = usePersistedState(
     "redline.frontDoor.text",
     "",
@@ -743,25 +840,36 @@ function App() {
   const [frontDoorAttachments, setFrontDoorAttachments] = usePersistedState<
     string[]
   >("redline.frontDoor.attachments", []);
+  // Read by `releasePending`, which runs long after the render that armed the
+  // launch — it must see what the composer holds NOW, not at launch time, or
+  // giving a sentence back would clobber whatever was typed since.
+  const frontDoorTextRef = useRef(frontDoorText);
+  frontDoorTextRef.current = frontDoorText;
+  const frontDoorAttachmentsRef = useRef(frontDoorAttachments);
+  frontDoorAttachmentsRef.current = frontDoorAttachments;
+  // A ⏎ the LAUNCH path refused, for the door to render. Deliberately NOT
+  // persisted and deliberately nonce-keyed: it is a reaction to one keystroke,
+  // and pressing ⏎ twice against the same blocker has to nudge twice or the
+  // second press reads as a no-op all over again.
+  const [frontDoorRefusal, setFrontDoorRefusal] = useState<{
+    item: ReadinessItem | null;
+    reason: string | null;
+    nonce: number;
+  } | null>(null);
   // Where ⏎ sends. Sticky like the rest of the door's state — someone who
   // works by shaping long briefs first shouldn't re-pick it every session.
   const [frontDoorDest, setFrontDoorDest] = usePersistedState<LaunchDestination>(
     "redline.frontDoor.destination",
     "plan",
   );
-  const [frontDoorPending, setFrontDoorPending] = useState<{
-    prompt: string;
-    startedAt: number;
-    /** The terminal this launch is running in. When it goes, so does the
-     *  session — the card must not outlive it. */
-    terminalId: string | null;
-    /** What the composer held, so an aborted launch gives it back intact
-     *  rather than making the user retype a sentence they already wrote. */
-    text: string;
-    attachments: string[];
-  } | null>(null);
-  const frontDoorPendingRef = useRef(frontDoorPending);
-  frontDoorPendingRef.current = frontDoorPending;
+  // ONE pending launch, keyed by the door it came through. Not one per
+  // surface: `deriveReadiness` takes a single `pendingSince`, so two states
+  // would force App to fold them, and the 90s `hook-unapproved` nudge would
+  // sometimes describe a launch nobody is watching. Never persisted — a stale
+  // "Planning…" card must not outlive a restart.
+  const [pendingLaunch, setPendingLaunch] = useState<PendingLaunch | null>(null);
+  const pendingLaunchRef = useRef(pendingLaunch);
+  pendingLaunchRef.current = pendingLaunch;
   // Focus + seed handoff from the type-to-start listener (see lib/landing.ts).
   const [frontDoorFocus, setFrontDoorFocus] = useState(0);
   // "Can this machine actually deliver a plan" — null until the first probe
@@ -785,6 +893,23 @@ function App() {
   // shadow), but must not clobber the INCOMING doc's `drafterLoaded`.
   const drafterDraftIdRef = useRef(drafterDraftId);
   drafterDraftIdRef.current = drafterDraftId;
+  // The open document's project as a plain path, for everything that just
+  // wants a cwd (the picker, the voice panel, the browser's repo guess). Null
+  // here means EITHER "explicitly Home" or "not loaded" — which is fine for a
+  // reader, and fatal for a writer, so the writers go through `projectForDoc`.
+  const drafterProjectPath = useMemo(
+    () => projectForDoc(drafterProject, drafterDraftId)?.path ?? null,
+    [drafterProject, drafterDraftId],
+  );
+  // The picker's setter: a pick is always FOR the document on screen.
+  const setDrafterProjectPath = useCallback(
+    (path: string | null) => {
+      const forId = drafterDraftIdRef.current;
+      if (!forId) return;
+      setDrafterProject({ forId, path });
+    },
+    [],
+  );
   useEffect(() => {
     if (!drafterDraftId) setDrafterDraftId(crypto.randomUUID());
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -809,7 +934,21 @@ function App() {
   // Close a document (dropdown ✕): drop it from the set; if it was active,
   // activate its neighbour. Closing the last one leaves the active id null and
   // the mint effect above opens a fresh blank — the drafter never goes dark.
+  //
+  // Also the delete path's other half: `BookshelfView` deletes the ROW, and
+  // without this the deleted document stays in the open set, keeps its tab, and
+  // gets reopened by the mount effect as a zombie whose row no longer exists.
+  // Evicting the caches here fixes the storage-leak half for free — a closed
+  // document's session entry, crash shadow and mode key have nothing left to
+  // shadow.
   const closeDrafterDoc = (id: string) => {
+    drafterSessionCache.current.delete(id);
+    clearDrafterShadow(id);
+    try {
+      localStorage.removeItem(drafterModeKey(id));
+    } catch {
+      /* storage unavailable — the key is moot either way */
+    }
     const idx = drafterOpenIds.indexOf(id);
     if (idx < 0) return;
     const next = drafterOpenIds.filter((x) => x !== id);
@@ -836,7 +975,10 @@ function App() {
       // no fetch, no "Opening…" flash, and never a recovery prompt (the
       // shadow may be mid-flight, but the cache is what it shadows).
       setDrafterLoaded({ forId, doc: entry.json });
-      if (entry.projectPath) setDrafterProject(entry.projectPath);
+      // Unconditional and TAGGED. The old `if (path)` guard is what let doc
+      // A's repo answer for doc B — a null here means "B chose Home", and the
+      // tag is what makes that distinguishable from "B isn't loaded".
+      setDrafterProject({ forId, path: entry.projectPath ?? null });
       setDrafterSaveState(null);
       return;
     }
@@ -869,32 +1011,32 @@ function App() {
         if (!alive) return;
       }
       // Crash recovery: a shadow newer than the DB row means the app died
-      // between a keystroke and its write landing. Offer the shadow; either
-      // answer clears it (declined = the user chose the stored copy).
+      // between a keystroke and its write landing.
+      //
+      // This used to be a `window.confirm`, whose DECLINED branch cleared the
+      // shadow — and WKWebView returns a silent `false` for it. So in the
+      // packaged app the recovery prompt never appeared AND the unsaved work
+      // was destroyed on the way past. It is a card in the pane now: a real
+      // choice, rendered where the document would be, and the shadow survives
+      // until the user makes it.
       const shadow = readDrafterShadow(forId);
       if (
         shadow &&
         resolveDraftOpen(entry, loaded?.updatedAt ?? 0, shadow.at) ===
           "shadow-prompt"
       ) {
-        if (
-          window.confirm(
-            "Recover unsaved changes? This document has edits that didn't reach the database before the app last closed.",
-          )
-        ) {
-          parsed = shadow.json;
-          const project = loaded?.projectPath ?? null;
-          // Land the recovered body now; the shadow clears only once the DB
-          // write is confirmed.
-          void persistDraftDoc(forId, shadow.markdown, shadow.json, project)
-            .then(() => clearDrafterShadow(forId))
-            .catch(() => {});
-        } else {
-          clearDrafterShadow(forId);
-        }
+        setDrafterRecovery({
+          forId,
+          shadow,
+          stored: parsed,
+          projectPath: loaded?.projectPath ?? null,
+        });
+        setDrafterProject({ forId, path: loaded?.projectPath ?? null });
+        setDrafterSaveState(null);
+        return;
       }
       setDrafterLoaded({ forId, doc: parsed });
-      if (loaded?.projectPath) setDrafterProject(loaded.projectPath);
+      setDrafterProject({ forId, path: loaded?.projectPath ?? null });
       // The save indicator describes the OPEN document — don't carry the
       // previous one's "Saved · 2s ago" across a switch.
       setDrafterSaveState(null);
@@ -904,21 +1046,132 @@ function App() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [drafterDraftId]);
+  // A new document is being minted for this surface. Distinct from "loading a
+  // document" (which the id tag already covers) because during a mint there is
+  // no id to tag against yet — the previously-open document would otherwise
+  // render for the half-second the round-trip takes.
+  const [drafterOpening, setDrafterOpening] = useState(false);
+  // The aperture a surface opens from — the island's box, measured on the
+  // frame the user committed. Ephemeral by construction: the portal clears it
+  // once it has opened, and a stale one would re-clip a live surface.
+  // The island's box, measured on the gesture that opened the Drafter. It is
+  // what the incoming surface springs FROM, and it is cleared the moment the
+  // spring lands — a stale one would re-run the animation on the next render.
+  //
+  // Deliberately NOT a persisted "the drafter is open" flag. The Drafter has
+  // its own surface and its own header tab; letting it take over the Document
+  // slot meant the Front Door was gone on that tab until you found the way
+  // back, and a persisted flag meant it was still gone after a reload.
+  const [swapFrom, setSwapFrom] = useState<SwapRect | null>(null);
+  // Arriving from the Front Door: keep the surface QUIET until the editor is
+  // actually up. `swapFrom` cannot do this job — it has to clear when the
+  // animation ends, because it is also what holds the editor's mount back, and
+  // the editor is usually a beat behind the landing. That gap is where
+  // "Opening the document…" appeared as a heading block in the top-left corner
+  // and then vanished. During a spring arrival the loading state is the growth
+  // itself; a sentence that shows up inside the surface as it opens and is
+  // taken away again is worse than nothing at all.
+  const [quietOpen, setQuietOpen] = useState(false);
+  // Safety net: if the editor never comes up at all, the surface must not stay
+  // silent forever. Leaving the drafter ends the arrival regardless.
+  useEffect(() => {
+    if (mainSurfaceRef.current !== "drafter") setQuietOpen(false);
+  }, [mainSurface]);
+
   // The shelf, shown in place of the open document inside the same surface —
   // no fourth pane, and it inherits the pane's fullscreen and zoom.
-  const [drafterShelfOpen, setDrafterShelfOpen] = useState(false);
-  // Sources attached to the open document (a count for the footer chip).
-  const [drafterSourceCount, setDrafterSourceCount] = useState(0);
+  // Persisted: it was plain useState, so the shelf closed itself on every
+  // remount — a surface switch and back, or a pane toggle, and you were back
+  // in the document without asking to be.
+  const [drafterShelfOpen, setDrafterShelfOpen] = usePersistedState(
+    "redline.drafter.shelfOpen",
+    false,
+  );
+  // The open document's attached sources — the rows, not just a count.
+  //
+  // The backend for these has been complete and unreachable: `draft_source_add`
+  // / `_import_file` / `_delete` and their typed wrappers had zero callers, so
+  // the count was provably always 0 and the `· N src` chip could never render,
+  // while this effect still fired a `listSources` invoke per document switch to
+  // compute a constant. Building the other half is what makes it true.
+  const [drafterSources, setDrafterSources] = useState<DraftSource[]>([]);
+  const refreshDrafterSources = useCallback((id: string | null) => {
+    if (!id) {
+      setDrafterSources([]);
+      return;
+    }
+    void listSources(id)
+      .then((rows) => setDrafterSources(Array.isArray(rows) ? rows : []))
+      .catch((err) => console.warn("draft_source_list failed", err));
+  }, []);
   useEffect(() => {
-    if (!drafterDraftId) return;
-    let alive = true;
-    void listSources(drafterDraftId)
-      .then((rows) => alive && setDrafterSourceCount(rows.length))
-      .catch(() => {});
-    return () => {
-      alive = false;
-    };
-  }, [drafterDraftId, drafterShelfOpen]);
+    refreshDrafterSources(drafterDraftId);
+  }, [drafterDraftId, drafterShelfOpen, refreshDrafterSources]);
+
+  // Copy files in and attach them. `draft_source_import_file` copies at capture
+  // time (a source the user later moves or trashes would break silently),
+  // sanitizes the basename and enforces the size cap — all of which already
+  // existed and had no way in.
+  const attachDrafterFiles = useCallback(
+    (paths: string[]) => {
+      const id = drafterDraftIdRef.current;
+      if (!id) return;
+      void Promise.allSettled(paths.map((p) => importSourceFile(id, p))).then(
+        (results) => {
+          const failed = results.filter((r) => r.status === "rejected");
+          if (failed.length > 0) {
+            setToast(
+              `Couldn't attach ${failed.length} file${failed.length === 1 ? "" : "s"}: ${
+                (failed[0] as PromiseRejectedResult).reason
+              }`,
+            );
+            setTimeout(() => setToast(null), 8000);
+          }
+          refreshDrafterSources(id);
+        },
+      );
+    },
+    [refreshDrafterSources],
+  );
+  // Templates, promoted out of the documents dropdown and onto the blank page —
+  // the one moment a template is what you actually want. Loaded with the shelf,
+  // refreshed when the shelf is opened (which is where they're made).
+  const [drafterTemplates, setDrafterTemplates] = useState<BookshelfDraft[]>([]);
+  useEffect(() => {
+    void loadShelf()
+      .then((shelf) =>
+        setDrafterTemplates(shelf.drafts.filter((d) => d.isTemplate)),
+      )
+      .catch((err) => console.warn("bookshelf_list failed", err));
+  }, [drafterShelfOpen]);
+  // The same mint `DocumentsMenu` already performs: the copy is filed beside
+  // its template and is an ordinary document from birth.
+  const useDrafterTemplate = useCallback(
+    (templateId: string) => {
+      const t = drafterTemplates.find((d) => d.draftId === templateId);
+      void newDraft(t?.folderId ?? null, undefined, null, templateId)
+        .then(setDrafterDraftId)
+        .catch((e) => {
+          setToast(`Couldn't start from that template: ${e}`);
+          setTimeout(() => setToast(null), 6000);
+        });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [drafterTemplates],
+  );
+
+  const removeDrafterSource = useCallback(
+    (sourceId: string) => {
+      const id = drafterDraftIdRef.current;
+      setDrafterSources((list) => list.filter((s) => s.id !== sourceId));
+      void deleteSource(sourceId).catch((err) => {
+        setToast(`Couldn't remove that attachment: ${err}`);
+        setTimeout(() => setToast(null), 6000);
+        refreshDrafterSources(id);
+      });
+    },
+    [refreshDrafterSources],
+  );
   // The drafter's 🎙️ voice drawer + what it's primed with: the latest mirrored
   // markdown and its parsed Section tree (for the Guided Walkthrough).
   const [drafterVoiceOpen, setDrafterVoiceOpen] = useState(false);
@@ -931,6 +1184,9 @@ function App() {
   const registerDrafterLiveMarkdown = useCallback(
     (get: (() => string) | null) => {
       drafterLiveMdRef.current = get;
+      // Called with a getter on mount and null on unmount, which makes it the
+      // precise "the editor is up" signal — no polling, no timeout.
+      if (get) setQuietOpen(false);
     },
     [],
   );
@@ -953,32 +1209,25 @@ function App() {
   // write) must neither clear the newer shadow nor overwrite its status.
   const drafterSaveSeq = useRef(0);
   const drafterRetryTimer = useRef<number | null>(null);
+  const drafterFlushDeps = useMemo(
+    () => ({
+      storage: localStorage,
+      cache: drafterSessionCache.current,
+      persist: persistDraftDoc,
+      now: Date.now,
+    }),
+    [],
+  );
   const drafterPersist = useCallback(
     (json: JSONContent, markdown: string) => {
       setDrafterMarkdown(markdown);
       if (!drafterDraftId) return;
       const id = drafterDraftId;
-      try {
-        localStorage.setItem(
-          drafterShadowKey(id),
-          JSON.stringify({ json, markdown, at: Date.now() } as DrafterShadow),
-        );
-      } catch {
-        /* quota / private mode — the DB write below is still the real path */
-      }
-      // The in-session cache rides the same flush, unconditionally under the
-      // flush's OWN id — an outgoing doc's unmount flush lands under that doc
-      // (onPersist carries its closure), which is exactly right. The
-      // `drafterLoaded` mirror is guarded by the live id so that same flush
-      // can never clobber the incoming doc's mount.
-      drafterSessionCache.current.set(id, {
-        json,
-        projectPath: drafterProject,
-        at: Date.now(),
-      });
-      if (drafterDraftIdRef.current === id) {
-        setDrafterLoaded({ forId: id, doc: json });
-      }
+      // The pick, but only if it belongs to THIS document. `upsert_draft`
+      // writes `project_path` unconditionally, so a null reaching it must mean
+      // "explicitly Home" and never "I don't know" — and the mount gate below
+      // removes "I don't know" from the reachable states entirely.
+      const project = projectForDoc(drafterProject, id)?.path ?? null;
       const seq = ++drafterSaveSeq.current;
       if (drafterRetryTimer.current !== null) {
         window.clearTimeout(drafterRetryTimer.current);
@@ -986,7 +1235,12 @@ function App() {
       }
       const attempt = (retriesLeft: number, delayMs: number) => {
         setDrafterSaveState({ kind: "saving" });
-        persistDraftDoc(id, markdown, json, drafterProject)
+        // Shadow, then the in-session cache, then the DB — the order is the
+        // contract and it lives in `writeDrafterFlush`, where it is testable.
+        // The cache write is unconditionally under the flush's OWN id: an
+        // outgoing doc's unmount flush lands under that doc (onPersist carries
+        // its closure), which is exactly right.
+        writeDrafterFlush(id, json, markdown, project, drafterFlushDeps)
           .then(() => {
             if (seq !== drafterSaveSeq.current) return; // a newer write owns the state
             clearDrafterShadow(id);
@@ -1140,6 +1394,31 @@ function App() {
   // shell has settled. A first-ever launch (tour not yet run) holds the
   // closed frame one breath longer before opening.
   const { bootAnimating, bootSettled } = useBootChoreography(!onboardingDone);
+
+  // Warm the Drafter's chunk once the shell has settled and the main thread is
+  // free. Nothing on the boot path changes — this is a dynamic import at idle,
+  // so the size budget is untouched — but it removes the one difference
+  // between the first trip from the Front Door and every later one: on a cold
+  // chunk the spring animates a Suspense fallback and then the real editor
+  // arrives mid-flight, which is precisely the first-run jank.
+  useEffect(() => {
+    if (!bootSettled) return;
+    const idle = (
+      window as Window & {
+        requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number;
+      }
+    ).requestIdleCallback;
+    const run = () => void loadPromptDrafter().catch(() => {});
+    if (idle) {
+      const id = idle(run, { timeout: 3000 });
+      return () =>
+        (
+          window as Window & { cancelIdleCallback?: (h: number) => void }
+        ).cancelIdleCallback?.(id);
+    }
+    const t = window.setTimeout(run, 1200);
+    return () => window.clearTimeout(t);
+  }, [bootSettled]);
   const clampZoom = (z: number) =>
     Math.min(1.6, Math.max(0.8, Math.round(z * 100) / 100));
   const zoomIn = () => setDocZoom((z) => clampZoom(z + 0.1));
@@ -1177,6 +1456,7 @@ function App() {
   // doesn't from firing both. Through a ref: snapBack is defined below the
   // terminal state it writes, and the listener mounts once.
   const snapBackRef = useRef<() => void>(() => {});
+  const openFrontDoorRef = useRef<() => void>(() => {});
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey)) return;
@@ -1195,6 +1475,13 @@ function App() {
       } else if (isPaletteKey(e)) {
         e.preventDefault();
         setPaletteOpen((v) => !v);
+      } else if (isNewPlanKey(e)) {
+        // Back to the front door from anywhere, including a surface whose
+        // sessions sidebar is masked. Through a ref for the same reason as
+        // snap-back: this listener mounts once and openFrontDoor is defined
+        // below the selection state it clears.
+        e.preventDefault();
+        openFrontDoorRef.current();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -1236,14 +1523,140 @@ function App() {
     260,
     { debounceMs: 250 },
   );
-  const [termCollapsed, setTermCollapsed] = usePersistedState(
+  const [termCollapsedPref, setTermCollapsed] = usePersistedState(
     "redline.terminalPane.collapsed",
     false,
   );
-  const [termFullscreen, setTermFullscreen] = usePersistedState(
+  const [termFullscreenPref, setTermFullscreen] = usePersistedState(
     "redline.terminalPane.fullscreen",
     false,
   );
+
+  // ---- Immersive surfaces ---------------------------------------------------
+  //
+  // A non-document surface takes the whole window: the periphery is masked on
+  // entry and comes back untouched on exit. The mask is DERIVED, never stored
+  // — see lib/immersive.ts for why a snapshot blob would go stale. The names
+  // below are the ORIGINAL flag names, so every read site downstream
+  // (layoutFlagsRef, computePaneLayout, the JSX guards, browserVisible, the
+  // useResizablePane wiring) reads the effective value with no diff at all.
+  // A read that sits ABOVE this block is a TypeScript error, never a silently
+  // wrong value.
+  const immersive = isImmersive({
+    surface: mainSurface,
+    broken: immersiveBroken,
+    enabled: workspaceImmersive(workspace),
+  });
+  const baseShape = effectiveShape(
+    {
+      sidebarCollapsed: sidebarCollapsedPref,
+      paneCollapsed: paneCollapsedPref,
+      paneFullscreen: paneFullscreenPref,
+      termCollapsed: termCollapsedPref,
+      termFullscreen: termFullscreenPref,
+      docPinned: docPinnedPref,
+    },
+    immersive,
+  );
+  // The second, NARROWER overlay: just the two side panels, leaving the header,
+  // the footer and the terminal dock exactly where they are. The sessions list
+  // is a document index and the discussion pane is a plan's margin, so on a
+  // surface with no document neither is about anything on screen. Same law as
+  // above — an overlay, never a write, so coming back is the mask lifting.
+  // `docPinned` is read from the UNMASKED shape (this never touches it), so
+  // there is no cycle.
+  const pMask = panelMask({
+    surface: mainSurface,
+    broken: immersiveBroken,
+    enabled: workspaceImmersive(workspace),
+    docPinned: baseShape.docPinned,
+  });
+  const {
+    sidebarCollapsed,
+    paneCollapsed,
+    paneFullscreen,
+    termCollapsed,
+    termFullscreen,
+    docPinned,
+  } = maskPanels(baseShape, pMask);
+  const panelsAreMasked = panelsMasked(pMask);
+  const docVisible = mainSurface === "document" || docPinned;
+
+  // Breaking out. While immersive a persisted flag is masked, so a bare
+  // `setPaneCollapsed(false)` changes nothing on screen — every gesture that
+  // OPENS something clears the mask first. The rule: immersive hides, the user
+  // unhides, and the user wins for the rest of that visit. Nothing here writes
+  // a "was immersive" bit; the next selectSurface re-arms.
+  const revealSidebar = useCallback(() => {
+    setImmersiveBroken(true);
+    setSidebarCollapsed(false);
+  }, [setSidebarCollapsed]);
+  const revealPane = useCallback(() => {
+    setImmersiveBroken(true);
+    setPaneCollapsed(false);
+  }, [setPaneCollapsed]);
+  const revealTerm = useCallback(() => {
+    setImmersiveBroken(true);
+    setTermCollapsed(false);
+  }, [setTermCollapsed]);
+  // The user-driven toggles read the EFFECTIVE value to pick their direction:
+  // masked, the pane reads as closed, so the gesture means "open" — which is
+  // what the user pressing ⇧← at a hidden sidebar is asking for.
+  const toggleSidebar = useCallback(() => {
+    setImmersiveBroken(true);
+    setSidebarCollapsed(!sidebarCollapsed);
+  }, [sidebarCollapsed, setSidebarCollapsed]);
+  const togglePane = useCallback(() => {
+    setImmersiveBroken(true);
+    setPaneCollapsed(!paneCollapsed);
+  }, [paneCollapsed, setPaneCollapsed]);
+  const toggleTerm = useCallback(() => {
+    setImmersiveBroken(true);
+    setTermCollapsed(!termCollapsed);
+  }, [termCollapsed, setTermCollapsed]);
+
+  // The chrome's hover reveal. The header can't simply vanish — it is the
+  // window-drag region and the traffic lights float over it — so immersive
+  // swaps it for a slim hull rail, and pointing at the rail slides the real
+  // bar back (see components/HullRail.tsx). One state for both bars: the
+  // chrome returns as a unit. `openMenuCount` is already tracked for
+  // `browserVisible`; here it stops a header dropdown from being torn out
+  // from under the pointer.
+  const chrome = useEdgeReveal({
+    enabled: immersive,
+    menusOpen: openMenuCount,
+  });
+  const chromeRevealed = chrome.revealed;
+
+  // First masked entry ever: say where the panels went. A mode with no visible
+  // exit reads as a trap. Gated on the PANEL mask, not `immersive` — the panel
+  // mask is the one that actually fires, and it is the one that takes something
+  // off the screen without being asked.
+  const [immersiveHintSeen, setImmersiveHintSeen] = usePersistedState(
+    "redline.immersiveHintSeen",
+    false,
+  );
+  // Read through a ref so the flag is NOT a dependency. It was, and the effect
+  // set it — so React ran this effect's cleanup (`clearTimeout`) before the
+  // re-run, cancelling the hint's own dismissal every single time. The banner
+  // then sat there forever. An 8-second notice that never leaves is not a
+  // notice, it is furniture.
+  const immersiveHintSeenRef = useRef(immersiveHintSeen);
+  immersiveHintSeenRef.current = immersiveHintSeen;
+  useEffect(() => {
+    if (!panelsAreMasked || immersiveHintSeenRef.current) return;
+    setImmersiveHintSeen(true);
+    setToast({
+      // `info`, not the default `success`: nothing succeeded. It rendered as a
+      // green success banner for an explanatory line about where the panels
+      // went, which is the wrong colour for the wrong kind of message.
+      tone: "info",
+      message:
+        "Panels hidden for this surface — ⇧← or ⇧→ brings one back, ⌘⇧0 snaps everything back.",
+    });
+    const t = window.setTimeout(() => setToast(null), 8000);
+    return () => window.clearTimeout(t);
+  }, [panelsAreMasked, setImmersiveHintSeen]);
   // A3 snap-back: one gesture returns the shell to its canonical resting
   // arrangement — the shape a fresh install's doors open onto — and a second
   // gesture from rest CLOSES the panes (full-bleed document). The cycle is
@@ -1265,15 +1678,22 @@ function App() {
       window.innerHeight,
       workspaceLayout(workspace),
     );
+    // Snap-back is the immersive escape hatch, so it drops the mask on the way
+    // through (the canonical branch also lands on the document, which re-arms
+    // it). Everything below reads the *Pref flags, not the masked ones: the
+    // at-rest cycle has to describe the user's real layout, or ⌘⇧0 from an
+    // immersive surface would read "already closed" and do the wrong half of
+    // the cycle.
+    setImmersiveBroken(true);
     if (
       isLayoutAtRest(
         {
-          sidebarCollapsed,
-          paneCollapsed,
-          paneFullscreen,
-          termCollapsed,
-          termFullscreen,
-          docPinned,
+          sidebarCollapsed: sidebarCollapsedPref,
+          paneCollapsed: paneCollapsedPref,
+          paneFullscreen: paneFullscreenPref,
+          termCollapsed: termCollapsedPref,
+          termFullscreen: termFullscreenPref,
+          docPinned: docPinnedPref,
           surface: mainSurface,
         },
         target,
@@ -1321,14 +1741,14 @@ function App() {
     setTermCollapsed,
     setTermFullscreen,
     setDocPinned,
-    // The at-rest check reads the live flags; snapBackRef exists precisely so
-    // the mount-once ⌘⇧0 listener sees this fresh closure.
-    sidebarCollapsed,
-    paneCollapsed,
-    paneFullscreen,
-    termCollapsed,
-    termFullscreen,
-    docPinned,
+    // The at-rest check reads the live persisted flags; snapBackRef exists
+    // precisely so the mount-once ⌘⇧0 listener sees this fresh closure.
+    sidebarCollapsedPref,
+    paneCollapsedPref,
+    paneFullscreenPref,
+    termCollapsedPref,
+    termFullscreenPref,
+    docPinnedPref,
     mainSurface,
   ]);
   snapBackRef.current = snapBack;
@@ -1372,7 +1792,9 @@ function App() {
         );
         if (termCollapsed || termFullscreen || termHeight !== partial) {
           if (termFullscreen) setTermFullscreen(false);
-          if (termCollapsed) setTermCollapsed(false);
+          // The spotlight needs its target on screen, so a tour step pointing
+          // at a pane breaks the immersive mask like any other reveal.
+          if (termCollapsed) revealTerm();
           if (termHeight !== partial) setTermHeight(partial);
           tourRevealRestore.current = () => {
             setTermCollapsed(prevCollapsed);
@@ -1381,10 +1803,10 @@ function App() {
           };
         }
       } else if (anchor === "sessions" && sidebarCollapsed) {
-        setSidebarCollapsed(false);
+        revealSidebar();
         tourRevealRestore.current = () => setSidebarCollapsed(true);
       } else if (anchor === "discussion" && paneCollapsed) {
-        setPaneCollapsed(false);
+        revealPane();
         tourRevealRestore.current = () => setPaneCollapsed(true);
       }
     },
@@ -1399,6 +1821,9 @@ function App() {
       setTermHeight,
       setSidebarCollapsed,
       setPaneCollapsed,
+      revealSidebar,
+      revealPane,
+      revealTerm,
     ],
   );
   // Project-folder explorer: open folders (sidebar tabs), the active tab, the
@@ -1501,13 +1926,13 @@ function App() {
 
       switch (e.key) {
         case "ArrowLeft":
-          setSidebarCollapsed((c) => !c);
+          toggleSidebar();
           break;
         case "ArrowRight":
-          setPaneCollapsed((c) => !c);
+          togglePane();
           break;
         case "ArrowDown":
-          setTermCollapsed((c) => !c);
+          toggleTerm();
           break;
         case "ArrowUp": {
           // Ordered tabs: index 0 = sessions, 1..n = open folders. Wrap forward.
@@ -1526,9 +1951,12 @@ function App() {
     window.addEventListener("keydown", onKey, true); // capture phase
     return () => window.removeEventListener("keydown", onKey, true);
   }, [
-    setSidebarCollapsed,
-    setPaneCollapsed,
-    setTermCollapsed,
+    // The toggles close over the EFFECTIVE flags to pick their direction, so
+    // the listener re-subscribes when one flips — the same cadence it already
+    // has for the sidebar tabs below.
+    toggleSidebar,
+    togglePane,
+    toggleTerm,
     openFolders,
     sidebarTab,
     selectSessions,
@@ -2193,9 +2621,10 @@ function App() {
     max: sidebarMaxW,
     // Drag the document over the sidebar past its hard stop → snap it shut.
     onCollapse: () => setSidebarCollapsed(true),
-    // Drag the divider of a collapsed sidebar to re-open it as a drawer.
+    // Drag the divider of a collapsed sidebar to re-open it as a drawer —
+    // including a sidebar that is only collapsed because immersive says so.
     collapsed: sidebarCollapsed,
-    onExpand: () => setSidebarCollapsed(false),
+    onExpand: revealSidebar,
   });
 
   const {
@@ -2207,10 +2636,11 @@ function App() {
     onWidthChange: setPaneWidth,
     onLiveSize: (w) => applyLiveLayout({ paneWidth: w }),
     max: paneMaxW,
-    // Same for the comment pane on the right edge.
+    // Same for the comment pane on the right edge. Its drag-from-edge expand
+    // is the escape hatch that keeps Code Review workable while immersive.
     onCollapse: () => setPaneCollapsed(true),
     collapsed: paneCollapsed,
-    onExpand: () => setPaneCollapsed(false),
+    onExpand: revealPane,
   });
 
   // The voice panel splits the *document column*, so its ceiling is what the
@@ -2301,7 +2731,7 @@ function App() {
       termHeight,
     );
     if (next !== termHeight) setTermHeight(next);
-    if (termCollapsed) setTermCollapsed(false);
+    if (termCollapsed) revealTerm();
     // Growth fires on the tile-count edge only — height/collapse are read
     // fresh but must not re-trigger it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2387,6 +2817,14 @@ function App() {
       const statuses = Promise.all([
         invoke<HookStatus>("get_hook_status").then(setHookStatus, (err) =>
           console.error("get_hook_status failed", err),
+        ),
+        invoke<CodexHookStatus>("get_codex_hook_status").then(
+          setCodexHookStatus,
+          (err) => console.error("get_codex_hook_status failed", err),
+        ),
+        invoke<SkillStatus>("get_codex_skill_status").then(
+          setCodexSkillStatus,
+          (err) => console.error("get_codex_skill_status failed", err),
         ),
         invoke<SkillStatus>("get_skill_status").then(
           (status) => {
@@ -2501,7 +2939,7 @@ function App() {
       // front door's `/hooks` nudge is retired for good — and this launch, if
       // it was one, is over.
       setPlanEverArrived(true);
-      setFrontDoorPending(null);
+      setPendingLaunch(null);
       // Attention cue: a plan was just intercepted. Fire on *every* intercept,
       // regardless of which session it targets or whether we're focused.
       if (flashEnabledRef.current) {
@@ -2541,6 +2979,13 @@ function App() {
         // plan, so flip the sidebar back to Sessions and select it.
         const focusIntercepted = () => {
           selectSessions();
+          // …and open the pane the plan is reviewed in. On an immersive
+          // surface this is what stops the intercept landing invisibly: the
+          // periphery is masked, so a plan would otherwise arrive behind a
+          // full-bleed browser with only the window flash to announce it.
+          // Breaking out is the right call either way — an intercept is the
+          // app asking for the reviewer's attention.
+          revealPane();
           setActiveId(payload.sessionId);
           // Land on the clean latest, even if the reviewer was parked on a
           // historical version when the revision arrived.
@@ -2675,7 +3120,7 @@ function App() {
         // POST to a full review by design, and claiming is strictly the safe
         // direction: the worst case is a plan getting reviewed rather than
         // auto-approved.
-        if (frontDoorPendingRef.current) {
+        if (pendingLaunchRef.current) {
           void invoke<boolean>("claim_review", {
             sessionId: e.payload.sessionId,
           }).catch((err) => console.error("claim_review failed", err));
@@ -2707,7 +3152,7 @@ function App() {
       void modeUnlisten.then((u) => u());
       void decisionUnlisten.then((u) => u());
     };
-  }, [activeId, selectSessions]);
+  }, [activeId, selectSessions, revealPane]);
 
   // `redline://…#RLS1…` deep links — the browser viewer's "Open in Redline"
   // link lands a shared plan here as a full native review. The handler ref is
@@ -2966,7 +3411,7 @@ function App() {
     reviewId: codeReview.activeReviewId,
     reviewRepo: codeReview.repo,
     drafterDraftId,
-    drafterProject,
+    drafterProject: drafterProjectPath,
     activeFile,
     hasTerminal: termTabCount > 0,
   });
@@ -3450,7 +3895,7 @@ function App() {
       // inside a collapsed sidecar and nothing becomes visible (the common case
       // while the user is just talking to the voice agent). Mirrors the
       // `setPaneCollapsed(false)` that the manual `beginCompose` gesture does.
-      setPaneCollapsed(false);
+      revealPane();
       setAutoOpenCommentId(fresh.id);
       setFocusedCommentId(fresh.id);
     }
@@ -3590,8 +4035,8 @@ function App() {
   const beginCompose = (type: CommentType) => {
     if (!selection) return;
     // The composer lives in the comment pane — make sure it's open, or the
-    // action appears to do nothing when the pane is collapsed.
-    setPaneCollapsed(false);
+    // action appears to do nothing when the pane is collapsed (or masked).
+    revealPane();
     setComposing({
       type,
       anchorId: selection.anchorId,
@@ -3612,7 +4057,7 @@ function App() {
   const beginCrossOut = () => {
     if (!selection) return;
     // Reveal the pane so the resulting struck-edit card is visible.
-    setPaneCollapsed(false);
+    revealPane();
     planActionsRef.current?.strikeSelection();
     clearSelection();
   };
@@ -3793,7 +4238,7 @@ function App() {
     const launchCmd = buildOrchestrateLaunchCommand(projectPath, model);
     suppressTerminalRevealFocus();
     setTermFullscreen(false);
-    setTermCollapsed(false);
+    revealTerm();
     const id = terminalsRef.current?.openSessionTerminal(projectPath) ?? null;
     const fail = async (stage: string, reason: string) => {
       await invoke("reset_run", { sessionId }).catch(() => {});
@@ -3963,7 +4408,7 @@ function App() {
             label: "Show tab",
             onAction: () => {
               setToast(null);
-              setTermCollapsed(false);
+              revealTerm();
               terminalsRef.current?.selectTab(terminal);
             },
           },
@@ -4034,7 +4479,7 @@ function App() {
     void invoke("arm_restore", { sessionId: session.sessionId });
     suppressTerminalRevealFocus();
     setTermFullscreen(false);
-    setTermCollapsed(false);
+    revealTerm();
     const id = terminalsRef.current?.openSessionTerminal(cwd) ?? null;
     if (id) {
       typeIntoTerminal(
@@ -4065,51 +4510,103 @@ function App() {
     return [...seen.values()];
   }, [summaries, openFolders]);
 
-  // Send the drafted prompt to a *fresh* Claude Code plan session: spawn a
-  // terminal in the chosen project and launch `claude --permission-mode plan`
-  // seeded with the prompt — the same spawn-verified handoff as
-  // restorePlanSession (no timing guess; the write is checked).
+  // A pending launch is being displaced (or has died). Pay back whatever the
+  // surface handed over before overwriting it — the Front Door gave up its
+  // sentence to the card and is owed it; the Drafter never took the document
+  // away and is owed nothing.
+  const releasePending = (p: PendingLaunch | null, note?: string) => {
+    if (!p) return;
+    if (p.restore.kind === "composer") {
+      const next = restoreInto(
+        { text: frontDoorTextRef.current, attachments: frontDoorAttachmentsRef.current },
+        p.restore,
+      );
+      setFrontDoorText(next.text);
+      setFrontDoorAttachments(next.attachments);
+    }
+    if (note) {
+      setToast(note);
+      setTimeout(() => setToast(null), 4000);
+    }
+  };
+
+  // THE launch. One impure function behind every door: it spawns the terminal,
+  // types `claude --permission-mode plan` with the prompt (the spawn-verified
+  // handoff — no timing guess; the write is checked), records the lineage, and
+  // sets the pending state the surface renders its card from.
   //
-  // `draftId` defaults to the ACTIVE drafter document because that is where
-  // most launches originate — but it must be overridable. Hardcoding it
-  // mis-attributes every launch that didn't come from the Drafter (the
-  // browser's "Send to Claude Code" already suffered this) to whatever
-  // document happened to be open. The front door passes `null`: it has no
-  // document, and the Rust side already takes `draft_id: Option<String>`.
-  const launchPromptDraft = (
-    markdown: string,
-    projectPath: string | null,
-    draftId: string | null = drafterDraftId,
-  ) => {
-    const trimmed = markdown.trim();
-    if (!trimmed) return;
-    // Polis ledger: record the drafted prompt at launch (the plan session
-    // doesn't exist yet, so this is the only place its body is first-class).
-    // The draft_id makes the eventual plan session a CHILD of this draft —
-    // the ingest hook links them when the spawned session first fires.
-    void invoke("record_drafted_prompt", {
-      markdown: trimmed,
-      projectPath,
-      draftId,
-    });
-    const cmd = `${buildPlanLaunchCommand(trimmed, projectPath)}\r`;
+  // The readiness gate here is a BACKSTOP. Surfaces still call `attemptLaunch`
+  // themselves so they can order their own steps (render the blocker inside
+  // their own island, hold the ⏎ to carry through). This catches the door that
+  // forgets — which is exactly how the Drafter shipped with zero preflight.
+  const launchPlan = (req: {
+    origin: LaunchOrigin;
+    prompt: string;
+    projectPath: string | null;
+    draftId: string | null;
+    restore: LaunchRestore;
+  }):
+    | { ok: true; terminalId: string }
+    // `blocked` carries the readiness item itself, not just its label: a door
+    // that can render the fix where the user is looking should not have to
+    // re-derive which fault it was from a sentence.
+    | { ok: false; reason: string; blocked?: ReadinessItem } => {
+    const trimmed = req.prompt.trim();
+    if (!trimmed) return { ok: false, reason: "nothing to launch" };
+    const gate = attemptLaunch(readinessRef.current);
+    if (gate.kind === "blocked")
+      return { ok: false, reason: gate.item.label, blocked: gate.item };
+
+    const cmd = `${buildPlanLaunchCommand(trimmed, req.projectPath)}\r`;
     suppressTerminalRevealFocus();
     setTermFullscreen(false);
-    setTermCollapsed(false);
-    const id = terminalsRef.current?.openSessionTerminal(projectPath) ?? null;
-    if (id) {
-      typeIntoTerminal(id, cmd, "Couldn't type the plan launch");
-    }
+    revealTerm();
+    const terminalId =
+      terminalsRef.current?.openSessionTerminal(req.projectPath) ?? null;
+    // No terminal means the command was never typed and nothing will ever
+    // arrive. Report it — `PendingLaunch.terminalId` is non-nullable precisely
+    // so "spinning on a launch that never happened" cannot be constructed.
+    if (!terminalId) return { ok: false, reason: "couldn't open a terminal" };
+    typeIntoTerminal(terminalId, cmd, "Couldn't type the plan launch");
+
+    // Polis ledger: record the launched prompt (the plan session doesn't exist
+    // yet, so this is the only place its body is first-class). `origin` is
+    // ground truth for the lake's `surface`, and a `draftId` makes the eventual
+    // plan session a CHILD of that document — the ingest hook links them when
+    // the spawned session first fires. The `.catch` is the point: this used to
+    // be a bare `void invoke(...)`, so a failed ledger write was 100% silent.
+    const startedAt = Date.now();
+    void invoke("record_plan_launch", {
+      markdown: trimmed,
+      projectPath: req.projectPath,
+      draftId: req.draftId,
+      origin: req.origin,
+    }).catch((err: unknown) => {
+      const reason = String(err);
+      console.error("record_plan_launch failed", err);
+      setPendingLaunch((cur) =>
+        cur?.startedAt === startedAt ? { ...cur, lineageError: reason } : cur,
+      );
+    });
+
+    releasePending(pendingLaunchRef.current);
+    setReadinessNow(startedAt);
+    setPendingLaunch({
+      origin: req.origin,
+      prompt: trimmed,
+      startedAt,
+      terminalId,
+      draftId: req.draftId,
+      restore: req.restore,
+    });
+    if (req.projectPath) setLastLaunchProject(req.projectPath);
     setToast("Launching plan in the terminal below ↓");
     setTimeout(() => setToast(null), 4000);
-    // The terminal this launch lives in. Callers that show progress need it:
-    // when the tile goes, so does the session, and a spinner outliving its
-    // process is the exact lie this whole surface exists to remove.
-    return id;
+    return { ok: true, terminalId };
   };
 
   // "Run" on a Localhost card: bring a dev server back without hunting for the
-  // command. Same spawn-verified handoff as launchPromptDraft.
+  // command. Same spawn-verified handoff as launchPlan.
   // No `cd` prefix — openSessionTerminal spawns the PTY *in* that directory,
   // and prefixing one would break on a path the shell would need quoted.
   const runDevServer = (projectPath: string, runCommand: string) => {
@@ -4117,7 +4614,7 @@ function App() {
     if (!cmd) return;
     suppressTerminalRevealFocus();
     setTermFullscreen(false);
-    setTermCollapsed(false);
+    revealTerm();
     const id = terminalsRef.current?.openSessionTerminal(projectPath) ?? null;
     if (id) {
       typeIntoTerminal(id, `${cmd}\r`, "Couldn't start the dev server");
@@ -4164,7 +4661,10 @@ function App() {
     if (!markdown.trim()) return;
     const folder = sidebarTab.kind === "folder" ? sidebarTab.id : null;
     const initialProject =
-      guessProjectForPlan(markdown, projectOptions) ?? folder ?? drafterProject;
+      guessProjectForPlan(markdown, projectOptions) ??
+      folder ??
+      drafterProjectPath ??
+      lastLaunchProject;
     selectSurface("document");
     setSendConfirm({ markdown, initialProject });
   };
@@ -4179,8 +4679,19 @@ function App() {
     // draftId `null` — this plan was drafted while browsing, not in the
     // Drafter, so inheriting whatever document happens to be open there would
     // file it under an unrelated draft. (The "Open in Drafter" route mints a
-    // real document and keeps its own lineage.)
-    launchPromptDraft(markdown, project, null);
+    // real document and keeps its own lineage.) It owes nothing back: the reply
+    // it came from is still in the browser's thread.
+    const r = launchPlan({
+      origin: "browser",
+      prompt: markdown,
+      projectPath: project,
+      draftId: null,
+      restore: { kind: "none" },
+    });
+    if (!r.ok) {
+      setToast(`Couldn't launch the plan — ${r.reason}`);
+      setTimeout(() => setToast(null), 6000);
+    }
   };
 
   // Seed the Prompt Drafter with agent-authored markdown and pre-select the
@@ -4195,6 +4706,18 @@ function App() {
   // outright.
   const openDrafterWithMarkdown = async (markdown: string) => {
     if (!markdown.trim()) return;
+    // Grow on the frame of the keypress. The mint and the first persist are a
+    // database round-trip and they used to gate this, so the key did nothing at
+    // all until they landed; they now happen while the island is growing.
+    //
+    // NOT a surface switch. The Drafter renders inside the Front Door's island,
+    // which is what lets the growth be one continuous element instead of an
+    // animation across an unmount.
+    //
+    // `drafterOpening` keeps the previously-open document from flashing up in
+    // the half-second before the new one exists.
+    setDrafterOpening(true);
+    selectSurface("drafter");
     let json: JSONContent;
     try {
       const { planMarkdownToDoc } = await import("./editor/markdown/parser");
@@ -4206,9 +4729,14 @@ function App() {
         content: [{ type: "paragraph", content: [{ type: "text", text: markdown }] }],
       } as unknown as JSONContent;
     }
-    const guess = guessProjectForPlan(markdown, projectOptions);
-    if (guess !== null) setDrafterProject(guess);
-    const project = guess ?? drafterProject;
+    // No pre-set of `drafterProject` here: the pick belongs to a document, and
+    // the document this mints doesn't exist yet. Setting it now would be the
+    // same bleed one function up — the new row is created WITH the project, and
+    // the load effect tags the pick when it opens.
+    const project =
+      guessProjectForPlan(markdown, projectOptions) ??
+      drafterProjectPath ??
+      lastLaunchProject;
     try {
       const id = await newDraft(null, undefined, project);
       await persistDraftDoc(id, markdown, json, project);
@@ -4225,8 +4753,13 @@ function App() {
         at: Date.now(),
       });
       setDrafterLoaded({ forId, doc: json });
+      // MUST be updated too, and tagged: without it the drafter hangs on
+      // "Opening…" (the mount gate compares the pick's `forId` to the active
+      // id, and an untagged pick never matches).
+      setDrafterProject({ forId, path: project });
+    } finally {
+      setDrafterOpening(false);
     }
-    selectSurface("drafter");
   };
 
   // "Synthesize → Drafter" from a mission: the orchestrator's brief becomes a
@@ -4537,6 +5070,8 @@ function App() {
     const errors: string[] = [];
     let hookOk = false;
     let skillOk = false;
+    let codexHookOk = false;
+    let codexSkillOk = false;
     try {
       const status = await invoke<HookStatus>("install_hook");
       setHookStatus(status);
@@ -4546,6 +5081,22 @@ function App() {
       errors.push(`Hook install failed: ${err}`);
     }
     try {
+      const status = await invoke<CodexHookStatus>("install_codex_hook");
+      setCodexHookStatus(status);
+      codexHookOk = status.installed;
+    } catch (err) {
+      console.error("install_codex_hook failed", err);
+      errors.push(`Codex hook install failed: ${err}`);
+    }
+    try {
+      const skill = await invoke<SkillStatus>("install_codex_skill");
+      setCodexSkillStatus(skill);
+      codexSkillOk = skill.installed;
+    } catch (err) {
+      console.error("install_codex_skill failed", err);
+      errors.push(`Codex skill install failed: ${err}`);
+    }
+    try {
       const skill = await invoke<SkillStatus>("install_skill");
       setSkillStatus(skill);
       skillOk = skill.installed;
@@ -4553,7 +5104,8 @@ function App() {
       console.error("install_skill failed", err);
       errors.push(`Skill install failed: ${err}`);
     }
-    const ok = errors.length === 0 && hookOk && skillOk;
+    const ok =
+      errors.length === 0 && hookOk && skillOk && codexHookOk && codexSkillOk;
     if (showExplainer) {
       setInstallError(errors.length > 0 ? errors.join(" ") : null);
       if (ok) setSetupPhase("done");
@@ -4572,6 +5124,8 @@ function App() {
     !!skillStatus &&
     (!hookStatus.installed ||
       !skillStatus.installed ||
+      (codexHookStatus?.available &&
+        (!codexHookStatus.installed || !codexSkillStatus?.installed)) ||
       setupPhase === "done");
   // First-run auto-start waits for the doors to settle — the tour's spotlight
   // must never overlay plates that are still mid-flight.
@@ -4646,31 +5200,48 @@ function App() {
   // built to eliminate, reintroduced one layer up.
   //
   // `liveTermIds` is null until the dock first reports, so a launch can never
-  // be cancelled by the absence of a report.
+  // be cancelled by the absence of a report — and, per `launchLiveness`, not by
+  // the FIRST report either, which is always the pre-launch one: the dock's id
+  // reporter is a child effect that queues its new list in the same flush this
+  // one runs in. A terminal is dead only once the dock vouched for it and a
+  // later report dropped it.
+  //
+  // Keyed on `startedAt` so one launch's confirmation can never vouch for the
+  // next; the object identity changes on `lineageError` alone, which must not
+  // reset it.
+  const launchConfirmedRef = useRef<{ startedAt: number; confirmed: boolean } | null>(
+    null,
+  );
   useEffect(() => {
-    const p = frontDoorPending;
-    if (!p) return;
-    if (launchStillLive(p.terminalId, liveTermIds)) return;
-    setFrontDoorPending(null);
-    // Give the sentence back. It was cleared into the card on launch, and
-    // asking someone to retype what they already wrote — because they changed
-    // their mind about a terminal — is the small betrayal this door exists to
-    // remove. Only when the composer is empty: never clobber newer typing.
-    setFrontDoorText((prev) => (prev.trim() ? prev : p.text));
-    setFrontDoorAttachments((prev) => (prev.length ? prev : p.attachments));
-    setToast("Launch cancelled — that terminal was closed");
-    setTimeout(() => setToast(null), 4000);
+    const p = pendingLaunch;
+    if (!p) {
+      launchConfirmedRef.current = null;
+      return;
+    }
+    if (launchConfirmedRef.current?.startedAt !== p.startedAt) {
+      launchConfirmedRef.current = { startedAt: p.startedAt, confirmed: false };
+    }
+    const seen = launchConfirmedRef.current;
+    const live = launchLiveness(p.terminalId, liveTermIds, seen.confirmed);
+    seen.confirmed = live.confirmed;
+    if (live.alive) return;
+    setPendingLaunch(null);
+    // Give the sentence back, for the door that took one. Asking someone to
+    // retype what they already wrote — because they changed their mind about a
+    // terminal — is the small betrayal this surface exists to remove. The
+    // Drafter's document never left the screen, so its restore is `none`.
+    releasePending(p, "Launch cancelled — that terminal was closed");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [liveTermIds, frontDoorPending]);
+  }, [liveTermIds, pendingLaunch]);
 
   // The `/hooks` nudge is the only time-based item, so the clock only ticks
   // while a launch is actually pending.
   const [readinessNow, setReadinessNow] = useState(() => Date.now());
   useEffect(() => {
-    if (!frontDoorPending) return;
+    if (!pendingLaunch) return;
     const t = setInterval(() => setReadinessNow(Date.now()), 5000);
     return () => clearInterval(t);
-  }, [frontDoorPending]);
+  }, [pendingLaunch]);
 
   const readiness = useMemo(
     () =>
@@ -4681,7 +5252,7 @@ function App() {
         daemonBound,
         hookModalActive: setupModalActive,
         planEverArrived: planEverArrived || summaries.length > 0,
-        pendingSince: frontDoorPending?.startedAt ?? null,
+        pendingSince: pendingLaunch?.startedAt ?? null,
         now: readinessNow,
         projectCount: projectOptions.length,
       }),
@@ -4692,57 +5263,119 @@ function App() {
       setupModalActive,
       planEverArrived,
       summaries.length,
-      frontDoorPending,
+      pendingLaunch,
       readinessNow,
       projectOptions.length,
     ],
   );
+  // `launchPlan`'s backstop gate reads this at call time, from a definition
+  // that sits above it in the body.
+  const readinessRef = useRef(readiness);
+  readinessRef.current = readiness;
 
   const frontDoorResolvedProject = useMemo(
     () =>
       resolveLaunchProject(frontDoorText, frontDoorProject, {
         projectOptions,
         openFolder: sidebarTab.kind === "folder" ? sidebarTab.id : null,
-        lastDrafterProject: drafterProject,
+        lastLaunchProject,
       }),
-    [frontDoorText, frontDoorProject, projectOptions, sidebarTab, drafterProject],
+    [
+      frontDoorText,
+      frontDoorProject,
+      projectOptions,
+      sidebarTab,
+      lastLaunchProject,
+    ],
   );
 
   const launchFromFrontDoor = (projectOverride?: string) => {
     const prompt = composePrompt(frontDoorText, frontDoorAttachments);
     if (!prompt) return;
     const project = projectOverride ?? frontDoorResolvedProject;
-    // draftId `null`: the front door has no document, and inheriting the
-    // active Drafter's id would file this plan under an unrelated draft.
-    const terminalId = launchPromptDraft(prompt, project, null) ?? null;
-    if (!terminalId) {
-      // No terminal, so the command was never typed and nothing will ever
-      // arrive. Say so instead of spinning on a launch that didn't happen.
-      setToast("Couldn't open a terminal to launch the plan");
+    const r = launchPlan({
+      origin: "front-door",
+      prompt,
+      projectPath: project,
+      // The front door has no document, and inheriting the active Drafter's id
+      // would file this plan under an unrelated draft.
+      draftId: null,
+      // It owes the sentence back: the composer clears because the text MOVED
+      // into the card.
+      restore: {
+        kind: "composer",
+        text: frontDoorText,
+        attachments: frontDoorAttachments,
+      },
+    });
+    if (!r.ok) {
+      setToast(`Couldn't launch the plan — ${r.reason}`);
       setTimeout(() => setToast(null), 6000);
+      // And say it INSIDE the island. A toast in the corner is easy to miss
+      // when your eyes are on the sentence you just pressed ⏎ on — which is
+      // the whole "the text just sits there" report — and it carries no fix
+      // button. This lands the blocker where the door's own gate already puts
+      // one, and nudges the island either way.
+      setFrontDoorRefusal((prev) => ({
+        item: r.blocked ?? null,
+        reason: r.blocked ? null : r.reason,
+        nonce: (prev?.nonce ?? 0) + 1,
+      }));
       return;
     }
-    const startedAt = Date.now();
-    setReadinessNow(startedAt);
-    setFrontDoorPending({
-      prompt,
-      startedAt,
-      terminalId,
-      text: frontDoorText,
-      attachments: frontDoorAttachments,
-    });
     // The prompt now lives on the Planning card; a stale copy left in the
     // composer would relaunch on the next ⏎.
     setFrontDoorText("");
     setFrontDoorAttachments([]);
   };
 
+  // The Front Door's island opening into the Drafter's page.
+  //
+  // Two things made this a route change instead of an expansion. First, it
+  // awaited the mint AND the first persist before `selectSurface` ever ran — so
+  // the key did nothing for a database round-trip and then the surface
+  // hard-cut. Second, even after the cut there was no relationship between the
+  // glass slab you had been typing in and the sheet that replaced it.
+  //
+  // Now: measure the island, switch on the same frame, and let one slab travel
+  // from the island's box to the page's box while the mint happens behind it.
   const drafterFromFrontDoor = () => {
     const prompt = composePrompt(frontDoorText, frontDoorAttachments);
     if (!prompt) return;
+    // Measured HERE, synchronously, while the island is still on screen — one
+    // render later it is gone. This is the box the Drafter springs out of.
+    const island = document.querySelector(".rl-fd-island");
+    const r = island?.getBoundingClientRect();
+    setSwapFrom(
+      r && r.width > 0
+        ? { left: r.left, top: r.top, width: r.width, height: r.height }
+        : null,
+    );
+    setQuietOpen(true);
     void openDrafterWithMarkdown(prompt);
     setFrontDoorText("");
     setFrontDoorAttachments([]);
+  };
+
+  // Sending from the Drafter. The document STAYS — visible, editable, exactly
+  // where it was. The front door clears its composer because the sentence moved
+  // into the card; a document is not a sentence, and taking it away (or locking
+  // it behind a spinner) would be the worst possible translation of that idea.
+  // The bar morphs into the launch card above it instead, so what changes is
+  // the receipt, not the work.
+  const launchFromDrafter = (markdown: string, project: string | null) => {
+    const r = launchPlan({
+      origin: "drafter",
+      prompt: markdown,
+      projectPath: project,
+      draftId: drafterDraftId,
+      // Nothing to give back: the document never left.
+      restore: { kind: "none" },
+    });
+    if (!r.ok) {
+      setToast(`Couldn't launch the plan — ${r.reason}`);
+      setTimeout(() => setToast(null), 6000);
+    }
   };
 
   // Each fix is a one-line reuse of a path App already owns. Resolving true
@@ -4833,6 +5466,8 @@ function App() {
     selectSessions();
     selectSurfaceRef.current("document");
   }, [selectSessions]);
+  // Fresh view of it for the mount-once ⌘⇧N listener.
+  openFrontDoorRef.current = openFrontDoor;
 
   // Type-to-start's destination. The composer is ALWAYS mounted while the
   // door is up, so the cross-surface mount race the seed buffer was built for
@@ -4895,7 +5530,7 @@ function App() {
         fonts: FONTS.map(({ name, label }) => ({ name, label })),
         currentFont: font,
         actions: {
-          // ⌘K "Draft a new plan" lands on the front door, which is now the
+          // ⌘K "Plan a build" lands on the front door, which is now the
           // primary way to start one. The Drafter is still one hop away
           // there, behind `Plan ▾ → Draft a document first`.
           draftNewPlan: openFrontDoor,
@@ -4911,9 +5546,13 @@ function App() {
             if (d) selectSurfaceRef.current(d.id);
           },
           snapBack,
-          toggleSidebar: () => setSidebarCollapsed((c) => !c),
-          toggleDiscussion: () => setPaneCollapsed((c) => !c),
-          toggleTerminal: () => setTermCollapsed((c) => !c),
+          toggleSidebar,
+          toggleDiscussion: togglePane,
+          toggleTerminal: toggleTerm,
+          // The palette's word for "give me the panels back on this surface"
+          // (and, pressed again on the same visit, hide them again). It flips
+          // the break-out bit only — the persisted layout is never touched.
+          toggleImmersive: () => setImmersiveBroken((b) => !b),
           setTheme: (name) => {
             if (isThemeName(name)) onThemeChange(name);
           },
@@ -4934,9 +5573,9 @@ function App() {
       openFrontDoor,
       snapBack,
       selectSessions,
-      setSidebarCollapsed,
-      setPaneCollapsed,
-      setTermCollapsed,
+      toggleSidebar,
+      togglePane,
+      toggleTerm,
       setDocZoom,
     ],
   );
@@ -4986,6 +5625,11 @@ function App() {
           relaunch.
         </div>
       )}
+      {/* Immersive: the header becomes a hull rail until the pointer asks for
+          it back. Reveal REFLOWS the plate down rather than floating over it —
+          a native webview composites above all React DOM, so an overlaid
+          header on the browser surface would simply be invisible. */}
+      <ChromeSlot immersive={immersive} edge="top" reveal={chrome}>
       <Header
         session={session}
         theme={theme}
@@ -5032,7 +5676,11 @@ function App() {
         onToggleDocPin={() => {
           // Entering/leaving a tile — reset the split so both panes show.
           setSplitRatio(0.5);
-          setDocPinned((v) => !v);
+          // Reads the EFFECTIVE pin: immersive masks the tile away, so the
+          // button means "tile the document back in" — and asking for the
+          // document back is a break-out like any other.
+          setImmersiveBroken(true);
+          setDocPinned(!docPinned);
         }}
         onOpenMemory={() => selectSurface("memory")}
         onOpenMemoryInspector={() => setMemoryInspectorOpen(true)}
@@ -5052,6 +5700,7 @@ function App() {
         onSnapBack={snapBack}
         onOpenPalette={() => setPaletteOpen(true)}
       />
+      </ChromeSlot>
       {decisionWindow && (
         <DecisionWindowBanner
           event={decisionWindow}
@@ -5201,7 +5850,7 @@ function App() {
               label="sidebar"
               collapsed={sidebarCollapsed}
               dragging={sidebarDragging}
-              onToggle={() => setSidebarCollapsed((c) => !c)}
+              onToggle={toggleSidebar}
               onPointerDown={startSidebarDrag}
               hideChevron={latchActive}
             />
@@ -5218,9 +5867,19 @@ function App() {
           label="sidebar"
           collapsed={sidebarCollapsed}
           dragging={sidebarDragging}
-          onToggle={() => setSidebarCollapsed((c) => !c)}
+          onToggle={toggleSidebar}
           onPointerDown={startSidebarDrag}
           hideChevron={latchActive || liveFlags.curtainL}
+          // The front door's affordance, on the one piece of the sidebar that
+          // never goes away. Its only other visible entry is a row INSIDE the
+          // sessions list, and that list is now closed on every non-document
+          // surface (and collapsible on the document) — so without this the
+          // app's resting state would be reachable only through ⌘K.
+          action={{
+            glyph: "＋",
+            label: "Plan a build (⌘⇧N)",
+            onClick: openFrontDoor,
+          }}
         />
         <div
           ref={docColumnRef}
@@ -5242,7 +5901,20 @@ function App() {
 
               Its children are deliberately NOT re-indented — a whole-block
               shift would bury this change in ~530 lines of whitespace diff. */}
-          <div className="flex-1 min-w-0 overflow-hidden flex flex-col relative">
+          {/* `--rl-doc-zoom` lives HERE, on the common ancestor of every
+              surface body — not on the plan's <article>, where it used to sit.
+              `.rl-prose { font-size: calc(15px * var(--rl-doc-zoom, 1)) }` was
+              therefore inert in the Drafter, whose body is a SIBLING of that
+              article: ⌘+/⌘−/⌘0 have been global bindings all along and simply
+              did nothing on this surface. One level up and they work.
+
+              The sheet grows with the type, as Word does — a page that stays
+              816px while the words get bigger just gives you fewer words per
+              line, which is the opposite of what zoom is for. */}
+          <div
+            className="rl-surface-pane flex-1 min-w-0 overflow-hidden flex flex-col relative"
+            style={{ "--rl-doc-zoom": docZoom } as React.CSSProperties}
+          >
           {/* Table-of-contents rail (Phase 2). Docked to the left of the
               document column: the scroller below reserves `TOC_RAIL_W` of left
               padding while this is open (see `tocDocked`), so the rail sits
@@ -5440,6 +6112,269 @@ function App() {
             );
           })()}
           {(() => {
+            const drafterMount = resolveDrafterMountDoc(
+              drafterSessionCache.current,
+              drafterLoaded,
+              drafterDraftId,
+            );
+            // The shelf is a SHEET over the document, not a replacement for
+            // it. Swapping the whole surface meant opening the shelf hid the
+            // document you were writing — you lost your place to look
+            // something up. Same glass recipe as the launch bar; Esc closes.
+            const drafterShelf = drafterShelfOpen ? (
+              <div
+                className="rl-dl-shelf"
+                data-no-drag="true"
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") setDrafterShelfOpen(false);
+                }}
+              >
+                <BookshelfView
+                  openDraftId={drafterDraftId}
+                  openIds={drafterOpenIds}
+                  defaultProject={drafterProjectPath}
+                  onOpen={(id) => {
+                    setDrafterDraftId(id);
+                    setDrafterShelfOpen(false);
+                  }}
+                  onCloseDoc={closeDrafterDoc}
+                  onClose={() => setDrafterShelfOpen(false)}
+                />
+              </div>
+            ) : null;
+            const drafterBody = drafterRecovery?.forId === drafterDraftId ? (
+              // The crash-recovery choice, as a card rather than a native
+              // confirm. Nothing is destroyed until the user picks.
+              <EmptyState
+                title="Recover unsaved changes?"
+                body={
+                  "This document has edits that didn't reach the database " +
+                  "before Redline last closed. They're still here — pick which " +
+                  "copy is the document."
+                }
+                action={{
+                  label: "Recover them",
+                  onAction: () => {
+                    const r = drafterRecovery;
+                    setDrafterRecovery(null);
+                    setDrafterLoaded({ forId: r.forId, doc: r.shadow.json });
+                    // Land the recovered body now; the shadow clears only once
+                    // the DB write is CONFIRMED.
+                    void persistDraftDoc(
+                      r.forId,
+                      r.shadow.markdown,
+                      r.shadow.json,
+                      r.projectPath,
+                    )
+                      .then(() => clearDrafterShadow(r.forId))
+                      .catch((err) => {
+                        setToast(`Couldn't save the recovered copy: ${err}`);
+                        setTimeout(() => setToast(null), 8000);
+                      });
+                  },
+                }}
+                secondary={{
+                  label: "Discard them",
+                  onAction: () => {
+                    const r = drafterRecovery;
+                    setDrafterRecovery(null);
+                    setDrafterLoaded({ forId: r.forId, doc: r.stored });
+                    clearDrafterShadow(r.forId);
+                  },
+                }}
+              />
+            ) : drafterOpening ||
+              drafterMount === null ||
+              drafterProject?.forId !== drafterDraftId ? (
+              // A body belonging to a DIFFERENT id is the same state as not
+              // loaded at all — the gate makes mounting the wrong body
+              // unrepresentable during a doc switch. The project pick is gated
+              // on the same id for the same reason: it is what the persist
+              // writes, and `upsert_draft` writes `project_path`
+              // unconditionally, so a null must mean "explicitly Home" and
+              // never "I don't know". Waiting here removes "I don't know" from
+              // the reachable states rather than guarding against it downstream.
+              //
+              // The editor is deliberately NOT held back until the spring
+              // lands. Mounting inside the growing container is the point —
+              // the ribbon and page grow with it, which is what "the island
+              // becomes the Drafter" actually looks like. Holding it out meant
+              // an empty box grew and the surface appeared afterwards, which
+              // is a reveal, not an expansion.
+              //
+              // That was only ever unsafe because of the `fill: "backwards"`
+              // bug in SpringSwap, which snapped the surface back to
+              // island-size for a frame at the landing. With the fill correct,
+              // a mid-flight mount rides the transform — and WAAPI transforms
+              // run on the compositor, so even TipTap's expensive first
+              // construction cannot stall the animation.
+              //
+              // Nothing is rendered meanwhile: the growth IS the loading
+              // indicator, and a sentence that appears inside the surface as it
+              // opens and is taken away again is worse than an empty one.
+              swapFrom || quietOpen ? null : (
+                <EmptyState
+                  title="Opening the document…"
+                  body="Reading it from your Bookshelf."
+                />
+              )
+            ) : (
+              // Lazy chunk; fallback matches the doc-loading beat above so a
+              // first open never flashes an empty pane.
+              //
+              // SILENT during a spring. The fallback is a small block of text
+              // at the surface's top-left, and a spring scales the surface up
+              // from the island's box — so that text visibly flew across the
+              // window and grew, then hard-swapped for the editor when the
+              // chunk landed. That was the first-run jank, and only the first
+              // run, because the chunk is cached after. What springs now is an
+              // empty glass surface and the editor fades in behind it.
+              <Suspense
+                fallback={
+                  swapFrom || quietOpen ? null : (
+                    <EmptyState
+                      title="Opening the document…"
+                      body="Reading it from your Bookshelf."
+                    />
+                  )
+                }
+              >
+                <PromptDrafter
+                  // Remount on the open document so TipTap picks up its content:
+                  // `content` is captured once, at editor creation.
+                  key={drafterDraftId ?? ""}
+                  draftId={drafterDraftId ?? ""}
+                  doc={drafterMount.doc}
+                  onPersist={drafterPersist}
+                  projectOptions={projectOptions}
+                  selectedProject={drafterProjectPath}
+                  onSelectedProjectChange={setDrafterProjectPath}
+                  onLaunch={launchFromDrafter}
+                  readiness={readiness}
+                  onFix={applyReadinessFix}
+                  // ONLY this document's launch. One pending state serves every
+                  // door, so a card keyed to another document (or to the front
+                  // door) would claim a launch that isn't this one's.
+                  pending={
+                    pendingLaunch?.origin === "drafter" &&
+                    pendingLaunch.draftId === drafterDraftId
+                      ? pendingLaunch
+                      : null
+                  }
+                  onDismissPending={() => setPendingLaunch(null)}
+                  sources={drafterSources}
+                  onAttachFiles={attachDrafterFiles}
+                  onRemoveSource={removeDrafterSource}
+                  templates={drafterTemplates}
+                  onUseTemplate={useDrafterTemplate}
+                  // The floating Discuss pill inside the drafter pane opens the
+                  // draft's voice panel — the one discussion surface (talk or
+                  // type). Hidden while the panel is up.
+                  onDiscuss={
+                    voiceEnabled && drafterDraftId && !drafterVoiceOpen
+                      ? () => setDrafterVoiceOpen(true)
+                      : null
+                  }
+                  onOpenShelf={() => setDrafterShelfOpen(true)}
+                  // Only when the drafter is living inside the Front Door's
+                  // island; reached by its own route there is nothing to go
+                  // back to.
+                  // Back to the Front Door, which is the Document surface's
+                  // resting state and always has been.
+                  onExit={() => selectSurface("document")}
+                  saveState={drafterSaveState}
+                  consumeSeed={consumeLandingSeed}
+                  registerLiveMarkdown={registerDrafterLiveMarkdown}
+                  documentsMenu={
+                    <DocumentsMenu
+                      openIds={drafterOpenIds}
+                      activeId={drafterDraftId}
+                      defaultProject={drafterProjectPath}
+                      side="above"
+                      onActivate={setDrafterDraftId}
+                      onCloseDoc={closeDrafterDoc}
+                    />
+                  }
+                />
+              </Suspense>
+            );
+            // An orchestrated run wraps the review pane in its RunReport
+            // container (claims vs ground truth above, resolution bar below);
+            // closing the container falls back to the plain review pane.
+            const runReportSummary = runReportFor
+              ? summaries.find((s) => s.sessionId === runReportFor) ?? null
+              : null;
+            const reviewBody = runReportFor ? (
+              <RunReport
+                planSessionId={runReportFor}
+                planTitle={runReportSummary?.planTitle ?? null}
+                repoPath={runReportSummary?.projectPath ?? null}
+                review={codeReview}
+                projectOptions={projectOptions}
+                onClose={() => setRunReportFor(null)}
+                onResolved={() => void refreshSummaries()}
+                canRelaunch={runReportSummary?.status === "approved"}
+                onRelaunch={(sid) => void relaunchOrchestrator(sid)}
+                onStandDown={(sid) => void standDownRun(sid)}
+              />
+            ) : (
+              <ReviewPanel
+                review={codeReview}
+                projectOptions={projectOptions}
+                onClose={() => selectSurface("document")}
+              />
+            );
+            const serversBody = (
+              <ServersPane
+                scan={devServers.scan}
+                error={devServers.error}
+                active={serversOpen}
+                onRefresh={devServers.refresh}
+                onStop={devServers.stopServer}
+                onRun={runDevServer}
+                onOpenUrl={openUrlInBrowser}
+                onThumbCaptured={persistDevServerThumb}
+              />
+            );
+            const memoryBody = (
+              <MemorySurface
+                activeSessionId={session?.sessionId ?? null}
+                activeSessionName={session?.projectName ?? null}
+              />
+            );
+            const runsBody = (
+              <Suspense fallback={<EmptyState title="Runs" body="Opening the monitor…" />}>
+                <OrchestrationSurface
+                  active={runsOpen}
+                  summaries={summaries}
+                  activePlanSessionId={activeId}
+                  onOpenRunReport={(sid) => {
+                    setRunReportFor(sid);
+                    selectSurface("review");
+                  }}
+                  onRetryLaunch={(sid) => void relaunchOrchestrator(sid)}
+                  onResetRun={(sid) => void resetRunFor(sid)}
+                  onUnapprove={(sid) => void unapproveSession(sid)}
+                  onStandDown={(sid) => void standDownRun(sid)}
+                />
+              </Suspense>
+            );
+            // Exactly one surface owns the pane; a non-document surface splits
+            // against the document only while the doc pin is on, with the exact
+            // same SplitPane (orientation toggle, ratio and fold-to-edge
+            // divider) the browser has always used.
+            // Which branch of the chain below lands on the front door. Hoisted
+            // out of the ternary because the scroller and the article both have
+            // to know: while the door is up, the document scroller stops being
+            // a scroller and the article drops its vertical padding, so the
+            // hero can size itself to the pane instead of overflowing it. One
+            // const rather than the condition written three times, so the three
+            // can't drift.
+            const frontDoorShowing =
+              !joinedActive &&
+              sidebarTab.kind !== "folder" &&
+              !(loading || (activeId && !sessionReady)) &&
+              !sessionReady;
             const documentBody =
               sidebarTab.kind === "folder" && activeFile ? (
             <FileViewer
@@ -5450,7 +6385,9 @@ function App() {
           ) : (
           <div
             ref={docScrollerRef}
-            className="rl-thin-scroll-y flex-1 overflow-y-auto"
+            className={`rl-thin-scroll-y flex-1 ${
+              frontDoorShowing ? "rl-doorframe overflow-hidden" : "overflow-y-auto"
+            }`}
             style={{
               paddingLeft: tocDocked ? `${tocRailW}px` : undefined,
               transition: tocDragging
@@ -5461,7 +6398,10 @@ function App() {
           <article
             ref={documentRef}
             data-tour="editor"
-            className="doc-article mx-auto pl-16 py-10"
+            // `py-10` is 80px the door does not have to give on a short pane,
+            // and it carries its own vertical rhythm anyway. Same idiom as the
+            // paddingLeft/Right special-case just below.
+            className={`doc-article mx-auto pl-16${frontDoorShowing ? "" : " py-10"}`}
             style={
               {
                 // Wide view drops the measure entirely and lets the column run
@@ -5482,7 +6422,8 @@ function App() {
                 maxWidth: docSurfaceActive && !docWide ? "820px" : "none",
                 paddingLeft: docSurfaceActive ? undefined : "24px",
                 paddingRight: docSurfaceActive ? `${docPadR}px` : "24px",
-                "--rl-doc-zoom": docZoom,
+                // `--rl-doc-zoom` moved UP one level, to the ancestor every
+                // surface body shares — it was inert in the Drafter from here.
               } as React.CSSProperties
             }
           >
@@ -5587,6 +6528,17 @@ function App() {
               // Arrival needs no wiring here — `focusIntercepted` already
               // selects the incoming session, so the Planning card is
               // replaced by the review pane for free.
+              // The document slot holds ONE of two separate surfaces: the
+              // Front Door's composer, or the Drafter. They know nothing about
+              // each other — App decides which is in the slot, and owns the
+              // transition between them.
+              //
+              // `SpringSwap` mounts both for the length of the spring: the
+              // door fades back while the Drafter springs out of the box the
+              // island occupied. Without that overlap the door would vanish in
+              // a single frame, which is the whole-screen cut that read as
+              // janky navigation in every earlier attempt.
+              frontDoorShowing ? (
               <FrontDoor
                 visible={bootSettled && !loading}
                 text={frontDoorText}
@@ -5599,12 +6551,22 @@ function App() {
                 onAttachmentsChange={setFrontDoorAttachments}
                 readiness={readiness}
                 onFix={applyReadinessFix}
-                pending={frontDoorPending}
+                // Only ITS launch: one pending state serves every door, so the
+                // front door must not render a card for the Drafter's launch.
+                pending={
+                  pendingLaunch?.origin === "front-door" ? pendingLaunch : null
+                }
                 onLaunch={launchFromFrontDoor}
+                // A refusal from App's own backstop gate, so the fix lands in
+                // the island rather than only in a corner toast.
+                refusal={frontDoorRefusal}
                 onDrafter={drafterFromFrontDoor}
                 destination={frontDoorDest}
                 onDestinationChange={setFrontDoorDest}
-                onCancelPending={() => setFrontDoorPending(null)}
+                onCancelPending={() => {
+                  releasePending(pendingLaunchRef.current);
+                  setPendingLaunch(null);
+                }}
                 onHowItWorks={() => setHowItWorksOpen(true)}
                 onCreateProject={createFrontDoorProject}
                 focusNonce={frontDoorFocus}
@@ -5613,6 +6575,7 @@ function App() {
                 // panel owns the mic whenever it is open.
                 dictationEnabled={!voiceOpen}
               />
+              ) : null
             )}
           </article>
           </div>
@@ -5649,148 +6612,41 @@ function App() {
                 // the terminal dock. The GRID key (tile count + rows) stands
                 // where tab count used to: a new terminal that lands untiled
                 // changes no geometry, while a tile row changes everything.
-                layoutKey={`${paneCollapsed}|${sidebarCollapsed}|${docVisible}|${splitVertical}|${liveFlags.curtain}|${voiceDocked}|${termCollapsed}|${termHeight}|${termFullscreen}|${termTiles.count}x${termTiles.rows}`}
+                // Immersive entry and every chrome reveal move the slot as
+                // surely as a pane toggle does, and the native webview only
+                // re-reads its rect when this key changes.
+                layoutKey={`${paneCollapsed}|${sidebarCollapsed}|${docVisible}|${splitVertical}|${liveFlags.curtain}|${voiceDocked}|${termCollapsed}|${termHeight}|${termFullscreen}|${termTiles.count}x${termTiles.rows}|${immersive}|${chromeRevealed}`}
               />
             );
-            const drafterBody = drafterShelfOpen ? (
-              <BookshelfView
-                openDraftId={drafterDraftId}
-                openIds={drafterOpenIds}
-                defaultProject={drafterProject}
-                onOpen={(id) => {
-                  setDrafterDraftId(id);
-                  setDrafterShelfOpen(false);
-                }}
-                onCloseDoc={closeDrafterDoc}
-                onClose={() => setDrafterShelfOpen(false)}
-              />
-            ) : drafterLoaded === null ||
-              drafterLoaded.forId !== drafterDraftId ? (
-              // The loaded doc belonging to a DIFFERENT id is the same state
-              // as not loaded at all — the gate makes mounting the wrong
-              // body unrepresentable during a doc switch.
-              <EmptyState
-                title="Opening the document…"
-                body="Reading it from your Bookshelf."
-              />
-            ) : (
-              // Lazy chunk; fallback matches the doc-loading beat above so a
-              // first open never flashes an empty pane.
-              <Suspense
-                fallback={
-                  <EmptyState
-                    title="Opening the document…"
-                    body="Reading it from your Bookshelf."
-                  />
-                }
-              >
-                <PromptDrafter
-                  // Remount on the open document so TipTap picks up its content:
-                  // `content` is captured once, at editor creation.
-                  key={drafterDraftId ?? ""}
-                  draftId={drafterDraftId ?? ""}
-                  doc={drafterLoaded.doc}
-                  onPersist={drafterPersist}
-                  projectOptions={projectOptions}
-                  selectedProject={drafterProject}
-                  onSelectedProjectChange={setDrafterProject}
-                  onLaunch={launchPromptDraft}
-                  // The floating Discuss pill inside the drafter pane opens the
-                  // draft's voice panel — the one discussion surface (talk or
-                  // type). Hidden while the panel is up.
-                  onDiscuss={
-                    voiceEnabled && drafterDraftId && !drafterVoiceOpen
-                      ? () => setDrafterVoiceOpen(true)
-                      : null
-                  }
-                  onOpenShelf={() => setDrafterShelfOpen(true)}
-                  sourceCount={drafterSourceCount}
-                  saveState={drafterSaveState}
-                  consumeSeed={consumeLandingSeed}
-                  registerLiveMarkdown={registerDrafterLiveMarkdown}
-                  documentsMenu={
-                    <DocumentsMenu
-                      openIds={drafterOpenIds}
-                      activeId={drafterDraftId}
-                      defaultProject={drafterProject}
-                      side="above"
-                      onActivate={setDrafterDraftId}
-                      onCloseDoc={closeDrafterDoc}
-                    />
-                  }
-                />
-              </Suspense>
-            );
-            // An orchestrated run wraps the review pane in its RunReport
-            // container (claims vs ground truth above, resolution bar below);
-            // closing the container falls back to the plain review pane.
-            const runReportSummary = runReportFor
-              ? summaries.find((s) => s.sessionId === runReportFor) ?? null
-              : null;
-            const reviewBody = runReportFor ? (
-              <RunReport
-                planSessionId={runReportFor}
-                planTitle={runReportSummary?.planTitle ?? null}
-                repoPath={runReportSummary?.projectPath ?? null}
-                review={codeReview}
-                projectOptions={projectOptions}
-                onClose={() => setRunReportFor(null)}
-                onResolved={() => void refreshSummaries()}
-                canRelaunch={runReportSummary?.status === "approved"}
-                onRelaunch={(sid) => void relaunchOrchestrator(sid)}
-                onStandDown={(sid) => void standDownRun(sid)}
-              />
-            ) : (
-              <ReviewPanel
-                review={codeReview}
-                projectOptions={projectOptions}
-                onClose={() => selectSurface("document")}
-              />
-            );
-            const serversBody = (
-              <ServersPane
-                scan={devServers.scan}
-                error={devServers.error}
-                active={serversOpen}
-                onRefresh={devServers.refresh}
-                onStop={devServers.stopServer}
-                onRun={runDevServer}
-                onOpenUrl={openUrlInBrowser}
-                onThumbCaptured={persistDevServerThumb}
-              />
-            );
-            const memoryBody = (
-              <MemorySurface
-                activeSessionId={session?.sessionId ?? null}
-                activeSessionName={session?.projectName ?? null}
-              />
-            );
-            const runsBody = (
-              <Suspense fallback={<EmptyState title="Runs" body="Opening the monitor…" />}>
-                <OrchestrationSurface
-                  active={runsOpen}
-                  summaries={summaries}
-                  activePlanSessionId={activeId}
-                  onOpenRunReport={(sid) => {
-                    setRunReportFor(sid);
-                    selectSurface("review");
-                  }}
-                  onRetryLaunch={(sid) => void relaunchOrchestrator(sid)}
-                  onResetRun={(sid) => void resetRunFor(sid)}
-                  onUnapprove={(sid) => void unapproveSession(sid)}
-                  onStandDown={(sid) => void standDownRun(sid)}
-                />
-              </Suspense>
-            );
-            // Exactly one surface owns the pane; a non-document surface splits
-            // against the document only while the doc pin is on, with the exact
-            // same SplitPane (orientation toggle, ratio and fold-to-edge
-            // divider) the browser has always used.
+            // What the editor mounts with, resolved HERE rather than pushed at
+            // it every 400ms. The session cache is strictly fresher than
+            // `drafterLoaded` by construction, and reading it at the mount site
+            // is what lets the persist stop writing a prop the component
+            // contractually ignores after mount.
             const secondaryBody =
               mainSurface === "browser"
                 ? browserBody
                 : mainSurface === "drafter"
-                  ? drafterBody
+                  ? (
+                      // Arriving from the Front Door, this springs out of the
+                      // box the island occupied, with the door still mounted
+                      // behind it and fading — one spring, two separate
+                      // surfaces, App owning the transition between them.
+                      //
+                      // `from` is null for the header and command-palette
+                      // routes: they have no island to spring from, so
+                      // SpringSwap renders the body untouched.
+                      <SpringSwap
+                        from={swapFrom}
+                        onArrived={() => setSwapFrom(null)}
+                        leaving={swapFrom ? documentBody : null}
+                      >
+                        <div className="relative flex h-full min-h-0 flex-col">
+                          {drafterBody}
+                          {drafterShelf}
+                        </div>
+                      </SpringSwap>
+                    )
                   : mainSurface === "review"
                     ? reviewBody
                     : mainSurface === "servers"
@@ -5842,8 +6698,7 @@ function App() {
               (a horizontal row here would trip the overlap check and hide the
               only affordance that undoes the mode). `column-reverse` so the
               order still reads + above − with the mode toggle on top. */}
-          {mainSurface === "document" &&
-            docSurfaceActive &&
+          {(mainSurface === "document" ? docSurfaceActive : drafterOpen) &&
             !(sidebarTab.kind === "folder" && activeFile) &&
             zoomVisible && (
             <div
@@ -5953,7 +6808,7 @@ function App() {
                       sessionId={`drafter:${drafterDraftId ?? ""}`}
                       markdown={drafterMarkdown}
                       sections={drafterSections}
-                      cwd={drafterProject}
+                      cwd={drafterProjectPath}
                       liveMarkdown={getDrafterLiveMarkdown}
                       onClose={() => setDrafterVoiceOpen(false)}
                     />
@@ -5972,7 +6827,7 @@ function App() {
           <PaneDivider
             collapsed={paneCollapsed}
             dragging={isDragging}
-            onToggle={() => setPaneCollapsed((c) => !c)}
+            onToggle={togglePane}
             onPointerDown={startDrag}
             hideChevron={latchActive || liveFlags.curtainR}
           />
@@ -6071,7 +6926,7 @@ function App() {
             <PaneDivider
               collapsed={paneCollapsed}
               dragging={isDragging}
-              onToggle={() => setPaneCollapsed((c) => !c)}
+              onToggle={togglePane}
               onPointerDown={startDrag}
               hideChevron={latchActive}
             />
@@ -6191,7 +7046,12 @@ function App() {
                 )}
               <button
                 type="button"
-                onClick={() => setPaneFullscreen((f) => !f)}
+                onClick={() => {
+                  // Effective-value toggle, same rule as the pane's collapse:
+                  // immersive masks fullscreen off, so ⤢ means "go fullscreen".
+                  setImmersiveBroken(true);
+                  setPaneFullscreen(!paneFullscreen);
+                }}
                 title={
                   paneFullscreen
                     ? "Restore comment pane"
@@ -6348,7 +7208,7 @@ function App() {
                   : "Feedback sent. Claude is revising in the background — "}
                 <button
                   type="button"
-                  onClick={() => setTermCollapsed(false)}
+                  onClick={revealTerm}
                   style={{
                     color: "var(--color-ink)",
                     cursor: "pointer",
@@ -6514,7 +7374,7 @@ function App() {
             label="terminal"
             collapsed={termCollapsed}
             dragging={termDragging}
-            onToggle={() => setTermCollapsed((c) => !c)}
+            onToggle={toggleTerm}
             onPointerDown={startTermDrag}
           />
         )}
@@ -6563,7 +7423,12 @@ function App() {
             ref={terminalsRef}
             theme={theme}
             fullscreen={termFullscreen}
-            onFullscreenChange={setTermFullscreen}
+            onFullscreenChange={(v) => {
+              // The dock's own ⤢. Going fullscreen is an open gesture, so it
+              // breaks the mask; leaving it never needs to.
+              if (v) setImmersiveBroken(true);
+              setTermFullscreen(v);
+            }}
             onTabsChange={setTermTabCount}
             onTabIdsChange={setLiveTermIds}
             onTileCountChange={handleTileCountChange}
@@ -6598,6 +7463,9 @@ function App() {
           </div>
         )}
       >
+      {/* Same swap at the bottom — no native constraint here, so the footer
+          hides outright behind a SHELL_EDGE strip of hull. */}
+      <ChromeSlot immersive={immersive} edge="bottom" reveal={chrome}>
       <Footer
         comments={threadComments}
         sessionReady={sessionReady}
@@ -6612,8 +7480,9 @@ function App() {
         termCollapsed={termCollapsed && !termFullscreen}
         termTabCount={termTabCount}
         termHasUnseen={termHasUnseen}
-        onExpandTerminal={() => setTermCollapsed(false)}
+        onExpandTerminal={revealTerm}
       />
+      </ChromeSlot>
       </ErrorBoundary>
       {/* The trailing modal/overlay cluster: a crash in any dialog collapses
           to a quiet toast instead of taking down the app tree. */}
@@ -6735,7 +7604,7 @@ function App() {
             <button
               type="button"
               onClick={() => {
-                setTermCollapsed(false);
+                revealTerm();
                 terminalsRef.current?.openSessionTerminal(
                   handoffFailure.projectPath,
                 );
@@ -6826,15 +7695,22 @@ function App() {
         skillStatus &&
         (!hookStatus.installed ||
           !skillStatus.installed ||
+          (codexHookStatus?.available &&
+            (!codexHookStatus.installed || !codexSkillStatus?.installed)) ||
           setupPhase === "done") && (
           <HookSetupModal
             phase={
-              !hookStatus.installed || !skillStatus.installed
+              !hookStatus.installed ||
+              !skillStatus.installed ||
+              (codexHookStatus?.available &&
+                (!codexHookStatus.installed || !codexSkillStatus?.installed))
                 ? "setup"
                 : "done"
             }
             hookStatus={hookStatus}
             skillStatus={skillStatus}
+            codexHookStatus={codexHookStatus}
+            codexSkillStatus={codexSkillStatus}
             onInstall={installIntegration}
             onDismiss={() => setSetupPhase("setup")}
             onShowHowItWorks={() => setHowItWorksOpen(true)}
@@ -6860,6 +7736,8 @@ function App() {
           !!skillStatus &&
           (!hookStatus.installed ||
             !skillStatus.installed ||
+            (codexHookStatus?.available &&
+              (!codexHookStatus.installed || !codexSkillStatus?.installed)) ||
             setupPhase === "done");
         const show =
           tourOpen || (!onboardingDone && !setupActive && bootSettled);

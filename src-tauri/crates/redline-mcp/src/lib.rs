@@ -34,13 +34,57 @@ pub const DEFAULT_PROTOCOL_VERSION: &str = "2024-11-05";
 /// `REDLINE_DAEMON_ADDR`). Kept in sync with `redline_lib`'s `DAEMON_ADDR`.
 pub const DEFAULT_DAEMON_ADDR: &str = "127.0.0.1:7676";
 
-/// The four tools the proxy exposes, each a thin wrapper over one read-only
-/// route. Returned by `tools/list` and used to validate `tools/call` names.
+/// The tools the proxy exposes, each a thin wrapper over one read-only route.
+/// Returned by `tools/list` and used to validate `tools/call` names.
+///
+/// `answer_pack` leads deliberately: it is the most valuable route on the
+/// daemon — one batched read that answers most memory questions — and the MCP
+/// surface did not expose it at all, so an external session had to walk the
+/// catalog the same way the internal agent used to before it was inlined.
 pub fn tool_definitions() -> Value {
     json!([
         {
+            "name": "answer_pack",
+            "description": "START HERE for any question about what the user decided, researched, or asked. ONE batched read that resolves the question to a class in their catalog and returns that class with its children, its links into the record (each with supersededBy), its observations, plus the user's own margin notes, matching prompts and matching browsed pages. Every hit carries a ledger `seq` — cite those as #seq. Prefer this over query_prompts/memory_tree/search_browsing; reach for those only when the pack is genuinely insufficient.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "q": {"type": "string", "description": "The question, in natural language. Stopwords are dropped and terms are stemmed; quoted \"phrases\" are matched adjacently."},
+                    "node": {"type": "string", "description": "Optional class node id, when you already know which class to open."},
+                    "limit": {"type": "integer", "description": "Hits per arm (1..60, default 20)."}
+                }
+            }
+        },
+        {
+            "name": "grep_memory",
+            "description": "Literal and regex search over the record, for what a word index cannot hold: command flags (--allowedTools), file paths (src-tauri/src/db.rs), error strings, attributes. `q` is a substring answered from a trigram index and must be at least 3 characters — shorter is refused rather than silently scanned. `re` is an optional regex applied to what the index returned. Use this when the thing you want is an exact string rather than a topic.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "q": {"type": "string", "description": "Substring to find (3+ characters, required)."},
+                    "re": {"type": "string", "description": "Optional regex, applied to the indexed candidates."},
+                    "case": {"type": "boolean", "description": "Case-sensitive (default false)."},
+                    "scope": {"type": "string", "description": "prompts | browse | all (default all)."},
+                    "limit": {"type": "integer", "description": "Max hits (1..200, default 30)."}
+                },
+                "required": ["q"]
+            }
+        },
+        {
+            "name": "search_memory",
+            "description": "Ranked search over the user's own prompts, best-first (BM25, stemmed, with the opening of each prompt weighted over its body). Returns the same items as query_prompts but ordered by relevance rather than by chain position — use it when you want the BEST matches, and query_prompts when you want a faceted or chronological slice.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "q": {"type": "string", "description": "Free-text query."},
+                    "limit": {"type": "integer", "description": "Max hits (1..200, default 20)."}
+                },
+                "required": ["q"]
+            }
+        },
+        {
             "name": "query_prompts",
-            "description": "Search the user's captured prompts (the Redline lake). Filter by session, mission, surface, project, a since-seq floor, and a free-text substring. Returns oldest-first prompt/decision items.",
+            "description": "Faceted, chronological slice of the user's captured prompts (the Redline lake). Filter by session, mission, surface, project, corpus role, a since-seq floor, and a free-text query. Returns oldest-first prompt/decision items. For 'what are the best matches for X' prefer search_memory; for 'what did I decide about X' prefer answer_pack.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -49,7 +93,9 @@ pub fn tool_definitions() -> Value {
                     "surface": {"type": "string", "description": "Capture surface, e.g. pty_plan, browse, mission, voice."},
                     "project": {"type": "string", "description": "Absolute project path to scope to."},
                     "since_seq": {"type": "integer", "description": "Only events with ledger seq greater than this."},
-                    "q": {"type": "string", "description": "Case-sensitive substring to match in the prompt body."},
+                    "q": {"type": "string", "description": "Free-text query. Words are stemmed and ALL of them must match (quote a \"phrase\" to require adjacency); it is NOT a case-sensitive substring. For substrings use grep_memory."},
+                    "role": {"type": "string", "description": "Corpus role: user (what the person typed) | agent (prompts Redline constructed for its own agents) | system (task notifications the CLI injected). Defaults to everything except agent."},
+                    "include_agent": {"type": "boolean", "description": "Include Redline's own constructed agent prompts. Off by default: they are ~73% of the corpus by weight and answer nobody's question."},
                     "limit": {"type": "integer", "description": "Max items (1..200, default 200)."}
                 }
             }
@@ -113,13 +159,58 @@ pub fn route_for_tool(name: &str, args: &Value) -> Result<(String, Vec<(String, 
             params.push((k.to_string(), v));
         }
     };
+    // Booleans arrive as JSON `true` from a well-behaved client and as the
+    // string "true" from a sloppy one; both mean the same thing here.
+    let b = |k: &str| {
+        args.get(k).and_then(|v| {
+            v.as_bool()
+                .or_else(|| v.as_str().map(|s| matches!(s.trim(), "1" | "true")))
+        })
+    };
     match name {
+        "answer_pack" => {
+            push(&mut params, "q", s("q"));
+            push(&mut params, "node", s("node"));
+            if let Some(lim) = i("limit") {
+                params.push(("limit".into(), lim.to_string()));
+            }
+            Ok(("/v1/memory/answer-pack".to_string(), params))
+        }
+        "grep_memory" => {
+            let q = s("q").filter(|v| !v.trim().is_empty()).ok_or("grep_memory requires q")?;
+            params.push(("q".into(), q));
+            push(&mut params, "re", s("re"));
+            push(&mut params, "scope", s("scope"));
+            if b("case").unwrap_or(false) {
+                params.push(("case".into(), "1".into()));
+            }
+            if let Some(lim) = i("limit") {
+                params.push(("limit".into(), lim.to_string()));
+            }
+            Ok(("/v1/memory/grep".to_string(), params))
+        }
+        "search_memory" => {
+            let q = s("q").filter(|v| !v.trim().is_empty()).ok_or("search_memory requires q")?;
+            params.push(("q".into(), q));
+            if let Some(lim) = i("limit") {
+                params.push(("limit".into(), lim.to_string()));
+            }
+            // The answer pack IS the ranked search, with `?node=` unset: it
+            // returns the same bm25-ordered prompt hits plus the evidence
+            // around them, so a second ranking route would be one more thing
+            // to keep in sync for no extra reach.
+            Ok(("/v1/memory/answer-pack".to_string(), params))
+        }
         "query_prompts" => {
             push(&mut params, "session", s("session_id"));
             push(&mut params, "mission", s("mission_id"));
             push(&mut params, "surface", s("surface"));
             push(&mut params, "project", s("project"));
             push(&mut params, "q", s("q"));
+            push(&mut params, "role", s("role"));
+            if b("include_agent").unwrap_or(false) {
+                params.push(("include_agent".into(), "1".into()));
+            }
             if let Some(seq) = i("since_seq") {
                 params.push(("since_seq".into(), seq.to_string()));
             }
@@ -237,8 +328,83 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(
             names,
-            ["query_prompts", "session_history", "memory_tree", "stats", "search_browsing"]
+            [
+                // The batched read leads: it is the most valuable route on the
+                // daemon, and ordering is the only steer a tool list gives.
+                "answer_pack",
+                "grep_memory",
+                "search_memory",
+                "query_prompts",
+                "session_history",
+                "memory_tree",
+                "stats",
+                "search_browsing",
+            ]
         );
+    }
+
+    /// The three routes the surface was missing, plus the parameters that make
+    /// the corpus roles reachable.
+    #[test]
+    fn the_batched_and_literal_routes_are_reachable() {
+        let (path, params) =
+            route_for_tool("answer_pack", &json!({"q": "browser tab suspension", "limit": 8}))
+                .unwrap();
+        assert_eq!(path, "/v1/memory/answer-pack");
+        assert!(params.contains(&("q".into(), "browser tab suspension".into())));
+        assert!(params.contains(&("limit".into(), "8".into())));
+
+        let (path, params) =
+            route_for_tool("grep_memory", &json!({"q": "--allowedTools", "case": true})).unwrap();
+        assert_eq!(path, "/v1/memory/grep");
+        assert!(params.contains(&("q".into(), "--allowedTools".into())));
+        assert!(params.contains(&("case".into(), "1".into())));
+        // A missing needle is rejected here rather than sent as an empty query.
+        assert!(route_for_tool("grep_memory", &json!({})).is_err());
+
+        // The ranked search is the pack without a node — one implementation.
+        let (path, _) = route_for_tool("search_memory", &json!({"q": "compaction"})).unwrap();
+        assert_eq!(path, "/v1/memory/answer-pack");
+        assert!(route_for_tool("search_memory", &json!({"q": "  "})).is_err());
+    }
+
+    /// Corpus roles must be reachable from an external session, and `true`
+    /// must survive arriving as either a JSON bool or the string "true".
+    #[test]
+    fn query_prompts_threads_role_and_include_agent() {
+        let (_, params) =
+            route_for_tool("query_prompts", &json!({"role": "system", "include_agent": true}))
+                .unwrap();
+        assert!(params.contains(&("role".into(), "system".into())));
+        assert!(params.contains(&("include_agent".into(), "1".into())));
+
+        let (_, params) =
+            route_for_tool("query_prompts", &json!({"include_agent": "true"})).unwrap();
+        assert!(params.contains(&("include_agent".into(), "1".into())));
+
+        // Absent means absent — the route's own default (exclude agent) applies.
+        let (_, params) = route_for_tool("query_prompts", &json!({})).unwrap();
+        assert!(params.is_empty());
+    }
+
+    /// The description of `q` was wrong from the moment this route moved onto
+    /// an FTS filter, and told external sessions to expect substring
+    /// behaviour they would never get.
+    #[test]
+    fn query_prompts_no_longer_promises_substring_matching() {
+        let tools = tool_definitions();
+        let qp = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "query_prompts")
+            .unwrap();
+        let q_desc = qp["inputSchema"]["properties"]["q"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(!q_desc.contains("Case-sensitive substring"), "{q_desc}");
+        assert!(q_desc.contains("stemmed"), "{q_desc}");
+        assert!(q_desc.contains("grep_memory"), "it must name where substrings DO work");
     }
 
     #[test]

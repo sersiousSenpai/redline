@@ -29,6 +29,7 @@ Unregistered routes fail closed: a route added to the router without a `ROUTE_TA
 | GET | `/viewer/*path` | open | Async-share viewer static assets (legacy standalone bundle) | path of the bundled asset | asset bytes with content type |
 | GET | `/assets/*path` | open | Shared build chunks for the async-share viewer page (folded into the app build) | path of the built asset under dist/assets | asset bytes with content type |
 | POST | `/v1/plan` | hook contract | Plan-hold ingest: the ExitPlanMode hook POSTs the plan and blocks until the review resolves | JSON hook payload {session_id, plan markdown, cwd, ...} | held; resolves to the review verdict (approve/deny reason) |
+| POST | `/v1/codex/stop` | hook contract | Codex Plan-mode Stop hook: extracts the proposed plan and holds until review resolves | JSON Codex Stop payload {session_id, turn_id, permission_mode, last_assistant_message, ...} | {} to finish the turn, or {decision:"block", reason} to request revision |
 | POST | `/v1/prompts/ingest` | hook contract | Polis lake capture: the global UserPromptSubmit hook POSTs its stdin payload (fail-open) | JSON hook payload (prompt, session, cwd) | 200 always (never blocks the hook) |
 | GET | `/v1/sessions/:session_id/plan` | open | Latest plan revision with block structure (agent-in-doc read) | session id in path | JSON {version, blocks:[{id, markdown}, ...]} |
 | POST | `/v1/sessions/:session_id/suggestions` | token: `plan.suggest` | Post a tracked edit suggestion against a plan block | JSON {block_id, op, markdown, ...} | JSON accepted suggestion (or staleness error) |
@@ -56,6 +57,7 @@ Unregistered routes fail closed: a route added to the router without a `ROUTE_TA
 | GET | `/v1/memory/node/:id` | open | One ClassMemory node with members | node id in path | JSON node detail |
 | GET | `/v1/memory/prompts` | open | Prompts under a class (retrieval leaf read) | ?class= node id | JSON prompt list |
 | GET | `/v1/memory/answer-pack` | open | Batched retrieval read: node + subtree + links + notes + lexical hits in one call | ?q= term, ?node= node id, ?limit= n | JSON answer pack (byte-bounded) |
+| GET | `/v1/memory/grep` | open | Literal/regex search over the record — flags, paths, error strings, attributes | ?q= literal (>= 3 chars, required), ?re= regex, ?case=1, ?scope=prompts/browse/all, ?limit= n | JSON {hits:[{kind, seq, ts, label, excerpt}]}; 400 with a reason when the literal is too short |
 | POST | `/v1/memory/proposals` | token: `memory.propose` | Stage reviewable ClassMemory proposal rows (never accepts or moves a node) | JSON structured proposal ops | JSON staged proposal ids |
 | GET | `/v1/context/overview` | open | Librarian friction digest: ground-truth counts and staleness | — | JSON overview |
 | GET | `/v1/context/codehealth` | open | Shipwright code digest: git state, recorded corrections, static repo health, runtime failures, unfinished work | ?repo=<absolute path> | JSON code digest |

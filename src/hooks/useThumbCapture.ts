@@ -440,6 +440,10 @@ export function useThumbCapture(
     prunedRef.current = true;
     void invoke("thumbs_prune", {
       keepKeys: targets.map((t) => t.key),
+      // Scope the sweep to the dashboard's own keyspace. `thumbs/` has another
+      // writer — BrowserPane's `tab-<id>` drag stand-ins — and passing only our
+      // keys with no prefix deleted every one of them on each mount.
+      prefix: "p",
     }).catch(() => {});
   }, [targets]);
 

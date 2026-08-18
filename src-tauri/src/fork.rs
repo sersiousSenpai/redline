@@ -107,7 +107,7 @@ impl ForkState {
              question:\n\n{}",
             question.trim()
         );
-        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&framed));
+        crate::ledger::register_agent_prompt(&framed);
 
         let mut args: Vec<String> = discussion_fork_args("fork_plan", framed);
         args.push("--resume".to_string());
@@ -467,6 +467,7 @@ pub async fn fork_thread_send(
             crate::ledger::PromptSource::RustFirstTurn,
             "fork",
             &prompt,
+            Some(&text),
             Some(cwd.clone()),
             Some(session_id.clone()),
             None,
@@ -478,7 +479,7 @@ pub async fn fork_thread_send(
             crate::seat::model_for("fork_plan"),
         );
     } else {
-        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+        crate::ledger::register_agent_prompt(&prompt);
     }
 
     // Read-only discussion fork: the Read/Grep/Glob + web tool surface plus the
@@ -692,6 +693,7 @@ pub async fn review_thread_send(
             crate::ledger::PromptSource::RustFirstTurn,
             "review_fork",
             &prompt,
+            Some(&text),
             Some(cwd.clone()),
             Some(review_id.clone()),
             None,
@@ -703,7 +705,7 @@ pub async fn review_thread_send(
             crate::seat::model_for("fork_review"),
         );
     } else {
-        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+        crate::ledger::register_agent_prompt(&prompt);
     }
 
     // Same read-only discussion-fork tool surface as plan threads (scoped curl
@@ -872,6 +874,7 @@ pub async fn review_question_send(
             crate::ledger::PromptSource::RustFirstTurn,
             "review_question",
             &prompt,
+            Some(&text),
             Some(cwd.clone()),
             Some(review_id.clone()),
             None,
@@ -883,7 +886,7 @@ pub async fn review_question_send(
             crate::seat::model_for("fork_review"),
         );
     } else {
-        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+        crate::ledger::register_agent_prompt(&prompt);
     }
 
     // Same read-only discussion-fork tool surface as the annotation threads
@@ -1097,6 +1100,7 @@ pub async fn draft_thread_send(
             crate::ledger::PromptSource::RustFirstTurn,
             "drafter_fork",
             &prompt,
+            Some(&text),
             Some(cwd.clone()),
             None,
             None,
@@ -1108,7 +1112,7 @@ pub async fn draft_thread_send(
             crate::seat::model_for("fork_drafter"),
         );
     } else {
-        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+        crate::ledger::register_agent_prompt(&prompt);
     }
 
     let mut args: Vec<String> = discussion_fork_args("fork_drafter", prompt);

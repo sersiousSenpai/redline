@@ -48,12 +48,27 @@ interface BrowserChatProps {
   /** Pin an assistant reply to the active mission ("I like this part"). Present
    *  only when a mission is active; the parent attaches the source tab. */
   onAddToMission?: (markdown: string) => void | Promise<boolean>;
+  /** Append an assistant reply to this tab's working list. The reverse of
+   *  §1e's `💬`: the list feeds the conversation, the conversation feeds back.
+   *  Present only once the tab HAS a list — `browse_list_add` refuses an
+   *  orphan item, so offering the button without one would only ever fail. */
+  onAddToList?: (markdown: string) => void | Promise<boolean>;
+  /** Text to merge into the composer once, on mount or when the nonce changes
+   *  — how `💬` on a list item arrives here with the item already quoted.
+   *
+   *  A prop with a nonce, not a direct write to the persisted draft key: the
+   *  draft lives in `usePersistedState`, and writing that localStorage key
+   *  from outside would desync its in-memory copy whenever the panel is
+   *  already mounted. Same shape as `openRequest`/`onOpenRequestConsumed` in
+   *  BrowserPane and `consumeSeed` on the Front Door. */
+  seed?: { text: string; nonce: number } | null;
+  onSeedConsumed?: () => void;
   /** Continue THIS tab chat as the spanning Linked discussion — a fork, not a
    *  move: the tab chat stays intact, its context carries into the new linked
    *  chat. Present once there's a conversation worth carrying. */
   onContinueAsLinked?: () => void;
-  /** A linked discussion already exists — the header button offers a choice
-   *  ("continue as new" vs "open existing") instead of converting silently. */
+  /** A linked discussion already exists — the `▾` beside 🔗 offers the ones
+   *  that do. The 🔗 itself always converts; see the header. */
   linkedExists?: boolean;
   onOpenExistingLinked?: () => void;
   /** Tandem agent mode is on. Sent to the agent so it opens the best page and
@@ -139,6 +154,9 @@ export const BrowserChat = memo(function BrowserChat({
   onSendToRedline,
   onSendToDrafter,
   onAddToMission,
+  onAddToList,
+  seed,
+  onSeedConsumed,
   onContinueAsLinked,
   linkedExists,
   onOpenExistingLinked,
@@ -148,8 +166,9 @@ export const BrowserChat = memo(function BrowserChat({
   // keyed by browseId, so each tab's discussion keeps its own).
   const [draft, setDraft] = usePersistedState<string>(`rl.chatDraft.browse.${browseId}`, "");
   const [zoom, setZoom] = useState(loadZoom);
-  // The header's "continue across tabs" choice popover (shown only when a
-  // linked discussion already exists).
+  // The `▾` beside 🔗: the pre-existing Linked discussions. 🔗 itself always
+  // converts, so this holds the one remaining choice rather than the primary
+  // action.
   const [linkedMenuOpen, setLinkedMenuOpen] = useState(false);
   // Per-source thumbs verdicts for this tab's thread (url → +1 / -1), restored
   // from the backend so ratings survive a reload. Only meaningful in tandem mode.
@@ -250,6 +269,31 @@ export const BrowserChat = memo(function BrowserChat({
     stickRef.current = true;
   }, [browseId]);
 
+  // A seed (`💬` on a list item) MERGES into the draft rather than replacing
+  // it: whatever the user had half-typed is theirs, and quoting an item is an
+  // addition to the question, not a reason to lose it. Nonce-keyed so the same
+  // item can be quoted twice, and consumed immediately so a re-render can't
+  // paste it again.
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const lastSeedRef = useRef<number | null>(null);
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  useEffect(() => {
+    if (!seed || seed.nonce === lastSeedRef.current) return;
+    lastSeedRef.current = seed.nonce;
+    const prev = draftRef.current;
+    setDraft(prev.trim() ? `${prev.replace(/\s*$/, "")}\n\n${seed.text}` : seed.text);
+    onSeedConsumed?.();
+    // Land the caret at the end, below the quote, ready to type the question.
+    requestAnimationFrame(() => {
+      const el = composerRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seed]);
+
   // Follow streaming/new turns only while the user is parked at the bottom;
   // if they've scrolled up to read, leave their position untouched.
   useEffect(() => {
@@ -321,21 +365,40 @@ export const BrowserChat = memo(function BrowserChat({
         )}
         <div className="flex items-center gap-1 ml-auto">
           {onContinueAsLinked && messages.length > 0 && (
-            <div className="relative">
+            <div className="relative flex items-center">
+              {/* The gesture means ONE thing, always: carry this conversation
+                  across tabs. It used to open a menu once any linked
+                  discussion existed, whose default reading was "go to the old
+                  one" — so the second and every later use of 🔗 silently did
+                  nothing. Converting is now unconditional; the pre-existing
+                  discussions moved behind the ▾ beside it. */}
               <button
                 type="button"
                 onClick={() => {
-                  // With no existing linked chat there's nothing to choose —
-                  // convert directly. Otherwise offer the choice.
-                  if (!linkedExists) onContinueAsLinked();
-                  else setLinkedMenuOpen((o) => !o);
+                  setLinkedMenuOpen(false);
+                  onContinueAsLinked();
                 }}
-                title="Continue across tabs — turn this chat into the Linked discussion (this tab's chat is kept)"
+                title="Continue this conversation across tabs — starts a new Linked discussion from this chat (this tab's chat is kept)"
                 className="px-1 leading-none hover:opacity-100 opacity-60"
                 style={{ color: "var(--color-ink-muted)" }}
               >
                 <Link2 size={12} strokeWidth={2} />
               </button>
+              {linkedExists && onOpenExistingLinked && (
+                <button
+                  type="button"
+                  onClick={() => setLinkedMenuOpen((o) => !o)}
+                  title="Other Linked discussions"
+                  className="leading-none hover:opacity-100 opacity-60"
+                  style={{
+                    color: "var(--color-ink-muted)",
+                    fontSize: "9px",
+                    padding: "0 2px",
+                  }}
+                >
+                  ▾
+                </button>
+              )}
               {linkedMenuOpen && (
                 <div
                   className="absolute right-0 top-full mt-1 z-20 flex flex-col"
@@ -354,21 +417,10 @@ export const BrowserChat = memo(function BrowserChat({
                     style={{ fontSize: "11px", color: "var(--color-ink)" }}
                     onClick={() => {
                       setLinkedMenuOpen(false);
-                      onContinueAsLinked();
-                    }}
-                  >
-                    Continue this chat as a new Linked discussion
-                  </button>
-                  <button
-                    type="button"
-                    className="text-left rounded px-2 py-1.5 hover:opacity-80"
-                    style={{ fontSize: "11px", color: "var(--color-ink)" }}
-                    onClick={() => {
-                      setLinkedMenuOpen(false);
                       onOpenExistingLinked?.();
                     }}
                   >
-                    Open the existing Linked discussion
+                    Open an existing Linked discussion
                   </button>
                 </div>
               )}
@@ -437,6 +489,7 @@ export const BrowserChat = memo(function BrowserChat({
               onSendToRedline={onSendToRedline}
               onSendToDrafter={onSendToDrafter}
               onAddToMission={onAddToMission}
+              onAddToList={onAddToList}
               showSources={!!tandem}
               feedback={feedback}
               onVerdict={setVerdict}
@@ -465,6 +518,7 @@ export const BrowserChat = memo(function BrowserChat({
 
       <div className="px-3 py-2 shrink-0" style={{ borderTop: "1px solid var(--color-rule)" }}>
         <Composer
+          taRef={composerRef}
           draft={draft}
           setDraft={setDraft}
           streaming={status === "streaming"}
@@ -488,6 +542,7 @@ function MessageBubble({
   onSendToRedline,
   onSendToDrafter,
   onAddToMission,
+  onAddToList,
   showSources,
   feedback,
   onVerdict,
@@ -499,6 +554,7 @@ function MessageBubble({
   onSendToRedline?: (markdown: string) => void;
   onSendToDrafter?: (markdown: string) => void;
   onAddToMission?: (markdown: string) => void | Promise<boolean>;
+  onAddToList?: (markdown: string) => void | Promise<boolean>;
   showSources?: boolean;
   feedback?: Record<string, number>;
   onVerdict?: (source: Source, verdict: number) => void;
@@ -562,6 +618,7 @@ function MessageBubble({
           onSendToRedline={onSendToRedline}
           onSendToDrafter={onSendToDrafter}
           onAddToMission={onAddToMission}
+          onAddToList={onAddToList}
         />
       )}
     </div>
@@ -670,14 +727,17 @@ function MessageActions({
   onSendToRedline,
   onSendToDrafter,
   onAddToMission,
+  onAddToList,
 }: {
   body: string;
   onSendToRedline?: (markdown: string) => void;
   onSendToDrafter?: (markdown: string) => void;
   onAddToMission?: (markdown: string) => void | Promise<boolean>;
+  onAddToList?: (markdown: string) => void | Promise<boolean>;
 }) {
   const [copied, setCopied] = useState(false);
   const [pinned, setPinned] = useState<"idle" | "ok" | "failed">("idle");
+  const [listed, setListed] = useState<"idle" | "ok" | "failed">("idle");
   const copy = () => {
     void navigator.clipboard?.writeText(body).then(() => {
       setCopied(true);
@@ -729,6 +789,27 @@ function MessageActions({
               <Pin size={10} strokeWidth={2} /> Add to mission
             </span>
           )}
+        </button>
+      )}
+      {onAddToList && (
+        <button
+          type="button"
+          onClick={() => {
+            // Same truthfulness rule as the pin beside it: an add that never
+            // reached the DB must not flash a tick.
+            void Promise.resolve(onAddToList(body)).then((ok) => {
+              setListed(ok === false ? "failed" : "ok");
+              window.setTimeout(() => setListed("idle"), 1400);
+            });
+          }}
+          title="Add this reply to this tab's working list"
+          style={{ ...actionStyle, color: "var(--color-info)" }}
+        >
+          {listed === "ok"
+            ? "Added ✓"
+            : listed === "failed"
+              ? "Add failed ✗"
+              : "＋ Add as item"}
         </button>
       )}
       {onSendToDrafter && (
@@ -798,19 +879,21 @@ function StreamingBubble({
 }
 
 function Composer({
+  taRef,
   draft,
   setDraft,
   streaming,
   onSend,
   onStop,
 }: {
+  /** Owned by the parent so a seed can focus and place the caret. */
+  taRef: React.RefObject<HTMLTextAreaElement | null>;
   draft: string;
   setDraft: (s: string) => void;
   streaming: boolean;
   onSend: () => void;
   onStop: () => void;
 }) {
-  const taRef = useRef<HTMLTextAreaElement>(null);
   const autosize = () => {
     const el = taRef.current;
     if (!el) return;

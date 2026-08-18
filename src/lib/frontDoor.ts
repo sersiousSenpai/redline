@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 
-// The front door's pure core: what a keystroke means, where a prompt should
-// launch, how attachments ride along, and the slug proposed to a first-run
-// user who has no project at all. House style — every decision the surface
-// makes lives here so it can be tested without a DOM; FrontDoor.tsx only
-// renders and App.tsx only wires.
-
-import type { ProjectOption } from "../components/ProjectPicker";
-import { guessProjectForPlan } from "./guessProject";
+// The front door's pure core: what a keystroke means, its starter chips, and
+// the slug proposed to a first-run user who has no project at all. House style
+// — every decision the surface makes lives here so it can be tested without a
+// DOM; FrontDoor.tsx only renders and App.tsx only wires.
+//
+// What is NOT here: anything about *launching*. Project resolution, prompt
+// composition, the readiness gate and the pending-launch shape all moved to
+// `lib/launch.ts` when the Drafter and the browser became doors too — they are
+// shared property. The composer keybindings and chip templater below are not,
+// and stay.
 
 /** Where the composer sends its text. A sticky setting, not a one-off: you
  *  pick it in `Plan ▾` and it stays picked, so a session spent shaping long
@@ -50,54 +52,6 @@ export function submitAction(
   return destination;
 }
 
-/** The project chip's state. `null` means untouched — resolve it from the
- *  prompt text and the workspace. `{ path }` is an explicit pick, and
- *  `{ path: null }` is an explicit "Home (~)", which must NOT be re-guessed
- *  away on the next keystroke. */
-export type ProjectChoice = { path: string | null } | null;
-
-export interface LaunchProjectInputs {
-  /** Known repos: every review session's project plus each open folder. */
-  projectOptions: ProjectOption[];
-  /** The folder workspace currently open in the sidebar, if any. */
-  openFolder: string | null;
-  /** The repo the Drafter last shipped a prompt into. */
-  lastDrafterProject: string | null;
-}
-
-/** Where ⏎ launches. Precedence: an explicit chip beats everything; then the
- *  repo named in the prompt itself; then the folder the user is browsing;
- *  then the last repo they drafted into; then Home. */
-export function resolveLaunchProject(
-  text: string,
-  chip: ProjectChoice,
-  opts: LaunchProjectInputs,
-): string | null {
-  if (chip) return chip.path;
-  const guess = guessProjectForPlan(text, opts.projectOptions);
-  if (guess) return guess;
-  if (opts.openFolder) return opts.openFolder;
-  return opts.lastDrafterProject ?? null;
-}
-
-/** The prompt as launched. Attached files ride as a plain `Context:` path
- *  list — the plan session already has `Read Grep Glob` pre-approved, so a
- *  path is all it needs; inlining the bytes would only burn its context. */
-export function composePrompt(text: string, attachments: string[]): string {
-  const body = text.trim();
-  if (!body) return "";
-  const seen = new Set<string>();
-  const paths: string[] = [];
-  for (const raw of attachments) {
-    const p = raw.trim();
-    if (!p || seen.has(p)) continue;
-    seen.add(p);
-    paths.push(p);
-  }
-  if (paths.length === 0) return body;
-  return `${body}\n\nContext:\n${paths.map((p) => `- ${p}`).join("\n")}`;
-}
-
 export interface FrontDoorSuggestion {
   /** What the chip reads. */
   label: string;
@@ -127,26 +81,6 @@ export function frontDoorSuggestions(
     },
     { label: "Write tests", text: "Write tests for " },
   ];
-}
-
-/** Is a launched plan session still alive?
- *
- *  A launch lives in one terminal tile. Close the tile and the PTY dies with
- *  it, so no plan is ever coming and the "Planning…" card has to go — a
- *  spinner outliving its process is exactly the confident lie this surface
- *  exists to remove.
- *
- *  The rule that matters is the negative one: only a REPORTED set of live ids
- *  that omits ours proves the terminal is gone. `null` means the dock hasn't
- *  told us yet, which is ignorance, not death — treating it as death would
- *  cancel every launch during the frames before the first report. */
-export function launchStillLive(
-  terminalId: string | null,
-  liveTerminalIds: string[] | null,
-): boolean {
-  if (!terminalId) return true;
-  if (liveTerminalIds === null) return true;
-  return liveTerminalIds.includes(terminalId);
 }
 
 /** Words that carry no identity in a project name — the leading verb, the

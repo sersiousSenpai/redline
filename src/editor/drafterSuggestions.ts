@@ -57,9 +57,19 @@ function findBlock(
   return found;
 }
 
-/** True when the doc has no content worth preserving (empty / one blank para). */
+/** True when the doc has no content worth preserving.
+ *
+ *  ONE emptiness predicate, shared with the launch gate — they disagreed, and
+ *  the disagreement destroyed documents. `canSend` asks `editor.isEmpty` (a
+ *  horizontal rule, a table, a heading with no words all count as content),
+ *  while this asked `textContent.trim()` (all of those count as empty). So an
+ *  agent `append` into a structure-only document took the wholesale
+ *  `setContent` branch and REPLACED the document, reporting `"applied"` with no
+ *  Accept/Reject card. Recoverable — that branch is the only one not marked
+ *  `addToHistory: false`, so ⌘Z works — but still wrong. With `isEmpty` here
+ *  the same append takes the `proposed` branch: a tracked insert with a card. */
 export function docIsEmpty(editor: Editor): boolean {
-  return editor.state.doc.textContent.trim().length === 0;
+  return editor.isEmpty;
 }
 
 /** Mark every text leaf in [from, to) with a pending rl_ins for `s`. */
@@ -403,7 +413,28 @@ export function rejectAllUserSuggestions(editor: Editor): boolean {
   return revertLeaves(editor, leaves);
 }
 
-/** Whether any pending user-authored run exists (gates the Review rows). */
+/** Whether any pending user-authored run exists (gates the Review rows).
+ *
+ *  A short-circuiting walk, not `userPendingLeaves(...).length > 0`: this runs
+ *  in a per-transaction selector, and collecting an array of EVERY pending leaf
+ *  in the document only to ask whether there is at least one is pure waste —
+ *  the answer is usually decided by the first marked text node. */
 export function hasPendingUserSuggestions(editor: Editor): boolean {
-  return userPendingLeaves(editor).length > 0;
+  let found = false;
+  editor.state.doc.descendants((n) => {
+    if (found) return false; // stop descending; the answer is settled
+    if (!n.isText) return true;
+    if (
+      n.marks.some(
+        (m) =>
+          isPendingSuggestionMark(m) &&
+          (m.attrs.authorId ?? USER_AUTHOR) === USER_AUTHOR,
+      )
+    ) {
+      found = true;
+      return false;
+    }
+    return true;
+  });
+  return found;
 }

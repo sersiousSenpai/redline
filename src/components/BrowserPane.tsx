@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, memo, Suspense, useCallback, useEffect, useRef, useState } from "react";
 
 import { rafCoalesce } from "../lib/raf";
 import {
@@ -8,6 +8,7 @@ import {
   ArrowRight,
   ChevronDown,
   Link2,
+  ListChecks,
   MessageSquare,
   Palette,
   Plus,
@@ -23,6 +24,18 @@ import { Webview } from "@tauri-apps/api/webview";
 import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
 import { usePersistedState } from "../theme/usePersistedState";
 import { resolveOmniboxInput } from "../lib/omnibox";
+import {
+  chatEntryFor,
+  pruneChatState,
+  withChatPatch,
+  type ChatPill,
+  type ChatStateMap,
+} from "../lib/browseChatState";
+import { isLocalhostUrl, sameTabUrl } from "../lib/browseList";
+// `BrowserPane` is a static import in App, so it sits in the boot path. The
+// list panel only exists once a user picks the pill, so it has no business
+// costing boot bytes — and `scripts/size-budget.json` has limited headroom.
+const BrowseList = lazy(() => import("./BrowseList"));
 import type {
   BinaryFile,
   BrowseFocusTabEvent,
@@ -356,7 +369,13 @@ function BrowserPaneBase({
       window.setTimeout(() => {
         timers.delete(id);
         const label = `browser-${id}`;
-        void invoke("browser_cache_snapshot", { label }).catch(() => {});
+        // The on-screen gate is ours to compute and only ours: WebKit snapshots
+        // a hidden view as a blank frame and reports success, so the backend
+        // has no way to know. Passing it lets the capture ride the same IPC
+        // call that records the page — no window where the row exists without
+        // its picture.
+        const onScreen = id === activeIdRef.current && visibleRef.current;
+        void invoke("browser_cache_snapshot", { label, onScreen }).catch(() => {});
         // Piggyback a picture on the same settle. Only the tab that is
         // actually on screen: WebKit snapshots a hidden view blank, and a
         // blank stand-in is worse than none. Deliberately here rather than at
@@ -445,13 +464,91 @@ function BrowserPaneBase({
       initialTabsRef.current!.find((t) => t.id === initialActiveRef.current)
         ?.url ?? initialTabsRef.current![0].url,
   );
-  // Page-discussion panel (browse agent). Open state is in-session; the panel
-  // splits the webview slot when open. The thread itself persists in the DB.
-  const [chatOpen, setChatOpen] = useState(false);
-  // Which discussion the split shows: the per-tab "page" chat, the mission
-  // "orchestrator" chat (a tier above), or the "linked" discussion (one thread
-  // spanning all tabs). The 💬/🎯/🔗 toolbar buttons set this.
-  const [chatTab, setChatTab] = useState<"page" | "mission" | "linked">("page");
+  // The discussion panel's memory, PER TAB and persisted.
+  //
+  // This was a plain `useState` pair, and that was the bug: `BrowserPane` is
+  // unmounted whenever the main surface changes (App mounts it only while
+  // `mainSurface === "browser"`) and re-parented on every document-pin toggle,
+  // so a round-trip to Code Review closed the chat every single time and there
+  // was no way to say "leave it as I had it". Keyed on `browseId` — the tab's
+  // durable id — so the panel reopens on the tab the user left it open on,
+  // through a reload and a mission restore, not on whatever tab inherited its
+  // slot. See lib/browseChatState.ts.
+  const [chatState, setChatState] = usePersistedState<ChatStateMap>(
+    "redline.browser.chatState",
+    {},
+  );
+  // Keyed on the ACTIVE tab, not `discussionId`: the memory should follow the
+  // tab the user is looking at, and those two deliberately diverge when an
+  // agent opens a tab on the current conversation's behalf.
+  const activeBrowseId =
+    (tabs.find((t) => t.id === activeId) ?? tabs[0])?.browseId ?? null;
+  const chatHere = chatEntryFor(chatState, activeBrowseId);
+  const chatOpen = chatHere.open;
+  const chatTab = chatHere.pill;
+  const activeBrowseIdRef = useRef(activeBrowseId);
+  activeBrowseIdRef.current = activeBrowseId;
+  /** Write one tab's panel state. Every old `setChatOpen`/`setChatTab` pair
+   *  becomes one of these — the change surface is exactly the call sites. */
+  const setChatFor = useCallback(
+    (browseId: string | null, patch: { open?: boolean; pill?: ChatPill }) => {
+      if (!browseId) return;
+      setChatState((prev) => withChatPatch(prev, browseId, patch, Date.now()));
+    },
+    [setChatState],
+  );
+  /** …and this one for the common case: the tab the user is on right now. */
+  const setChatHere = useCallback(
+    (patch: { open?: boolean; pill?: ChatPill }) =>
+      setChatFor(activeBrowseIdRef.current, patch),
+    [setChatFor],
+  );
+  // Text handed to the page-discussion composer once (`💬` on a list item).
+  // A prop with a nonce, not a write to the composer's persisted localStorage
+  // key — that would desync `usePersistedState`'s in-memory copy whenever the
+  // panel is already mounted. Same shape as `openRequest` below.
+  const [chatSeed, setChatSeed] = useState<{ text: string; nonce: number } | null>(
+    null,
+  );
+  // Which tabs are known to HAVE a list. Drives the auto-offer below and the
+  // "＋ Add as item" action in the page chat; `BrowseList` reports both
+  // directions so neither has to poll.
+  const [listedTabs, setListedTabs] = useState<Record<string, boolean>>({});
+
+  // The localhost auto-offer.
+  //
+  // On a tab showing the user's own dev server, with no list and no
+  // conversation yet, opening the panel lands on the List chooser rather than
+  // the page chat — because that is what people actually want there: not only
+  // a conversation, but a running tally of what needs to change.
+  //
+  // Strictly a FIRST-OPEN offer. Once a template is picked or a page message is
+  // sent, both probes come back non-empty and §2's remembered pill takes over;
+  // the probed set stops it re-firing within a session even before that, so a
+  // user who opens the panel and switches to This page isn't flipped back. A
+  // mode that fights the user is worse than no offer at all.
+  const offeredListRef = useRef<Set<string>>(new Set());
+  const activeTabUrl = (tabs.find((t) => t.id === activeId) ?? tabs[0])?.url ?? "";
+  useEffect(() => {
+    if (!chatOpen || !activeBrowseId) return;
+    if (!isLocalhostUrl(activeTabUrl)) return;
+    if (offeredListRef.current.has(activeBrowseId)) return;
+    offeredListRef.current.add(activeBrowseId);
+    const bid = activeBrowseId;
+    void Promise.all([
+      invoke<unknown | null>("browse_list_get", { browseId: bid }),
+      invoke<unknown[]>("get_browse_thread", { browseId: bid }),
+    ])
+      .then(([list, thread]) => {
+        if (list || (Array.isArray(thread) && thread.length > 0)) return;
+        // Still the tab the user is looking at? Two round-trips is enough time
+        // to have moved on, and yanking a pill on a tab they left is exactly
+        // the kind of thing that makes a surface feel possessed.
+        if (activeBrowseIdRef.current !== bid) return;
+        setChatFor(bid, { pill: "list" });
+      })
+      .catch(() => {});
+  }, [chatOpen, activeBrowseId, activeTabUrl, setChatFor]);
   // Research-mission state (active mission, its pins, the resumable list).
   // Mirrors itself to the backend so the daemon's /v1/mission/* routes can
   // answer the orchestrator. See useMission.
@@ -620,6 +717,12 @@ function BrowserPaneBase({
         }
       }
     }
+    // Keep the per-tab chat memory bounded — without this the map grows for
+    // the life of the install. Live tabs are never dropped, and closed ones
+    // only past a cap: `tabs` is one WORKSPACE, so evicting everything absent
+    // from it would forget the regular tabs the moment a mission swaps in.
+    setChatState((prev) => pruneChatState(prev, tabs.map((t) => t.browseId)));
+
     // Mirror the live tab list to the daemon, so the orchestrator and page
     // agents see the current tabs (independent of which bucket persists).
     void invoke("browser_set_tabs", {
@@ -1248,10 +1351,13 @@ function BrowserPaneBase({
   ) => {
     // Opening an already-open URL foregrounds that tab instead of stacking a
     // duplicate — "Open" on a Localhost card (and any replayed request) would
-    // otherwise accumulate tabs. Blank tabs are exempt: "+" on HOME is an
-    // intentional second empty tab.
+    // otherwise accumulate tabs. `sameTabUrl`, not `===`: the poll below
+    // rewrites `t.url` to the webview's canonical URL, so a tab opened at
+    // `http://localhost:3000` is holding `http://localhost:3000/dashboard` by
+    // the time you click the card again. Blank tabs are exempt: "+" on HOME is
+    // an intentional second empty tab.
     if (url !== HOME) {
-      const existing = tabsRef.current.find((t) => t.url === url);
+      const existing = tabsRef.current.find((t) => sameTabUrl(t.url, url));
       if (existing) {
         ensureLive(existing.id);
         touchMru(existing.id);
@@ -1277,11 +1383,9 @@ function BrowserPaneBase({
     // of the current conversation (then it stays anchored to its origin tab).
     if (!opts.anchorDiscussion) setDiscussionId(id);
     // Tandem mode is agent-first: every new tab lands in the split so the user
-    // can ask straight away.
-    if (tandemRef.current) {
-      setChatOpen(true);
-      setChatTab("page");
-    }
+    // can ask straight away. Written against the NEW tab's browseId, not the
+    // active one — `activeId` hasn't committed yet at this point.
+    if (tandemRef.current) setChatFor(tab.browseId, { open: true, pill: "page" });
   };
 
   const closeTab = (id: string) => {
@@ -1398,6 +1502,11 @@ function BrowserPaneBase({
     setLiveVersion((v) => v + 1);
     if (target.kind === "mission") mission.resumeMission(target.id);
     else mission.closeMission();
+    // The tab that is now active. Returned rather than read back through
+    // `activeBrowseIdRef`: the setState calls above haven't committed when this
+    // returns, so a caller wanting to open the mission panel on the swapped-in
+    // workspace would otherwise write to the OUTGOING tab's key.
+    return active.browseId;
   };
 
   // Start a new mission. From regular browsing the current tabs carry in (and
@@ -1420,23 +1529,23 @@ function BrowserPaneBase({
         /* ignore */
       }
       // No swap — the current tabs/webviews stay; they're now the mission's.
+      setChatHere({ open: true, pill: "mission" });
     } else {
-      await swapWorkspace({ kind: "mission", id: m.missionId });
+      // The swap hands back the tab that becomes active; `activeBrowseIdRef`
+      // still points at the outgoing one here.
+      const landed = await swapWorkspace({ kind: "mission", id: m.missionId });
+      setChatFor(landed, { open: true, pill: "mission" });
     }
-    setChatOpen(true);
-    setChatTab("mission");
   };
 
   const switchToMission = async (id: string) => {
     if (id === activeMissionIdRef.current) {
-      setChatOpen(true);
-      setChatTab("mission");
+      setChatHere({ open: true, pill: "mission" });
       return;
     }
     await saveCurrentWorkspace();
-    await swapWorkspace({ kind: "mission", id });
-    setChatOpen(true);
-    setChatTab("mission");
+    const landed = await swapWorkspace({ kind: "mission", id });
+    setChatFor(landed, { open: true, pill: "mission" });
   };
 
   const exitMission = async () => {
@@ -1455,10 +1564,7 @@ function BrowserPaneBase({
       tabTitle: tab.title,
       tabUrl: tab.url,
     });
-    if (l) {
-      setChatOpen(true);
-      setChatTab("linked");
-    }
+    if (l) setChatHere({ open: true, pill: "linked" });
   };
 
   const deleteMissionFlow = async (id: string) => {
@@ -1773,8 +1879,7 @@ function BrowserPaneBase({
   const prevTandemRef = useRef(tandem);
   useEffect(() => {
     if (tandem) {
-      setChatOpen(true);
-      setChatTab("page");
+      setChatHere({ open: true, pill: "page" });
       // Snap to 50/50 only on the on-transition, not on every render, so a user
       // who later drags the divider isn't yanked back to center.
       if (!prevTandemRef.current) setChatRatio(0.5);
@@ -1807,9 +1912,13 @@ function BrowserPaneBase({
       {!browserFullscreen && (
         <>
       {/* Tab strip — scrolls horizontally when the pane is too narrow to show
-          every tab (each tab keeps its width instead of being squeezed away). */}
+          every tab (each tab keeps its width instead of being squeezed away),
+          with the bar itself hidden: a scrollbar drawn under a row of tabs is
+          chrome about chrome. Native `title=` tooltips here, not `.rl-tipwrap`,
+          so the overflow constraint documented at TerminalTileHeader doesn't
+          apply. */}
       <div
-        className="flex items-center gap-1 px-2 pt-2 overflow-x-auto"
+        className="rl-hide-scroll-x flex items-center gap-1 px-2 pt-2 overflow-x-auto"
         style={{ background: "var(--color-bg-elevated)" }}
       >
         {tabs.map((tab, i) => {
@@ -2059,8 +2168,7 @@ function BrowserPaneBase({
             aria-label="Mission"
             onClick={() => {
               if (mission.activeMission) {
-                setChatOpen(true);
-                setChatTab("mission");
+                setChatHere({ open: true, pill: "mission" });
               } else {
                 setMissionDialogOpen(true);
               }
@@ -2151,16 +2259,30 @@ function BrowserPaneBase({
           title="Discuss this page with Claude (reads & drives the browser)"
           aria-label="Discuss this page"
           aria-pressed={chatOpen && chatTab === "page"}
-          onClick={() => {
-            if (chatOpen && chatTab === "page") {
-              setChatOpen(false);
-            } else {
-              setChatOpen(true);
-              setChatTab("page");
-            }
-          }}
+          onClick={() =>
+            chatOpen && chatTab === "page"
+              ? setChatHere({ open: false })
+              : setChatHere({ open: true, pill: "page" })
+          }
         >
           <MessageSquare size={14} strokeWidth={2} />
+        </button>
+        <button
+          type="button"
+          style={{
+            ...chromeBtn,
+            color: chatOpen && chatTab === "list" ? "var(--color-info)" : "var(--color-ink)",
+          }}
+          title="This tab's list — collect what needs to change, then hand it over in one piece"
+          aria-label="Tab list"
+          aria-pressed={chatOpen && chatTab === "list"}
+          onClick={() =>
+            chatOpen && chatTab === "list"
+              ? setChatHere({ open: false })
+              : setChatHere({ open: true, pill: "list" })
+          }
+        >
+          <ListChecks size={14} strokeWidth={2} />
         </button>
         <button
           type="button"
@@ -2171,18 +2293,15 @@ function BrowserPaneBase({
           title="Linked discussion — one conversation that follows you across tabs"
           aria-label="Linked discussion"
           aria-pressed={chatOpen && chatTab === "linked"}
-          onClick={() => {
-            if (chatOpen && chatTab === "linked") {
-              setChatOpen(false);
-            } else {
-              // No lazy create here: with no active linked discussion the
-              // panel shows the empty state, whose primary action can carry
-              // the current tab's chat across (converting is a real choice,
-              // not a silent side effect of opening the panel).
-              setChatOpen(true);
-              setChatTab("linked");
-            }
-          }}
+          onClick={() =>
+            chatOpen && chatTab === "linked"
+              ? setChatHere({ open: false })
+              : // No lazy create here: with no active linked discussion the
+                // panel shows the empty state, whose primary action can carry
+                // the current tab's chat across (converting is a real choice,
+                // not a silent side effect of opening the panel).
+                setChatHere({ open: true, pill: "linked" })
+          }
         >
           <Link2 size={14} strokeWidth={2} />
         </button>
@@ -2272,12 +2391,39 @@ function BrowserPaneBase({
           <div className="flex flex-col h-full min-h-0">
             <DiscussionSwitcher
               tab={chatTab}
-              setTab={setChatTab}
+              setTab={(pill) => setChatHere({ pill })}
               hasMission={!!mission.activeMission}
               pinCount={mission.findings.length}
             />
             <div className="flex-1 min-h-0">
-              {chatTab === "linked" ? (
+              {chatTab === "list" ? (
+                <Suspense fallback={<div className="h-full" />}>
+                  <BrowseList
+                    key={discussionTab.browseId}
+                    browseId={discussionTab.browseId}
+                    source={{ url: discussionTab.url, title: discussionTab.title }}
+                    onClose={() => setChatHere({ open: false })}
+                    onSendToDrafter={onSendToDrafter}
+                    onSendToRedline={onSendToRedline}
+                    onListChanged={(exists) =>
+                      setListedTabs((prev) => {
+                        if (!!prev[discussionTab.browseId] === exists) return prev;
+                        const next = { ...prev };
+                        if (exists) next[discussionTab.browseId] = true;
+                        else delete next[discussionTab.browseId];
+                        return next;
+                      })
+                    }
+                    // `💬` on an item: the page agent already grounds on the
+                    // live page and can read the repo, so it is the right
+                    // colleague — this needs no backend of its own.
+                    onDiscussItem={(quoted) => {
+                      setChatSeed({ text: quoted, nonce: Date.now() });
+                      setChatHere({ open: true, pill: "page" });
+                    }}
+                  />
+                </Suspense>
+              ) : chatTab === "linked" ? (
                 linked.activeLinked ? (
                   <LinkedChat
                     key={linked.activeLinked.linkedId}
@@ -2290,7 +2436,7 @@ function BrowserPaneBase({
                       title: activeTab.title,
                     }}
                     projectDir={projectDir}
-                    onClose={() => setChatOpen(false)}
+                    onClose={() => setChatHere({ open: false })}
                     onOpenLink={(url) => openTab(url)}
                     onSendToRedline={onSendToRedline}
                     onSendToDrafter={onSendToDrafter}
@@ -2310,14 +2456,17 @@ function BrowserPaneBase({
                     mission={mission.activeMission}
                     findings={mission.findings}
                     projectDir={projectDir}
-                    onClose={() => setChatOpen(false)}
+                    onClose={() => setChatHere({ open: false })}
                     onOpenLink={(url) => openTab(url)}
                     onRemoveFinding={(id) => void mission.removeFinding(id)}
                     onJumpToFinding={(bid) => {
                       const t = tabsRef.current.find((x) => x.browseId === bid);
                       if (t) {
                         selectTab(t.id);
-                        setChatTab("page");
+                        // Written against the JUMPED-TO tab: the pill belongs
+                        // to the tab we're landing on, and `activeId` hasn't
+                        // committed yet.
+                        setChatFor(t.browseId, { open: true, pill: "page" });
                       }
                     }}
                     onEditGoal={(title, goal) =>
@@ -2339,17 +2488,38 @@ function BrowserPaneBase({
                   anchoredFromTitle={
                     discussionTab.id !== activeId ? discussionTab.title : undefined
                   }
-                  onClose={() => setChatOpen(false)}
+                  onClose={() => setChatHere({ open: false })}
                   onOpenLink={(url) => openTab(url)}
                   onSendToRedline={onSendToRedline}
                   onSendToDrafter={onSendToDrafter}
+                  seed={chatSeed}
+                  onSeedConsumed={() => setChatSeed(null)}
+                  onAddToList={
+                    // Offered only once the tab HAS a list: `browse_list_add`
+                    // refuses an orphan item, so without one the button could
+                    // only ever fail.
+                    listedTabs[discussionTab.browseId]
+                      ? (body) =>
+                          invoke("browse_list_add", {
+                            browseId: discussionTab.browseId,
+                            kind: "note",
+                            body,
+                          }).then(
+                            () => true,
+                            (e: unknown) => {
+                              console.error("browse_list_add failed", e);
+                              return false;
+                            },
+                          )
+                      : undefined
+                  }
                   onContinueAsLinked={() => void continueTabAsLinked(discussionTab)}
                   linkedExists={linked.linkedSessions.length > 0}
                   onOpenExistingLinked={() => {
                     if (linked.activeLinkedId === null && linked.linkedSessions[0]) {
                       linked.resumeLinked(linked.linkedSessions[0].linkedId);
                     }
-                    setChatTab("linked");
+                    setChatHere({ pill: "linked" });
                   }}
                   onAddToMission={
                     mission.activeMission
@@ -2394,16 +2564,17 @@ function BrowserPaneBase({
   );
 }
 
-/** The slim two-tab switcher atop the discussion split: per-tab page chat vs the
- *  mission orchestrator (a tier above). */
+/** The slim switcher atop the discussion split: this tab's page chat, this
+ *  tab's working list, the mission orchestrator (a tier above), and the linked
+ *  discussion (one thread spanning every tab). */
 function DiscussionSwitcher({
   tab,
   setTab,
   hasMission,
   pinCount,
 }: {
-  tab: "page" | "mission" | "linked";
-  setTab: (t: "page" | "mission" | "linked") => void;
+  tab: ChatPill;
+  setTab: (t: ChatPill) => void;
   hasMission: boolean;
   pinCount: number;
 }) {
@@ -2428,6 +2599,9 @@ function DiscussionSwitcher({
     >
       <button type="button" style={pill(tab === "page")} onClick={() => setTab("page")}>
         <MessageSquare size={11} strokeWidth={2} /> This page
+      </button>
+      <button type="button" style={pill(tab === "list")} onClick={() => setTab("list")}>
+        <ListChecks size={11} strokeWidth={2} /> List
       </button>
       <button type="button" style={pill(tab === "mission")} onClick={() => setTab("mission")}>
         <Target size={11} strokeWidth={2} /> Mission

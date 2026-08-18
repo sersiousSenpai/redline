@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildFolderTree,
   draftLabel,
+  draftTitleFromMarkdown,
   draftsInFolder,
   type BookshelfDraft,
   type BookshelfFolder,
@@ -102,5 +103,52 @@ describe("draftLabel", () => {
       "Untitled document",
     );
     expect(draftLabel(draft("d", null, { title: "Spec" }))).toBe("Spec");
+  });
+});
+
+describe("draftTitleFromMarkdown", () => {
+  it("takes the first heading, without its hashes", () => {
+    expect(draftTitleFromMarkdown("## Add a dark mode toggle\n\nbody")).toBe(
+      "Add a dark mode toggle",
+    );
+  });
+
+  it("takes a plain first line when there is no heading", () => {
+    expect(draftTitleFromMarkdown("Fix the launch race\nmore text")).toBe(
+      "Fix the launch race",
+    );
+  });
+
+  it("skips leading blank lines", () => {
+    expect(draftTitleFromMarkdown("\n\n   \n# Real title\n")).toBe(
+      "Real title",
+    );
+  });
+
+  it("strips list markers, quotes and inline emphasis", () => {
+    expect(draftTitleFromMarkdown("- **Ship** the `drafter` fix")).toBe(
+      "Ship the drafter fix",
+    );
+    expect(draftTitleFromMarkdown("1. First step")).toBe("First step");
+    expect(draftTitleFromMarkdown("> quoted opener")).toBe("quoted opener");
+  });
+
+  it("collapses runs of whitespace", () => {
+    expect(draftTitleFromMarkdown("#  spaced\tout   words")).toBe(
+      "spaced out words",
+    );
+  });
+
+  it("ellipsizes past 60 characters", () => {
+    const title = draftTitleFromMarkdown(`# ${"a".repeat(80)}`);
+    expect(title).toBe(`${"a".repeat(59)}…`);
+    expect(title).toHaveLength(60);
+  });
+
+  it("returns null for a body with no usable line", () => {
+    expect(draftTitleFromMarkdown("")).toBeNull();
+    expect(draftTitleFromMarkdown("\n   \n\t\n")).toBeNull();
+    // Syntax-only lines strip down to nothing, so they are not titles either.
+    expect(draftTitleFromMarkdown("###   \n")).toBeNull();
   });
 });

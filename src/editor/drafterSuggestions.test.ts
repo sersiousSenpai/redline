@@ -397,3 +397,64 @@ describe("block locking (pending agent suggestion)", () => {
     expect(editor.state.doc.textContent.trim()).toBe("agent rewrite");
   });
 });
+
+// One emptiness predicate, shared with the launch gate.
+//
+// They disagreed, and the disagreement destroyed documents: `canSend` asked
+// `editor.isEmpty` (a horizontal rule, a table, a heading with no words all
+// count as content) while `docIsEmpty` asked `textContent.trim()` (all of those
+// counted as empty). So an agent `append` into a structure-only document took
+// the wholesale `setContent` branch and REPLACED it, reporting "applied" with
+// no Accept/Reject card.
+describe("docIsEmpty agrees with the launch gate", () => {
+  it("an append into a structure-only doc PROPOSES rather than replacing", () => {
+    const editor = makeEditor({
+      type: "doc",
+      content: [{ type: "horizontalRule" }, { type: "paragraph" }],
+    });
+    // The document has no text, but it is not empty — you can send it.
+    expect(editor.state.doc.textContent.trim()).toBe("");
+    expect(editor.isEmpty).toBe(false);
+    expect(docIsEmpty(editor)).toBe(false);
+
+    const before = editor.state.doc.childCount;
+    const outcome = applyDraftSuggestion(
+      editor,
+      suggestion({ op: "append", markdown: "# Goal\n\nShip auth." }),
+    );
+    // A tracked insert with a card, not a wholesale replacement.
+    expect(outcome).toBe("proposed");
+    expect(editor.state.doc.childCount).toBeGreaterThan(before);
+    // The structure that was there is still there.
+    let rules = 0;
+    editor.state.doc.forEach((n) => {
+      if (n.type.name === "horizontalRule") rules++;
+    });
+    expect(rules, "the existing document was replaced").toBe(1);
+    // ...and it arrived as a PENDING insert, so it can be rejected.
+    let pending = 0;
+    editor.state.doc.descendants((n) => {
+      if (n.isText && n.marks.some((m) => m.type.name === "rl_ins")) pending++;
+      return true;
+    });
+    expect(pending).toBeGreaterThan(0);
+  });
+
+  it("a genuinely blank doc still takes the direct-apply path", () => {
+    // The behaviour worth keeping: a first agent write into a blank document
+    // shouldn't arrive as a review queue.
+    const editor = makeEditor();
+    expect(docIsEmpty(editor)).toBe(true);
+    expect(
+      applyDraftSuggestion(
+        editor,
+        suggestion({ op: "append", markdown: "Ship auth." }),
+      ),
+    ).toBe("applied");
+  });
+
+  it("whitespace-only is still empty — a stray space is not content", () => {
+    const editor = makeEditor({ type: "doc", content: [para("   ")] });
+    expect(docIsEmpty(editor)).toBe(editor.isEmpty);
+  });
+});

@@ -1013,6 +1013,20 @@ export function AgentSeats() {
               </span>
             )}
           </span>
+          {row.name === "ai_commit" && <select
+            aria-label={`${row.label} backend`}
+            value={cfg.backend ?? "claude-code"}
+            onChange={(e) =>
+              update(row.name, {
+                backend:
+                  e.target.value === "claude-code" ? undefined : e.target.value,
+              })
+            }
+            style={selectStyle}
+          >
+            <option value="claude-code">Claude Code</option>
+            <option value="codex">Codex</option>
+          </select>}
           <SeatPicker
             rowLabel={row.label}
             defaultLabel={defaultLabel}

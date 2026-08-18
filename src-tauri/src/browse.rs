@@ -158,7 +158,7 @@ impl BrowseState {
         // A consult is an internal map-reduce delegation, not a user prompt, so
         // it earns no ledger event — but it still spawns an agent that would trip
         // the global hook, so suppress that duplicate.
-        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+        crate::ledger::register_agent_prompt(&prompt);
 
         let args = bridge_args("browse", prompt, prior_session.as_deref());
         let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
@@ -725,6 +725,7 @@ fn start_browse_turn(
                 crate::ledger::PromptSource::RustFirstTurn,
                 "browse",
                 &prompt,
+                Some(&text),
                 cwd.clone(),
                 None,
                 None,
@@ -738,7 +739,7 @@ fn start_browse_turn(
                 crate::seat::model_for("browse"),
             );
         } else {
-            crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+            crate::ledger::register_agent_prompt(&prompt);
         }
 
         // The agent gets Bash so it can curl the browser endpoints. `--tools` only

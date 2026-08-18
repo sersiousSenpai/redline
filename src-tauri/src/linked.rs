@@ -142,7 +142,7 @@ impl LinkedState {
                 build_first_turn_prompt(&TabContext::default(), None, &framed, None, None)
             }
         };
-        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+        crate::ledger::register_agent_prompt(&prompt);
 
         let args = args_for(prompt, &resume);
         let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
@@ -869,6 +869,7 @@ fn start_linked_turn(
                 crate::ledger::PromptSource::RustFirstTurn,
                 "linked",
                 &prompt,
+                Some(&text),
                 cwd.clone(),
                 None,
                 None,
@@ -882,7 +883,7 @@ fn start_linked_turn(
                 crate::seat::model_for("linked"),
             );
         } else {
-            crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&prompt));
+            crate::ledger::register_agent_prompt(&prompt);
         }
 
         let args = args_for(prompt, &resume);

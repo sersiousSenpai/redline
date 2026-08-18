@@ -690,6 +690,49 @@ pub struct BrowseMessage {
     pub created_at: i64,
 }
 
+/// A browser tab's **working list** — the punch list built while clicking
+/// around a running dev server, then handed to Claude Code or the Drafter in
+/// one piece. Keyed on the same durable per-tab `browse_id` as `BrowseMessage`,
+/// so the list reattaches to its tab the way the conversation does.
+///
+/// `template` is a frontend id, deliberately opaque here: which sections a
+/// template shows is data (src/lib/browseList.ts), and adding one must not
+/// touch Rust.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowseList {
+    pub browse_id: String,
+    pub template: String,
+    pub title: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// One line of a `BrowseList`. `kind` is the template's own vocabulary
+/// ("bug" | "fix" | "improvement" | "note"); `sort_idx` is the user's order,
+/// rewritten wholesale on a drag rather than nudged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowseListItem {
+    pub id: String,
+    pub browse_id: String,
+    pub kind: String,
+    pub body: String,
+    pub done: bool,
+    pub sort_idx: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// A whole list in one payload — the list row plus its items, so the panel
+/// renders from a single command rather than a two-call waterfall.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowseListView {
+    pub list: BrowseList,
+    pub items: Vec<BrowseListItem>,
+}
+
 /// One visible line of a voice/discussion panel transcript. Mirrors
 /// `BrowseMessage`, keyed by the voice key (a plan session id, or
 /// `drafter:<draft_id>` — the same key `voice.rs` uses everywhere).

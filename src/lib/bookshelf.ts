@@ -142,6 +142,24 @@ export function draftLabel(d: BookshelfDraft): string {
   return t.length > 0 ? t : "Untitled document";
 }
 
+/** An auto-title for a document the user never named: its first heading or
+ *  first real line, stripped of markdown syntax and capped. Null when the
+ *  body has no usable line. */
+export function draftTitleFromMarkdown(markdown: string): string | null {
+  for (const raw of markdown.split("\n")) {
+    const line = raw
+      .replace(/^\s*(?:#{1,6}\s+|[-*+]\s+|\d+\.\s+|>\s*)/, "")
+      .replace(/[*_`]/g, "")
+      .trim();
+    if (!line) continue;
+    const collapsed = line.replace(/\s+/g, " ");
+    return collapsed.length > 60
+      ? `${collapsed.slice(0, 59).trimEnd()}…`
+      : collapsed;
+  }
+  return null;
+}
+
 // --- commands ---------------------------------------------------------------
 
 export const loadShelf = () => invoke<Shelf>("bookshelf_list");

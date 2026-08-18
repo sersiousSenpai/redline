@@ -773,7 +773,7 @@ async fn drive_run(app: &AppHandle, store: &SessionStore, entry: &QueueEntry) {
     // claude session under the plan — which is also the `running` beacon and
     // the run-watcher anchor.
     let bh = crate::ledger::body_hash(&prompt);
-    crate::ledger::register_agent_prompt(&bh);
+    crate::ledger::register_agent_prompt(&prompt);
     crate::ledger::register_orchestration_prompt(&bh, sid);
     crate::advance_run_state(app, store, sid, "orchestrating");
 

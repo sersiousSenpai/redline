@@ -9,10 +9,10 @@ description: >-
   about X". Covers the emergent-taxonomy rules (repos seed roots; topics earn
   promotion by size × coherence × recency), the seven proposal ops (file /
   create / promote / split / merge / collapse / supersede), the proposals-only +
-  provenance-as-ground-truth discipline, and the vectorless tree-walk retrieval
-  contract (current decisions first, superseded as history, observations as
-  labeled patterns).
-version: 3
+  provenance-as-ground-truth discipline, and the hybrid answer-pack-first
+  retrieval contract (one batched read, then the tree walk; current decisions
+  first, superseded as history, observations as labeled patterns).
+version: 4
 ---
 
 # Redline ClassMemory
@@ -190,10 +190,58 @@ the delta doesn't warrant reorganization.
 
 ## Role B — Retrieval (you read the tree to answer a question)
 
-When you need memory to answer "what did I decide / research about X", walk the
-catalog — it is a **vectorless tree-walk**, not a similarity search:
+When you need memory to answer "what did I decide / research about X":
 
-1. **Resolve the class (step 0).** The cwd repo is a strong prior. An explicitly
+**The pack ranks; the tree organizes.** Retrieval is now hybrid — several
+independent arms find candidates, and the catalog decides what things *are*. A
+ranked index may tell you what to READ; it never tells you what a class IS.
+
+0. **Ask for the pack. This is step zero and it usually ends here.**
+   ```
+   curl -s 'http://127.0.0.1:7676/v1/memory/answer-pack?q=<the question>'
+   ```
+   One batched read: it resolves the question to a class node and returns that
+   node with its children, its links (each carrying `supersededBy`), its
+   observations, plus the user's own notes, matching prompts and matching
+   pages. Add `&node=<id>` when you already know the class. Pass the question in
+   natural language — stopwords are dropped and terms are stemmed, so
+   "compacting" finds "compaction"; quote a `"phrase"` to require adjacency.
+
+   Read the pack, then ANSWER. Everything below is what to do when it is
+   **insufficient**, and the pack tells you when that is:
+   - `node` is `null` and the lexical hits are about something else → your terms
+     resolved nothing; try the tree walk, or ask a narrower question.
+   - `truncated` names a list → there was more than fitted; re-ask with
+     `&node=<id>` to go deep on one class instead of wide on all of them.
+   - the hit you want is a class you can see but not its contents → open it with
+     the node route.
+
+   **Trust differs by arm.** Every prompt hit carries a `stage`:
+   - `and` — every term in your question is present. The precise reading.
+   - `or` — the query was widened because nothing matched precisely. Treat these
+     as *associated*, not *asserted*; verify before you state them as fact.
+   - `like` — a substring fallback; weakest of the three.
+   A `node`-arm hit is **curated** — a human accepted that class — and outranks
+   any lexical hit. `grepHits` are exact string matches and carry no ranking
+   claim at all beyond "this literal appears here".
+
+   **What the pack does NOT search:** prompts Redline constructed for its own
+   agents. Those are ~73% of the record by weight and are nobody's question;
+   they are excluded from the corpus by design, not missing by accident.
+
+0b. **Reaching for a literal?** Flags, paths, error strings and attributes are
+   invisible to any word index. Use the substring route instead — `q` must be
+   3+ characters, and `re` is an optional regex applied to what the index
+   returned:
+   ```
+   curl -s 'http://127.0.0.1:7676/v1/memory/grep?q=--allowedTools'
+   curl -s 'http://127.0.0.1:7676/v1/memory/grep?q=serde&re=rename_all.*camel'
+   ```
+
+When the pack is insufficient, walk the catalog by hand — a **vectorless
+tree-walk**, not a similarity search:
+
+1. **Resolve the class.** The cwd repo is a strong prior. An explicitly
    named repo or class overrides it. `~general` and other classes compete on
    equal footing when no repo is named.
    - `curl -s http://127.0.0.1:7676/v1/memory/tree` — the accepted tree (pass

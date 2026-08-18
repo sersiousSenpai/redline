@@ -6,6 +6,7 @@ mod ai_review;
 mod auth;
 mod bookshelf;
 mod browse;
+mod browse_list;
 #[cfg(target_os = "macos")]
 mod browser_popup;
 mod bundle;
@@ -16,10 +17,12 @@ mod code;
 mod companion;
 mod context;
 mod db;
+mod dedup;
 mod devmap;
 mod dictation;
 mod dictation_whisper;
 mod draft_chat;
+mod embed;
 mod extension;
 mod extension_host;
 mod feedback;
@@ -28,6 +31,8 @@ mod fsbrowse;
 mod fswatch;
 mod highlight;
 mod hook;
+mod codex_hook;
+mod codex_app_server;
 mod intake;
 mod moot;
 mod keeper;
@@ -50,6 +55,7 @@ mod preflight;
 mod project;
 mod pty;
 mod push;
+mod query;
 mod queue;
 mod repoicon;
 mod resolutions;
@@ -60,6 +66,7 @@ mod runwatch;
 mod scroller_guard;
 mod seat;
 mod shipwright;
+mod shots;
 mod skill;
 mod state;
 mod thumbs;
@@ -85,7 +92,7 @@ use axum::{
 };
 use std::net::SocketAddr;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use tauri::{
     menu::{
         CheckMenuItem, Menu, MenuBuilder, MenuEvent, MenuItem, MenuItemBuilder, MenuItemKind,
@@ -168,13 +175,37 @@ fn restore_handshake(raw_plan: &str) -> Option<Option<String>> {
 /// wholesale (rows, comments, attachment paths), so it must require both a
 /// sentinel-only body and a syntactically valid id; prose in a plan body must
 /// never be able to move another session's data.
-fn valid_session_uuid(id: &str) -> bool {
-    let b = id.as_bytes();
-    b.len() == 36
-        && b.iter().enumerate().all(|(i, &c)| match i {
-            8 | 13 | 18 | 23 => c == b'-',
-            _ => c.is_ascii_digit() || (b'a'..=b'f').contains(&c),
-        })
+fn valid_session_id(id: &str) -> bool {
+    // Claude currently uses lowercase UUIDs while Codex uses opaque thread
+    // ids (for example `thr_…`). A restore id never reaches the filesystem by
+    // itself, but it can re-key durable review state, so keep the accepted
+    // alphabet deliberately narrow and bounded rather than treating it as an
+    // arbitrary string.
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+}
+
+/// Pull the one official plan block from a Codex Plan-mode final message.
+/// Requiring exactly one complete block keeps ordinary Stop hooks, prose that
+/// merely discusses the marker, and malformed output out of the review store.
+fn extract_codex_proposed_plan(message: &str) -> Option<String> {
+    const OPEN: &str = "<proposed_plan>";
+    const CLOSE: &str = "</proposed_plan>";
+    let start = message.find(OPEN)?;
+    if message[start + OPEN.len()..].contains(OPEN) {
+        return None;
+    }
+    let body_start = start + OPEN.len();
+    let close_rel = message[body_start..].find(CLOSE)?;
+    let close = body_start + close_rel;
+    if message[close + CLOSE.len()..].contains(CLOSE) {
+        return None;
+    }
+    let body = message[body_start..close].trim();
+    (!body.is_empty()).then(|| body.to_string())
 }
 
 /// Interception mode, persisted to the `app_settings` table and mirrored in memory.
@@ -1369,7 +1400,7 @@ fn plan_passed_through(
     app_state: &AppState,
     session_id: &str,
     reason: &str,
-) -> Json<HookResponse> {
+) -> HookResponse {
     let _ = app_state.store.database().record_friction(
         "plan_passed_through",
         Some("plan"),
@@ -1385,7 +1416,7 @@ fn plan_passed_through(
     ) {
         tracing::warn!(error = %e, "failed to emit plan-passed-through");
     }
-    Json(allow_response(reason))
+    allow_response(reason)
 }
 
 /// Steps 3→4 of the interception chain: register the held POST (superseding a
@@ -1419,6 +1450,53 @@ async fn handle_plan(
     State(app_state): State<AppState>,
     Json(payload): Json<Value>,
 ) -> Json<HookResponse> {
+    Json(handle_plan_core(peer, app_state, payload).await)
+}
+
+/// Codex's Stop hook is the plan-mode equivalent of Claude Code's
+/// `PreToolUse(ExitPlanMode)`. Normalize it into the existing plan wire shape
+/// so parsing, persistence, review holds, Ambient mode, and restore all keep a
+/// single implementation.
+async fn handle_codex_stop(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    State(app_state): State<AppState>,
+    Json(payload): Json<Value>,
+) -> Json<Value> {
+    if payload.get("permission_mode").and_then(Value::as_str) != Some("plan") {
+        return Json(json!({}));
+    }
+    let Some(plan) = payload
+        .get("last_assistant_message")
+        .and_then(Value::as_str)
+        .and_then(extract_codex_proposed_plan)
+    else {
+        return Json(json!({}));
+    };
+    let normalized = json!({
+        "session_id": payload.get("session_id").cloned().unwrap_or(Value::Null),
+        "tool_use_id": payload.get("turn_id").cloned().unwrap_or(Value::Null),
+        "cwd": payload.get("cwd").cloned().unwrap_or(Value::Null),
+        "model": payload.get("model").cloned().unwrap_or(Value::Null),
+        "tool_input": { "plan": plan },
+        "redline_provider": "codex"
+    });
+    let decision = handle_plan_core(peer, app_state, normalized).await;
+    if decision.hook_specific_output.permission_decision == "deny" {
+        Json(json!({
+            "decision": "block",
+            "reason": decision.hook_specific_output.permission_decision_reason
+        }))
+    } else {
+        // A successful Stop hook lets the completed Plan-mode turn finish.
+        Json(json!({}))
+    }
+}
+
+async fn handle_plan_core(
+    peer: SocketAddr,
+    app_state: AppState,
+    payload: Value,
+) -> HookResponse {
     let session_id = payload
         .get("session_id")
         .and_then(|v| v.as_str())
@@ -1445,9 +1523,9 @@ async fn handle_plan(
     // Paused = killswitch: auto-approve immediately, capture nothing.
     if mode == InterceptionMode::Paused {
         tracing::info!(session_id = %session_id, tool_use_id = %tool_use_id, "Redline paused — auto-approving without capture");
-        return Json(allow_response(
+        return allow_response(
             "Redline is paused — this plan was auto-approved without review.",
-        ));
+        );
     }
 
     // Model provenance: by ExitPlanMode time the transcript has assistant
@@ -1488,11 +1566,11 @@ async fn handle_plan(
             Some(&session_id),
             Some(&plan_sid),
         );
-        return Json(deny_response(
+        return deny_response(
             "✅ You are the orchestrator for a plan already approved in Redline. Do NOT \
              plan or call ExitPlanMode — execute the approved plan as your launch prompt \
              instructs, then file the exit report and open the code review.",
-        ));
+        );
     }
 
     // Bulletproof restore rebind: a restore handshake carries the held plan's
@@ -1509,7 +1587,7 @@ async fn handle_plan(
     // consumes this — never a substring probe over the plan body.
     let restore_sentinel = restore_handshake(&raw_plan);
     if let Some(Some(target)) = restore_sentinel.clone() {
-        if !valid_session_uuid(&target) {
+        if !valid_session_id(&target) {
             tracing::warn!(
                 session_id = %session_id, target = %target,
                 "restore sentinel carries a malformed session id — refusing to rekey"
@@ -1867,7 +1945,7 @@ async fn handle_plan(
         }
     };
 
-    Json(response)
+    response
 }
 
 /// The daemon's bind address. Loopback-only by invariant (cold-wallet posture,
@@ -2019,6 +2097,7 @@ fn classify_prompt_origin(db: &db::Database, cwd: Option<&str>) -> ledger::Origi
 /// Fail-open: any error returns 200 so the hook never blocks prompt submission.
 async fn handle_prompts_ingest(
     State(app_state): State<AppState>,
+    headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> axum::response::Response {
     // 64KB cap (reject oversized payloads without parsing).
@@ -2046,27 +2125,59 @@ async fn handle_prompts_ingest(
     // A headless `claude -p` fires this hook too, so Redline's own spawned
     // agents would be double-captured (Rust site + hook). The Rust site is
     // authoritative; it registers the body before spawn, so claim-and-skip here.
+    //
+    // The header is the primary mechanism and the hash guard is the fallback,
+    // not the other way round: the guard can only recognize a body Rust predicts
+    // byte-exactly, once, within 300s, while the header rides the spawn's own
+    // environment and so also covers what an agent composes for itself mid-run
+    // (sub-agent Task prompts, retries, resumed turns) — the residue that put
+    // 4.32 MB of Redline's own instruction text into the searchable lake.
+    //
+    // Both are evaluated, and `claim_agent_prompt` runs FIRST and unconditionally
+    // so the registration is consumed either way; the handoffs below (draft →
+    // session, orchestration → run monitor) hang off this same branch and must
+    // run for a header-marked spawn too — the overnight queue's orchestrator is
+    // spawned through `claude_command_for_seat`, so it arrives here carrying the
+    // header, and skipping early would cost it its `running` beacon and its
+    // run-watcher anchor.
+    let agent_seat = headers
+        .get(hook::CAPTURE_AGENT_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
     let bh = ledger::body_hash(&prompt);
-    if ledger::claim_agent_prompt(&bh) {
+    let claimed = ledger::claim_agent_prompt(&bh);
+    if claimed || agent_seat.is_some() {
         // The draft→launched-session handoff: this hook fire is the first
         // moment the spawned session's claude id is known. When the skipped
         // body was a drafter launch, link the new session under its draft —
         // the seam the whole temporal hierarchy hinges on.
-        if let Some(draft_id) = ledger::claim_drafted_prompt(&bh) {
+        if let Some(claim) = ledger::claim_plan_launch(&bh) {
             if let Some(sid) = claude_session_id.as_deref().filter(|s| !s.is_empty()) {
                 let db = app_state.store.database();
-                if let Err(e) =
-                    ledger::record_session_link(&db, "session", sid, "drafter", &draft_id)
-                {
-                    tracing::warn!(error = %e, "failed to link launched session to its draft");
-                }
-                // Bind the drafter's launch-time prompt row (recorded with no
-                // claude session — claude hadn't spawned) to the session that
-                // now runs it, then let the transcript stamp its model. This
-                // is the seam that makes drafter-launched prompts reachable by
-                // the model backfill at all.
-                if let Err(e) = db.bind_drafter_prompt_session(&bh, &draft_id, sid) {
-                    tracing::warn!(error = %e, "failed to bind drafter prompt to its session");
+                // Bind the launch-time prompt row (recorded with no claude
+                // session — claude hadn't spawned) to the session that now runs
+                // it, then let the transcript stamp its model. This is the seam
+                // that makes launched prompts reachable by the model backfill at
+                // all, and it applies to every door: only the drafter's launch
+                // carries a thread to bind through.
+                let bound = match claim.draft_id.as_deref() {
+                    Some(draft_id) => {
+                        if let Err(e) =
+                            ledger::record_session_link(&db, "session", sid, "drafter", draft_id)
+                        {
+                            tracing::warn!(error = %e, "failed to link launched session to its draft");
+                        }
+                        db.bind_drafter_prompt_session(&bh, draft_id, sid)
+                    }
+                    None => db.bind_launch_prompt_session(&bh, sid),
+                };
+                if let Err(e) = bound {
+                    tracing::warn!(
+                        error = %e, origin = %claim.origin,
+                        "failed to bind launch prompt to its session"
+                    );
                 }
                 backfill_model_from_hook(&db, &v, sid);
             }
@@ -2121,7 +2232,14 @@ async fn handle_prompts_ingest(
             }
             advance_run_state(&app_state.app_handle, &app_state.store, &plan_sid, "running");
         }
-        return (StatusCode::OK, Json(serde_json::json!({ "skipped": "agent_dup" })))
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "skipped": "agent_dup",
+                "by": if claimed { "guard" } else { "header" },
+                "seat": agent_seat,
+            })),
+        )
             .into_response();
     }
 
@@ -2148,7 +2266,14 @@ async fn handle_prompts_ingest(
         source: ledger::PromptSource::Hook,
         origin,
         surface: surface.to_string(),
-        role: None,
+        // The CLI fires `UserPromptSubmit` for its own injections too — a
+        // `<task-notification>` or `<system-reminder>` arrives here shaped
+        // exactly like a keystroke, and 109 of them were 1.78 MB of the lake.
+        // They stay recorded (a task notification reports work the user's
+        // session actually did) but they are not the user talking, and the
+        // Timeline's role facet defaults to the user.
+        role: ledger::CorpusRole::classify_captured(&prompt),
+        user_text: None,
         session_id: None,
         claude_session_id,
         mission_id: None,
@@ -2593,6 +2718,7 @@ async fn run_server(state: AppState) {
         .route("/viewer/*path", get(handle_viewer_asset))
         .route("/assets/*path", get(handle_root_asset))
         .route("/v1/plan", post(handle_plan))
+        .route("/v1/codex/stop", post(handle_codex_stop))
         // Polis prompt store (Phase 1): the global UserPromptSubmit capture hook
         // POSTs its stdin payload here. Fail-open by design — never 500s the hook.
         .route("/v1/prompts/ingest", post(handle_prompts_ingest))
@@ -2670,6 +2796,7 @@ async fn run_server(state: AppState) {
         .route("/v1/memory/prompts", get(handle_memory_prompts))
         // The batched read: one call in place of the tree→node→search walk.
         .route("/v1/memory/answer-pack", get(handle_memory_answer_pack))
+        .route("/v1/memory/grep", get(handle_memory_grep))
         .route("/v1/memory/proposals", post(handle_memory_proposals))
         // Context access (Phase 3): the Librarian agent's friction digest —
         // ground-truth counts/staleness (backlog, held proposals, stalled
@@ -4991,6 +5118,56 @@ async fn handle_memory_answer_pack(
 }
 
 #[derive(Deserialize)]
+struct MemoryGrepQ {
+    q: Option<String>,
+    re: Option<String>,
+    case: Option<String>,
+    scope: Option<String>,
+    limit: Option<i64>,
+}
+
+/// `GET /v1/memory/grep?q=&re=&case=&scope=&limit=` — literal and regex search
+/// over the record, for the things tokenization cannot reach: flags
+/// (`--allowedTools`), paths (`src-tauri/src/db.rs`), error strings,
+/// attributes (`#[serde(rename_all)]`).
+///
+/// `q` is a substring answered from a trigram index and must be at least
+/// `GREP_MIN_LITERAL` characters — shorter is refused by name rather than
+/// silently turned into a scan. `re` is applied in Rust to what the index
+/// returned, so a pathological pattern costs one pass over the candidates
+/// instead of a walk of the corpus under the DB lock.
+///
+/// The bridge allow-list needs no change: `Bash(curl -s
+/// http://127.0.0.1:7676/*)` already covers this in all three quoting variants
+/// (`claude_proc::BRIDGE_INVARIANT_ARGS`).
+async fn handle_memory_grep(
+    State(app_state): State<AppState>,
+    Query(q): Query<MemoryGrepQ>,
+) -> axum::response::Response {
+    let db = app_state.store.database();
+    let literal = q.q.unwrap_or_default();
+    let case_sensitive = matches!(q.case.as_deref(), Some("1") | Some("true"));
+    let scope = db::GrepScope::parse(q.scope.as_deref());
+    let limit = q.limit.unwrap_or(30);
+    let re = q.re;
+    let hits = tokio::task::spawn_blocking(move || {
+        db.grep_memory(&literal, re.as_deref(), case_sensitive, scope, limit)
+    })
+    .await;
+    match hits {
+        Ok(Ok(hits)) => Json(serde_json::json!({ "hits": hits })).into_response(),
+        // A refusal is a 400 WITH its reason in the body: the agent's next move
+        // ("lengthen the needle") is only available if it can read why.
+        Ok(Err(e)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+        Err(e) => browser_error_response(format!("grep failed: {e}")),
+    }
+}
+
+#[derive(Deserialize)]
 struct MemoryPromptsQ {
     since_seq: Option<i64>,
     limit: Option<i64>,
@@ -5085,11 +5262,17 @@ struct ContextPromptsQ {
     parent_session: Option<String>,
     /// Exact-match filter on the recorded model (`prompts.model`).
     model: Option<String>,
+    /// Corpus role: `user` (default view) | `agent` | `system`.
+    role: Option<String>,
+    /// Opt in to Redline's own constructed prefaces, which are excluded by
+    /// default. `1`/`true` to include.
+    include_agent: Option<String>,
 }
 
-/// `GET /v1/context/prompts?session=&mission=&surface=&project=&since_seq=&q=&limit=`
-/// — filtered read of the captured-prompt lake. Every filter is ANDed; `q` is a
-/// bound substring (injection-safe). Oldest-first, byte-bounded. Read-only.
+/// `GET /v1/context/prompts?session=&mission=&surface=&project=&since_seq=&q=&limit=&role=&include_agent=`
+/// — filtered read of the captured-prompt lake. Every filter is ANDed; `q` is
+/// planned through the FTS index (AND→OR→LIKE cascade). `agent` rows are
+/// excluded unless asked for. Oldest-first, byte-bounded. Read-only.
 async fn handle_context_prompts(
     State(app_state): State<AppState>,
     Query(q): Query<ContextPromptsQ>,
@@ -5107,6 +5290,8 @@ async fn handle_context_prompts(
         thread_id: q.thread_id,
         parent_session_id: q.parent_session,
         model: q.model,
+        role: q.role,
+        include_agent: matches!(q.include_agent.as_deref(), Some("1") | Some("true")),
     };
     match context::list_prompts(&db, &filters) {
         Ok(items) => Json(serde_json::json!({ "items": items })).into_response(),
@@ -5296,6 +5481,41 @@ struct OpenReq {
     url: String,
 }
 
+const LOOPBACK_HOSTS: [&str; 5] = ["localhost", "127.0.0.1", "0.0.0.0", "[::1]", "::1"];
+
+/// Do these two URLs mean "the same tab"? The Rust half of `sameTabUrl` in
+/// `src/lib/browseList.ts`, and it has to agree with it: the frontend now
+/// FOCUSES an already-open tab instead of stacking a duplicate, so a request
+/// that used to always produce a new active label often produces no label
+/// change at all. Without this, `handle_browser_open` would sit out its whole
+/// 6s budget and tell the agent a focus that worked had timed out.
+///
+/// Duplicated rather than shared because the rule is ten lines and the
+/// alternative is an IPC round-trip inside a poll loop. Loopback matches on
+/// effective port; everything else on normalized origin + path + query.
+fn same_tab_url(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    let (Ok(ua), Ok(ub)) = (a.parse::<tauri::Url>(), b.parse::<tauri::Url>()) else {
+        return false;
+    };
+    let host = |u: &tauri::Url| u.host_str().unwrap_or("").to_ascii_lowercase();
+    // `Url::port_or_known_default` fills in 80/443 for http/https, which is
+    // exactly the "effective port" the JS side computes.
+    let port = |u: &tauri::Url| u.port_or_known_default();
+    let (ha, hb) = (host(&ua), host(&ub));
+    let loop_a = LOOPBACK_HOSTS.contains(&ha.as_str());
+    let loop_b = LOOPBACK_HOSTS.contains(&hb.as_str());
+    if loop_a || loop_b {
+        return loop_a && loop_b && port(&ua) == port(&ub);
+    }
+    if ua.scheme() != ub.scheme() || ha != hb || port(&ua) != port(&ub) {
+        return false;
+    }
+    ua.path().trim_end_matches('/') == ub.path().trim_end_matches('/') && ua.query() == ub.query()
+}
+
 /// `POST /v1/browser/open` {url} — open the URL in a NEW tab and foreground it
 /// (the frontend owns the tab list, so this signals `BrowserPane` via the
 /// `browse-open-tab` event), then wait for that tab's webview to become active
@@ -5318,14 +5538,25 @@ async fn handle_browser_open(
         return browser_error_response(format!("could not signal the browser pane: {e}"));
     }
     // BrowserPane creates the native webview asynchronously, then activates it
-    // (mirroring the label back via browser_set_active). Poll until a NEW active
-    // label resolves to a live webview, or give up (e.g. the tab cap was hit, so
-    // openTab no-ops and the active tab never changes).
+    // (mirroring the label back via browser_set_active). Poll until the active
+    // label resolves to a live webview showing what we asked for, or give up
+    // (e.g. the tab cap was hit, so openTab no-ops and nothing ever changes).
+    //
+    // TWO ways to succeed, because `openTab` has two outcomes. A brand-new tab
+    // changes the active label. Focusing an ALREADY-OPEN tab (the dedupe) may
+    // not change it at all — the requested URL is already the active tab — so
+    // the label test alone would report a correct focus as a timeout. The
+    // second test asks the tab mirror what the active tab is actually showing.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
     loop {
         if let Some(label) = app_state.active_browser.get() {
             let is_new = before.as_deref() != Some(label.as_str());
-            if is_new && app_state.app_handle.get_webview(&label).is_some() {
+            let shows_it = app_state
+                .browser_tabs
+                .get()
+                .iter()
+                .any(|t| t.label == label && same_tab_url(&t.url, &url));
+            if (is_new || shows_it) && app_state.app_handle.get_webview(&label).is_some() {
                 let id = label.strip_prefix("browser-").unwrap_or(&label).to_string();
                 return Json(serde_json::json!({ "ok": true, "label": label, "id": id, "url": url }))
                     .into_response();
@@ -5756,6 +5987,11 @@ async fn browser_cache_snapshot(
     app: AppHandle,
     store: tauri::State<'_, SessionStore>,
     label: String,
+    // `on_screen`: whether the webview is actually visible. The frontend
+    // already computes this (`BrowserPane.tsx`), and the backend cannot —
+    // WebKit snapshots a hidden view as a blank frame and reports success.
+    // Absent (an older caller) means "don't capture", which fails safe.
+    on_screen: Option<bool>,
 ) -> Result<(), String> {
     if app.get_webview(&label).is_none() {
         return Ok(());
@@ -5765,6 +6001,19 @@ async fn browser_cache_snapshot(
         .get_webview(&label)
         .and_then(|wv| webview_current_url(&wv))
         .unwrap_or_default();
+
+    // ONE policy gates the text row and the picture together. A denylist that
+    // suppressed the screenshot while `browse_events.text` kept the full DOM in
+    // plaintext SQLite would be privacy theatre — the words are the sensitive
+    // part and the pixels are a redundant copy of them. So this returns before
+    // anything is recorded, not merely before the capture.
+    {
+        let db = store.database();
+        let denylist = db.get_setting(shots::SETTING_SHOT_DENYLIST).unwrap_or_default();
+        if !shots::capture_allowed(&denylist, &url) {
+            return Ok(());
+        }
+    }
 
     // Dojo P2 — record this page as a browsing event in the lake (best-effort).
     // The normalized on-screen content + a content hash feed the "Browsing
@@ -5778,6 +6027,11 @@ async fn browser_cache_snapshot(
                 .find(|t| t.label == label)
                 .map(|t| t.browse_id);
             let db = store.database();
+            // The content hash IS the shot key's basis, so it is computed here
+            // the same way `record_browse_event` computes it — content
+            // addressing is what makes the 829 → 665 dedupe free and makes
+            // "forget this picture" mean it in every tab that saw the page.
+            let context_hash = ledger::body_hash(&text);
             match ledger::record_browse_event(
                 &db,
                 ledger::BrowseEventInput {
@@ -5791,6 +6045,31 @@ async fn browser_cache_snapshot(
                 },
             ) {
                 Ok(Some(_)) => {
+                    // The picture, taken in the SAME command that recorded the
+                    // row: there is never a window where the row exists without
+                    // its shot, and `looks_blank`'s existing retry still guards
+                    // the too-early frame. Best-effort throughout — a page
+                    // recorded without a picture is a normal state (NULL
+                    // `shot_key`), a picture without a page is not.
+                    if on_screen.unwrap_or(false)
+                        && db
+                            .get_setting(shots::SETTING_SHOTS_ENABLED)
+                            .map(|v| v != "false")
+                            .unwrap_or(true)
+                    {
+                        let key = shots::page_key(&context_hash);
+                        match thumbs::capture_shot(&app, &label, shots::SHOT_WIDTH).await {
+                            Ok(bytes) => match shots::write_shot(&app, &key, &bytes) {
+                                Ok(_) => {
+                                    if let Err(e) = db.set_shot_key_for_hash(&context_hash, &key) {
+                                        tracing::warn!(error = %e, "failed to bind a shot key");
+                                    }
+                                }
+                                Err(e) => tracing::warn!(error = %e, "failed to write a page shot"),
+                            },
+                            Err(e) => tracing::debug!(error = %e, "no page shot for this capture"),
+                        }
+                    }
                     // Companion journal: a page the user landed on (url+title
                     // only — the content stays in the lake, not the journal).
                     let _ = db.append_journal(
@@ -6953,7 +7232,31 @@ fn approve_plan(
         },
     );
     refresh_tray(&app, &store);
+    capture_approval_shot(&app, &store, &session_id);
     Ok(())
+}
+
+/// Photograph the moment a plan was approved.
+///
+/// Fired ONLY from approval, which is what keeps this cheap: at the observed
+/// rate that is ~236 shots a year (~12 MB) against the browse stream's ~240 MB.
+/// Detached from the caller so approval never waits on a screenshot, and
+/// best-effort throughout — the approval is the event, the picture is a nicety.
+fn capture_approval_shot(app: &AppHandle, store: &SessionStore, session_id: &str) {
+    let app = app.clone();
+    let db = store.database();
+    let session_id = session_id.to_string();
+    tauri::async_runtime::spawn(async move {
+        // The seq of the approval that just landed — the shot is keyed to the
+        // event so the Timeline row and the picture find each other.
+        let Ok(Some(seq)) = db.latest_decision_seq(&session_id, "approval") else {
+            return;
+        };
+        if let Some(key) = shots::capture_redline_surface(&app, &db, "approval", seq).await {
+            tracing::debug!(seq, key, "captured an approval shot");
+            let _ = app.emit("memory-changed", ());
+        }
+    });
 }
 
 /// The deny reason `orchestrate_plan` sends into the held ExitPlanMode. One
@@ -7053,7 +7356,7 @@ fn record_orchestration_launch(
         return Err("orchestrate launch needs a prompt and a plan session id".to_string());
     }
     let bh = ledger::body_hash(&body);
-    ledger::register_agent_prompt(&bh);
+    ledger::register_agent_prompt(&body);
     // A retry re-arms both guards deliberately: `register_*` is a plain
     // insert, so re-registering after a claim or a `GUARD_TTL` expiry
     // genuinely re-arms — a reviewer who takes >5 min on the workflow card
@@ -8796,12 +9099,20 @@ fn ledger_set_capture_external(
         .map_err(|e| e.to_string())
 }
 
-/// Record a drafted prompt at Prompt Drafter launch. The plan session doesn't
-/// exist yet (claude hasn't spawned), so there's no claude session id here; the
-/// drafted body is registered against the agent guard so the eventual hook fire
-/// for the spawned session doesn't double-record it.
+/// Record a plan launch, from whichever of Redline's three doors made it: the
+/// Front Door's one sentence, the Prompt Drafter's document, or the browser's
+/// Send to Claude Code. The plan session doesn't exist yet (claude hasn't
+/// spawned), so there's no claude session id here; the launched body is
+/// registered against the agent guard so the eventual hook fire for the spawned
+/// session doesn't double-record it, and against the launch guard so that same
+/// fire can bind this prompt row to the session now running it.
+///
+/// `origin` is ground truth for `surface`. It used to be hardcoded `"drafter"`,
+/// which filed every front-door and browser launch in the lake as a drafter
+/// launch — a live provenance bug, since `surface` feeds `resolve_parent` and
+/// the Companion's account of what you did.
 #[tauri::command]
-fn record_drafted_prompt(
+fn record_plan_launch(
     app: AppHandle,
     store: tauri::State<'_, SessionStore>,
     active_mission: tauri::State<'_, ActiveMission>,
@@ -8809,19 +9120,21 @@ fn record_drafted_prompt(
     markdown: String,
     project_path: Option<String>,
     draft_id: Option<String>,
+    origin: Option<String>,
 ) -> Result<(), String> {
     let body = markdown.trim().to_string();
     if body.is_empty() {
         return Ok(());
     }
+    // An unknown origin degrades to the door that has a document, matching what
+    // the caller must have been — never a guess that widens the lie.
+    let origin = origin
+        .filter(|o| matches!(o.as_str(), "front-door" | "drafter" | "browser"))
+        .unwrap_or_else(|| "drafter".to_string());
     let bh = ledger::body_hash(&body);
-    ledger::register_agent_prompt(&bh);
     let db = store.database();
     let draft_id = draft_id.filter(|d| !d.trim().is_empty());
     let thread = draft_id.as_ref().map(|d| {
-        // Register the launch body for the draft→session handoff: the ingest
-        // hook links the spawned session under this draft when it fires.
-        ledger::register_drafted_prompt(&bh, d);
         let surface = active_surface.kind_and_id();
         let parent = ledger::resolve_parent(
             None,
@@ -8843,24 +9156,43 @@ fn record_drafted_prompt(
     let input = ledger::PromptInput {
         source: ledger::PromptSource::DrafterLaunch,
         origin: ledger::Origin::Redline,
-        surface: "drafter".to_string(),
-        role: None,
+        surface: origin.clone(),
+        role: crate::ledger::CorpusRole::User,
+        user_text: None,
         session_id: None,
         claude_session_id: None,
         mission_id: None,
         project_path,
-        body,
+        body: body.clone(),
         thread,
-        author: None, // the launched draft is the human's own document
+        author: None, // the launched prompt is the human's own writing
         // The launch command passes no --model (buildPlanLaunchCommand); the
         // transcript backfill stamps it once the session is bound + answering.
         model: None,
         model_source: None,
     };
-    ledger::record_prompt(&db, input)?;
+    // Write the ledger row BEFORE arming either guard. Both guards exist to make
+    // the spawned session's own hook fire *skip* this body; arming them first
+    // meant a failed write left them armed for the 300s TTL, the hook skipped
+    // the prompt, and the prompt existed nowhere at all — the launch succeeded,
+    // the plan arrived, and nothing recorded what was asked. Recording first
+    // makes the worst case "a prompt with no session link" instead of "no
+    // prompt", and `record_friction` gives Shipwright and the Librarian the
+    // failure rather than a silence.
+    if let Err(e) = ledger::record_prompt(&db, input) {
+        let _ = db.record_friction(
+            "plan_launch_unrecorded",
+            Some(&origin),
+            draft_id.as_deref(),
+            Some(&e),
+        );
+        return Err(e);
+    }
+    ledger::register_agent_prompt(&body);
+    ledger::register_plan_launch(&bh, &origin, draft_id.as_deref());
     let _ = db.append_journal(
         "drafter_launch",
-        Some("drafter"),
+        Some(&origin),
         draft_id.as_deref(),
         None,
         None,
@@ -9664,6 +9996,42 @@ fn memory_status(store: tauri::State<'_, SessionStore>) -> Result<serde_json::Va
     let pending_proposals = db
         .count_pending_class_proposals()
         .map_err(|e| e.to_string())?;
+    // Corpus composition — the number that was missing. Reported as rows AND
+    // bytes per role, because the two tell different stories: 397 machine rows
+    // out of 1,213 is a third of the corpus by count and 92.6% of it by weight.
+    let composition = db.corpus_composition().map_err(|e| e.to_string())?;
+    let corpus_roles: Vec<serde_json::Value> = composition
+        .iter()
+        .map(|(role, rows, bytes)| serde_json::json!({ "role": role, "rows": rows, "bytes": bytes }))
+        .collect();
+    let corpus_bytes: i64 = composition.iter().map(|(_, _, b)| *b).sum();
+    let user_bytes: i64 = composition
+        .iter()
+        .filter(|(r, _, _)| r == "user")
+        .map(|(_, _, b)| *b)
+        .sum();
+    let (gist_agent, gist_deterministic) = db.gist_source_counts().map_err(|e| e.to_string())?;
+    let (archived_rows, archived_bytes) = db.archive_stats().map_err(|e| e.to_string())?;
+    let (prefetch_hits, prefetch_turns) = db.prefetch_hit_rate().map_err(|e| e.to_string())?;
+    // A HALF-BUILT semantic index degrades recall silently, so it is reported
+    // rather than inferred: `pending` is the honest counterpart to `chunks`,
+    // and `provider: "absent"` says the arm cannot run at all — which is a fact
+    // about this machine, not about the user's history.
+    let embeddings = match embed::provider_for(&db) {
+        Some(p) => {
+            let (chunks, pending) = db.embedding_stats(&p.model_id()).map_err(|e| e.to_string())?;
+            serde_json::json!({
+                "provider": embed::provider_kind().as_str(),
+                "model": p.model_id(),
+                "chunks": chunks,
+                "pending": pending,
+            })
+        }
+        None => serde_json::json!({
+            "provider": embed::ProviderKind::Absent.as_str(),
+            "model": null, "chunks": 0, "pending": 0,
+        }),
+    };
     Ok(serde_json::json!({
         "live": true,
         "itemCount": max_seq,
@@ -9675,6 +10043,113 @@ fn memory_status(store: tauri::State<'_, SessionStore>) -> Result<serde_json::Va
         "reclaimedBytes": reclaimed,
         "lastCompactionTs": last_compaction_ts,
         "pendingProposals": pending_proposals,
+        "corpusRoles": corpus_roles,
+        "corpusBytes": corpus_bytes,
+        "corpusUserBytes": user_bytes,
+        "keeperGistSource": { "agent": gist_agent, "deterministic": gist_deterministic },
+        "archivedCount": archived_rows,
+        "archivedBytes": archived_bytes,
+        "askPrefetch": { "hits": prefetch_hits, "turns": prefetch_turns },
+        "embeddings": embeddings,
+    }))
+}
+
+/// Set (or clear) the embedding provider. Changing it invalidates the index —
+/// vectors from two models are not comparable — so this drops them and lets the
+/// keeper rebuild, which is safe precisely because the index is derived.
+///
+/// The key is stored in `app_settings` and read only in Rust; it never crosses
+/// into the webview, and the network call is made from here. Same shape as the
+/// premium TTS engines (`tts.rs`).
+#[tauri::command(async)]
+fn memory_set_embed_provider(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    provider: String,
+    key: Option<String>,
+) -> Result<(), String> {
+    let db = store.database();
+    let provider = provider.trim();
+    if !matches!(provider, "local" | "openai" | "") {
+        return Err(format!("unknown embedding provider `{provider}`"));
+    }
+    db.set_setting(embed::SETTING_EMBED_PROVIDER, provider)
+        .map_err(|e| e.to_string())?;
+    if let Some(k) = key {
+        db.set_setting(embed::SETTING_EMBED_KEY, k.trim())
+            .map_err(|e| e.to_string())?;
+    }
+    // Two models' vectors are not comparable, so the old ones go.
+    let _ = db.clear_embeddings();
+    let _ = app.emit("memory-changed", ());
+    Ok(())
+}
+
+/// What the settings row shows: the configured provider and whether a key is
+/// present. The key itself is NEVER returned — only whether one is set.
+#[tauri::command]
+fn memory_embed_settings(
+    store: tauri::State<'_, SessionStore>,
+) -> Result<serde_json::Value, String> {
+    let db = store.database();
+    Ok(serde_json::json!({
+        "provider": db
+            .get_setting(embed::SETTING_EMBED_PROVIDER)
+            .unwrap_or_else(|| "local".to_string()),
+        "hasKey": db
+            .get_setting(embed::SETTING_EMBED_KEY)
+            .is_some_and(|k| !k.trim().is_empty()),
+        "localAvailable": embed::provider_kind() != embed::ProviderKind::Absent,
+        "localKind": embed::provider_kind().as_str(),
+    }))
+}
+
+/// Put a cold-compacted prompt's words back.
+///
+/// The other half of Phase 1.4, and the reason archiving was worth doing at
+/// all: a cold compaction is a GUESS that you were finished with something, and
+/// a guess you cannot undo is just a deletion with better manners. The inflated
+/// bytes are re-hashed against the archive's recorded hash before they go
+/// anywhere near the row — the archive is derived data outside the chain, so it
+/// gets no trust it hasn't just earned.
+///
+/// Returns `false` when there is nothing archived: never compacted, compacted
+/// before archiving existed, or forgotten on purpose (a forget deletes the
+/// archive too — forget means forget).
+#[tauri::command(async)]
+fn memory_restore(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+    prompt_id: i64,
+) -> Result<bool, String> {
+    let db = store.database();
+    let restored = db.restore_prompt_body(prompt_id).map_err(|e| e.to_string())?;
+    if restored {
+        let _ = app.emit("memory-changed", ());
+        let _ = app.emit("ledger-changed", ());
+        extension_host::publish(
+            ext_events::LEDGER_CHANGED,
+            &ext_events::LedgerChanged { ts_ms: extension_host::now_ms() },
+        );
+    }
+    Ok(restored)
+}
+
+/// Rebuild the semantic index from scratch: drop every vector for the current
+/// model and let the keeper's watch re-embed. The escape hatch for a corrupt or
+/// half-built index — the whole thing is DERIVED, so throwing it away costs
+/// nothing but time and can never touch the record.
+#[tauri::command(async)]
+fn memory_reindex(
+    app: AppHandle,
+    store: tauri::State<'_, SessionStore>,
+) -> Result<serde_json::Value, String> {
+    let db = store.database();
+    let dropped = db.clear_embeddings().map_err(|e| e.to_string())?;
+    let _ = app.emit("memory-changed", ());
+    Ok(serde_json::json!({
+        "dropped": dropped,
+        "provider": embed::provider_kind().as_str(),
     }))
 }
 
@@ -9689,7 +10164,13 @@ fn memory_forget(
 ) -> Result<Option<i64>, String> {
     let db = store.database();
     let seq = db
-        .compact_prompt_body(prompt_id, "[forgotten]", "forget", &ledger::local_author())
+        .compact_prompt_body(
+            prompt_id,
+            "[forgotten]",
+            "forget",
+            keeper::GIST_SOURCE_DETERMINISTIC,
+            &ledger::local_author(),
+        )
         .map_err(|e| e.to_string())?;
     let _ = app.emit("memory-changed", ());
     let _ = app.emit("ledger-changed", ());
@@ -10174,6 +10655,30 @@ fn install_hook() -> Result<HookStatus, String> {
     result
 }
 
+#[tauri::command]
+fn get_codex_hook_status() -> codex_hook::CodexHookStatus {
+    codex_hook::get_status()
+}
+
+#[tauri::command]
+fn install_codex_hook() -> Result<codex_hook::CodexHookStatus, String> {
+    let result = codex_hook::install();
+    if let Ok(status) = &result {
+        tracing::info!(path = %status.hooks_path, "installed Redline Codex hooks");
+    }
+    result
+}
+
+#[tauri::command]
+fn get_codex_skill_status() -> SkillStatus {
+    skill::get_codex_status()
+}
+
+#[tauri::command]
+fn install_codex_skill() -> Result<SkillStatus, String> {
+    skill::install_codex()
+}
+
 /// "Remove Redline Hook…" app-menu flow: confirm, remove Redline's entry from
 /// ~/.claude/settings.json, report. Removal is reversible — the next launch
 /// detects the missing hook and the setup modal offers the one-click install
@@ -10366,6 +10871,10 @@ pub fn run() {
             show_main_window,
             get_hook_status,
             install_hook,
+            get_codex_hook_status,
+            install_codex_hook,
+            get_codex_skill_status,
+            install_codex_skill,
             get_skill_status,
             install_skill,
             pty::pty_spawn,
@@ -10408,6 +10917,13 @@ pub fn run() {
             browse::browse_unqueue,
             browse::browse_discard,
             browse::browse_kill_all,
+            browse_list::browse_list_get,
+            browse_list::browse_list_start,
+            browse_list::browse_list_add,
+            browse_list::browse_list_update,
+            browse_list::browse_list_remove,
+            browse_list::browse_list_reorder,
+            browse_list::browse_list_clear,
             mission::mission_create,
             mission::mission_list,
             mission::mission_set_goal,
@@ -10511,6 +11027,12 @@ pub fn run() {
             thumbs::browser_take_thumbnail,
             thumbs::thumbs_list,
             thumbs::thumbs_prune,
+            shots::shots_list,
+            shots::shot_forget,
+            shots::shots_caption_backlog,
+            shots::shots_caption_run,
+            shots::shots_get_policy,
+            shots::shots_set_policy,
             surface_set_active,
             drafter_set_doc,
             drafter_get_doc,
@@ -10535,12 +11057,9 @@ pub fn run() {
             bookshelf::draft_source_import_file,
             bookshelf::draft_source_list,
             bookshelf::draft_source_delete,
-            draft_chat::draft_chat_send,
             draft_chat::draft_instruct,
             draft_chat::draft_turn_status,
-            draft_chat::get_draft_chat_thread,
             draft_chat::draft_chat_cancel,
-            draft_chat::draft_chat_discard,
             draft_chat::draft_chat_kill_all,
             draft_chat::draft_comment_add,
             draft_chat::draft_comment_list,
@@ -10585,7 +11104,7 @@ pub fn run() {
             memory_map,
             ledger_get_capture_external,
             ledger_set_capture_external,
-            record_drafted_prompt,
+            record_plan_launch,
             classmem_organize,
             classmem_tree,
             classmem_node,
@@ -10605,6 +11124,10 @@ pub fn run() {
             classmem_pin_observation,
             memory_status,
             memory_forget,
+            memory_reindex,
+            memory_restore,
+            memory_set_embed_provider,
+            memory_embed_settings,
             memory_revert_link,
             memory_note_write,
             memory_note_get,
@@ -10757,6 +11280,10 @@ pub fn run() {
             // reasoning as the fork state.
             let browse_state = browse::BrowseState::new(db.clone());
             app.manage(browse_state);
+
+            // A tab's working list. Pure CRUD — no `claude`, nothing to
+            // resolve lazily, so it holds the db and nothing else.
+            app.manage(browse_list::BrowseListState::new(db.clone()));
 
             // Mission orchestrator (browser pane, a tier above the browse
             // agents). Same lazy-`claude` reasoning; reads across tabs + pins.
@@ -11250,6 +11777,81 @@ mod tests {
     use super::*;
     use crate::db::Database;
 
+    /// `same_tab_url` has to agree with `sameTabUrl` in browseList.ts, because
+    /// the frontend's dedupe decides whether the active label changes and this
+    /// decides whether that counts as success. A drift between the two shows up
+    /// as `/v1/browser/open` reporting a timeout on a focus that worked.
+    #[test]
+    fn same_tab_url_matches_a_dev_server_by_port() {
+        // The reported bug, in three strings: the card links one, the poll
+        // rewrites the tab to another, a redirect produces the third.
+        assert!(same_tab_url(
+            "http://localhost:3000",
+            "http://localhost:3000/"
+        ));
+        assert!(same_tab_url(
+            "http://localhost:3000",
+            "http://localhost:3000/dashboard"
+        ));
+        assert!(same_tab_url("http://127.0.0.1:3000/x", "http://localhost:3000"));
+        assert!(same_tab_url("https://localhost:3000", "http://localhost:3000"));
+        // Different port is a different server, loopback or not.
+        assert!(!same_tab_url(
+            "http://localhost:3000",
+            "http://localhost:5173"
+        ));
+        // Loopback and public are two different machines.
+        assert!(!same_tab_url("http://localhost:3000", "http://example.com:3000"));
+    }
+
+    #[test]
+    fn same_tab_url_is_strict_off_loopback() {
+        assert!(same_tab_url("https://example.com/a/", "https://example.com/a"));
+        assert!(same_tab_url(
+            "https://example.com/a#top",
+            "https://example.com/a"
+        ));
+        assert!(same_tab_url("https://example.com:443/a", "https://example.com/a"));
+        // A public site's paths are separate pages — only loopback collapses
+        // them, and only because a dev server's identity is its port.
+        assert!(!same_tab_url("https://example.com/a", "https://example.com/b"));
+        assert!(!same_tab_url(
+            "https://example.com/a?x=1",
+            "https://example.com/a?x=2"
+        ));
+        assert!(!same_tab_url("https://example.com/a", "http://example.com/a"));
+        // Unparseable on either side falls back to exact equality: never widen
+        // a match we can't reason about.
+        assert!(!same_tab_url("not a url", "https://example.com"));
+        assert!(same_tab_url("not a url", "not a url"));
+    }
+
+    /// A failed ledger write must leave BOTH launch guards disarmed. Both exist
+    /// to make the spawned session's own hook fire *skip* this body; arming
+    /// them before the write meant a failed write left them armed for the 300s
+    /// TTL, the hook skipped the prompt, and the prompt existed nowhere — the
+    /// launch succeeded, the plan arrived, and nothing recorded what was asked.
+    /// Ordering is the whole fix, so ordering is what's pinned.
+    #[test]
+    fn a_failed_ledger_write_leaves_both_launch_guards_disarmed() {
+        const SRC: &str = include_str!("lib.rs");
+        let body = SRC
+            .split_once("fn record_plan_launch(")
+            .expect("record_plan_launch exists")
+            .1;
+        let record = body.find("ledger::record_prompt(&db, input)").expect("records");
+        let agent_guard = body.find("ledger::register_agent_prompt(&body)").expect("arms");
+        let launch_guard = body.find("ledger::register_plan_launch(").expect("arms");
+        assert!(
+            record < agent_guard && record < launch_guard,
+            "record_prompt must run BEFORE either guard is armed"
+        );
+        // ...and the failure must be visible to Shipwright/Librarian, not just
+        // returned to a caller that used to drop it.
+        let friction = body.find("record_friction(").expect("friction on the error path");
+        assert!(friction < agent_guard, "friction is on the early-return path");
+    }
+
     /// The suggestions endpoint teaches snake_case but agents long saw
     /// `blockId`/`agentId` — both casings must deserialize, or block ops 400
     /// on casing alone.
@@ -11368,7 +11970,8 @@ mod tests {
                 source: ledger::PromptSource::DrafterLaunch,
                 origin: ledger::Origin::Redline,
                 surface: "drafter".into(),
-                role: None,
+                role: crate::ledger::CorpusRole::User,
+                user_text: None,
                 session_id: None,
                 claude_session_id: None,
                 mission_id: None,
@@ -11392,7 +11995,8 @@ mod tests {
                 source: ledger::PromptSource::RustFirstTurn,
                 origin: ledger::Origin::Redline,
                 surface: "browse".into(),
-                role: None,
+                role: crate::ledger::CorpusRole::User,
+                user_text: None,
                 session_id: None,
                 claude_session_id: Some("cs-1".into()),
                 mission_id: None,
@@ -11618,15 +12222,31 @@ mod tests {
     }
 
     #[test]
-    fn rekey_gate_requires_a_well_formed_session_uuid() {
-        // The rekey moves a live review's rows wholesale; hook-input prose
-        // must never reach it with anything but a real claude session id.
-        assert!(valid_session_uuid("57b38664-9fa4-4b71-a5a2-fe88f70ac1b9"));
-        assert!(!valid_session_uuid("57B38664-9FA4-4B71-A5A2-FE88F70AC1B9")); // uppercase
-        assert!(!valid_session_uuid("abc-123")); // prose-shaped
-        assert!(!valid_session_uuid("57b386649fa44b71a5a2fe88f70ac1b9")); // no dashes
-        assert!(!valid_session_uuid("../../etc/passwd"));
-        assert!(!valid_session_uuid(""));
+    fn rekey_gate_accepts_provider_ids_but_rejects_path_like_input() {
+        assert!(valid_session_id("57b38664-9fa4-4b71-a5a2-fe88f70ac1b9"));
+        assert!(valid_session_id("thr_0199a213-81c0-7800-8aa1-bbab2a035a53"));
+        assert!(valid_session_id("ABC_123"));
+        assert!(!valid_session_id("../../etc/passwd"));
+        assert!(!valid_session_id("contains spaces"));
+        assert!(!valid_session_id(""));
+        assert!(!valid_session_id(&"a".repeat(129)));
+    }
+
+    #[test]
+    fn codex_plan_extraction_requires_one_complete_nonempty_block() {
+        assert_eq!(
+            extract_codex_proposed_plan("before\n<proposed_plan>\n# Build\n\nBody\n</proposed_plan>\nafter"),
+            Some("# Build\n\nBody".to_string())
+        );
+        assert_eq!(extract_codex_proposed_plan("ordinary answer"), None);
+        assert_eq!(extract_codex_proposed_plan("<proposed_plan> </proposed_plan>"), None);
+        assert_eq!(extract_codex_proposed_plan("<proposed_plan># missing close"), None);
+        assert_eq!(
+            extract_codex_proposed_plan(
+                "<proposed_plan># one</proposed_plan><proposed_plan># two</proposed_plan>"
+            ),
+            None
+        );
     }
 
     #[test]

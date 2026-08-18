@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import type { ReactNode } from "react";
-import type { HookStatus, SkillStatus } from "../types";
+import type { CodexHookStatus, HookStatus, SkillStatus } from "../types";
 import { CopyChip } from "./CopyChip";
 
 interface HookSetupModalProps {
@@ -10,6 +10,8 @@ interface HookSetupModalProps {
   phase: "setup" | "done";
   hookStatus: HookStatus;
   skillStatus: SkillStatus;
+  codexHookStatus?: CodexHookStatus | null;
+  codexSkillStatus?: SkillStatus | null;
   /** Installs both the hook and the skill. */
   onInstall: () => void;
   /** Dismisses the post-install explainer. */
@@ -112,6 +114,8 @@ export function HookSetupModal({
   phase,
   hookStatus,
   skillStatus,
+  codexHookStatus,
+  codexSkillStatus,
   onInstall,
   onDismiss,
   onShowHowItWorks,
@@ -154,9 +158,9 @@ export function HookSetupModal({
                 marginBottom: 14,
               }}
             >
-              Redline works by plugging into Claude Code — a <strong>hook</strong>{" "}
-              that routes every plan here for review, and a <strong>skill</strong>{" "}
-              that teaches Claude the review format. Until they're installed,
+              Redline plugs into Claude Code and Codex using a <strong>hook</strong>{" "}
+              that routes plans here for review, plus <strong>skills</strong>{" "}
+              that teach each agent the review format. Until they're installed,
               plans never leave the terminal and Redline has nothing to show.
               Installing is one click; each piece is a plain file edit you can
               inspect or undo.
@@ -177,12 +181,28 @@ export function HookSetupModal({
                 note={hookNote}
               />
               <PieceLine
-                label="Review-protocol skill"
+                label="Claude Code review skill"
                 description="Teaches Claude presentation-aware plan markdown and the revision contract."
                 path={skillStatus.skillPath}
                 installed={skillStatus.installed && !skillStatus.outdated}
                 note={skillNote}
               />
+              {codexHookStatus?.available && (
+                <PieceLine
+                  label="Codex plan and prompt hooks"
+                  description="Routes Codex Plan-mode proposals into Redline and captures prompts without blocking."
+                  path={codexHookStatus.hooksPath}
+                  installed={codexHookStatus.installed}
+                />
+              )}
+              {codexHookStatus?.available && codexSkillStatus && (
+                <PieceLine
+                  label="Codex review skill"
+                  description="Installs Redline's review and collaboration contracts for Codex."
+                  path={codexSkillStatus.skillPath}
+                  installed={codexSkillStatus.installed && !codexSkillStatus.outdated}
+                />
+              )}
             </div>
             <p
               style={{

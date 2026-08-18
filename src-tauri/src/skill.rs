@@ -103,7 +103,7 @@ const SKILLS: &[EmbeddedSkill] = &[
     },
     EmbeddedSkill {
         name: "classmemory",
-        version: 3,
+        version: 4,
         content: include_str!("../../skills/classmemory/SKILL.md"),
     },
     EmbeddedSkill {
@@ -182,6 +182,13 @@ fn skills_root() -> PathBuf {
     home.join(".claude").join("skills")
 }
 
+fn codex_skills_root() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    home.join(".codex").join("skills")
+}
+
 /// Per-skill install state at a path: `Ok(true)` installed-and-current,
 /// `Ok(false)` present-but-stale, `Err` absent. Byte-equality, not existence —
 /// an existence-only check would report a stale file as installed after a
@@ -196,6 +203,10 @@ fn is_current(skill: &EmbeddedSkill, path: &std::path::Path) -> Result<bool, ()>
 
 pub fn get_status() -> SkillStatus {
     get_status_under(&skills_root())
+}
+
+pub fn get_codex_status() -> SkillStatus {
+    get_status_under(&codex_skills_root())
 }
 
 /// Aggregate status across every shipped skill, resolving each under `root`
@@ -237,6 +248,10 @@ pub fn get_status_under(root: &std::path::Path) -> SkillStatus {
 
 pub fn install() -> Result<SkillStatus, String> {
     install_under(&skills_root())
+}
+
+pub fn install_codex() -> Result<SkillStatus, String> {
+    install_under(&codex_skills_root())
 }
 
 /// Write every embedded skill under `root` (`<root>/<name>/SKILL.md`), creating
@@ -379,6 +394,15 @@ mod tests {
             // retrieval leads with them (the one human-authored signal).
             "target_kind: \"note\"",
             "human-authored",
+            // v4: retrieval is answer-pack-first. The invariant sentence and
+            // the batched route must both be present, or the contract has
+            // silently reverted to the 5-turn tree walk.
+            "The pack ranks; the tree organizes",
+            "/v1/memory/answer-pack",
+            "/v1/memory/grep",
+            // …and the arms carry different trust, which is what makes it safe
+            // to answer from a ranked hit at all.
+            "curated",
         ] {
             assert!(
                 cm.content.contains(needle),

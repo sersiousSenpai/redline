@@ -646,6 +646,10 @@ pub async fn voice_send(
     // route), and — for a fresh (non-resumed) session — the document text so
     // the agent knows what it's discussing.
     let is_first_turn = !primed.swap(true, Ordering::SeqCst);
+    // The spoken words themselves, kept before the preamble swallows them: this
+    // is what the lexical index reads for the row, so a voice turn is findable
+    // by what was said rather than by the persona block wrapped around it.
+    let spoken = text.clone();
     let send_text = if is_first_turn {
         let (preamble, bridge, doc_tag) = match drafter_key_id(&session_id) {
             Some(draft_id) => (
@@ -687,6 +691,7 @@ pub async fn voice_send(
                     crate::ledger::PromptSource::VoiceStream,
                     "drafter_voice",
                     &send_text,
+                    Some(&spoken),
                     None,
                     None,
                     None,
@@ -711,6 +716,7 @@ pub async fn voice_send(
                     crate::ledger::PromptSource::VoiceStream,
                     "voice",
                     &send_text,
+                    Some(&spoken),
                     None,
                     Some(session_id.clone()),
                     None,
@@ -724,7 +730,7 @@ pub async fn voice_send(
             }
         }
     } else {
-        crate::ledger::register_agent_prompt(&crate::ledger::body_hash(&send_text));
+        crate::ledger::register_agent_prompt(&send_text);
     }
 
     let line = user_turn_line(&send_text);

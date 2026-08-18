@@ -63,7 +63,12 @@ describe("size guard", () => {
   // B1d lazy boundaries. Each of these surfaces carries a vendor family the
   // boot path must not pay for (Tiptap/prosemirror, the audio+discussion
   // stack, the markdown→PM parser + block serializer).
-  for (const name of ["PromptDrafter", "VoicePanel", "ShareSnapshotDialog"]) {
+  for (const name of [
+    "PromptDrafter",
+    "VoicePanel",
+    "ShareSnapshotDialog",
+    "MemorySurface",
+  ]) {
     it(`App.tsx keeps ${name} lazy`, () => {
       const app = files.find(({ rel }) => rel === "App.tsx");
       expect(app).toBeDefined();

@@ -9,12 +9,8 @@
 //! as JSON and is mirrored into a process-global store so the ~15 spawn sites
 //! (which have no DB handle) can read it synchronously.
 //!
-//! The `backend` field exists from day one (defaulting to `claude-code`) so
-//! the GUI never churns when a second backend lands (Phase 5); today any
-//! other value still spawns Claude Code. When that second backend is
-//! evaluated, ACP (the agent-client protocol now field-proven across
-//! multiple agent CLIs) is a live candidate standard for this seam —
-//! weigh it against a bespoke adapter then, not before.
+//! `backend` defaults to `claude-code`; `codex` selects the Codex app-server
+//! adapter. Keeping the choice on the seat allows mixed rosters.
 //!
 //! Fork-thread categories default to *inherit*: an empty seat config adds no
 //! flags, so the thread runs exactly like its parent surface. The one real
@@ -259,6 +255,7 @@ impl SeatConfig {
             o.as_deref().map(str::trim).unwrap_or("").is_empty()
         }
         blank(&self.model)
+            && blank(&self.backend)
             && blank(&self.effort)
             && blank(&self.fallback)
             && blank(&self.binary_path)
@@ -323,6 +320,7 @@ pub fn set_seat(db: &Database, seat: &str, config: SeatConfig) -> Result<(), Str
     if !KNOWN_SEATS.contains(&seat) {
         return Err(format!("unknown agent seat: {seat}"));
     }
+    validate_backend_for_seat(seat, &config)?;
     let mut s = store().write().unwrap();
     if config.is_empty() {
         s.seats.remove(seat);
@@ -340,6 +338,15 @@ pub fn set_seat(db: &Database, seat: &str, config: SeatConfig) -> Result<(), Str
     Ok(())
 }
 
+fn validate_backend_for_seat(seat: &str, config: &SeatConfig) -> Result<(), String> {
+    match config.backend.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        None | Some("claude-code") => Ok(()),
+        Some("codex") if seat == "ai_commit" => Ok(()),
+        Some("codex") => Err(format!("Codex execution is not enabled for the {seat} seat yet")),
+        Some(value) => Err(format!("unsupported agent backend: {value}")),
+    }
+}
+
 /// Apply many seats in one shot: validate every name first, then mutate and
 /// persist once. All-or-nothing, so a batch from the Seat Assignment agent can
 /// never half-land.
@@ -348,6 +355,9 @@ pub fn set_seats(db: &Database, updates: &[(String, SeatConfig)]) -> Result<(), 
         if !KNOWN_SEATS.contains(&seat.as_str()) {
             return Err(format!("unknown agent seat: {seat}"));
         }
+    }
+    for (seat, config) in updates {
+        validate_backend_for_seat(seat, config)?;
     }
     let mut s = store().write().unwrap();
     for (seat, config) in updates {
@@ -474,6 +484,15 @@ pub fn model_for(seat: &str) -> Option<String> {
         .map(str::trim)
         .filter(|m| !m.is_empty())
         .map(str::to_string)
+}
+
+/// Effective harness for a seat. Unconfigured and inherited-empty seats retain
+/// the historical Claude Code behavior.
+pub fn backend_for(seat: &str) -> &'static str {
+    match effective(seat).backend.as_deref().map(str::trim) {
+        Some("codex") => "codex",
+        _ => "claude-code",
+    }
 }
 
 /// The claude binary a seat should spawn, if overridden: the seat's own
@@ -814,6 +833,24 @@ mod tests {
         assert!(flag_args("browse").is_empty());
         assert_eq!(flag_args("voice"), vec!["--model", "haiku", "--effort", "low"]);
 
+        store().write().unwrap().seats.clear();
+    }
+
+    #[test]
+    fn backend_defaults_to_claude_and_codex_only_config_is_retained() {
+        let _guard = store_guard();
+        let db = Database::open_in_memory().unwrap();
+        store().write().unwrap().seats.clear();
+        assert_eq!(backend_for("ai_commit"), "claude-code");
+        set_seat(&db, "ai_commit", SeatConfig {
+            backend: Some("codex".into()),
+            ..SeatConfig::default()
+        }).unwrap();
+        assert_eq!(backend_for("ai_commit"), "codex");
+        assert!(set_seat(&db, "ai_commit", SeatConfig {
+            backend: Some("unknown".into()),
+            ..SeatConfig::default()
+        }).is_err());
         store().write().unwrap().seats.clear();
     }
 

@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::state::{
-    reparse_sections, AttachState, BrowseMessage, CodeReviewSession, Comment, CommentAttachment,
+    reparse_sections, AttachState, BrowseList, BrowseListItem, BrowseMessage, CodeReviewSession,
+    Comment, CommentAttachment,
     CommentKind, CommentOffer,
     CommentScope, CommentSelection, CommentStatus, EditPayload, Linked, LinkedMessage, Mission,
     MissionFinding, MissionMessage, PushRecord, Resolution, ReviewAnnotation, ReviewQuestion,
@@ -98,31 +99,190 @@ pub struct ShareReturnRecord {
 #[serde(rename_all = "camelCase")]
 pub struct BrowseHit {
     pub id: i64,
+    /// The LEDGER seq for this page view — what `#seq` citations and the
+    /// Timeline's filter both speak. Carrying only `browse_events.id` (which
+    /// is a different id-space entirely) meant a page the Ask agent cited was
+    /// uncitable: the chip pointed at a seq that was some unrelated prompt.
+    /// `None` only if the ledger row is missing, which no live row is.
+    pub seq: Option<i64>,
     pub ts: i64,
     pub url: String,
     pub title: Option<String>,
     pub snippet: String,
     pub score: f64,
+    /// Which stage of the query cascade found this — `and` (every term present)
+    /// or `or` (widened). Surfaced so "we found what you asked for" reads
+    /// differently from "we widened until something matched".
+    pub stage: String,
+    /// The picture of this page, when one was captured. Completes the seam the
+    /// visual layer is built on: a `#seq` chip → a Timeline row → a detail rail
+    /// → a picture. An agent can say "there's a screenshot of this" instead of
+    /// describing a page from its text alone.
+    pub shot_key: Option<String>,
+    /// A vision-tier description, for a page whose text didn't capture — the
+    /// 12% of the corpus that is otherwise dark.
+    pub caption: Option<String>,
 }
 
-/// Turn a raw user query into a safe FTS5 MATCH string: split on whitespace,
-/// keep tokens with at least one alphanumeric, escape embedded quotes, wrap each
-/// as a quoted phrase, and OR them for keyword recall. Quoting neutralizes FTS5
-/// operators (`*`, `-`, `:`, `NEAR`, parens), so an injection-shaped query can
-/// only ever match literally. Returns `None` when nothing searchable survives,
-/// so the caller returns no hits instead of a syntax error.
-fn sanitize_fts_query(q: &str) -> Option<String> {
-    let terms: Vec<String> = q
-        .split_whitespace()
-        .filter(|t| t.chars().any(char::is_alphanumeric))
-        .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
-        .collect();
-    if terms.is_empty() {
-        None
-    } else {
-        Some(terms.join(" OR "))
+/// Shortest literal the grep arm will accept. This is the trigram size, and it
+/// is a hard floor rather than a tuning knob: a two-character needle cannot be
+/// answered from a trigram index at all, so accepting one would silently turn
+/// an indexed lookup into a full scan of the corpus under the connection lock.
+pub const GREP_MIN_LITERAL: usize = 3;
+
+/// Characters of context returned around a grep match.
+const GREP_EXCERPT_CHARS: usize = 240;
+
+/// What the grep arm searches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GrepScope {
+    #[default]
+    All,
+    Prompts,
+    Browse,
+}
+
+impl GrepScope {
+    pub fn parse(s: Option<&str>) -> GrepScope {
+        match s.map(str::trim) {
+            Some("prompts") => GrepScope::Prompts,
+            Some("browse") => GrepScope::Browse,
+            _ => GrepScope::All,
+        }
+    }
+    fn wants_prompts(self) -> bool {
+        matches!(self, GrepScope::All | GrepScope::Prompts)
+    }
+    fn wants_browse(self) -> bool {
+        matches!(self, GrepScope::All | GrepScope::Browse)
     }
 }
+
+/// One grep hit. `seq` is the ledger seq, so a hit is citable as `#seq` and
+/// opens the Timeline exactly like every other citation.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrepHit {
+    /// `prompt` | `browse`.
+    pub kind: String,
+    pub seq: Option<i64>,
+    pub ts: i64,
+    /// The surface for a prompt; the page title (or URL) for a browse hit.
+    pub label: String,
+    /// Text around the match — centered on it, never the head.
+    pub excerpt: String,
+}
+
+/// Why a grep was refused. Both variants are named rather than degraded into an
+/// empty result: "nothing matched" and "we declined to look" are different
+/// answers, and a caller can only fix the second if it is told.
+#[derive(Debug, Clone)]
+pub enum GrepError {
+    LiteralTooShort { min: usize, got: usize },
+    BadRegex(String),
+    Db(String),
+}
+
+impl std::fmt::Display for GrepError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GrepError::LiteralTooShort { min, got } => write!(
+                f,
+                "the literal must be at least {min} characters (got {got}) — shorter than a \
+                 trigram cannot be answered from the index, and scanning the whole record \
+                 instead would be slow rather than helpful"
+            ),
+            GrepError::BadRegex(e) => write!(f, "invalid regex: {e}"),
+            GrepError::Db(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl From<rusqlite::Error> for GrepError {
+    fn from(e: rusqlite::Error) -> Self {
+        GrepError::Db(e.to_string())
+    }
+}
+
+/// The ONE tokenizer every lexical index in this database is built with, in
+/// SQL-escaped form (the inner quotes are doubled for embedding in
+/// `tokenize='…'`).
+///
+/// - `porter` — stemming, so "compacting" finds "compaction". Measured free:
+///   123 KB stemmed vs 125 KB unstemmed over the cleaned corpus.
+/// - `remove_diacritics 2` — the Unicode-correct variant (1 mishandles
+///   multi-codepoint sequences).
+/// - `tokenchars '_-./@'` — keeps `rl_del`, `src/db.rs`, `--allowedTools` and
+///   `user@host` as SINGLE tokens instead of shredding them at every
+///   punctuation mark. This is why the grep arm has less to cover.
+///
+/// One tokenizer for prompts, browse events and the catalog, deliberately: a
+/// query planned for one index has to mean the same thing in the others, or a
+/// term that matched a page silently misses the prompt that discussed it.
+pub const TOKENIZER: &str = "porter unicode61 remove_diacritics 2 tokenchars ''_-./@''";
+
+/// Prefix indexes at 2 and 3 characters — enough for the OR-with-prefix stage of
+/// the query cascade to reach short stems without indexing every prefix length.
+///
+/// Applied to the SMALL indexes only (prompts, the catalog). A prefix index is
+/// not free: adding it to `browse_events_fts`, which covers 5.7 MB of page DOM,
+/// measured **+1.3 MB — it doubled that index** for a stage that runs only when
+/// the precise reading already failed. FTS5 still answers `"term"*` without one
+/// by walking the term-index range, which over 829 documents is nothing. Same
+/// reasoning that keeps browse `text` out of the trigram arm: the big text
+/// column is where index tricks stop paying.
+pub const PREFIX_SIZES: &str = "2 3";
+
+/// How much of a `system` row (a `<task-notification>` / `<system-reminder>`
+/// the CLI injected) enters the searchable text. Enough to name what happened,
+/// not the whole dump — see the `fts_text` note in `migrate`.
+pub const SYSTEM_INDEX_CHARS: usize = 600;
+
+/// Version key for the whole derived lexical layer. Bumping this drops and
+/// rebuilds every FTS table — which is the migration, because an FTS5
+/// tokenizer is fixed at creation time.
+pub const SETTING_LEXICAL_VERSION: &str = "redline.memory.lexicalVersion";
+pub const LEXICAL_VERSION: &str = "2";
+
+/// The ONE expression that reads a prompt's text, for use in a query that has
+/// `prompts` aliased as `p`. Compaction sets `body = ''` (not NULL), so the
+/// obvious `COALESCE(p.body, p.gist)` returns an EMPTY STRING for every
+/// compacted row rather than falling through to the gist — a silent
+/// content-free read, not an error. Two live queries had it; this const exists
+/// so there is one place to be right.
+pub const PROMPT_TEXT: &str = "COALESCE(NULLIF(p.body, ''), p.gist)";
+
+/// The codec `prompt_archive.blob` is written with. Stored per row rather than
+/// assumed, so a future codec is a new value here and not a migration.
+pub const ARCHIVE_ALGO: &str = "deflate";
+
+/// Deflate a released prompt body for the compaction archive.
+fn deflate_body(body: &str) -> std::io::Result<Vec<u8>> {
+    use std::io::Write;
+    let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(body.as_bytes())?;
+    enc.finish()
+}
+
+/// Inflate an archived body. Callers must re-verify the result against the
+/// row's `body_hash` before trusting it — see `restore_prompt_body`.
+fn inflate_body(blob: &[u8]) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut out = String::new();
+    flate2::read::DeflateDecoder::new(blob).read_to_string(&mut out)?;
+    Ok(out)
+}
+
+/// The `app_settings` key the one-time corpus-role backfill records itself
+/// under, and the version it writes. Bumping the version re-runs the
+/// classification over any row still NULL — it never touches a row that already
+/// has a role, so a user's own correction survives an upgrade.
+///
+/// Phase 2's `fts_text` generated column reads `role`, so it MUST key on this
+/// same counter and run after it: created first, it would compute against NULL
+/// roles and index every preface.
+pub const SETTING_CORPUS_ROLE_VERSION: &str = "redline.memory.corpusRoleVersion";
+pub const CORPUS_ROLE_VERSION: &str = "1";
 
 /// One context-journal row — a meaningful app activity the Companion folds into
 /// its "while you were away" delta (surface switch, revision, nav, pin, …).
@@ -567,6 +727,37 @@ impl Database {
                 browse_id TEXT PRIMARY KEY,
                 claude_session_id TEXT
             );
+
+            -- A tab's working list: the punch list a user builds while looking
+            -- at their own dev server. Keyed on `browse_id`, the same durable
+            -- per-tab key as the discussion above, so the list reattaches to
+            -- its tab exactly the way the conversation does — across a reload,
+            -- a surface round-trip, and the recreated native webview.
+            --
+            -- `template` is a frontend id (see src/lib/browseList.ts), not a
+            -- schema: adding a template must never require a migration, and an
+            -- unknown string falls back rather than stranding the row.
+            CREATE TABLE IF NOT EXISTS browse_lists (
+                browse_id  TEXT PRIMARY KEY,
+                template   TEXT NOT NULL,
+                title      TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS browse_list_items (
+                id         TEXT PRIMARY KEY,
+                browse_id  TEXT NOT NULL,
+                kind       TEXT NOT NULL,
+                body       TEXT NOT NULL,
+                done       INTEGER NOT NULL DEFAULT 0,
+                sort_idx   INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_browse_list_items
+                ON browse_list_items (browse_id, sort_idx);
 
             -- The voice agent's per-plan memory: the forked `claude` session id
             -- that holds the spoken discussion, keyed by the plan's session id.
@@ -1021,28 +1212,28 @@ impl Database {
             -- there is no new dependency, no embedding model, and retrieval stays
             -- auditable (you can see which terms matched).
             --
-            -- DESIGN LAW, amended: this used to read "only this noisy stream gets
-            -- lexical search; plans/prompts keep the vectorless ClassMemory walk".
-            -- The walk stays the ORGANIZING principle — the catalog is how memory
-            -- is structured, and no embedding model enters the product — but the
-            -- prompt lake now carries its own FTS index too (`prompts_fts`, built
-            -- after the gist ALTERs below). The distinction that actually
-            -- mattered was never lexical-vs-walk: it was that a *ranked* fuzzy
-            -- index must not become the taxonomy. So `prompts_fts` is used as a
-            -- FILTER inside the existing ordered queries, and bm25 ranks only
-            -- inside the answer pack's own search. The `?q=` prompt route was a
-            -- LIKE cross-scan over the whole chain; that is what changed.
-            -- External-content table over `browse_events`, kept in sync by an
-            -- AFTER INSERT trigger (browse_events is insert-only).
-            CREATE VIRTUAL TABLE IF NOT EXISTS browse_events_fts USING fts5(
-                title, url, text,
-                content='browse_events',
-                content_rowid='id'
-            );
-            CREATE TRIGGER IF NOT EXISTS browse_events_ai AFTER INSERT ON browse_events BEGIN
-                INSERT INTO browse_events_fts (rowid, title, url, text)
-                VALUES (new.id, new.title, new.url, new.text);
-            END;
+            -- DESIGN LAW, amended twice. It first read "only this noisy stream
+            -- gets lexical search; plans/prompts keep the vectorless ClassMemory
+            -- walk", then "…and no embedding model enters the product".
+            --
+            -- What survives, and is now enforced by guard tests rather than by
+            -- convention: **a ranked fuzzy index must not become the taxonomy.**
+            -- In one line — the arms decide what you READ; the tree decides what
+            -- things ARE. Node resolution never consults a lake ranking, no
+            -- retrieval path writes to the catalog, and the classifier's input is
+            -- chain order and never a ranking.
+            --
+            -- What is retired: "lexical vs walk" was never the real distinction,
+            -- and "no embedding model" was a proxy for two concerns (binary size,
+            -- auditability) that are better met directly — by an OS-provided
+            -- embedding service with zero model bytes in the binary, and by
+            -- labeling every hit with the arm that found it.
+            --
+            -- The index definitions themselves live in the versioned lexical
+            -- block further down, not here: they depend on columns added by the
+            -- ALTERs below (`role`, `user_text`, `gist`), and they carry a
+            -- tokenizer that must be able to change without a hand-written
+            -- migration per change.
 
             -- Memory-by-session: the readable parent/child relation across the
             -- app's disjoint thread id-spaces. A child (browse tab thread,
@@ -1402,59 +1593,434 @@ impl Database {
             [],
         );
 
-        // Lexical index over the prompt lake. Same reasoning as
-        // `browse_events_fts` (see the amended design-law note above it), but
-        // `prompts` is NOT insert-only: compaction rewrites `gist`/`body` in
-        // place, and an explicit forget releases the words. So this needs the
-        // full trigger set — insert, update AND delete — with the FTS5
-        // `'delete'` idiom supplying the OLD indexed text on the way out.
-        // Indexing `COALESCE(gist, body)` is what makes compaction correct:
-        // once a body is released the gist becomes the searchable text, and the
-        // released words genuinely stop matching.
+        // --- Corpus hygiene: what kind of text a lake row IS -----------------
         //
-        // Down here, after the ALTERs, because every statement references
-        // `gist` — in the batch above it would run before that column exists.
-        let _ = conn.execute_batch(
-            r#"
-            CREATE VIRTUAL TABLE IF NOT EXISTS prompts_fts USING fts5(
-                body,
-                content='prompts',
-                content_rowid='id'
-            );
-            CREATE TRIGGER IF NOT EXISTS prompts_fts_ai AFTER INSERT ON prompts BEGIN
-                INSERT INTO prompts_fts (rowid, body)
-                VALUES (new.id, COALESCE(new.gist, new.body));
-            END;
-            CREATE TRIGGER IF NOT EXISTS prompts_fts_ad AFTER DELETE ON prompts BEGIN
-                INSERT INTO prompts_fts (prompts_fts, rowid, body)
-                VALUES ('delete', old.id, COALESCE(old.gist, old.body));
-            END;
-            CREATE TRIGGER IF NOT EXISTS prompts_fts_au AFTER UPDATE ON prompts BEGIN
-                INSERT INTO prompts_fts (prompts_fts, rowid, body)
-                VALUES ('delete', old.id, COALESCE(old.gist, old.body));
-                INSERT INTO prompts_fts (rowid, body)
-                VALUES (new.id, COALESCE(new.gist, new.body));
-            END;
-            "#,
-        );
-        // Backfill for every database that already had prompts. Guarded on the
-        // `%_docsize` shadow table, which counts INDEXED docs — `COUNT(*)` on an
-        // external-content FTS table reads the CONTENT table instead, so it can
-        // never tell you the index is empty. A plain `'rebuild'` would be wrong
-        // here too: it re-reads `prompts.body` by column name, which is `''` for
-        // every compacted row, silently dropping their gists from the index.
+        // `prompts.role` shipped in the original DDL and was NULL on every row,
+        // which is how the corpus reached 92.6% machine text unnoticed: 4.32 MB
+        // of leaked agent prefaces, 1.25 MB recorded on purpose, and 1.78 MB of
+        // `<task-notification>`/`<system-reminder>` injections, against ~120 KB
+        // of genuine user prompts. `user_text` carries the human's own words out
+        // of an agent row's constructed body so the lexical index can read the
+        // question instead of the preface. Both are non-hashed and chain-safe —
+        // only `prompt_id` + `body_hash` enter the chained event (the
+        // gist/thread_kind precedent).
+        let _ = conn.execute("ALTER TABLE prompts ADD COLUMN user_text TEXT", []);
+        // Which tier produced a compacted row's gist: `agent` (the keeper's
+        // summarizer ran) or `deterministic` (it didn't, and the fallback kept a
+        // window of the text). Without this the two are indistinguishable after
+        // the fact, which is how 47% of gists came to be raw truncations while
+        // the reclaim number looked like a success.
+        let _ = conn.execute("ALTER TABLE prompts ADD COLUMN gist_source TEXT", []);
+
+        // One-time reclassification of everything captured before the column
+        // was filled. RECLASSIFY, NOT COMPACT — deliberately. Compacting the
+        // 397 machine rows instead would append 397 `compaction` events to a
+        // 2,938-event chain (+13.5%), irreversibly, and destroy the very
+        // evidence needed to audit whether this classification was right. An
+        // UPDATE of a non-hashed column leaves the rows byte-intact, the ledger
+        // untouched, zero new events, and is fully reversible. Reclaiming the
+        // disk is a separate, honest act (`keeper::select_compaction_candidates`
+        // now targets `agent`/`system` first).
+        //
+        // Guarded on a version key, and keyed on the SAME counter as the Phase-2
+        // `fts_text` generated column: that column reads `role`, so if it were
+        // ever created first it would compute against NULL and index every
+        // preface. Ordering here is arithmetic, not preference.
         {
-            let prompt_ct: i64 = conn
-                .query_row("SELECT COUNT(*) FROM prompts", [], |r| r.get(0))
-                .unwrap_or(0);
-            let indexed_ct: i64 = conn
-                .query_row("SELECT COUNT(*) FROM prompts_fts_docsize", [], |r| r.get(0))
-                .unwrap_or(-1);
-            if prompt_ct > 0 && indexed_ct == 0 {
+            let done: Option<String> = conn
+                .query_row(
+                    "SELECT value FROM app_settings WHERE key = ?1",
+                    params![SETTING_CORPUS_ROLE_VERSION],
+                    |r| r.get(0),
+                )
+                .ok();
+            if done.as_deref() != Some(CORPUS_ROLE_VERSION) {
+                // The order of the CASE arms is the classification, and each arm
+                // is evidence-backed:
+                //   1. the CLI's injections announce themselves by prefix;
+                //   2. `rust_firstturn`/`voice_stream` are Redline's own
+                //      constructed prompts by definition of the source;
+                //   3. the leaked captures came in through the hook wearing no
+                //      such marking — they are recognizable only by shape, and
+                //      "opens with `You are ` and runs past 2 KB" is a first-turn
+                //      preface, not something a person types;
+                //   4. everything else is the user. Defaulting to `user` is the
+                //      conservative direction: a misfiled user prompt stays
+                //      searchable, a misfiled agent prompt disappears from view.
                 let _ = conn.execute(
-                    "INSERT INTO prompts_fts (rowid, body)
-                     SELECT id, COALESCE(gist, body) FROM prompts",
+                    "UPDATE prompts SET role = CASE
+                        WHEN TRIM(body) LIKE '<task-notification>%'
+                          OR TRIM(body) LIKE '<system-reminder>%'   THEN 'system'
+                        WHEN source IN ('rust_firstturn','voice_stream') THEN 'agent'
+                        WHEN body LIKE 'You are %' AND LENGTH(body) > 2000 THEN 'agent'
+                        ELSE 'user' END
+                     WHERE role IS NULL",
                     [],
+                );
+                let _ = conn.execute(
+                    "INSERT INTO app_settings (key, value) VALUES (?1, ?2)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    params![SETTING_CORPUS_ROLE_VERSION, CORPUS_ROLE_VERSION],
+                );
+            }
+        }
+        // The lake's read paths, indexed. Every one of these backs a filter the
+        // Timeline or a `/v1/context` route actually offers; without them each
+        // faceted read is a full scan of `prompts` under the connection lock.
+        // Composite `(x, ts)` rather than `(x)` alone because every one of these
+        // reads is ordered by time within its facet.
+        for ddl in [
+            "CREATE INDEX IF NOT EXISTS idx_prompts_ts ON prompts (ts)",
+            "CREATE INDEX IF NOT EXISTS idx_prompts_role ON prompts (role)",
+            "CREATE INDEX IF NOT EXISTS idx_prompts_surface_ts ON prompts (surface, ts)",
+            "CREATE INDEX IF NOT EXISTS idx_prompts_project_ts ON prompts (project_path, ts)",
+            "CREATE INDEX IF NOT EXISTS idx_prompts_session ON prompts (session_id)",
+            "CREATE INDEX IF NOT EXISTS idx_prompts_claude_sess ON prompts (claude_session_id)",
+            "CREATE INDEX IF NOT EXISTS idx_prompts_thread ON prompts (thread_kind, thread_id)",
+            "CREATE INDEX IF NOT EXISTS idx_prompts_model ON prompts (model)",
+        ] {
+            let _ = conn.execute(ddl, []);
+        }
+
+        // Compaction archive. A cold compaction releases the words at 59:1 and
+        // used to be irrecoverable; that is a fine trade for machine text and a
+        // terrible one for anything else, and "fine" was being decided by a
+        // heuristic. Archiving the deflated original makes the decision
+        // reversible, which is what lets the blade stay sharp.
+        //
+        // `body_hash` is stored beside the blob and re-verified on restore: the
+        // archive is derived data outside the hash chain, so nothing may be
+        // trusted back into a prompt row without proving it is the same bytes
+        // the chain committed to. `algo` leaves room for a future codec without
+        // a migration. Forget deletes from here too — forget must mean forget.
+        let _ = conn.execute(
+            "CREATE TABLE IF NOT EXISTS prompt_archive (
+                prompt_id INTEGER PRIMARY KEY,
+                body_hash TEXT NOT NULL,
+                algo TEXT NOT NULL,
+                original_bytes INTEGER NOT NULL,
+                blob BLOB NOT NULL,
+                archived_at INTEGER NOT NULL
+            )",
+            [],
+        );
+
+        // The picture store's pointer. NULL means no picture, and it is stored
+        // rather than derived from `context_hash` because NULL has to be able
+        // to mean three different real things: never captured, policy-denied,
+        // and the user forgot it. A derived key could only ever say "the file
+        // should exist", which is a different claim.
+        let _ = conn.execute("ALTER TABLE browse_events ADD COLUMN shot_key TEXT", []);
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_browse_events_shot ON browse_events (shot_key)",
+            [],
+        );
+        // A vision-tier caption for a page whose text didn't capture. Kept in
+        // its OWN column and never appended into `text`, because
+        // `context_hash = body_hash(text)` is the identity that the shot key,
+        // the dedupe and the hash chain all rest on — folding a caption into
+        // `text` would silently re-key the page.
+        let _ = conn.execute("ALTER TABLE browse_events ADD COLUMN caption TEXT", []);
+
+        // Pictures of Redline's OWN surfaces, keyed by the ledger event they
+        // record. Its own table rather than a column, because these hang off
+        // events that carry no `browse_events` row (an approval, a revision).
+        //
+        // `theme` is stamped at capture: a shot taken under a theme the user has
+        // since changed can then be LABELLED as historical instead of silently
+        // looking like a rendering bug. That is the mitigation for the one real
+        // objection to shooting our own surfaces — they age badly.
+        let _ = conn.execute(
+            "CREATE TABLE IF NOT EXISTS surface_shots (
+                seq INTEGER PRIMARY KEY,
+                surface TEXT NOT NULL,
+                shot_key TEXT NOT NULL,
+                theme TEXT,
+                created_at INTEGER NOT NULL
+            )",
+            [],
+        );
+
+        // Semantic index — a DERIVED index, exactly like `prompts_fts`: not on
+        // the hash chain, droppable, rebuildable from the content tables. That
+        // is what makes an embedding model admissible at all; nothing here is
+        // evidence, so nothing here can corrupt the record.
+        //
+        // `vec` is `dim` int8 bytes of an L2-normalized vector, with its scale
+        // beside it. `source_hash` makes re-runs free (unchanged text is
+        // skipped) and makes a model change a clean re-index rather than a
+        // migration: rows carry the `model` that produced them, and a different
+        // model simply has no rows yet.
+        let _ = conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS embeddings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_kind TEXT NOT NULL,       -- prompt | browse_event | class_node
+                target_id INTEGER NOT NULL,
+                chunk_ix INTEGER NOT NULL,
+                char_start INTEGER NOT NULL,
+                char_len INTEGER NOT NULL,
+                dim INTEGER NOT NULL,
+                scale REAL NOT NULL,
+                vec BLOB NOT NULL,
+                model TEXT NOT NULL,
+                source_hash TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_embeddings_chunk
+                ON embeddings (target_kind, target_id, chunk_ix, model);
+            CREATE INDEX IF NOT EXISTS idx_embeddings_target
+                ON embeddings (target_kind, target_id);",
+        );
+
+        // --- The lexical layer, versioned ------------------------------------
+        //
+        // Everything here (tokenizer, indexed expression, column weighting) is
+        // DERIVED: droppable and rebuildable from the content tables, never on
+        // the hash chain. So it is versioned as one unit rather than migrated
+        // statement by statement — changing the tokenizer is a version bump, not
+        // a hand-written ALTER, and the rebuild is the migration.
+        //
+        // Two things are load-bearing:
+        //
+        // 1. **Generated columns.** The old triggers indexed
+        //    `COALESCE(gist, body)` while the content table held `body = ''` for
+        //    every compacted row — a divergence that made FTS5's own `'rebuild'`
+        //    command WRONG (it re-reads by column name and would have silently
+        //    dropped 224 gists), which is why the code carried a comment
+        //    forbidding it. Making the indexed text a real generated column of
+        //    the content table removes the divergence by construction: the
+        //    triggers write `new.fts_head`/`new.fts_tail`, `'rebuild'` reads the
+        //    same two columns, and they cannot disagree. `'rebuild'` is now
+        //    correct, and `prompts_fts_rebuild_is_now_correct` pins it.
+        //
+        // 2. **`fts_text` reads `user_text` for an agent row.** This is where
+        //    Phase 1's corpus work turns into index size: porter over the
+        //    cleaned corpus measures 123 KB against today's 2,642 KB. The role
+        //    backfill above MUST have run first or this computes against NULL
+        //    roles and indexes every preface — which is why both key on
+        //    `SETTING_CORPUS_ROLE_VERSION` and run in one migration step.
+        //
+        // The head/tail split lets bm25 weight the opening of a prompt (where a
+        // 6 KB body states its ask) over its interior, at zero extra index bytes
+        // since the two columns are disjoint slices of the same text.
+        // What each role contributes to the searchable text, measured on the
+        // live corpus (1,215 rows / 7.65 MB):
+        //
+        //   agent   447 rows  5.6 MB (73.3%) → its `user_text` only
+        //   system  110 rows  1.8 MB (24.0%) → its first SYSTEM_INDEX_CHARS
+        //   user    658 rows  208 KB ( 2.7%) → all of it
+        //
+        // The `system` rule is the one judgement call here. A
+        // `<task-notification>` is a real event in the user's history — it
+        // reports work their own session did — so it stays in the corpus and on
+        // the Timeline. But it is not their words, and its BODY is a dump of
+        // agent output: indexing all 1.8 MB of it would leave the lexical layer
+        // 90% machine text even after the agent rows are gone, and every
+        // question would compete with agent-speak for recall. The notification
+        // says what finished in its opening lines, so a head window keeps it
+        // findable at ~7% of the bytes.
+        let _ = conn.execute(
+            &format!(
+                "ALTER TABLE prompts ADD COLUMN fts_text TEXT GENERATED ALWAYS AS (
+                    CASE WHEN role = 'agent'  THEN COALESCE(NULLIF(user_text, ''), '')
+                         WHEN role = 'system' THEN substr(COALESCE(NULLIF(body, ''), gist, ''),
+                                                          1, {SYSTEM_INDEX_CHARS})
+                         ELSE COALESCE(NULLIF(body, ''), gist, '') END) VIRTUAL"
+            ),
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE prompts ADD COLUMN fts_head TEXT
+                GENERATED ALWAYS AS (substr(fts_text, 1, 400)) VIRTUAL",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE prompts ADD COLUMN fts_tail TEXT
+                GENERATED ALWAYS AS (substr(fts_text, 401)) VIRTUAL",
+            [],
+        );
+
+        {
+            let built: Option<String> = conn
+                .query_row(
+                    "SELECT value FROM app_settings WHERE key = ?1",
+                    params![SETTING_LEXICAL_VERSION],
+                    |r| r.get(0),
+                )
+                .ok();
+            if built.as_deref() != Some(LEXICAL_VERSION) {
+                // Drop first: an FTS5 table's tokenizer is fixed at creation, so
+                // a tokenizer change is a re-creation. The shadow tables go with
+                // it (DROP on the virtual table removes them).
+                let _ = conn.execute_batch(
+                    "DROP TRIGGER IF EXISTS prompts_fts_ai;
+                     DROP TRIGGER IF EXISTS prompts_fts_ad;
+                     DROP TRIGGER IF EXISTS prompts_fts_au;
+                     DROP TABLE IF EXISTS prompts_fts;
+                     DROP TRIGGER IF EXISTS browse_events_ai;
+                     DROP TRIGGER IF EXISTS browse_events_ad;
+                     DROP TRIGGER IF EXISTS browse_events_au;
+                     DROP TABLE IF EXISTS browse_events_fts;
+                     DROP TRIGGER IF EXISTS class_nodes_fts_ai;
+                     DROP TRIGGER IF EXISTS class_nodes_fts_ad;
+                     DROP TRIGGER IF EXISTS class_nodes_fts_au;
+                     DROP TABLE IF EXISTS class_nodes_fts;
+                     DROP TRIGGER IF EXISTS prompts_grep_ai;
+                     DROP TRIGGER IF EXISTS prompts_grep_ad;
+                     DROP TRIGGER IF EXISTS prompts_grep_au;
+                     DROP TABLE IF EXISTS prompts_grep;
+                     DROP TRIGGER IF EXISTS browse_grep_ai;
+                     DROP TABLE IF EXISTS browse_grep;",
+                );
+                let ddl = format!(
+                    r#"
+                    CREATE VIRTUAL TABLE prompts_fts USING fts5(
+                        fts_head, fts_tail,
+                        content='prompts', content_rowid='id',
+                        tokenize='{TOKENIZER}', prefix='{PREFIX_SIZES}'
+                    );
+                    -- `prompts` is NOT insert-only: compaction rewrites
+                    -- gist/body in place and a forget releases the words, so the
+                    -- full trigger set is required, with FTS5's `'delete'` idiom
+                    -- supplying the OLD text on the way out. Getting this wrong
+                    -- doesn't error — it returns garbage from snippet().
+                    CREATE TRIGGER prompts_fts_ai AFTER INSERT ON prompts BEGIN
+                        INSERT INTO prompts_fts (rowid, fts_head, fts_tail)
+                        VALUES (new.id, new.fts_head, new.fts_tail);
+                    END;
+                    CREATE TRIGGER prompts_fts_ad AFTER DELETE ON prompts BEGIN
+                        INSERT INTO prompts_fts (prompts_fts, rowid, fts_head, fts_tail)
+                        VALUES ('delete', old.id, old.fts_head, old.fts_tail);
+                    END;
+                    CREATE TRIGGER prompts_fts_au AFTER UPDATE ON prompts BEGIN
+                        INSERT INTO prompts_fts (prompts_fts, rowid, fts_head, fts_tail)
+                        VALUES ('delete', old.id, old.fts_head, old.fts_tail);
+                        INSERT INTO prompts_fts (rowid, fts_head, fts_tail)
+                        VALUES (new.id, new.fts_head, new.fts_tail);
+                    END;
+
+                    -- No `prefix=` here, deliberately: see PREFIX_SIZES. This
+                    -- index covers 5.7 MB of page DOM and a prefix index over
+                    -- it measured +1.3 MB, doubling it.
+                    CREATE VIRTUAL TABLE browse_events_fts USING fts5(
+                        title, url, text,
+                        content='browse_events', content_rowid='id',
+                        tokenize='{TOKENIZER}'
+                    );
+                    -- `browse_events` USED to be insert-only, which is why an
+                    -- AFTER INSERT trigger alone was safe. It no longer is:
+                    -- `caption` (the vision tier) is written by an UPDATE, and
+                    -- an external-content FTS table whose content row changes
+                    -- without a matching `'delete'` row does not error — it
+                    -- returns GARBAGE from snippet(), because the index still
+                    -- holds offsets into text that no longer exists. The full
+                    -- trigger set lands HERE, before the caption column is ever
+                    -- written to, and `browse_events_fts_survives_an_update`
+                    -- pins it.
+                    CREATE TRIGGER browse_events_ai AFTER INSERT ON browse_events BEGIN
+                        INSERT INTO browse_events_fts (rowid, title, url, text)
+                        VALUES (new.id, new.title, new.url, new.text);
+                    END;
+                    CREATE TRIGGER browse_events_ad AFTER DELETE ON browse_events BEGIN
+                        INSERT INTO browse_events_fts (browse_events_fts, rowid, title, url, text)
+                        VALUES ('delete', old.id, old.title, old.url, old.text);
+                    END;
+                    CREATE TRIGGER browse_events_au AFTER UPDATE ON browse_events BEGIN
+                        INSERT INTO browse_events_fts (browse_events_fts, rowid, title, url, text)
+                        VALUES ('delete', old.id, old.title, old.url, old.text);
+                        INSERT INTO browse_events_fts (rowid, title, url, text)
+                        VALUES (new.id, new.title, new.url, new.text);
+                    END;
+
+                    -- The catalog gets an index of its own — the highest-leverage
+                    -- single fix in the program. `match_class_nodes` LIKEd the
+                    -- ENTIRE raw query as one `%…%` pattern, so any
+                    -- question-shaped `?q=` resolved no node at all and the
+                    -- answer pack silently degraded to lexical-only. 125 rows;
+                    -- the index is single-digit KB.
+                    CREATE VIRTUAL TABLE class_nodes_fts USING fts5(
+                        title, summary,
+                        content='class_nodes', content_rowid='rowid',
+                        tokenize='{TOKENIZER}', prefix='{PREFIX_SIZES}'
+                    );
+                    CREATE TRIGGER class_nodes_fts_ai AFTER INSERT ON class_nodes BEGIN
+                        INSERT INTO class_nodes_fts (rowid, title, summary)
+                        VALUES (new.rowid, new.title, COALESCE(new.summary, ''));
+                    END;
+                    CREATE TRIGGER class_nodes_fts_ad AFTER DELETE ON class_nodes BEGIN
+                        INSERT INTO class_nodes_fts (class_nodes_fts, rowid, title, summary)
+                        VALUES ('delete', old.rowid, old.title, COALESCE(old.summary, ''));
+                    END;
+                    CREATE TRIGGER class_nodes_fts_au AFTER UPDATE ON class_nodes BEGIN
+                        INSERT INTO class_nodes_fts (class_nodes_fts, rowid, title, summary)
+                        VALUES ('delete', old.rowid, old.title, COALESCE(old.summary, ''));
+                        INSERT INTO class_nodes_fts (rowid, title, summary)
+                        VALUES (new.rowid, new.title, COALESCE(new.summary, ''));
+                    END;
+
+                    -- The grep arm: trigram indexes, which answer arbitrary
+                    -- substring `LIKE '%…%'` from an INDEX instead of a scan.
+                    -- This is the Google-Code-Search shape — an index proposes
+                    -- candidates, a regex verifies them in Rust — and it is the
+                    -- only honest way to reach what tokenization cannot: error
+                    -- strings, `#[serde(rename_all)]`, a fragment of a path.
+                    --
+                    -- A bare `regexp` function over "a candidate set" was
+                    -- rejected: without an index there IS no candidate set, so
+                    -- it degenerates into a 7 MB scan under the connection lock.
+                    --
+                    -- What is deliberately NOT indexed: browse `text`. A
+                    -- trigram index over 5.7 MB of page DOM measured ~5.7 MB of
+                    -- index, and substring search INSIDE a rendered page is not
+                    -- a question anyone asks — you ask WHICH page, and
+                    -- url + title answers that.
+                    CREATE VIRTUAL TABLE prompts_grep USING fts5(
+                        fts_text, content='prompts', content_rowid='id',
+                        tokenize='trigram'
+                    );
+                    CREATE TRIGGER prompts_grep_ai AFTER INSERT ON prompts BEGIN
+                        INSERT INTO prompts_grep (rowid, fts_text) VALUES (new.id, new.fts_text);
+                    END;
+                    CREATE TRIGGER prompts_grep_ad AFTER DELETE ON prompts BEGIN
+                        INSERT INTO prompts_grep (prompts_grep, rowid, fts_text)
+                        VALUES ('delete', old.id, old.fts_text);
+                    END;
+                    CREATE TRIGGER prompts_grep_au AFTER UPDATE ON prompts BEGIN
+                        INSERT INTO prompts_grep (prompts_grep, rowid, fts_text)
+                        VALUES ('delete', old.id, old.fts_text);
+                        INSERT INTO prompts_grep (rowid, fts_text) VALUES (new.id, new.fts_text);
+                    END;
+
+                    CREATE VIRTUAL TABLE browse_grep USING fts5(
+                        url, title, content='browse_events', content_rowid='id',
+                        tokenize='trigram'
+                    );
+                    CREATE TRIGGER browse_grep_ai AFTER INSERT ON browse_events BEGIN
+                        INSERT INTO browse_grep (rowid, url, title)
+                        VALUES (new.id, new.url, COALESCE(new.title, ''));
+                    END;
+                    "#
+                );
+                if let Err(e) = conn.execute_batch(&ddl) {
+                    tracing::warn!(error = %e, "lexical index rebuild failed");
+                }
+                // `'rebuild'` — correct now, for the first time, because every
+                // indexed column resolves against a real column of its content
+                // table. No `%_docsize` guard is needed either: this runs once
+                // per version, not once per boot.
+                for table in [
+                    "prompts_fts",
+                    "browse_events_fts",
+                    "class_nodes_fts",
+                    "prompts_grep",
+                    "browse_grep",
+                ] {
+                    let _ = conn.execute(&format!("INSERT INTO {table}({table}) VALUES('rebuild')"), []);
+                }
+                let _ = conn.execute(
+                    "INSERT INTO app_settings (key, value) VALUES (?1, ?2)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    params![SETTING_LEXICAL_VERSION, LEXICAL_VERSION],
                 );
             }
         }
@@ -1502,25 +2068,6 @@ impl Database {
         // migration: it is enforced in Rust (`ledger::BrowseAction`), not by a
         // CHECK, and existing rows are all already 'navigate'.
         let _ = conn.execute("ALTER TABLE browse_events ADD COLUMN from_event_id INTEGER", []);
-
-        // Dojo P3: backfill the browse-events FTS index for the upgrade path where
-        // `browse_events` already had rows (a P2-only build) before the FTS table
-        // + trigger existed — the trigger only fires on new inserts. Guarded so
-        // the common case (empty or already-indexed) is a cheap no-op.
-        {
-            let ev_ct: i64 = conn
-                .query_row("SELECT COUNT(*) FROM browse_events", [], |r| r.get(0))
-                .unwrap_or(0);
-            let fts_ct: i64 = conn
-                .query_row("SELECT COUNT(*) FROM browse_events_fts", [], |r| r.get(0))
-                .unwrap_or(0);
-            if ev_ct > 0 && fts_ct == 0 {
-                let _ = conn.execute(
-                    "INSERT INTO browse_events_fts(browse_events_fts) VALUES('rebuild')",
-                    [],
-                );
-            }
-        }
 
         // Migration: comment ids are session-scoped (`c-001` restarts per
         // session), but legacy databases declared `id TEXT PRIMARY KEY`
@@ -1721,6 +2268,53 @@ impl Database {
             [],
         );
         let _ = conn.execute("ALTER TABLE drafts ADD COLUMN last_opened_at INTEGER", []);
+        // Whether the title was *pinned* by a rename or is still derived from
+        // the markdown's first heading. Derived-vs-pinned is a property of the
+        // row, not of the call site: five separate writers mirror the document
+        // and every one of them re-derives a title and passes it, so a call-site
+        // contract ("pass None to keep the name") loses to entropy — `voice.rs`
+        // proved it by hand-rolling the same preservation for `project_path`
+        // and not generalizing it. With the flag here, `upsert_draft` keeps a
+        // renamed title no matter who writes, and zero call sites change.
+        if conn
+            .execute(
+                "ALTER TABLE drafts ADD COLUMN title_is_user_set INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .is_ok()
+        {
+            // Backfill, once: a stored title that does *not* match what the
+            // body would derive can only have come from a rename. Without this
+            // every rename made before the flag shipped stays broken. A false
+            // positive costs only auto-follow, so the comparison errs safe.
+            let pinned: Vec<String> = conn
+                .prepare("SELECT draft_id, title, doc_markdown FROM drafts WHERE title IS NOT NULL")
+                .and_then(|mut st| {
+                    st.query_map([], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                        ))
+                    })
+                    .map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
+                })
+                .map(|rows| {
+                    rows.into_iter()
+                        .filter(|(_, title, md)| {
+                            crate::draft_title_from_markdown(md).as_deref() != Some(title.as_str())
+                        })
+                        .map(|(id, _, _)| id)
+                        .collect()
+                })
+                .unwrap_or_default();
+            for id in pinned {
+                let _ = conn.execute(
+                    "UPDATE drafts SET title_is_user_set = 1 WHERE draft_id = ?1",
+                    params![id],
+                );
+            }
+        }
         // Run lifecycle (orchestrated executions): the run-state machine rides
         // in nullable columns beside the frozen three-value `status`, so
         // reconciliation and the liveness watchdog never see it. Only
@@ -1986,10 +2580,10 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let changed = conn.execute(
             "INSERT INTO prompts
-                (ts, source, origin, surface, role, session_id, claude_session_id,
+                (ts, source, origin, surface, role, user_text, session_id, claude_session_id,
                  mission_id, project_path, body, body_hash,
                  thread_kind, thread_id, parent_session_id, model, model_source)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
              ON CONFLICT(body_hash, claude_session_id) DO NOTHING",
             params![
                 p.ts,
@@ -1997,6 +2591,7 @@ impl Database {
                 p.origin,
                 p.surface,
                 p.role,
+                p.user_text,
                 p.session_id,
                 p.claude_session_id,
                 p.mission_id,
@@ -2069,6 +2664,25 @@ impl Database {
         )
     }
 
+    /// The same bind for a launch that had no document — the Front Door's one
+    /// sentence and the browser's Send. Those prompts are recorded with no
+    /// thread and no claude session (claude hadn't spawned), so without this
+    /// they keep a **permanently NULL** `claude_session_id` and the transcript
+    /// model backfill never reaches them. `thread_id IS NULL` is what keeps
+    /// this off any threaded row; the body hash is what makes it the right one.
+    pub fn bind_launch_prompt_session(
+        &self,
+        body_hash: &str,
+        claude_session_id: &str,
+    ) -> rusqlite::Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE OR IGNORE prompts SET claude_session_id = ?2
+             WHERE body_hash = ?1 AND thread_id IS NULL AND claude_session_id IS NULL",
+            params![body_hash, claude_session_id],
+        )
+    }
+
     /// `(prompt_id, model)` for every prompt with a stamped model — the Memory
     /// inspector joins this onto its event rows for the per-row chip + filter.
     pub fn list_prompt_models(&self) -> rusqlite::Result<Vec<(i64, String)>> {
@@ -2115,31 +2729,59 @@ impl Database {
     /// vectorless walk). Ranks by FTS5 `bm25`, best first, and returns a matched
     /// snippet per hit. A query that sanitizes to nothing yields no hits.
     pub fn search_browse_events(&self, query: &str, limit: i64) -> rusqlite::Result<Vec<BrowseHit>> {
-        let Some(match_q) = sanitize_fts_query(query) else {
+        use crate::query::MatchStage;
+        let Some(plan) = crate::query::plan_fts_query(query) else {
             return Ok(Vec::new());
         };
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT be.id, be.ts, be.url, be.title,
-                    snippet(browse_events_fts, 2, '[', ']', '…', 12),
-                    bm25(browse_events_fts)
-             FROM browse_events_fts
-             JOIN browse_events be ON be.id = browse_events_fts.rowid
-             WHERE browse_events_fts MATCH ?1
-             ORDER BY bm25(browse_events_fts)
-             LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(params![match_q, limit.max(1)], |r| {
-            Ok(BrowseHit {
-                id: r.get(0)?,
-                ts: r.get(1)?,
-                url: r.get(2)?,
-                title: r.get(3)?,
-                snippet: r.get(4)?,
-                score: r.get(5)?,
-            })
-        })?;
-        rows.collect()
+        // Same AND-then-OR cascade as the prompt arm. Columns are weighted
+        // `title 5 / url 2 / text 1`: a term in a page's title says the page is
+        // ABOUT it; the same term buried in 3 KB of DOM text says it appeared.
+        //
+        // The ledger `seq` join is what makes a browse hit CITABLE. `BrowseHit`
+        // used to carry `browse_events.id`, but the Ask citation contract is
+        // `#seq` and the Timeline's filter takes seqs — so a page the agent
+        // cited could not be opened. Verified 1:1 and complete on live data
+        // (829 events, 829 ledger rows).
+        for stage in [MatchStage::And, MatchStage::Or] {
+            let Some(match_q) = plan.match_for(stage) else { continue };
+            if match_q.is_empty() {
+                continue;
+            }
+            let mut stmt = conn.prepare(
+                "SELECT be.id, le.seq, be.ts, be.url, be.title,
+                        snippet(browse_events_fts, 2, '[', ']', '…', 12),
+                        bm25(browse_events_fts, 5.0, 2.0, 1.0),
+                        be.shot_key, be.caption
+                 FROM browse_events_fts
+                 JOIN browse_events be ON be.id = browse_events_fts.rowid
+                 LEFT JOIN ledger_events le
+                        ON le.ref_kind = 'browse_event' AND le.ref_id = CAST(be.id AS TEXT)
+                 WHERE browse_events_fts MATCH ?1
+                 ORDER BY bm25(browse_events_fts, 5.0, 2.0, 1.0)
+                 LIMIT ?2",
+            )?;
+            let rows: Vec<BrowseHit> = stmt
+                .query_map(params![match_q, limit.max(1)], |r| {
+                    Ok(BrowseHit {
+                        id: r.get(0)?,
+                        seq: r.get(1)?,
+                        ts: r.get(2)?,
+                        url: r.get(3)?,
+                        title: r.get(4)?,
+                        snippet: r.get(5)?,
+                        score: r.get(6)?,
+                        stage: stage.as_str().to_string(),
+                        shot_key: r.get(7)?,
+                        caption: r.get(8)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            if !rows.is_empty() {
+                return Ok(rows);
+            }
+        }
+        Ok(Vec::new())
     }
 
     /// Row → `LakeItem` over the canonical projection every lake reader
@@ -2186,11 +2828,36 @@ impl Database {
     /// `compaction` event pointing at the same `prompt_id`, so without it the
     /// join returns one hit per event and a compacted prompt would appear
     /// twice, spending the pack's budget on a duplicate.
+    /// The plain ranked form. Production reads go through
+    /// `search_prompts_ranked`, which also reports the cascade stage; this
+    /// stays as the legible API over the same cascade.
+    #[allow(dead_code)]
     pub fn search_prompts_fts(
         &self,
         q: &str,
         limit: i64,
     ) -> rusqlite::Result<Vec<crate::classmem::LakeItem>> {
+        Ok(self.search_prompts_ranked(q, limit)?.into_iter().map(|(it, _)| it).collect())
+    }
+
+    /// The cascade behind `search_prompts_fts`, with each hit labelled by the
+    /// stage that found it.
+    ///
+    /// `AND` first, then `OR` with prefixes, then `LIKE`. The stages are tried
+    /// in order and the FIRST one that returns anything wins — widening is a
+    /// fallback, not a supplement, because mixing a precise hit with a
+    /// one-term-in-nine hit and ranking them together is how "browser" ends up
+    /// beating "browser tab suspension" on a query that named all three.
+    ///
+    /// `bm25(prompts_fts, 3.0, 1.0)` weights the head column 3× over the tail:
+    /// a 6 KB prompt states its ask in its first paragraph, and a match there
+    /// means something different from a match 4 KB in.
+    pub fn search_prompts_ranked(
+        &self,
+        q: &str,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<(crate::classmem::LakeItem, crate::query::MatchStage)>> {
+        use crate::query::MatchStage;
         let trimmed = q.trim();
         if trimmed.is_empty() {
             return Ok(Vec::new());
@@ -2199,41 +2866,228 @@ impl Database {
                     p.surface, p.origin, p.role, p.mission_id, p.project_path,
                     COALESCE(NULLIF(p.body, ''), p.gist),
                     p.thread_kind, p.thread_id, p.parent_session_id, p.model";
+        let plan = crate::query::plan_fts_query(trimmed);
         let conn = self.conn.lock().unwrap();
-        match sanitize_fts_query(trimmed) {
-            Some(match_q) => {
+
+        if let Some(plan) = &plan {
+            for stage in [MatchStage::And, MatchStage::Or] {
+                let Some(match_q) = plan.match_for(stage) else { continue };
+                if match_q.is_empty() {
+                    continue;
+                }
                 let mut stmt = conn.prepare(&format!(
                     "{COLS}
                      FROM prompts_fts
                      JOIN prompts p ON p.id = prompts_fts.rowid
                      JOIN ledger_events le ON le.prompt_id = p.id
                      WHERE prompts_fts MATCH ?1 AND le.kind = 'prompt'
-                     ORDER BY bm25(prompts_fts) LIMIT ?2"
+                     ORDER BY bm25(prompts_fts, 3.0, 1.0) LIMIT ?2"
                 ))?;
-                let rows =
-                    stmt.query_map(params![match_q, limit.max(1)], Self::row_to_lake_item)?;
-                rows.collect()
-            }
-            None => {
-                let escaped = trimmed
-                    .replace('\\', "\\\\")
-                    .replace('%', "\\%")
-                    .replace('_', "\\_");
-                let mut stmt = conn.prepare(&format!(
-                    "{COLS}
-                     FROM prompts p
-                     JOIN ledger_events le ON le.prompt_id = p.id
-                     WHERE COALESCE(NULLIF(p.body, ''), p.gist) LIKE ?1 ESCAPE '\\'
-                       AND le.kind = 'prompt'
-                     ORDER BY le.seq DESC LIMIT ?2"
-                ))?;
-                let rows = stmt.query_map(
-                    params![format!("%{escaped}%"), limit.max(1)],
-                    Self::row_to_lake_item,
-                )?;
-                rows.collect()
+                let rows: Vec<crate::classmem::LakeItem> = stmt
+                    .query_map(params![match_q, limit.max(1)], Self::row_to_lake_item)?
+                    .collect::<rusqlite::Result<_>>()?;
+                if !rows.is_empty() {
+                    return Ok(rows.into_iter().map(|r| (r, stage)).collect());
+                }
             }
         }
+
+        // Stage 3: a bound substring scan. Reached when the query produced no
+        // usable terms at all (all punctuation, a single CJK character) or when
+        // both index stages came back empty.
+        //
+        // It matches against `p.fts_text`, the SAME generated column the index
+        // reads — not against the raw body. Otherwise the fallback quietly
+        // undoes the corpus rule: an agent preface is unreachable through the
+        // index and then perfectly reachable through the LIKE, so the words
+        // Phase 1 removed from the corpus come back the moment a query happens
+        // to miss. The row still RETURNS its display text; only the matching
+        // changes.
+        let escaped = trimmed
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let mut stmt = conn.prepare(&format!(
+            "{COLS}
+                     FROM prompts p
+                     JOIN ledger_events le ON le.prompt_id = p.id
+                     WHERE p.fts_text LIKE ?1 ESCAPE '\\'
+                       AND le.kind = 'prompt'
+                     ORDER BY le.seq DESC LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(
+            params![format!("%{escaped}%"), limit.max(1)],
+            Self::row_to_lake_item,
+        )?;
+        Ok(rows
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .map(|r| (r, MatchStage::Like))
+            .collect())
+    }
+
+    /// Substring/regex search over the record — the arm that reaches what
+    /// tokenization cannot: flags (`--allowedTools`), paths
+    /// (`src-tauri/src/db.rs`), error strings, attributes
+    /// (`#[serde(rename_all)]`).
+    ///
+    /// The shape is Google Code Search's: the trigram index proposes candidates
+    /// for the LIKE, and the optional regex VERIFIES them in Rust over what the
+    /// index returned. The regex never touches the database, so a pathological
+    /// pattern costs one Rust pass over ≤`limit` rows instead of a scan under
+    /// the connection lock.
+    ///
+    /// `literal` must be at least `GREP_MIN_LITERAL` characters, because that
+    /// is the trigram size: a shorter needle cannot be answered from the index
+    /// and would silently become a full scan. It is refused BY NAME
+    /// (`GrepError::LiteralTooShort`) rather than quietly scanned — a caller
+    /// that gets a slow answer learns nothing, a caller that gets a named
+    /// refusal learns to lengthen the needle.
+    pub fn grep_memory(
+        &self,
+        literal: &str,
+        re: Option<&str>,
+        case_sensitive: bool,
+        scope: GrepScope,
+        limit: i64,
+    ) -> Result<Vec<GrepHit>, GrepError> {
+        let needle = literal.trim();
+        if needle.chars().count() < GREP_MIN_LITERAL {
+            return Err(GrepError::LiteralTooShort {
+                min: GREP_MIN_LITERAL,
+                got: needle.chars().count(),
+            });
+        }
+        // Compiled BEFORE any query: a bad pattern is the caller's mistake and
+        // should cost nothing.
+        let matcher = re
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .map(|r| {
+                let src = if case_sensitive { r.to_string() } else { format!("(?i){r}") };
+                regex_lite::Regex::new(&src)
+            })
+            .transpose()
+            .map_err(|e| GrepError::BadRegex(e.to_string()))?;
+
+        let escaped = needle
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let pat = format!("%{escaped}%");
+        let limit = limit.clamp(1, 200);
+        let conn = self.conn.lock().unwrap();
+        let mut out: Vec<GrepHit> = Vec::new();
+
+        // The trigram index answers a `LIKE '%…%'` on its own column directly —
+        // that is the whole reason this tokenizer exists. `case_sensitive` is a
+        // post-filter rather than a second index: two trigram indexes over the
+        // same text would double the cost to serve a rare option.
+        if scope.wants_prompts() {
+            let mut stmt = conn.prepare(
+                "SELECT le.seq, p.id, p.ts, p.surface, p.fts_text
+                 FROM prompts_grep
+                 JOIN prompts p ON p.id = prompts_grep.rowid
+                 JOIN ledger_events le ON le.prompt_id = p.id AND le.kind = 'prompt'
+                 WHERE prompts_grep.fts_text LIKE ?1 ESCAPE '\\'
+                 ORDER BY le.seq DESC LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![pat, limit], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            })?;
+            for row in rows {
+                let (seq, _id, ts, surface, text) = row?;
+                if case_sensitive && !text.contains(needle) {
+                    continue;
+                }
+                if matcher.as_ref().is_some_and(|m| !m.is_match(&text)) {
+                    continue;
+                }
+                out.push(GrepHit {
+                    kind: "prompt".to_string(),
+                    seq: Some(seq),
+                    ts,
+                    label: surface.unwrap_or_else(|| "prompt".to_string()),
+                    excerpt: crate::dedup::excerpt_around(
+                        &text,
+                        std::slice::from_ref(&needle.to_string()),
+                        GREP_EXCERPT_CHARS,
+                    ),
+                });
+            }
+        }
+
+        if scope.wants_browse() {
+            let mut stmt = conn.prepare(
+                "SELECT le.seq, be.id, be.ts, be.url, COALESCE(be.title, '')
+                 FROM browse_grep
+                 JOIN browse_events be ON be.id = browse_grep.rowid
+                 LEFT JOIN ledger_events le
+                        ON le.ref_kind = 'browse_event' AND le.ref_id = CAST(be.id AS TEXT)
+                 WHERE browse_grep.url LIKE ?1 ESCAPE '\\'
+                    OR browse_grep.title LIKE ?1 ESCAPE '\\'
+                 ORDER BY be.ts DESC LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![pat, limit], |r| {
+                Ok((
+                    r.get::<_, Option<i64>>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            })?;
+            for row in rows {
+                let (seq, _id, ts, url, title) = row?;
+                let hay = format!("{title} {url}");
+                if case_sensitive && !hay.contains(needle) {
+                    continue;
+                }
+                if matcher.as_ref().is_some_and(|m| !m.is_match(&hay)) {
+                    continue;
+                }
+                out.push(GrepHit {
+                    kind: "browse".to_string(),
+                    seq,
+                    ts,
+                    label: if title.is_empty() { url.clone() } else { title },
+                    excerpt: url,
+                });
+            }
+        }
+
+        out.sort_by(|a, b| b.ts.cmp(&a.ts));
+        out.truncate(limit as usize);
+        Ok(out)
+    }
+
+    /// `context_hash` (sha256 of the normalized DOM) for a set of browse-event
+    /// ids — the exact-identity key the answer pack dedupes on. Already stored
+    /// and indexed, which is what makes exact dedup free: 829 browse events
+    /// hold only 665 distinct pages.
+    pub fn context_hashes_for_browse_ids(
+        &self,
+        ids: &[i64],
+    ) -> rusqlite::Result<std::collections::HashMap<i64, String>> {
+        if ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let conn = self.conn.lock().unwrap();
+        let marks = vec!["?"; ids.len()].join(", ");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT id, context_hash FROM browse_events WHERE id IN ({marks})"
+        ))?;
+        let refs: Vec<&dyn rusqlite::ToSql> = ids.iter().map(|i| i as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(refs.as_slice(), |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
+        rows.collect()
     }
 
     /// Fetch a browse event's `(url, title, text, context_hash)` by id — the read
@@ -2276,12 +3130,16 @@ impl Database {
     /// returns the new ledger seq. `reason` distinguishes an automatic gist
     /// (`"cold"`) from an explicit forget (`"forget"`). `actor` is who released
     /// the words — the keeper's seat name for an automatic gist, the local
-    /// human for an explicit forget.
+    /// human for an explicit forget. `gist_source` records which tier wrote the
+    /// gist — `"agent"` (the keeper's summarizer) or `"deterministic"` (the
+    /// fallback window) — so a summarizer that silently stopped running is
+    /// visible on Health instead of hiding behind the reclaim number.
     pub fn compact_prompt_body(
         &self,
         prompt_id: i64,
         gist: &str,
         reason: &str,
+        gist_source: &str,
         actor: &str,
     ) -> rusqlite::Result<Option<i64>> {
         let conn = self.conn.lock().unwrap();
@@ -2299,11 +3157,42 @@ impl Database {
         };
         let original_bytes = body.len() as i64;
         let ts = crate::ledger::now_millis();
+        // Archive BEFORE the words are released, and only for a `cold`
+        // compaction: cold means "we think you're done with this", which is a
+        // guess and must therefore be reversible. `forget` means the user said
+        // so — it archives nothing and *deletes* any archive an earlier cold
+        // pass left behind, because a forget that leaves a recoverable copy on
+        // disk is not a forget. The two branches are the whole contract.
+        if reason == "cold" {
+            match deflate_body(&body) {
+                Ok(blob) => {
+                    if let Err(e) = conn.execute(
+                        "INSERT INTO prompt_archive
+                            (prompt_id, body_hash, algo, original_bytes, blob, archived_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                         ON CONFLICT(prompt_id) DO UPDATE SET
+                            body_hash = excluded.body_hash, algo = excluded.algo,
+                            original_bytes = excluded.original_bytes,
+                            blob = excluded.blob, archived_at = excluded.archived_at",
+                        params![prompt_id, body_hash, ARCHIVE_ALGO, original_bytes, blob, ts],
+                    ) {
+                        // Best-effort: an archive failure must not block the
+                        // reclaim, but it must not be silent either — an
+                        // un-archived compaction is exactly today's behaviour.
+                        tracing::warn!(error = %e, prompt = prompt_id, "prompt archive write failed");
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, prompt = prompt_id, "prompt archive deflate failed"),
+            }
+        } else {
+            let _ = conn.execute("DELETE FROM prompt_archive WHERE prompt_id = ?1", params![prompt_id]);
+        }
         conn.execute(
             "UPDATE prompts
-                SET gist = ?2, body = '', compacted_at = ?3, original_bytes = ?4
+                SET gist = ?2, body = '', compacted_at = ?3, original_bytes = ?4,
+                    gist_source = ?5
              WHERE id = ?1 AND gist IS NULL",
-            params![prompt_id, gist, ts, original_bytes],
+            params![prompt_id, gist, ts, original_bytes, gist_source],
         )?;
         // The compaction event references the prompt and pins the ORIGINAL body
         // hash + the gist hash + the reason, so "what was forgotten" is provable
@@ -2333,32 +3222,619 @@ impl Database {
         Ok(Some(ev.seq))
     }
 
+    /// Restore a cold-compacted prompt's original body from the archive.
+    ///
+    /// Returns `Ok(false)` when there is nothing archived (never compacted, or
+    /// compacted before archiving existed, or forgotten on purpose). The
+    /// inflated bytes are re-hashed and checked against the archive row's
+    /// `body_hash` before they go anywhere near the prompt row: the archive is
+    /// derived data that lives OUTSIDE the hash chain, so it gets no trust it
+    /// hasn't just earned. A mismatch is an error, never a silent overwrite —
+    /// the whole point of the chain is that corrupt bytes can't quietly become
+    /// the record.
+    pub fn restore_prompt_body(&self, prompt_id: i64) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let row: Option<(String, String, Vec<u8>)> = conn
+            .query_row(
+                "SELECT body_hash, algo, blob FROM prompt_archive WHERE prompt_id = ?1",
+                params![prompt_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((archived_hash, algo, blob)) = row else {
+            return Ok(false);
+        };
+        if algo != ARCHIVE_ALGO {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "prompt {prompt_id}: unknown archive codec `{algo}`"
+            )));
+        }
+        let body = inflate_body(&blob).map_err(|e| {
+            rusqlite::Error::InvalidParameterName(format!("prompt {prompt_id}: inflate failed: {e}"))
+        })?;
+        if crate::ledger::body_hash(&body) != archived_hash {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "prompt {prompt_id}: archived body does not match its recorded hash"
+            )));
+        }
+        // The prompt's own `body_hash` is the chain's commitment and is never
+        // rewritten by compaction, so restoring is a pure re-inflation: put the
+        // words back, clear the compaction marks, drop the archive row.
+        let changed = conn.execute(
+            "UPDATE prompts
+                SET body = ?2, gist = NULL, compacted_at = NULL, original_bytes = NULL
+             WHERE id = ?1 AND body_hash = ?3",
+            params![prompt_id, body, archived_hash],
+        )?;
+        if changed == 0 {
+            return Ok(false);
+        }
+        conn.execute("DELETE FROM prompt_archive WHERE prompt_id = ?1", params![prompt_id])?;
+        Ok(true)
+    }
+
+    /// The corpus's own composition: `(role, rows, bytes)` over the whole lake,
+    /// NULL-safe. This is the number that was never on screen — 92.6% of the
+    /// searchable bytes were machine text and nothing reported it, so the only
+    /// visible symptom was that search "felt wrong". Cheap enough for the
+    /// memory-status poll (one grouped scan of a small table).
+    pub fn corpus_composition(&self) -> rusqlite::Result<Vec<(String, i64, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(role, 'unclassified') AS r, COUNT(*),
+                    COALESCE(SUM(LENGTH(CAST(COALESCE(NULLIF(body, ''), gist, '') AS BLOB))), 0)
+             FROM prompts GROUP BY r ORDER BY r",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+        })?;
+        rows.collect()
+    }
+
+    /// `(agent_written, deterministic_fallback)` gist counts. 47% of surviving
+    /// gists were the deterministic fallback — i.e. the summarizer wasn't
+    /// running — and nobody was watching, so compaction was quietly degrading to
+    /// "keep the first 240 characters" while reporting a 59:1 reclaim.
+    pub fn gist_source_counts(&self) -> rusqlite::Result<(i64, i64)> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT
+                COALESCE(SUM(CASE WHEN gist_source = 'agent' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN gist_source <> 'agent' OR gist_source IS NULL
+                                  THEN 1 ELSE 0 END), 0)
+             FROM prompts WHERE gist IS NOT NULL",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+    }
+
+    // --- the picture store (Phase 7) ---------------------------------------
+
+    /// Point every row with this `context_hash` at a shot. Content-addressed,
+    /// so one capture serves every tab that saw the same page.
+    pub fn set_shot_key_for_hash(&self, context_hash: &str, key: &str) -> rusqlite::Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE browse_events SET shot_key = ?2 WHERE context_hash = ?1",
+            params![context_hash, key],
+        )
+    }
+
+    /// "Forget this picture": clear the pointer everywhere it appears. The
+    /// caller deletes the file; this is the half that makes it disappear from
+    /// the UI even if the unlink fails.
+    pub fn clear_shot_key(&self, key: &str) -> rusqlite::Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("UPDATE browse_events SET shot_key = NULL WHERE shot_key = ?1", params![key])
+    }
+
+    /// Every shot key the database still points at — the retention sweep's
+    /// ground truth. DB-driven, never caller-driven.
+    ///
+    /// BOTH stores, because a key missing from this set is deleted: leaving out
+    /// `surface_shots` would have made every Redline-surface picture
+    /// "unreferenced" and swept on the first pass, which is precisely the
+    /// one-writer-erases-another's-files bug this design exists to avoid.
+    pub fn referenced_shot_keys(&self) -> rusqlite::Result<std::collections::HashSet<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut out = std::collections::HashSet::new();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT shot_key FROM browse_events WHERE shot_key IS NOT NULL
+             UNION
+             SELECT DISTINCT shot_key FROM surface_shots",
+        )?;
+        for row in stmt.query_map([], |r| r.get::<_, String>(0))? {
+            out.insert(row?);
+        }
+        Ok(out)
+    }
+
+    /// The newest decision event of a kind on a session — what a surface shot
+    /// keys itself to.
+    pub fn latest_decision_seq(&self, session_id: &str, kind: &str) -> rusqlite::Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT MAX(seq) FROM ledger_events WHERE session_id = ?1 AND kind = ?2",
+            params![session_id, kind],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+    }
+
+    /// Record a picture of one of Redline's own surfaces.
+    pub fn record_surface_shot(
+        &self,
+        seq: i64,
+        surface: &str,
+        shot_key: &str,
+        theme: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO surface_shots (seq, surface, shot_key, theme, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(seq) DO UPDATE SET
+                shot_key = excluded.shot_key, theme = excluded.theme",
+            params![seq, surface, shot_key, theme, crate::ledger::now_millis()],
+        )?;
+        Ok(())
+    }
+
+    /// Surface shots for a page of seqs — one query, joined onto the Timeline.
+    /// The batched read; the Timeline joins inline on its own connection.
+    #[allow(dead_code)]
+    pub fn surface_shots_for_seqs(
+        &self,
+        seqs: &[i64],
+    ) -> rusqlite::Result<std::collections::HashMap<i64, (String, Option<String>)>> {
+        if seqs.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let conn = self.conn.lock().unwrap();
+        let marks = vec!["?"; seqs.len()].join(", ");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT seq, shot_key, theme FROM surface_shots WHERE seq IN ({marks})"
+        ))?;
+        let refs: Vec<&dyn rusqlite::ToSql> =
+            seqs.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(refs.as_slice(), |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                (r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?),
+            ))
+        })?;
+        rows.collect()
+    }
+
+    /// Clearing a surface shot removes its row too.
+    pub fn clear_surface_shot(&self, key: &str) -> rusqlite::Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM surface_shots WHERE shot_key = ?1", params![key])
+    }
+
+    /// Pages that have a PICTURE but essentially no TEXT — the vision tier's
+    /// backlog, and the measurement that earns it.
+    ///
+    /// 100 of 829 live browse rows (12.1%) have `length(text) < 200`, i.e. next
+    /// to nothing after the `"{title}\n{url}\n\n"` prefix. The sample is exactly
+    /// the predicted class: a docs site that renders client-side, a Wikimedia
+    /// infographic that IS an image, a wall of `localhost:3000` React
+    /// dashboards. Those rows sit in `browse_events_fts` contributing nothing —
+    /// and for every one of them there is already a picture on disk. Not
+    /// "vision is cool": **12% of the corpus is dark and the light is already
+    /// on**.
+    pub fn pages_with_a_picture_but_no_text(
+        &self,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<(i64, String, String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, url, COALESCE(title, ''), shot_key
+             FROM browse_events
+             WHERE shot_key IS NOT NULL
+               AND caption IS NULL
+               AND LENGTH(text) < 200
+             GROUP BY context_hash
+             ORDER BY id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+        rows.collect()
+    }
+
+    /// Store a vision-tier caption.
+    ///
+    /// Written to `caption`, NEVER appended into `text` — `context_hash =
+    /// body_hash(text)` is the identity the shot key, the dedupe and the chain
+    /// all rest on, so folding a caption into `text` would silently re-key the
+    /// page and orphan its own picture.
+    pub fn set_caption_for_hash(&self, context_hash: &str, caption: &str) -> rusqlite::Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE browse_events SET caption = ?2 WHERE context_hash = ?1",
+            params![context_hash, caption],
+        )
+    }
+
+    /// `(with_pictures, dark_pages)` for Health.
+    pub fn shot_stats(&self) -> rusqlite::Result<(i64, i64)> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT
+                (SELECT COUNT(DISTINCT shot_key) FROM browse_events WHERE shot_key IS NOT NULL),
+                (SELECT COUNT(DISTINCT context_hash) FROM browse_events
+                  WHERE shot_key IS NOT NULL AND caption IS NULL AND LENGTH(text) < 200)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+    }
+
+    /// The `context_hash` for one browse event — the capture path needs it to
+    /// mint a content-addressed key.
+    pub fn context_hash_for_browse_id(&self, id: i64) -> rusqlite::Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT context_hash FROM browse_events WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .optional()
+    }
+
+    /// `prompt_id → ledger seq` for a set of prompt ids.
+    ///
+    /// The semantic index keys on `prompts.id` (a chunk belongs to a row) while
+    /// every retrieval surface speaks ledger `seq` (a citation belongs to a
+    /// moment). Fusing two ranked lists that key on different id-spaces would
+    /// produce a fusion that agrees with itself about nothing, so the bridge is
+    /// explicit. `le.kind = 'prompt'` is load-bearing: a compacted row also
+    /// carries a `compaction` event with the same `prompt_id`.
+    pub fn seqs_for_prompt_ids(
+        &self,
+        ids: &[i64],
+    ) -> rusqlite::Result<std::collections::HashMap<i64, i64>> {
+        if ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let conn = self.conn.lock().unwrap();
+        let marks = vec!["?"; ids.len()].join(", ");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT prompt_id, MIN(seq) FROM ledger_events
+             WHERE kind = 'prompt' AND prompt_id IN ({marks})
+             GROUP BY prompt_id"
+        ))?;
+        let refs: Vec<&dyn rusqlite::ToSql> = ids.iter().map(|i| i as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(refs.as_slice(), |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        rows.collect()
+    }
+
+    /// Full lake items for an exact set of seqs — how a semantic-only hit
+    /// (one no lexical term matched) gets a body to show.
+    pub fn lake_items_for_seqs(
+        &self,
+        seqs: &[i64],
+    ) -> rusqlite::Result<Vec<crate::classmem::LakeItem>> {
+        if seqs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().unwrap();
+        let marks = vec!["?"; seqs.len()].join(", ");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT le.seq, le.ts, le.kind, le.ref_kind, le.ref_id, le.session_id,
+                    p.surface, p.origin, p.role, p.mission_id, p.project_path,
+                    {PROMPT_TEXT},
+                    p.thread_kind, p.thread_id, p.parent_session_id, p.model
+             FROM ledger_events le
+             JOIN prompts p ON p.id = le.prompt_id
+             WHERE le.kind = 'prompt' AND le.seq IN ({marks})
+             ORDER BY le.seq DESC"
+        ))?;
+        let refs: Vec<&dyn rusqlite::ToSql> =
+            seqs.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(refs.as_slice(), Self::row_to_lake_item)?;
+        rows.collect()
+    }
+
+    // --- semantic index (derived; see the `embeddings` DDL) ----------------
+
+    /// Targets that still need embedding for `model`, oldest first.
+    ///
+    /// The `source_hash` join is what makes re-runs free: a row whose text has
+    /// not changed since it was embedded produces no work, so the incremental
+    /// worker converges instead of re-doing the corpus every tick.
+    ///
+    /// Only `role <> 'agent'` prompts are eligible, for the same reason they
+    /// are out of the lexical index and out of the classifier: Redline's own
+    /// constructed prefaces are 73% of the corpus by weight and answer nobody's
+    /// question. Embedding them would spend 87% of the budget describing our
+    /// own instruction text — the plan's "1 before 6, by a factor of 8".
+    pub fn embedding_backlog(
+        &self,
+        model: &str,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<(String, i64, String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut out = Vec::new();
+
+        // Prompts: the user's own words (or an agent row's `user_text`, which
+        // `fts_text` already resolves for us).
+        let mut stmt = conn.prepare(
+            "SELECT p.id, p.fts_text, p.body_hash
+             FROM prompts p
+             WHERE COALESCE(p.role, 'user') <> 'agent'
+               AND LENGTH(p.fts_text) > 0
+               AND NOT EXISTS (
+                   SELECT 1 FROM embeddings e
+                   WHERE e.target_kind = 'prompt' AND e.target_id = p.id
+                     AND e.model = ?1 AND e.source_hash = p.body_hash)
+             ORDER BY p.id ASC LIMIT ?2",
+        )?;
+        for row in stmt.query_map(params![model, limit], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })? {
+            let (id, text, hash) = row?;
+            out.push(("prompt".to_string(), id, text, hash));
+        }
+        drop(stmt);
+        if out.len() as i64 >= limit {
+            return Ok(out);
+        }
+
+        // Browse events, deduped by `context_hash` FIRST: 829 rows hold 665
+        // distinct pages, so a fifth of the embedding work would be spent
+        // re-embedding text we already have a vector for. `MIN(id)` keeps the
+        // earliest view of each page as its representative.
+        let mut stmt = conn.prepare(
+            "SELECT MIN(be.id), be.text, be.context_hash
+             FROM browse_events be
+             WHERE LENGTH(be.text) > 0
+               AND NOT EXISTS (
+                   SELECT 1 FROM embeddings e
+                   WHERE e.target_kind = 'browse_event'
+                     AND e.model = ?1 AND e.source_hash = be.context_hash)
+             GROUP BY be.context_hash
+             ORDER BY MIN(be.id) ASC LIMIT ?2",
+        )?;
+        for row in stmt.query_map(params![model, limit - out.len() as i64], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })? {
+            let (id, text, hash) = row?;
+            out.push(("browse_event".to_string(), id, text, hash));
+        }
+        drop(stmt);
+        if out.len() as i64 >= limit {
+            return Ok(out);
+        }
+
+        // Class nodes: `title + summary` as ONE chunk. This is what gives
+        // semantic NODE resolution — a question that shares no words with a
+        // class title can still reach it — without ever letting a lake ranking
+        // decide what a class IS.
+        let mut stmt = conn.prepare(
+            "SELECT n.rowid, n.title || COALESCE(' — ' || n.summary, ''),
+                    n.title || COALESCE(n.summary, '')
+             FROM class_nodes n
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM embeddings e
+                 WHERE e.target_kind = 'class_node' AND e.target_id = n.rowid
+                   AND e.model = ?1
+                   AND e.source_hash = n.title || COALESCE(n.summary, ''))
+             ORDER BY n.rowid ASC LIMIT ?2",
+        )?;
+        for row in stmt.query_map(params![model, limit - out.len() as i64], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })? {
+            let (id, text, hash) = row?;
+            out.push(("class_node".to_string(), id, text, hash));
+        }
+        Ok(out)
+    }
+
+    /// Replace one target's vectors for a model, atomically.
+    pub fn store_embeddings(
+        &self,
+        target_kind: &str,
+        target_id: i64,
+        model: &str,
+        source_hash: &str,
+        chunks: &[(crate::embed::Chunk, crate::embed::QVec)],
+    ) -> rusqlite::Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM embeddings
+             WHERE target_kind = ?1 AND target_id = ?2 AND model = ?3",
+            params![target_kind, target_id, model],
+        )?;
+        let now = crate::ledger::now_millis();
+        for (chunk, q) in chunks {
+            tx.execute(
+                "INSERT INTO embeddings
+                    (target_kind, target_id, chunk_ix, char_start, char_len,
+                     dim, scale, vec, model, source_hash, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    target_kind,
+                    target_id,
+                    chunk.ix,
+                    chunk.char_start,
+                    chunk.char_len,
+                    q.bytes.len() as i64,
+                    q.scale,
+                    crate::embed::pack(q),
+                    model,
+                    source_hash,
+                    now,
+                ],
+            )?;
+        }
+        tx.commit()
+    }
+
+    /// Every vector for a model, as `(target_kind, target_id, chunk_ix, vec)`.
+    /// Read whole and cached — see `embed::VectorCache`.
+    pub fn all_embeddings(
+        &self,
+        model: &str,
+    ) -> rusqlite::Result<Vec<(i64, String, i64, crate::embed::QVec)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, target_kind, target_id, scale, vec
+             FROM embeddings WHERE model = ?1 ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(params![model], |r| {
+            let scale: f64 = r.get(3)?;
+            let blob: Vec<u8> = r.get(4)?;
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                crate::embed::unpack(&blob, scale as f32),
+            ))
+        })?;
+        rows.collect()
+    }
+
+    /// `(chunks, pending, distinct_targets)` for a model — what Health shows,
+    /// so a half-built index is VISIBLE rather than silently degrading recall.
+    pub fn embedding_stats(&self, model: &str) -> rusqlite::Result<(i64, i64)> {
+        let conn = self.conn.lock().unwrap();
+        let chunks: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM embeddings WHERE model = ?1",
+            params![model],
+            |r| r.get(0),
+        )?;
+        let pending: i64 = conn.query_row(
+            "SELECT
+               (SELECT COUNT(*) FROM prompts p
+                 WHERE COALESCE(p.role,'user') <> 'agent' AND LENGTH(p.fts_text) > 0
+                   AND NOT EXISTS (SELECT 1 FROM embeddings e
+                     WHERE e.target_kind='prompt' AND e.target_id=p.id
+                       AND e.model=?1 AND e.source_hash=p.body_hash))
+             + (SELECT COUNT(*) FROM (SELECT context_hash FROM browse_events be
+                 WHERE LENGTH(be.text) > 0
+                   AND NOT EXISTS (SELECT 1 FROM embeddings e
+                     WHERE e.target_kind='browse_event' AND e.model=?1
+                       AND e.source_hash=be.context_hash)
+                 GROUP BY be.context_hash))",
+            params![model],
+            |r| r.get(0),
+        )?;
+        Ok((chunks, pending))
+    }
+
+    /// Drop every vector. The index is derived, so this is always safe and
+    /// always recoverable — the keeper's watch rebuilds it.
+    pub fn clear_embeddings(&self) -> rusqlite::Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute("DELETE FROM embeddings", [])?;
+        if let Ok(mut guard) = crate::embed::cache().write() {
+            *guard = None;
+        }
+        Ok(n)
+    }
+
+    /// The vector index's high-water mark — the cache key. One monotonic
+    /// number, so invalidation never depends on anyone remembering to clear it
+    /// (the `build_stats_cached` idiom).
+    pub fn max_embedding_id(&self) -> rusqlite::Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT COALESCE(MAX(id), 0) FROM embeddings", [], |r| r.get(0))
+    }
+
+    /// `(hits, total)` for the Ask prefetch, over whatever `context_journal`
+    /// still holds (it self-prunes at 2,000 rows / 14 days, which is the right
+    /// window: this is a "is it working NOW" number, not a lifetime statistic).
+    ///
+    /// A hit is a turn where the agent was handed a prefetch and made no memory
+    /// curl at all. That is the honest A/B for the whole one-turn design, and
+    /// it self-reports a planner regression — which is the only way a retrieval
+    /// change shows up as anything other than "Ask feels slower again".
+    pub fn prefetch_hit_rate(&self) -> rusqlite::Result<(i64, i64)> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COALESCE(SUM(CASE WHEN label = 'hit' THEN 1 ELSE 0 END), 0), COUNT(*)
+             FROM context_journal WHERE kind = 'memchat_prefetch'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+    }
+
+    /// How many compacted bodies are still recoverable, and the deflated bytes
+    /// they occupy — the honest counterpart to `compaction_stats`' reclaim
+    /// number, which reads as pure profit until you can see the cost.
+    pub fn archive_stats(&self) -> rusqlite::Result<(i64, i64)> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(LENGTH(blob)), 0) FROM prompt_archive",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+    }
+
     /// Compaction candidates: warm prompts (`gist IS NULL`) at least `size_floor`
-    /// bytes, each paired with an ACCEPTED class node it is linked into. A prompt
-    /// links into a node by ledger seq (`class_links.target_id` = the prompt
-    /// event's seq), so we resolve seq → `prompt_id` here. Returns
-    /// `(prompt_id, byte_len, node_id)` rows — the keeper groups them by prompt
-    /// and applies the cold/pinned/size interlocks in pure code. A prompt not yet
-    /// classified into any node produces no rows (only classified-and-cold data
-    /// is ever gisted).
+    /// bytes. A prompt links into a node by ledger seq
+    /// (`class_links.target_id` = the prompt event's seq), so we resolve
+    /// seq → `prompt_id` here; the keeper groups the rows by prompt and applies
+    /// the role/cold/pinned/size interlocks in pure code.
+    ///
+    /// Warm prompts worth considering for compaction, as flat
+    /// `(id, bytes, role, node_id)` rows — one per accepted class link, or a
+    /// single row with `node_id = NULL` for machine text.
+    ///
+    /// The class-link join is now a LEFT join, because machine text
+    /// (`agent`/`system`) is deliberately kept out of the classifier and so can
+    /// never acquire a link to go cold *through*. Without this it would be
+    /// immortal: excluded from classification by Phase 1.5, and therefore never
+    /// selectable — the 6.9 MB would sit on disk forever while the only rows
+    /// still reachable by the blade were the user's own. Machine rows qualify on
+    /// lake-relative age instead (`machine_cold_before_ts`).
     pub fn list_compaction_candidates(
         &self,
         size_floor: i64,
-    ) -> rusqlite::Result<Vec<(i64, i64, String)>> {
+        machine_cold_before_ts: i64,
+    ) -> rusqlite::Result<Vec<(i64, i64, String, Option<String>)>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT p.id, LENGTH(CAST(p.body AS BLOB)) AS bytes, l.node_id
+            "SELECT p.id, LENGTH(CAST(p.body AS BLOB)) AS bytes,
+                    COALESCE(p.role, 'user') AS role, l.node_id
              FROM prompts p
              JOIN ledger_events le ON le.prompt_id = p.id AND le.kind = 'prompt'
-             JOIN class_links l
+             LEFT JOIN class_links l
                ON l.target_kind = 'prompt'
               AND CAST(l.target_id AS INTEGER) = le.seq
               AND l.status = 'accepted'
              WHERE p.gist IS NULL
-               AND LENGTH(CAST(p.body AS BLOB)) >= ?1",
+               AND LENGTH(CAST(p.body AS BLOB)) >= ?1
+               AND (l.node_id IS NOT NULL
+                    OR (COALESCE(p.role, 'user') <> 'user' AND p.ts <= ?2))",
         )?;
-        let rows = stmt.query_map(params![size_floor], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?))
+        let rows = stmt.query_map(params![size_floor, machine_cold_before_ts], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+            ))
         })?;
         rows.collect()
     }
@@ -2734,7 +4210,8 @@ impl Database {
             "INSERT INTO drafts (draft_id, title, project_path, doc_markdown, doc_json, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
              ON CONFLICT(draft_id) DO UPDATE SET
-                title = excluded.title,
+                title = CASE WHEN drafts.title_is_user_set = 1 THEN drafts.title
+                             ELSE COALESCE(excluded.title, drafts.title) END,
                 project_path = excluded.project_path,
                 doc_markdown = excluded.doc_markdown,
                 doc_json = COALESCE(excluded.doc_json, drafts.doc_json),
@@ -2856,12 +4333,16 @@ impl Database {
     }
 
     /// Rename a document. The title is normally derived from the markdown's
-    /// first heading; this is the explicit override the shelf offers.
+    /// first heading; this is the explicit override the shelf offers. Pinning
+    /// `title_is_user_set` here is what makes the override survive the next
+    /// keystroke — every document mirror writer re-derives a title and passes
+    /// it, and `upsert_draft` reads this flag rather than trusting them.
     pub fn rename_draft(&self, draft_id: &str, title: &str) -> rusqlite::Result<()> {
         let now = crate::ledger::now_millis();
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE drafts SET title = ?2, updated_at = ?3 WHERE draft_id = ?1",
+            "UPDATE drafts SET title = ?2, title_is_user_set = 1, updated_at = ?3
+             WHERE draft_id = ?1",
             params![draft_id, title, now],
         )?;
         Ok(())
@@ -4049,15 +5530,31 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         // Build a parameterized WHERE; each clause pushes a bound value so no
         // caller string ever reaches the SQL text.
-        let mut sql = String::from(
+        // `p.body` alone was a live bug here: compaction writes `body = ''`, so
+        // this route — which backs the MCP `query_prompts` tool — returned an
+        // empty string for all 224 compacted rows rather than their gists. An
+        // external session grounding itself on the user's memory read them as
+        // content-free. `PROMPT_TEXT` is the one expression that resolves it.
+        let mut sql = format!(
             "SELECT le.seq, le.ts, le.kind, le.ref_kind, le.ref_id, le.session_id,
-                    p.surface, p.origin, p.role, p.mission_id, p.project_path, p.body,
+                    p.surface, p.origin, p.role, p.mission_id, p.project_path,
+                    {PROMPT_TEXT},
                     p.thread_kind, p.thread_id, p.parent_session_id, p.model
              FROM prompts p
              JOIN ledger_events le ON le.prompt_id = p.id
-             WHERE 1 = 1",
+             WHERE 1 = 1"
         );
         let mut binds: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        match f.role.as_deref().filter(|s| !s.is_empty()) {
+            Some(role) => {
+                sql.push_str(" AND COALESCE(p.role, 'user') = ?");
+                binds.push(Box::new(role.to_string()));
+            }
+            None if !f.include_agent => {
+                sql.push_str(" AND COALESCE(p.role, 'user') <> 'agent'");
+            }
+            None => {}
+        }
         if let Some(s) = f.session_id.as_deref().filter(|s| !s.is_empty()) {
             sql.push_str(" AND p.session_id = ?");
             binds.push(Box::new(s.to_string()));
@@ -4104,18 +5601,22 @@ impl Database {
             // An unsanitizable query — punctuation only, say — yields no FTS
             // tokens; fall back to the bound LIKE so it still matches something
             // rather than erroring or silently returning nothing.
-            match sanitize_fts_query(q) {
-                Some(match_q) => {
+            // The planner's AND reading is the right one for a FILTER: the
+            // job is narrowing, and every extra word the user types should cut
+            // the list down rather than widen it. (The OR-with-prefix stage is
+            // for RANKED search, where a weak hit still beats no hit.)
+            match crate::query::plan_fts_query(q) {
+                Some(plan) => {
                     sql.push_str(
                         " AND p.id IN (SELECT rowid FROM prompts_fts WHERE prompts_fts MATCH ?)",
                     );
-                    binds.push(Box::new(match_q));
+                    binds.push(Box::new(plan.and_match));
                 }
                 None => {
                     // Escape LIKE metacharacters so the text matches literally.
                     let escaped =
                         q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
-                    sql.push_str(" AND COALESCE(NULLIF(p.body, ''), p.gist) LIKE ? ESCAPE '\\'");
+                    sql.push_str(&format!(" AND {PROMPT_TEXT} LIKE ? ESCAPE '\\'"));
                     binds.push(Box::new(format!("%{escaped}%")));
                 }
             }
@@ -4209,13 +5710,23 @@ impl Database {
         // is a `note` event's OWN readable row — its standalone row by id, or
         // the row on whatever target it annotates — so the list shows the
         // note's current text, not a payload hash.
-        let mut sql = String::from(
+        // Clip in SQL, not in Rust. A page is up to 500 rows and a row renders
+        // `PREVIEW_CHARS` characters at ROW_H=30, but the average body is
+        // 6.3 KB — so this read moved ~730 KB across the connection lock to
+        // display ~120 KB of it. One character past the window is fetched so
+        // the "…" stays truthful, and `body_chars` reports the real length
+        // without carrying the text it stands for.
+        let preview_window = crate::context::PREVIEW_CHARS + 1;
+        let mut sql = format!(
             "SELECT le.seq, le.ts, le.kind, le.author, le.prompt_id, le.session_id,
                     le.version_number, le.ref_kind, le.ref_id, le.payload_hash,
                     le.prev_hash, le.entry_hash,
                     p.surface, p.project_path, p.thread_kind, p.model,
-                    COALESCE(p.gist, p.body), p.compacted_at,
+                    substr(COALESCE(NULLIF(p.body, ''), p.gist), 1, {preview_window}),
+                    LENGTH(COALESCE(NULLIF(p.body, ''), p.gist)),
+                    p.role, p.compacted_at,
                     be.browse_id, be.url, be.title, be.action, be.from_event_id,
+                    be.shot_key, be.caption,
                     COALESCE(n_on.starred, 0), n_on.text,
                     COALESCE(n_own.starred, 0), n_own.text
              FROM ledger_events le
@@ -4254,17 +5765,50 @@ impl Database {
             binds.push(Box::new(p.to_string()));
         }
         if let Some(q) = f.q.as_deref().filter(|s| !s.is_empty()) {
-            // Escape LIKE metacharacters so the query text is matched literally.
-            // Note text is searched alongside bodies — a margin note is words
-            // you wrote, the strongest recall handle there is.
+            // The UI's own search box, and the last `LIKE '%…%'` full scan on
+            // the surface: it read every prompt body in the lake, joined to the
+            // whole chain, on every keystroke past the 250 ms debounce.
+            //
+            // Now the prompt half rides `prompts_fts` as a FILTER — the index
+            // narrows, `ORDER BY le.seq DESC` still decides the order, and the
+            // response shape is untouched. That discipline is the design law:
+            // a ranked fuzzy index must not become the taxonomy, so it may
+            // narrow an ordered query but never reorder one. The AND reading is
+            // what a search box means: more words, fewer rows.
+            //
+            // Note text keeps its LIKE. `user_notes` is tiny (one row per
+            // annotated target) and a margin note is words the user chose, so
+            // substring behaviour there is what they expect — and an index over
+            // it would cost more than it saves.
             let escaped = q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
-            sql.push_str(
-                " AND (COALESCE(p.gist, p.body) LIKE ? ESCAPE '\\'
-                    OR n_own.text LIKE ? ESCAPE '\\')",
-            );
             let pat = format!("%{escaped}%");
-            binds.push(Box::new(pat.clone()));
-            binds.push(Box::new(pat));
+            match crate::query::plan_fts_query(q) {
+                Some(plan) => {
+                    sql.push_str(
+                        " AND (p.id IN (SELECT rowid FROM prompts_fts WHERE prompts_fts MATCH ?)
+                            OR n_own.text LIKE ? ESCAPE '\\')",
+                    );
+                    binds.push(Box::new(plan.and_match));
+                    binds.push(Box::new(pat));
+                }
+                None => {
+                    sql.push_str(&format!(
+                        " AND ({PROMPT_TEXT} LIKE ? ESCAPE '\\'
+                            OR n_own.text LIKE ? ESCAPE '\\')"
+                    ));
+                    binds.push(Box::new(pat.clone()));
+                    binds.push(Box::new(pat));
+                }
+            }
+        }
+        // Corpus-role facet. Defaults to `user` at the UI, which is what makes
+        // the reclassification visible rather than merely done: flipping it
+        // reveals the 6.9 MB of Redline's own agent text that was silently
+        // sharing the corpus with the user's prompts. A non-prompt event (a
+        // decision, a browse view) has no role and is never filtered out by it.
+        if let Some(role) = f.role.as_deref().filter(|s| !s.is_empty()) {
+            sql.push_str(" AND (le.prompt_id IS NULL OR COALESCE(p.role, 'user') = ?)");
+            binds.push(Box::new(role.to_string()));
         }
         // Star / note facets — structural clauses, nothing user-typed. An
         // event counts as starred/noted through either probe: annotated, or a
@@ -4334,31 +5878,45 @@ impl Database {
         let rows = stmt.query_map(refs.as_slice(), |r| {
             let event = Self::row_to_ledger_event(r)?;
             let body: Option<String> = r.get(16)?;
-            let compacted_at: Option<i64> = r.get(17)?;
-            let starred_on: i64 = r.get(23)?;
-            let note_on: Option<String> = r.get(24)?;
-            let starred_own: i64 = r.get(25)?;
-            let note_own: Option<String> = r.get(26)?;
+            let body_chars: Option<i64> = r.get(17)?;
+            let role: Option<String> = r.get(18)?;
+            let compacted_at: Option<i64> = r.get(19)?;
+            let starred_on: i64 = r.get(27)?;
+            let note_on: Option<String> = r.get(28)?;
+            let starred_own: i64 = r.get(29)?;
+            let note_own: Option<String> = r.get(30)?;
+            // A `note` event's list text is its row's current words; those come
+            // back whole (the table is tiny) so they still clip here.
+            let from_note = body.is_none();
+            let preview = body.or(note_own);
+            let full_chars = if from_note {
+                preview.as_ref().map(|p| p.chars().count() as i64)
+            } else {
+                body_chars
+            };
             Ok(crate::context::TimelineItem {
                 event,
                 surface: r.get(12)?,
                 project_path: r.get(13)?,
                 thread_kind: r.get(14)?,
                 model: r.get(15)?,
-                // A `note` event's list text is its row's current words.
-                preview: body.or(note_own).map(|b| {
+                preview: preview.map(|b| {
                     if b.chars().count() > crate::context::PREVIEW_CHARS {
                         b.chars().take(crate::context::PREVIEW_CHARS).collect::<String>() + "…"
                     } else {
                         b
                     }
                 }),
+                body_chars: full_chars,
+                role,
                 compacted: compacted_at.is_some(),
-                browse_id: r.get(18)?,
-                url: r.get(19)?,
-                title: r.get(20)?,
-                action: r.get(21)?,
-                from_event_id: r.get(22)?,
+                browse_id: r.get(20)?,
+                url: r.get(21)?,
+                title: r.get(22)?,
+                action: r.get(23)?,
+                from_event_id: r.get(24)?,
+                shot_key: r.get(25)?,
+                caption: r.get(26)?,
                 class_node_id: None,
                 class_title: None,
                 starred: starred_on != 0 || starred_own != 0,
@@ -4399,6 +5957,32 @@ impl Database {
             if let Some((node_id, title)) = filing {
                 it.class_node_id = Some(node_id.clone());
                 it.class_title = Some(title.clone());
+            }
+        }
+        // Pictures of Redline's own surfaces hang off the EVENT rather than a
+        // `browse_events` row, so they join here — one query for the page, on
+        // the connection already held (re-locking would deadlock).
+        if !items.is_empty() {
+            let marks = vec!["?"; items.len()].join(", ");
+            let mut stmt = conn.prepare(&format!(
+                "SELECT seq, shot_key FROM surface_shots WHERE seq IN ({marks})"
+            ))?;
+            let seqs: Vec<i64> = items.iter().map(|it| it.event.seq).collect();
+            let refs: Vec<&dyn rusqlite::ToSql> =
+                seqs.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+            let mut by_seq: std::collections::HashMap<i64, String> =
+                std::collections::HashMap::new();
+            for row in stmt.query_map(refs.as_slice(), |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            })? {
+                let (seq, key) = row?;
+                by_seq.insert(seq, key);
+            }
+            drop(stmt);
+            for it in &mut items {
+                if let Some(key) = by_seq.get(&it.event.seq) {
+                    it.shot_key = Some(key.clone());
+                }
             }
         }
         Ok(items)
@@ -5281,6 +6865,42 @@ impl Database {
         rows.collect()
     }
 
+    /// Children of MANY parents in one query — the batched form of
+    /// `list_class_children`, same `link_previews_for_seqs` idiom.
+    ///
+    /// The answer pack fetched a node's grandchildren by calling the singular
+    /// version once per child, so a node with 40 children took 40 round trips
+    /// through the connection mutex to build a list the pack then truncates.
+    /// One query, one lock acquisition.
+    pub fn list_class_children_for_parents(
+        &self,
+        parent_ids: &[String],
+    ) -> rusqlite::Result<Vec<crate::classmem::ClassNode>> {
+        if parent_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().unwrap();
+        let mut out = Vec::new();
+        // Chunked so a very wide node can't build a statement past SQLite's
+        // variable limit.
+        for chunk in parent_ids.chunks(400) {
+            let marks = vec!["?"; chunk.len()].join(", ");
+            let mut stmt = conn.prepare(&format!(
+                "SELECT id, parent_id, kind, title, summary, project_path, ip_name,
+                        status, pinned, curated_by, created_at, updated_at
+                 FROM class_nodes WHERE parent_id IN ({marks})
+                 ORDER BY parent_id ASC, title ASC"
+            ))?;
+            let refs: Vec<&dyn rusqlite::ToSql> =
+                chunk.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+            let rows = stmt.query_map(refs.as_slice(), Self::row_to_class_node)?;
+            for r in rows {
+                out.push(r?);
+            }
+        }
+        Ok(out)
+    }
+
     /// `link_preview` for a whole page of link targets in ONE query under ONE
     /// lock, keyed by ledger seq. The per-link version issued a query (and took
     /// the connection mutex) once per link, which is what made a node with a
@@ -5357,38 +6977,75 @@ impl Database {
         rows.collect()
     }
 
-    /// Class nodes whose title or summary matches a term, best guess first —
+    /// Class nodes whose title or summary matches a question, best guess first —
     /// how the answer pack resolves a question to a node when the caller didn't
-    /// name one. The class table is small (a catalog, not a lake), so a LIKE
-    /// scan is honest here; a title hit outranks a summary hit, and accepted
-    /// outranks proposed.
+    /// name one.
+    ///
+    /// This was the single highest-leverage bug in the retrieval path. It LIKEd
+    /// the **entire raw query** as one `%…%` pattern, so it could only ever
+    /// match a node whose title literally contained the user's whole sentence.
+    /// Every question-shaped `?q=` therefore resolved NO node — verified live:
+    /// `q="what did I decide about the browser tab suspension"` → `node: null`,
+    /// `matchedNodes: []` — and the answer pack silently degraded to
+    /// lexical-only, which reads exactly like "you never thought about this".
+    /// The catalog could not improve its way out either: all 125 nodes have an
+    /// empty `summary`, so even a per-token LIKE would have had only titles.
+    ///
+    /// Now it scores per token through `class_nodes_fts`, with three signals:
+    /// `bm25(title 5, summary 1)`, a recency term on `updated_at`, and
+    /// accepted-before-proposed as the tie-break. The recency term is the piece
+    /// our ranking has been missing everywhere — a class the user touched last
+    /// week is a better answer than one they touched in March, and no amount of
+    /// term overlap says that.
+    ///
+    /// **Design law:** this is node RESOLUTION, and it reads only human-curated
+    /// text (titles and summaries the user accepted). It never consults a lake
+    /// ranking — a vector or bm25 hit on a *prompt* can never create, rename,
+    /// reparent or reorder a class. The arms decide what you read; the tree
+    /// decides what things are.
     pub fn match_class_nodes(
         &self,
         q: &str,
         limit: i64,
     ) -> rusqlite::Result<Vec<crate::classmem::ClassNode>> {
-        let trimmed = q.trim();
-        if trimmed.is_empty() {
+        use crate::query::MatchStage;
+        let Some(plan) = crate::query::plan_fts_query(q) else {
             return Ok(Vec::new());
-        }
-        let escaped = trimmed
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
-        let pat = format!("%{escaped}%");
+        };
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, parent_id, kind, title, summary, project_path, ip_name,
-                    status, pinned, curated_by, created_at, updated_at
-             FROM class_nodes
-             WHERE title LIKE ?1 ESCAPE '\\' OR summary LIKE ?1 ESCAPE '\\'
-             ORDER BY (title LIKE ?1 ESCAPE '\\') DESC,
-                      (status = 'accepted') DESC,
-                      LENGTH(title) ASC
-             LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(params![pat, limit.max(1)], Self::row_to_class_node)?;
-        rows.collect()
+        let now = crate::ledger::now_millis();
+        for stage in [MatchStage::And, MatchStage::Or] {
+            let Some(match_q) = plan.match_for(stage) else { continue };
+            if match_q.is_empty() {
+                continue;
+            }
+            let mut stmt = conn.prepare(
+                // bm25 is negative-is-better in FTS5, so it is negated into a
+                // score that sorts DESC with the recency bonus. The 0.2 weight
+                // is deliberately small: recency breaks ties between comparable
+                // matches, it does not outrank relevance.
+                // NOT aliased: FTS5 rejects a table alias on both sides of
+                // `MATCH` and in the auxiliary functions, with a "no such
+                // column" that reads like a typo.
+                "SELECT n.id, n.parent_id, n.kind, n.title, n.summary, n.project_path,
+                        n.ip_name, n.status, n.pinned, n.curated_by, n.created_at, n.updated_at
+                 FROM class_nodes_fts
+                 JOIN class_nodes n ON n.rowid = class_nodes_fts.rowid
+                 WHERE class_nodes_fts MATCH ?1
+                 ORDER BY (-bm25(class_nodes_fts, 5.0, 1.0)
+                           + 0.2 * MAX(0.0, 1.0 - (?2 - n.updated_at) / 2592000000.0)
+                           + CASE WHEN n.status = 'accepted' THEN 0.1 ELSE 0.0 END) DESC,
+                          LENGTH(n.title) ASC
+                 LIMIT ?3",
+            )?;
+            let rows: Vec<crate::classmem::ClassNode> = stmt
+                .query_map(params![match_q, now, limit.max(1)], Self::row_to_class_node)?
+                .collect::<rusqlite::Result<_>>()?;
+            if !rows.is_empty() {
+                return Ok(rows);
+            }
+        }
+        Ok(Vec::new())
     }
 
     /// Stage one parsed proposal as reviewable rows (never accepts). Additive
@@ -6764,13 +8421,27 @@ impl Database {
         // under the "[decision references …]" fallback and read to the
         // classifier as pseudo-decisions. They remain on the chain and in the
         // ledger views — they just never feed classification.
+        //
+        // `role = 'agent'` joins them, permanently. Redline's own constructed
+        // prefaces are not things the user thought about, and feeding them to
+        // the classifier taught the taxonomy to describe Redline's instruction
+        // text. `system` rows STAY: a `<task-notification>` reports work the
+        // user's own session actually did, which is a real event in their
+        // history even though they didn't type it.
+        //
+        // The body expression resolves the gist. `COALESCE(p.body, …)` was
+        // wrong in a way that returned no error: compaction sets `body = ''`
+        // rather than NULL, so a compacted prompt handed the classifier an
+        // EMPTY body — 224 rows that read as content-free rather than as
+        // summarized. `NULLIF(p.body, '')` is the fix, and the same expression
+        // is `PROMPT_TEXT` everywhere else it's needed.
         let mut stmt = conn.prepare(
             "SELECT le.seq, le.ts, le.kind, le.ref_kind, le.ref_id, le.session_id,
                     COALESCE(p.surface, CASE WHEN le.ref_kind = 'browse_event'
                                              THEN 'browse_event' END,
                              CASE WHEN le.kind = 'note' THEN 'note' END),
                     p.origin, p.role, p.mission_id, p.project_path,
-                    COALESCE(p.body, be.text, un.text),
+                    COALESCE(NULLIF(p.body, ''), p.gist, be.text, un.text),
                     p.thread_kind, p.thread_id, p.parent_session_id, p.model
              FROM ledger_events le
              LEFT JOIN prompts p ON le.prompt_id = p.id
@@ -6784,6 +8455,7 @@ impl Database {
              WHERE le.seq > ?1
                AND le.kind NOT IN ('router_verdict', 'moot_turn',
                                    'work_file', 'work_claim', 'work_close')
+               AND COALESCE(p.role, 'user') <> 'agent'
              ORDER BY le.seq ASC
              LIMIT ?2",
         )?;
@@ -8084,6 +9756,187 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "DELETE FROM browse_threads WHERE browse_id = ?1",
+            params![browse_id],
+        )?;
+        Ok(())
+    }
+
+    // --- Browse working lists ----------------------------------------------
+    // A tab's punch list, keyed on the same `browse_id` as its discussion. No
+    // agent and no thread, so — unlike every fork/sidecar surface — this
+    // deliberately does NOT join `thread_table`: a list item is a private note,
+    // not a curation decision, and filing it as one would pollute the lake.
+    // See browse_list.rs.
+
+    pub fn get_browse_list(&self, browse_id: &str) -> rusqlite::Result<Option<BrowseList>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT browse_id, template, title, created_at, updated_at
+             FROM browse_lists WHERE browse_id = ?1",
+            params![browse_id],
+            |row| {
+                Ok(BrowseList {
+                    browse_id: row.get(0)?,
+                    template: row.get(1)?,
+                    title: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                })
+            },
+        )
+        .optional()
+    }
+
+    /// Create the list row, or re-point an existing one at a new template. The
+    /// upsert keeps `created_at` — switching template is an edit of the same
+    /// list, not a new one, and the items carry over.
+    pub fn upsert_browse_list(&self, l: &BrowseList) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO browse_lists (browse_id, template, title, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(browse_id) DO UPDATE SET
+                 template = ?2, title = ?3, updated_at = ?5",
+            params![l.browse_id, l.template, l.title, l.created_at, l.updated_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_browse_list_items(
+        &self,
+        browse_id: &str,
+    ) -> rusqlite::Result<Vec<BrowseListItem>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, browse_id, kind, body, done, sort_idx, created_at, updated_at
+             FROM browse_list_items
+             WHERE browse_id = ?1
+             ORDER BY sort_idx, created_at, id",
+        )?;
+        let rows = stmt.query_map(params![browse_id], |row| {
+            Ok(BrowseListItem {
+                id: row.get(0)?,
+                browse_id: row.get(1)?,
+                kind: row.get(2)?,
+                body: row.get(3)?,
+                done: row.get::<_, i64>(4)? != 0,
+                sort_idx: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn insert_browse_list_item(&self, it: &BrowseListItem) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO browse_list_items
+                (id, browse_id, kind, body, done, sort_idx, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                it.id,
+                it.browse_id,
+                it.kind,
+                it.body,
+                it.done as i64,
+                it.sort_idx,
+                it.created_at,
+                it.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The next append slot. `MAX(sort_idx)` over the tab's items, so an append
+    /// lands after everything the user can see — including after a reorder that
+    /// rewrote the indices.
+    pub fn next_browse_list_sort(&self, browse_id: &str) -> rusqlite::Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        let max: Option<i64> = conn.query_row(
+            "SELECT MAX(sort_idx) FROM browse_list_items WHERE browse_id = ?1",
+            params![browse_id],
+            |row| row.get(0),
+        )?;
+        Ok(max.unwrap_or(-1) + 1)
+    }
+
+    pub fn get_browse_list_item(&self, id: &str) -> rusqlite::Result<Option<BrowseListItem>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, browse_id, kind, body, done, sort_idx, created_at, updated_at
+             FROM browse_list_items WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(BrowseListItem {
+                    id: row.get(0)?,
+                    browse_id: row.get(1)?,
+                    kind: row.get(2)?,
+                    body: row.get(3)?,
+                    done: row.get::<_, i64>(4)? != 0,
+                    sort_idx: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                })
+            },
+        )
+        .optional()
+    }
+
+    /// Write back a whole item. The partial-edit shape lives in browse_list.rs,
+    /// which reads the row, applies the patch and calls this — so there is one
+    /// place that knows which fields an edit may touch.
+    pub fn update_browse_list_item(&self, it: &BrowseListItem) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE browse_list_items
+                SET kind = ?2, body = ?3, done = ?4, sort_idx = ?5, updated_at = ?6
+             WHERE id = ?1",
+            params![
+                it.id,
+                it.kind,
+                it.body,
+                it.done as i64,
+                it.sort_idx,
+                it.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_browse_list_item(&self, id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM browse_list_items WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Rewrite the order from the given ids, in one transaction. Ids that do
+    /// not belong to this tab are ignored rather than reassigned — a reorder
+    /// must never be able to steal another tab's item.
+    pub fn reorder_browse_list(&self, browse_id: &str, ids: &[String]) -> rusqlite::Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        for (i, id) in ids.iter().enumerate() {
+            tx.execute(
+                "UPDATE browse_list_items SET sort_idx = ?1
+                 WHERE id = ?2 AND browse_id = ?3",
+                params![i as i64, id, browse_id],
+            )?;
+        }
+        tx.commit()
+    }
+
+    /// Drop the whole list — items and the row itself. Mirrors
+    /// `delete_browse_thread`: clearing means the list is gone, not emptied,
+    /// so the next open lands back on the template chooser.
+    pub fn delete_browse_list(&self, browse_id: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM browse_list_items WHERE browse_id = ?1",
+            params![browse_id],
+        )?;
+        conn.execute(
+            "DELETE FROM browse_lists WHERE browse_id = ?1",
             params![browse_id],
         )?;
         Ok(())
@@ -10385,7 +12238,8 @@ impl Database {
             "INSERT INTO drafts (draft_id, title, project_path, doc_markdown, doc_json, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?5)
              ON CONFLICT(draft_id) DO UPDATE SET
-                title = excluded.title,
+                title = CASE WHEN drafts.title_is_user_set = 1 THEN drafts.title
+                             ELSE COALESCE(excluded.title, drafts.title) END,
                 project_path = excluded.project_path,
                 doc_markdown = excluded.doc_markdown,
                 doc_json = NULL,
@@ -10428,7 +12282,8 @@ mod batched_read_tests {
                 source: crate::ledger::PromptSource::Hook,
                 origin: crate::ledger::Origin::Redline,
                 surface: "pty_plan".to_string(),
-                role: None,
+                role: crate::ledger::CorpusRole::User,
+                user_text: None,
                 session_id: Some("s1".to_string()),
                 claude_session_id: Some(format!("cs-{body}")),
                 mission_id: None,
@@ -10661,7 +12516,8 @@ mod prompt_fts_tests {
                 source: crate::ledger::PromptSource::Hook,
                 origin: crate::ledger::Origin::Redline,
                 surface: "pty_plan".to_string(),
-                role: None,
+                role: crate::ledger::CorpusRole::User,
+                user_text: None,
                 session_id: Some("s1".to_string()),
                 claude_session_id: Some(format!("cs-{body}")),
                 mission_id: None,
@@ -10703,7 +12559,7 @@ mod prompt_fts_tests {
 
         // Compaction: the gist becomes the searchable text…
         let pid = prompt_id_for(&db, seq);
-        db.compact_prompt_body(pid, "gist: the loop executor decision", "cold", "keeper")
+        db.compact_prompt_body(pid, "gist: the loop executor decision", "cold", "agent", "keeper")
             .unwrap();
         assert_eq!(
             db.search_prompts_fts("decision", 10).unwrap().len(),
@@ -10719,7 +12575,7 @@ mod prompt_fts_tests {
 
         // Explicit forget replaces the body with the sentinel.
         let pid2 = prompt_id_for(&db, 2);
-        db.compact_prompt_body(pid2, "[forgotten]", "forget", "yusuf")
+        db.compact_prompt_body(pid2, "[forgotten]", "forget", "deterministic", "yusuf")
             .unwrap();
         assert!(db.search_prompts_fts("widget", 10).unwrap().is_empty());
 
@@ -10861,6 +12717,91 @@ mod query_plan_guards {
             "the prompt table must be reached by rowid from the index.\n  plan: {plan}"
         );
         assert!(plan.contains("prompts_fts"), "plan: {plan}");
+    }
+
+    /// The Timeline's own search box — the last `LIKE '%…%'` full scan on the
+    /// surface, and the one the user drives directly.
+    ///
+    /// What must be true: the match set comes from the index (once, as a
+    /// materialized list), and `prompts` is reached by rowid rather than
+    /// scanned. What must NOT be asserted: that `ledger_events` is untouched.
+    /// The Timeline is `ORDER BY le.seq DESC LIMIT n` over the whole chain, so
+    /// SQLite walks the seq b-tree backwards and stops at the limit — that walk
+    /// IS the ordering, and driving from the FTS index instead would mean
+    /// sorting by relevance, which is precisely the thing the design law
+    /// forbids here. The win is that the walk no longer reads a 6.3 KB body per
+    /// row to run a LIKE against it.
+    #[test]
+    fn timeline_q_drives_from_the_fts_index() {
+        let db = Database::open_in_memory().unwrap();
+        let sql = "SELECT le.seq FROM ledger_events le
+             LEFT JOIN prompts p ON p.id = le.prompt_id
+             WHERE 1 = 1
+               AND p.id IN (SELECT rowid FROM prompts_fts WHERE prompts_fts MATCH '\"x\"')
+             ORDER BY le.seq DESC LIMIT 100";
+        let plan = db.explain_query_plan(sql).unwrap();
+        assert!(
+            plan.contains("prompts_fts"),
+            "the Timeline's ?q= must ride the index, not scan every body.\n  plan: {plan}"
+        );
+        assert!(
+            plan.contains("LIST SUBQUERY"),
+            "the index probe must be materialized once, not re-run per row.\n  plan: {plan}"
+        );
+        assert!(
+            !plan.split(" | ").any(|s| s == "SCAN p" || s.starts_with("SCAN p ")),
+            "`prompts` must be reached by rowid, never scanned.\n  plan: {plan}"
+        );
+        assert!(
+            !plan.contains("USE TEMP B-TREE"),
+            "the seq order must come from the index, never a sort.\n  plan: {plan}"
+        );
+    }
+
+    /// The grep arm must ride the trigram index. Without one there is no
+    /// candidate set at all and `LIKE '%…%'` degenerates into a 7 MB scan under
+    /// the connection lock — which is exactly why a bare `regexp` function was
+    /// rejected in favour of this shape.
+    #[test]
+    fn grep_drives_from_the_trigram_index() {
+        let db = Database::open_in_memory().unwrap();
+        let plan = db
+            .explain_query_plan(
+                "SELECT le.seq FROM prompts_grep
+                 JOIN prompts p ON p.id = prompts_grep.rowid
+                 JOIN ledger_events le ON le.prompt_id = p.id AND le.kind = 'prompt'
+                 WHERE prompts_grep.fts_text LIKE '%needle%' ESCAPE '\\'
+                 ORDER BY le.seq DESC LIMIT 30",
+            )
+            .unwrap();
+        assert!(
+            plan.contains("prompts_grep VIRTUAL TABLE INDEX"),
+            "the LIKE must be answered by the trigram index.\n  plan: {plan}"
+        );
+        assert!(
+            !plan.split(" | ").any(|s| s == "SCAN p" || s.starts_with("SCAN p ")),
+            "`prompts` must be reached by rowid, never scanned.\n  plan: {plan}"
+        );
+    }
+
+    /// Node resolution rides `class_nodes_fts`, not a LIKE over the catalog.
+    #[test]
+    fn class_node_match_drives_from_the_fts_index() {
+        let db = Database::open_in_memory().unwrap();
+        let plan = db
+            .explain_query_plan(
+                "SELECT n.id FROM class_nodes_fts
+                 JOIN class_nodes n ON n.rowid = class_nodes_fts.rowid
+                 WHERE class_nodes_fts MATCH '\"loop\"'
+                 ORDER BY -bm25(class_nodes_fts, 5.0, 1.0) DESC LIMIT 5",
+            )
+            .unwrap();
+        assert!(plan.contains("class_nodes_fts"), "plan: {plan}");
+        assert!(
+            !plan.split(" | ").any(|s| s.starts_with("SCAN class_nodes ")
+                || s == "SCAN class_nodes"),
+            "the catalog must be reached by rowid from its index.\n  plan: {plan}"
+        );
     }
 
     /// The session spine (`/v1/context/sessions/:id/history`).
@@ -11344,7 +13285,8 @@ mod tests {
             source: "hook",
             origin: "redline",
             surface: "pty",
-            role: None,
+            role: "user",
+            user_text: None,
             session_id: None,
             claude_session_id: sid,
             mission_id: None,
@@ -11801,7 +13743,8 @@ mod tests {
                 source: crate::ledger::PromptSource::Hook,
                 origin: crate::ledger::Origin::Redline,
                 surface: "pty".into(),
-                role: None,
+                role: crate::ledger::CorpusRole::User,
+                user_text: None,
                 session_id: None,
                 claude_session_id: Some("cs-h".into()),
                 mission_id: None,
@@ -11822,7 +13765,8 @@ mod tests {
                 source: crate::ledger::PromptSource::RustFirstTurn,
                 origin: crate::ledger::Origin::Redline,
                 surface: "browse".into(),
-                role: None,
+                role: crate::ledger::CorpusRole::User,
+                user_text: None,
                 session_id: None,
                 claude_session_id: Some("cs-a".into()),
                 mission_id: None,
@@ -11890,7 +13834,8 @@ mod tests {
                 source: crate::ledger::PromptSource::Hook,
                 origin: crate::ledger::Origin::Redline,
                 surface: surface.into(),
-                role: None,
+                role: crate::ledger::CorpusRole::User,
+                user_text: None,
                 session_id: None,
                 claude_session_id: Some(cs.into()),
                 mission_id: None,
@@ -12162,7 +14107,8 @@ mod tests {
                 source: crate::ledger::PromptSource::RustFirstTurn,
                 origin: crate::ledger::Origin::Redline,
                 surface: "linked".into(),
-                role: None,
+                role: crate::ledger::CorpusRole::User,
+                user_text: None,
                 session_id: None,
                 claude_session_id: Some("cs-l".into()),
                 mission_id: None,
@@ -12867,7 +14813,8 @@ mod tests {
                 source: crate::ledger::PromptSource::RustFirstTurn,
                 origin: crate::ledger::Origin::Redline,
                 surface: "browse".to_string(),
-                role: None,
+                role: crate::ledger::CorpusRole::User,
+                user_text: None,
                 session_id: None,
                 claude_session_id: None,
                 mission_id: None,
@@ -12952,9 +14899,26 @@ mod tests {
         assert_eq!(hits[0].url, "https://a.example");
         assert!(hits[0].snippet.contains('[') && hits[0].snippet.contains(']'));
 
-        // Multi-term OR recall: matches either page, ranked.
-        let hits = db.search_browse_events("vacuum authentication", 10).unwrap();
-        assert_eq!(hits.len(), 2);
+        // A browse hit must be CITABLE. It used to carry `browse_events.id`,
+        // which is a different id-space from the ledger `seq` that `#seq` chips
+        // and the Timeline's filter both speak — so a page the Ask agent cited
+        // pointed the user at some unrelated event. Verified 1:1 and complete
+        // on live data (829 events, 829 ledger rows, 0 duplicates).
+        let seq = hits[0].seq.expect("a browse hit carries its ledger seq");
+        let ev = db.list_ledger_events(10).unwrap();
+        let row = ev.iter().find(|e| e.seq == seq).expect("the seq resolves to a real event");
+        assert_eq!(row.ref_kind.as_deref(), Some("browse_event"));
+        assert_eq!(row.ref_id.as_deref(), Some(hits[0].id.to_string().as_str()));
+
+        // The cascade widens only when the precise reading fails.
+        let both = db.search_browse_events("vacuum authentication", 10).unwrap();
+        assert_eq!(both.len(), 2, "no page has both terms, so the OR stage answers");
+        assert!(both.iter().all(|h| h.stage == "or"));
+        assert_eq!(
+            db.search_browse_events("clerk authentication", 10).unwrap()[0].stage,
+            "and",
+            "…and a page with every term is found precisely"
+        );
 
         // An FTS-operator-shaped query can't error out — it matches literally
         // (no such literal here) and simply returns nothing.
@@ -13159,7 +15123,8 @@ mod tests {
                 source: crate::ledger::PromptSource::Hook,
                 origin: crate::ledger::Origin::Redline,
                 surface: "pty_plan".into(),
-                role: None,
+                role: crate::ledger::CorpusRole::User,
+                user_text: None,
                 session_id: Some("s1".into()),
                 claude_session_id: Some("cs1".into()),
                 mission_id: None,
@@ -13182,7 +15147,7 @@ mod tests {
         assert!(db.verify_ledger_chain().unwrap().ok);
 
         // Compact it → a new ledger seq is returned.
-        let cseq = db.compact_prompt_body(pid, "gist: a cold prompt", "cold", "keeper").unwrap();
+        let cseq = db.compact_prompt_body(pid, "gist: a cold prompt", "cold", "agent", "keeper").unwrap();
         assert!(cseq.is_some());
 
         // The body now reads as the gist for every consumer.
@@ -13216,7 +15181,7 @@ mod tests {
         assert_eq!(bh, orig_hash, "body_hash is never rewritten");
 
         // Idempotent: compacting again is a no-op.
-        assert!(db.compact_prompt_body(pid, "again", "cold", "keeper").unwrap().is_none());
+        assert!(db.compact_prompt_body(pid, "again", "cold", "agent", "keeper").unwrap().is_none());
     }
 
     #[test]
@@ -13367,6 +15332,781 @@ mod tests {
         assert_eq!(items[0].kind, "approval");
         // They stay on the chain — excluded from the feed, not from history.
         assert!(db.verify_ledger_chain().unwrap().ok);
+    }
+
+    /// Redline's own constructed prefaces never reach the classifier. Feeding
+    /// them in taught the taxonomy to describe Redline's instruction text
+    /// instead of the user's work — 5,809 preface chunks against 752 real ones.
+    /// `system` rows STAY: a task notification reports work the user's session
+    /// actually did, even though nobody typed it.
+    #[test]
+    fn classifier_delta_excludes_agent_prompts() {
+        let db = Database::open_in_memory().unwrap();
+        let seed = |body: &str, bh: &str, role: &str| {
+            let mut row = prompt_row(body, bh, Some(bh));
+            row.role = role;
+            let pid = db.insert_prompt(&row).unwrap().unwrap();
+            db.append_ledger_event(&crate::ledger::LedgerAppend {
+                kind: "prompt",
+                author: "t",
+                ts: 1,
+                prompt_id: Some(pid),
+                session_id: None,
+                version_number: None,
+                ref_kind: None,
+                ref_id: None,
+                payload_hash: bh,
+            })
+            .unwrap();
+            pid
+        };
+        seed("what did I decide about auth", "bh-user", "user");
+        seed("You are the browse agent. …6KB of preface…", "bh-agent", "agent");
+        seed("<task-notification>the run finished</task-notification>", "bh-sys", "system");
+
+        let items = db.list_lake_items_since(0, 100).unwrap();
+        let bodies: Vec<&str> = items.iter().filter_map(|i| i.body.as_deref()).collect();
+        assert!(bodies.iter().any(|b| b.contains("what did I decide")));
+        assert!(bodies.iter().any(|b| b.contains("task-notification")), "system rows stay");
+        assert!(
+            !bodies.iter().any(|b| b.contains("browse agent")),
+            "an agent preface must never enter classification: {bodies:?}"
+        );
+    }
+
+    /// A compacted prompt is SUMMARIZED, not empty — but compaction writes
+    /// `body = ''` rather than NULL, so `COALESCE(p.body, …)` silently handed
+    /// the classifier an empty string for all 224 compacted rows. They read as
+    /// content-free and were classified as such. `NULLIF(p.body, '')` is the fix.
+    #[test]
+    fn classifier_delta_resolves_a_compacted_gist() {
+        let db = Database::open_in_memory().unwrap();
+        let pid = db
+            .insert_prompt(&prompt_row("the original cold body", "bh-cold", Some("s")))
+            .unwrap()
+            .unwrap();
+        db.append_ledger_event(&crate::ledger::LedgerAppend {
+            kind: "prompt",
+            author: "t",
+            ts: 1,
+            prompt_id: Some(pid),
+            session_id: None,
+            version_number: None,
+            ref_kind: None,
+            ref_id: None,
+            payload_hash: "bh-cold",
+        })
+        .unwrap();
+        db.compact_prompt_body(pid, "gist: chose Yjs for collab", "cold", "agent", "keeper")
+            .unwrap();
+
+        let items = db.list_lake_items_since(0, 100).unwrap();
+        let prompt_item = items.iter().find(|i| i.kind == "prompt").expect("the prompt is in the feed");
+        assert_eq!(
+            prompt_item.body.as_deref(),
+            Some("gist: chose Yjs for collab"),
+            "the gist stands in for the released body — not an empty string"
+        );
+    }
+
+    /// A cold compaction is a guess and must be reversible; the archive is
+    /// derived data outside the chain, so the inflated bytes are re-hashed
+    /// against the recorded hash before they are trusted back into the row.
+    #[test]
+    fn archived_body_round_trips_and_verifies() {
+        let db = Database::open_in_memory().unwrap();
+        let body = "the original body, ".repeat(60);
+        let bh = crate::ledger::body_hash(&body);
+        let pid = db.insert_prompt(&prompt_row(&body, &bh, Some("s"))).unwrap().unwrap();
+        db.compact_prompt_body(pid, "gist: a thing", "cold", "agent", "keeper").unwrap();
+        assert_eq!(db.get_prompt_body(pid).unwrap().as_deref(), Some("gist: a thing"));
+        let (rows, bytes) = db.archive_stats().unwrap();
+        assert_eq!(rows, 1);
+        assert!(bytes > 0 && bytes < body.len() as i64, "deflated, not stored raw");
+
+        assert!(db.restore_prompt_body(pid).unwrap());
+        assert_eq!(db.get_prompt_body(pid).unwrap().as_deref(), Some(body.as_str()));
+        assert_eq!(db.archive_stats().unwrap().0, 0, "restore consumes the archive");
+        assert!(!db.restore_prompt_body(pid).unwrap(), "nothing left to restore");
+
+        // A corrupted blob is refused, never silently written back.
+        db.compact_prompt_body(pid, "gist: again", "cold", "agent", "keeper").unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE prompt_archive SET blob = ?2 WHERE prompt_id = ?1",
+                params![pid, deflate_body("not the original body at all").unwrap()],
+            )
+            .unwrap();
+        }
+        assert!(db.restore_prompt_body(pid).is_err(), "hash mismatch is an error");
+    }
+
+    /// Forget must mean forget: no archive row survives it, and a forget over an
+    /// earlier cold compaction removes the copy that pass left behind.
+    #[test]
+    fn forget_leaves_no_archive_row() {
+        let db = Database::open_in_memory().unwrap();
+        let body = "something private, ".repeat(40);
+        let bh = crate::ledger::body_hash(&body);
+        let pid = db.insert_prompt(&prompt_row(&body, &bh, Some("s"))).unwrap().unwrap();
+
+        // Direct forget → nothing archived.
+        db.compact_prompt_body(pid, "[forgotten]", "forget", "deterministic", "yusuf")
+            .unwrap();
+        assert_eq!(db.archive_stats().unwrap().0, 0);
+
+        // Cold first, then forget → the cold pass's archive is deleted too.
+        let body2 = "also private, ".repeat(40);
+        let bh2 = crate::ledger::body_hash(&body2);
+        let pid2 = db.insert_prompt(&prompt_row(&body2, &bh2, Some("s2"))).unwrap().unwrap();
+        db.compact_prompt_body(pid2, "gist", "cold", "agent", "keeper").unwrap();
+        assert_eq!(db.archive_stats().unwrap().0, 1);
+        db.restore_prompt_body(pid2).unwrap();
+        db.compact_prompt_body(pid2, "[forgotten]", "forget", "deterministic", "yusuf")
+            .unwrap();
+        assert_eq!(
+            db.archive_stats().unwrap().0,
+            0,
+            "a forget over a cold compaction must remove the recoverable copy"
+        );
+    }
+
+    /// Insert a lake row AND its ledger event — the search paths join through
+    /// `ledger_events`, so a bare `insert_prompt` is invisible to them.
+    fn seed_indexed_prompt(
+        db: &Database,
+        body: &str,
+        bh: &str,
+        role: &str,
+        user_text: Option<&str>,
+    ) -> i64 {
+        let mut row = prompt_row(body, bh, Some(bh));
+        row.role = role;
+        row.user_text = user_text;
+        let pid = db.insert_prompt(&row).unwrap().unwrap();
+        db.append_ledger_event(&crate::ledger::LedgerAppend {
+            kind: "prompt",
+            author: "tester",
+            ts: 1000,
+            prompt_id: Some(pid),
+            session_id: None,
+            version_number: None,
+            ref_kind: None,
+            ref_id: None,
+            payload_hash: bh,
+        })
+        .unwrap();
+        pid
+    }
+
+    /// THE FTS LANDMINE, defused before the caption column is ever written.
+    ///
+    /// `browse_events_fts` is external-content and had only an `AFTER INSERT`
+    /// trigger — safe exactly as long as the table was insert-only. The vision
+    /// tier's `caption` is written by an UPDATE, and an external-content FTS
+    /// table whose content row changes without a matching `'delete'` row does
+    /// NOT error: it keeps offsets into text that no longer exists and
+    /// `snippet()` returns garbage. The delete/update pair has to exist first,
+    /// so it is tested first.
+    #[test]
+    fn browse_events_fts_survives_an_update() {
+        let db = Database::open_in_memory().unwrap();
+        crate::ledger::record_browse_event(
+            &db,
+            crate::ledger::BrowseEventInput {
+                action: crate::ledger::BrowseAction::Navigate,
+                browse_id: Some("t1".into()),
+                url: "https://example.test/a".into(),
+                title: Some("Original title".into()),
+                text: "the original body mentions zeppelins".into(),
+                from_event_id: None,
+                author: None,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(db.search_browse_events("zeppelins", 10).unwrap().len(), 1);
+
+        // An UPDATE that rewrites the indexed text.
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE browse_events SET title = ?1, text = ?2 WHERE id = 1",
+                params!["Revised title", "the revised body mentions dirigibles"],
+            )
+            .unwrap();
+        }
+        assert!(
+            db.search_browse_events("zeppelins", 10).unwrap().is_empty(),
+            "the OLD text must leave the index, or it matches forever"
+        );
+        let hits = db.search_browse_events("dirigibles", 10).unwrap();
+        assert_eq!(hits.len(), 1, "the NEW text must be findable");
+        // …and `snippet()` must be readable rather than offsets into text that
+        // no longer exists — the actual symptom of a missing delete trigger.
+        assert!(
+            hits[0].snippet.contains("dirigibles"),
+            "snippet is garbage: {:?}",
+            hits[0].snippet
+        );
+
+        // A DELETE removes it from the index too.
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("DELETE FROM browse_events WHERE id = 1", []).unwrap();
+        }
+        assert!(db.search_browse_events("dirigibles", 10).unwrap().is_empty());
+    }
+
+    /// A picture of one of Redline's own surfaces reaches its Timeline row, is
+    /// counted as REFERENCED by the retention sweep, and carries the theme it
+    /// was taken under.
+    ///
+    /// The referenced check is the load-bearing one: the sweep deletes anything
+    /// the database doesn't point at, so a surface shot missing from
+    /// `referenced_shot_keys` would be captured and then deleted on the next
+    /// pass — silently, and only visible as "the pictures never appear". That
+    /// is the same one-writer-erases-another's-files shape as the
+    /// `thumbs_prune` bug this program already had to fix once.
+    #[test]
+    fn a_surface_shot_reaches_its_row_and_survives_the_sweep() {
+        let db = Database::open_in_memory().unwrap();
+        let ev = append(&db, "approval", "ph-approve");
+        db.record_surface_shot(ev.seq, "approval", "rl-approval-1", Some("frivolous"))
+            .unwrap();
+
+        // It reaches the Timeline row it belongs to.
+        let items = db
+            .query_ledger_events(&crate::context::LedgerFilters::default())
+            .unwrap();
+        let row = items.iter().find(|i| i.event.seq == ev.seq).expect("the event is listed");
+        assert_eq!(row.shot_key.as_deref(), Some("rl-approval-1"));
+
+        // The sweep can see it — otherwise it would be deleted as unreferenced.
+        assert!(db.referenced_shot_keys().unwrap().contains("rl-approval-1"));
+        let plan = crate::shots::plan_sweep(
+            &[("rl-approval-1".to_string(), 40_000, crate::ledger::now_millis())],
+            &db.referenced_shot_keys().unwrap(),
+            crate::ledger::now_millis(),
+            crate::shots::SHOTS_MAX_BYTES,
+            crate::shots::SHOTS_MAX_AGE_DAYS,
+        );
+        assert!(plan.delete.is_empty(), "a referenced surface shot must survive");
+
+        // The theme is stamped, so an old shot can be labelled rather than
+        // silently looking like a rendering bug.
+        let stored = db.surface_shots_for_seqs(&[ev.seq]).unwrap();
+        assert_eq!(stored.get(&ev.seq).unwrap().1.as_deref(), Some("frivolous"));
+
+        // Forgetting it removes the row, and the sweep then reclaims the file.
+        assert_eq!(db.clear_surface_shot("rl-approval-1").unwrap(), 1);
+        assert!(db.referenced_shot_keys().unwrap().is_empty());
+    }
+
+    /// A caption goes in its OWN column. `context_hash = body_hash(text)` is
+    /// the identity the shot key, the dedupe and the chain all rest on, so
+    /// folding a caption into `text` would silently re-key the page and orphan
+    /// its own picture.
+    #[test]
+    fn a_caption_never_re_keys_the_page_it_describes() {
+        let db = Database::open_in_memory().unwrap();
+        crate::ledger::record_browse_event(
+            &db,
+            crate::ledger::BrowseEventInput {
+                action: crate::ledger::BrowseAction::Navigate,
+                browse_id: Some("t1".into()),
+                url: "https://dash.test/".into(),
+                title: Some("Dashboard".into()),
+                // A dark page: essentially no text after the title/url prefix.
+                text: "Dashboard\nhttps://dash.test/\n\n".into(),
+                from_event_id: None,
+                author: None,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        let hash_before = db.context_hash_for_browse_id(1).unwrap().unwrap();
+        db.set_shot_key_for_hash(&hash_before, "bs-abc123").unwrap();
+
+        // It IS in the dark set, and captioning it takes it out.
+        assert_eq!(db.pages_with_a_picture_but_no_text(10).unwrap().len(), 1);
+        db.set_caption_for_hash(&hash_before, "A metrics dashboard with four charts")
+            .unwrap();
+        assert!(db.pages_with_a_picture_but_no_text(10).unwrap().is_empty());
+
+        // The identity is unchanged, so the picture is still its picture.
+        let hash_after = db.context_hash_for_browse_id(1).unwrap().unwrap();
+        assert_eq!(hash_before, hash_after, "a caption must not re-key the page");
+        assert!(db.referenced_shot_keys().unwrap().contains("bs-abc123"));
+
+        // Forgetting the picture clears the pointer everywhere it appears.
+        assert_eq!(db.clear_shot_key("bs-abc123").unwrap(), 1);
+        assert!(db.referenced_shot_keys().unwrap().is_empty());
+    }
+
+    /// Porter earns its place by unifying inflections at no index cost — this
+    /// is the "compacting finds compaction" behaviour the Timeline promises.
+    #[test]
+    fn porter_stems_across_inflections() {
+        let db = Database::open_in_memory().unwrap();
+        seed_indexed_prompt(
+            &db,
+            "the keeper compaction pass released cold bodies",
+            "bh-s",
+            "user",
+            None,
+        );
+        for q in ["compaction", "compacting", "compacted", "compact"] {
+            assert_eq!(
+                db.search_prompts_fts(q, 10).unwrap().len(),
+                1,
+                "{q:?} must reach the same document"
+            );
+        }
+    }
+
+    /// `tokenchars` keeps identifiers, paths and flags whole. Without it,
+    /// `src/db.rs` shreds into three tokens and `--allowedTools` into one bare
+    /// word, and neither can be searched for as itself.
+    #[test]
+    fn tokenchars_keep_identifiers_whole() {
+        let db = Database::open_in_memory().unwrap();
+        seed_indexed_prompt(
+            &db,
+            "pass --allowedTools to the spawn in src-tauri/src/db.rs for rl_del",
+            "bh-t",
+            "user",
+            None,
+        );
+        for q in ["\"--allowedTools\"", "\"src-tauri/src/db.rs\"", "rl_del"] {
+            assert_eq!(db.search_prompts_fts(q, 10).unwrap().len(), 1, "for {q}");
+        }
+    }
+
+    /// Phase 1's corpus work becomes index size here: an agent row contributes
+    /// only the human's words, never the preface wrapped around them.
+    #[test]
+    fn fts_excludes_agent_bodies_but_keeps_user_text() {
+        let db = Database::open_in_memory().unwrap();
+        seed_indexed_prompt(
+            &db,
+            "You are the browse agent. Follow your browse skill. …preface…",
+            "bh-agent",
+            "agent",
+            Some("does clerk charge per MAU"),
+        );
+
+        assert!(
+            db.search_prompts_fts("preface", 10).unwrap().is_empty(),
+            "the preface must not be searchable"
+        );
+        assert_eq!(
+            db.search_prompts_fts("clerk", 10).unwrap().len(),
+            1,
+            "the question it wrapped must be"
+        );
+    }
+
+    /// THE caveat this design retires. `'rebuild'` used to be forbidden here:
+    /// the triggers indexed `COALESCE(gist, body)` while rebuild re-read
+    /// `prompts.body` by column name — `''` for every compacted row — so
+    /// rebuilding silently dropped 224 gists out of the index. With the indexed
+    /// text as a generated column of the content table, the two paths read the
+    /// same expression and cannot disagree.
+    #[test]
+    fn prompts_fts_rebuild_is_now_correct() {
+        let db = Database::open_in_memory().unwrap();
+        seed_indexed_prompt(&db, "the warm body mentions widgets", "bh-warm", "user", None);
+        let cold_id = seed_indexed_prompt(
+            &db,
+            "a long deliberation ending in sprockets, with the throwaway token zzyzx",
+            "bh-cold",
+            "user",
+            None,
+        );
+        db.compact_prompt_body(cold_id, "gist: chose sprockets over widgets", "cold", "agent", "keeper")
+            .unwrap();
+
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("INSERT INTO prompts_fts(prompts_fts) VALUES('rebuild')", [])
+                .unwrap();
+        }
+        assert_eq!(
+            db.search_prompts_fts("widgets", 10).unwrap().len(),
+            2,
+            "the warm body and the cold row's gist both still match"
+        );
+        assert_eq!(
+            db.search_prompts_fts("sprockets", 10).unwrap().len(),
+            1,
+            "the compacted row survives a rebuild through its gist"
+        );
+        assert!(
+            db.search_prompts_fts("zzyzx", 10).unwrap().is_empty(),
+            "and the RELEASED words stay released — a rebuild must not resurrect them"
+        );
+    }
+
+    /// The cascade: `AND` is tried first and wins outright when it matches, so
+    /// a precise reading is never diluted by one-term-in-five noise.
+    #[test]
+    fn and_first_then_or_cascade() {
+        let db = Database::open_in_memory().unwrap();
+        for (i, body) in [
+            "the browser tab suspension design",
+            "browser windows generally",
+            "tab bar styling",
+        ]
+        .iter()
+        .enumerate()
+        {
+            seed_indexed_prompt(&db, body, &format!("bh-{i}"), "user", None);
+        }
+
+        let precise = db.search_prompts_ranked("browser tab suspension", 10).unwrap();
+        assert_eq!(precise.len(), 1, "AND wins outright: {precise:?}");
+        assert_eq!(precise[0].1, crate::query::MatchStage::And);
+
+        // No document has all three, so the cascade widens — and SAYS it did.
+        let widened = db.search_prompts_ranked("browser suspension zebra", 10).unwrap();
+        assert!(widened.len() > 1);
+        assert!(widened.iter().all(|(_, s)| *s == crate::query::MatchStage::Or));
+    }
+
+    /// The bug that made every natural-language question resolve `node: null`:
+    /// the whole raw query was one LIKE pattern.
+    #[test]
+    fn match_class_nodes_resolves_a_question() {
+        let db = Database::open_in_memory().unwrap();
+        db.seed_class_roots(&[
+            ("n-browser".into(), "Embedded browser".into(), None),
+            ("n-voice".into(), "Voice agent".into(), None),
+        ])
+        .unwrap();
+        db.accept_class_node("n-browser").unwrap();
+
+        // Verbatim from the live probe that returned `node: null`.
+        let hits = db
+            .match_class_nodes("what did I decide about the browser tab suspension", 5)
+            .unwrap();
+        assert_eq!(
+            hits.first().map(|n| n.id.as_str()),
+            Some("n-browser"),
+            "a question must resolve to its class: {hits:?}"
+        );
+        // A question about nothing in the catalog still resolves nothing —
+        // widening must not invent a node.
+        assert!(db
+            .match_class_nodes("what did I decide about zebras", 5)
+            .unwrap()
+            .is_empty());
+    }
+
+    /// Every read of a prompt body must resolve the gist. `COALESCE(p.body, …)`
+    /// returns `''` for a compacted row — a silent content-free read, not an
+    /// error — so the invariant is pinned in source across the whole file.
+    #[test]
+    fn every_prompt_body_read_resolves_the_gist() {
+        const SRC: &str = include_str!("db.rs");
+        // Assembled at runtime so this test's own source doesn't match itself.
+        let needle = format!("COALESCE(p.{}", "body");
+        for (ix, _) in SRC.match_indices(&needle) {
+            let line_end = SRC[ix..].find('\n').map(|n| ix + n).unwrap_or(SRC.len());
+            let line_start = SRC[..ix].rfind('\n').map(|n| n + 1).unwrap_or(0);
+            let line = &SRC[line_start..line_end];
+            assert!(
+                line.trim_start().starts_with("//"),
+                "reading `p.body` without NULLIF returns '' for every compacted row — \
+                 use PROMPT_TEXT.\n  {line}"
+            );
+        }
+        // And the const itself says the right thing.
+        assert_eq!(PROMPT_TEXT, "COALESCE(NULLIF(p.body, ''), p.gist)");
+    }
+
+    /// The grep arm's reason for existing: reach what tokenization cannot.
+    #[test]
+    fn grep_finds_what_fts_cannot() {
+        let db = Database::open_in_memory().unwrap();
+        seed_indexed_prompt(
+            &db,
+            "the spawn passes #[serde(rename_all = \"camelCase\")] and fails with \
+             E0308: mismatched types",
+            "bh-g",
+            "user",
+            None,
+        );
+        // A fragment INSIDE a token: no tokenizer can produce `rename_al`, so
+        // this is unreachable through FTS by construction.
+        let hits = db
+            .grep_memory("rename_al", None, false, GrepScope::Prompts, 10)
+            .unwrap();
+        assert_eq!(hits.len(), 1, "the trigram index reaches inside a token");
+        assert!(hits[0].excerpt.contains("rename_all"), "{}", hits[0].excerpt);
+        assert!(hits[0].seq.is_some(), "a grep hit must be citable as #seq");
+
+        // An error string with punctuation the tokenizer eats.
+        assert_eq!(
+            db.grep_memory("E0308:", None, false, GrepScope::Prompts, 10).unwrap().len(),
+            1
+        );
+    }
+
+    /// A needle shorter than a trigram cannot be answered from the index, so it
+    /// is refused BY NAME rather than silently becoming a full scan.
+    #[test]
+    fn grep_refuses_a_short_literal() {
+        let db = Database::open_in_memory().unwrap();
+        let err = db.grep_memory("ab", None, false, GrepScope::All, 10).unwrap_err();
+        assert!(matches!(err, GrepError::LiteralTooShort { min: 3, got: 2 }));
+        // The message has to teach the fix, not just report a failure.
+        let msg = err.to_string();
+        assert!(msg.contains("at least 3"), "{msg}");
+        assert!(msg.contains("trigram"), "{msg}");
+        // Whitespace doesn't buy length.
+        assert!(db.grep_memory("  a  ", None, false, GrepScope::All, 10).is_err());
+    }
+
+    #[test]
+    fn grep_case_sensitive_post_filters() {
+        let db = Database::open_in_memory().unwrap();
+        seed_indexed_prompt(&db, "pass --allowedTools to the spawn", "bh-c1", "user", None);
+        seed_indexed_prompt(&db, "pass --allowedtools to the spawn", "bh-c2", "user", None);
+        assert_eq!(
+            db.grep_memory("allowedTools", None, false, GrepScope::Prompts, 10).unwrap().len(),
+            2,
+            "case-insensitive is the default"
+        );
+        assert_eq!(
+            db.grep_memory("allowedTools", None, true, GrepScope::Prompts, 10).unwrap().len(),
+            1,
+            "case-sensitivity post-filters rather than needing a second index"
+        );
+    }
+
+    /// The regex is a VERIFIER over what the index returned — it narrows, never
+    /// widens, and a bad pattern is rejected before any query runs.
+    #[test]
+    fn grep_regex_verifies_the_indexed_candidates() {
+        let db = Database::open_in_memory().unwrap();
+        seed_indexed_prompt(&db, "error code E0308 in the build", "bh-r1", "user", None);
+        seed_indexed_prompt(&db, "error code E0061 in the build", "bh-r2", "user", None);
+        assert_eq!(
+            db.grep_memory("error code", None, false, GrepScope::Prompts, 10).unwrap().len(),
+            2
+        );
+        assert_eq!(
+            db.grep_memory("error code", Some(r"E03\d\d"), false, GrepScope::Prompts, 10)
+                .unwrap()
+                .len(),
+            1,
+            "the regex filters the candidate set"
+        );
+        assert!(matches!(
+            db.grep_memory("error code", Some("("), false, GrepScope::Prompts, 10).unwrap_err(),
+            GrepError::BadRegex(_)
+        ));
+    }
+
+    /// Run the migration against a COPY of a real database and print what it
+    /// did to the corpus. Not a unit test — a measuring instrument, kept in the
+    /// tree because "we shrank the index by 2.5 MB" is a claim about one
+    /// specific corpus and should be re-checkable on any other.
+    ///
+    /// ```text
+    /// cp ~/Library/Application\ Support/com.redline.app/redline.db /tmp/real.db
+    /// REDLINE_REAL_DB=/tmp/real.db cargo test --lib real_db -- --ignored --nocapture
+    /// ```
+    ///
+    /// It asserts only the invariants that must hold for ANY corpus — the chain
+    /// still verifies, no ledger event was appended, no body was mutated — and
+    /// prints the rest for a human to read.
+    #[test]
+    #[ignore = "needs REDLINE_REAL_DB pointing at a copy of a live database"]
+    fn real_db_migration_report() {
+        let Ok(path) = std::env::var("REDLINE_REAL_DB") else {
+            eprintln!("set REDLINE_REAL_DB to a COPY of a live redline.db");
+            return;
+        };
+        let path = std::path::PathBuf::from(path);
+
+        // Before: read with a bare connection so nothing migrates yet.
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        let scalar = |c: &rusqlite::Connection, sql: &str| -> i64 {
+            c.query_row(sql, [], |r| r.get(0)).unwrap_or(-1)
+        };
+        let events_before = scalar(&raw, "SELECT COUNT(*) FROM ledger_events");
+        let prompts_before = scalar(&raw, "SELECT COUNT(*) FROM prompts");
+        let bytes_before = scalar(
+            &raw,
+            "SELECT COALESCE(SUM(LENGTH(CAST(COALESCE(NULLIF(body,''),gist,'') AS BLOB))),0) FROM prompts",
+        );
+        let fts_before = scalar(
+            &raw,
+            "SELECT COALESCE(SUM(pgsize),0) FROM dbstat
+             WHERE name LIKE '%_fts%' OR name LIKE '%_grep%'",
+        );
+        drop(raw);
+
+        let db = Database::open(&path).unwrap();
+        let conn = db.conn.lock().unwrap();
+        println!("\n--- corpus composition ---");
+        let mut stmt = conn
+            .prepare(
+                "SELECT COALESCE(role,'unclassified'), COUNT(*),
+                        SUM(LENGTH(CAST(COALESCE(NULLIF(body,''),gist,'') AS BLOB)))
+                 FROM prompts GROUP BY 1 ORDER BY 3 DESC",
+            )
+            .unwrap();
+        let rows: Vec<(String, i64, i64)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        for (role, n, bytes) in &rows {
+            println!(
+                "  {role:<14} {n:>5} rows  {:>8.1} KB  ({:.1}%)",
+                *bytes as f64 / 1024.0,
+                100.0 * *bytes as f64 / bytes_before.max(1) as f64
+            );
+        }
+        drop(stmt);
+
+        println!("\n--- index sizes ---");
+        let mut stmt = conn
+            .prepare(
+                "SELECT name, SUM(pgsize) FROM dbstat
+                 WHERE name LIKE '%_fts%' OR name LIKE '%_grep%'
+                 GROUP BY name ORDER BY 2 DESC",
+            )
+            .unwrap();
+        let idx: Vec<(String, i64)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        for (name, bytes) in &idx {
+            println!("  {name:<32} {:>8.1} KB", *bytes as f64 / 1024.0);
+        }
+        let fts_after: i64 = idx.iter().map(|(_, b)| *b).sum();
+        println!(
+            "\n  FTS total: {:.1} KB → {:.1} KB  ({:+.1} KB)",
+            fts_before as f64 / 1024.0,
+            fts_after as f64 / 1024.0,
+            (fts_after - fts_before) as f64 / 1024.0
+        );
+        drop(stmt);
+
+        // The invariants that must hold for any corpus.
+        let events_after = scalar(&conn, "SELECT COUNT(*) FROM ledger_events");
+        assert_eq!(
+            events_after, events_before,
+            "reclassification must append NOTHING to the chain"
+        );
+        assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM prompts"), prompts_before);
+        assert_eq!(
+            scalar(
+                &conn,
+                "SELECT COALESCE(SUM(LENGTH(CAST(COALESCE(NULLIF(body,''),gist,'') AS BLOB))),0) FROM prompts"
+            ),
+            bytes_before,
+            "no body may be mutated by the migration"
+        );
+        assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM prompts WHERE role IS NULL"), 0);
+        drop(conn);
+        assert!(db.verify_ledger_chain().unwrap().ok, "the chain still verifies");
+
+        // And the retrieval probes from the plan's verification section.
+        println!("\n--- retrieval probes ---");
+        for q in [
+            "what did I decide about the browser tab suspension",
+            "keeper compaction",
+            "compacting",
+        ] {
+            let nodes = db.match_class_nodes(q, 3).unwrap();
+            let pack = crate::context::build_answer_pack(&db, Some(q), None, 8);
+            let bytes = serde_json::to_vec(&pack).unwrap().len();
+            // Are any two surviving bodies near-duplicates of each other? This
+            // is the "4 of 8 hits were the same boilerplate" check.
+            let bodies: Vec<u64> = pack
+                .prompt_hits
+                .iter()
+                .filter_map(|h| h.item.body.as_deref())
+                .map(crate::dedup::simhash)
+                .collect();
+            let dupe_pairs = bodies
+                .iter()
+                .enumerate()
+                .flat_map(|(i, a)| bodies[i + 1..].iter().map(move |b| (*a, *b)))
+                .filter(|(a, b)| crate::dedup::near_duplicate(*a, *b))
+                .count();
+            println!(
+                "  {q:?}\n    node: {:?}  bytes: {bytes}  promptHits: {}  browseHits: {}  \
+                 notes: {}  dupePairs: {dupe_pairs}  truncated: {:?}  matchedNodes: {}",
+                nodes.first().map(|n| n.title.as_str()),
+                pack.prompt_hits.len(),
+                pack.browse_hits.len(),
+                pack.notes.len(),
+                pack.truncated,
+                pack.matched_nodes.len(),
+            );
+        }
+        println!();
+    }
+
+    /// The one-time reclassification runs over rows captured before the column
+    /// was filled, leaves them byte-intact, and appends nothing to the chain.
+    #[test]
+    fn corpus_role_backfill_reclassifies_without_touching_the_chain() {
+        let db = Database::open_in_memory().unwrap();
+        let seed = |body: &str, bh: &str, source: &str| {
+            let mut row = prompt_row(body, bh, Some(bh));
+            row.source = source;
+            db.insert_prompt(&row).unwrap().unwrap()
+        };
+        let user = seed("add auth to the app", "bh-a", "hook");
+        let sys = seed("<task-notification>done</task-notification>", "bh-b", "hook");
+        let agent = seed("first-turn preface", "bh-c", "rust_firstturn");
+        let leaked = seed(&format!("You are the browse agent. {}", "x".repeat(2100)), "bh-d", "hook");
+        append(&db, "approval", "keep-me");
+        let events_before = db.max_ledger_seq().unwrap();
+
+        {
+            // Simulate an upgrade: clear the roles and the version key, then
+            // re-run the migration.
+            let conn = db.conn.lock().unwrap();
+            conn.execute("UPDATE prompts SET role = NULL", []).unwrap();
+            conn.execute(
+                "DELETE FROM app_settings WHERE key = ?1",
+                params![SETTING_CORPUS_ROLE_VERSION],
+            )
+            .unwrap();
+        }
+        db.migrate().unwrap();
+
+        let role_of = |id: i64| -> String {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row("SELECT role FROM prompts WHERE id = ?1", params![id], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(role_of(user), "user");
+        assert_eq!(role_of(sys), "system");
+        assert_eq!(role_of(agent), "agent");
+        assert_eq!(role_of(leaked), "agent", "the leaked captures are recognized by shape");
+
+        // Reclassify, don't compact: bodies intact, zero new chain events.
+        assert_eq!(db.get_prompt_body(user).unwrap().as_deref(), Some("add auth to the app"));
+        assert_eq!(db.max_ledger_seq().unwrap(), events_before, "no events appended");
+        assert!(db.verify_ledger_chain().unwrap().ok);
+
+        // Composition is reportable — the number nobody could see.
+        let comp = db.corpus_composition().unwrap();
+        let rows_for = |r: &str| comp.iter().find(|(k, _, _)| k == r).map(|(_, n, _)| *n).unwrap_or(0);
+        assert_eq!(rows_for("user"), 1);
+        assert_eq!(rows_for("agent"), 2);
+        assert_eq!(rows_for("system"), 1);
     }
 
     #[test]

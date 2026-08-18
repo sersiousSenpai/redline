@@ -40,7 +40,10 @@ pub enum PromptSource {
     /// The global `UserPromptSubmit` hook (interactive PTY plan sessions +
     /// external sessions).
     Hook,
-    /// The Prompt Drafter launch (`record_drafted_prompt` command).
+    /// A plan launch through any of Redline's three doors — the Front Door, the
+    /// Prompt Drafter, or the browser's Send (`record_plan_launch` command).
+    /// The wire value stays `drafter_launch` because it is stored in the lake;
+    /// which door it came through is `surface`, not this.
     DrafterLaunch,
     /// A Rust-constructed first-turn prompt for a spawned agent
     /// (fork / browse / mission / linked).
@@ -56,6 +59,55 @@ impl PromptSource {
             PromptSource::DrafterLaunch => "drafter_launch",
             PromptSource::RustFirstTurn => "rust_firstturn",
             PromptSource::VoiceStream => "voice_stream",
+        }
+    }
+}
+
+/// What KIND of text a lake row is — the corpus's own composition, as opposed
+/// to `PromptSource` (which mechanism captured it) or `Origin` (whose session it
+/// belonged to). Three values, exhaustively:
+///
+/// - `User` — a human typed it. This is the signal the lake exists to hold.
+/// - `Agent` — Redline constructed it. A first-turn preface, a framing wrapper,
+///   a queued-run instruction: our own words, addressed to a model.
+/// - `System` — the CLI injected it. `<task-notification>` and
+///   `<system-reminder>` fire `UserPromptSubmit` exactly as a keystroke does.
+///
+/// Kept as a required field on `PromptInput` rather than an `Option`: the column
+/// existed and was NULL on all 1,213 rows, and that silence is precisely how the
+/// corpus reached 92.6% machine text without anyone seeing it. A new row must
+/// say what it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CorpusRole {
+    User,
+    Agent,
+    System,
+}
+
+impl CorpusRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CorpusRole::User => "user",
+            CorpusRole::Agent => "agent",
+            CorpusRole::System => "system",
+        }
+    }
+
+    /// The prefixes the CLI's own injections open with. `UserPromptSubmit` fires
+    /// for these as it does for typing, so the hook path is the only place they
+    /// can be told apart — by their shape, which is stable and documented.
+    pub const SYSTEM_PREFIXES: [&'static str; 2] = ["<task-notification>", "<system-reminder>"];
+
+    /// Classify a hook-captured payload. Only ever `System` or `User`: an
+    /// agent-constructed body never reaches this path (the guard and the
+    /// `X-Redline-Agent` header both skip it upstream), and inferring `Agent`
+    /// from shape here would relabel a user who quotes a preface.
+    pub fn classify_captured(body: &str) -> CorpusRole {
+        let head = body.trim_start();
+        if Self::SYSTEM_PREFIXES.iter().any(|p| head.starts_with(p)) {
+            CorpusRole::System
+        } else {
+            CorpusRole::User
         }
     }
 }
@@ -305,7 +357,14 @@ pub struct PromptRow<'a> {
     pub source: &'a str,
     pub origin: &'a str,
     pub surface: &'a str,
-    pub role: Option<&'a str>,
+    pub role: &'a str,
+    /// The human's own words inside an `agent` row's constructed prompt — the
+    /// question the preface wraps. Non-hashed and chain-safe (the
+    /// `gist`/`thread_kind` precedent): only `prompt_id` + `body_hash` enter the
+    /// chained event. This is what the lexical index reads for an agent row, so
+    /// a first-turn preface stops being 155 copies of searchable boilerplate
+    /// while the row itself stays byte-intact for audit.
+    pub user_text: Option<&'a str>,
     pub session_id: Option<&'a str>,
     pub claude_session_id: Option<&'a str>,
     pub mission_id: Option<&'a str>,
@@ -381,10 +440,23 @@ fn prune(map: &mut HashMap<String, Instant>) {
 
 /// Record that a Rust construction site is about to spawn an agent with this
 /// prompt body, so the hook path can recognize and skip the duplicate.
-pub fn register_agent_prompt(body_hash: &str) {
+///
+/// Takes the BODY, never a hash, and keys on the *trimmed* body — deliberately,
+/// and the signature is the fix. `ingest_prompt_text` trims the hook payload
+/// before hashing it, while every construction site here hashed the body as
+/// constructed; a prompt ending in `\n` therefore hashed two different ways and
+/// could never be claimed. That single asymmetry leaked 4.32 MB of Redline's own
+/// agent prefaces into the searchable lake (237 rows, the same first-turn
+/// preface up to 9× over). Taking `&str` for a hash made the two spellings
+/// indistinguishable at every call site; taking the body makes the trim the
+/// guard's own business, once.
+///
+/// `every_constructed_agent_prompt_is_claimable` pins that no call site ever
+/// hands this a hash again.
+pub fn register_agent_prompt(body: &str) {
     let mut g = agent_guard().lock().unwrap();
     prune(&mut g);
-    g.insert(body_hash.to_string(), Instant::now());
+    g.insert(body_hash(body.trim()), Instant::now());
 }
 
 /// Consume a registration: returns `true` if this body was registered by a Rust
@@ -401,35 +473,59 @@ pub fn claim_agent_prompt(body_hash: &str) -> bool {
 // Drafted-prompt handoff guard
 // ---------------------------------------------------------------------------
 //
-// The draft→launched-session lineage: `record_drafted_prompt` registers the
-// launched body's hash here WITH its draft id; when the spawned session's first
-// `UserPromptSubmit` hook fire arrives at the ingest handler (and is
-// claim-skipped by the agent guard above), the handler claims this map too —
-// at that exact moment the claude session id is known, so the ingest can record
-// `session_link(session → drafter draft)`. Same TTL/consume-once semantics as
-// the agent guard.
+// The launch→session lineage: `record_plan_launch` registers the launched
+// body's hash here WITH the door it came through and, when there is one, the
+// draft id; when the spawned session's first `UserPromptSubmit` hook fire
+// arrives at the ingest handler (and is claim-skipped by the agent guard
+// above), the handler claims this map too — at that exact moment the claude
+// session id is known, so the ingest can bind the launch-time prompt row to the
+// session running it, and record `session_link(session → drafter draft)` for
+// the door that has a document. Same TTL/consume-once semantics as the agent
+// guard.
 
-fn drafted_guard() -> &'static Mutex<HashMap<String, (String, Instant)>> {
-    static G: OnceLock<Mutex<HashMap<String, (String, Instant)>>> = OnceLock::new();
+/// What a plan launch registered about itself, held until the spawned session's
+/// first hook fire claims it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchClaim {
+    /// Which door launched it: `front-door` | `drafter` | `browser`.
+    pub origin: String,
+    /// The document it was launched from. `None` for the doors that have no
+    /// document — the front door's one sentence and the browser's Send — whose
+    /// prompts still need binding even though there is nothing to link them to.
+    pub draft_id: Option<String>,
+}
+
+fn launch_guard() -> &'static Mutex<HashMap<String, (LaunchClaim, Instant)>> {
+    static G: OnceLock<Mutex<HashMap<String, (LaunchClaim, Instant)>>> = OnceLock::new();
     G.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Register a drafted prompt body about to be launched into a new plan session,
-/// carrying the draft id the eventual session should be linked under.
-pub fn register_drafted_prompt(body_hash: &str, draft_id: &str) {
-    let mut g = drafted_guard().lock().unwrap();
+/// Register a prompt body about to be launched into a new plan session,
+/// carrying the door it came through and the draft id (when the door has a
+/// document) the eventual session should be linked under.
+pub fn register_plan_launch(body_hash: &str, origin: &str, draft_id: Option<&str>) {
+    let mut g = launch_guard().lock().unwrap();
     let now = Instant::now();
     g.retain(|_, (_, t)| now.duration_since(*t) < GUARD_TTL);
-    g.insert(body_hash.to_string(), (draft_id.to_string(), now));
+    g.insert(
+        body_hash.to_string(),
+        (
+            LaunchClaim {
+                origin: origin.to_string(),
+                draft_id: draft_id.map(str::to_string),
+            },
+            now,
+        ),
+    );
 }
 
-/// Consume a drafted-prompt registration: the draft id this body was launched
-/// from, or `None` if the body wasn't a drafter launch.
-pub fn claim_drafted_prompt(body_hash: &str) -> Option<String> {
-    let mut g = drafted_guard().lock().unwrap();
+/// Consume a plan-launch registration: what this body was launched from, or
+/// `None` if the body wasn't a plan launch at all.
+pub fn claim_plan_launch(body_hash: &str) -> Option<LaunchClaim> {
+    let mut g = launch_guard().lock().unwrap();
     let now = Instant::now();
     g.retain(|_, (_, t)| now.duration_since(*t) < GUARD_TTL);
-    g.remove(body_hash).map(|(draft_id, _)| draft_id)
+    g.remove(body_hash).map(|(claim, _)| claim)
 }
 
 // ---------------------------------------------------------------------------
@@ -491,7 +587,9 @@ pub struct PromptInput {
     pub source: PromptSource,
     pub origin: Origin,
     pub surface: String,
-    pub role: Option<String>,
+    /// What kind of text this is. Required, never inferred downstream — see
+    /// [`CorpusRole`] for why the `Option` it replaced was the bug.
+    pub role: CorpusRole,
     pub session_id: Option<String>,
     pub claude_session_id: Option<String>,
     pub mission_id: Option<String>,
@@ -509,6 +607,11 @@ pub struct PromptInput {
     /// How the model is known: `"seat"` at capture, `"transcript"` on
     /// backfill. Always `None` when `model` is.
     pub model_source: Option<String>,
+    /// For an `Agent` row: the human's own words the constructed prompt wraps.
+    /// `None` for a pure tool agent (classifier, keeper, librarian, shipwright,
+    /// seat assignment) — nobody asked those anything, so nothing of theirs
+    /// should ever enter the search corpus. See [`PromptRow::user_text`].
+    pub user_text: Option<String>,
 }
 
 /// Record a prompt into the lake + emit its ledger event. Returns the new
@@ -523,7 +626,8 @@ pub fn record_prompt(db: &Database, input: PromptInput) -> Result<Option<i64>, S
         source: input.source.as_str(),
         origin: input.origin.as_str(),
         surface: &input.surface,
-        role: input.role.as_deref(),
+        role: input.role.as_str(),
+        user_text: input.user_text.as_deref(),
         session_id: input.session_id.as_deref(),
         claude_session_id: input.claude_session_id.as_deref(),
         mission_id: input.mission_id.as_deref(),
@@ -565,30 +669,42 @@ pub fn record_prompt(db: &Database, input: PromptInput) -> Result<Option<i64>, S
 /// event. Best-effort — logs on error, never propagates, so a spawn is never
 /// blocked by ledger bookkeeping. `body` must be the exact prompt string the
 /// agent receives, or the guard won't match the hook.
+///
+/// `user_text` is the human's own words inside `body` — the question the preface
+/// wraps. The row stores `body` byte-intact (audit) but the lexical index reads
+/// `user_text` (search), which is what stops Redline's own instruction text from
+/// being 87% of its own corpus. Pass `None` from the pure tool agents — the
+/// classifier, keeper, librarian, shipwright and seat-assignment prompts wrap
+/// nobody's question, so nothing of theirs belongs in the search corpus at all.
 #[allow(clippy::too_many_arguments)]
 pub fn record_agent_prompt(
     db: &Database,
     source: PromptSource,
     surface: &str,
     body: &str,
+    user_text: Option<&str>,
     project_path: Option<String>,
     session_id: Option<String>,
     mission_id: Option<String>,
     thread: Option<ThreadRef>,
     model: Option<String>,
 ) {
-    register_agent_prompt(&body_hash(body));
+    register_agent_prompt(body);
     let model_source = model.as_ref().map(|_| "seat".to_string());
     let input = PromptInput {
         source,
         origin: Origin::Redline,
         surface: surface.to_string(),
-        role: None,
+        role: CorpusRole::Agent,
         session_id,
         claude_session_id: None,
         mission_id,
         project_path,
         body: body.to_string(),
+        user_text: user_text
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string),
         thread,
         // The constructed body is the surface agent's artifact, so it authors
         // the event as itself — the surface string is already ground truth here.
@@ -1104,11 +1220,112 @@ mod tests {
 
     #[test]
     fn agent_guard_claims_once() {
-        let bh = format!("guardtest-{}", now_millis());
+        let body = format!("guardtest-{}", now_millis());
+        let bh = body_hash(&body);
         assert!(!claim_agent_prompt(&bh), "unregistered → not claimed");
-        register_agent_prompt(&bh);
+        register_agent_prompt(&body);
         assert!(claim_agent_prompt(&bh), "registered → claimed");
         assert!(!claim_agent_prompt(&bh), "consume-once → second claim fails");
+    }
+
+    /// THE regression test for the lake-pollution bug. Every Rust construction
+    /// site registers the body it is about to spawn with; the capture hook
+    /// hashes the payload *after* trimming it. A constructed prompt that ends
+    /// in a newline — most of them — hashed two different ways, so the guard
+    /// never fired and the preface landed in the searchable lake anyway.
+    #[test]
+    fn agent_prompt_guard_is_trim_insensitive() {
+        let core = format!("You are the drafter agent.\nguardtest-{}", now_millis());
+        for spelling in [
+            format!("{core}\n"),
+            format!("{core}\n\n"),
+            format!("  {core}  "),
+            format!("\n{core}"),
+        ] {
+            register_agent_prompt(&spelling);
+            // What the hook computes: `ingest_prompt_text` trims, then hashes.
+            let hook_hash = body_hash(spelling.trim());
+            assert!(
+                claim_agent_prompt(&hook_hash),
+                "the hook's trimmed hash must claim a registration made from {spelling:?}"
+            );
+        }
+    }
+
+    /// What the hook path may and may not conclude from a payload's shape.
+    #[test]
+    fn classify_corpus_role_table() {
+        let cases: &[(&str, CorpusRole)] = &[
+            ("<task-notification>agent finished</task-notification>", CorpusRole::System),
+            ("<system-reminder>your todo list is empty</system-reminder>", CorpusRole::System),
+            // Leading whitespace/newlines don't disguise an injection.
+            ("\n  <system-reminder>x</system-reminder>", CorpusRole::System),
+            ("add auth to the app", CorpusRole::User),
+            ("", CorpusRole::User),
+            // A user QUOTING an injection is still the user talking — the marker
+            // has to open the payload, not merely appear in it.
+            ("why do I keep seeing <system-reminder> blocks?", CorpusRole::User),
+            // Shape alone never yields `Agent` here: an agent body is skipped
+            // upstream by the header + guard, and guessing would relabel a user
+            // who pastes a preface into their own prompt.
+            ("You are Redline's memory keeper. Summarize these.", CorpusRole::User),
+        ];
+        for (body, want) in cases {
+            assert_eq!(CorpusRole::classify_captured(body), *want, "for {body:?}");
+        }
+    }
+
+    /// The signature is the fix: `register_agent_prompt` takes the BODY. Handing
+    /// it a hash still type-checks (both are `&str`), which is exactly how the
+    /// two spellings stayed indistinguishable for 237 rows — so the invariant is
+    /// pinned in source rather than left to review. Table-driven over every file
+    /// that arms the guard.
+    #[test]
+    fn every_constructed_agent_prompt_is_claimable() {
+        const SOURCES: &[(&str, &str)] = &[
+            ("browse.rs", include_str!("browse.rs")),
+            ("classmem.rs", include_str!("classmem.rs")),
+            ("companion.rs", include_str!("companion.rs")),
+            ("draft_chat.rs", include_str!("draft_chat.rs")),
+            ("fork.rs", include_str!("fork.rs")),
+            ("intake.rs", include_str!("intake.rs")),
+            ("keeper.rs", include_str!("keeper.rs")),
+            ("ledger.rs", include_str!("ledger.rs")),
+            ("lib.rs", include_str!("lib.rs")),
+            ("librarian.rs", include_str!("librarian.rs")),
+            ("linked.rs", include_str!("linked.rs")),
+            ("memchat.rs", include_str!("memchat.rs")),
+            ("mission.rs", include_str!("mission.rs")),
+            ("moot.rs", include_str!("moot.rs")),
+            ("queue.rs", include_str!("queue.rs")),
+            ("seatassign.rs", include_str!("seatassign.rs")),
+            ("shipwright.rs", include_str!("shipwright.rs")),
+            ("voice.rs", include_str!("voice.rs")),
+        ];
+        let mut armed = 0usize;
+        for (name, src) in SOURCES {
+            for (ix, _) in src.match_indices("register_agent_prompt(") {
+                let arg_start = ix + "register_agent_prompt(".len();
+                // Char-safe: these files are full of em dashes, so a byte slice
+                // can land mid-codepoint.
+                let arg: String = src[arg_start..]
+                    .chars()
+                    .take_while(|c| *c != ')')
+                    .take(120)
+                    .collect();
+                // The call in this file's own definition/test scaffolding is the
+                // only place a literal body is built inline; everywhere else the
+                // argument must be a body binding, never a hash.
+                assert!(
+                    !arg.contains("body_hash"),
+                    "{name}: register_agent_prompt must be handed the BODY, not a hash \
+                     (`{arg}`) — hashing at the call site is what made the trimmed and \
+                     untrimmed spellings indistinguishable"
+                );
+                armed += 1;
+            }
+        }
+        assert!(armed >= 20, "expected the guard to be armed across the surfaces, saw {armed}");
     }
 
     #[test]
@@ -1149,12 +1366,31 @@ mod tests {
     }
 
     #[test]
-    fn drafted_guard_claims_once_with_draft_id() {
+    fn launch_guard_claims_once_with_origin_and_draft_id() {
         let bh = format!("draftguard-{}", now_millis());
-        assert_eq!(claim_drafted_prompt(&bh), None);
-        register_drafted_prompt(&bh, "draft-7");
-        assert_eq!(claim_drafted_prompt(&bh), Some("draft-7".to_string()));
-        assert_eq!(claim_drafted_prompt(&bh), None, "consume-once");
+        assert_eq!(claim_plan_launch(&bh), None);
+        register_plan_launch(&bh, "drafter", Some("draft-7"));
+        assert_eq!(
+            claim_plan_launch(&bh),
+            Some(LaunchClaim {
+                origin: "drafter".to_string(),
+                draft_id: Some("draft-7".to_string()),
+            })
+        );
+        assert_eq!(claim_plan_launch(&bh), None, "consume-once");
+    }
+
+    #[test]
+    fn launch_guard_holds_the_doors_that_have_no_document() {
+        // The front door and the browser's Send launch the same plan session
+        // with nothing to link it under. They still register, because binding
+        // the prompt row to its session is what the claim is *for* — leaving
+        // them out is why those prompts had a permanently NULL session id.
+        let bh = format!("fdguard-{}", now_millis());
+        register_plan_launch(&bh, "front-door", None);
+        let claim = claim_plan_launch(&bh).expect("a draftless launch still registers");
+        assert_eq!(claim.origin, "front-door");
+        assert_eq!(claim.draft_id, None);
     }
 
     #[test]
