@@ -220,6 +220,9 @@ pub struct ExtensionInfo {
     pub strikes: u32,
     pub panel: Option<String>,
     pub dir: String,
+    /// Where a link-installed extension (A5a) actually lives — provenance
+    /// for the panel ("linked → …") and the signal that Reload applies.
+    pub link_target: Option<String>,
 }
 
 pub fn snapshot() -> Vec<ExtensionInfo> {
@@ -243,6 +246,7 @@ pub fn snapshot() -> Vec<ExtensionInfo> {
                 strikes: e.strikes.load(Ordering::SeqCst),
                 panel: e.panel.lock().expect("panel lock").clone(),
                 dir: e.dir.display().to_string(),
+                link_target: crate::local_install::link_target(&e.dir),
             }
         })
         .collect()

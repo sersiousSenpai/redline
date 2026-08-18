@@ -116,3 +116,120 @@ describe("boot CSS contract", () => {
     );
   });
 });
+
+// Source invariants on App.tsx — the boot-path JS contract (A0). The doors
+// give ~700ms of cover; the deal that keeps boot JS under budget WITHOUT a
+// blank frame behind the parting plates is: heavy surfaces load lazily, and
+// the one surface boot will actually land on is prefetched the moment
+// `initialSurface` resolves. These pins keep both halves of that deal from
+// silently regressing.
+describe("boot-path JS contract", () => {
+  const app = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
+
+  // Everything here was once a static import that cost the boot budget its
+  // headroom. `import type` is fine (erased at build); a VALUE import is the
+  // regression.
+  const LAZY_ONLY = [
+    "PlanEditor",
+    "PromptDrafter",
+    "VoicePanel",
+    "ShareSnapshotDialog",
+    "MemorySurface",
+    "OrchestrationSurface",
+    "BrowserPane",
+    "MemoryInspector",
+    "BookshelfView",
+    "AgentShelf",
+    "OnboardingTour",
+    "SessionSidebar",
+    "FileViewer",
+  ];
+
+  it("the heavy surfaces never return to App's static import list", () => {
+    for (const name of LAZY_ONLY) {
+      const staticImport = new RegExp(
+        `^import (?!type\\b)[^;]*from "\\./components/${name}"`,
+        "m",
+      );
+      expect(app.match(staticImport), `${name} is statically imported`).toBe(
+        null,
+      );
+      expect(
+        app.includes(`import("./components/${name}")`),
+        `${name} lost its lazy() import`,
+      ).toBe(true);
+    }
+  });
+
+  it("the terminal dock stays static — it is first paint", () => {
+    expect(app).toMatch(
+      /^import { TerminalTabs } from "\.\/components\/TerminalTabs";/m,
+    );
+  });
+
+  it("harness edits land on refocus — the A5a dev loop", () => {
+    // A link-installed harness is read through its link, so a re-list is a
+    // re-read: the focus listener IS the edit loop ("edit harness.json,
+    // refocus Redline, the change is live"), and the DOM event is the
+    // Extensions panel announcing an install that happened with the window
+    // already focused. Both funnel through the same resolution the boot
+    // pass uses, so a deleted harness exits cleanly everywhere.
+    expect(app).toContain('window.addEventListener("focus", refreshHarnesses)');
+    expect(app).toContain(
+      'window.addEventListener("redline:harnesses-changed", refreshHarnesses)',
+    );
+    expect(app).toContain("const resolved = applyHarnessResolution(installed)");
+  });
+
+  it("boot prefetches the landing surface's chunk under the doors", () => {
+    // The map must cover every lazily-loaded surface body, and the boot
+    // effect must warm the resolved landing target plus the sidebar's
+    // resting tab. A lazy surface missing from the map is a surface that CAN
+    // blank behind the doors when a manifest lands boot on it.
+    const map = app.match(
+      /const SURFACE_CHUNK_LOADERS[\s\S]*?= \{([\s\S]*?)\}/,
+    );
+    expect(map, "SURFACE_CHUNK_LOADERS map missing").not.toBe(null);
+    for (const key of ["document", "drafter", "browser", "memory", "runs"]) {
+      expect(map![1].includes(`${key}:`), `${key} missing from loader map`).toBe(
+        true,
+      );
+    }
+    expect(app).toContain("prefetchSurfaceChunk(target)");
+    expect(app).toContain("void loadSessionSidebar().catch(() => {})");
+  });
+
+  it("the first frame composes from the paint caches, not the defaults", () => {
+    // The manifest (and any active harness) is read over IPC AFTER first
+    // paint — so without the synchronous localStorage mirrors, a manifest
+    // that hides surfaces (or a harness that rebrands them) flashes the
+    // stock header on every launch. The state INITIALIZERS must read the
+    // caches; the boot effect then confirms against the file and refreshes
+    // them (storeWorkspaceCache / storeActiveHarness).
+    expect(app).toContain(
+      "readWorkspaceCache(localStorage) ?? defaultWorkspace()",
+    );
+    expect(app).toContain("readActiveHarness(localStorage)");
+    expect(app).toContain("storeWorkspaceCache(localStorage,");
+    expect(app).toContain("storeActiveHarness(localStorage, resolved)");
+  });
+
+  it("the surface dispatch is a lenient record, not a closed ternary", () => {
+    // Manifests (workspace.json, a harness pack) name surfaces as strings;
+    // dispatch over a Record lets an id this build can't render degrade to
+    // no body instead of failing a closed union (A5).
+    expect(app).toContain(
+      "const surfaceBodies: Record<string, ReactNode | undefined>",
+    );
+    expect(app).toContain("surfaceBodies[mainSurface]");
+  });
+
+  it("plate fallbacks stay quiet — null, never a spinner", () => {
+    // The bodies that sit inside an animating plate suspend to NOTHING; a
+    // fallback flashing inside the parting doors reads as a glitch. Count
+    // enforced ≥ the sites wrapped by A0 so a new quiet site never fails
+    // this, while flipping an existing null to a visible fallback does.
+    const quiet = app.match(/<Suspense fallback=\{null\}>/g) ?? [];
+    expect(quiet.length).toBeGreaterThanOrEqual(8);
+  });
+});

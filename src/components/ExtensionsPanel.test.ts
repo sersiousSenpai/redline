@@ -22,6 +22,7 @@ const info = (over: Partial<ExtensionInfo>): ExtensionInfo => ({
   strikes: 0,
   panel: null,
   dir: "/tmp/x",
+  link_target: null,
   ...over,
 });
 

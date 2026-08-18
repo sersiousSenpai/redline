@@ -209,20 +209,35 @@ fn validate(manifest: &ExtensionManifest, dir_name: &str) -> Result<(), String> 
 /// why — the boot scan treats that as a warning, B4's marketplace
 /// hot-install as a hard error.
 pub fn load_extension_dir(dir: &Path) -> Result<LoadedExtension, String> {
-    let manifest_path = dir.join("extension.json");
-    let raw = fs::read_to_string(&manifest_path)
-        .map_err(|e| format!("{}: {e}", manifest_path.display()))?;
+    let manifest = read_manifest(dir)?;
     let dir_name = dir
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .ok_or_else(|| "extension dir has no name".to_string())?;
-    let manifest: ExtensionManifest =
-        serde_json::from_str(&raw).map_err(|e| format!("unparseable extension.json: {e}"))?;
     validate(&manifest, &dir_name)?;
     Ok(LoadedExtension {
         manifest,
         dir: dir.to_path_buf(),
     })
+}
+
+/// Validate an extension SOURCE folder for local install (A5a). Everything
+/// `load_extension_dir` checks except the name==dir coupling: the author's
+/// project folder may be named anything, because the install links it under
+/// `manifest.name` — after which the coupling holds at the installed path
+/// and every later load goes through `load_extension_dir` as usual.
+pub fn load_extension_folder(dir: &Path) -> Result<ExtensionManifest, String> {
+    let manifest = read_manifest(dir)?;
+    let name = manifest.name.clone();
+    validate(&manifest, &name)?;
+    Ok(manifest)
+}
+
+fn read_manifest(dir: &Path) -> Result<ExtensionManifest, String> {
+    let manifest_path = dir.join("extension.json");
+    let raw = fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("{}: {e}", manifest_path.display()))?;
+    serde_json::from_str(&raw).map_err(|e| format!("unparseable extension.json: {e}"))
 }
 
 /// Scan an extensions root for valid manifests. Pure-ish (parameterized on
@@ -251,9 +266,12 @@ pub fn load_extensions(root: &Path) -> Vec<LoadedExtension> {
 }
 
 /// Default extensions root, alongside Phase 1's `~/.redline/themes` and
-/// `~/.redline/skills`.
+/// `~/.redline/skills`. Routed through the flavor-aware config root so a
+/// flavored build (REDLINE_HARNESS baked) keeps its extensions under its own
+/// `~/.redline/flavors/<id>/` — for the default build this is byte-identical
+/// to the old `~/.redline/extensions`.
 pub fn extensions_root() -> Option<PathBuf> {
-    dirs_home().map(|h| h.join(".redline").join("extensions"))
+    dirs_home().map(|_| crate::userconfig::config_root().join("extensions"))
 }
 
 fn dirs_home() -> Option<PathBuf> {

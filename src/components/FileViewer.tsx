@@ -21,6 +21,7 @@ import {
   type EditSwapState,
 } from "../lib/editSwap";
 import { MarkdownView } from "./MarkdownView";
+import { codeViewImport } from "./codeViewWarm";
 // Type-only: erased at build, so the main bundle stays CodeMirror-free.
 import type { PreparedEdit } from "./CodeEditor";
 
@@ -29,18 +30,12 @@ import type { PreparedEdit } from "./CodeEditor";
 const LOADING_DELAY_MS = 120;
 
 // The code viewer is a separate chunk; keep it out of the initial bundle but
-// preload it as soon as the folder explorer is shown (see `preloadCodeView`), so
-// the first file click never waits on the chunk — which would stack a Suspense
-// "Loading…" on top of CodeView's own load (the "double flash").
-const codeViewImport = () => import("./CodeView");
+// preload it as soon as the folder explorer is shown (`preloadCodeView` in
+// codeViewWarm.ts — its own module so FileTree can warm without statically
+// importing this file), so the first file click never waits on the chunk —
+// which would stack a Suspense "Loading…" on top of CodeView's own load (the
+// "double flash").
 const CodeView = lazy(codeViewImport);
-
-let codeViewPreloaded: Promise<unknown> | null = null;
-/** Warm the CodeView chunk ahead of the first open. Idempotent; the bundler
- *  dedupes this with the `lazy()` import so they share one fetch. */
-export function preloadCodeView(): void {
-  if (!codeViewPreloaded) codeViewPreloaded = codeViewImport();
-}
 
 // The editor (CodeMirror + friends) is a bigger chunk and most file opens are
 // read-only — so unlike CodeView it is NOT warmed on explorer open, only when

@@ -17,7 +17,7 @@
 
 import type { ProjectOption } from "../components/ProjectPicker";
 import { guessProjectForPlan } from "./guessProject";
-import type { ReadinessItem } from "./readiness";
+import type { ExtensionToolchain, ReadinessItem } from "./readiness";
 import { blockingItems } from "./readiness";
 
 // ── Project resolution ──────────────────────────────────────────────────────
@@ -93,6 +93,23 @@ export function composePrompt(text: string, attachments: string[]): string {
   }
   if (paths.length === 0) return body;
   return `${body}\n\nContext:\n${paths.map((p) => `- ${p}`).join("\n")}`;
+}
+
+/** The extra directory grants an extension-pack launch carries. A pack
+ *  author's session builds against the staged ABI/SDK crates and the worked
+ *  template — all outside the project cwd — so the launch grants them via
+ *  `--add-dir`. Empty for a plain project, and empty for any dir the probe
+ *  couldn't resolve (a moved checkout): a launch with fewer grants beats a
+ *  launch that fails. */
+export function extensionAddDirs(
+  kind: "extension" | "harness" | null,
+  probe: ExtensionToolchain | null | undefined,
+): string[] {
+  // A harness pack is data — no toolchain, no staged crates, no grants.
+  if (kind !== "extension" || !probe) return [];
+  return [probe.abiDir, probe.sdkDir, probe.templateDir].filter(
+    (d): d is string => typeof d === "string" && d.length > 0,
+  );
 }
 
 // ── The readiness gate ──────────────────────────────────────────────────────

@@ -282,6 +282,19 @@ pub const SEAT_FACTS: &[SeatFact] = &[
         traits: &["interactive", "latency_sensitive"],
         note: Some("Inherits the `drafter` seat when left unset, so leaving it Default is often right."),
     },
+    SeatFact {
+        seat: "harness",
+        label: "Shelf agents",
+        role: "Spawn template for user-authored shelf agents: an agent runs a \
+               plain-English instruction against the open document and lands \
+               tracked suggestions the user accepts or rejects.",
+        traits: &["interactive", "write_capable"],
+        note: Some(
+            "A template, not one agent: every shelf agent without a `custom:<id>` \
+             seat of its own spawns with this config. Per-agent `custom:` seats \
+             are outside this proposal's scope — never propose picks for them.",
+        ),
+    },
 ];
 
 /// Extra guidance written for the **human** reading the settings tooltip, as

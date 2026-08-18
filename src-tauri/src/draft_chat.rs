@@ -198,6 +198,104 @@ impl DraftChatState {
         }
         Ok(text)
     }
+
+    /// Run one user-authored shelf agent against this draft (harness program
+    /// A2): the `draft_instruct` turn shape — busy guard, server-side mirror
+    /// flush, a thread message, `draft-chat-*` streaming, suggestions through
+    /// the same write contract — with the prompt composed from the agent's
+    /// ROW (`harness::build_agent_run_prompt`) and the spawn tagged with the
+    /// agent's `custom:<id>` seat. Always a FRESH session (`owns_thread`
+    /// false): a shelf agent is its own persona, so it never resumes — nor
+    /// overwrites — the draft discussion's continuity.
+    /// `preview` marks a builder preview-on-a-copy (harness program A3):
+    /// same spawn, same contract, but ledgered as `shelf_preview` so a saved
+    /// agent's run history is never padded by its author's rehearsals.
+    pub async fn run_shelf_agent(
+        &self,
+        app: AppHandle,
+        agent: crate::db::HarnessAgent,
+        draft_id: String,
+        draft_markdown: Option<String>,
+        project_path: Option<String>,
+        cwd: Option<String>,
+        preview: bool,
+    ) -> Result<(), String> {
+        // Atomic reservation; early `?` returns release it via the guard's Drop.
+        let slot = self
+            .turns
+            .begin(&draft_id)
+            .map_err(|_| "the draft agent is still replying".to_string())?;
+
+        // The doc the agent runs against: the caller's live markdown (an open
+        // drafter pane), mirrored server-side exactly like `draft_instruct` —
+        // or the stored mirror when the run comes from a bare command.
+        let (markdown, project_path) = match draft_markdown {
+            Some(md) => {
+                let title = crate::draft_title_from_markdown(&md);
+                self.db
+                    .upsert_draft(&draft_id, title.as_deref(), project_path.as_deref(), &md, None)
+                    .map_err(|e| format!("failed to mirror the draft: {e}"))?;
+                (md, project_path)
+            }
+            None => {
+                let (_, stored_project, md, _) = self
+                    .db
+                    .get_draft(&draft_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "no such draft".to_string())?;
+                (md, project_path.or(stored_project))
+            }
+        };
+
+        let user_msg = DraftChatMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            draft_id: draft_id.clone(),
+            role: "user".to_string(),
+            body: format!("▶ Run agent: {}", agent.name),
+            status: "complete".to_string(),
+            created_at: now_millis(),
+        };
+        self.db
+            .insert_draft_chat_message(&user_msg)
+            .map_err(|e| format!("failed to persist message: {e}"))?;
+
+        let seat = crate::seat::custom_seat(&agent.agent_id);
+        let prompt = crate::harness::build_agent_run_prompt(&draft_id, &agent, &markdown);
+        // Every run is a first turn of a fresh session, so every run is
+        // recorded (the follow-up `register_agent_prompt` arm never applies).
+        let kind = if preview { "shelf_preview" } else { "shelf_agent" };
+        crate::ledger::record_agent_prompt(
+            &self.db,
+            crate::ledger::PromptSource::RustFirstTurn,
+            kind,
+            &prompt,
+            Some(&agent.instruction),
+            project_path.clone(),
+            None,
+            None,
+            Some(crate::ledger::ThreadRef {
+                thread_kind: kind,
+                thread_id: agent.agent_id.clone(),
+                parent_session_id: None,
+            }),
+            crate::seat::model_for(&seat),
+        );
+
+        run_draft_turn(
+            self,
+            app,
+            slot,
+            draft_id,
+            prompt,
+            None,
+            cwd,
+            project_path,
+            None,
+            seat,
+            false,
+        )
+        .await
+    }
 }
 
 // --- Prompt builders ---------------------------------------------------------
@@ -205,7 +303,7 @@ impl DraftChatState {
 /// The write contract the agent is taught, verbatim in both the first-turn
 /// prompt and `skills/drafter/SKILL.md`. Kept as one constant so prompt and
 /// docs can't drift.
-fn suggestions_contract(draft_id: &str) -> String {
+pub(crate) fn suggestions_contract(draft_id: &str) -> String {
     format!(
         "WRITING INTO THE DOCUMENT — you can draft and edit the prompt directly. \
          Post a suggestion (already permitted — no approval needed). This write \
@@ -243,7 +341,7 @@ fn suggestions_contract(draft_id: &str) -> String {
     )
 }
 
-fn doc_route_block(draft_id: &str) -> String {
+pub(crate) fn doc_route_block(draft_id: &str) -> String {
     format!(
         "THE DOCUMENT — the draft lives at (already permitted — no approval needed):\n  \
          curl -s http://127.0.0.1:7676/v1/drafter/{draft_id}/doc\n\
@@ -494,6 +592,11 @@ struct DraftChatCancelled {
 /// via `draft-chat-*`. An instruct turn passes its target block in
 /// `instruct_block`; the marker is set only once the spawn attached (a failed
 /// or cancelled spawn must never leave a phantom pulse to restore).
+/// `seat` tags the spawn ("drafter" for the discussion agent, a
+/// `custom:<agent_id>` seat for a shelf-agent run). `owns_thread` says whether
+/// this turn belongs to the draft's own discussion session: a GUEST turn (a
+/// shelf agent) streams and lands in the same thread but never persists —
+/// or, on overflow, clears — the draft's resumable session id.
 #[allow(clippy::too_many_arguments)]
 async fn run_draft_turn(
     chat: &DraftChatState,
@@ -505,8 +608,10 @@ async fn run_draft_turn(
     cwd: Option<String>,
     project_path: Option<String>,
     instruct: Option<InstructMeta>,
+    seat: String,
+    owns_thread: bool,
 ) -> Result<(), String> {
-    let args = bridge_args("drafter", prompt, prior_session.as_deref());
+    let args = bridge_args(&seat, prompt, prior_session.as_deref());
     let cwd = cwd
         .or(project_path)
         .filter(|c| !c.trim().is_empty())
@@ -514,7 +619,7 @@ async fn run_draft_turn(
         .unwrap_or_else(|| "/".to_string());
 
     let claude_bin = chat.claude_bin().await?;
-    let mut cmd = crate::claude_proc::claude_command_for_seat("drafter", &claude_bin);
+    let mut cmd = crate::claude_proc::claude_command_for_seat(&seat, &claude_bin);
     let mut child = cmd
         .current_dir(&cwd)
         .args(&args)
@@ -560,6 +665,7 @@ async fn run_draft_turn(
         draft_id,
         stdout,
         stderr,
+        owns_thread,
     ));
     Ok(())
 }
@@ -771,6 +877,8 @@ pub async fn draft_instruct(
             block_id,
             instruction: instruction.trim().to_string(),
         }),
+        "drafter".to_string(),
+        true,
     )
     .await
 }
@@ -869,6 +977,7 @@ async fn read_draft_chat(
     draft_id: String,
     stdout: ChildStdout,
     stderr: ChildStderr,
+    owns_thread: bool,
 ) {
     let mut lines = BufReader::new(stdout).lines();
     let mut stderr_lines = BufReader::new(stderr).lines();
@@ -932,7 +1041,7 @@ async fn read_draft_chat(
         return;
     }
     if let Some(err) = errored {
-        let why = describe_turn_error(&db, &draft_id, &err);
+        let why = describe_turn_error(&db, &draft_id, &err, owns_thread);
         finish_error(&app, &db, &draft_id, &why);
         return;
     }
@@ -941,9 +1050,14 @@ async fn read_draft_chat(
             finish_error(&app, &db, &draft_id, "claude produced an empty reply");
             return;
         }
-        if let Some(sid) = &session {
-            if let Err(e) = db.set_draft_chat_session(&draft_id, sid) {
-                tracing::warn!(error = %e, "failed to persist draft chat session id");
+        // A guest turn (shelf agent) is a fresh one-shot session: persisting
+        // its id would make the NEXT discussion turn resume the wrong
+        // conversation, silently replacing the thread's continuity.
+        if owns_thread {
+            if let Some(sid) = &session {
+                if let Err(e) = db.set_draft_chat_session(&draft_id, sid) {
+                    tracing::warn!(error = %e, "failed to persist draft chat session id");
+                }
             }
         }
         let msg = DraftChatMessage {
@@ -983,9 +1097,16 @@ async fn read_draft_chat(
 
 /// Same recovery policy as the browse agent: explicit context overflow resets
 /// the resumable session (the next turn re-embeds the draft); transient API
-/// errors keep it and ask for a retry.
-fn describe_turn_error(db: &Database, draft_id: &str, error: &str) -> String {
+/// errors keep it and ask for a retry. A guest turn (`owns_thread` false)
+/// has no resumable session — overflow means the document itself outgrew one
+/// fresh pass, and the discussion thread's own session must stay untouched.
+fn describe_turn_error(db: &Database, draft_id: &str, error: &str, owns_thread: bool) -> String {
     if is_context_overflow(error) {
+        if !owns_thread {
+            return "This run outgrew the model's context window — the document \
+                    is too large for a single pass by this agent."
+                .to_string();
+        }
         if let Err(e) = db.clear_draft_chat_session(draft_id) {
             tracing::warn!(error = %e, "failed to clear over-limit draft chat session");
         }

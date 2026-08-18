@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import type { DirEntry } from "../types";
 import { subscribeFsChange } from "../hooks/useFsWatch";
-import { preloadCodeView } from "./FileViewer";
+import { preloadCodeView } from "./codeViewWarm";
 
 interface FileTreeProps {
   /** Absolute path of the folder this tree is rooted at. */

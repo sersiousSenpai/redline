@@ -12,6 +12,18 @@
 // no green checklist to dismiss — the door is either quiet or it is telling
 // you something actionable.
 
+/** Can this machine BUILD an extension pack? Advisory: planning one needs no
+ *  toolchain, compiling it does. The dirs are the staged ABI/SDK/template of
+ *  the checkout this binary was built from — what an extension launch grants
+ *  via `--add-dir` (lib/launch.ts `extensionAddDirs`). */
+export interface ExtensionToolchain {
+  cargo: boolean;
+  wasmTarget: boolean;
+  abiDir: string | null;
+  sdkDir: string | null;
+  templateDir: string | null;
+}
+
 /** Runtime probe from `preflight_status` (src-tauri/src/preflight.rs). */
 export interface PreflightStatus {
   claude: { found: boolean; path: string | null; source: string };
@@ -20,6 +32,9 @@ export interface PreflightStatus {
   mode: string;
   hook: { installed: boolean; conflictingUrl: string | null };
   skill: { installed: boolean; outdated: boolean };
+  /** Optional so a probe predating the field reads as "no answer" — every
+   *  derivation from it is withheld rather than guessed at. */
+  extension?: ExtensionToolchain;
 }
 
 export type ReadinessId =
@@ -30,7 +45,8 @@ export type ReadinessId =
   | "no-project"
   | "hook-missing"
   | "skill-stale"
-  | "curl-old";
+  | "curl-old"
+  | "ext-toolchain";
 
 /** What a fix button does. The surface maps each kind to the handler App
  *  already owns — no new backend paths. */
@@ -73,6 +89,9 @@ export interface ReadinessInput {
   now: number;
   /** Known repos. Zero means a first-run user with nowhere to build. */
   projectCount: number;
+  /** ⏎'s resolved target is an extension-pack project (workspace registry
+   *  kind). Gates the toolchain item so it never nags a plain build. */
+  targetIsExtension?: boolean;
 }
 
 /** How long a launch may sit with nothing arriving before we name the most
@@ -92,6 +111,7 @@ const ID_ORDER: ReadinessId[] = [
   "hook-missing",
   "skill-stale",
   "curl-old",
+  "ext-toolchain",
 ];
 
 export function deriveReadiness(input: ReadinessInput): ReadinessItem[] {
@@ -201,6 +221,32 @@ export function deriveReadiness(input: ReadinessInput): ReadinessItem[] {
         "They teach Claude how to present a plan and fold your revisions " +
         "back in. Plans still arrive without them — they just read worse.",
       fix: { label: "Install integration", kind: "install-integration" },
+    });
+  }
+
+  // Only when ⏎ would land in an extension-pack project, and never blocking:
+  // the plan session needs no cargo — `build.sh` does. Named before the user
+  // spends a session finding out, which is this file's whole reason to exist.
+  const ext = pf?.extension;
+  if (input.targetIsExtension && ext && (!ext.cargo || !ext.wasmTarget)) {
+    items.push({
+      id: "ext-toolchain",
+      state: "warn",
+      label: ext.cargo
+        ? "The wasm build target isn't installed"
+        : "No Rust toolchain for building the extension",
+      detail: ext.cargo
+        ? "Planning works without it, but build.sh compiles for " +
+          "wasm32-unknown-unknown. One command adds it."
+        : "Planning works without it, but building the extension needs " +
+          "cargo (rustup.rs installs it in one line).",
+      fix: {
+        label: "Copy the command",
+        kind: "copy-hooks",
+        copyText: ext.cargo
+          ? "rustup target add wasm32-unknown-unknown"
+          : "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh",
+      },
     });
   }
 

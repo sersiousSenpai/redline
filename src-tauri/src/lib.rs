@@ -15,6 +15,7 @@ mod codehealth;
 mod claude_proc;
 mod code;
 mod companion;
+mod compose;
 mod context;
 mod db;
 mod dedup;
@@ -25,10 +26,12 @@ mod draft_chat;
 mod embed;
 mod extension;
 mod extension_host;
+mod extension_scaffold;
 mod feedback;
 mod fork;
 mod fsbrowse;
 mod fswatch;
+mod harness;
 mod highlight;
 mod hook;
 mod codex_hook;
@@ -39,6 +42,7 @@ mod keeper;
 mod ledger;
 mod linked;
 mod librarian;
+mod local_install;
 mod marketplace;
 mod seatassign;
 /// App-side MCP remnant: the `~/.claude.json` snippet generator for the
@@ -2546,7 +2550,137 @@ fn extension_uninstall(name: String) -> Result<(), String> {
             dir.display()
         ));
     }
-    std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())
+    // A link-installed extension (A5a): the LINK is the install — remove it
+    // and only it. The author's project behind it is never ours to delete.
+    match std::fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            std::fs::remove_file(&dir).map_err(|e| e.to_string())
+        }
+        _ => std::fs::remove_dir_all(&dir).map_err(|e| e.to_string()),
+    }
+}
+
+/// A local folder inspected for install (A5a) — what the confirmation UI
+/// shows before anything is written. For an extension the scopes/events are
+/// the consent surface; a harness holds neither (it composes, it cannot
+/// call), so its identity is the whole story.
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum LocalInstallPreview {
+    Harness {
+        id: String,
+        name: String,
+    },
+    Extension {
+        name: String,
+        ext_kind: String,
+        version: Option<String>,
+        scopes: Vec<String>,
+        events: Vec<String>,
+    },
+}
+
+/// Inspect a folder for local install: what is it, and what would it get?
+/// Read-only — hard errors carry the validator's reason, the same posture
+/// as the marketplace's pre-consent checks.
+#[tauri::command(async)]
+fn local_install_inspect(path: String) -> Result<LocalInstallPreview, String> {
+    let folder = std::path::Path::new(&path);
+    match local_install::detect(folder)? {
+        local_install::FolderKind::Harness => {
+            let h = local_install::read_harness_identity(folder)?;
+            Ok(LocalInstallPreview::Harness { id: h.id, name: h.name })
+        }
+        local_install::FolderKind::Extension => {
+            let m = extension::load_extension_folder(folder)?;
+            Ok(LocalInstallPreview::Extension {
+                name: m.name.clone(),
+                ext_kind: m.kind().to_string(),
+                version: m.version.clone(),
+                scopes: m.scopes.clone(),
+                events: m.events.clone(),
+            })
+        }
+    }
+}
+
+/// Install a local folder (A5a): link it under the matching root and — for
+/// a code extension — hot-load it through the same arm the marketplace
+/// uses, so it runs now, not at the next launch. No registry, no sha256:
+/// the folder the user picked and confirmed is the consent.
+#[tauri::command(async)]
+fn local_install_confirm(
+    store: tauri::State<'_, SessionStore>,
+    path: String,
+) -> Result<LocalInstallPreview, String> {
+    let folder = std::path::Path::new(&path);
+    match local_install::detect(folder)? {
+        local_install::FolderKind::Harness => {
+            let h = local_install::install_harness_folder(&userconfig::config_root(), folder)?;
+            Ok(LocalInstallPreview::Harness { id: h.id, name: h.name })
+        }
+        local_install::FolderKind::Extension => {
+            let manifest = extension::load_extension_folder(folder)?;
+            let name = manifest.name.clone();
+            let disabled: std::collections::BTreeSet<String> = store
+                .database()
+                .get_setting(EXTENSIONS_DISABLED_KEY)
+                .and_then(|raw| serde_json::from_str(&raw).ok())
+                .unwrap_or_default();
+            let root = extension::extensions_root().ok_or("no extensions root")?;
+            // Link first: if the name is held by a real (curated or
+            // hand-placed) directory this refuses before the live
+            // registration is touched.
+            let dest = local_install::link_extension_folder(&root, folder, &name)?;
+            if extension_host::remove(&name).is_ok() {
+                auth::revoke_grant(&name);
+            }
+            // Load THROUGH the link: the name==dir rule holds at the
+            // installed path, and an external extension's `.token` lands in
+            // the author's own folder, where their process reads it.
+            let loaded = extension::load_extension_dir(&dest)?;
+            let booted = extension::boot_token(loaded)?;
+            extension_host::load_one(booted, disabled.contains(&name))?;
+            tracing::info!("local install: linked {name} -> {}", path);
+            Ok(LocalInstallPreview::Extension {
+                name,
+                ext_kind: manifest.kind().to_string(),
+                version: manifest.version.clone(),
+                scopes: manifest.scopes.clone(),
+                events: manifest.events.clone(),
+            })
+        }
+    }
+}
+
+/// Reload an installed extension from disk (A5a's iterate step): after the
+/// author rebuilds their module, one click re-reads the manifest and bytes
+/// through the link and re-registers — fresh token, fresh strikes, same
+/// enabled/disabled choice. Works for any installed extension, but exists
+/// for the linked ones.
+#[tauri::command(async)]
+fn extension_reload(
+    store: tauri::State<'_, SessionStore>,
+    name: String,
+) -> Result<(), String> {
+    if !extension::valid_name(&name) {
+        return Err(format!("invalid extension name {name:?}"));
+    }
+    let root = extension::extensions_root().ok_or("no extensions root")?;
+    let dir = root.join(&name);
+    // Validate the fresh state BEFORE dropping the live registration, so a
+    // broken edit leaves the running install running and names the problem.
+    let loaded = extension::load_extension_dir(&dir)?;
+    let disabled: std::collections::BTreeSet<String> = store
+        .database()
+        .get_setting(EXTENSIONS_DISABLED_KEY)
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default();
+    if extension_host::remove(&name).is_ok() {
+        auth::revoke_grant(&name);
+    }
+    let booted = extension::boot_token(loaded)?;
+    extension_host::load_one(booted, disabled.contains(&name))
 }
 
 // --- Marketplace (Elevation B4, see `marketplace.rs`) ---------------------
@@ -9372,6 +9506,23 @@ fn draft_suggestion_resolve(
     Ok(updated)
 }
 
+/// Undo-after-accept (harness program A3): return an ACCEPTED suggestion to
+/// the pending queue after the drafter reverses the accept in the document.
+/// Applied-only — reject removed the marks, so there is nothing to un-resolve
+/// back to. No extension event: `SUGGESTION_RESOLVED` announces a verdict,
+/// and this is a verdict being taken back, not a new one; the eventual
+/// re-resolve publishes normally.
+#[tauri::command(async)]
+fn draft_suggestion_unresolve(
+    store: tauri::State<'_, SessionStore>,
+    id: String,
+) -> Result<bool, String> {
+    store
+        .database()
+        .unresolve_draft_suggestion(&id)
+        .map_err(|e| e.to_string())
+}
+
 #[derive(Deserialize)]
 struct DraftSuggestionReq {
     op: String,
@@ -10792,6 +10943,9 @@ pub fn run() {
             extensions_list,
             extension_set_enabled,
             extension_uninstall,
+            extension_reload,
+            local_install_inspect,
+            local_install_confirm,
             marketplace_index,
             marketplace_install,
             list_sessions,
@@ -10836,6 +10990,7 @@ pub fn run() {
             set_interception_mode,
             preflight::preflight_status,
             project::project_create,
+            project::projects_parent,
             get_ui_prefs,
             set_ui_pref,
             get_agent_seats,
@@ -10850,6 +11005,10 @@ pub fn run() {
             work::get_work_graph,
             userconfig::get_workspace,
             userconfig::save_workspace,
+            userconfig::list_harnesses,
+            userconfig::harness_flavor,
+            userconfig::harness_install_from_folder,
+            userconfig::harness_uninstall,
             get_relay_config,
             set_relay_config,
             get_owner_secret,
@@ -11064,6 +11223,16 @@ pub fn run() {
             draft_chat::draft_comment_add,
             draft_chat::draft_comment_list,
             draft_chat::draft_comment_delete,
+            harness::harness_agent_create,
+            harness::harness_agent_list,
+            harness::harness_agent_update,
+            harness::harness_agent_set_starred,
+            harness::harness_agent_set_folder,
+            harness::harness_agent_delete,
+            harness::harness_agent_duplicate,
+            harness::harness_agent_run,
+            harness::harness_agent_preview,
+            harness::harness_preview_discard,
             fork::draft_thread_send,
             fork::draft_thread_discard,
             memchat::memchat_send,
@@ -11083,6 +11252,7 @@ pub fn run() {
             companion::companion_kill_all,
             draft_suggestions_pending,
             draft_suggestion_resolve,
+            draft_suggestion_unresolve,
             parse_markdown_sections,
             browser_enable_gestures,
             browser_enable_autoresize,

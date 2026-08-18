@@ -43,6 +43,23 @@ pub struct CurlProbe {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ExtensionToolchainProbe {
+    /// `cargo` is reachable (PATH, or the rustup default `~/.cargo/bin`).
+    pub cargo: bool,
+    /// The `wasm32-unknown-unknown` target is installed — what `build.sh`
+    /// actually compiles for. False whenever rustup itself is missing.
+    pub wasm_target: bool,
+    /// The staged ABI / SDK / template dirs of the checkout this binary was
+    /// built from (`extension_scaffold`'s resolvers) — the dirs a pack
+    /// author's plan session is granted via `--add-dir`. `None` once the
+    /// clone has moved; the launch simply grants nothing then.
+    pub abi_dir: Option<String>,
+    pub sdk_dir: Option<String>,
+    pub template_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PreflightStatus {
     pub claude: ClaudeProbe,
     pub curl: CurlProbe,
@@ -52,6 +69,9 @@ pub struct PreflightStatus {
     pub mode: String,
     pub hook: crate::hook::HookStatus,
     pub skill: crate::skill::SkillStatus,
+    /// Can this machine BUILD an extension pack? Advisory, never blocking:
+    /// planning one needs no toolchain, compiling it does.
+    pub extension: ExtensionToolchainProbe,
 }
 
 /// The curl release that introduced `--variable` / `--expand-header`. The
@@ -173,6 +193,48 @@ async fn probe_curl() -> CurlProbe {
     }
 }
 
+/// Does `rustup target list --installed` name wasm32-unknown-unknown? Exact
+/// line match: the banner-free list is one target triple per line, and a
+/// substring match would be fooled by e.g. `wasm32-unknown-unknown-...`
+/// variants a future rustup might print.
+pub fn has_wasm_target(text: &str) -> bool {
+    text.lines().any(|l| l.trim() == "wasm32-unknown-unknown")
+}
+
+/// A rustup-managed tool as the launched terminal would find it: PATH first,
+/// then the rustup default `~/.cargo/bin` — present even under a Finder
+/// launch's minimal PATH, which never carries cargo.
+fn cargo_tool(name: &str) -> Option<PathBuf> {
+    if let Some(p) = on_path(name) {
+        return Some(p);
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let candidate = home.join(".cargo/bin").join(name);
+    candidate.is_file().then_some(candidate)
+}
+
+async fn probe_extension_toolchain() -> ExtensionToolchainProbe {
+    let cargo = cargo_tool("cargo").is_some();
+    let wasm_target = match cargo_tool("rustup") {
+        Some(rustup) => tokio::process::Command::new(rustup)
+            .args(["target", "list", "--installed"])
+            .output()
+            .await
+            .ok()
+            .filter(|o| o.status.success())
+            .is_some_and(|o| has_wasm_target(&String::from_utf8_lossy(&o.stdout))),
+        None => false,
+    };
+    let dir = |d: Option<std::path::PathBuf>| d.map(|p| p.to_string_lossy().into_owned());
+    ExtensionToolchainProbe {
+        cargo,
+        wasm_target,
+        abi_dir: dir(crate::extension_scaffold::abi_dir()),
+        sdk_dir: dir(crate::extension_scaffold::sdk_dir()),
+        template_dir: dir(crate::extension_scaffold::template_dir()),
+    }
+}
+
 /// One answer to "can this machine deliver a plan". Async because the curl
 /// probe and the `claude` login-shell fallback both spawn a child; neither may
 /// block the UI thread on a cold boot.
@@ -188,6 +250,7 @@ pub async fn preflight_status(settings: tauri::State<'_, crate::Settings>) -> Re
         mode,
         hook: crate::hook::get_status(),
         skill: crate::skill::get_status(),
+        extension: probe_extension_toolchain().await,
     })
 }
 
@@ -260,6 +323,35 @@ mod tests {
         }
         assert_eq!(claude_source("claude"), "path");
         assert_eq!(claude_source("/usr/local/bin/claude"), "probe");
+    }
+
+    #[test]
+    fn wasm_target_matches_the_exact_triple_only() {
+        assert!(has_wasm_target("aarch64-apple-darwin\nwasm32-unknown-unknown\n"));
+        assert!(has_wasm_target("  wasm32-unknown-unknown  "));
+        assert!(!has_wasm_target(""));
+        assert!(!has_wasm_target("aarch64-apple-darwin\n"));
+        // A future variant triple must not satisfy the exact check.
+        assert!(!has_wasm_target("wasm32-unknown-unknown-extra\n"));
+        assert!(!has_wasm_target("also wasm32-unknown-unknown here\n"));
+    }
+
+    #[test]
+    fn extension_dirs_resolve_inside_this_checkout() {
+        // This test runs from the source tree, so all three staged dirs
+        // exist; what matters is that they resolve absolute and distinct.
+        let dirs = [
+            crate::extension_scaffold::abi_dir(),
+            crate::extension_scaffold::sdk_dir(),
+            crate::extension_scaffold::template_dir(),
+        ];
+        for d in &dirs {
+            let d = d.as_ref().expect("staged dir missing in a dev tree");
+            assert!(d.is_absolute());
+            assert!(d.is_dir());
+        }
+        assert_ne!(dirs[0], dirs[1]);
+        assert_ne!(dirs[1], dirs[2]);
     }
 
     #[test]

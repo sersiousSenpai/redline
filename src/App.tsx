@@ -23,8 +23,9 @@ import { installExternalLinkHandler } from "./lib/externalLinks";
 import { isClaudeWorking } from "./lib/claudeWorking";
 import { heldPlanByTerminal, heldTerminalIds } from "./lib/heldTerminals";
 // Tiptap/ProseMirror is heavy; lazy-load so it's off the initial paint path.
+const loadPlanEditor = () => import("./components/PlanEditor");
 const PlanEditor = lazy(() =>
-  import("./components/PlanEditor").then((m) => ({ default: m.PlanEditor })),
+  loadPlanEditor().then((m) => ({ default: m.PlanEditor })),
 );
 import type { PlanEditorActions } from "./components/PlanEditor";
 import type { PlanEditorCollab } from "./components/PlanEditor";
@@ -41,6 +42,7 @@ import { type LaunchDestination } from "./lib/frontDoor";
 import {
   attemptLaunch,
   composePrompt,
+  extensionAddDirs,
   launchLiveness,
   projectForDoc,
   resolveLaunchProject,
@@ -102,11 +104,22 @@ import { HookSetupModal } from "./components/HookSetupModal";
 import { HowItWorksCard } from "./components/HowItWorksCard";
 import { ReadmeModal } from "./components/ReadmeModal";
 import { FeedbackModal } from "./components/FeedbackModal";
-import { OnboardingTour } from "./components/OnboardingTour";
+// Shown once, ever — the cleanest lazy win on the boot path (A0).
+const OnboardingTour = lazy(() =>
+  import("./components/OnboardingTour").then((m) => ({
+    default: m.OnboardingTour,
+  })),
+);
 import { AskModeViolationBanner } from "./components/AskModeViolationBanner";
 import { ResolutionWarningBanner } from "./components/ResolutionWarningBanner";
 import { SelectionMenu } from "./components/SelectionMenu";
-import { SessionSidebar } from "./components/SessionSidebar";
+// Off the boot path, but warmed by the boot effect: the sessions tab is the
+// sidebar's resting state, so its chunk is fetched under the parting doors
+// rather than on first paint of the aside.
+const loadSessionSidebar = () => import("./components/SessionSidebar");
+const SessionSidebar = lazy(() =>
+  loadSessionSidebar().then((m) => ({ default: m.SessionSidebar })),
+);
 import {
   suppressTerminalRevealFocus,
   tauriHandoffDeps,
@@ -119,8 +132,18 @@ import {
 import { SidebarTabStrip } from "./components/SidebarTabStrip";
 import { PlanToc } from "./components/PlanToc";
 import { FileTree } from "./components/FileTree";
-import { FileViewer } from "./components/FileViewer";
-import { BrowserPane } from "./components/BrowserPane";
+// Lazy: the read-only viewer only mounts once a folder tab opens a file.
+const FileViewer = lazy(() =>
+  import("./components/FileViewer").then((m) => ({ default: m.FileViewer })),
+);
+// The largest unclaimed lever on the boot path (109 KB source). The pane
+// mounts only when the browser surface is selected, and `browserVisible` is
+// already false during the boot choreography — the chunk fetch hides in the
+// same gate.
+const loadBrowserPane = () => import("./components/BrowserPane");
+const BrowserPane = lazy(() =>
+  loadBrowserPane().then((m) => ({ default: m.BrowserPane })),
+);
 import { MenuOverlayProvider } from "./components/menuOverlay";
 import { SplitPane } from "./components/SplitPane";
 // Same Tiptap/ProseMirror stack as PlanEditor — lazy for the same reason. The
@@ -140,22 +163,46 @@ const PromptDrafter = lazy(() =>
 );
 import type { DrafterSaveState } from "./components/PromptDrafter";
 import ReviewPanel from "./components/ReviewPanel";
-import { MemoryInspector } from "./components/MemoryInspector";
+// Lazy: a settings pane. Its module also feeds MemorySurface (class tree +
+// portability sections), so the chunk is shared with that surface's family.
+const MemoryInspector = lazy(() =>
+  import("./components/MemoryInspector").then((m) => ({
+    default: m.MemoryInspector,
+  })),
+);
 // Off the boot path. `MemorySurface` is 85KB and structurally identical to the
 // surfaces already lazy here (the drafter, the voice panel) — it was static
 // only by omission, and boot JS sits at the budget ceiling.
+const loadMemorySurface = () => import("./components/MemorySurface");
 const MemorySurface = lazy(() =>
-  import("./components/MemorySurface").then((m) => ({
-    default: m.MemorySurface,
-  })),
+  loadMemorySurface().then((m) => ({ default: m.MemorySurface })),
 );
 // Off the boot path like the drafter: the Runs surface only matters once an
 // orchestrated run exists, so its chunk loads on first open.
+const loadOrchestrationSurface = () => import("./components/OrchestrationSurface");
 const OrchestrationSurface = lazy(() =>
-  import("./components/OrchestrationSurface").then((m) => ({
+  loadOrchestrationSurface().then((m) => ({
     default: m.OrchestrationSurface,
   })),
 );
+// Every lazy surface body's chunk, keyed by the surface that mounts it. The
+// boot effect prefetches the LANDING surface's entry the moment
+// `initialSurface` resolves — the doors' choreography covers the fetch, so a
+// lazy landing never blanks behind the parting plates (boot.test.ts pins
+// this). Review and servers are static; document warms the editor a held
+// session would mount.
+const SURFACE_CHUNK_LOADERS: Partial<
+  Record<string, () => Promise<unknown>>
+> = {
+  document: loadPlanEditor,
+  drafter: loadPromptDrafter,
+  browser: loadBrowserPane,
+  memory: loadMemorySurface,
+  runs: loadOrchestrationSurface,
+};
+function prefetchSurfaceChunk(surface: string): void {
+  void SURFACE_CHUNK_LOADERS[surface]?.().catch(() => {});
+}
 import ReviewDiscussionPane from "./components/ReviewDiscussionPane";
 import { ServersPane } from "./components/ServersPane";
 import { useReview } from "./hooks/useReview";
@@ -228,15 +275,31 @@ import {
   initialSurface,
   moveHeaderSurface,
   parseWorkspace,
+  projectKind,
+  readWorkspaceCache,
+  registerProject,
   serializeWorkspace,
   setLanding,
   setSurfaceEnabled,
+  storeWorkspaceCache,
   surfaceEnabled,
   workspaceImmersive,
   workspaceLayout,
   type ToggleableSurface,
   type Workspace,
 } from "./config/workspace";
+import {
+  harnessHeaderSurfaces,
+  harnessWorkspace,
+  readActiveHarness,
+  readHarnessArrangement,
+  resolveHarnesses,
+  storeActiveHarness,
+  storeHarnessArrangement,
+  type ActiveHarness,
+  type HarnessEntry,
+  type HarnessManifest,
+} from "./lib/harness";
 import {
   effectiveShape,
   isImmersive,
@@ -336,7 +399,18 @@ import {
   type BookshelfDraft,
   type DraftSource,
 } from "./lib/bookshelf";
-import { BookshelfView } from "./components/BookshelfView";
+// Lazy: the shelf is a sheet over the drafter, opened on click.
+const BookshelfView = lazy(() =>
+  import("./components/BookshelfView").then((m) => ({
+    default: m.BookshelfView,
+  })),
+);
+// Lazy: the agent shelf (harness A3) is the Bookshelf's sibling sheet.
+const AgentShelf = lazy(() =>
+  import("./components/AgentShelf").then((m) => ({
+    default: m.AgentShelf,
+  })),
+);
 import { DocumentsMenu } from "./components/DocumentsMenu";
 import { SendToRedlineDialog } from "./components/SendToRedlineDialog";
 import type { JSONContent } from "@tiptap/react";
@@ -670,19 +744,69 @@ function App() {
   // this build *yours*: which surfaces exist, header order, landing surface.
   // GUI–file duality: the file is the store, this state is the lens; every
   // customization gesture funnels through updateWorkspace, which rewrites the
-  // file. Loaded in the initial-load effect; until then, defaults (= today's
-  // stock UI) apply.
-  const [workspace, setWorkspace] = useState<Workspace>(() =>
-    defaultWorkspace(),
+  // file. The initializer reads the PAINT CACHE (the mirrored last-loaded
+  // manifest text, localStorage — synchronous) so the very first render
+  // composes the user's real header instead of the stock one; the
+  // authoritative file read lands in the boot effect and confirms or
+  // corrects it. Same contract as the theme cache in index.html.
+  const [workspace, setWorkspace] = useState<Workspace>(
+    () => readWorkspaceCache(localStorage) ?? defaultWorkspace(),
+  );
+  // Harness mode (A5) — one mechanism, two entry points: entered from the
+  // Front Door (exit shown) or by a flavored build at boot (exit hidden).
+  // Active state + the per-harness arrangement live in localStorage, NOT
+  // workspace.json: the WebKit store is identifier-scoped so it splits per
+  // flavor, while ~/.redline is HOME-resolved and shared — user state must
+  // never direct another flavor's boot. Synchronous reads double as the
+  // no-stock-header-flash fix; the boot effect re-resolves the manifest
+  // from its source (fixture / ~/.redline/harnesses) and corrects the cache.
+  const [activeHarness, setActiveHarness] = useState<ActiveHarness | null>(
+    () => readActiveHarness(localStorage),
+  );
+  const [harnessDelta, setHarnessDelta] = useState<Workspace>(() => {
+    const active = readActiveHarness(localStorage);
+    return active
+      ? readHarnessArrangement(localStorage, active.manifest.id)
+      : {};
+  });
+  const [harnessList, setHarnessList] = useState<HarnessManifest[]>(() =>
+    resolveHarnesses([]),
+  );
+  const activeHarnessRef = useRef(activeHarness);
+  activeHarnessRef.current = activeHarness;
+  // What the UI composes from: the harness's arrangement while inside one,
+  // the user's own manifest otherwise. Layout knobs (snap-back overrides,
+  // immersive opt-out) deliberately keep reading the STOCK manifest — they
+  // are user chrome, not part of a harness's surface set.
+  const effectiveWorkspace = useMemo(
+    () =>
+      activeHarness
+        ? harnessWorkspace(activeHarness.manifest, harnessDelta)
+        : workspace,
+    [activeHarness, harnessDelta, workspace],
   );
   const updateWorkspace = useCallback(
     (fn: (ws: Workspace) => Workspace) => {
+      // Inside a harness the same gestures arrange THE HARNESS: the result
+      // persists per harness id in localStorage, and workspace.json — the
+      // stock arrangement — is never written from harness mode.
+      const active = activeHarnessRef.current;
+      if (active) {
+        setHarnessDelta((prev) => {
+          const base = harnessWorkspace(active.manifest, prev);
+          const next = fn(base);
+          if (next === base) return prev;
+          storeHarnessArrangement(localStorage, active.manifest.id, next);
+          return next;
+        });
+        return;
+      }
       setWorkspace((prev) => {
         const next = fn(prev);
         if (next !== prev) {
-          void invoke("save_workspace", {
-            json: serializeWorkspace(next),
-          }).catch(() => {});
+          const json = serializeWorkspace(next);
+          storeWorkspaceCache(localStorage, json);
+          void invoke("save_workspace", { json }).catch(() => {});
         }
         return next;
       });
@@ -690,8 +814,11 @@ function App() {
     [],
   );
   const headerSurfaceList = useMemo(
-    () => headerSurfaces(workspace),
-    [workspace],
+    () =>
+      activeHarness
+        ? harnessHeaderSurfaces(effectiveWorkspace, activeHarness.manifest)
+        : headerSurfaces(effectiveWorkspace),
+    [activeHarness, effectiveWorkspace],
   );
   // Workspace-nudge bookkeeping (src/lib/nudge.ts): the launch-habit history
   // feeding the one quiet suggestion. Loaded with the other DB prefs; every
@@ -729,24 +856,134 @@ function App() {
     () => suggestLanding(nudgeState, workspace),
     [nudgeState, workspace],
   );
-  const voiceEnabled = surfaceEnabled(workspace, "voice");
+  const voiceEnabled = surfaceEnabled(effectiveWorkspace, "voice");
   // Fresh view of mainSurface for the boot-time landing decision.
   const mainSurfaceRef = useRef(mainSurface);
   mainSurfaceRef.current = mainSurface;
+  // Enter a harness: pure recomposition — cache the manifest so the NEXT
+  // launch's first render already composes it (no stock-header flash), load
+  // this harness's saved arrangement, land on its landing surface. No
+  // command runs on entry or exit (harness.test.ts pins the ban): a held
+  // ExitPlanMode plan lives behind the daemon, and a path that never reaches
+  // the daemon cannot strand it.
+  const enterHarness = useCallback(
+    (manifest: HarnessManifest, entry: HarnessEntry = "user") => {
+      const active: ActiveHarness = {
+        manifest,
+        entry,
+        returnSurface: mainSurfaceRef.current,
+      };
+      const delta = readHarnessArrangement(localStorage, manifest.id);
+      storeActiveHarness(localStorage, active);
+      setActiveHarness(active);
+      setHarnessDelta(delta);
+      const target = initialSurface(
+        harnessWorkspace(manifest, delta),
+        mainSurfaceRef.current,
+      );
+      prefetchSurfaceChunk(target);
+      selectSurfaceRef.current(target);
+    },
+    [],
+  );
+  // Exit lands back where the user stood at entry — if stock Redline still
+  // shows that surface; the document (always present) otherwise.
+  const exitHarness = useCallback(() => {
+    const leaving = activeHarnessRef.current;
+    if (!leaving) return;
+    storeActiveHarness(localStorage, null);
+    setActiveHarness(null);
+    setHarnessDelta({});
+    const back = leaving.returnSurface;
+    const target =
+      back && headerSurfaces(workspace).some((d) => d.id === back)
+        ? (back as MainSurface)
+        : "document";
+    prefetchSurfaceChunk(target);
+    selectSurfaceRef.current(target);
+  }, [workspace]);
+  // A5a's edit loop. A link-installed harness is read THROUGH its link on
+  // every scan, so a re-list is a re-read: re-resolving on window focus
+  // means "edit harness.json in your editor, refocus Redline, the change
+  // is live" — no watcher, no restart. The same pass corrects the active
+  // harness (renamed → fresh manifest; unlinked/deleted → clean exit to
+  // stock, with the eviction effect below rehoming a stranded surface).
+  const harnessFlavorRef = useRef<string | null>(null);
+  const harnessListJsonRef = useRef("");
+  const bootSettledRef = useRef(false);
+  const applyHarnessResolution = useCallback(
+    (installed: { id: string; json: string }[]): ActiveHarness | null => {
+      const harnesses = resolveHarnesses(installed);
+      const listJson = JSON.stringify(harnesses);
+      if (listJson !== harnessListJsonRef.current) {
+        harnessListJsonRef.current = listJson;
+        setHarnessList(harnesses);
+      }
+      // The BUILD wins ("the build says which harness"): a flavored binary
+      // boots into its harness with the exit hidden, and no user state can
+      // redirect it. Otherwise a user-entered harness is re-resolved from
+      // its source.
+      const flavor = harnessFlavorRef.current;
+      const cached = activeHarnessRef.current;
+      let resolved: ActiveHarness | null = null;
+      if (flavor) {
+        const manifest = harnesses.find((h) => h.id === flavor) ?? null;
+        resolved = manifest ? { manifest, entry: "boot" } : null;
+      } else if (cached && cached.entry !== "boot") {
+        const manifest =
+          harnesses.find((h) => h.id === cached.manifest.id) ?? null;
+        resolved = manifest ? { ...cached, manifest } : null;
+      }
+      // Unchanged resolution = no state churn: focus fires often, App
+      // re-renders are not free, and the delta can only have moved through
+      // updateWorkspace, which already set it.
+      if (JSON.stringify(resolved) === JSON.stringify(cached)) {
+        return cached;
+      }
+      storeActiveHarness(localStorage, resolved);
+      setActiveHarness(resolved);
+      setHarnessDelta(
+        resolved
+          ? readHarnessArrangement(localStorage, resolved.manifest.id)
+          : {},
+      );
+      return resolved;
+    },
+    [],
+  );
+  const refreshHarnesses = useCallback(() => {
+    if (!bootSettledRef.current) return;
+    void invoke<{ id: string; json: string }[]>("list_harnesses")
+      .then(applyHarnessResolution)
+      .catch(() => {});
+  }, [applyHarnessResolution]);
+  useEffect(() => {
+    // Focus is the editor loop; the DOM event is the Extensions panel
+    // announcing an install/unlink that happened without a refocus.
+    window.addEventListener("focus", refreshHarnesses);
+    window.addEventListener("redline:harnesses-changed", refreshHarnesses);
+    return () => {
+      window.removeEventListener("focus", refreshHarnesses);
+      window.removeEventListener("redline:harnesses-changed", refreshHarnesses);
+    };
+  }, [refreshHarnesses]);
   // Hiding a surface you're standing on sends you to the document; the
   // header entry is already gone, so staying would strand the pane with no
   // way back. (Only manifest changes trigger this — programmatic opens like
   // review-requested still work on a hidden surface by design: a blocking
-  // agent review must never be stranded by a cosmetic hide.)
+  // agent review must never be stranded by a cosmetic hide.) Reads the
+  // EFFECTIVE manifest, so entering a harness that removes the surface you
+  // are on bounces you to the document — the held plan's home — not into a
+  // pane with no header entry.
   useEffect(() => {
     if (
       mainSurface !== "document" &&
-      !surfaceEnabled(workspace, mainSurface as ToggleableSurface)
+      !surfaceEnabled(effectiveWorkspace, mainSurface as ToggleableSurface)
     ) {
       selectSurfaceRef.current("document");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspace]);
+  }, [effectiveWorkspace]);
   // The Prompt Drafter — a Word-style authoring surface selected into the
   // center pane. Its draft (Tiptap JSON) and the project it launches into
   // persist across reloads.
@@ -1087,6 +1324,15 @@ function App() {
     "redline.drafter.shelfOpen",
     false,
   );
+  // The agent shelf (harness A3): the user's own agents, run against the open
+  // document. A transient sheet — deliberately NOT persisted: reopening the
+  // app inside the agent list instead of the document would be disorienting.
+  const [agentShelfOpen, setAgentShelfOpen] = useState(false);
+  // The shelf-agent run in flight, by name. Suggestions land through the
+  // drafter's own listeners; this only claims the run's closing chat line
+  // for a toast (the drafter's ✦ note is gated on ITS in-flight ref, so a
+  // guest run would otherwise finish silently).
+  const shelfRunLive = useRef<string | null>(null);
   // The open document's attached sources — the rows, not just a count.
   //
   // The backend for these has been complete and unreachable: `draft_source_add`
@@ -1194,6 +1440,45 @@ function App() {
     () => drafterLiveMdRef.current?.(),
     [],
   );
+  // A shelf-agent run's endgame: its one-liner arrives on `draft-chat-done`
+  // like any drafter turn, but the drafter's own handler is gated on the ✦
+  // in-flight ref and ignores guest turns. While `shelfRunLive` names a run,
+  // this claims the terminal event for a toast.
+  useEffect(() => {
+    let alive = true;
+    const done = listen<{ draftId: string; body: string }>(
+      "draft-chat-done",
+      (e) => {
+        if (!alive || !shelfRunLive.current) return;
+        if (e.payload.draftId !== drafterDraftId) return;
+        const name = shelfRunLive.current;
+        shelfRunLive.current = null;
+        const line = e.payload.body.trim();
+        setToast(
+          line
+            ? `${name} — ${line}`
+            : `${name} finished. Review its tracked changes in the document.`,
+        );
+        setTimeout(() => setToast(null), 12_000);
+      },
+    );
+    const err = listen<{ draftId: string; error: string }>(
+      "draft-chat-error",
+      (e) => {
+        if (!alive || !shelfRunLive.current) return;
+        if (e.payload.draftId !== drafterDraftId) return;
+        const name = shelfRunLive.current;
+        shelfRunLive.current = null;
+        setToast(`${name} failed: ${e.payload.error}`);
+        setTimeout(() => setToast(null), 12_000);
+      },
+    );
+    return () => {
+      alive = false;
+      void done.then((un) => un());
+      void err.then((un) => un());
+    };
+  }, [drafterDraftId]);
   // Persist the open document: the TipTap fidelity source AND the markdown
   // mirror agents read via /v1/drafter/:id/doc, in one write on the drafter's
   // debounce (400ms idle, 2s max-wait). Three guarantees layered on the write:
@@ -2863,16 +3148,33 @@ function App() {
       ]);
       // The workspace manifest gates what mounts, so it loads with the other
       // boot lookups. Missing/malformed file = defaults = today's stock UI
-      // (and so does an unavailable command — tests / web).
-      const [ws, list] = await Promise.all([
-        invoke<string | null>("get_workspace").then(
-          (text) => parseWorkspace(text),
-          () => defaultWorkspace(),
+      // (and so does an unavailable command — tests / web). The harness
+      // lookups ride the same batch: the build's flavor (A7's boot entry —
+      // None in every normal build) and the installed manifests.
+      const [wsText, flavor, installed, list] = await Promise.all([
+        invoke<string | null>("get_workspace").catch(() => null),
+        invoke<string | null>("harness_flavor").catch(() => null),
+        invoke<{ id: string; json: string }[]>("list_harnesses").catch(
+          () => [] as { id: string; json: string }[],
         ),
         refreshSummaries(),
         statuses,
       ]);
+      const ws = parseWorkspace(wsText);
       setWorkspace(ws);
+      // Refresh the paint cache from the authoritative read — the file is
+      // the store, the cache is next launch's first frame.
+      storeWorkspaceCache(localStorage, wsText ?? null);
+      // Harness resolution. The boot pass and every later refresh (window
+      // focus, an install landing) share applyHarnessResolution: a
+      // user-entered harness from last session is RE-RESOLVED from its
+      // source, so an edited manifest shows fresh and a deleted one exits
+      // cleanly to stock Redline.
+      harnessFlavorRef.current = flavor;
+      const resolved = applyHarnessResolution(installed);
+      const harnessDeltaNow = resolved
+        ? readHarnessArrangement(localStorage, resolved.manifest.id)
+        : {};
       // Boot lands on the FRONT DOOR, not on the last plan you happened to
       // read. Opening Redline is nearly always "I want to build something",
       // and the plans are one click away in the sidebar either way.
@@ -2886,12 +3188,24 @@ function App() {
       await loadSession(held?.sessionId ?? null);
       // Landing: "last" (default) keeps the persisted surface — today's
       // behavior. A fixed or per-project landing overrides it; a landing on
-      // a disabled surface falls back to the document.
-      const target = initialSurface(
-        ws,
-        mainSurfaceRef.current,
-        list[0]?.projectPath ?? null,
-      );
+      // a disabled surface falls back to the document. Inside a harness the
+      // HARNESS's arrangement decides (its landing, its surface set) — the
+      // stock manifest's say resumes at exit.
+      const target = resolved
+        ? initialSurface(
+            harnessWorkspace(resolved.manifest, harnessDeltaNow),
+            mainSurfaceRef.current,
+          )
+        : initialSurface(
+            ws,
+            mainSurfaceRef.current,
+            list[0]?.projectPath ?? null,
+          );
+      // Warm what boot is about to show while the doors are still parting:
+      // the landing surface's chunk, and the sessions sidebar (the aside's
+      // resting tab). Dynamic imports — the size budget never sees them.
+      prefetchSurfaceChunk(target);
+      void loadSessionSidebar().catch(() => {});
       if (target !== mainSurfaceRef.current) {
         selectSurfaceRef.current(target);
       }
@@ -2902,6 +3216,7 @@ function App() {
         startedAt: Date.now(),
         done: false,
       };
+      bootSettledRef.current = true;
       setLoading(false);
     })();
   }, []);
@@ -4497,7 +4812,9 @@ function App() {
   };
 
   // Candidate project directories for the drafter's launch picker: every review
-  // session's project plus each open folder workspace, deduped by path.
+  // session's project, each open folder workspace, and every folder registered
+  // in the workspace manifest (project_create writes there, so a created
+  // project is visible before any plan ever lands in it), deduped by path.
   const projectOptions = useMemo<ProjectOption[]>(() => {
     const seen = new Map<string, ProjectOption>();
     const add = (path: string, name: string, source: ProjectOption["source"]) => {
@@ -4507,8 +4824,19 @@ function App() {
     };
     for (const s of summaries) add(s.projectPath, s.projectName, "session");
     for (const f of openFolders) add(f.path, f.name, "folder");
+    for (const path of Object.keys(workspace.projects ?? {})) {
+      const base = path.replace(/\/+$/, "");
+      add(path, base.slice(base.lastIndexOf("/") + 1) || path, "workspace");
+    }
     return [...seen.values()];
-  }, [summaries, openFolders]);
+  }, [summaries, openFolders, workspace]);
+
+  // Kinds of projects created THIS session, written synchronously at
+  // creation. The workspace registration lands via queued state, but the
+  // create-and-plan path launches in the same continuation — a launch that
+  // read only `workspace` would miss the brand-new pack's type and skip its
+  // --add-dir grants exactly once, on the launch the folder was made for.
+  const createdKindsRef = useRef<Record<string, "extension" | "harness">>({});
 
   // A pending launch is being displaced (or has died). Pay back whatever the
   // surface handed over before overwriting it — the Front Door gave up its
@@ -4557,7 +4885,16 @@ function App() {
     if (gate.kind === "blocked")
       return { ok: false, reason: gate.item.label, blocked: gate.item };
 
-    const cmd = `${buildPlanLaunchCommand(trimmed, req.projectPath)}\r`;
+    // An extension-pack target gets the staged ABI/SDK/template dirs granted
+    // via --add-dir: the contract it builds against lives outside its cwd.
+    const addDirs = extensionAddDirs(
+      projectKind(workspace, req.projectPath) ??
+        (req.projectPath
+          ? (createdKindsRef.current[req.projectPath] ?? null)
+          : null),
+      preflight?.extension ?? null,
+    );
+    const cmd = `${buildPlanLaunchCommand(trimmed, req.projectPath, addDirs)}\r`;
     suppressTerminalRevealFocus();
     setTermFullscreen(false);
     revealTerm();
@@ -5243,36 +5580,6 @@ function App() {
     return () => clearInterval(t);
   }, [pendingLaunch]);
 
-  const readiness = useMemo(
-    () =>
-      deriveReadiness({
-        // The live `mode` beats the probe's snapshot: `mode-changed` lands
-        // long before the re-probe it triggers resolves.
-        preflight: preflight ? { ...preflight, mode } : null,
-        daemonBound,
-        hookModalActive: setupModalActive,
-        planEverArrived: planEverArrived || summaries.length > 0,
-        pendingSince: pendingLaunch?.startedAt ?? null,
-        now: readinessNow,
-        projectCount: projectOptions.length,
-      }),
-    [
-      preflight,
-      mode,
-      daemonBound,
-      setupModalActive,
-      planEverArrived,
-      summaries.length,
-      pendingLaunch,
-      readinessNow,
-      projectOptions.length,
-    ],
-  );
-  // `launchPlan`'s backstop gate reads this at call time, from a definition
-  // that sits above it in the body.
-  const readinessRef = useRef(readiness);
-  readinessRef.current = readiness;
-
   const frontDoorResolvedProject = useMemo(
     () =>
       resolveLaunchProject(frontDoorText, frontDoorProject, {
@@ -5288,6 +5595,42 @@ function App() {
       lastLaunchProject,
     ],
   );
+
+  const readiness = useMemo(
+    () =>
+      deriveReadiness({
+        // The live `mode` beats the probe's snapshot: `mode-changed` lands
+        // long before the re-probe it triggers resolves.
+        preflight: preflight ? { ...preflight, mode } : null,
+        daemonBound,
+        hookModalActive: setupModalActive,
+        planEverArrived: planEverArrived || summaries.length > 0,
+        pendingSince: pendingLaunch?.startedAt ?? null,
+        now: readinessNow,
+        projectCount: projectOptions.length,
+        // ⏎'s resolved target: the toolchain item fires only when the launch
+        // would actually land in an extension-pack project.
+        targetIsExtension:
+          projectKind(workspace, frontDoorResolvedProject) === "extension",
+      }),
+    [
+      preflight,
+      mode,
+      daemonBound,
+      setupModalActive,
+      planEverArrived,
+      summaries.length,
+      pendingLaunch,
+      readinessNow,
+      projectOptions.length,
+      workspace,
+      frontDoorResolvedProject,
+    ],
+  );
+  // `launchPlan`'s backstop gate reads this at call time, from a definition
+  // that sits above it in the body.
+  const readinessRef = useRef(readiness);
+  readinessRef.current = readiness;
 
   const launchFromFrontDoor = (projectOverride?: string) => {
     const prompt = composePrompt(frontDoorText, frontDoorAttachments);
@@ -5418,12 +5761,25 @@ function App() {
 
   const createFrontDoorProject = async (
     name: string,
+    kind?: "extension" | "harness",
   ): Promise<string | null> => {
     try {
       const path = await invoke<string>("project_create", {
         parent: null,
         name,
+        kind: kind ?? null,
       });
+      // The other half of creation: register the folder in the workspace
+      // manifest so it is visible (picker, guess, readiness) before any plan
+      // lands in it — and typed, so an extension launch gets its dir grants.
+      // The ref first — synchronously — so the create-and-plan launch that
+      // follows in this same continuation already sees the type.
+      if (kind) createdKindsRef.current[path] = kind;
+      updateWorkspace((ws) => registerProject(ws, path, kind));
+      // A harness project was link-installed by its creation (A5a): pull
+      // the fresh list now so its Front Door chip appears with the toast,
+      // not at the next refocus.
+      if (kind === "harness") refreshHarnesses();
       setFrontDoorProject({ path });
       setToast(`Created ${path}`);
       setTimeout(() => setToast(null), 4000);
@@ -5529,6 +5885,15 @@ function App() {
         currentTheme: theme,
         fonts: FONTS.map(({ name, label }) => ({ name, label })),
         currentFont: font,
+        harnesses: activeHarness
+          ? []
+          : harnessList.map((h) => ({ id: h.id, name: h.name })),
+        activeHarness: activeHarness
+          ? {
+              name: activeHarness.manifest.name,
+              exitHidden: activeHarness.entry === "boot",
+            }
+          : null,
         actions: {
           // ⌘K "Plan a build" lands on the front door, which is now the
           // primary way to start one. The Drafter is still one hop away
@@ -5561,6 +5926,11 @@ function App() {
           },
           zoomReset: () => setDocZoom(1),
           replayTour: () => setTourOpen(true),
+          enterHarness: (id) => {
+            const manifest = harnessList.find((h) => h.id === id);
+            if (manifest) enterHarness(manifest);
+          },
+          exitHarness,
         },
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -5570,6 +5940,10 @@ function App() {
       summaries,
       theme,
       font,
+      harnessList,
+      activeHarness,
+      enterHarness,
+      exitHarness,
       openFrontDoor,
       snapBack,
       selectSessions,
@@ -5667,10 +6041,25 @@ function App() {
         onMoveSurface={(id, delta) =>
           updateWorkspace((ws) => moveHeaderSurface(ws, id, delta))
         }
-        collabEnabled={surfaceEnabled(workspace, "collab")}
-        memoryEnabled={surfaceEnabled(workspace, "memory")}
+        collabEnabled={surfaceEnabled(effectiveWorkspace, "collab")}
+        memoryEnabled={surfaceEnabled(effectiveWorkspace, "memory")}
+        // In harness mode the panel is a lens on the HARNESS's arrangement
+        // (updateWorkspace already routes writes there) — the stock manifest
+        // stays untouched until exit.
         surfacesPanel={
-          <SurfacesPanel workspace={workspace} onUpdate={updateWorkspace} />
+          <SurfacesPanel
+            workspace={effectiveWorkspace}
+            onUpdate={updateWorkspace}
+            harnessName={activeHarness ? activeHarness.manifest.name : null}
+          />
+        }
+        // The harness chip — the one piece of header branding A5 swaps: the
+        // harness's name where stock Redline shows none, doubling as the
+        // exit. Hidden for a boot entry (a flavored build IS its harness;
+        // there is no Redline underneath to exit to).
+        harnessName={activeHarness ? activeHarness.manifest.name : null}
+        onExitHarness={
+          activeHarness && activeHarness.entry !== "boot" ? exitHarness : null
         }
         docPinned={docPinned}
         onToggleDocPin={() => {
@@ -5781,6 +6170,9 @@ function App() {
             onToggleLink={() => setLinkNav((v) => !v)}
           />
           {sidebarTab.kind === "sessions" ? (
+            // Chunk warmed by the boot effect; null while it lands — the house
+            // rule is a quietly blank plate, never a spinner.
+            <Suspense fallback={null}>
             <SessionSidebar
               sessions={summaries}
               activeId={activeId}
@@ -5821,6 +6213,7 @@ function App() {
                 }
               }}
             />
+            </Suspense>
           ) : (
             <div className="flex-1 overflow-y-auto" style={{ background: "var(--color-paper)" }}>
               <FileTree
@@ -6129,19 +6522,51 @@ function App() {
                   if (e.key === "Escape") setDrafterShelfOpen(false);
                 }}
               >
-                <BookshelfView
-                  openDraftId={drafterDraftId}
-                  openIds={drafterOpenIds}
-                  defaultProject={drafterProjectPath}
-                  onOpen={(id) => {
-                    setDrafterDraftId(id);
-                    setDrafterShelfOpen(false);
-                  }}
-                  onCloseDoc={closeDrafterDoc}
-                  onClose={() => setDrafterShelfOpen(false)}
-                />
+                <Suspense fallback={null}>
+                  <BookshelfView
+                    openDraftId={drafterDraftId}
+                    openIds={drafterOpenIds}
+                    defaultProject={drafterProjectPath}
+                    onOpen={(id) => {
+                      setDrafterDraftId(id);
+                      setDrafterShelfOpen(false);
+                    }}
+                    onCloseDoc={closeDrafterDoc}
+                    onClose={() => setDrafterShelfOpen(false)}
+                  />
+                </Suspense>
               </div>
             ) : null;
+            // The agent shelf rides the same sheet recipe: the document stays
+            // mounted underneath, Esc closes. A run closes the sheet so the
+            // user watches the tracked changes land in their document.
+            const agentShelf =
+              agentShelfOpen && drafterDraftId ? (
+                <div
+                  className="rl-dl-shelf"
+                  data-no-drag="true"
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") setAgentShelfOpen(false);
+                  }}
+                >
+                  <Suspense fallback={null}>
+                    <AgentShelf
+                      draftId={drafterDraftId}
+                      projectPath={drafterProjectPath}
+                      getLiveMarkdown={getDrafterLiveMarkdown}
+                      onRunStarted={(name) => {
+                        shelfRunLive.current = name;
+                        setAgentShelfOpen(false);
+                        setToast(
+                          `${name} is working — its edits will land as tracked changes.`,
+                        );
+                        setTimeout(() => setToast(null), 8000);
+                      }}
+                      onClose={() => setAgentShelfOpen(false)}
+                    />
+                  </Suspense>
+                </div>
+              ) : null;
             const drafterBody = drafterRecovery?.forId === drafterDraftId ? (
               // The crash-recovery choice, as a card rather than a native
               // confirm. Nothing is destroyed until the user picks.
@@ -6276,6 +6701,7 @@ function App() {
                       : null
                   }
                   onOpenShelf={() => setDrafterShelfOpen(true)}
+                  onOpenAgents={() => setAgentShelfOpen(true)}
                   // Only when the drafter is living inside the Front Door's
                   // island; reached by its own route there is nothing to go
                   // back to.
@@ -6337,10 +6763,16 @@ function App() {
               />
             );
             const memoryBody = (
-              <MemorySurface
-                activeSessionId={session?.sessionId ?? null}
-                activeSessionName={session?.projectName ?? null}
-              />
+              // fallback={null}: the surface arrives a beat after its plate,
+              // which reads as a settle — a spinner would read as a glitch.
+              // (Also the boundary itself: `lazy` with no Suspense above it
+              // throws to the content-area ErrorBoundary on a cold chunk.)
+              <Suspense fallback={null}>
+                <MemorySurface
+                  activeSessionId={session?.sessionId ?? null}
+                  activeSessionName={session?.projectName ?? null}
+                />
+              </Suspense>
             );
             const runsBody = (
               <Suspense fallback={<EmptyState title="Runs" body="Opening the monitor…" />}>
@@ -6377,11 +6809,13 @@ function App() {
               !sessionReady;
             const documentBody =
               sidebarTab.kind === "folder" && activeFile ? (
-            <FileViewer
-              path={activeFile}
-              onClose={handleCloseFile}
-              onSaved={toastSaved}
-            />
+            <Suspense fallback={null}>
+              <FileViewer
+                path={activeFile}
+                onClose={handleCloseFile}
+                onSaved={toastSaved}
+              />
+            </Suspense>
           ) : (
           <div
             ref={docScrollerRef}
@@ -6571,6 +7005,20 @@ function App() {
                 onCreateProject={createFrontDoorProject}
                 focusNonce={frontDoorFocus}
                 consumeSeed={consumeLandingSeed}
+                // "Your harnesses" — the door is where a harness is entered
+                // (a contextual entry, never a header button). Hidden while
+                // inside one: a harness is a place, not a switcher — exit
+                // first. Inside one, the door wears the harness's hero.
+                harnesses={
+                  activeHarness
+                    ? []
+                    : harnessList.map((h) => ({ id: h.id, name: h.name }))
+                }
+                onEnterHarness={(id) => {
+                  const manifest = harnessList.find((h) => h.id === id);
+                  if (manifest) enterHarness(manifest);
+                }}
+                hero={activeHarness?.manifest.hero ?? null}
                 // One native capture at a time, no session id — the voice
                 // panel owns the mic whenever it is open.
                 dictationEnabled={!voiceOpen}
@@ -6581,6 +7029,7 @@ function App() {
           </div>
               );
             const browserBody = (
+              <Suspense fallback={null}>
               <BrowserPane
                 onClose={() => selectSurface("document")}
                 visible={browserVisible}
@@ -6617,45 +7066,52 @@ function App() {
                 // re-reads its rect when this key changes.
                 layoutKey={`${paneCollapsed}|${sidebarCollapsed}|${docVisible}|${splitVertical}|${liveFlags.curtain}|${voiceDocked}|${termCollapsed}|${termHeight}|${termFullscreen}|${termTiles.count}x${termTiles.rows}|${immersive}|${chromeRevealed}`}
               />
+              </Suspense>
             );
             // What the editor mounts with, resolved HERE rather than pushed at
             // it every 400ms. The session cache is strictly fresher than
             // `drafterLoaded` by construction, and reading it at the mount site
             // is what lets the persist stop writing a prop the component
             // contractually ignores after mount.
+            // Arriving from the Front Door, the drafter springs out of the
+            // box the island occupied, with the door still mounted behind it
+            // and fading — one spring, two separate surfaces, App owning the
+            // transition between them.
+            //
+            // `from` is null for the header and command-palette routes: they
+            // have no island to spring from, so SpringSwap renders the body
+            // untouched.
+            const drafterSurface = (
+              <SpringSwap
+                from={swapFrom}
+                onArrived={() => setSwapFrom(null)}
+                leaving={swapFrom ? documentBody : null}
+              >
+                <div className="relative flex h-full min-h-0 flex-col">
+                  {drafterBody}
+                  {drafterShelf}
+                  {agentShelf}
+                </div>
+              </SpringSwap>
+            );
+            // The surface dispatch — a lenient record over the bodies this
+            // build ships, not a closed ternary: a manifest can name any
+            // surface (a harness pack, a future workspace.json), and an id
+            // this build can't render resolves to no body — the document —
+            // never to a type error. The bodies are the consts built above,
+            // so the record costs what the ternary cost.
+            const surfaceBodies: Record<string, ReactNode | undefined> = {
+              browser: browserBody,
+              drafter: drafterSurface,
+              review: reviewBody,
+              servers: serversBody,
+              memory: memoryBody,
+              runs: runsBody,
+            };
             const secondaryBody =
-              mainSurface === "browser"
-                ? browserBody
-                : mainSurface === "drafter"
-                  ? (
-                      // Arriving from the Front Door, this springs out of the
-                      // box the island occupied, with the door still mounted
-                      // behind it and fading — one spring, two separate
-                      // surfaces, App owning the transition between them.
-                      //
-                      // `from` is null for the header and command-palette
-                      // routes: they have no island to spring from, so
-                      // SpringSwap renders the body untouched.
-                      <SpringSwap
-                        from={swapFrom}
-                        onArrived={() => setSwapFrom(null)}
-                        leaving={swapFrom ? documentBody : null}
-                      >
-                        <div className="relative flex h-full min-h-0 flex-col">
-                          {drafterBody}
-                          {drafterShelf}
-                        </div>
-                      </SpringSwap>
-                    )
-                  : mainSurface === "review"
-                    ? reviewBody
-                    : mainSurface === "servers"
-                      ? serversBody
-                      : mainSurface === "memory"
-                        ? memoryBody
-                        : mainSurface === "runs"
-                          ? runsBody
-                          : null;
+              mainSurface === "document"
+                ? null
+                : (surfaceBodies[mainSurface] ?? null);
             if (secondaryBody && docPinned)
               return (
                 <SplitPane
@@ -7681,11 +8137,13 @@ function App() {
         </Suspense>
       )}
       {memoryInspectorOpen && (
-        <MemoryInspector
-          onClose={() => setMemoryInspectorOpen(false)}
-          activeSessionId={session?.sessionId ?? null}
-          activeSessionName={session?.projectName ?? null}
-        />
+        <Suspense fallback={null}>
+          <MemoryInspector
+            onClose={() => setMemoryInspectorOpen(false)}
+            activeSessionId={session?.sessionId ?? null}
+            activeSessionName={session?.projectName ?? null}
+          />
+        </Suspense>
       )}
       {showReadme && <ReadmeModal onClose={() => setShowReadme(false)} />}
       {showFeedback && (
@@ -7743,18 +8201,22 @@ function App() {
           tourOpen || (!onboardingDone && !setupActive && bootSettled);
         if (!show) return null;
         return (
-          <OnboardingTour
-            onAnchorChange={handleTourAnchor}
-            onClose={() => {
-              setTourOpen(false);
-              setOnboardingDone(true);
-            }}
-          />
+          <Suspense fallback={null}>
+            <OnboardingTour
+              onAnchorChange={handleTourAnchor}
+              onClose={() => {
+                setTourOpen(false);
+                setOnboardingDone(true);
+              }}
+            />
+          </Suspense>
         );
       })()}
       {/* The one quiet workspace suggestion (nudge.ts) — accept edits the
-          manifest, dismiss retires it; either way it never fires again. */}
-      {nudgeSuggestion && !loading && (
+          manifest, dismiss retires it; either way it never fires again.
+          Suppressed inside a harness: the suggestion is about the STOCK
+          landing, and accepting it there would edit the wrong manifest. */}
+      {nudgeSuggestion && !loading && !activeHarness && (
         <NudgeCard
           message={nudgeSuggestion.message}
           onAccept={() => {

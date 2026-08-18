@@ -80,6 +80,12 @@ interface HeaderProps {
    *  the workspace manifest — customization happens where the thing is. */
   onHideSurface: (id: ToggleableSurface) => void;
   onMoveSurface: (id: MainSurface, delta: -1 | 1) => void;
+  /** Harness mode: the harness's name, shown as the header's brand chip —
+   *  the one piece of branding A5 swaps. null = stock Redline. */
+  harnessName?: string | null;
+  /** Exit the harness. null hides the exit (a boot-entered flavor IS its
+   *  harness — there is no Redline underneath to return to). */
+  onExitHarness?: (() => void) | null;
   /** Manifest-gated auxiliary surfaces. */
   collabEnabled: boolean;
   /** The Surfaces row content for the settings menu (SurfacesPanel). */
@@ -146,6 +152,8 @@ export function Header({
   surfaces,
   onHideSurface,
   onMoveSurface,
+  harnessName = null,
+  onExitHarness = null,
   collabEnabled,
   surfacesPanel,
   memoryEnabled,
@@ -225,6 +233,46 @@ export function Header({
     >
       <div className="flex items-center gap-3">
         <div className="flex items-center gap-1.5">
+          {/* Harness mode: the harness's name stands where stock Redline
+              wears no brand at all — one chip that says WHERE you are and,
+              when the entry was the user's, is the way back out. */}
+          {harnessName && (
+            <span
+              className="flex items-center gap-1 rounded-full px-2.5 py-1 font-sans"
+              style={{
+                fontSize: "var(--rl-text-xs)",
+                fontWeight: 700,
+                lineHeight: 1,
+                border: "1px solid var(--color-rule)",
+                background: "var(--color-anchor-bg)",
+                color: "var(--color-ink)",
+                whiteSpace: "nowrap",
+              }}
+              title={
+                onExitHarness
+                  ? `Inside ${harnessName} — a harness running on Redline`
+                  : harnessName
+              }
+            >
+              {harnessName}
+              {onExitHarness && (
+                <button
+                  type="button"
+                  onClick={onExitHarness}
+                  aria-label={`Exit ${harnessName}`}
+                  title="Exit to Redline"
+                  className="flex items-center"
+                  style={{
+                    color: "var(--color-ink-muted)",
+                    cursor: "pointer",
+                    marginLeft: "2px",
+                  }}
+                >
+                  ✕
+                </button>
+              )}
+            </span>
+          )}
           {/* Surface picker — one segmented control (a floating control
               cluster on the canvas) instead of a loose row of buttons.
               Clicking full-switches the center pane (clicking the active

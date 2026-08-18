@@ -573,8 +573,8 @@ pub fn claim_orchestration_prompt(body_hash: &str) -> Option<String> {
 #[derive(Debug, Clone)]
 pub struct ThreadRef {
     /// `browse | linked | mission | voice | drafter | drafter_chat | fork |
-    /// review_thread | review_question | companion | memchat` — the thread's
-    /// kind.
+    /// review_thread | review_question | companion | memchat | shelf_agent |
+    /// shelf_preview` — the thread's kind.
     pub thread_kind: &'static str,
     /// The thread's own id in its id-space (browse_id, linked_id, …).
     pub thread_id: String,

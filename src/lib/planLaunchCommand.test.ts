@@ -62,6 +62,36 @@ describe("buildPlanLaunchCommand", () => {
   });
 });
 
+describe("buildPlanLaunchCommand — --add-dir grants", () => {
+  const ALLOW = "--allowedTools Read Grep Glob WebSearch WebFetch Bash";
+
+  it("grants each extra dir with its own --add-dir flag", () => {
+    const cmd = buildPlanLaunchCommand("hi", "/Users/me/pack", [
+      "/repo/src-tauri/crates/redline-extension-abi",
+      "/repo/marketplace/redline-extension-template",
+    ]);
+    expect(cmd).toBe(
+      "cd '/Users/me/pack' && claude " +
+        "--add-dir '/repo/src-tauri/crates/redline-extension-abi' " +
+        "--add-dir '/repo/marketplace/redline-extension-template' " +
+        `${ALLOW} --permission-mode plan 'hi'`,
+    );
+  });
+
+  it("changes nothing when no dirs are granted", () => {
+    // The default must stay byte-identical to the pre-A1 command — every
+    // existing door launches through this line.
+    expect(buildPlanLaunchCommand("hi", "/p", [])).toBe(
+      buildPlanLaunchCommand("hi", "/p"),
+    );
+  });
+
+  it("quotes a granted dir through shq", () => {
+    const cmd = buildPlanLaunchCommand("hi", null, ["/tmp/o'brien"]);
+    expect(cmd).toContain(`--add-dir '/tmp/o'\\''brien' --allowedTools`);
+  });
+});
+
 describe("buildOrchestrateLaunchCommand", () => {
   it("builds a bare acceptEdits launch that carries no prompt", () => {
     const cmd = buildOrchestrateLaunchCommand("/Users/me/redline", "sonnet");

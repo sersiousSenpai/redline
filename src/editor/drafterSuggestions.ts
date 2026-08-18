@@ -2,6 +2,8 @@
 // Copyright 2026 Yusuf Al-Bazian
 import type { Editor } from "@tiptap/react";
 import { Fragment, type Node as PMNode } from "@tiptap/pm/model";
+import type { Step } from "@tiptap/pm/transform";
+import type { Transaction } from "@tiptap/pm/state";
 
 import { diffWords } from "./wordDiff";
 import { planMarkdownToDoc, serializeBlockToMarkdown } from "./markdown";
@@ -260,28 +262,22 @@ export function suggestionLeaves(
   return leaves;
 }
 
-/**
- * Accept a suggestion: pending deletions are really deleted, pending
- * insertions settle in place (status flips to `accepted`). For a card-only
- * delete (unmarkable block) the row's `blockId` is deleted outright.
- */
-export function acceptDraftSuggestion(
-  editor: Editor,
-  s: DraftSuggestionRow,
-): boolean {
+/** Build (don't dispatch) the accept transaction for a suggestion, or null
+ *  when there is nothing to accept. Shared by the plain accept and the
+ *  undoable accept so the two can never drift. */
+function buildAcceptTr(editor: Editor, s: DraftSuggestionRow): Transaction | null {
   const leaves = suggestionLeaves(editor, s.id);
   const schema = editor.schema;
   if (leaves.length === 0) {
     if (s.op === "delete_block" && s.blockId) {
       const at = findBlock(editor, s.blockId);
-      if (!at) return false;
+      if (!at) return null;
       const tr = editor.state.tr;
       tr.delete(at.pos, at.pos + at.node.nodeSize);
       tr.setMeta("rl-sync", true);
-      editor.view.dispatch(tr);
-      return true;
+      return tr;
     }
-    return false;
+    return null;
   }
   const tr = editor.state.tr;
   for (const leaf of leaves.sort((a, b) => b.from - a.from)) {
@@ -302,6 +298,70 @@ export function acceptDraftSuggestion(
   }
   // A structured replace struck the whole old block; accepting must remove it
   // even if some of its leaves carried no mark (mark boundaries).
+  tr.setMeta("rl-sync", true);
+  return tr;
+}
+
+/**
+ * Accept a suggestion: pending deletions are really deleted, pending
+ * insertions settle in place (status flips to `accepted`). For a card-only
+ * delete (unmarkable block) the row's `blockId` is deleted outright.
+ */
+export function acceptDraftSuggestion(
+  editor: Editor,
+  s: DraftSuggestionRow,
+): boolean {
+  const tr = buildAcceptTr(editor, s);
+  if (!tr) return false;
+  editor.view.dispatch(tr);
+  return true;
+}
+
+/** What an accept must remember to be reversible: the exact inverse of its
+ *  steps, valid against the document as it stood right after the accept.
+ *  The token dies with the next foreign doc change — the CALLER owns that
+ *  invalidation, because only it can tell its own dispatches apart. */
+export interface SuggestionUndoToken {
+  suggestionId: string;
+  inverted: Step[];
+}
+
+/**
+ * Accept, remembering how to undo (A3's "Undo next to Accept"): same
+ * transaction as `acceptDraftSuggestion`, but each step's inverse is captured
+ * before dispatch. `undoAcceptedSuggestion` replays those inverses to return
+ * the suggestion to its exact PENDING presentation — marks, struck text and
+ * all — after which the un-resolved row re-grows its card.
+ */
+export function acceptDraftSuggestionUndoable(
+  editor: Editor,
+  s: DraftSuggestionRow,
+): SuggestionUndoToken | null {
+  const tr = buildAcceptTr(editor, s);
+  if (!tr) return null;
+  const inverted = tr.steps.map((st, i) => st.invert(tr.docs[i]));
+  editor.view.dispatch(tr);
+  return { suggestionId: s.id, inverted };
+}
+
+/** Replay an accept's inverted steps (newest first). Only valid while the
+ *  document still reads exactly as the accept left it; a stale token fails
+ *  cleanly on the first step that no longer fits, changing nothing. */
+export function undoAcceptedSuggestion(
+  editor: Editor,
+  token: SuggestionUndoToken,
+): boolean {
+  const tr = editor.state.tr;
+  for (let i = token.inverted.length - 1; i >= 0; i--) {
+    // maybeStep reports a content misfit as `.failed` but THROWS a RangeError
+    // when the step's positions fall outside the current doc — both just mean
+    // "stale", and neither may dispatch a half-applied undo.
+    try {
+      if (tr.maybeStep(token.inverted[i]).failed) return false;
+    } catch {
+      return false;
+    }
+  }
   tr.setMeta("rl-sync", true);
   editor.view.dispatch(tr);
   return true;

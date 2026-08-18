@@ -22,9 +22,14 @@ import type { Landing, Workspace } from "../config/workspace";
 export function SurfacesPanel({
   workspace,
   onUpdate,
+  harnessName = null,
 }: {
   workspace: Workspace;
   onUpdate: (fn: (ws: Workspace) => Workspace) => void;
+  /** Set while a harness is active: the panel is then a lens on that
+   *  harness's per-Mac arrangement, and the caption must not claim the
+   *  stock workspace.json is being written — it isn't. */
+  harnessName?: string | null;
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -149,8 +154,9 @@ export function SurfacesPanel({
             className="px-3 py-2 font-sans"
             style={{ fontSize: "10px", color: "var(--color-ink-muted)" }}
           >
-            Saved to ~/.redline/workspace.json — the file is yours to edit or
-            fork.
+            {harnessName
+              ? `Arranged for ${harnessName} on this Mac — the stock workspace.json is untouched.`
+              : "Saved to ~/.redline/workspace.json — the file is yours to edit or fork."}
           </div>
         </div>
       )}

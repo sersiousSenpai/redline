@@ -73,6 +73,32 @@ Artifact **minisign signatures are v2**, deliberately out of this schema.
 - **Enable/disable**: unchanged from B3 (persisted in
   `app_settings.extensions.disabled`; marketplace installs respect it).
 
+## Local-folder install (A5a — the dev loop)
+
+The loop the registry bolts onto. Extensions ▸ Installed ▸ **Install from
+folder…** links a folder — no registry, no sha256, no index PR: the folder
+the user picked and confirmed *is* the consent (an extension still shows its
+scopes/events first; a harness pack grants nothing, so it confirms in one
+step).
+
+- The install is a **symlink**: `~/.redline/extensions/<name>` (or
+  `~/.redline/harnesses/<id>`) → the author's folder. Every scan reads the
+  manifest *through* the link, so edits in the project are live —
+  harness.json changes land on window refocus, and a rebuilt module lands
+  via the row's **Reload** (re-read + re-register, fresh token, same
+  enabled choice). `local_install.rs` owns the mechanism.
+- **Links are the only thing local install may create or remove.** A real
+  directory under either root (curated install, hand-authored pack) is
+  never replaced and never deleted — install refuses, uninstall names the
+  path instead. Uninstalling a linked extension removes the link only; the
+  project behind it is untouched.
+- An `external`-kind extension's `.token` is written through the link into
+  the author's folder — where their process expects it. This is also how
+  the docx codec (Track C) installs.
+- A harness-pack **project** (Front Door ▸ "A harness") is seeded with a
+  `harness.json` and auto-linked at creation, so its Front Door chip and
+  its edit loop exist before the first edit.
+
 ## Index cache + the launch check
 
 The fetched index document is cached in SQLite

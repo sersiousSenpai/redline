@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 import type { ProjectOption } from "../components/ProjectPicker";
 import {
+  extensionAddDirs,
   attemptLaunch,
   composePrompt,
   launchLiveness,
@@ -422,5 +423,48 @@ describe("launchReceipt", () => {
       blocks: 0,
       aidsDropped: false,
     });
+  });
+});
+
+describe("extensionAddDirs", () => {
+  const probe = {
+    cargo: true,
+    wasmTarget: true,
+    abiDir: "/repo/src-tauri/crates/redline-extension-abi",
+    sdkDir: "/repo/src-tauri/crates/redline-extension-sdk",
+    templateDir: "/repo/marketplace/redline-extension-template",
+  };
+
+  it("grants the three staged dirs for an extension target", () => {
+    expect(extensionAddDirs("extension", probe)).toEqual([
+      probe.abiDir,
+      probe.sdkDir,
+      probe.templateDir,
+    ]);
+  });
+
+  it("grants nothing for a plain project, whatever the probe says", () => {
+    expect(extensionAddDirs(null, probe)).toEqual([]);
+  });
+
+  it("grants nothing for a harness pack — data needs no toolchain", () => {
+    expect(extensionAddDirs("harness", probe)).toEqual([]);
+  });
+
+  it("grants nothing without a probe, and skips unresolved dirs", () => {
+    expect(extensionAddDirs("extension", null)).toEqual([]);
+    expect(extensionAddDirs("extension", undefined)).toEqual([]);
+    // A moved checkout resolves nothing: fewer grants, never a failure.
+    expect(
+      extensionAddDirs("extension", {
+        ...probe,
+        abiDir: null,
+        sdkDir: null,
+        templateDir: null,
+      }),
+    ).toEqual([]);
+    expect(
+      extensionAddDirs("extension", { ...probe, templateDir: null }),
+    ).toEqual([probe.abiDir, probe.sdkDir]);
   });
 });

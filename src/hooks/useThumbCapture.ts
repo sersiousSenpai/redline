@@ -25,7 +25,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { LogicalPosition, LogicalSize } from "@tauri-apps/api/dpi";
 import { Webview } from "@tauri-apps/api/webview";
 import { Window } from "@tauri-apps/api/window";
-import { SAFARI_UA } from "../components/BrowserPane";
+import { SAFARI_UA } from "../lib/safariUA";
 import type { BinaryFile } from "../types";
 import {
   calibrateScale,

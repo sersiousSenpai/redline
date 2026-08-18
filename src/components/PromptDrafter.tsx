@@ -8,22 +8,24 @@ import type { Node as PMNode } from "@tiptap/pm/model";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { ChevronLeft, CornerDownLeft, Library, Plus, X } from "lucide-react";
+import { Bot, ChevronLeft, CornerDownLeft, Library, Plus, X } from "lucide-react";
 
 import { drafterExtensions } from "../editor/extensions/drafterExtensions";
 import { resolveInstructionBlock } from "../editor/extensions/InstructionTrigger";
 import { planDocToMarkdown } from "../editor/markdown/serializer";
 import {
   acceptAllUserSuggestions,
-  acceptDraftSuggestion,
   acceptUserSuggestion,
+  acceptDraftSuggestionUndoable,
   applyDraftSuggestion,
   hasPendingUserSuggestions,
   rejectAllUserSuggestions,
   rejectDraftSuggestion,
   rejectUserSuggestion,
   suggestionLeaves,
+  undoAcceptedSuggestion,
   type DraftSuggestionRow,
+  type SuggestionUndoToken,
 } from "../editor/drafterSuggestions";
 import {
   isPendingSuggestionMark,
@@ -106,6 +108,10 @@ interface PromptDrafterProps {
   onDiscuss?: (() => void) | null;
   /** Show the shelf — the folder tree + document list this document sits in. */
   onOpenShelf?: () => void;
+  /** Show the agent shelf — the user's own agents, run against this document
+   *  (harness A3). Lives beside the Bookshelf: agents belong to the drafter
+   *  area because that is what they act on. */
+  onOpenAgents?: () => void;
   /** Back to the Front Door's one-line composer. Rendered in the launch bar
    *  with the rest of this surface's navigation — a floating chip at the top
    *  would land on the ribbon, which is where the first attempt put it. */
@@ -177,6 +183,7 @@ function PromptDrafterBase({
   onUseTemplate,
   onDiscuss = null,
   onOpenShelf,
+  onOpenAgents,
   onExit = null,
   documentsMenu = null,
   saveState = null,
@@ -586,11 +593,34 @@ function PromptDrafterBase({
     };
   }, [editor, draftId, landSuggestion]);
 
+  // "Undo next to Accept" (A3): the LAST accept stays reversible until the
+  // document moves on. The token holds the accept's exact inverted steps;
+  // the invalidation below clears it on ANY later doc change — including our
+  // own dispatches, which is why the accept path stashes the token only
+  // AFTER its dispatch has already fired (and cleared) the update handler.
+  // Accept-all therefore leaves exactly its final accept undoable.
+  const [undoable, setUndoable] = useState<{
+    s: DraftSuggestionRow;
+    token: SuggestionUndoToken;
+  } | null>(null);
+  useEffect(() => {
+    if (!editor || editor.isDestroyed) return;
+    const clear = () => setUndoable(null);
+    editor.on("update", clear);
+    return () => {
+      editor.off("update", clear);
+    };
+  }, [editor]);
+
   const resolveSuggestion = useCallback(
     (s: DraftSuggestionRow, verdict: "applied" | "rejected") => {
       if (editor && !editor.isDestroyed) {
-        if (verdict === "applied") acceptDraftSuggestion(editor, s);
-        else rejectDraftSuggestion(editor, s);
+        if (verdict === "applied") {
+          const token = acceptDraftSuggestionUndoable(editor, s);
+          if (token) setUndoable({ s, token });
+        } else {
+          rejectDraftSuggestion(editor, s);
+        }
       }
       setSuggestions((list) => list.filter((x) => x.id !== s.id));
       void invoke("draft_suggestion_resolve", {
@@ -600,6 +630,23 @@ function PromptDrafterBase({
     },
     [editor],
   );
+
+  // Reverse the last accept: the document returns to the suggestion's exact
+  // pending presentation, the row goes back to the pending queue (so the
+  // agent's next doc read sees it unresolved), and its card comes back.
+  const undoAccept = useCallback(() => {
+    if (!undoable || !editor || editor.isDestroyed) return;
+    const { s, token } = undoable;
+    if (!undoAcceptedSuggestion(editor, token)) {
+      setUndoable(null);
+      return;
+    }
+    void invoke("draft_suggestion_unresolve", { id: s.id }).catch(() => {});
+    setSuggestions((list) =>
+      list.some((x) => x.id === s.id) ? list : [...list, s],
+    );
+    setUndoable(null);
+  }, [editor, undoable]);
 
   // Lock enforcement input: blocks whose text carries a pending FOREIGN
   // (agent) suggestion mark — plus blocks the agent is generating into —
@@ -1328,11 +1375,17 @@ function PromptDrafterBase({
       {/* `relative` so the floating Discuss pill anchors to this body row (not
           the scroll container — an abspos child there would scroll away). */}
       <div className="relative flex min-h-0 flex-1">
-        {suggestions.length > 0 && (
+        {(suggestions.length > 0 || undoable !== null) && (
           <SuggestionsStrip
             suggestions={suggestions}
             onShow={showSuggestion}
             onResolve={resolveSuggestion}
+            undoableLabel={
+              undoable
+                ? undoable.s.body?.trim() || "the last accepted suggestion"
+                : null
+            }
+            onUndo={undoAccept}
           />
         )}
         <div
@@ -1642,6 +1695,17 @@ function PromptDrafterBase({
                     )}
                   </button>
                 )}
+                {onOpenAgents && (
+                  <button
+                    type="button"
+                    onClick={onOpenAgents}
+                    title="Your agents — standing instructions, written in plain English, that run against this document"
+                    className="rl-fd-tool is-wide"
+                  >
+                    <Bot size={13} strokeWidth={2} />
+                    Agents
+                  </button>
+                )}
                 {documentsMenu}
                 <ProjectPicker
                   options={projectOptions}
@@ -1814,45 +1878,68 @@ function SuggestionsStrip({
   suggestions,
   onShow,
   onResolve,
+  undoableLabel,
+  onUndo,
 }: {
   suggestions: DraftSuggestionRow[];
   onShow: (s: DraftSuggestionRow) => void;
   onResolve: (s: DraftSuggestionRow, verdict: "applied" | "rejected") => void;
+  /** One-line label for the last accepted (still-reversible) suggestion, or
+   *  null when nothing is undoable. */
+  undoableLabel?: string | null;
+  onUndo?: () => void;
 }) {
   const [dismissed, setDismissed] = useState(false);
   const btnRef = useRef<HTMLButtonElement | null>(null);
   const pop = useClickPopover(btnRef, "right", "below", 420);
 
-  // A new suggestion un-dismisses the strip: dismissing is "I've seen these",
-  // not "stop telling me".
+  // A new suggestion — or a fresh accept becoming undoable — un-dismisses
+  // the strip: dismissing is "I've seen these", not "stop telling me".
   const count = suggestions.length;
-  useEffect(() => setDismissed(false), [count]);
+  const undoUp = Boolean(undoableLabel);
+  useEffect(() => setDismissed(false), [count, undoUp]);
   if (dismissed) return null;
 
   return (
     <div className="rl-dl-suggest-strip rl-fd-block" data-no-drag="true">
       <span style={{ fontSize: "12px" }}>✍️</span>
-      <span className="rl-fd-label">
-        {count} suggestion{count === 1 ? "" : "s"}
-      </span>
-      <button
-        type="button"
-        ref={btnRef}
-        onClick={pop.toggle}
-        className="rl-fd-quiet"
-        aria-expanded={pop.open}
-      >
-        Review <span className="rl-fd-caret">▾</span>
-      </button>
-      <button
-        type="button"
-        onClick={() => {
-          for (const s of suggestions) onResolve(s, "applied");
-        }}
-        className="rl-fd-fix"
-      >
-        Accept all
-      </button>
+      {count > 0 ? (
+        <>
+          <span className="rl-fd-label">
+            {count} suggestion{count === 1 ? "" : "s"}
+          </span>
+          <button
+            type="button"
+            ref={btnRef}
+            onClick={pop.toggle}
+            className="rl-fd-quiet"
+            aria-expanded={pop.open}
+          >
+            Review <span className="rl-fd-caret">▾</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              for (const s of suggestions) onResolve(s, "applied");
+            }}
+            className="rl-fd-fix"
+          >
+            Accept all
+          </button>
+        </>
+      ) : (
+        <span className="rl-fd-label">Accepted ✓</span>
+      )}
+      {undoableLabel && onUndo && (
+        <button
+          type="button"
+          onClick={onUndo}
+          className="rl-fd-quiet"
+          title={`Put "${undoableLabel}" back as a pending suggestion`}
+        >
+          Undo
+        </button>
+      )}
       <button
         type="button"
         onClick={() => setDismissed(true)}

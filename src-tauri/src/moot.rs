@@ -232,6 +232,10 @@ fn render_moot_doc(m: &Moot) -> String {
 /// explicit intervention block front and center. Pure — the whole context is
 /// baked in so the core loop never depends on the agent curling anything.
 fn turn_prompt(m: &Moot, seat: &str, round: u32) -> String {
+    // The charter is user-editable text reaching a live prompt. This site
+    // predates `compose.rs` (the generalized layer new call sites use) and
+    // keeps its exact bytes — moot prompts are fresh per turn, so nothing
+    // here rides the cache-stable-prefix contract.
     let (charter, _trigger) = crate::seat::charter_for(seat);
     let mut p = format!(
         "You are the `{seat}` seat in a Redline MOOT — a bounded, on-the-record \

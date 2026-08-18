@@ -32,6 +32,7 @@ import {
   type ChatStateMap,
 } from "../lib/browseChatState";
 import { isLocalhostUrl, sameTabUrl } from "../lib/browseList";
+import { SAFARI_UA } from "../lib/safariUA";
 // `BrowserPane` is a static import in App, so it sits in the boot path. The
 // list panel only exists once a user picks the pill, so it has no business
 // costing boot bytes — and `scripts/size-budget.json` has limited headroom.
@@ -97,8 +98,7 @@ export const clampChatRatio = (r: number): number =>
 // SAME identity as a real tab — a dev server's landing page served a legacy
 // layout would be captured as one, and the screenshot would not match what the
 // user sees when they click Open.
-export const SAFARI_UA =
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15";
+export { SAFARI_UA };
 
 /** Px the measured webview slot is inset from its frame element. The native
  *  webview is a square rect composited over a rounded plate (radius 10): a

@@ -435,6 +435,24 @@ pub struct BookshelfDraft {
     pub last_opened_at: Option<i64>,
 }
 
+/// One user-authored agent on the shelf (harness program A2). The instruction
+/// IS the agent: plain English, composed into a prompt at run time — never a
+/// skill (a7be07f stands).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessAgent {
+    pub agent_id: String,
+    pub name: String,
+    pub instruction: String,
+    pub folder_id: Option<String>,
+    pub starred: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+    /// Epoch millis of the most recent run; `None` = never run.
+    pub last_run_at: Option<i64>,
+    pub run_count: i64,
+}
+
 /// One folder in the shelf's adjacency list. `parent_id = None` is the root.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1456,6 +1474,27 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS idx_draft_suggestions
                 ON draft_suggestions (draft_id, status, created_at);
+
+            -- The agent shelf (harness program A2): user-authored agents as
+            -- ROWS, never skills — each is a plain-English instruction composed
+            -- into a live prompt at run time (compose.rs) and run against the
+            -- open Drafter document, its output landing through the tracked-
+            -- suggestion contract above. Modeled on drafts + is_template
+            -- (named, foldered, starrable, duplicable), minus "instantiate as
+            -- a new doc", plus "run against the open doc". Spawn config comes
+            -- from the `harness` template seat, or a per-agent
+            -- `custom:<agent_id>` seat row (seat.rs).
+            CREATE TABLE IF NOT EXISTS harness_agents (
+                agent_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                instruction TEXT NOT NULL,
+                folder_id TEXT,
+                starred INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                last_run_at INTEGER,
+                run_count INTEGER NOT NULL DEFAULT 0
+            );
 
             -- Review Request registry: one row per minted share link. Durable
             -- (replaces the per-webview localStorage list) and joinable with
@@ -4262,7 +4301,9 @@ impl Database {
                     (SELECT COUNT(*) FROM draft_sources s WHERE s.draft_id = d.draft_id),
                     (d.doc_json IS NOT NULL AND d.doc_json <> ''),
                     d.is_template, d.open_count, d.last_opened_at
-             FROM drafts d ORDER BY d.updated_at DESC, d.draft_id ASC",
+             FROM drafts d
+             WHERE d.draft_id NOT LIKE 'preview-%'
+             ORDER BY d.updated_at DESC, d.draft_id ASC",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(BookshelfDraft {
@@ -5372,6 +5413,192 @@ impl Database {
             params![id, status],
         )?;
         Ok(changed > 0)
+    }
+
+    /// Undo-after-accept (harness program A3): an ACCEPTED suggestion goes
+    /// back to the pending queue when the user undoes the accept in the
+    /// drafter. Applied-only on purpose — a rejected suggestion's marks were
+    /// removed from the document, so there is nothing an undo could return
+    /// to pending.
+    pub fn unresolve_draft_suggestion(&self, id: &str) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE draft_suggestions SET status = 'pending'
+             WHERE id = ?1 AND status = 'applied'",
+            params![id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Preview drafts (`preview-…`, harness program A3) that outlived their
+    /// builder — a crash or a closed window skipped the discard. Swept at the
+    /// start of every new preview.
+    pub fn list_stale_preview_drafts(&self, cutoff_ms: i64) -> rusqlite::Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT draft_id FROM drafts
+             WHERE draft_id LIKE 'preview-%' AND updated_at < ?1",
+        )?;
+        let rows = stmt.query_map(params![cutoff_ms], |r| r.get(0))?;
+        rows.collect()
+    }
+
+    // --- Agent shelf (harness program A2) ---
+
+    pub fn insert_harness_agent(&self, a: &HarnessAgent) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO harness_agents
+                (agent_id, name, instruction, folder_id, starred, created_at, updated_at,
+                 last_run_at, run_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                a.agent_id,
+                a.name,
+                a.instruction,
+                a.folder_id,
+                a.starred as i64,
+                a.created_at,
+                a.updated_at,
+                a.last_run_at,
+                a.run_count
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_harness_agent(&self, agent_id: &str) -> rusqlite::Result<Option<HarnessAgent>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT agent_id, name, instruction, folder_id, starred, created_at, updated_at,
+                    last_run_at, run_count
+             FROM harness_agents WHERE agent_id = ?1",
+            params![agent_id],
+            Self::harness_agent_row,
+        )
+        .optional()
+    }
+
+    /// Every shelf agent, most-recently-updated first (the drafts ordering).
+    pub fn list_harness_agents(&self) -> rusqlite::Result<Vec<HarnessAgent>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT agent_id, name, instruction, folder_id, starred, created_at, updated_at,
+                    last_run_at, run_count
+             FROM harness_agents ORDER BY updated_at DESC, agent_id ASC",
+        )?;
+        let rows = stmt.query_map([], Self::harness_agent_row)?;
+        rows.collect()
+    }
+
+    fn harness_agent_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<HarnessAgent> {
+        Ok(HarnessAgent {
+            agent_id: r.get(0)?,
+            name: r.get(1)?,
+            instruction: r.get(2)?,
+            folder_id: r.get(3)?,
+            starred: r.get::<_, i64>(4)? != 0,
+            created_at: r.get(5)?,
+            updated_at: r.get(6)?,
+            last_run_at: r.get(7)?,
+            run_count: r.get(8)?,
+        })
+    }
+
+    /// Rename / re-instruct. Bumps `updated_at` — the shelf orders by it.
+    /// Returns whether the row exists.
+    pub fn update_harness_agent(
+        &self,
+        agent_id: &str,
+        name: &str,
+        instruction: &str,
+    ) -> rusqlite::Result<bool> {
+        let now = crate::ledger::now_millis();
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE harness_agents SET name = ?2, instruction = ?3, updated_at = ?4
+             WHERE agent_id = ?1",
+            params![agent_id, name, instruction, now],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Star/unstar. Deliberately does NOT bump `updated_at` — starring isn't
+    /// editing and must not reorder the shelf (the `touch_draft` discipline).
+    pub fn set_harness_agent_starred(
+        &self,
+        agent_id: &str,
+        starred: bool,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE harness_agents SET starred = ?2 WHERE agent_id = ?1",
+            params![agent_id, starred as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Move to a folder (`None` = shelf root). Does not bump `updated_at`.
+    pub fn set_harness_agent_folder(
+        &self,
+        agent_id: &str,
+        folder_id: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE harness_agents SET folder_id = ?2 WHERE agent_id = ?1",
+            params![agent_id, folder_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_harness_agent(&self, agent_id: &str) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "DELETE FROM harness_agents WHERE agent_id = ?1",
+            params![agent_id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Deep-copy an agent into a fresh row (`<name> copy`, never starred, no
+    /// run history) — the `copy_draft_body` discipline. Returns the copy, or
+    /// `None` when `src` doesn't exist.
+    pub fn duplicate_harness_agent(
+        &self,
+        src: &str,
+        dest: &str,
+    ) -> rusqlite::Result<Option<HarnessAgent>> {
+        let Some(orig) = self.get_harness_agent(src)? else {
+            return Ok(None);
+        };
+        let now = crate::ledger::now_millis();
+        let copy = HarnessAgent {
+            agent_id: dest.to_string(),
+            name: format!("{} copy", orig.name),
+            instruction: orig.instruction,
+            folder_id: orig.folder_id,
+            starred: false,
+            created_at: now,
+            updated_at: now,
+            last_run_at: None,
+            run_count: 0,
+        };
+        self.insert_harness_agent(&copy)?;
+        Ok(Some(copy))
+    }
+
+    /// Count a run. Deliberately does NOT bump `updated_at` — running isn't
+    /// editing, and must not reorder the shelf.
+    pub fn touch_harness_agent_run(&self, agent_id: &str) -> rusqlite::Result<()> {
+        let now = crate::ledger::now_millis();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE harness_agents SET run_count = run_count + 1, last_run_at = ?2
+             WHERE agent_id = ?1",
+            params![agent_id, now],
+        )?;
+        Ok(())
     }
 
     /// Resolve a thread kind to its `(table, key column)`. The one place the
@@ -13277,6 +13504,145 @@ mod tests {
     fn make_store() -> SessionStore {
         let db = Arc::new(Database::open_in_memory().unwrap());
         SessionStore::new(db)
+    }
+
+    // --- Agent shelf (harness program A2) ----------------------------------
+
+    fn shelf_agent(id: &str, name: &str) -> HarnessAgent {
+        HarnessAgent {
+            agent_id: id.to_string(),
+            name: name.to_string(),
+            instruction: "Tighten every heading.".to_string(),
+            folder_id: None,
+            starred: false,
+            created_at: 1000,
+            updated_at: 1000,
+            last_run_at: None,
+            run_count: 0,
+        }
+    }
+
+    #[test]
+    fn harness_agent_crud_round_trip() {
+        let db = Database::open_in_memory().unwrap();
+        db.insert_harness_agent(&shelf_agent("ha-1", "Header tightener")).unwrap();
+
+        let got = db.get_harness_agent("ha-1").unwrap().expect("row exists");
+        assert_eq!(got.name, "Header tightener");
+        assert_eq!(got.instruction, "Tighten every heading.");
+        assert!(!got.starred);
+        assert_eq!(got.run_count, 0);
+
+        assert!(db.update_harness_agent("ha-1", "Tightener", "Shorter.").unwrap());
+        let got = db.get_harness_agent("ha-1").unwrap().unwrap();
+        assert_eq!(got.name, "Tightener");
+        assert_eq!(got.instruction, "Shorter.");
+        assert!(got.updated_at >= 1000, "update bumps updated_at");
+
+        db.set_harness_agent_starred("ha-1", true).unwrap();
+        assert!(db.get_harness_agent("ha-1").unwrap().unwrap().starred);
+
+        db.set_harness_agent_folder("ha-1", Some("f-1")).unwrap();
+        assert_eq!(
+            db.get_harness_agent("ha-1").unwrap().unwrap().folder_id.as_deref(),
+            Some("f-1")
+        );
+
+        assert!(!db.update_harness_agent("nope", "x", "y").unwrap(), "missing row updates nothing");
+        assert!(db.delete_harness_agent("ha-1").unwrap());
+        assert!(db.get_harness_agent("ha-1").unwrap().is_none());
+        assert!(!db.delete_harness_agent("ha-1").unwrap(), "second delete is a no-op");
+    }
+
+    /// A duplicate is `<name> copy`, never starred, with no run history — and
+    /// the run counter never reorders the shelf (`updated_at` untouched).
+    #[test]
+    fn harness_agent_duplicate_and_run_touch() {
+        let db = Database::open_in_memory().unwrap();
+        let mut a = shelf_agent("ha-1", "Summarizer");
+        a.starred = true;
+        a.folder_id = Some("f-9".to_string());
+        db.insert_harness_agent(&a).unwrap();
+
+        let copy = db
+            .duplicate_harness_agent("ha-1", "ha-2")
+            .unwrap()
+            .expect("source exists");
+        assert_eq!(copy.name, "Summarizer copy");
+        assert_eq!(copy.instruction, a.instruction, "instruction deep-copied");
+        assert_eq!(copy.folder_id.as_deref(), Some("f-9"), "stays in the folder");
+        assert!(!copy.starred, "a copy is never starred");
+        assert_eq!(copy.run_count, 0);
+        assert!(db.duplicate_harness_agent("nope", "ha-3").unwrap().is_none());
+
+        let before = db.get_harness_agent("ha-1").unwrap().unwrap().updated_at;
+        db.touch_harness_agent_run("ha-1").unwrap();
+        let after = db.get_harness_agent("ha-1").unwrap().unwrap();
+        assert_eq!(after.run_count, 1);
+        assert!(after.last_run_at.is_some());
+        assert_eq!(after.updated_at, before, "a run must not reorder the shelf");
+    }
+
+    fn suggestion_row(id: &str, draft_id: &str) -> crate::state::DraftSuggestion {
+        crate::state::DraftSuggestion {
+            id: id.to_string(),
+            draft_id: draft_id.to_string(),
+            op: "replace_block".to_string(),
+            block_id: Some("blk-1".to_string()),
+            original: Some("old".to_string()),
+            markdown: "new".to_string(),
+            agent_id: Some("shelf:ha-1".to_string()),
+            body: Some("Tightened.".to_string()),
+            status: "pending".to_string(),
+            created_at: 1000,
+        }
+    }
+
+    /// Undo-after-accept (A3): only an APPLIED suggestion returns to the
+    /// pending queue. Rejected marks left the document, and a pending row has
+    /// nothing to undo — both must be no-ops.
+    #[test]
+    fn unresolve_returns_only_applied_suggestions_to_pending() {
+        let db = Database::open_in_memory().unwrap();
+        db.upsert_draft("d-1", Some("Doc"), None, "# Doc", None).unwrap();
+        db.insert_draft_suggestion(&suggestion_row("s-applied", "d-1")).unwrap();
+        db.insert_draft_suggestion(&suggestion_row("s-rejected", "d-1")).unwrap();
+        db.insert_draft_suggestion(&suggestion_row("s-pending", "d-1")).unwrap();
+        assert!(db.resolve_draft_suggestion("s-applied", "applied").unwrap());
+        assert!(db.resolve_draft_suggestion("s-rejected", "rejected").unwrap());
+
+        assert!(db.unresolve_draft_suggestion("s-applied").unwrap());
+        assert!(!db.unresolve_draft_suggestion("s-rejected").unwrap());
+        assert!(!db.unresolve_draft_suggestion("s-pending").unwrap());
+        assert!(!db.unresolve_draft_suggestion("nope").unwrap());
+
+        let pending = db.list_pending_draft_suggestions("d-1").unwrap();
+        let ids: Vec<&str> = pending.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["s-applied", "s-pending"], "undo re-queues; reject stays settled");
+    }
+
+    /// Preview copies (A3) are real `drafts` rows — the write contract needs
+    /// one — but they must never surface on the shelf, and the age-based
+    /// lister must offer only genuinely stale ones to the sweep.
+    #[test]
+    fn preview_drafts_stay_off_the_shelf_and_list_stale_by_age() {
+        let db = Database::open_in_memory().unwrap();
+        db.upsert_draft("d-real", Some("Real"), None, "# Real", None).unwrap();
+        db.upsert_draft("preview-1", Some("Copy"), None, "# Real", None).unwrap();
+
+        let listed = db.list_drafts().unwrap();
+        let ids: Vec<&str> = listed.iter().map(|d| d.draft_id.as_str()).collect();
+        assert_eq!(ids, ["d-real"], "a preview copy never reaches the shelf");
+
+        // Fresh previews survive the sweep cutoff; stale ones are offered.
+        let now = crate::ledger::now_millis();
+        assert!(db.list_stale_preview_drafts(now - 60_000).unwrap().is_empty());
+        let stale = db.list_stale_preview_drafts(now + 60_000).unwrap();
+        assert_eq!(stale, ["preview-1"]);
+        assert!(
+            !db.list_stale_preview_drafts(now + 60_000).unwrap().contains(&"d-real".to_string()),
+            "the sweep can only ever see the preview id-space"
+        );
     }
 
     fn prompt_row<'a>(body: &'a str, bh: &'a str, sid: Option<&'a str>) -> crate::ledger::PromptRow<'a> {

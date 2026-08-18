@@ -8,14 +8,19 @@ import {
   initialSurface,
   moveHeaderSurface,
   parseWorkspace,
+  projectKind,
+  registerProject,
   serializeWorkspace,
   setLanding,
   setSurfaceEnabled,
   surfaceEnabled,
   workspaceLayout,
   workspaceImmersive,
+  readWorkspaceCache,
+  storeWorkspaceCache,
   MAIN_SURFACE_DESCRIPTORS,
   TOGGLEABLE_SURFACES,
+  WORKSPACE_CACHE_KEY,
 } from "./workspace";
 import { canonicalLayout } from "../lib/paneLayout";
 
@@ -319,5 +324,119 @@ describe("layout overrides (snap-back canonical shape)", () => {
     // And it round-trips through serialization.
     const reparsed = parseWorkspace(serializeWorkspace(rewritten));
     expect(workspaceLayout(reparsed)).toEqual({ sidebar: 280 });
+  });
+});
+
+describe("the project registry — projectKind / registerProject", () => {
+  it("reads only the kind this build knows", () => {
+    const ws = parseWorkspace(
+      JSON.stringify({
+        projects: {
+          "/Users/me/pack": { kind: "extension" },
+          "/Users/me/desk": { kind: "harness" },
+          "/Users/me/app": {},
+          "/Users/me/future": { kind: "hologram" },
+        },
+      }),
+    );
+    expect(projectKind(ws, "/Users/me/pack")).toBe("extension");
+    expect(projectKind(ws, "/Users/me/desk")).toBe("harness");
+    expect(projectKind(ws, "/Users/me/app")).toBeNull();
+    // An unknown kind is a plain project, never an error.
+    expect(projectKind(ws, "/Users/me/future")).toBeNull();
+    expect(projectKind(ws, "/Users/me/unregistered")).toBeNull();
+    expect(projectKind(ws, null)).toBeNull();
+    expect(projectKind(defaultWorkspace(), "/anywhere")).toBeNull();
+  });
+
+  it("registers a plain project and an extension project", () => {
+    let ws = defaultWorkspace();
+    ws = registerProject(ws, "/Users/me/app");
+    ws = registerProject(ws, "/Users/me/pack", "extension");
+    expect(ws.projects?.["/Users/me/app"]).toEqual({});
+    expect(projectKind(ws, "/Users/me/app")).toBeNull();
+    expect(projectKind(ws, "/Users/me/pack")).toBe("extension");
+  });
+
+  it("preserves an existing entry's fields and unknown keys", () => {
+    const ws = parseWorkspace(
+      JSON.stringify({
+        note: "hand-annotated",
+        projects: {
+          "/Users/me/pack": { landing: "drafter", starred: true },
+        },
+      }),
+    );
+    const next = registerProject(ws, "/Users/me/pack", "extension");
+    expect(next.projects?.["/Users/me/pack"]).toMatchObject({
+      landing: "drafter",
+      starred: true,
+      kind: "extension",
+    });
+    // Unknown top-level keys ride through the rewrite untouched.
+    expect(next.note).toBe("hand-annotated");
+    // And a round-trip through the serializer keeps all of it.
+    const reread = parseWorkspace(serializeWorkspace(next));
+    expect(projectKind(reread, "/Users/me/pack")).toBe("extension");
+    expect(reread.note).toBe("hand-annotated");
+  });
+
+  it("never downgrades: a kindless registration keeps the existing kind", () => {
+    let ws = registerProject(defaultWorkspace(), "/Users/me/pack", "extension");
+    ws = registerProject(ws, "/Users/me/pack");
+    expect(projectKind(ws, "/Users/me/pack")).toBe("extension");
+  });
+
+  it("does not disturb per-project landing resolution", () => {
+    const ws = registerProject(
+      setLanding(defaultWorkspace(), "browser"),
+      "/Users/me/pack",
+      "extension",
+    );
+    // The registry entry has no landing, so the global landing still wins.
+    expect(initialSurface(ws, "document", "/Users/me/pack")).toBe("browser");
+  });
+});
+
+describe("the paint cache — the manifest's first-frame mirror", () => {
+  const storage = (init: Record<string, string> = {}): Storage => {
+    const m = new Map(Object.entries(init));
+    return {
+      get length() {
+        return m.size;
+      },
+      clear: () => m.clear(),
+      getItem: (k: string) => m.get(k) ?? null,
+      key: (i: number) => [...m.keys()][i] ?? null,
+      removeItem: (k: string) => {
+        m.delete(k);
+      },
+      setItem: (k: string, v: string) => {
+        m.set(k, String(v));
+      },
+    } as Storage;
+  };
+
+  it("mirrors the last-loaded text and reads it back parsed", () => {
+    const s = storage();
+    storeWorkspaceCache(s, '{"version":1,"landing":"drafter"}');
+    expect(readWorkspaceCache(s)?.landing).toBe("drafter");
+  });
+
+  it("no cache = null — a genuinely untouched install stays on defaults", () => {
+    expect(readWorkspaceCache(storage())).toBeNull();
+  });
+
+  it("a deleted manifest clears the mirror instead of echoing forever", () => {
+    const s = storage();
+    storeWorkspaceCache(s, '{"version":1}');
+    storeWorkspaceCache(s, null);
+    expect(readWorkspaceCache(s)).toBeNull();
+  });
+
+  it("a corrupted mirror degrades to defaults, never an error", () => {
+    const s = storage({ [WORKSPACE_CACHE_KEY]: "not json" });
+    // parseWorkspace's leniency applies: bad text = default manifest.
+    expect(readWorkspaceCache(s)).toEqual(defaultWorkspace());
   });
 });

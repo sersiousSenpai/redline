@@ -95,8 +95,15 @@ export interface Workspace {
   surfaces?: Record<string, boolean>;
   header?: { order?: string[] };
   landing?: string;
-  /** Per-project overrides keyed by absolute project path. */
-  projects?: Record<string, { landing?: string }>;
+  /** Per-project overrides keyed by absolute project path. `kind` is the
+   *  project type — `"extension"` marks a pack project scaffolded to build a
+   *  Redline extension; absent or unknown reads as a plain build. This record
+   *  doubles as project_create's registry: a created folder is written here
+   *  so it is visible before any plan ever lands in it. */
+  projects?: Record<
+    string,
+    { landing?: string; kind?: string; [key: string]: unknown }
+  >;
   /** Optional snap-back target overrides in px, plus the immersive opt-out,
    *  e.g. `{"layout": {"sidebar": 280, "discussion": 360, "terminal": 300,
    *  "immersive": false}}`. Read leniently field-by-field — see
@@ -157,6 +164,42 @@ export function parseWorkspace(text: string | null | undefined): Workspace {
 
 export function serializeWorkspace(ws: Workspace): string {
   return JSON.stringify(ws, null, 2) + "\n";
+}
+
+// ---- The paint cache --------------------------------------------------------
+// workspace.json is read over IPC, which lands AFTER the first React render —
+// so a manifest that hides surfaces briefly showed the stock header on every
+// launch. The fix is the theme cache's, one layer up: the last-loaded manifest
+// text is mirrored into localStorage (synchronous), the workspace state's
+// INITIALIZER reads it, and the file read then confirms or corrects it. The
+// file stays the store; the cache is a paint hint that is never authored into.
+
+export const WORKSPACE_CACHE_KEY = "redline.workspace.cache";
+
+/** The manifest to compose the first render from: the mirrored text if one
+ *  was cached, else null (defaults — a genuinely untouched install). */
+export function readWorkspaceCache(storage: Storage): Workspace | null {
+  try {
+    const raw = storage.getItem(WORKSPACE_CACHE_KEY);
+    if (!raw) return null;
+    return parseWorkspace(raw);
+  } catch {
+    return null;
+  }
+}
+
+/** Mirror the manifest text after every authoritative read or write. `null`
+ *  (no file on disk) clears the mirror so a deleted manifest stops echoing. */
+export function storeWorkspaceCache(
+  storage: Storage,
+  text: string | null,
+): void {
+  try {
+    if (text) storage.setItem(WORKSPACE_CACHE_KEY, text);
+    else storage.removeItem(WORKSPACE_CACHE_KEY);
+  } catch {
+    /* storage unavailable — the async read still lands */
+  }
 }
 
 /** Only an explicit `false` disables — so a manifest that predates a surface
@@ -332,4 +375,38 @@ export function setLanding(ws: Workspace, landing: Landing): Workspace {
 /** The manifest's effective landing for display (settings UI). */
 export function currentLanding(ws: Workspace): Landing {
   return isLanding(ws.landing) ? ws.landing : "last";
+}
+
+// ---- The project registry (extension projects as a first-class type) -------
+
+/** The project kinds this build understands beyond a plain folder: a
+ *  buildable extension crate, or a data-only harness pack (A5a). */
+export type ProjectKind = "extension" | "harness";
+
+/** A registered project's typed kind. Lenient like every other read here:
+ *  only a kind this build knows returns; anything else — including a
+ *  hand-typed future kind — reads as a plain project, never as an error. */
+export function projectKind(
+  ws: Workspace,
+  path: string | null | undefined,
+): ProjectKind | null {
+  if (!path) return null;
+  const kind = ws.projects?.[path]?.kind;
+  return kind === "extension" || kind === "harness" ? kind : null;
+}
+
+/** Register a created project folder in the manifest — the missing half of
+ *  `project_create`, which used to leave the folder invisible until a plan
+ *  landed in it. Spread-copies the existing entry so a hand-annotated one (a
+ *  landing override, an unknown key) survives, and never downgrades: a
+ *  registration without a kind keeps whatever kind the entry already has. */
+export function registerProject(
+  ws: Workspace,
+  path: string,
+  kind?: ProjectKind,
+): Workspace {
+  const next = materialized(ws);
+  const entry = { ...ws.projects?.[path], ...(kind ? { kind } : {}) };
+  next.projects = { ...ws.projects, [path]: entry };
+  return next;
 }

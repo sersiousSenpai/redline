@@ -15,6 +15,15 @@ export type MainSurface =
   | "memory"
   | "runs";
 
+/** A surface id as MANIFEST data carries it (workspace.json, a harness
+ *  pack): the known union, plus any string a future manifest names. Widened
+ *  where data flows in — dispatch is a lenient Record and header composition
+ *  filters to what this build renders, so an unknown id degrades to nothing
+ *  instead of failing a closed union. State stays `MainSurface`: every
+ *  surface Redline can actually SHOW is compiled in (one codebase — a
+ *  harness composes surfaces, it never adds code). */
+export type SurfaceId = MainSurface | (string & {});
+
 export const MAIN_SURFACE_KEY = "redline.mainSurface";
 export const DOC_PINNED_KEY = "redline.doc.pinned";
 

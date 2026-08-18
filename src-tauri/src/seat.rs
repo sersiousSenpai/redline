@@ -60,7 +60,21 @@ pub const KNOWN_SEATS: &[&str] = &[
     "fork_plan",
     "fork_review",
     "fork_drafter",
+    "harness",
 ];
+
+/// The per-agent seat namespace (harness program A2): `custom:<agent_id>`
+/// names a seat row belonging to ONE user-authored shelf agent — the escape
+/// hatch through the otherwise-closed `KNOWN_SEATS` vocabulary. A custom seat
+/// inherits the `harness` template seat when unconfigured, and `set_seat`
+/// admits it only when the shelf agent actually exists, so junk keys still
+/// can't accumulate in the setting.
+pub const CUSTOM_SEAT_PREFIX: &str = "custom:";
+
+/// The seat name carrying one shelf agent's own spawn config.
+pub fn custom_seat(agent_id: &str) -> String {
+    format!("{CUSTOM_SEAT_PREFIX}{agent_id}")
+}
 
 /// `fork_drafter` inherits the `drafter` seat when unconfigured (the sidecar
 /// rides the same doc as the drafter discussion agent). The other fork
@@ -68,6 +82,7 @@ pub const KNOWN_SEATS: &[&str] = &[
 fn inherits_from(seat: &str) -> Option<&'static str> {
     match seat {
         "fork_drafter" => Some("drafter"),
+        s if s.starts_with(CUSTOM_SEAT_PREFIX) => Some("harness"),
         _ => None,
     }
 }
@@ -185,6 +200,13 @@ pub const DEFAULT_CHARTERS: &[(&str, &str, &str)] = &[
         "fork_drafter",
         "Answers one comment thread on a Drafter document, read-only.",
         "When you open a comment thread on a document.",
+    ),
+    (
+        "harness",
+        "Spawn template for user-authored shelf agents: every agent you build \
+         runs with this seat's model and flags unless it has a custom seat of \
+         its own.",
+        "When you run one of your own agents against a document.",
     ),
 ];
 
@@ -317,9 +339,7 @@ pub fn all_seats() -> HashMap<String, SeatConfig> {
 /// Update one seat, persist the whole map, and refresh the store. An
 /// all-empty config removes the row (back to inherit/default).
 pub fn set_seat(db: &Database, seat: &str, config: SeatConfig) -> Result<(), String> {
-    if !KNOWN_SEATS.contains(&seat) {
-        return Err(format!("unknown agent seat: {seat}"));
-    }
+    seat_admissible(db, seat)?;
     validate_backend_for_seat(seat, &config)?;
     let mut s = store().write().unwrap();
     if config.is_empty() {
@@ -333,6 +353,44 @@ pub fn set_seat(db: &Database, seat: &str, config: SeatConfig) -> Result<(), Str
     // A hand-edit retires the batch undo. Otherwise Revert would sit there
     // indefinitely and, days later, restore a chart from before edits the user
     // has since made by hand — silently destroying them.
+    drop(s);
+    clear_snapshot(db);
+    Ok(())
+}
+
+/// Whether `seat` may hold a config row: a known seat, or a `custom:<id>`
+/// whose shelf agent actually exists. The escape hatch stays validated — the
+/// "junk keys can't accumulate" property of the closed set survives it.
+fn seat_admissible(db: &Database, seat: &str) -> Result<(), String> {
+    if KNOWN_SEATS.contains(&seat) {
+        return Ok(());
+    }
+    if let Some(agent_id) = seat.strip_prefix(CUSTOM_SEAT_PREFIX) {
+        return match db.get_harness_agent(agent_id) {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err(format!(
+                "unknown agent seat: {seat} (no shelf agent `{agent_id}`)"
+            )),
+            Err(e) => Err(e.to_string()),
+        };
+    }
+    Err(format!("unknown agent seat: {seat}"))
+}
+
+/// Drop a deleted shelf agent's `custom:<id>` seat row, if it has one. No
+/// admissibility check — the agent row is already gone (or going), which is
+/// exactly why `set_seat` can't do this. A no-op when no row exists; when one
+/// is removed the seatassign snapshot retires with it (a revert must not
+/// resurrect a seat for a deleted agent).
+pub fn clear_custom_seat(db: &Database, agent_id: &str) -> Result<(), String> {
+    let seat = custom_seat(agent_id);
+    let mut s = store().write().unwrap();
+    if s.seats.remove(&seat).is_none() {
+        return Ok(());
+    }
+    let json = serde_json::to_string(&s.seats).map_err(|e| e.to_string())?;
+    db.set_setting(SETTING_AGENT_SEATS, &json)
+        .map_err(|e| e.to_string())?;
     drop(s);
     clear_snapshot(db);
     Ok(())
@@ -352,9 +410,7 @@ fn validate_backend_for_seat(seat: &str, config: &SeatConfig) -> Result<(), Stri
 /// never half-land.
 pub fn set_seats(db: &Database, updates: &[(String, SeatConfig)]) -> Result<(), String> {
     for (seat, _) in updates {
-        if !KNOWN_SEATS.contains(&seat.as_str()) {
-            return Err(format!("unknown agent seat: {seat}"));
-        }
+        seat_admissible(db, seat)?;
     }
     for (seat, config) in updates {
         validate_backend_for_seat(seat, config)?;
@@ -793,6 +849,73 @@ mod tests {
         let mut s = store().write().unwrap();
         s.seats.remove("drafter");
         s.seats.remove("fork_drafter");
+    }
+
+    /// A2 escape hatch: a `custom:<id>` seat inherits the `harness` template
+    /// when unconfigured, and its own row wins once set.
+    #[test]
+    fn custom_seat_inherits_the_harness_template() {
+        let _guard = store_guard();
+        {
+            let mut s = store().write().unwrap();
+            s.seats
+                .insert("harness".to_string(), cfg(Some("sonnet"), Some("low")));
+            s.seats.remove("custom:ha-inherit");
+        }
+        assert_eq!(
+            flag_args("custom:ha-inherit"),
+            vec!["--model", "sonnet", "--effort", "low"]
+        );
+        {
+            let mut s = store().write().unwrap();
+            s.seats
+                .insert("custom:ha-inherit".to_string(), cfg(Some("opus"), None));
+        }
+        assert_eq!(flag_args("custom:ha-inherit"), vec!["--model", "opus"]);
+        let mut s = store().write().unwrap();
+        s.seats.remove("harness");
+        s.seats.remove("custom:ha-inherit");
+    }
+
+    /// The escape hatch stays validated: `set_seat` admits `custom:<id>` only
+    /// when that shelf agent exists, so junk keys still can't accumulate.
+    #[test]
+    fn set_seat_admits_custom_only_for_existing_shelf_agents() {
+        let _guard = store_guard();
+        let db = Database::open_in_memory().unwrap();
+        store().write().unwrap().seats.clear();
+
+        let err = set_seat(&db, "custom:ha-x", cfg(Some("opus"), None)).unwrap_err();
+        assert!(err.contains("no shelf agent"), "unexpected error: {err}");
+        // A bare prefix is junk, not a wildcard.
+        assert!(set_seat(&db, "custom:", cfg(Some("opus"), None)).is_err());
+
+        db.insert_harness_agent(&crate::db::HarnessAgent {
+            agent_id: "ha-x".to_string(),
+            name: "Tightener".to_string(),
+            instruction: "Tighten.".to_string(),
+            folder_id: None,
+            starred: false,
+            created_at: 1,
+            updated_at: 1,
+            last_run_at: None,
+            run_count: 0,
+        })
+        .unwrap();
+        set_seat(&db, "custom:ha-x", cfg(Some("opus"), None)).unwrap();
+        assert_eq!(flag_args("custom:ha-x"), vec!["--model", "opus"]);
+
+        // Deleting the agent clears its seat row (and only its row).
+        clear_custom_seat(&db, "ha-x").unwrap();
+        assert!(flag_args("custom:ha-x").is_empty());
+        assert!(
+            !store().read().unwrap().seats.contains_key("custom:ha-x"),
+            "the custom row must be gone from the store"
+        );
+        // Clearing a seatless agent is a quiet no-op.
+        clear_custom_seat(&db, "ha-never").unwrap();
+
+        store().write().unwrap().seats.clear();
     }
 
     #[test]

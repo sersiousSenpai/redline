@@ -3914,6 +3914,13 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
   border-color: color-mix(in srgb, var(--color-info) 40%, transparent);
   color: var(--color-ink);
 }
+/* The new-project offer reuses the chip as a radio: `is-on` is the picked
+   project type (a build vs an extension pack). */
+.rl-fd-suggestion.is-on {
+  background: color-mix(in srgb, var(--color-info) 12%, transparent);
+  border-color: color-mix(in srgb, var(--color-info) 55%, transparent);
+  color: var(--color-ink);
+}
 
 .rl-fd-how {
   align-self: center;

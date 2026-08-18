@@ -8,9 +8,11 @@ import { planDocToMarkdown } from "./markdown/serializer";
 import {
   acceptAllUserSuggestions,
   acceptDraftSuggestion,
+  acceptDraftSuggestionUndoable,
   acceptUserSuggestion,
   applyDraftSuggestion,
   docIsEmpty,
+  undoAcceptedSuggestion,
   hasPendingUserSuggestions,
   rejectAllUserSuggestions,
   rejectDraftSuggestion,
@@ -167,6 +169,77 @@ describe("applyDraftSuggestion", () => {
     expect(acceptDraftSuggestion(editor, s)).toBe(true);
     expect(editor.state.doc.textContent).not.toContain("doomed");
     expect(editor.state.doc.textContent).toContain("first");
+  });
+
+  it("undoable accept round-trips: the suggestion returns to its exact pending state", () => {
+    const editor = makeEditor({
+      type: "doc",
+      content: [para("keep this old ending")],
+    });
+    const bid = blockIds(editor)[0]!;
+    const s = suggestion({
+      op: "replace_block",
+      blockId: bid,
+      original: "keep this old ending",
+      markdown: "keep this new ending",
+    });
+    expect(applyDraftSuggestion(editor, s)).toBe("proposed");
+    const pendingText = editor.state.doc.textContent;
+    const pendingLeaves = suggestionLeaves(editor, s.id);
+    expect(pendingLeaves.length).toBeGreaterThan(0);
+
+    const token = acceptDraftSuggestionUndoable(editor, s);
+    expect(token).not.toBeNull();
+    expect(editor.state.doc.textContent.trim()).toBe("keep this new ending");
+    expect(suggestionLeaves(editor, s.id)).toEqual([]);
+
+    // Undo → the struck old text and pending marks are back, byte-for-byte.
+    expect(undoAcceptedSuggestion(editor, token!)).toBe(true);
+    expect(editor.state.doc.textContent).toBe(pendingText);
+    expect(suggestionLeaves(editor, s.id)).toEqual(pendingLeaves);
+
+    // The returned suggestion resolves normally — reject restores the base.
+    expect(rejectDraftSuggestion(editor, s)).toBe(true);
+    expect(editor.state.doc.textContent.trim()).toBe("keep this old ending");
+  });
+
+  it("undoable accept restores a card-only delete_block", () => {
+    const editor = makeEditor({
+      type: "doc",
+      content: [para("first"), para("doomed")],
+    });
+    const bid = blockIds(editor)[1]!;
+    const s = suggestion({ op: "delete_block", blockId: bid, markdown: "" });
+    expect(applyDraftSuggestion(editor, s)).toBe("proposed");
+    // Reject first so no marks remain, then accept the card-only path.
+    expect(rejectDraftSuggestion(editor, s)).toBe(true);
+    const token = acceptDraftSuggestionUndoable(editor, s);
+    expect(token).not.toBeNull();
+    expect(editor.state.doc.textContent).not.toContain("doomed");
+    expect(undoAcceptedSuggestion(editor, token!)).toBe(true);
+    expect(editor.state.doc.textContent).toContain("doomed");
+  });
+
+  it("a stale undo token fails cleanly and changes nothing", () => {
+    const editor = makeEditor({
+      type: "doc",
+      content: [para("keep this old ending")],
+    });
+    const bid = blockIds(editor)[0]!;
+    const s = suggestion({
+      op: "replace_block",
+      blockId: bid,
+      original: "keep this old ending",
+      markdown: "keep this new ending",
+    });
+    expect(applyDraftSuggestion(editor, s)).toBe("proposed");
+    const token = acceptDraftSuggestionUndoable(editor, s);
+    expect(token).not.toBeNull();
+    // The document moves on — the token's positions no longer fit.
+    editor.commands.setContent({ type: "doc", content: [para("x")] });
+    const before = editor.state.doc.toJSON();
+    expect(undoAcceptedSuggestion(editor, token!)).toBe(false);
+    expect(editor.state.doc.toJSON()).toEqual(before);
   });
 
   it("a stale blockId reports stale", () => {

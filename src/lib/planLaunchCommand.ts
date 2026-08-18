@@ -14,10 +14,18 @@ import { shq } from "./resumeCommand";
  *  into a shell sitting anywhere. Omitted when no project is chosen — the
  *  spawned shell's own cwd ($HOME) is used.
  *
+ *  `addDirs` grants the session extra directories via `--add-dir` — one flag
+ *  per dir so no dir is ever parsed as a second variadic value. The extension
+ *  launch uses it for the staged ABI/SDK/template dirs a pack author needs to
+ *  read: they sit outside the project cwd (inside the Redline checkout), and
+ *  without the grant the session can't scout the contract it is building
+ *  against. Plan mode still gates every write behind plan approval.
+ *
  *  Callers append a trailing `\r` to actually run the command in a PTY. */
 export function buildPlanLaunchCommand(
   prompt: string,
   projectPath?: string | null,
+  addDirs: readonly string[] = [],
 ): string {
   // Read-only research tools + Bash, pre-approved so a fresh plan session can
   // scout the project without surfacing a permission prompt per tool call — the
@@ -27,7 +35,8 @@ export function buildPlanLaunchCommand(
   // leaving the prompt as the sole positional arg. Plan mode still gates every
   // edit/write behind the user's plan approval, so Bash here only runs
   // read-style research commands before ExitPlanMode.
-  const launch = `claude --allowedTools ${ALLOWED_TOOLS} --permission-mode plan ${shq(prompt)}`;
+  const grants = addDirs.map((d) => `--add-dir ${shq(d)} `).join("");
+  const launch = `claude ${grants}--allowedTools ${ALLOWED_TOOLS} --permission-mode plan ${shq(prompt)}`;
   return projectPath ? `cd ${shq(projectPath)} && ${launch}` : launch;
 }
 

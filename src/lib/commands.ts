@@ -98,6 +98,11 @@ export interface CommandDeps {
   currentTheme: string;
   fonts: PaletteChoiceRef[];
   currentFont: string;
+  /** Enterable harnesses (empty while inside one — exit first). */
+  harnesses?: { id: string; name: string }[];
+  /** The harness the app is inside, if any. `exitHidden` = a boot entry
+   *  (a flavored build IS its harness — no exit exists). */
+  activeHarness?: { name: string; exitHidden: boolean } | null;
   actions: {
     draftNewPlan: () => void;
     openSession: (id: string) => void;
@@ -112,6 +117,8 @@ export interface CommandDeps {
     setFont: (name: string) => void;
     zoomReset: () => void;
     replayTour: () => void;
+    enterHarness?: (id: string) => void;
+    exitHarness?: () => void;
   };
 }
 
@@ -151,6 +158,28 @@ export function buildCommands(deps: CommandDeps): PaletteCommand[] {
       group: "Surfaces",
       detail: s.id === deps.currentSurface ? "showing now" : s.title,
       run: () => actions.selectSurface(s.id),
+    });
+  }
+
+  // Harness mode — enter from anywhere the palette opens; exit only when an
+  // exit exists (a boot-entered flavor hides it, so the command must too).
+  if (actions.enterHarness) {
+    for (const h of deps.harnesses ?? []) {
+      commands.push({
+        id: `harness:${h.id}`,
+        title: `Enter harness: ${h.name}`,
+        group: "Surfaces",
+        run: () => actions.enterHarness!(h.id),
+      });
+    }
+  }
+  if (deps.activeHarness && !deps.activeHarness.exitHidden && actions.exitHarness) {
+    commands.push({
+      id: "harness-exit",
+      title: `Exit ${deps.activeHarness.name}`,
+      detail: "Back to Redline",
+      group: "Surfaces",
+      run: actions.exitHarness,
     });
   }
 

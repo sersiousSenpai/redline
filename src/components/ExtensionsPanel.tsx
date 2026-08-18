@@ -29,6 +29,8 @@ export interface ExtensionInfo {
   strikes: number;
   panel: string | null;
   dir: string;
+  /** Where a link-installed extension (A5a) lives; null for a real dir. */
+  link_target: string | null;
 }
 
 /** Mirror of `marketplace::InstallState` (serde snake_case). */
@@ -230,6 +232,22 @@ function ExtensionRow({
           </span>
         )}
         <span style={{ flex: 1 }} />
+        {info.link_target && (
+          <button
+            type="button"
+            disabled={busy}
+            title="Re-read the manifest and module from the linked folder — the iterate step after a rebuild"
+            onClick={() =>
+              run(() => invoke("extension_reload", { name: info.name }))
+            }
+            style={{
+              ...smallButton("default", busy),
+              background: "var(--color-bg-elevated)",
+            }}
+          >
+            Reload
+          </button>
+        )}
         {isToggleable(info) && (
           <button
             type="button"
@@ -281,6 +299,19 @@ function ExtensionRow({
           }}
         >
           {info.detail}
+        </div>
+      )}
+      {info.link_target && (
+        <div
+          className="font-mono"
+          title="Link-installed: edits in this folder are read live; Uninstall removes only the link"
+          style={{
+            marginTop: "4px",
+            fontSize: "10px",
+            color: "var(--color-ink-muted)",
+          }}
+        >
+          linked → {info.link_target}
         </div>
       )}
       <div className="flex flex-wrap items-center gap-1.5" style={{ marginTop: "6px" }}>
@@ -705,6 +736,317 @@ function BrowseTab() {
   );
 }
 
+/** Mirror of lib.rs `LocalInstallPreview` (serde tag = "kind"). */
+export type LocalInstallPreview =
+  | { kind: "harness"; id: string; name: string }
+  | {
+      kind: "extension";
+      name: string;
+      ext_kind: string;
+      version: string | null;
+      scopes: string[];
+      events: string[];
+    };
+
+/** Local-folder install (A5a): pick a folder, see what it is and what it
+ *  would get, confirm. The install is a LINK — the folder stays where it
+ *  is and edits there are read live. A harness confirms in one step (it
+ *  composes UI and can call nothing); an extension shows its scopes and
+ *  events first — same consent posture as the marketplace, minus the
+ *  sha256 that a folder you picked yourself doesn't need. */
+function LocalInstallControls({ onChanged }: { onChanged: () => void }) {
+  const [preview, setPreview] = useState<
+    { path: string; view: LocalInstallPreview } | null
+  >(null);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const finish = useCallback(
+    (view: LocalInstallPreview) => {
+      setPreview(null);
+      setNote(
+        view.kind === "harness"
+          ? `Linked harness "${view.name}" — it's on the Front Door now; edits land on refocus.`
+          : `Linked ${view.name} — running now; Reload after a rebuild.`,
+      );
+      window.dispatchEvent(new Event("redline:harnesses-changed"));
+      onChanged();
+    },
+    [onChanged],
+  );
+
+  const pick = useCallback(async () => {
+    setError(null);
+    setNote(null);
+    let picked: unknown;
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      picked = await open({ directory: true, multiple: false });
+    } catch {
+      return; // dialog unavailable (tests / web)
+    }
+    if (typeof picked !== "string") return; // cancelled
+    setBusy(true);
+    try {
+      const view = await invoke<LocalInstallPreview>("local_install_inspect", {
+        path: picked,
+      });
+      if (view.kind === "harness") {
+        // No scopes to consent to — installing is the confirmation.
+        finish(
+          await invoke<LocalInstallPreview>("local_install_confirm", {
+            path: picked,
+          }),
+        );
+      } else {
+        setPreview({ path: picked, view });
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [finish]);
+
+  const confirm = useCallback(async () => {
+    if (!preview) return;
+    setBusy(true);
+    setError(null);
+    try {
+      finish(
+        await invoke<LocalInstallPreview>("local_install_confirm", {
+          path: preview.path,
+        }),
+      );
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [preview, finish]);
+
+  return (
+    <div
+      style={{ padding: "10px 14px", borderBottom: "1px solid var(--color-rule)" }}
+    >
+      <div className="flex items-center gap-2">
+        <span
+          className="font-sans"
+          style={{ fontSize: "var(--rl-text-xs)", color: "var(--color-ink-muted)" }}
+        >
+          The dev loop: link a harness or extension straight from its folder —
+          no registry, no relaunch.
+        </span>
+        <span style={{ flex: 1 }} />
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => void pick()}
+          style={smallButton("default", busy)}
+        >
+          Install from folder…
+        </button>
+      </div>
+      {preview && preview.view.kind === "extension" && (
+        <div
+          style={{
+            marginTop: "8px",
+            padding: "8px 10px",
+            border: "1px solid var(--color-rule)",
+            borderRadius: "var(--rl-radius-control)",
+            background: "var(--color-paper)",
+          }}
+        >
+          <div className="font-sans" style={{ fontSize: "var(--rl-text-xs)" }}>
+            <b>{preview.view.name}</b>
+            {preview.view.version ? ` v${preview.view.version}` : ""} —{" "}
+            {preview.view.ext_kind} extension from{" "}
+            <code className="font-mono">{preview.path}</code>
+          </div>
+          <div
+            className="flex flex-wrap items-center gap-1.5"
+            style={{ marginTop: "6px" }}
+          >
+            {preview.view.scopes.map((s) => (
+              <Chip key={`s-${s}`} text={s} title="scope it will hold" />
+            ))}
+            {preview.view.events.map((e) => (
+              <Chip key={`e-${e}`} text={`⚡ ${e}`} title="event it will hear" />
+            ))}
+          </div>
+          <div className="flex items-center gap-2" style={{ marginTop: "8px" }}>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void confirm()}
+              style={smallButton("accent", busy)}
+            >
+              {busy ? "Linking…" : "Link & run"}
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => setPreview(null)}
+              style={smallButton("default", busy)}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+      {note && (
+        <div
+          className="font-sans"
+          style={{
+            marginTop: "6px",
+            fontSize: "var(--rl-text-xs)",
+            color: "var(--color-ink-muted)",
+          }}
+        >
+          {note}
+        </div>
+      )}
+      {error && (
+        <div
+          className="font-sans"
+          style={{
+            marginTop: "6px",
+            fontSize: "var(--rl-text-xs)",
+            color: "var(--color-danger)",
+          }}
+        >
+          {error}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Mirror of `userconfig::HarnessFileEntry`. */
+interface HarnessFileEntry {
+  id: string;
+  json: string;
+  link_target: string | null;
+}
+
+/** The harness packs on this machine — the declarative tier's install list,
+ *  shown beside the code tiers so one dialog answers "what is extending my
+ *  Redline". Uninstall is offered for LINKED packs only: it removes the
+ *  link, never the folder behind it; a hand-authored directory is named
+ *  instead. */
+function HarnessPacksSection({ nonce }: { nonce: number }) {
+  const [entries, setEntries] = useState<HarnessFileEntry[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(() => {
+    invoke<HarnessFileEntry[]>("list_harnesses")
+      .then(setEntries)
+      .catch(() => setEntries([]));
+  }, []);
+  useEffect(refresh, [refresh, nonce]);
+
+  if (entries.length === 0 && !error) return null;
+  return (
+    <div style={{ borderTop: "1px solid var(--color-rule)" }}>
+      <div
+        className="font-sans"
+        style={{
+          padding: "10px 14px 2px",
+          fontSize: "10px",
+          fontWeight: 700,
+          letterSpacing: "0.14em",
+          textTransform: "uppercase",
+          color: "var(--color-ink-muted)",
+        }}
+      >
+        Harness packs
+      </div>
+      {entries.map((h) => {
+        let name = h.id;
+        try {
+          const parsed: unknown = JSON.parse(h.json);
+          if (
+            typeof parsed === "object" &&
+            parsed !== null &&
+            typeof (parsed as { name?: unknown }).name === "string"
+          ) {
+            name = (parsed as { name: string }).name;
+          }
+        } catch {
+          /* the id is enough */
+        }
+        return (
+          <div
+            key={h.id}
+            style={{
+              padding: "8px 14px",
+              borderBottom: "1px solid var(--color-rule)",
+            }}
+          >
+            <div className="flex items-center gap-2">
+              <span
+                className="font-sans"
+                style={{ fontSize: "var(--rl-text-sm)", fontWeight: 700 }}
+              >
+                {name}
+              </span>
+              <Chip text={h.id} title="harness id" />
+              <span style={{ flex: 1 }} />
+              {h.link_target && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setError(null);
+                    invoke("harness_uninstall", { id: h.id })
+                      .then(() => {
+                        window.dispatchEvent(
+                          new Event("redline:harnesses-changed"),
+                        );
+                        refresh();
+                      })
+                      .catch((e) => setError(String(e)));
+                  }}
+                  style={{
+                    ...smallButton("default"),
+                    color: "var(--color-ink-muted)",
+                  }}
+                >
+                  Unlink
+                </button>
+              )}
+            </div>
+            <div
+              className="font-mono"
+              style={{
+                marginTop: "3px",
+                fontSize: "10px",
+                color: "var(--color-ink-muted)",
+              }}
+            >
+              {h.link_target
+                ? `linked → ${h.link_target}`
+                : "hand-authored under ~/.redline/harnesses"}
+            </div>
+          </div>
+        );
+      })}
+      {error && (
+        <div
+          className="font-sans"
+          style={{
+            padding: "6px 14px",
+            fontSize: "var(--rl-text-xs)",
+            color: "var(--color-danger)",
+          }}
+        >
+          {error}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** The Settings-row control: a quiet trigger opening the Extensions dialog
  *  (the same trigger-in-row + hero-dialog language as Agent Seats). */
 export function ExtensionsPanel() {
@@ -712,6 +1054,9 @@ export function ExtensionsPanel() {
   const [tab, setTab] = useState<"installed" | "browse">("installed");
   const [extensions, setExtensions] = useState<ExtensionInfo[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Bumped when a local install/unlink lands, so the harness section
+  // re-lists (harness changes ride no extensions-changed event).
+  const [localNonce, setLocalNonce] = useState(0);
 
   const refresh = useCallback(() => {
     invoke<ExtensionInfo[]>("extensions_list")
@@ -721,6 +1066,10 @@ export function ExtensionsPanel() {
       })
       .catch((e) => setLoadError(String(e)));
   }, []);
+  const onLocalChanged = useCallback(() => {
+    refresh();
+    setLocalNonce((n) => n + 1);
+  }, [refresh]);
 
   useEffect(() => {
     if (!open) return;
@@ -851,6 +1200,7 @@ export function ExtensionsPanel() {
             <div style={{ overflowY: "auto" }}>
               {tab === "installed" && (
                 <>
+                  <LocalInstallControls onChanged={onLocalChanged} />
                   {loadError && (
                     <div
                       className="font-sans"
@@ -881,6 +1231,7 @@ export function ExtensionsPanel() {
                   {extensions.map((info) => (
                     <ExtensionRow key={info.name} info={info} onChanged={refresh} />
                   ))}
+                  <HarnessPacksSection nonce={localNonce} />
                 </>
               )}
               {tab === "browse" && <BrowseTab />}

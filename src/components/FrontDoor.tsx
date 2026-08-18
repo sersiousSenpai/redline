@@ -8,6 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Check, CornerDownLeft, Mic, Plus, X } from "lucide-react";
 import { ProjectPicker, type ProjectOption } from "./ProjectPicker";
@@ -80,14 +81,27 @@ export interface FrontDoorProps {
   onCancelPending: () => void;
   onHowItWorks: () => void;
   /** Create a project folder; resolves its absolute path, or null on
-   *  failure (the error is surfaced by App as a toast). */
-  onCreateProject: (name: string) => Promise<string | null>;
+   *  failure (the error is surfaced by App as a toast). `kind: "extension"`
+   *  additionally seeds the extension-pack scaffold and registers the type;
+   *  `kind: "harness"` seeds a harness.json and link-installs it (A5a). */
+  onCreateProject: (
+    name: string,
+    kind?: "extension" | "harness",
+  ) => Promise<string | null>;
   /** Bumped by the type-to-start handoff: focus the composer and take the
    *  buffered keystrokes. */
   focusNonce: number;
   consumeSeed: () => string;
   /** False while the Voice panel owns the mic — one capture at a time. */
   dictationEnabled: boolean;
+  /** Enterable harnesses — "your harnesses" beside "plan a build". The door
+   *  is harness mode's entry point (a contextual entry on the resting
+   *  state, never a header button). Empty hides the row. */
+  harnesses?: { id: string; name: string }[];
+  onEnterHarness?: (id: string) => void;
+  /** Inside a harness the door wears ITS voice — the harness manifest's
+   *  hero lines replace the stock ones, field by field. */
+  hero?: { eyebrow?: string; title?: string; sub?: string } | null;
 }
 
 export function FrontDoor(props: FrontDoorProps) {
@@ -115,6 +129,9 @@ export function FrontDoor(props: FrontDoorProps) {
     focusNonce,
     consumeSeed,
     dictationEnabled,
+    harnesses = [],
+    onEnterHarness,
+    hero = null,
   } = props;
 
   const [entered, setEntered] = useState(false);
@@ -164,10 +181,12 @@ export function FrontDoor(props: FrontDoorProps) {
   const [blocked, setBlocked] = useState<ReadinessItem | null>(null);
   // The "build this in a new folder" offer: `launchAfter` distinguishes the
   // ⏎ route (create, then launch) from the picker's `＋ New project…` row
-  // (create, then just select it).
+  // (create, then just select it). `kind` is the project type — a plain
+  // build, or an extension pack scaffolded to extend Redline itself.
   const [offer, setOffer] = useState<{
     name: string;
     launchAfter: boolean;
+    kind: "app" | "extension" | "harness";
   } | null>(null);
   const [creating, setCreating] = useState(false);
   // A refused ⏎ has to LOOK refused. Every refusal below is a real condition
@@ -274,7 +293,7 @@ export function FrontDoor(props: FrontDoorProps) {
       return;
     }
     if (projectOptions.length === 0 && !choice) {
-      setOffer({ name: projectNameFromPrompt(text), launchAfter: true });
+      setOffer({ name: projectNameFromPrompt(text), launchAfter: true, kind: "app" });
       refuse();
       return;
     }
@@ -342,9 +361,10 @@ export function FrontDoor(props: FrontDoorProps) {
     if (!offer || creating) return;
     setCreating(true);
     const launchAfter = offer.launchAfter;
-    const path = await onCreateProject(offer.name).finally(() =>
-      setCreating(false),
-    );
+    const path = await onCreateProject(
+      offer.name,
+      offer.kind === "app" ? undefined : offer.kind,
+    ).finally(() => setCreating(false));
     if (!path) return;
     onChoiceChange({ path });
     setOffer(null);
@@ -359,7 +379,7 @@ export function FrontDoor(props: FrontDoorProps) {
   const handleFix = useCallback(
     async (item: ReadinessItem) => {
       if (item.fix?.kind === "new-project") {
-        setOffer({ name: projectNameFromPrompt(text), launchAfter: false });
+        setOffer({ name: projectNameFromPrompt(text), launchAfter: false, kind: "app" });
         return true;
       }
       return onFix(item);
@@ -412,12 +432,16 @@ export function FrontDoor(props: FrontDoorProps) {
 
       {/* The stance, not another question — the composer's placeholder is
           already asking one. "Redline" is the verb, which is the whole point
-          of the product and the shortest way to say it. */}
-      <div className="rl-fd-eyebrow">Plan mode</div>
+          of the product and the shortest way to say it. Inside a harness the
+          manifest's hero speaks instead, field by field — the door is the
+          one place the resting state carries a brand voice. */}
+      <div className="rl-fd-eyebrow">{hero?.eyebrow || "Plan mode"}</div>
       <h1 className="rl-fd-title font-serif">
-        Every build starts as a draft.
+        {hero?.title || "Every build starts as a draft."}
       </h1>
-      <p className="rl-fd-sub">Describe it. Redline the plan. Then build.</p>
+      <p className="rl-fd-sub">
+        {hero?.sub || "Describe it. Redline the plan. Then build."}
+      </p>
 
       <div className={islandClass}>
         {pending ? (
@@ -482,6 +506,7 @@ export function FrontDoor(props: FrontDoorProps) {
                   setOffer({
                     name: projectNameFromPrompt(text),
                     launchAfter: false,
+                    kind: "app",
                   })
                 }
                 onAfterPick={() => taRef.current?.focus()}
@@ -550,6 +575,8 @@ export function FrontDoor(props: FrontDoorProps) {
           <NewProjectOffer
             name={offer.name}
             busy={creating}
+            kind={offer.kind}
+            onKind={(kind) => setOffer({ ...offer, kind })}
             onName={(name) => setOffer({ ...offer, name })}
             onCreate={createFromOffer}
             onCancel={() => setOffer(null)}
@@ -593,6 +620,41 @@ export function FrontDoor(props: FrontDoorProps) {
           ))}
         </div>
       </div>
+
+      {/* "Your harnesses" — the other doors this build can open. Same orbit
+          discipline as the suggestions: a way in, not furniture — the row
+          retires the moment there is a sentence to finish. */}
+      {harnesses.length > 0 && onEnterHarness && (
+        <div
+          className={`rl-fd-suggest-wrap${suggestionsHidden ? " is-hidden" : ""}`}
+          aria-hidden={suggestionsHidden}
+        >
+          <div className="rl-fd-suggestions">
+            <span
+              className="font-sans"
+              style={{
+                fontSize: "var(--rl-text-xs)",
+                color: "var(--color-ink-muted)",
+                alignSelf: "center",
+              }}
+            >
+              Your harnesses
+            </span>
+            {harnesses.map((h) => (
+              <button
+                key={h.id}
+                type="button"
+                className="rl-fd-suggestion"
+                tabIndex={suggestionsHidden ? -1 : 0}
+                title={`Enter ${h.name} — a harness running on Redline`}
+                onClick={() => onEnterHarness(h.id)}
+              >
+                {h.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       <ReadinessStrip items={readiness} onFix={handleFix} />
 
@@ -716,10 +778,18 @@ function PlanMenu({
 
 /** The first-run hole this closes: `projectOptions` is derived entirely from
  *  existing sessions and open folders, so a genuine first run has none and
- *  the first build would land in `$HOME`. */
+ *  the first build would land in `$HOME`.
+ *
+ *  The type row is A1's entry point: an *extension pack* is a project that
+ *  extends Redline itself — the folder is seeded as a buildable extension
+ *  crate, and its plan sessions get the staged ABI/SDK/template dirs granted.
+ *  A quiet second row here, not a header button: creation is the only moment
+ *  the type question exists. */
 function NewProjectOffer({
   name,
   busy,
+  kind,
+  onKind,
   onName,
   onCreate,
   onCancel,
@@ -727,16 +797,56 @@ function NewProjectOffer({
 }: {
   name: string;
   busy: boolean;
+  kind: "app" | "extension" | "harness";
+  onKind: (kind: "app" | "extension" | "harness") => void;
   onName: (name: string) => void;
   onCreate: () => void;
   onCancel: () => void;
   onSkip?: () => void;
 }) {
+  // The destination prefix comes from the same policy as the write
+  // (`project.rs::default_parent`): `~/Projects/` only on machines that
+  // keep one, else `~/`. A hardcoded label here once promised `~/Projects/`
+  // and the folder landed in `$HOME`.
+  const [parentLabel, setParentLabel] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    invoke<string>("projects_parent")
+      .then((p) => {
+        if (alive) setParentLabel(p);
+      })
+      .catch(() => {
+        if (alive) setParentLabel("~/");
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
   return (
     <div className="rl-fd-block">
       <div className="rl-fd-label">Build this in a new folder</div>
+      <div className="rl-fd-row" role="radiogroup" aria-label="Project type">
+        {(
+          [
+            ["app", "A build"],
+            ["extension", "An extension pack"],
+            ["harness", "A harness"],
+          ] as const
+        ).map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            role="radio"
+            aria-checked={kind === id}
+            className={`rl-fd-suggestion${kind === id ? " is-on" : ""}`}
+            onClick={() => onKind(id)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
       <div className="rl-fd-row">
-        <span className="rl-fd-detail font-mono">~/Projects/</span>
+        <span className="rl-fd-detail font-mono">{parentLabel ?? ""}</span>
         <input
           className="rl-fd-name"
           value={name}
@@ -767,8 +877,16 @@ function NewProjectOffer({
         </button>
       </div>
       <div className="rl-fd-detail">
-        A folder with a README and a fresh git repo. Redline won't write into a
-        directory that already has something in it.
+        {kind === "extension"
+          ? "A buildable Redline extension crate — manifest, SDK dependency, " +
+            "build.sh — plus a README and a fresh git repo. Plan sessions in " +
+            "it can read Redline's extension ABI and the worked template."
+          : kind === "harness"
+            ? "A data-only harness pack — surfaces, labels, landing, hero in " +
+              "one harness.json — linked live into this Redline: it appears " +
+              "under Your harnesses now, and edits land on refocus."
+            : "A folder with a README and a fresh git repo. Redline won't " +
+              "write into a directory that already has something in it."}
       </div>
     </div>
   );

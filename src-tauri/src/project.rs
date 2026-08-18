@@ -82,6 +82,28 @@ fn default_parent() -> PathBuf {
     }
 }
 
+/// The display form of `default_parent()` — `~/Projects/` or `~/` — so the
+/// Front Door's new-project offer can label the destination BEFORE creating
+/// it. The label and the write share one policy; a hardcoded UI prefix said
+/// `~/Projects/` on machines where the folder lands in `$HOME`.
+#[tauri::command]
+pub fn projects_parent() -> String {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    display_parent(&default_parent(), &home)
+}
+
+fn display_parent(parent: &Path, home: &Path) -> String {
+    if parent == home {
+        return "~/".to_string();
+    }
+    match parent.strip_prefix(home) {
+        Ok(rest) => format!("~/{}/", rest.display()),
+        Err(_) => format!("{}/", parent.display()),
+    }
+}
+
 /// True when `dir` holds something the user would miss. `.DS_Store` alone is
 /// an empty folder that Finder happened to visit, not someone's work.
 fn has_contents(dir: &Path) -> bool {
@@ -111,9 +133,23 @@ async fn git_init(dir: &Path) {
 /// Create a project directory and return its absolute path.
 ///
 /// The folder is seeded with a one-line `README.md` so it isn't empty and
-/// `guessProjectForPlan` has a name to match on later.
+/// `guessProjectForPlan` has a name to match on later. `kind` selects a typed
+/// scaffold as an additive third step after the README and `git init` —
+/// `"extension"` seeds a buildable Redline extension crate
+/// (`extension_scaffold::seed`); `"harness"` seeds a data-only harness pack
+/// and link-installs it so the dev loop starts live (A5a). The slug boundary
+/// is untouched: every kind goes through the same `slugify_project_name`
+/// gate, and an unknown kind is a refusal, not a silent plain folder.
 #[tauri::command(async)]
-pub async fn project_create(parent: Option<String>, name: String) -> Result<String, String> {
+pub async fn project_create(
+    parent: Option<String>,
+    name: String,
+    kind: Option<String>,
+) -> Result<String, String> {
+    match kind.as_deref() {
+        None | Some("extension") | Some("harness") => {}
+        Some(other) => return Err(format!("unknown project kind {other:?}")),
+    }
     let slug = slugify_project_name(&name)
         .ok_or_else(|| format!("\"{}\" isn't a usable folder name", name.trim()))?;
     let parent_dir = match parent.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
@@ -143,6 +179,24 @@ pub async fn project_create(parent: Option<String>, name: String) -> Result<Stri
 
     git_init(&target).await;
 
+    if kind.as_deref() == Some("extension") {
+        crate::extension_scaffold::seed(&target, &slug)?;
+    }
+    if kind.as_deref() == Some("harness") {
+        crate::extension_scaffold::seed_harness(&target, &slug, &name)?;
+        // Creating a harness pack IS the intent to iterate on it, so the
+        // dev loop starts linked (A5a): the Front Door chip appears now and
+        // every edit is live through the link. Link failure only warns —
+        // the project exists either way, and the Extensions panel's
+        // install-from-folder can finish the job.
+        if let Err(why) = crate::local_install::install_harness_folder(
+            &crate::userconfig::config_root(),
+            &target,
+        ) {
+            tracing::warn!("harness project created but not linked: {why}");
+        }
+    }
+
     Ok(target.to_string_lossy().into_owned())
 }
 
@@ -164,6 +218,15 @@ mod tests {
         assert_eq!(slugify_project_name("Build a *CRM* (v2)!").as_deref(), Some("build-a-crm-v2"));
         assert_eq!(slugify_project_name("café ☕").as_deref(), Some("caf"));
         assert_eq!(slugify_project_name("a$b&c").as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn display_parent_maps_home_and_projects() {
+        let home = Path::new("/Users/someone");
+        assert_eq!(display_parent(home, home), "~/");
+        assert_eq!(display_parent(&home.join("Projects"), home), "~/Projects/");
+        // A parent outside $HOME renders absolute rather than pretending.
+        assert_eq!(display_parent(Path::new("/srv/work"), home), "/srv/work/");
     }
 
     #[test]

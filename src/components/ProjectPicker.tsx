@@ -10,8 +10,9 @@ export interface ProjectOption {
   path: string;
   /** Display label (basename / project name). */
   name: string;
-  /** Where it came from, for the muted source hint. */
-  source: "session" | "folder";
+  /** Where it came from, for the muted source hint. `workspace` = registered
+   *  in ~/.redline/workspace.json by project_create, before any session. */
+  source: "session" | "folder" | "workspace";
 }
 
 interface ProjectPickerProps {
@@ -163,7 +164,13 @@ export function ProjectPicker({
             <MenuRow
               key={opt.path}
               label={opt.name}
-              hint={opt.source === "session" ? "session" : "open folder"}
+              hint={
+                opt.source === "session"
+                  ? "session"
+                  : opt.source === "folder"
+                    ? "open folder"
+                    : "project"
+              }
               selected={
                 (value?.replace(/\/+$/, "") || "") ===
                 (opt.path.replace(/\/+$/, "") || "")

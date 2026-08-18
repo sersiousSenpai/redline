@@ -245,3 +245,61 @@ describe("blockingItems", () => {
     expect(blockingItems(deriveReadiness(healthy()))).toEqual([]);
   });
 });
+
+describe("ext-toolchain — the extension-pack build check", () => {
+  const toolchain = (over: Partial<NonNullable<PreflightStatus["extension"]>> = {}) => ({
+    cargo: true,
+    wasmTarget: true,
+    abiDir: "/repo/src-tauri/crates/redline-extension-abi",
+    sdkDir: "/repo/src-tauri/crates/redline-extension-sdk",
+    templateDir: "/repo/marketplace/redline-extension-template",
+    ...over,
+  });
+
+  it("stays silent for a plain project even with no toolchain at all", () => {
+    const pf = {
+      ...healthyPreflight(),
+      extension: toolchain({ cargo: false, wasmTarget: false }),
+    };
+    expect(ids(healthy({ preflight: pf }))).toEqual([]);
+  });
+
+  it("stays silent when the target is a pack and the toolchain is whole", () => {
+    const pf = { ...healthyPreflight(), extension: toolchain() };
+    expect(ids(healthy({ preflight: pf, targetIsExtension: true }))).toEqual([]);
+  });
+
+  it("warns — never blocks — when the pack target has no cargo", () => {
+    const pf = {
+      ...healthyPreflight(),
+      extension: toolchain({ cargo: false, wasmTarget: false }),
+    };
+    const items = deriveReadiness(
+      healthy({ preflight: pf, targetIsExtension: true }),
+    );
+    expect(items.map((i) => [i.id, i.state])).toEqual([
+      ["ext-toolchain", "warn"],
+    ]);
+    expect(blockingItems(items)).toEqual([]);
+    expect(items[0].fix?.copyText).toContain("rustup.rs");
+  });
+
+  it("offers the one-line target add when only the wasm target is missing", () => {
+    const pf = {
+      ...healthyPreflight(),
+      extension: toolchain({ wasmTarget: false }),
+    };
+    const items = deriveReadiness(
+      healthy({ preflight: pf, targetIsExtension: true }),
+    );
+    expect(items).toHaveLength(1);
+    expect(items[0].fix?.copyText).toBe(
+      "rustup target add wasm32-unknown-unknown",
+    );
+  });
+
+  it("withholds the item when the probe predates the field", () => {
+    // An older backend's status has no `extension` key: no answer, no nag.
+    expect(ids(healthy({ targetIsExtension: true }))).toEqual([]);
+  });
+});
