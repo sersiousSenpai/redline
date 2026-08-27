@@ -279,3 +279,21 @@ export function sortReadiness(items: ReadinessItem[]): ReadinessItem[] {
 export function blockingItems(items: ReadinessItem[]): ReadinessItem[] {
   return items.filter((i) => i.state === "blocked");
 }
+
+/** The blockers that apply to opening a CHAT.
+ *
+ *  A chat is a third case the two existing ones don't cover. The plan route
+ *  gates on everything, because a plan has to be captured, approved through a
+ *  hook, and land in a project. The Drafter gates on nothing, because opening a
+ *  document spawns no process at all. Chat sits between: it DOES spawn
+ *  `claude`, so a missing binary or a stolen daemon port really does mean the
+ *  first message goes nowhere — but it needs no hook approval (nothing is
+ *  captured), no project (it is unbound by design) and no interception mode
+ *  (there is no plan to intercept). Reusing the plan gate would refuse a
+ *  conversation for faults that cannot touch it; skipping it, as the Drafter
+ *  does, would let the first message vanish silently. */
+const CHAT_BLOCKERS: readonly ReadinessId[] = ["claude-missing", "daemon-unbound"];
+
+export function chatBlockingItems(items: ReadinessItem[]): ReadinessItem[] {
+  return blockingItems(items).filter((i) => CHAT_BLOCKERS.includes(i.id));
+}

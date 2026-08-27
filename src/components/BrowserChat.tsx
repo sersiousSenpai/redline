@@ -54,14 +54,16 @@ interface BrowserChatProps {
    *  orphan item, so offering the button without one would only ever fail. */
   onAddToList?: (markdown: string) => void | Promise<boolean>;
   /** Text to merge into the composer once, on mount or when the nonce changes
-   *  — how `💬` on a list item arrives here with the item already quoted.
+   *  — how `💬` on a list item, and a highlight in the page, arrive here with
+   *  the passage already quoted. `autoSend` sends it instead (the one-tap
+   *  highlight intents; see lib/browseSelection.ts).
    *
    *  A prop with a nonce, not a direct write to the persisted draft key: the
    *  draft lives in `usePersistedState`, and writing that localStorage key
    *  from outside would desync its in-memory copy whenever the panel is
    *  already mounted. Same shape as `openRequest`/`onOpenRequestConsumed` in
    *  BrowserPane and `consumeSeed` on the Front Door. */
-  seed?: { text: string; nonce: number } | null;
+  seed?: { text: string; nonce: number; autoSend?: boolean } | null;
   onSeedConsumed?: () => void;
   /** Continue THIS tab chat as the spanning Linked discussion — a fork, not a
    *  move: the tab chat stays intact, its context carries into the new linked
@@ -280,7 +282,23 @@ export const BrowserChat = memo(function BrowserChat({
   draftRef.current = draft;
   useEffect(() => {
     if (!seed || seed.nonce === lastSeedRef.current) return;
+    // An auto-send seed waits for the thread to finish restoring: sending into
+    // a not-yet-loaded thread races the restore. Holding it costs nothing —
+    // this effect re-runs the moment `loaded` flips, and the seed is untouched
+    // until then (so a remount can't lose it either).
+    if (seed.autoSend && !loaded) return;
     lastSeedRef.current = seed.nonce;
+    if (seed.autoSend) {
+      // The draft is deliberately untouched: whatever they were half-typing is
+      // still theirs. `send` queues behind an in-flight reply on its own, so a
+      // one-tap intent mid-answer needs nothing special here, and going through
+      // it (rather than `browse_send`) keeps the optimistic bubble and the
+      // stream wiring intact.
+      stickRef.current = true;
+      send(seed.text);
+      onSeedConsumed?.();
+      return;
+    }
     const prev = draftRef.current;
     setDraft(prev.trim() ? `${prev.replace(/\s*$/, "")}\n\n${seed.text}` : seed.text);
     onSeedConsumed?.();
@@ -292,7 +310,7 @@ export const BrowserChat = memo(function BrowserChat({
       el.setSelectionRange(el.value.length, el.value.length);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [seed]);
+  }, [seed, loaded]);
 
   // Follow streaming/new turns only while the user is parked at the bottom;
   // if they've scrolled up to read, leave their position untouched.

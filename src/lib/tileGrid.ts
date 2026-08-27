@@ -80,6 +80,9 @@ export type FractionStore = Record<string, GridFractions>;
  *  with N tiles (1/7 of a wide dock is a legitimate width). */
 export const MIN_TILE_W = 360;
 export const MIN_TILE_H = 180;
+/** Share of the nominal tile a minimum may claim once the tile is smaller than
+ *  the fixed minimum above. Leaves `1 - 2×` of the pair's span draggable. */
+const DENSE_MIN_FRAC = 0.6;
 
 /** The per-tile header's height, exported so the geometry (which subtracts it
  *  when scoring what character grid a tile would get) and the header component
@@ -321,8 +324,31 @@ export function gutters(
   sizePx: SizePx,
 ): Gutter[] {
   const out: Gutter[] = [];
-  const minH = minFrac(MIN_TILE_H, sizePx.height);
-  const minW = minFrac(MIN_TILE_W, sizePx.width);
+  // Effective minima — relaxed only where the fixed ones have already stopped
+  // working.
+  //
+  // MIN_TILE_W/H are right while a tile is roughly that big. They stop being
+  // right once the grid is dense: at 14 tiles a row holds 4-5 columns, so on a
+  // 1728px window an adjacent pair spans ≈690px, under `2 × MIN_TILE_W`.
+  // `clampPair` then pins every handle to its midpoint, and the grid silently
+  // stops being tunable at exactly the density where tuning matters most.
+  //
+  // So the constant stands until the NOMINAL tile is smaller than it — which
+  // is precisely the point where the clamp was already collapsing — and past
+  // there the minimum becomes a fraction of the tile, always leaving
+  // `0.8 × nominal` of real drag range. Every arrangement whose handles work
+  // today is numerically untouched, because the second branch only fires where
+  // they didn't.
+  const nominalW = shape.cols > 0 ? sizePx.width / shape.cols : 0;
+  const nominalH = shape.rows > 0 ? sizePx.height / shape.rows : 0;
+  const minW = minFrac(
+    nominalW >= MIN_TILE_W ? MIN_TILE_W : nominalW * DENSE_MIN_FRAC,
+    sizePx.width,
+  );
+  const minH = minFrac(
+    nominalH >= MIN_TILE_H ? MIN_TILE_H : nominalH * DENSE_MIN_FRAC,
+    sizePx.height,
+  );
   let rowStart = 0;
   for (let r = 0; r < shape.rows; r++) {
     if (r > 0) {
@@ -417,13 +443,19 @@ export function evenAt(
  *  count's floor (two passes resolve the rows↔height circularity), capped so
  *  the document keeps its own floor — and it ONLY EVER GROWS: a dock dragged
  *  taller keeps its height, and removing a tile never yanks it shorter.
- *  Shrinking is the user's job; they have a divider and a collapse caret. */
+ *  Shrinking is the user's job; they have a divider and a collapse caret.
+ *
+ *  The 0.72 step serves the 8-14 range the tile cap now allows. It is still
+ *  capped by the document's floor and still only ever grows, so 1-7 tiles are
+ *  byte-identical to before it existed. A grid that dense genuinely wants
+ *  fullscreen, which the terminal divider's ⤢ now makes a one-click move. */
 export function dockHeightForTiles(
   n: number,
   win: SizePx,
   current: number,
 ): number {
-  const frac = n <= 2 ? CANONICAL_TERM_FRAC : n <= 4 ? 0.45 : 0.6;
+  const frac =
+    n <= 2 ? CANONICAL_TERM_FRAC : n <= 4 ? 0.45 : n <= 7 ? 0.6 : 0.72;
   let target = Math.round(win.height * frac);
   const shape = gridShapeFor(n, { width: win.width, height: target });
   target = Math.max(target, shape.rows * MIN_TILE_H);

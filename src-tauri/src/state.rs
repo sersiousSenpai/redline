@@ -843,6 +843,17 @@ pub struct Companion {
     pub status: String,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Per-conversation `--model` override on top of the `companion` seat.
+    /// `None` = the seat's own model. A brainstorm and a quick lookup are not
+    /// the same workload, and the seat is one setting for both.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Per-conversation `--effort` override. Same contract as `model`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// The user renamed this chat, so the auto-titling pass must leave it be.
+    #[serde(default)]
+    pub title_is_user_set: bool,
 }
 
 /// One persisted turn in a Companion discussion. Each turn is surface-tagged

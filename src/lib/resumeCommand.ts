@@ -23,19 +23,42 @@ export function restoreSentinel(sessionId: string): string {
   return `<!-- REDLINE_RESTORE:${sessionId} -->`;
 }
 
-/** A resumed session lands *outside* plan mode and without the plan body in
- *  context — but Redline already holds the current plan, so restore is just
- *  re-establishing the held ExitPlanMode. Claude does the irreducible minimum:
- *  EnterPlanMode, drop a one-line marker in the plan file, ExitPlanMode. No
- *  daemon fetch, no retyping the (potentially huge) plan body. The redline
- *  skill's "Restoring a reopened plan" section documents the same sequence. */
-const restorePrompt = (sessionId: string) =>
-  "This plan was reopened in Redline for continued review. You are not in plan " +
-  "mode and your plan body is not in this context — but Redline already holds " +
-  "your current plan and will re-present it, so do NOT fetch or retype it. Just " +
-  `call EnterPlanMode, write exactly \`${restoreSentinel(sessionId)}\` as your ` +
-  "plan file's contents, and call ExitPlanMode. Redline restores the held plan " +
-  "and ignores what you submit.";
+/** The restore handshake, as the resumed session is asked to perform it.
+ *
+ *  Restore is only ever re-establishing the held ExitPlanMode: Redline already
+ *  holds the current plan and re-presents its own copy, so the body submitted
+ *  here is a marker, never the plan. That makes every step of this a pure cost,
+ *  and each one is a model round trip against a resumed session's full context
+ *  — measured at 4-6 seconds apiece on a 1.7 MB transcript.
+ *
+ *  So there are two versions. When Redline has already written the marker into
+ *  the session's plan file (`primed` — see `prime_plan_file`), the whole
+ *  handshake is ONE tool call. Otherwise the model writes the marker itself,
+ *  the way it always did.
+ *
+ *  `EnterPlanMode` is gone from both: `--permission-mode plan` puts a RESUMED
+ *  session in plan mode on Claude Code 2.1.222, verified by asking one. The
+ *  fallback sentence costs nothing on a build where that stops being true.
+ *  The redline skill's "Restoring a reopened plan" section documents the same
+ *  sequence. */
+const restorePrompt = (sessionId: string, primed: boolean) => {
+  const head =
+    "This plan was reopened in Redline for continued review. Redline already " +
+    "holds your current plan and will re-present it, so do NOT fetch, read or " +
+    "retype it, and do not explore the codebase. ";
+  const body = primed
+    ? "Your plan file has already been written for you — it contains exactly " +
+      `\`${restoreSentinel(sessionId)}\`. Call ExitPlanMode now, as your very ` +
+      "first action, with no other tool calls and no preamble. (If your plan " +
+      "file somehow does not contain that line, write it there first.)"
+    : "Write exactly " +
+      `\`${restoreSentinel(sessionId)}\` as your plan file's contents, then ` +
+      "call ExitPlanMode. Nothing else — no preamble, no other tool calls.";
+  const tail =
+    " Redline restores the held plan and ignores what you submit. (If you are " +
+    "not in plan mode, call EnterPlanMode first.)";
+  return head + body + tail;
+};
 
 /** Local "YYYY-MM-DD HH:MM" stamp appended to the restore prompt. Every
  *  restore lands the same prompt in the same conversation, and the resume
@@ -49,10 +72,10 @@ const restoreStamp = (now: Date) => {
   );
 };
 
-/** The "Restore plan session" command. `--permission-mode plan` signals plan
- *  intent, but does not by itself yield an immediately-exitable plan-mode state
- *  on resume (Claude Code v2.1.178 still reports "You are not in plan mode"), so
- *  the prompt has Claude call EnterPlanMode explicitly. Used both by the
+/** The "Restore plan session" command. `--permission-mode plan` lands a resumed
+ *  session in plan mode on 2.1.222 — it did not on 2.1.178, which is why the
+ *  prompt used to open with an explicit EnterPlanMode; that step is now a
+ *  one-clause fallback rather than a guaranteed round trip. Used both by the
  *  embedded terminal (with a trailing \r appended by the caller) and the
  *  copy-to-clipboard fallback.
  *
@@ -78,9 +101,12 @@ export function buildResumeCommand(
   now: Date,
   projectPath?: string | null,
   rescinded?: boolean,
+  /** Redline wrote the marker into the plan file already, so the handshake is
+   *  a single ExitPlanMode. Resolved by `prepare_restore`. */
+  primed?: boolean,
 ): string {
   const prompt =
-    `${restorePrompt(sessionId)} (Restore requested ${restoreStamp(now)}.)` +
+    `${restorePrompt(sessionId, !!primed)} (Restore requested ${restoreStamp(now)}.)` +
     (rescinded ? RESCINDED_SENTENCE : "");
   const resume = `claude --resume ${shq(sessionId)} --permission-mode plan ${shq(prompt)}`;
   return projectPath ? `cd ${shq(projectPath)} && ${resume}` : resume;

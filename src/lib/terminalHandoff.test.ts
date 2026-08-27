@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 import {
   CLAUDE_READY,
+  SHELL_PROMPT,
   deliverToTerminal,
   orchestrateHandoff,
   type HandoffResult,
@@ -231,5 +232,39 @@ describe("CLAUDE_READY marker", () => {
     expect(CLAUDE_READY.test("yusufalbazian@Yusufs-MacBook-Pro qwallah %")).toBe(
       false,
     );
+  });
+});
+
+describe("SHELL_PROMPT — write once the shell owns the echo", () => {
+  it("matches the prompt a login zsh leaves on screen", () => {
+    // The exact tail from the field (macOS zsh, default theme).
+    expect(
+      SHELL_PROMPT.test("yusufalbazian@Yusufs-MacBook-Pro dialcrown % "),
+    ).toBe(true);
+    expect(SHELL_PROMPT.test("bash-3.2$ ")).toBe(true);
+    expect(SHELL_PROMPT.test("root@box:/srv# ")).toBe(true);
+    // Themed prompts end in their own glyph.
+    expect(SHELL_PROMPT.test("~/redline ❯ ")).toBe(true);
+  });
+
+  it("still matches through the escape sequences a themed prompt trails", () => {
+    // Colour reset after the prompt character, and the OSC title/cwd
+    // sequences macOS's own zshrc emits.
+    expect(SHELL_PROMPT.test("me@box redline % \x1b[0m")).toBe(true);
+    expect(
+      SHELL_PROMPT.test("me@box redline % \x1b]7;file://box/Users/me\x07"),
+    ).toBe(true);
+  });
+
+  it("does not fire on the rc-file noise that precedes the prompt", () => {
+    // The banner that used to sit BETWEEN the two echoes of the command.
+    expect(SHELL_PROMPT.test("Restored session: Wed Aug 26 16:07:33 PDT 2026\n")).toBe(
+      false,
+    );
+    expect(SHELL_PROMPT.test("...saving history...truncating history files...\n")).toBe(
+      false,
+    );
+    // A stray % mid-output is not a prompt: the match is anchored to the tail.
+    expect(SHELL_PROMPT.test("100% complete\nfetching…")).toBe(false);
   });
 });

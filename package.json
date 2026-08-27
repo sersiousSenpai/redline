@@ -9,6 +9,7 @@
     "url": "https://github.com/sersiousSenpai/redline.git"
   },
   "scripts": {
+    "predev": "node scripts/preflight-dev.mjs",
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",

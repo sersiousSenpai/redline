@@ -51,7 +51,7 @@ it, that's the discussion to have before merging.
    synchronous work inside the command body.
 
 5. **The number of *visible* terminals is a budget dimension.** The tile grid
-   puts up to seven live xterms on screen at once, all sharing the one main
+   puts up to fourteen live xterms on screen at once, all sharing the one main
    thread — a variable the user controls directly. Each stream is individually
    batched and ACK-backpressured (rule 3), so overload degrades per-stream (a
    busy terminal falls behind) rather than freezing the app, but anything that
@@ -60,7 +60,9 @@ it, that's the discussion to have before merging.
    per pane), and WebGL renderers are visibility-scoped and capped at
    `MAX_WEBGL` (surplus tiles keep xterm's DOM renderer) so WebKit's
    process-wide context cap can never silently evict the oldest terminal's
-   context.
+   context. At fourteen tiles that ceiling binds for the first time — it used
+   to sit above the tile cap and never fire — so the fallback path is now a
+   routine one rather than a backstop.
 
 ## Guards in CI
 

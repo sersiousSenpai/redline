@@ -7,6 +7,7 @@ import { createRoot, type Root } from "react-dom/client";
 // jsdom has no canvas; the Julia-mark rasterizer is not what's under test.
 vi.mock("../lib/repoMarkImage", () => ({ markImage: () => null }));
 
+import { HELD_RED } from "../lib/terminalMenu";
 import { TILE_HEADER_H } from "../lib/tileGrid";
 import type { TileActions } from "./TerminalTileMenu";
 import { TerminalTileHeader, type TerminalIdentity } from "./TerminalTileHeader";
@@ -56,7 +57,6 @@ function makeActions(): TileActions {
     onNewRepo: vi.fn(),
     onZoomTile: vi.fn(),
     onFocusTile: vi.fn(),
-    onToggleFullscreen: vi.fn(),
     onHintTile: vi.fn(),
     onRefreshCwds: vi.fn(),
   };
@@ -76,7 +76,6 @@ function mount(
         identity,
         focused: false,
         overflow: null,
-        fullscreen: false,
         zoomed: false,
         actions,
         ...props,
@@ -87,6 +86,13 @@ function mount(
 }
 
 const head = (c: HTMLElement) => c.querySelector(".rl-tile-head") as HTMLElement;
+
+/** jsdom normalises an inline colour to `rgb(r, g, b)`; derive the expected
+ *  string from the constant so a palette change can't silently pass. */
+const hexToRgb = (hex: string): string => {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgb(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255})`;
+};
 
 describe("terminal tile header", () => {
   it("keeps TILE_HEADER_H and a 2px border in BOTH focus states — no reflow on focus change", () => {
@@ -115,24 +121,49 @@ describe("terminal tile header", () => {
     expect(actions.onRefreshCwds).toHaveBeenCalled();
   });
 
-  it("× closes this terminal; ⤢ exists on the focused header only", () => {
+  it("× closes this terminal; no tile carries a dock-fullscreen button", () => {
     const { container, actions } = mount({ focused: false });
     const x = container.querySelector(
       "button[aria-label='Close redline 2']",
     ) as HTMLButtonElement;
     act(() => x.click());
     expect(actions.onCloseTerminal).toHaveBeenCalledWith("t1");
+
+    // Dock fullscreen moved to the terminal divider's centre pill. A tile is
+    // the wrong home for a whole-dock control, and the focused tile's `⤢` was
+    // the only thing standing between the two meanings of that glyph.
     expect(
       container.querySelector("button[aria-label*='Fullscreen']"),
     ).toBeNull();
-
     const focused = mount({ focused: true });
-    const fs = focused.container.querySelector(
-      "button[aria-label*='Fullscreen']",
-    ) as HTMLButtonElement;
-    expect(fs).not.toBeNull();
-    act(() => fs.click());
-    expect(focused.actions.onToggleFullscreen).toHaveBeenCalled();
+    expect(
+      focused.container.querySelector("button[aria-label*='Fullscreen']"),
+    ).toBeNull();
+  });
+
+  it("renders what the terminal is working on, in HELD_RED when a plan is held", () => {
+    const plain = mount({ workText: "npm test", workHeld: false });
+    expect(plain.container.textContent).toContain("npm test");
+    const line = plain.container.querySelector(
+      "span[title='npm test']",
+    ) as HTMLElement;
+    expect(line).not.toBeNull();
+    expect(line.style.color).not.toBe("");
+
+    const held = mount({ workText: "Rework the dock", workHeld: true });
+    const heldLine = held.container.querySelector(
+      "span[title='Rework the dock']",
+    ) as HTMLElement;
+    // The menu row's grammar: a held plan is the one claim Redline can make
+    // outright, so it takes the intercept red.
+    expect(heldLine.style.color).toBe(hexToRgb(HELD_RED));
+  });
+
+  it("falls back to a bare spacer when the terminal has volunteered nothing", () => {
+    // Absent, not padded with a guess — the header must not invent work.
+    const { container } = mount({ workText: null });
+    expect(container.querySelector("span[title]")).toBeNull();
+    expect(head(container).querySelector("span.flex-1")).not.toBeNull();
   });
 
   it("shows the overflow pip with its tone, on demand only", () => {

@@ -8,6 +8,12 @@ import {
   type CSSProperties,
 } from "react";
 import { createPortal } from "react-dom";
+import {
+  placeByRect,
+  viewportBounds,
+  type AnchorRect,
+} from "../lib/anchorPlacement";
+import { rafCoalesce } from "../lib/raf";
 import { useMenuOverlay } from "./menuOverlay";
 
 // The floating-panel idiom extracted from RepoBubbles (a pure move): a
@@ -23,6 +29,19 @@ export const PANEL_WIDTH = 272;
 const OPEN_DELAY_MS = 320;
 // Grace period so the pointer can travel from the anchor into the panel.
 const CLOSE_DELAY_MS = 160;
+/** Anchor edge to panel edge. */
+const GAP = 6;
+/** Keep-out from the viewport edges. */
+const MARGIN = 8;
+/** The height a panel is ASSUMED to want, for the one decision that has to be
+ *  made before the panel exists: which side of the anchor to open on.
+ *
+ *  There is no box to measure at click time, so the side has to be chosen
+ *  against a guess. Too small and a long menu stays below a low anchor and
+ *  overhangs; too large and a three-row menu flips above for no reason. ~320px
+ *  is seven rows: past that the panel is scrolling regardless, and it is
+ *  `maxHeight` — not the side — that makes the overflow reachable. */
+const ASSUMED_PANEL_HEIGHT = 320;
 
 export interface PanelProps {
   label: string;
@@ -66,6 +85,12 @@ export function Panel({
         position: "fixed",
         zIndex: 60,
         width: `${PANEL_WIDTH}px`,
+        // A COLUMN, so a `maxHeight` arriving through `style` (the placement
+        // helpers emit one) is a real bound: header and footer keep their
+        // natural height and the scrolling middle child takes the rest.
+        // `overflow: hidden` stays — it is what rounds the corners.
+        display: "flex",
+        flexDirection: "column",
         border: "1px solid var(--color-rule)",
         background: "var(--color-bg-elevated)",
         boxShadow: "0 8px 24px rgba(0,0,0,0.28)",
@@ -87,6 +112,8 @@ export function PanelHeader({ children }: { children: React.ReactNode }) {
     <div
       className="truncate px-3 py-1.5 font-sans"
       style={{
+        // Pinned: in a bounded column the scroller yields, not the chrome.
+        flexShrink: 0,
         fontSize: "10px",
         color: "var(--color-ink-muted)",
         borderBottom: "1px solid var(--color-rule)",
@@ -114,6 +141,7 @@ export function PanelFooter({
       className="rl-menu-item w-full text-left px-3 py-1.5 font-sans"
       style={{
         display: "block",
+        flexShrink: 0,
         fontSize: "11px",
         color: "var(--color-ink-muted)",
         borderTop: "1px solid var(--color-rule)",
@@ -125,37 +153,139 @@ export function PanelFooter({
   );
 }
 
-/** Place a fixed panel under `anchor`, clamped inside the viewport.
+/** The shared body of `placeUnder` / `placeOver`: pick a side that has room,
+ *  clamp horizontally, and say how tall the panel may be.
+ *
+ *  These used to clamp the HORIZONTAL axis only. `top` was unconditionally
+ *  `anchor.bottom + 6` with no vertical fit and no flip, so a trigger low in
+ *  the window opened a menu that ran off the bottom edge — and since the panel
+ *  is `position: fixed`, nothing could scroll the overhang back. The rows
+ *  rendered last were simply unreachable. `placeByRect` already does the flip
+ *  honestly, and now also reports the room it landed in. */
+function place(
+  anchor: HTMLElement | null,
+  align: "left" | "right",
+  width: number,
+  prefer: "below" | "above",
+): CSSProperties | null {
+  const r = anchor?.getBoundingClientRect();
+  if (!r) return null;
+  // `placeByRect` aligns to its target's LEFT edge, which is the whole of
+  // `align: "left"`. `align: "right"` is expressed by handing it a target
+  // already shifted so that edge falls where the right-hung panel wants it —
+  // rather than teaching the shared helper a second alignment mode.
+  const rawLeft = align === "left" ? r.left : r.right - width;
+  const target: AnchorRect = {
+    left: rawLeft,
+    top: r.top,
+    right: rawLeft + width,
+    bottom: r.bottom,
+  };
+  const p = placeByRect(
+    target,
+    { width, height: ASSUMED_PANEL_HEIGHT },
+    { bounds: viewportBounds(), prefer, gap: GAP, margin: MARGIN },
+  );
+
+  // Landing above is expressed as `bottom`, not `top`. The panel's real height
+  // is only knowable after it renders, so anchoring the edge that TOUCHES the
+  // anchor lets it grow upward from there whatever that height turns out to be
+  // — which is what the old `placeOver` got right and is worth keeping. (It is
+  // also why `p.top` goes unused here: that number was computed against
+  // ASSUMED_PANEL_HEIGHT, a guess, while `p.side` and `p.maxHeight` are facts
+  // about the room.)
+  const vertical: CSSProperties =
+    p.side === "above"
+      ? { bottom: `${window.innerHeight - r.top + GAP}px` }
+      : { top: `${r.bottom + GAP}px` };
+
+  return { left: `${p.left}px`, ...vertical, maxHeight: `${p.maxHeight}px` };
+}
+
+/** Place a fixed panel under `anchor`, inside the viewport — flipping ABOVE
+ *  when there isn't room below.
  *  `align: "right"` hangs it off the anchor's right edge (an overflow menu).
  *  `width` must be the width the panel will actually render at — a style-only
  *  override on the panel would desync this clamp from the real width and hang
  *  the panel off the right edge, which is exactly what PANEL_WIDTH being a
- *  shared constant exists to prevent. */
+ *  shared constant exists to prevent.
+ *
+ *  The returned style carries a `maxHeight`: the room actually there on the
+ *  chosen side. A panel that wants to scroll should spend THAT on its
+ *  scroller rather than a `60vh` fraction of a window it isn't measured
+ *  against.
+ *
+ *  Note for callers that read the result's keys rather than spreading it: a
+ *  flip returns `bottom` instead of `top`. Spreading into a style is always
+ *  safe; indexing `.top` is not. */
 export function placeUnder(
   anchor: HTMLElement | null,
   align: "left" | "right",
   width: number = PANEL_WIDTH,
 ): CSSProperties | null {
-  const r = anchor?.getBoundingClientRect();
-  if (!r) return null;
-  const raw = align === "left" ? r.left : r.right - width;
-  const left = Math.max(8, Math.min(raw, window.innerWidth - width - 8));
-  return { left: `${left}px`, top: `${r.bottom + 6}px` };
+  return place(anchor, align, width, "below");
 }
 
-/** Place a fixed panel *above* `anchor` (a bottom-anchored footer button).
- *  Positioned with `bottom` rather than `top` so the panel grows upward from
- *  the anchor whatever its content height turns out to be. */
+/** Place a fixed panel *above* `anchor` (a bottom-anchored footer button),
+ *  flipping BELOW when the anchor is too near the top. Same `maxHeight`
+ *  contract as `placeUnder`. */
 export function placeOver(
   anchor: HTMLElement | null,
   align: "left" | "right",
   width: number = PANEL_WIDTH,
 ): CSSProperties | null {
-  const r = anchor?.getBoundingClientRect();
-  if (!r) return null;
-  const raw = align === "left" ? r.left : r.right - width;
-  const left = Math.max(8, Math.min(raw, window.innerWidth - width - 8));
-  return { left: `${left}px`, bottom: `${window.innerHeight - r.top + 6}px` };
+  return place(anchor, align, width, "above");
+}
+
+/** Keep an OPEN panel's placement honest.
+ *
+ *  A menu placed on the click that opened it is correct for exactly that
+ *  instant. Resize the window under it, or scroll the strip its trigger lives
+ *  in, and it is stranded at coordinates the anchor has left. Costs nothing
+ *  while closed — the effect doesn't subscribe — and one rAF-coalesced measure
+ *  per frame while open.
+ *
+ *  `capture: true` for the reason AnchoredOverlay documents: the scroll that
+ *  moves the anchor happens on an ancestor container, and a bubbling window
+ *  listener never sees it. */
+function useReplaceWhileOpen(
+  open: boolean,
+  compute: () => CSSProperties | null,
+  setStyle: React.Dispatch<React.SetStateAction<CSSProperties>>,
+) {
+  // Held in a ref so a fresh closure each render doesn't re-subscribe.
+  const computeRef = useRef(compute);
+  computeRef.current = compute;
+
+  useEffect(() => {
+    if (!open) return;
+    const measure = () => {
+      const next = computeRef.current();
+      if (!next) return;
+      // Same-place re-placements are the common case — scrolling the menu's
+      // OWN list fires this listener too. Bailing keeps a scroll from
+      // re-rendering a long panel on every frame.
+      setStyle((prev) => (samePlacement(prev, next) ? prev : next));
+    };
+    const onFrame = rafCoalesce(measure);
+    window.addEventListener("resize", onFrame);
+    window.addEventListener("scroll", onFrame, true);
+    return () => {
+      onFrame.cancel();
+      window.removeEventListener("resize", onFrame);
+      window.removeEventListener("scroll", onFrame, true);
+    };
+  }, [open, setStyle]);
+}
+
+function samePlacement(a: CSSProperties, b: CSSProperties): boolean {
+  return (
+    a.left === b.left &&
+    a.top === b.top &&
+    a.bottom === b.bottom &&
+    a.width === b.width &&
+    a.maxHeight === b.maxHeight
+  );
 }
 
 /** Shared dismissal for the popovers: outside mousedown and Escape. */
@@ -244,6 +374,11 @@ export function useHoverPopover(anchorRef: React.RefObject<HTMLElement | null>) 
   };
 
   useDismiss(open, close, [anchorRef, panelRef]);
+  useReplaceWhileOpen(
+    open,
+    () => placeUnder(anchorRef.current, "left"),
+    setStyle,
+  );
 
   return {
     open,
@@ -382,22 +517,29 @@ export function useClickPopover(
   useMenuOverlay(open);
 
   const close = useCallback(() => setOpen(false), []);
+  // One expression for both the opening placement and every re-placement, so
+  // the two can't drift.
+  const measure = (): CSSProperties | null => {
+    const pos =
+      side === "above"
+        ? placeOver(anchorRef.current, align, width)
+        : placeUnder(anchorRef.current, align, width);
+    // Panel spreads this style LAST, so the width here wins over its default.
+    return pos && { ...pos, width: `${width}px` };
+  };
   const toggle = () => {
     if (open) {
       setOpen(false);
       return;
     }
-    const pos =
-      side === "above"
-        ? placeOver(anchorRef.current, align, width)
-        : placeUnder(anchorRef.current, align, width);
+    const pos = measure();
     if (!pos) return;
-    // Panel spreads this style LAST, so the width here wins over its default.
-    setStyle({ ...pos, width: `${width}px` });
+    setStyle(pos);
     setOpen(true);
   };
 
   useDismiss(open, close, [anchorRef, panelRef]);
+  useReplaceWhileOpen(open, measure, setStyle);
 
   return {
     open,

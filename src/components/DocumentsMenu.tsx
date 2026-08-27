@@ -135,7 +135,9 @@ export function DocumentsMenu({
         <Panel label="Documents" {...panelProps}>
           <div
             className="rl-thin-scroll-y py-1"
-            style={{ maxHeight: "60vh", overflowY: "auto" }}
+            // Bounded by Panel's placement-derived `maxHeight`, not by a
+            // viewport fraction. See popover.tsx.
+            style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto" }}
           >
             {error && (
               <div

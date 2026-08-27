@@ -40,9 +40,10 @@ struct EmbeddedSkill {
 /// - `drafter`: the Prompt Drafter discussion agent — prompt-crafting
 ///   collaborator persona, the live-doc re-read discipline, and the tracked
 ///   write-suggestions contract (append/replace/insert/delete by block id).
-/// - `companion`: the global cross-surface Companion — the spanning-app
-///   discipline, the while-you-were-away journal feed, the global consult
-///   contract, and memory/lineage retrieval.
+/// - `companion`: the chat room's agent — the unbound conversation grounded in
+///   the user's record. The spanning-app discipline, the while-you-were-away
+///   journal feed, the global consult contract, answer-pack-first retrieval,
+///   and graduating a conversation into a plan or a document.
 /// - `redline-code-review`: the code-review loop — the blocking review curl, the
 ///   line-anchored feedback format, and the REDLINE_REVIEW_RESOLUTIONS reply.
 /// - `classmemory`: the ClassMemory classifier + retrieval contract (the lake's
@@ -93,7 +94,7 @@ const SKILLS: &[EmbeddedSkill] = &[
     },
     EmbeddedSkill {
         name: "companion",
-        version: 4,
+        version: 5,
         content: include_str!("../../skills/companion/SKILL.md"),
     },
     EmbeddedSkill {

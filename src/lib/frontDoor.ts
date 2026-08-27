@@ -14,8 +14,11 @@
 
 /** Where the composer sends its text. A sticky setting, not a one-off: you
  *  pick it in `Plan ▾` and it stays picked, so a session spent shaping long
- *  briefs doesn't mean reaching for a modifier on every one. */
-export type LaunchDestination = "plan" | "drafter";
+ *  briefs doesn't mean reaching for a modifier on every one.
+ *
+ *  `chat` is the third: an unbound conversation, for the half-formed idea that
+ *  is not yet a plan and not yet a document. */
+export type LaunchDestination = "plan" | "drafter" | "chat";
 
 export type SubmitAction = LaunchDestination | "newline" | "ignore";
 
@@ -28,8 +31,17 @@ export interface SubmitKeyInfo {
   isComposing?: boolean;
 }
 
-/** The other destination — what the modifier reaches for. */
-export function otherDestination(d: LaunchDestination): LaunchDestination {
+/** What the modifier reaches for.
+ *
+ *  With two destinations "the other one" was total; with three it isn't, and
+ *  an involution over three values cannot exist. The rule that replaces it is
+ *  the one the two-destination version already implemented in the only cases
+ *  that existed: **plan is the fallback, unless you are already on plan.**
+ *  So ⌘⏎ still opens the Drafter from the plan route and still plans from the
+ *  Drafter route — byte-for-byte today's behavior — and chat gets the sane
+ *  answer, ⌘⏎ = plan, because "I have written the thing out, just build it" is
+ *  the move you want one key away from a half-formed thought. */
+export function fallbackDestination(d: LaunchDestination): LaunchDestination {
   return d === "plan" ? "drafter" : "plan";
 }
 
@@ -47,7 +59,7 @@ export function submitAction(
 ): SubmitAction {
   if (e.key !== "Enter") return "ignore";
   if (e.isComposing) return "ignore";
-  if (e.metaKey || e.ctrlKey) return otherDestination(destination);
+  if (e.metaKey || e.ctrlKey) return fallbackDestination(destination);
   if (e.shiftKey) return "newline";
   return destination;
 }

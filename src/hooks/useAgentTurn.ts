@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 //! ONE lifecycle for every streaming chat surface (browse, linked, mission,
-//! memchat), replacing the copy-pasted component-local machinery whose state
+//! memchat, companion), replacing the copy-pasted component-local machinery whose state
 //! died on every surface switch. The backend turn registry is the durable
 //! truth; this hook makes a remount lossless:
 //!
@@ -32,7 +32,16 @@ import {
 } from "../lib/agentTurn";
 import type { QueuedTurn, SendOutcome, TurnStatus } from "../types";
 
-export type AgentSurface = "browse" | "linked" | "mission" | "memchat";
+export type AgentSurface =
+  | "browse"
+  | "linked"
+  | "mission"
+  | "memchat"
+  // The chat room. Every name already matches the convention — the backend
+  // command family is `companion_send` / `_turn_status` / `_cancel` /
+  // `_unqueue` and the events are `companion-delta|done|error|cancelled|
+  // queue-advanced` — so nothing is renamed to join.
+  | "companion";
 
 export interface AgentTurnConfig<M extends TurnMessage> {
   surface: AgentSurface;

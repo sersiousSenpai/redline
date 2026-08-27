@@ -63,6 +63,17 @@ pub const KNOWN_SEATS: &[&str] = &[
     "harness",
 ];
 
+/// The model ids the GUI offers, mirroring `src/lib/seatAssign.ts`'s
+/// `MODEL_OPTIONS`. Used to validate a per-conversation override strictly:
+/// a bad `--model` FAILS the spawn (the CLI rejects it outright), where a bad
+/// `--effort` only warns — so the two are validated with different severity on
+/// purpose. Seat rows themselves stay permissive: a seat is a power-user
+/// setting and forward compatibility with a new model id matters more there.
+pub const MODEL_OPTIONS: &[&str] = &["fable", "opus", "sonnet", "haiku"];
+
+/// The effort levels the GUI offers, mirroring `EFFORT_OPTIONS`.
+pub const EFFORT_OPTIONS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
 /// The per-agent seat namespace (harness program A2): `custom:<agent_id>`
 /// names a seat row belonging to ONE user-authored shelf agent — the escape
 /// hatch through the otherwise-closed `KNOWN_SEATS` vocabulary. A custom seat
@@ -97,9 +108,10 @@ fn inherits_from(seat: &str) -> Option<&'static str> {
 pub const DEFAULT_CHARTERS: &[(&str, &str, &str)] = &[
     (
         "companion",
-        "Holds one continuous discussion that follows you across every surface, \
-         glancing at other agents' context and consulting them on your behalf.",
-        "When you talk to the Companion column, on any surface.",
+        "Holds an open-ended chat grounded in your whole record — the prompt \
+         lake, the class catalog, every plan session — glancing at other \
+         agents' context and consulting them on your behalf.",
+        "When you talk in a chat room, opened from the front door.",
     ),
     (
         "browse",
@@ -527,6 +539,58 @@ pub fn flag_args_from(cfg: &SeatConfig) -> Vec<String> {
 /// The flag tail for a seat — what every spawn site appends to its argv.
 pub fn flag_args(seat: &str) -> Vec<String> {
     flag_args_from(&effective(seat))
+}
+
+/// A seat's flag tail with a per-call `model`/`effort` override laid on top.
+///
+/// Starts from the seat's own effective config and replaces exactly those two
+/// fields when the override is a non-empty string, then delegates to
+/// `flag_args_from` — no second flag builder, so `--fallback-model` and a
+/// seat's `extra_flags` still ride along untouched. An empty or whitespace
+/// override means "no opinion", which is what clearing the chip has to mean.
+pub fn flag_args_override(
+    seat: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Vec<String> {
+    flag_args_from(&override_config(seat, model, effort))
+}
+
+/// The seat config a per-call override resolves to. Split out so
+/// `model_for_override` and `flag_args_override` can never disagree about what
+/// the effective model IS — the lake's model provenance depends on that.
+fn override_config(seat: &str, model: Option<&str>, effort: Option<&str>) -> SeatConfig {
+    fn pick(over: Option<&str>) -> Option<Option<String>> {
+        over.map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(|v| Some(v.to_string()))
+    }
+    let mut cfg = effective(seat);
+    if let Some(m) = pick(model) {
+        cfg.model = m;
+    }
+    if let Some(e) = pick(effort) {
+        cfg.effort = e;
+    }
+    cfg
+}
+
+/// The model an overridden spawn will actually request — `model_for` with the
+/// same override applied. The lake stamps every captured prompt with the model
+/// that produced it, so a thread on a non-default model must record THAT one;
+/// passing the bare seat's model would mislabel it permanently, and the ledger
+/// is hash-chained, so a mislabelled row cannot be quietly repaired.
+pub fn model_for_override(
+    seat: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Option<String> {
+    override_config(seat, model, effort)
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(str::to_string)
 }
 
 /// The model a seat's spawn explicitly requests via `--model`, if any — the

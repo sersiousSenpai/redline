@@ -67,6 +67,32 @@ export interface HandoffDeps {
 export const CLAUDE_READY =
   /\? for shortcuts|Welcome to Claude Code|Claude Code v\d|shift\+tab to cycle|╭─{3,}/;
 
+/** A shell sitting at its prompt, ready to read a line.
+ *
+ *  The tty's line discipline buffers anything written before the shell's ZLE
+ *  takes over, so a command written at spawn still RUNS — but it gets echoed
+ *  twice: once raw by the tty as the bytes arrive, then again by the shell when
+ *  it draws its prompt and redraws the line it inherited. The reviewer sees
+ *  their restore command duplicated on screen, split by whatever the rc files
+ *  printed in between (macOS's "Restored session:" banner, most visibly), and
+ *  reads it as Redline having typed twice.
+ *
+ *  Waiting for the prompt costs nothing: the shell could not have run the
+ *  command any earlier anyway — this only moves the write to after the echo
+ *  is the shell's to make. Matches the tail of a prompt across the usual
+ *  shells, tolerating the trailing colour/OSC sequences most themes emit.
+ *
+ *  Deliberately NOT applied to writes into a shell that is already up: there
+ *  the prompt is long past and the wait would just burn its timeout. */
+export const SHELL_PROMPT =
+  /[%$#❯➜](?:\s| )(?:\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[a-zA-Z])*$/;
+
+/** How long to wait for it. A login shell reading its rc files takes well
+ *  under a second; past that the prompt is not coming in a shape we know, and
+ *  the write goes anyway — a doubled echo is a blemish, a skipped restore is a
+ *  failure. */
+export const PROMPT_TIMEOUT_MS = 4_000;
+
 export interface HandoffOptions {
   spawnTimeoutMs?: number;
 }

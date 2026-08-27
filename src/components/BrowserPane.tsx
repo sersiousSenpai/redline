@@ -31,7 +31,13 @@ import {
   type ChatPill,
   type ChatStateMap,
 } from "../lib/browseChatState";
-import { isLocalhostUrl, sameTabUrl } from "../lib/browseList";
+import { isLocalhostUrl, sameTabUrl, templateFor } from "../lib/browseList";
+import {
+  autoSends,
+  parseSelectionEvents,
+  promptForSelection,
+  type SelectionEvent,
+} from "../lib/browseSelection";
 import { SAFARI_UA } from "../lib/safariUA";
 // `BrowserPane` is a static import in App, so it sits in the boot path. The
 // list panel only exists once a user picks the pill, so it has no business
@@ -40,6 +46,7 @@ const BrowseList = lazy(() => import("./BrowseList"));
 import type {
   BinaryFile,
   BrowseFocusTabEvent,
+  BrowseListView,
   BrowseOpenTabEvent,
   BrowseWakeTabEvent,
   Mission,
@@ -507,13 +514,101 @@ function BrowserPaneBase({
   // A prop with a nonce, not a write to the composer's persisted localStorage
   // key — that would desync `usePersistedState`'s in-memory copy whenever the
   // panel is already mounted. Same shape as `openRequest` below.
-  const [chatSeed, setChatSeed] = useState<{ text: string; nonce: number } | null>(
-    null,
-  );
+  const [chatSeed, setChatSeed] = useState<{
+    text: string;
+    nonce: number;
+    /** Set by the one-tap highlight actions (Define/Explain/Research): the
+     *  intent line is already a complete instruction, so the turn goes out
+     *  rather than sitting in the composer waiting for a ⌘↵ that confirms
+     *  nothing. See lib/browseSelection.ts. */
+    autoSend?: boolean;
+  } | null>(null);
   // Which tabs are known to HAVE a list. Drives the auto-offer below and the
   // "＋ Add as item" action in the page chat; `BrowseList` reports both
   // directions so neither has to poll.
   const [listedTabs, setListedTabs] = useState<Record<string, boolean>>({});
+  // Bumped after a highlight writes into a list, so an already-open list panel
+  // remounts and shows the item instead of silently going stale (it loads from
+  // the DB on mount and has no reason to poll).
+  const [listReloadKey, setListReloadKey] = useState(0);
+
+  /** ＋ List, from the in-page highlight bar.
+   *
+   *  `browse_list_add` refuses an item with no list (browse_list.rs) — which is
+   *  why the chat's "＋ Add as item" is offered only once one exists. From a
+   *  highlight, creating it IS the right move. It reads the tab's real list
+   *  rather than trusting `listedTabs` (only populated once the panel has been
+   *  open) and rather than calling `browse_list_start` blindly, which would
+   *  silently re-point an existing list at the punch-list template. */
+  const addSelectionToList = useCallback(
+    async (browseId: string, body: string, title: string) => {
+      try {
+        const existing = await invoke<BrowseListView | null>("browse_list_get", {
+          browseId,
+        });
+        const template = existing?.list.template ?? "punch-list";
+        if (!existing) {
+          await invoke("browse_list_start", {
+            browseId,
+            template,
+            title: title.trim() || null,
+          });
+        }
+        await invoke("browse_list_add", {
+          browseId,
+          kind: templateFor(template).defaultKind,
+          body,
+        });
+        setListedTabs((prev) => (prev[browseId] ? prev : { ...prev, [browseId]: true }));
+        setListReloadKey((n) => n + 1);
+        // Show where it went. A write with no visible landing place reads as a
+        // dropped tap, and the panel is one pill away regardless. The PANEL
+        // state is keyed on the active tab (that's whose pane this is), even
+        // when the item itself went to the anchored discussion's list.
+        setChatHere({ open: true, pill: "list" });
+      } catch (e) {
+        console.error("highlight ＋ List failed", e);
+      }
+    },
+    [setChatHere],
+  );
+
+  /** One action off the in-page selection bar.
+   *
+   *  The passage the user highlighted is the best grounding signal the page can
+   *  give the browse agent, and until now it was thrown away — `SNAPSHOT_JS`
+   *  has always captured `window.getSelection()` into `snapshot.selection` and
+   *  nothing has ever read it. `ask` seeds the composer and waits for their
+   *  question; the one-tap intents are already complete instructions and send
+   *  themselves; ＋ List never becomes a chat turn at all. `Copy` never arrives
+   *  here — the shim does it in-page, inside the click's user activation. */
+  const dispatchSelection = useCallback(
+    (ev: SelectionEvent, nonce: number) => {
+      // Address the tab whose conversation the pane is actually SHOWING. That
+      // is normally the active tab; the two diverge only when the agent opened
+      // a page on the user's behalf and the conversation stayed anchored to the
+      // tab it started from — and that anchored conversation is exactly the one
+      // that should hear what the user highlighted on the page it opened.
+      const browseId =
+        tabs.find((t) => t.id === discussionId)?.browseId ?? activeBrowseIdRef.current;
+      if (!browseId) return;
+      if (ev.action === "list") {
+        void addSelectionToList(browseId, ev.text, ev.title);
+        return;
+      }
+      setChatSeed({
+        text: promptForSelection(ev),
+        nonce,
+        autoSend: autoSends(ev.action),
+      });
+      setChatHere({ open: true, pill: "page" });
+    },
+    [tabs, discussionId, addSelectionToList, setChatHere],
+  );
+  // The 250 ms poll below runs on a `[]`-deps effect; read through a ref so it
+  // never has to resubscribe (same pattern as `openTabRef`).
+  const dispatchSelectionRef = useRef(dispatchSelection);
+  dispatchSelectionRef.current = dispatchSelection;
 
   // The localhost auto-offer.
   //
@@ -640,6 +735,19 @@ function BrowserPaneBase({
   // Read inside the native settings-menu handler without re-subscribing.
   const tandemRef = useRef(tandem);
   tandemRef.current = tandem;
+  // Highlight-to-chat: the in-page action bar that pops when you finish
+  // selecting text (Ask about this · Define · Explain · Research · Copy ·
+  // ＋ List). On by default — it replaces select/copy/open-chat/paste/type with
+  // one tap — but it draws inside someone else's page, so it stays a toggle.
+  // The flag is passed to the native side, which installs (or tears down) the
+  // shim; see `selection_shim_js` in lib.rs.
+  const [selectionActions, setSelectionActions] = usePersistedState<boolean>(
+    "redline.browser.selectionActions",
+    true,
+  );
+  // Read from tab creation and the settings-menu handler without re-subscribing.
+  const selectionActionsRef = useRef(selectionActions);
+  selectionActionsRef.current = selectionActions;
   // Bookmarks open as a NATIVE popup menu (HTML can't overlay a native
   // webview). Item clicks arrive as a `bookmark-menu-action` event; the
   // handler reads these refs to stay current without re-subscribing.
@@ -868,7 +976,10 @@ function BrowserPaneBase({
       // Native-only: install the in-window fullscreen shim (so a video player's
       // fullscreen button fills the app window instead of being ignored). Also
       // re-installed by browser_set_view alongside any view filter.
-      void invoke("browser_install_shims", { label: tab.label }).catch(() => {});
+      void invoke("browser_install_shims", {
+        label: tab.label,
+        selectionActions: selectionActionsRef.current,
+      }).catch(() => {});
       return wv;
     },
     [],
@@ -905,6 +1016,7 @@ function BrowserPaneBase({
             void invoke("browser_set_view", {
               label: tab.label,
               css: cssForView(viewModeRef.current),
+              selectionActions: selectionActionsRef.current,
             }).catch(() => {});
           }
           // If this tab was suspended, restore its scroll once the page loads.
@@ -1080,6 +1192,9 @@ function BrowserPaneBase({
   //    delegate has no new-window handler), so the shim intercepts them and we
   //    open a real Redline tab here instead. Draining is idempotent (the shim
   //    hands back and clears the queue in one eval).
+  //  • `__redline_selections` — the same shape, for taps on the in-page
+  //    highlight action bar. Read-and-cleared in the same eval, so a dropped
+  //    poll cycle loses nothing and a slow cycle can't double-dispatch.
   // Reuses the proven string-returning eval path — no new native plumbing.
   // ~250ms keeps fullscreen and link-clicks responsive without churn.
   useEffect(() => {
@@ -1098,10 +1213,11 @@ function BrowserPaneBase({
           label: `browser-${id}`,
           script:
             '(function(){try{var q=window.__redline_newtabs||[];window.__redline_newtabs=[];' +
-            'return JSON.stringify({fs:!!window.__redline_fs,tabs:q})}catch(e){return "{}"}})()',
+            'var s=window.__redline_selections||[];window.__redline_selections=[];' +
+            'return JSON.stringify({fs:!!window.__redline_fs,tabs:q,sel:s})}catch(e){return "{}"}})()',
         });
         if (cancelled) return;
-        let sig: { fs?: boolean; tabs?: unknown } = {};
+        let sig: { fs?: boolean; tabs?: unknown; sel?: unknown } = {};
         try {
           sig = JSON.parse(raw || "{}");
         } catch {
@@ -1115,6 +1231,12 @@ function BrowserPaneBase({
             }
           }
         }
+        // The offset keeps the seed nonces distinct when a single drain carries
+        // more than one tap — same millisecond, different seeds.
+        const now = Date.now();
+        parseSelectionEvents(sig.sel).forEach((ev, i) => {
+          dispatchSelectionRef.current(ev, now + i);
+        });
       } catch {
         /* webview gone mid-poll — ignore */
       }
@@ -1807,12 +1929,30 @@ function BrowserPaneBase({
     const css = cssForView(viewMode);
     for (const t of tabsRef.current) {
       if (wvMapRef.current.has(t.id)) {
-        void invoke("browser_set_view", { label: t.label, css }).catch((e) =>
-          console.error("browser_set_view failed", e),
-        );
+        void invoke("browser_set_view", {
+          label: t.label,
+          css,
+          selectionActions: selectionActionsRef.current,
+        }).catch((e) => console.error("browser_set_view failed", e));
       }
     }
   }, [viewMode]);
+
+  // Same shape for the highlight-action toggle. `browser_set_view` rebuilds the
+  // WHOLE user-script set, so it's also how the selection bar goes on and off —
+  // and it evals the change into the already-loaded page, so unchecking the
+  // setting is felt on the page you're reading rather than on the next
+  // navigation. Runs on mount too (harmless: it reinstalls the same set).
+  useEffect(() => {
+    const css = cssForView(viewModeRef.current);
+    for (const t of tabsRef.current) {
+      if (wvMapRef.current.has(t.id)) {
+        void invoke("browser_set_view", { label: t.label, css, selectionActions }).catch(
+          (e) => console.error("browser_set_view failed", e),
+        );
+      }
+    }
+  }, [selectionActions]);
 
   // A click in the native View menu arrives here (HTML can't overlay the
   // webview, so the picker is a native popup like bookmarks). "view-none" resets.
@@ -1847,10 +1987,11 @@ function BrowserPaneBase({
   };
 
   // A click in the native browser Settings menu arrives here (same native-popup
-  // reason as bookmarks/view). Today the only item is the tandem-mode toggle.
+  // reason as bookmarks/view): tandem agent mode and the highlight action bar.
   useEffect(() => {
     const p = listen<string>("browser-settings-action", (e) => {
       if (e.payload === "bset-tandem") setTandem((v) => !v);
+      else if (e.payload === "bset-highlight") setSelectionActions((v) => !v);
     });
     return () => {
       void p.then((un) => un());
@@ -1868,6 +2009,7 @@ function BrowserPaneBase({
     const x = Math.max(margin, Math.min(r.right - SETTINGS_MENU_WIDTH, maxX));
     void invoke("show_browser_settings_menu", {
       tandem: tandemRef.current,
+      highlight: selectionActionsRef.current,
       x: Math.round(x),
       y: Math.round(r.bottom + 4),
     }).catch((err) => console.error("show_browser_settings_menu failed", err));
@@ -2399,7 +2541,7 @@ function BrowserPaneBase({
               {chatTab === "list" ? (
                 <Suspense fallback={<div className="h-full" />}>
                   <BrowseList
-                    key={discussionTab.browseId}
+                    key={`${discussionTab.browseId}:${listReloadKey}`}
                     browseId={discussionTab.browseId}
                     source={{ url: discussionTab.url, title: discussionTab.title }}
                     onClose={() => setChatHere({ open: false })}

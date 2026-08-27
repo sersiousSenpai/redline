@@ -1,9 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Folder } from "lucide-react";
-import { useMenuOverlay } from "./menuOverlay";
+import { Panel, useClickPopover } from "./popover";
+
+/** Panel width, px. Exported for the same reason `PANEL_WIDTH` is: the
+ *  placement clamp and the rendered panel must agree, or the clamp keeps a
+ *  narrower box on screen than the one that paints. */
+export const PICKER_WIDTH = 280;
 
 export interface ProjectOption {
   /** Absolute directory path. */
@@ -40,10 +45,26 @@ function basename(path: string): string {
   return trimmed.slice(idx + 1) || path;
 }
 
-// A small DOM dropdown of candidate project directories: review sessions and
-// open folder workspaces (deduped by path), a Home fallback, plus a native
-// "Browse…" folder picker. Gated through `useMenuOverlay` so the native browser
-// webview hides while the menu is open (same as the header dropdowns).
+// A small dropdown of candidate project directories: review sessions and open
+// folder workspaces (deduped by path), a Home fallback, plus a native
+// "Browse…" folder picker.
+//
+// The menu rides the shared popover primitive rather than its own
+// `position: absolute; bottom: calc(100% + 4px)` block. That block was two
+// separate bugs. It was *always* upward, with no flip and no viewport
+// awareness. And it was not portalled, so it was clipped by whatever ancestor
+// happened to clip — `.rl-doorframe { overflow: hidden }` on the Front Door,
+// and worst, the Send-to-Claude-Code dialog card, which is itself
+// `maxHeight: 90vh; overflowY: auto`. `overflow-y: auto` computes `overflow-x`
+// to `auto` as well, so that card clips BOTH axes: the menu grew up through
+// the card's own title and out of the clip, and scrolling the card moved
+// trigger and menu together. The rows were permanently unreachable.
+//
+// `useClickPopover` fixes all three call sites at once: it portals to
+// `document.body` (escaping every ancestor clip), flips to whichever side has
+// room, caps the list at the room actually there, and registers
+// `useMenuOverlay` internally so the native browser webview hides while the
+// menu is open (same as the header dropdowns).
 export function ProjectPicker({
   options,
   value,
@@ -52,9 +73,8 @@ export function ProjectPicker({
   onNewProject,
   chromeless = false,
 }: ProjectPickerProps) {
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement | null>(null);
-  useMenuOverlay(open);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const pop = useClickPopover(triggerRef, "left", "below", PICKER_WIDTH);
 
   // Dedupe by normalized path; sessions win over folders on a tie.
   const merged = useMemo(() => {
@@ -66,20 +86,14 @@ export function ProjectPicker({
     return [...seen.values()];
   }, [options]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
-  }, [open]);
+  // No local mousedown listener: `useClickPopover` runs `useDismiss`, which
+  // covers outside-mousedown AND Escape (which this never had).
 
   const label =
     value === null ? "Home (~)" : basename(value);
 
   const browse = async () => {
-    setOpen(false);
+    pop.close();
     try {
       const picked = await openDialog({ directory: true, multiple: false });
       if (typeof picked === "string") onChange(picked);
@@ -91,10 +105,13 @@ export function ProjectPicker({
   };
 
   return (
-    <div ref={rootRef} data-no-drag="true" style={{ position: "relative" }}>
+    <div data-no-drag="true">
       <button
         type="button"
-        onClick={() => setOpen((o) => !o)}
+        ref={triggerRef}
+        onClick={pop.toggle}
+        aria-haspopup="menu"
+        aria-expanded={pop.open}
         title="Choose the project to launch the plan in"
         className={
           chromeless
@@ -133,66 +150,63 @@ export function ProjectPicker({
           ▾
         </span>
       </button>
-      {open && (
-        <div
-          className="rl-thin-scroll-y"
-          style={{
-            position: "absolute",
-            bottom: "calc(100% + 4px)",
-            left: 0,
-            minWidth: "240px",
-            maxHeight: "320px",
-            overflowY: "auto",
-            zIndex: 50,
-            border: "1px solid var(--color-rule)",
-            borderRadius: "6px",
-            background: "var(--color-bg-elevated)",
-            boxShadow: "0 6px 24px rgba(0,0,0,0.3)",
-            padding: "4px",
-          }}
-        >
-          <MenuRow
-            label="Home (~)"
-            selected={value === null}
-            onClick={() => {
-              onChange(null);
-              setOpen(false);
+      {pop.open && (
+        <Panel label="Choose project" {...pop.panelProps}>
+          <div
+            className="rl-thin-scroll-y"
+            // Bounded by Panel's placement-derived `maxHeight`; `minHeight: 0`
+            // is what lets this flex child shrink below its content and
+            // therefore scroll.
+            style={{
+              flex: "1 1 auto",
+              minHeight: 0,
+              overflowY: "auto",
+              padding: "4px",
             }}
-          />
-          {merged.length > 0 && <RowDivider />}
-          {merged.map((opt) => (
+          >
             <MenuRow
-              key={opt.path}
-              label={opt.name}
-              hint={
-                opt.source === "session"
-                  ? "session"
-                  : opt.source === "folder"
-                    ? "open folder"
-                    : "project"
-              }
-              selected={
-                (value?.replace(/\/+$/, "") || "") ===
-                (opt.path.replace(/\/+$/, "") || "")
-              }
+              label="Home (~)"
+              selected={value === null}
               onClick={() => {
-                onChange(opt.path);
-                setOpen(false);
+                onChange(null);
+                pop.close();
               }}
             />
-          ))}
-          <RowDivider />
-          {onNewProject && (
-            <MenuRow
-              label="＋ New project…"
-              onClick={() => {
-                setOpen(false);
-                onNewProject();
-              }}
-            />
-          )}
-          <MenuRow label="📁 Browse…" onClick={browse} />
-        </div>
+            {merged.length > 0 && <RowDivider />}
+            {merged.map((opt) => (
+              <MenuRow
+                key={opt.path}
+                label={opt.name}
+                hint={
+                  opt.source === "session"
+                    ? "session"
+                    : opt.source === "folder"
+                      ? "open folder"
+                      : "project"
+                }
+                selected={
+                  (value?.replace(/\/+$/, "") || "") ===
+                  (opt.path.replace(/\/+$/, "") || "")
+                }
+                onClick={() => {
+                  onChange(opt.path);
+                  pop.close();
+                }}
+              />
+            ))}
+            <RowDivider />
+            {onNewProject && (
+              <MenuRow
+                label="＋ New project…"
+                onClick={() => {
+                  pop.close();
+                  onNewProject();
+                }}
+              />
+            )}
+            <MenuRow label="📁 Browse…" onClick={browse} />
+          </div>
+        </Panel>
       )}
     </div>
   );

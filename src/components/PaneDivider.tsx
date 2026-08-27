@@ -67,6 +67,23 @@ interface PaneDividerProps {
    *  the one piece of the sidebar that is always in flow whatever the panel is
    *  doing, so it is where an always-available entry belongs. */
   action?: { glyph: string; label: string; onClick: () => void };
+  /** What the CENTRE pill does while the pane is expanded and not already
+   *  fullscreen. Default `"collapse"` — every divider but the terminal's.
+   *
+   *  The terminal dock passes `"fullscreen"`: its top-edge caret is the
+   *  gesture users already reach for, and fullscreen used to live on a `⤢` in
+   *  one tile header, which is a strange place for a whole-dock control and
+   *  gets stranger the more tiles there are. The pill still calls `onToggle`;
+   *  only its glyph and label change, and only in that one state — collapsed
+   *  still shows the re-open caret, and a fullscreen instance still exits. */
+  toggleMode?: "collapse" | "fullscreen";
+  /** Which state shows `action`. Default `"collapsed"` (the sidebar's "Plan a
+   *  build", which exists to survive the sidebar going away).
+   *
+   *  `"expanded"` is for a divider whose centre pill is no longer the collapse
+   *  control: the terminal's collapse then needs a mouse affordance of its
+   *  own, because the drag has a 120px floor and cannot reach zero. */
+  actionVisible?: "collapsed" | "expanded";
 }
 
 // Divider hosting a drag affordance (when expanded) and a collapse/expand
@@ -85,6 +102,8 @@ export function PaneDivider({
   hideChevron = false,
   hairline = false,
   action,
+  toggleMode = "collapse",
+  actionVisible = "collapsed",
 }: PaneDividerProps) {
   const horizontal = orientation === "horizontal";
   const resizeCursor = horizontal ? "row-resize" : "col-resize";
@@ -97,11 +116,17 @@ export function PaneDivider({
     ? `Exit fullscreen ${label}`
     : `Exit fullscreen ${label}`;
   const handleClick = fullscreen && onExitFullscreen ? onExitFullscreen : onToggle;
+  // The centre pill is the fullscreen control only in the expanded,
+  // not-already-fullscreen state — the one state where "collapse" was its only
+  // job and a second pill can take that over.
+  const fullscreenPill = toggleMode === "fullscreen" && !collapsed;
   const buttonTitle = fullscreen
     ? exitLabel
     : collapsed
       ? `Show ${label}`
-      : `Collapse ${label}`;
+      : fullscreenPill
+        ? `Fullscreen ${label}`
+        : `Collapse ${label}`;
   // Chevrons read as "shrink back inward." For vertical dividers the direction
   // depends on which side the pane is on: a trailing (right) pane points "›"
   // when expanded, a leading (left) pane points "‹".
@@ -113,16 +138,27 @@ export function PaneDivider({
   // missing from many fonts (unlike its sibling U+2303 "⌃", which doubles as
   // the control-key symbol), so the expanded state rendered as a fallback
   // glyph that didn't read as a caret at all.
-  const glyph = horizontal
-    ? "›"
-    : fullscreen
-      ? collapseGlyph
-      : collapsed
-        ? expandGlyph
-        : collapseGlyph;
+  const glyph = fullscreenPill
+    ? fullscreen
+      ? "⤡"
+      : "⤢"
+    : horizontal
+      ? "›"
+      : fullscreen
+        ? collapseGlyph
+        : collapsed
+          ? expandGlyph
+          : collapseGlyph;
   // Down (+90°) collapses the bottom dock / exits fullscreen; up (-90°)
-  // re-opens a collapsed dock.
-  const rotation = horizontal ? (!fullscreen && collapsed ? -90 : 90) : 0;
+  // re-opens a collapsed dock. `⤢`/`⤡` are already directional and are the one
+  // pair that must never be rotated.
+  const rotation = fullscreenPill
+    ? 0
+    : horizontal
+      ? !fullscreen && collapsed
+        ? -90
+        : 90
+      : 0;
 
   // The interactive grab zone extends a few px past the gutter on each side so
   // the resize cursor is easy to acquire even when a scrollbar gutter sits
@@ -156,12 +192,18 @@ export function PaneDivider({
   // before the chevron along the divider's run, so the two never overlap in
   // either orientation.
   const STACK = 40;
-  // Only while collapsed — expanded, the sidebar's own "Plan a build" row is
-  // right there, and two entries to the same place is one too many. It also
-  // retires with the carets when the combined latch replaces them, and the
-  // curtain's absolutely-positioned copy of this divider passes no `action`,
-  // so it can never double-paint.
-  const showAction = !!action && collapsed && !fullscreen && !hideChevron;
+  // `actionVisible` picks the state. The sidebar's default is collapsed-only:
+  // expanded, its own "Plan a build" row is right there, and two entries to
+  // the same place is one too many. The terminal's is expanded-only, because
+  // there its centre pill has become the fullscreen control. Either way the
+  // action retires with the carets when the combined latch replaces them, and
+  // the curtain's absolutely-positioned copy of this divider passes no
+  // `action`, so it can never double-paint.
+  const showAction =
+    !!action &&
+    (actionVisible === "expanded" ? !collapsed : collapsed) &&
+    !fullscreen &&
+    !hideChevron;
   return (
     <div
       className={[

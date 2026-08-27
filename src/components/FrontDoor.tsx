@@ -17,13 +17,17 @@ import { WorkingIndicator } from "./WorkingIndicator";
 import { useMenuOverlay } from "./menuOverlay";
 import { useDictation } from "../lib/useDictation";
 import {
+  fallbackDestination,
   frontDoorSuggestions,
-  otherDestination,
   projectNameFromPrompt,
   submitAction,
   type LaunchDestination,
 } from "../lib/frontDoor";
-import { attemptLaunch as gateLaunch, type ProjectChoice } from "../lib/launch";
+import {
+  attemptChat as gateChat,
+  attemptLaunch as gateLaunch,
+  type ProjectChoice,
+} from "../lib/launch";
 import type { ReadinessItem } from "../lib/readiness";
 
 // The front door. The document plate's resting state and where Redline opens:
@@ -75,6 +79,12 @@ export interface FrontDoorProps {
    *  so the same blocker twice nudges twice. */
   refusal: { item: ReadinessItem | null; reason: string | null; nonce: number } | null;
   onDrafter: () => void;
+  /** Open the composer's text as a new chat — the third destination. */
+  onChat: () => void;
+  /** The manifest keeps the chat surface. False removes the destination
+   *  entirely rather than offering a route that bounces straight back off a
+   *  disabled surface. */
+  chatEnabled: boolean;
   /** Where ⏎ sends. Sticky and persisted — `Plan ▾` sets it. */
   destination: LaunchDestination;
   onDestinationChange: (next: LaunchDestination) => void;
@@ -99,6 +109,12 @@ export interface FrontDoorProps {
    *  state, never a header button). Empty hides the row. */
   harnesses?: { id: string; name: string }[];
   onEnterHarness?: (id: string) => void;
+  /** Recent chats — the contextual way BACK into a conversation. A chat is a
+   *  place you return to, and without a way back the room would be reachable
+   *  only by starting a new one. Same orbit discipline as the harness row: a
+   *  way in, never furniture. Empty hides the row. */
+  chats?: { id: string; title: string }[];
+  onOpenChat?: (id: string) => void;
   /** Inside a harness the door wears ITS voice — the harness manifest's
    *  hero lines replace the stock ones, field by field. */
   hero?: { eyebrow?: string; title?: string; sub?: string } | null;
@@ -121,6 +137,8 @@ export function FrontDoor(props: FrontDoorProps) {
     onLaunch,
     refusal,
     onDrafter,
+    onChat,
+    chatEnabled,
     destination,
     onDestinationChange,
     onCancelPending,
@@ -131,6 +149,8 @@ export function FrontDoor(props: FrontDoorProps) {
     dictationEnabled,
     harnesses = [],
     onEnterHarness,
+    chats = [],
+    onOpenChat,
     hero = null,
   } = props;
 
@@ -317,11 +337,37 @@ export function FrontDoor(props: FrontDoorProps) {
         else if (!hasText) refuse();
         return;
       }
-      if (to === "drafter") onDrafter();
-      else attemptLaunch();
+      if (to === "drafter") {
+        onDrafter();
+        return;
+      }
+      if (to === "chat") {
+        // A chat's gate is NARROWER than the plan's and wider than the
+        // Drafter's non-gate: it spawns `claude`, so a missing binary or a
+        // stolen daemon port really would swallow the first message — but it
+        // needs no hook approval, no project and no interception mode, and
+        // refusing a conversation for those would be nonsense.
+        const gate = gateChat(readiness);
+        if (gate.kind === "blocked") {
+          setBlocked(gate.item);
+          refuse();
+          return;
+        }
+        setBlocked(null);
+        setRefusedWhy(null);
+        onChat();
+        return;
+      }
+      attemptLaunch();
     },
-    [canSubmit, pending, hasText, refuse, onDrafter, attemptLaunch],
+    [canSubmit, pending, hasText, refuse, onDrafter, onChat, readiness, attemptLaunch],
   );
+
+  // A sticky destination outlives the manifest that allowed it: someone who
+  // left the door on `chat` and later disabled the surface would otherwise
+  // press ⏎ into a route that bounces straight back.
+  const liveDestination: LaunchDestination =
+    destination === "chat" && !chatEnabled ? "plan" : destination;
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     const action = submitAction(
@@ -332,7 +378,7 @@ export function FrontDoor(props: FrontDoorProps) {
         ctrlKey: e.ctrlKey,
         isComposing: e.nativeEvent.isComposing,
       },
-      destination,
+      liveDestination,
     );
     if (action === "ignore" || action === "newline") return;
     e.preventDefault();
@@ -513,8 +559,9 @@ export function FrontDoor(props: FrontDoorProps) {
                 chromeless
               />
               <PlanMenu
-                destination={destination}
+                destination={liveDestination}
                 onDestinationChange={onDestinationChange}
+                chatEnabled={chatEnabled}
               />
               <div style={{ flex: 1 }} />
               {dictation.error && (
@@ -539,12 +586,14 @@ export function FrontDoor(props: FrontDoorProps) {
               </button>
               <button
                 type="button"
-                onClick={() => send(destination)}
+                onClick={() => send(liveDestination)}
                 disabled={!canSubmit}
                 title={
-                  destination === "drafter"
+                  liveDestination === "drafter"
                     ? "Open this in the drafter (⏎)"
-                    : "Plan this (⏎)"
+                    : liveDestination === "chat"
+                      ? "Talk this through (⏎)"
+                      : "Plan this (⏎)"
                 }
                 className={`rl-fd-go${canSubmit ? " is-armed" : ""}`}
               >
@@ -656,6 +705,39 @@ export function FrontDoor(props: FrontDoorProps) {
         </div>
       )}
 
+      {/* Recent chats — the way back in. */}
+      {chats.length > 0 && onOpenChat && (
+        <div
+          className={`rl-fd-suggest-wrap${suggestionsHidden ? " is-hidden" : ""}`}
+          aria-hidden={suggestionsHidden}
+        >
+          <div className="rl-fd-suggestions">
+            <span
+              className="font-sans"
+              style={{
+                fontSize: "var(--rl-text-xs)",
+                color: "var(--color-ink-muted)",
+                alignSelf: "center",
+              }}
+            >
+              Recent chats
+            </span>
+            {chats.map((c) => (
+              <button
+                key={c.id}
+                type="button"
+                className="rl-fd-suggestion"
+                tabIndex={suggestionsHidden ? -1 : 0}
+                title={`Pick up “${c.title}” where you left it`}
+                onClick={() => onOpenChat(c.id)}
+              >
+                {c.title}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       <ReadinessStrip items={readiness} onFix={handleFix} />
 
       <button type="button" className="rl-fd-how" onClick={onHowItWorks}>
@@ -705,6 +787,10 @@ function PlanningCard({
 const DESTINATIONS: { id: LaunchDestination; label: string; chip: string }[] = [
   { id: "plan", label: "Plan a build", chip: "Plan" },
   { id: "drafter", label: "Draft a document first", chip: "Draft" },
+  // The third: for the thought that isn't a plan or a document yet. The keycap
+  // column already renders "" for "neither", so a third row needs no change
+  // there — only `fallbackDestination` had to stop being an involution.
+  { id: "chat", label: "Talk it through first", chip: "Chat" },
 ];
 
 /** `Plan ▾` — a DESTINATION picker, not a model picker, and a STICKY one.
@@ -718,9 +804,11 @@ const DESTINATIONS: { id: LaunchDestination; label: string; chip: string }[] = [
 function PlanMenu({
   destination,
   onDestinationChange,
+  chatEnabled,
 }: {
   destination: LaunchDestination;
   onDestinationChange: (next: LaunchDestination) => void;
+  chatEnabled: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -733,8 +821,9 @@ function PlanMenu({
     document.addEventListener("mousedown", onDown);
     return () => document.removeEventListener("mousedown", onDown);
   }, [open]);
-  const current = DESTINATIONS.find((d) => d.id === destination) ?? DESTINATIONS[0];
-  const alternate = otherDestination(destination);
+  const rows = DESTINATIONS.filter((d) => d.id !== "chat" || chatEnabled);
+  const current = rows.find((d) => d.id === destination) ?? rows[0];
+  const alternate = fallbackDestination(destination);
   return (
     <div ref={rootRef} data-no-drag="true" style={{ position: "relative" }}>
       <button
@@ -747,7 +836,7 @@ function PlanMenu({
       </button>
       {open && (
         <div className="rl-fd-menu">
-          {DESTINATIONS.map((d) => (
+          {rows.map((d) => (
             <button
               key={d.id}
               type="button"

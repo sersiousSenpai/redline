@@ -5,9 +5,15 @@
 // fit in the right-hand gutter, or would it sit on top of the text?
 //
 // Sibling of textClearance.ts, which answers the same question for the controls
-// in the LEFT margin. This one is a plain hide rather than a yield: the pill has
-// no smaller pose to take, so it drops out and the ⌘ +/−/0 shortcuts carry on
-// working without it.
+// in the LEFT margin — and answers it the same way: by YIELDING, never hiding.
+// The pill DOES have a smaller pose, the narrow column it stands up into in
+// wide view, and a gutter too tight for the row is still roomy enough for that.
+// So the answer here is never "gone". A plan document always carries its zoom
+// and its line-width toggle: ⌘ +/−/0 are not discoverable, the way back out of
+// wide view lives in this control, and at the pane widths this app actually
+// runs at — sidebar, terminal wall and a docked discussion all taking their
+// cut — the row almost never fits, so "hide when it doesn't" read as the
+// controls simply being gone.
 //
 // The subtlety is wide view. There the article runs to the pane's edges, so the
 // gutter this control lives in is no longer "whatever the centred column didn't
@@ -34,6 +40,11 @@ export const DOC_CTRL_GAP = 12;
  *  "would it fit again?" question needs a width from somewhere. */
 export const DOC_CTRL_ROW_W = 120;
 
+/** …and stacked into a column: one 22px button plus the pill's 3px padding and
+ *  1px border either side. A fallback only — the live element is measured — so
+ *  an approximation is enough. */
+export const DOC_CTRL_COL_W = 30;
+
 /** All viewport-space x-coordinates, as read from bounding rects. */
 export function docControlFits({
   articleRight,
@@ -53,4 +64,38 @@ export function docControlFits({
   const controlLeft = containerRight - DOC_CTRL_INSET - controlWidth;
   const textRight = articleRight - padRight;
   return textRight + DOC_CTRL_GAP <= controlLeft;
+}
+
+/** The two poses the control can take. There is deliberately no third one for
+ *  "hidden": see the header. */
+export type DocControlPose = "row" | "column";
+
+/** Which pose the control should take in the room the gutter gives it.
+ *
+ *  Only the ROW is measured against the text — a column that still doesn't fit
+ *  is shown anyway, floating over the tail of the last line rather than leaving
+ *  the document with no zoom and no way out of wide view. That is the whole
+ *  trade: a 30px chip in the bottom-right corner beats a missing control.
+ */
+export function docControlPose({
+  articleRight,
+  containerRight,
+  padRight,
+  rowWidth,
+}: {
+  articleRight: number;
+  containerRight: number;
+  padRight: number;
+  /** The control's width laid out as a ROW — never the stacked measurement,
+   *  which would answer a question nobody asked and oscillate (see App.tsx). */
+  rowWidth: number;
+}): DocControlPose {
+  return docControlFits({
+    articleRight,
+    containerRight,
+    padRight,
+    controlWidth: rowWidth,
+  })
+    ? "row"
+    : "column";
 }

@@ -34,9 +34,13 @@ import { Panel, PanelHeader, type PanelProps } from "./popover";
 export const TILE_MENU_WIDTH = 320;
 
 /** The filter row appears at this many terminals — derived, not taste: at
- *  320px an OPEN row is ~44px and maxHeight 60vh on a 900px window is ~540px
- *  ≈ 12 rows, so the filter earns its place exactly when the list stops
- *  fitting. */
+ *  320px an OPEN row is ~44px, and the height budget the placement helper
+ *  hands a comfortably-placed menu is a few hundred px ≈ 12 rows, so the
+ *  filter earns its place at about the point the list stops fitting.
+ *
+ *  A threshold is all this can be. The real budget is now the room beside the
+ *  anchor (`placeUnder` → `maxHeight`), which differs per tile and per window
+ *  size; the list scrolls when it exceeds that, whatever this number says. */
 export const MENU_FILTER_THRESHOLD = 12;
 
 /** Everything a header/menu can DO, one stable object for all N tiles —
@@ -54,7 +58,6 @@ export interface TileActions {
   onNewRepo: (tile: number, path: string) => void;
   onZoomTile: (tile: number) => void;
   onFocusTile: (tile: number) => void;
-  onToggleFullscreen: () => void;
   /** Outline tile `tile` imperatively while a row is hovered (null clears) —
    *  a style write on the ref-mapped element, no render. */
   onHintTile: (tile: number | null) => void;
@@ -226,7 +229,11 @@ export function TerminalTileMenu({
         tabIndex={-1}
         onKeyDown={onKeyDown}
         className="rl-thin-scroll-y py-1 outline-none"
-        style={{ maxHeight: "60vh", overflowY: "auto" }}
+        // The bound comes from Panel's `maxHeight` — the room actually left
+        // beside this tile's ▾ — not from a `60vh` fraction of a window the
+        // menu was never measured against. `minHeight: 0` is what lets a flex
+        // child shrink below its content and therefore scroll at all.
+        style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto" }}
       >
         {showFilter && (
           <div className="px-2 pb-1">

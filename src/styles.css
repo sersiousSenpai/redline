@@ -2088,7 +2088,8 @@ p.rl-block-modified {
 .rl-menu-item[aria-selected="true"]:hover {
   background: color-mix(in srgb, var(--color-ink) 8%, var(--color-anchor-bg));
 }
-/* Terminal tile header action cluster (⤢ ×). Always in flow at its natural
+/* Terminal tile header action cluster (× and the zoomed badge; dock fullscreen
+   moved to the terminal divider). Always in flow at its natural
    width and revealed by OPACITY only — a width reveal would re-truncate the
    label under the pointer. Shown on hover, keyboard focus within, an open
    tile menu, or on the focused tile (the one being typed in), so keyboard

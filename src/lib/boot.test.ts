@@ -143,6 +143,9 @@ describe("boot-path JS contract", () => {
     "OnboardingTour",
     "SessionSidebar",
     "FileViewer",
+    // The chat room. Not optional: the boot path sits at ~97% of its ceiling,
+    // so a room in the entry chunk would blow `size-budget.json` outright.
+    "ChatRoom",
   ];
 
   it("the heavy surfaces never return to App's static import list", () => {
@@ -190,7 +193,7 @@ describe("boot-path JS contract", () => {
       /const SURFACE_CHUNK_LOADERS[\s\S]*?= \{([\s\S]*?)\}/,
     );
     expect(map, "SURFACE_CHUNK_LOADERS map missing").not.toBe(null);
-    for (const key of ["document", "drafter", "browser", "memory", "runs"]) {
+    for (const key of ["document", "drafter", "browser", "memory", "runs", "chat"]) {
       expect(map![1].includes(`${key}:`), `${key} missing from loader map`).toBe(
         true,
       );

@@ -1299,7 +1299,21 @@ impl Database {
                 claude_session_id TEXT,
                 last_journal_seq INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
+                updated_at INTEGER NOT NULL,
+                -- Per-conversation seat override: a chat can sit on a bigger
+                -- model than the `companion` seat's default without moving the
+                -- seat. NULL on both = the seat's own flags, unchanged.
+                model TEXT,
+                effort TEXT,
+                -- Completed assistant turns as of this thread's last CLI-session
+                -- rotation. A COLUMN rather than an app_settings key on purpose:
+                -- chats are not a singleton, and a per-thread mark that dies with
+                -- its row can never be inherited by a recreated thread (the bug
+                -- memchat's `memchat_clear` has to clear by hand).
+                rotated_at_turns INTEGER NOT NULL DEFAULT 0,
+                -- A user rename from the Chats dropdown wins permanently: the
+                -- auto-titling pass must never overwrite a name they chose.
+                title_is_user_set INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS companion_messages (
@@ -1594,6 +1608,18 @@ impl Database {
         // A mission's saved tab workspace (JSON `[{id,url,title,browseId}]`), so
         // re-entering a mission reopens its exact tabs with their discussions.
         let _ = conn.execute("ALTER TABLE missions ADD COLUMN tabs_json TEXT", []);
+        // Chat (the Companion's unbound room): the per-conversation model/effort
+        // override, the per-thread rotation mark, and the user-rename latch.
+        let _ = conn.execute("ALTER TABLE companion_sessions ADD COLUMN model TEXT", []);
+        let _ = conn.execute("ALTER TABLE companion_sessions ADD COLUMN effort TEXT", []);
+        let _ = conn.execute(
+            "ALTER TABLE companion_sessions ADD COLUMN rotated_at_turns INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE companion_sessions ADD COLUMN title_is_user_set INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
         // Review-annotation discussion forks (P3.5) — for review_annotations
         // tables created before the column landed on this branch.
         let _ = conn.execute(
@@ -2694,12 +2720,27 @@ impl Database {
         draft_id: &str,
         claude_session_id: &str,
     ) -> rusqlite::Result<usize> {
+        self.bind_threaded_prompt_session(body_hash, "drafter", draft_id, claude_session_id)
+    }
+
+    /// The same bind for any thread that can launch a plan. A chat graduating
+    /// is the second — it owns its launched prompt exactly as a document does,
+    /// and hardcoding `'drafter'` here would have left every graduated prompt
+    /// with a permanently NULL `claude_session_id`, invisible to the transcript
+    /// model backfill.
+    pub fn bind_threaded_prompt_session(
+        &self,
+        body_hash: &str,
+        thread_kind: &str,
+        thread_id: &str,
+        claude_session_id: &str,
+    ) -> rusqlite::Result<usize> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE OR IGNORE prompts SET claude_session_id = ?3
-             WHERE body_hash = ?1 AND thread_kind = 'drafter' AND thread_id = ?2
+            "UPDATE OR IGNORE prompts SET claude_session_id = ?4
+             WHERE body_hash = ?1 AND thread_kind = ?2 AND thread_id = ?3
                AND claude_session_id IS NULL",
-            params![body_hash, draft_id, claude_session_id],
+            params![body_hash, thread_kind, thread_id, claude_session_id],
         )
     }
 
@@ -4064,9 +4105,17 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO companion_sessions
-                (companion_id, title, status, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![c.companion_id, c.title, c.status, c.created_at, c.updated_at],
+                (companion_id, title, status, created_at, updated_at, model, effort)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                c.companion_id,
+                c.title,
+                c.status,
+                c.created_at,
+                c.updated_at,
+                c.model,
+                c.effort
+            ],
         )?;
         Ok(())
     }
@@ -4075,7 +4124,8 @@ impl Database {
     pub fn list_companions(&self) -> rusqlite::Result<Vec<crate::state::Companion>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT companion_id, title, status, created_at, updated_at
+            "SELECT companion_id, title, status, created_at, updated_at, model, effort,
+                    title_is_user_set
              FROM companion_sessions ORDER BY updated_at DESC",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -4085,9 +4135,87 @@ impl Database {
                 status: r.get(2)?,
                 created_at: r.get(3)?,
                 updated_at: r.get(4)?,
+                model: r.get(5)?,
+                effort: r.get(6)?,
+                title_is_user_set: r.get::<_, i64>(7)? != 0,
             })
         })?;
         rows.collect()
+    }
+
+    /// One chat's per-conversation seat override, as `(model, effort)`. Both
+    /// `None` means "use the `companion` seat's own flags" — the override is
+    /// additive, never a second source of truth for the seat.
+    pub fn get_companion_seat(&self, companion_id: &str) -> (Option<String>, Option<String>) {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT model, effort FROM companion_sessions WHERE companion_id = ?1",
+            params![companion_id],
+            |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?)),
+        )
+        .unwrap_or((None, None))
+    }
+
+    /// Set (or clear, with `None`) a chat's model/effort override.
+    pub fn set_companion_seat(
+        &self,
+        companion_id: &str,
+        model: Option<&str>,
+        effort: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE companion_sessions SET model = ?2, effort = ?3 WHERE companion_id = ?1",
+            params![companion_id, model, effort],
+        )?;
+        Ok(())
+    }
+
+    /// Rename a chat. `by_user` latches `title_is_user_set`, which the
+    /// auto-titling pass reads as "never touch this again" — a name the user
+    /// chose outranks anything a model would propose, permanently.
+    pub fn set_companion_title(
+        &self,
+        companion_id: &str,
+        title: &str,
+        by_user: bool,
+    ) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let sql = if by_user {
+            "UPDATE companion_sessions SET title = ?2, title_is_user_set = 1
+             WHERE companion_id = ?1"
+        } else {
+            // The auto-title never overwrites a user-set name.
+            "UPDATE companion_sessions SET title = ?2
+             WHERE companion_id = ?1 AND title_is_user_set = 0"
+        };
+        Ok(conn.execute(sql, params![companion_id, title])? > 0)
+    }
+
+    /// Completed assistant turns as of this chat's last CLI-session rotation.
+    pub fn get_companion_rotated_at(&self, companion_id: &str) -> i64 {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT rotated_at_turns FROM companion_sessions WHERE companion_id = ?1",
+            params![companion_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0)
+    }
+
+    /// Move the rotation mark. Paired with `clear_companion_session` by
+    /// `reset_companion_session` so the two can never drift.
+    pub fn set_companion_rotated_at(
+        &self,
+        companion_id: &str,
+        at_turns: i64,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE companion_sessions SET rotated_at_turns = ?2 WHERE companion_id = ?1",
+            params![companion_id, at_turns],
+        )?;
+        Ok(())
     }
 
     pub fn delete_companion(&self, companion_id: &str) -> rusqlite::Result<()> {
@@ -5601,18 +5729,26 @@ impl Database {
         Ok(())
     }
 
-    /// Resolve a thread kind to its `(table, key column)`. The one place the
-    /// generic thread routes map the app's disjoint id-spaces; `session`/`fork`
-    /// reads a plan session's comment threads.
-    fn thread_table(kind: &str) -> Option<(&'static str, &'static str)> {
+    /// Resolve a thread kind to its `(table, key column, body column)`. The one
+    /// place the generic thread routes map the app's disjoint id-spaces;
+    /// `session`/`fork` reads a plan session's comment threads.
+    ///
+    /// The third element exists for exactly one table: `voice_messages` names
+    /// its body column `text` where every other thread table uses `body`. Three
+    /// prompts advertise `/v1/context/threads/voice/<id>` — `routes_block()`
+    /// (which the voice agent itself embeds), the consult 422, and
+    /// `/v1/global/agents`'s notes — so the route has to resolve, and a `voice`
+    /// arm alone would have produced `no such column: body` instead of a 404.
+    fn thread_table(kind: &str) -> Option<(&'static str, &'static str, &'static str)> {
         match kind {
-            "browse" => Some(("browse_messages", "browse_id")),
-            "linked" => Some(("linked_messages", "linked_id")),
-            "mission" => Some(("mission_messages", "mission_id")),
-            "companion" => Some(("companion_messages", "companion_id")),
-            "drafter" | "drafter_chat" => Some(("draft_chat_messages", "draft_id")),
-            "memchat" => Some(("mem_chat_messages", "thread_id")),
-            "session" | "fork" => Some(("thread_messages", "session_id")),
+            "browse" => Some(("browse_messages", "browse_id", "body")),
+            "linked" => Some(("linked_messages", "linked_id", "body")),
+            "mission" => Some(("mission_messages", "mission_id", "body")),
+            "companion" => Some(("companion_messages", "companion_id", "body")),
+            "voice" => Some(("voice_messages", "session_key", "text")),
+            "drafter" | "drafter_chat" => Some(("draft_chat_messages", "draft_id", "body")),
+            "memchat" => Some(("mem_chat_messages", "thread_id", "body")),
+            "session" | "fork" => Some(("thread_messages", "session_id", "body")),
             _ => None,
         }
     }
@@ -5628,7 +5764,7 @@ impl Database {
         message_id: &str,
         status: &str,
     ) -> rusqlite::Result<bool> {
-        let Some((table, _)) = Self::thread_table(kind) else {
+        let Some((table, _, _)) = Self::thread_table(kind) else {
             return Ok(false);
         };
         let conn = self.conn.lock().unwrap();
@@ -5639,7 +5775,7 @@ impl Database {
     /// Delete one thread message by id — backs `*_unqueue` (the queued user
     /// row disappears with its queue entry). Returns whether a row existed.
     pub fn delete_thread_message(&self, kind: &str, message_id: &str) -> rusqlite::Result<bool> {
-        let Some((table, _)) = Self::thread_table(kind) else {
+        let Some((table, _, _)) = Self::thread_table(kind) else {
             return Ok(false);
         };
         let conn = self.conn.lock().unwrap();
@@ -5654,8 +5790,8 @@ impl Database {
     pub fn sweep_queued_to_unsent(&self) -> rusqlite::Result<usize> {
         let conn = self.conn.lock().unwrap();
         let mut flipped = 0;
-        for kind in ["browse", "linked", "mission", "memchat"] {
-            let (table, _) = Self::thread_table(kind).expect("queue-capable kinds are mapped");
+        for kind in ["browse", "linked", "mission", "memchat", "companion"] {
+            let (table, _, _) = Self::thread_table(kind).expect("queue-capable kinds are mapped");
             let sql = format!("UPDATE {table} SET status = 'unsent' WHERE status = 'queued'");
             flipped += conn.execute(&sql, [])?;
         }
@@ -5672,12 +5808,14 @@ impl Database {
         id: &str,
         limit: i64,
     ) -> rusqlite::Result<Option<Vec<GenericThreadMsg>>> {
-        let Some((table, key)) = Self::thread_table(kind) else {
+        let Some((table, key, body)) = Self::thread_table(kind) else {
             return Ok(None);
         };
         let conn = self.conn.lock().unwrap();
+        // `{body} AS body` is the alias that lets `voice_messages.text` ride the
+        // same reader as every `body` column.
         let sql = format!(
-            "SELECT role, body, created_at FROM {table}
+            "SELECT role, {body} AS body, created_at FROM {table}
              WHERE {key} = ?1 ORDER BY created_at DESC, id DESC LIMIT ?2"
         );
         let mut stmt = conn.prepare(&sql)?;
@@ -5696,7 +5834,7 @@ impl Database {
     /// Message count + newest timestamp for a thread, for the tree route's
     /// child digests. `(0, None)` for an unknown kind or empty thread.
     pub fn thread_stats(&self, kind: &str, id: &str) -> rusqlite::Result<(i64, Option<i64>)> {
-        let Some((table, key)) = Self::thread_table(kind) else {
+        let Some((table, key, _)) = Self::thread_table(kind) else {
             return Ok((0, None));
         };
         let conn = self.conn.lock().unwrap();

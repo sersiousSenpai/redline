@@ -75,6 +75,52 @@ describe("placeByRect — the bounds are the pane", () => {
   });
 });
 
+describe("placeByRect — the height budget", () => {
+  // The fourth lie: a panel capping itself at `60vh` quotes a fraction of the
+  // WINDOW, unrelated to the room left beside its anchor. A `position: fixed`
+  // panel that overhangs cannot be scrolled back, so its last rows are simply
+  // unreachable. These pin the number that replaces it.
+
+  it("an anchor near the bottom either FITS below or flips above", () => {
+    // 830 in a pane ending at 850: 20px of room. The old code put the panel at
+    // `anchor.bottom + 6` regardless and let it hang off the edge.
+    const p = placeByRect(rect(200, 830), SIZE, { bounds: PANE, prefer: "below" });
+    if (p.side === "below") {
+      expect(p.top + p.maxHeight).toBeLessThanOrEqual(PANE.bottom - 8);
+    } else {
+      expect(p.side).toBe("above");
+    }
+    expect(p.maxHeight).toBeGreaterThan(0);
+  });
+
+  it("an anchor near the top never places the panel above the bounds", () => {
+    const p = placeByRect(rect(200, 60), SIZE, { bounds: PANE, prefer: "above" });
+    expect(p.top).toBeGreaterThanOrEqual(PANE.top + 8);
+    expect(p.maxHeight).toBeGreaterThan(0);
+  });
+
+  it("budgets the room on the side it actually landed on", () => {
+    // Mid-pane, preferring above: roomAbove is 400 - 50 = 350, less gap and
+    // margin. The budget describes the chosen side, not the roomier one.
+    const up = placeByRect(rect(200, 400), SIZE, { bounds: PANE, prefer: "above" });
+    expect(up.side).toBe("above");
+    expect(up.maxHeight).toBe(350 - 8 - 8);
+
+    const down = placeByRect(rect(200, 400), SIZE, { bounds: PANE, prefer: "below" });
+    expect(down.side).toBe("below");
+    // roomBelow = 850 - 420 = 430.
+    expect(down.maxHeight).toBe(430 - 8 - 8);
+  });
+
+  it("never budgets a panel to nothing, even in a pane with no room", () => {
+    // Both sides cramped: the viewport itself is the problem, and a scrollable
+    // stub beats a zero-height panel.
+    const tiny: AnchorRect = { left: 0, top: 0, right: 400, bottom: 60 };
+    const p = placeByRect(rect(10, 20, 80, 20), SIZE, { bounds: tiny });
+    expect(p.maxHeight).toBeGreaterThan(0);
+  });
+});
+
 describe("placeByRect — visibility", () => {
   it("is visible while the anchor overlaps the pane", () => {
     expect(placeByRect(rect(200, 400), SIZE, { bounds: PANE }).visible).toBe(

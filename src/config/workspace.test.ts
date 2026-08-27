@@ -19,6 +19,7 @@ import {
   readWorkspaceCache,
   storeWorkspaceCache,
   MAIN_SURFACE_DESCRIPTORS,
+  SURFACE_LABELS,
   TOGGLEABLE_SURFACES,
   WORKSPACE_CACHE_KEY,
 } from "./workspace";
@@ -40,6 +41,20 @@ describe("workspace snapshot — default manifest reproduces today's UI", () => 
       ["servers", "Localhost", "See your local dev servers"],
       ["runs", "Runs", "Monitor runs and the work graph"],
     ]);
+  });
+
+  it("keeps chat OUT of the header radio group", () => {
+    // Chat is a `MainSurface` and a toggleable one, but it earns no permanent
+    // button — same treatment as memory. Its entries are contextual: the front
+    // door's destination picker, and the recent-chat pills on the island. A
+    // surface earns a header slot by being a daily destination, not by
+    // shipping.
+    const ids = headerSurfaces(defaultWorkspace()).map((d) => d.id);
+    expect(ids).not.toContain("chat");
+    expect(ids).not.toContain("memory");
+    // …and it is still a surface a manifest can switch off.
+    expect(TOGGLEABLE_SURFACES).toContain("chat");
+    expect(SURFACE_LABELS.chat).toBe("Chat");
   });
 
   // The upgrade path for everyone who already customized their header: their

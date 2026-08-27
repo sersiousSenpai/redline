@@ -38,9 +38,9 @@ export interface OverflowPip {
 
 /** The 14px mark in front of a tile's label: the repo's own logo when it
  *  ships one, otherwise the Julia set generated from its name (repoIcon.ts).
- *  With seven near-identical strips the mark is the strongest identity cue,
- *  so it keeps a real logo's footprint and weight. (Moved from the deleted
- *  TerminalTabBar.) */
+ *  Across a wall of near-identical strips the mark is the strongest identity
+ *  cue, so it keeps a real logo's footprint and weight. (Moved from the
+ *  deleted TerminalTabBar.) */
 function TabIconMark({ icon }: { icon: TabIcon }) {
   // Keyed by src rather than a bare boolean so a tab that resolves to a
   // different repo gets a fresh attempt instead of inheriting a stale failure.
@@ -79,8 +79,15 @@ interface TerminalTileHeaderProps {
   focused: boolean;
   /** Present on the focused header only. */
   overflow?: OverflowPip | null;
-  fullscreen: boolean;
   zoomed: boolean;
+  /** What this terminal is working on — a held plan's title, else the shell's
+   *  laundered window title. Null when it has volunteered nothing.
+   *
+   *  Two primitives rather than the `{ text, held }` object `workSignal`
+   *  returns: this component is memo'd on shallow equality, and a fresh object
+   *  per render would re-render every header on every OSC-title tick. */
+  workText?: string | null;
+  workHeld?: boolean;
   actions: TileActions;
   /** Reserved third slot in the action cluster — future chrome lands here
    *  rather than growing a second cluster. */
@@ -88,7 +95,7 @@ interface TerminalTileHeaderProps {
 }
 
 // One tile's 26px header — the terminal's tab, relocated into its tile. Three
-// stacked focus cues, because one blue hairline among seven is too quiet:
+// stacked focus cues, because one blue hairline in a grid of them is too quiet:
 // header background (paper = active-tab paper, elevated otherwise), the 2px
 // bottom border (info vs rule), and label ink+weight. The border is 2px in
 // BOTH states: a 1px↔2px swap would change the tile's content box, reflow
@@ -105,8 +112,9 @@ export const TerminalTileHeader = memo(function TerminalTileHeader({
   identity,
   focused,
   overflow,
-  fullscreen,
   zoomed,
+  workText = null,
+  workHeld = false,
   actions,
   extraControl,
 }: TerminalTileHeaderProps) {
@@ -201,33 +209,49 @@ export const TerminalTileHeader = memo(function TerminalTileHeader({
           ▾
         </span>
       </button>
-      <span className="flex-1" />
+      {/* What it is working on, in the space the spacer used to hold. Same
+          grammar as the menu row: a 4px dot, HELD_RED when a plan is held.
+          Muted ink rather than the menu's full ink — the label beside it is
+          the primary identity and this is the gloss.
+
+          Native `title=`, never `.rl-tipwrap`: the header is `overflow:
+          hidden` and would clip the CSS tooltip (see the note above). Both
+          this and the label truncate inside `min-w-0` parents, so a narrow
+          header in a fourteen-tile grid degrades instead of overflowing. */}
+      {workText ? (
+        <span
+          className="flex flex-1 items-center gap-1 min-w-0"
+          title={workText}
+          style={{
+            fontSize: "11px",
+            color: workHeld ? HELD_RED : "var(--color-ink-muted)",
+          }}
+        >
+          <span
+            aria-hidden
+            className="shrink-0"
+            style={{
+              width: "4px",
+              height: "4px",
+              borderRadius: "50%",
+              background: workHeld ? HELD_RED : "var(--color-ink-muted)",
+            }}
+          />
+          <span className="truncate">{workText}</span>
+        </span>
+      ) : (
+        <span className="flex-1" />
+      )}
       {/* Always in flow at natural width; reveal is opacity-only. */}
       <div className="rl-tile-actions flex items-center gap-1 shrink-0">
         {extraControl}
-        {focused && (
-          // Dock fullscreen, on the focused tile only — one instance, not
-          // seven. It is the ONLY way to enter dock fullscreen (App's
-          // dividers merely collapse or exit), so it must not be dropped.
-          <button
-            type="button"
-            onClick={actions.onToggleFullscreen}
-            title={fullscreen ? "Restore terminal dock" : "Fullscreen terminal dock"}
-            aria-label={
-              fullscreen ? "Restore terminal dock" : "Fullscreen terminal dock"
-            }
-            className="flex items-center justify-center rounded cursor-pointer"
-            style={{
-              width: "18px",
-              height: "18px",
-              fontSize: "11px",
-              lineHeight: 1,
-              color: "var(--color-ink-muted)",
-            }}
-          >
-            {fullscreen ? "⤡" : "⤢"}
-          </button>
-        )}
+        {/* Dock fullscreen used to live here, on the focused tile. It has
+            moved to the terminal divider's centre pill (PaneDivider
+            `toggleMode="fullscreen"`): a whole-dock control belongs on the
+            dock's own edge, not inside one of its tiles — and the more tiles
+            there are, the stranger the old home looked. Per-tile ZOOM is
+            untouched: double-click this strip, or the menu's "⤢ Zoom this
+            tile" row. */}
         {zoomed && (
           <span
             title="Tile is zoomed — double-click the header to restore the grid"

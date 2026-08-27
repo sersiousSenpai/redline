@@ -415,3 +415,143 @@ describe("cancel and clear", () => {
     ctl.detach();
   });
 });
+
+// The chat room joins the contract with NOTHING renamed: the backend command
+// family is already `companion_send` / `_turn_status` / `_cancel` / `_unqueue`
+// and the events are already `companion-delta|done|error|cancelled|
+// queue-advanced`. This pins that — a rename on either side breaks it here,
+// not in a GUI walk.
+describe("the companion surface", () => {
+  // `Array.prototype.at` is past this build's lib target; the tail is all we
+  // ever want here anyway.
+  const last = <T,>(xs: T[]): T | undefined => xs[xs.length - 1];
+
+  const chatCfg = (): AgentTurnConfig<TurnMessage> =>
+    makeCfg({
+      surface: "companion",
+      key: "chat-1",
+      idField: "companionId",
+      historyCmd: "companion_get_thread",
+      historyArgs: { companionId: "chat-1" },
+      sendFailPrefix: "Couldn't reach the chat agent",
+      buildSendArgs: (text, extra) => ({
+        companionId: "chat-1",
+        text,
+        cwd: null,
+        handoff: extra ?? null,
+      }),
+    });
+
+  function chatIo() {
+    const f = fakeIo();
+    f.invokeImpl.set("companion_get_thread", () => []);
+    f.invokeImpl.set("companion_turn_status", () => idle);
+    f.invokeImpl.set("companion_send", (args) => ({
+      started: true,
+      queued: false,
+      messageId: `m-${String((args as { text: string }).text).slice(0, 4)}`,
+    }));
+    f.invokeImpl.set("companion_cancel", () => undefined);
+    f.invokeImpl.set("companion_unqueue", () => "pulled back");
+    return f;
+  }
+
+  it("subscribes the companion-* family and probes with companionId", async () => {
+    const { io, invokeImpl, handlers, invoke } = chatIo();
+    void invokeImpl;
+    const ctl = new AgentTurnController<TurnMessage>(chatCfg, io);
+    await ctl.attach();
+    await flush();
+    expect([...handlers.keys()].sort()).toEqual([
+      "companion-cancelled",
+      "companion-delta",
+      "companion-done",
+      "companion-error",
+      "companion-queue-advanced",
+    ]);
+    expect(
+      invoke.mock.calls.find((c) => c[0] === "companion_turn_status")?.[1],
+    ).toEqual({ companionId: "chat-1" });
+    ctl.detach();
+  });
+
+  it("streams a turn and settles on done", async () => {
+    const { io, emit } = chatIo();
+    const ctl = new AgentTurnController<TurnMessage>(chatCfg, io);
+    await ctl.attach();
+    await flush();
+    ctl.send("so I've been thinking…");
+    await flush();
+    expect(ctl.getState().phase).toBe("streaming");
+    emit("companion-delta", { companionId: "chat-1", text: "Right — ", seq: 1 });
+    emit("companion-delta", { companionId: "chat-1", text: "the anchoring thing.", seq: 2 });
+    expect(ctl.getState().liveText).toBe("Right — the anchoring thing.");
+    emit("companion-done", {
+      companionId: "chat-1",
+      messageId: "a1",
+      body: "Right — the anchoring thing.",
+    });
+    expect(ctl.getState().phase).toBe("idle");
+    expect(last(ctl.getState().messages)?.body).toBe("Right — the anchoring thing.");
+    ctl.detach();
+  });
+
+  it("ignores another chat's events entirely", async () => {
+    const { io, emit } = chatIo();
+    const ctl = new AgentTurnController<TurnMessage>(chatCfg, io);
+    await ctl.attach();
+    await flush();
+    emit("companion-delta", { companionId: "chat-OTHER", text: "not ours", seq: 1 });
+    expect(ctl.getState().liveText).toBe("");
+    ctl.detach();
+  });
+
+  it("carries the handoff target through as the send's extra", async () => {
+    // The graduation turn: `→ Draft` is an ordinary send whose extra flags the
+    // backend's pending-handoff, so the reply comes back as
+    // `companion-handoff-done` even if the room has since unmounted.
+    const { io, invoke } = chatIo();
+    const ctl = new AgentTurnController<TurnMessage>(chatCfg, io);
+    await ctl.attach();
+    await flush();
+    ctl.send("Distil this…", { localBody: "✦ Take this to a draft", extra: "drafter" });
+    await flush();
+    const call = invoke.mock.calls.find((c) => c[0] === "companion_send");
+    expect(call?.[1]).toMatchObject({
+      companionId: "chat-1",
+      handoff: "drafter",
+      queue: true,
+    });
+    // The bubble shows the stand-in, not the distillation instruction.
+    expect(last(ctl.getState().messages)?.body).toBe("✦ Take this to a draft");
+    ctl.detach();
+  });
+
+  it("queues a type-ahead send and pulls it back out", async () => {
+    const { io, emit, invokeImpl, invoke } = chatIo();
+    invokeImpl.set("companion_send", () => ({
+      started: false,
+      queued: true,
+      messageId: "m-queued",
+    }));
+    const ctl = new AgentTurnController<TurnMessage>(chatCfg, io);
+    await ctl.attach();
+    await flush();
+    ctl.send("and the beta?");
+    await flush();
+    expect(last(ctl.getState().messages)?.status).toBe("queued");
+
+    // The drain flips the chip off.
+    emit("companion-queue-advanced", { companionId: "chat-1", messageId: "m-queued" });
+    expect(last(ctl.getState().messages)?.status).toBe("complete");
+
+    // …and the × route reaches the right command with the right key.
+    ctl.send("scratch that");
+    await flush();
+    await expect(ctl.unqueue("m-queued")).resolves.toBe("pulled back");
+    expect(
+      invoke.mock.calls.find((c) => c[0] === "companion_unqueue")?.[1],
+    ).toEqual({ companionId: "chat-1", messageId: "m-queued" });
+    ctl.detach();
+  });
+});

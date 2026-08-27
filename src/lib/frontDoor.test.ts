@@ -4,8 +4,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  fallbackDestination,
   frontDoorSuggestions,
-  otherDestination,
   projectNameFromPrompt,
   submitAction,
 } from "./frontDoor";
@@ -30,6 +30,19 @@ describe("submitAction", () => {
     expect(submitAction(key("Enter"))).toBe("plan");
     expect(submitAction(key("Enter", { metaKey: true }))).toBe("drafter");
     expect(submitAction(key("Enter", { ctrlKey: true }))).toBe("drafter");
+  });
+
+  it("sends to chat on ⏎ and falls back to plan on ⌘⏎", () => {
+    expect(submitAction(key("Enter"), "chat")).toBe("chat");
+    expect(submitAction(key("Enter", { metaKey: true }), "chat")).toBe("plan");
+    expect(submitAction(key("Enter", { ctrlKey: true }), "chat")).toBe("plan");
+    // ⇧⏎ is still a newline on the third destination too.
+    expect(submitAction(key("Enter", { shiftKey: true }), "chat")).toBe(
+      "newline",
+    );
+    expect(submitAction(key("Enter", { isComposing: true }), "chat")).toBe(
+      "ignore",
+    );
   });
 
   it("follows the selected destination on a bare Enter", () => {
@@ -76,15 +89,23 @@ describe("submitAction", () => {
     for (const k of ["a", "Escape", "Tab", "ArrowDown", " ", "Backspace"]) {
       expect(submitAction(key(k))).toBe("ignore");
       expect(submitAction(key(k), "drafter")).toBe("ignore");
+      expect(submitAction(key(k), "chat")).toBe("ignore");
     }
   });
 });
 
-describe("otherDestination", () => {
-  it("is an involution — flipping twice returns you", () => {
-    expect(otherDestination("plan")).toBe("drafter");
-    expect(otherDestination("drafter")).toBe("plan");
-    expect(otherDestination(otherDestination("plan"))).toBe("plan");
+describe("fallbackDestination", () => {
+  it("reproduces the two-destination behavior exactly", () => {
+    // The whole point of the rename: plan⇄drafter is untouched.
+    expect(fallbackDestination("plan")).toBe("drafter");
+    expect(fallbackDestination("drafter")).toBe("plan");
+    expect(fallbackDestination(fallbackDestination("plan"))).toBe("plan");
+  });
+
+  it("gives chat a sane modifier — ⌘⏎ plans", () => {
+    // "I've written it out, just build it" is the move that belongs one key
+    // away from a half-formed thought.
+    expect(fallbackDestination("chat")).toBe("plan");
   });
 });
 

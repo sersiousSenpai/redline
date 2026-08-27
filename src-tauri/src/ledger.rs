@@ -487,12 +487,13 @@ pub fn claim_agent_prompt(body_hash: &str) -> bool {
 /// first hook fire claims it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchClaim {
-    /// Which door launched it: `front-door` | `drafter` | `browser`.
+    /// Which door launched it: `front-door` | `drafter` | `browser` | `chat`.
     pub origin: String,
-    /// The document it was launched from. `None` for the doors that have no
-    /// document — the front door's one sentence and the browser's Send — whose
+    /// The THREAD it was launched from, as `(kind, id)` — a Drafter document
+    /// (`drafter`) or a chat (`companion`). `None` for the doors that own no
+    /// thread — the front door's one sentence and the browser's Send — whose
     /// prompts still need binding even though there is nothing to link them to.
-    pub draft_id: Option<String>,
+    pub thread: Option<(String, String)>,
 }
 
 fn launch_guard() -> &'static Mutex<HashMap<String, (LaunchClaim, Instant)>> {
@@ -503,7 +504,11 @@ fn launch_guard() -> &'static Mutex<HashMap<String, (LaunchClaim, Instant)>> {
 /// Register a prompt body about to be launched into a new plan session,
 /// carrying the door it came through and the draft id (when the door has a
 /// document) the eventual session should be linked under.
-pub fn register_plan_launch(body_hash: &str, origin: &str, draft_id: Option<&str>) {
+pub fn register_plan_launch(
+    body_hash: &str,
+    origin: &str,
+    thread: Option<(&str, &str)>,
+) {
     let mut g = launch_guard().lock().unwrap();
     let now = Instant::now();
     g.retain(|_, (_, t)| now.duration_since(*t) < GUARD_TTL);
@@ -512,7 +517,7 @@ pub fn register_plan_launch(body_hash: &str, origin: &str, draft_id: Option<&str
         (
             LaunchClaim {
                 origin: origin.to_string(),
-                draft_id: draft_id.map(str::to_string),
+                thread: thread.map(|(k, i)| (k.to_string(), i.to_string())),
             },
             now,
         ),
@@ -1366,18 +1371,34 @@ mod tests {
     }
 
     #[test]
-    fn launch_guard_claims_once_with_origin_and_draft_id() {
+    fn launch_guard_claims_once_with_origin_and_owning_thread() {
         let bh = format!("draftguard-{}", now_millis());
         assert_eq!(claim_plan_launch(&bh), None);
-        register_plan_launch(&bh, "drafter", Some("draft-7"));
+        register_plan_launch(&bh, "drafter", Some(("drafter", "draft-7")));
         assert_eq!(
             claim_plan_launch(&bh),
             Some(LaunchClaim {
                 origin: "drafter".to_string(),
-                draft_id: Some("draft-7".to_string()),
+                thread: Some(("drafter".to_string(), "draft-7".to_string())),
             })
         );
         assert_eq!(claim_plan_launch(&bh), None, "consume-once");
+    }
+
+    /// A chat graduating owns its launched prompt exactly as a document does —
+    /// the claim carries the thread KIND, so the seam that links the spawned
+    /// plan session under its origin works for both.
+    #[test]
+    fn launch_guard_carries_a_chat_as_the_owning_thread() {
+        let bh = format!("chatguard-{}", now_millis());
+        register_plan_launch(&bh, "chat", Some(("companion", "chat-3")));
+        let claim = claim_plan_launch(&bh).expect("a graduation registers");
+        assert_eq!(claim.origin, "chat");
+        assert_eq!(
+            claim.thread,
+            Some(("companion".to_string(), "chat-3".to_string())),
+            "the kind must ride along, or the link is filed under a draft"
+        );
     }
 
     #[test]
@@ -1388,9 +1409,9 @@ mod tests {
         // them out is why those prompts had a permanently NULL session id.
         let bh = format!("fdguard-{}", now_millis());
         register_plan_launch(&bh, "front-door", None);
-        let claim = claim_plan_launch(&bh).expect("a draftless launch still registers");
+        let claim = claim_plan_launch(&bh).expect("a threadless launch still registers");
         assert_eq!(claim.origin, "front-door");
-        assert_eq!(claim.draft_id, None);
+        assert_eq!(claim.thread, None);
     }
 
     #[test]

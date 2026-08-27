@@ -30,7 +30,8 @@ export type ToggleableSurface =
   | "runs"
   | "voice"
   | "collab"
-  | "memory";
+  | "memory"
+  | "chat";
 
 // "companion" is gone from this list on purpose: the Companion's scope merged
 // into the voice agent (the Voice toggle covers the whole discussion surface
@@ -45,6 +46,7 @@ export const TOGGLEABLE_SURFACES: readonly ToggleableSurface[] = [
   "voice",
   "collab",
   "memory",
+  "chat",
 ];
 
 /** One header/main surface the registry can compose. `label`/`title` carry the
@@ -61,7 +63,9 @@ export interface SurfaceDescriptor {
  *  earn a permanent header button only when they're a daily destination, not
  *  per feature shipped. Runs earned its entry when the cross-project Work tab
  *  moved in (a destination you visit without a live run); the run chip stays
- *  as the contextual entry. */
+ *  as the contextual entry. Chat is absent for the same reason: you reach it
+ *  from the front door's destination picker or a recent-chat pill, both of
+ *  which are contextual entries on the resting state. */
 export const MAIN_SURFACE_DESCRIPTORS: readonly SurfaceDescriptor[] = [
   { id: "document", label: "Document", title: "Show the document" },
   { id: "browser", label: "Browser", title: "Switch to the browser" },
@@ -81,6 +85,7 @@ export const SURFACE_LABELS: Record<ToggleableSurface, string> = {
   voice: "Voice",
   collab: "Live Session",
   memory: "Memory",
+  chat: "Chat",
 };
 
 /** `"last"` = land wherever the previous run ended (today's behavior). */

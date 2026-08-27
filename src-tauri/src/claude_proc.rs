@@ -185,9 +185,22 @@ pub const BRIDGE_INVARIANT_ARGS: [&str; 15] = [
 /// consult path and the linked-discussion agent so the tool surface can't
 /// drift between them.
 pub fn bridge_args(seat: &str, prompt: String, prior_session: Option<&str>) -> Vec<String> {
+    bridge_args_with_flags(prompt, prior_session, crate::seat::flag_args(seat))
+}
+
+/// `bridge_args`, with the seat's flag tail passed in rather than read from the
+/// seat store — for a caller carrying a PER-THREAD override (a chat's own
+/// `--model`/`--effort`; see `seat::flag_args_override`). The invariant block
+/// is byte-identical either way, so `assert_read_only_argv` and every existing
+/// caller are unaffected; only where the tail comes from changes.
+pub fn bridge_args_with_flags(
+    prompt: String,
+    prior_session: Option<&str>,
+    seat_flags: Vec<String>,
+) -> Vec<String> {
     let mut args: Vec<String> = vec!["-p".to_string(), prompt];
     args.extend(BRIDGE_INVARIANT_ARGS.iter().map(|s| s.to_string()));
-    args.extend(crate::seat::flag_args(seat));
+    args.extend(seat_flags);
     if let Some(sid) = prior_session {
         args.push("--resume".to_string());
         args.push(sid.to_string());

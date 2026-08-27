@@ -127,6 +127,9 @@ import {
 import {
   deliverToTerminal,
   orchestrateHandoff,
+  PROMPT_TIMEOUT_MS,
+  SHELL_PROMPT,
+  type HandoffStep,
   type OrchestrateDeps,
 } from "./lib/terminalHandoff";
 import { SidebarTabStrip } from "./components/SidebarTabStrip";
@@ -185,6 +188,11 @@ const OrchestrationSurface = lazy(() =>
     default: m.OrchestrationSurface,
   })),
 );
+// Off the boot path, and this one is not optional: boot JS sits at ~99% of the
+// size budget, so a chat room in the boot chunk would fail `size-budget.json`
+// outright. It loads when the door's third destination is taken.
+const loadChatRoom = () => import("./components/ChatRoom");
+const ChatRoom = lazy(() => loadChatRoom().then((m) => ({ default: m.ChatRoom })));
 // Every lazy surface body's chunk, keyed by the surface that mounts it. The
 // boot effect prefetches the LANDING surface's entry the moment
 // `initialSurface` resolves — the doors' choreography covers the fetch, so a
@@ -199,6 +207,7 @@ const SURFACE_CHUNK_LOADERS: Partial<
   browser: loadBrowserPane,
   memory: loadMemorySurface,
   runs: loadOrchestrationSurface,
+  chat: loadChatRoom,
 };
 function prefetchSurfaceChunk(surface: string): void {
   void SURFACE_CHUNK_LOADERS[surface]?.().catch(() => {});
@@ -371,7 +380,7 @@ import {
   DOC_CTRL_ROW_W,
   DOC_PAD_R_NARROW,
   DOC_PAD_R_WIDE,
-  docControlFits,
+  docControlPose,
 } from "./lib/docControl";
 import {
   beginResizeSession,
@@ -418,6 +427,7 @@ import type {
   Comment,
   CommentType,
   CodexHookStatus,
+  Companion,
   GitStatus,
   HookStatus,
   InterceptionMode,
@@ -700,6 +710,7 @@ function App() {
   const serversOpen = mainSurface === "servers";
   const memoryOpen = mainSurface === "memory";
   const runsOpen = mainSurface === "runs";
+  const chatOpen = mainSurface === "chat";
   // The user has explicitly reopened something on this visit to an immersive
   // surface, so the mask is off until they leave. Declared here — above
   // selectSurface — because entering a surface re-arms it. Never persisted:
@@ -1099,6 +1110,64 @@ function App() {
     "redline.frontDoor.destination",
     "plan",
   );
+  // ── The chat room ───────────────────────────────────────────────────────
+  // Which conversation the room shows. PERSISTED for the same reason the
+  // door's sentence is: a chat is a place you come back to, and landing on a
+  // blank room after a restart would make it feel like a scratchpad instead.
+  const [chatId, setChatId] = usePersistedState<string | null>(
+    "redline.chat.id",
+    null,
+  );
+  // The chat list, for the door's recent-chat pills and the surface's title.
+  // App owns it (not the room) because the pills render on the FRONT DOOR,
+  // which is precisely where the room is not mounted.
+  const [chats, setChats] = useState<Companion[]>([]);
+  const [chatsLoaded, setChatsLoaded] = useState(false);
+  // The door's sentence, handed to the room to send as message 1. Ephemeral by
+  // design — a seed that outlived a restart would re-send an old sentence into
+  // a conversation that already has it.
+  const [chatSeed, setChatSeed] = useState<{
+    companionId: string;
+    text: string;
+  } | null>(null);
+  // The mint is in flight. Holds a placeholder so the PREVIOUS conversation
+  // can't flash up in the half-second before the new one exists — the same
+  // guard `drafterOpening` is for the Drafter.
+  const [chatOpening, setChatOpening] = useState(false);
+  const refreshChats = useCallback(() => {
+    void invoke<Companion[]>("companion_list")
+      .then(setChats)
+      .catch(() => {
+        /* the list is an affordance, not a dependency */
+      })
+      .finally(() => setChatsLoaded(true));
+  }, []);
+  useEffect(() => {
+    refreshChats();
+  }, [refreshChats]);
+  // The room retitles itself a beat after the first reply, and renames/deletes
+  // happen inside it — either way the door's pills have to follow.
+  useEffect(() => {
+    const un = listen("companion-retitled", () => refreshChats());
+    return () => {
+      void un.then((f) => f());
+    };
+  }, [refreshChats]);
+
+  // A chat surface with no chat. `mainSurface` is persisted and `chatId` can be
+  // cleared independently (the last chat deleted, storage wiped), so the pair
+  // can come back disagreeing — which would strand the room on its "starting a
+  // conversation…" placeholder forever. Land on the most recent conversation
+  // if there is one; otherwise go home. Waits for the list to load, so an
+  // in-flight fetch is never mistaken for an empty one.
+  useEffect(() => {
+    if (!chatOpen || chatId || chatOpening || !chatsLoaded) return;
+    const recent = chats[0];
+    if (recent) setChatId(recent.companionId);
+    else selectSurfaceRef.current("document");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatOpen, chatId, chatOpening, chatsLoaded, chats]);
+
   // ONE pending launch, keyed by the door it came through. Not one per
   // surface: `deriveReadiness` takes a single `pendingSince`, so two states
   // would force App to fold them, and the 90s `hook-unapproved` nudge would
@@ -1727,12 +1796,22 @@ function App() {
       ),
     [setDiscussionZoom],
   );
-  // The floating zoom control lives in the right gutter; it hides once the
-  // (centered) text column grows wide enough to reach it, so it never sits on
-  // top of the document text. Driven by the overlap effect below.
-  const [zoomVisible, setZoomVisible] = useState(true);
+  // The floating zoom control lives in the right gutter. It never LEAVES a
+  // plan document — once the (centered) text column grows wide enough to reach
+  // it, it stands up into the same narrow column it takes in wide view instead
+  // of dropping out. Driven by the overlap effect below.
+  const [zoomStacked, setZoomStacked] = useState(false);
   const zoomCtrlRef = useRef<HTMLDivElement | null>(null);
+  // Mirrors `zoomStacked` for the recompute closure, which must not re-run on
+  // its own output.
+  const zoomStackedRef = useRef(false);
+  // The control's remembered ROW width. Only ever written from a row-posed
+  // control: see the measurement note in the effect.
   const zoomCtrlW = useRef(DOC_CTRL_ROW_W);
+  // The pose, as the render reads it. Wide view always stacks (there is no
+  // horizontal gutter left at full bleed); a narrow pane stacks because the
+  // row would land on the text.
+  const zoomColumn = docWide || zoomStacked;
   // Cmd/Ctrl +/-/0 zoom the document. These combos aren't text input, so we
   // claim them globally (and preventDefault the browser's own page zoom).
   // ⌘⇧0 snap-back (A3) and ⌘K palette (A5) are matched by lib/keymap — the
@@ -1899,6 +1978,15 @@ function App() {
     setImmersiveBroken(true);
     setTermCollapsed(!termCollapsed);
   }, [termCollapsed, setTermCollapsed]);
+  // Entering dock fullscreen. Extracted from the inline handler that used to
+  // sit on TerminalTabs' `onFullscreenChange` (the per-tile `⤢`, now retired)
+  // so the terminal divider's centre pill can drive it. Going fullscreen is an
+  // open gesture and must still break the immersive mask; leaving it never
+  // needs to, which is why the two exit paths below just set the flag.
+  const enterTermFullscreen = useCallback(() => {
+    setImmersiveBroken(true);
+    setTermFullscreen(true);
+  }, [setTermFullscreen]);
 
   // The chrome's hover reveal. The header can't simply vanish — it is the
   // window-drag region and the traffic lights float over it — so immersive
@@ -2593,40 +2681,49 @@ function App() {
     },
   });
 
-  // Hide the floating zoom pill the moment the document text would reach it.
-  // The article is centered with a max width, so on a wide pane there's an empty
-  // right gutter to host the control; as the pane narrows the text column grows
-  // toward the right edge — once its text (minus the article's right padding)
-  // reaches the control's left edge, drop the control. Recomputed on any pane
-  // resize via a ResizeObserver on the scroll container. Re-runs on the
-  // surface switches / doc-pin toggles too: those unmount and remount the
-  // document, giving a fresh ref/observer — otherwise the pill would stay
-  // stale-hidden after another surface is switched back off.
+  // Stand the floating zoom pill UP the moment the document text would reach
+  // it. The article is centered with a max width, so on a wide pane there's an
+  // empty right gutter to host the control as a row; as the pane narrows the
+  // text column grows toward the right edge — once its text (minus the
+  // article's right padding) reaches the control's left edge, the row gives way
+  // to the narrow column, which fits in a gutter a fraction of the size. What
+  // never happens is the control leaving. Recomputed on any pane resize via a
+  // ResizeObserver on the scroll container. Re-runs on the surface switches /
+  // doc-pin toggles too: those unmount and remount the document, giving a fresh
+  // ref/observer — otherwise the pose would stay stale after another surface is
+  // switched back off.
   useEffect(() => {
     const article = documentRef.current;
     const container = article?.parentElement ?? null;
     if (!article || !container) {
-      setZoomVisible(false);
+      // No article to clear — the Drafter, which occupies the plate with its
+      // own editor. Nothing to overlap, so take the roomy pose. (This used to
+      // hide the control outright, which is why the Drafter had no zoom.)
+      zoomStackedRef.current = false;
+      setZoomStacked(false);
       return;
     }
     const recompute = () => {
       const a = article.getBoundingClientRect();
       const c = container.getBoundingClientRect();
-      // Once hidden the control is unmounted, so there is nothing left to
-      // measure — and the question is still "would it fit if it came back?".
-      // Answer it with the last width it actually had; the constant only ever
-      // covers the frames before the first measurement.
+      // The live element is the best width source — but only while it is posed
+      // as a row. Stacked (or in wide view, where it always stacks) it measures
+      // the OTHER pose, and feeding that ~30px back into "does the row fit?"
+      // answers yes, flips it to a row, which instantly doesn't fit, which
+      // flips it back — forever. So the row width is remembered, and only a row
+      // updates it; the constant covers the frames before the first one.
       const measured = zoomCtrlRef.current?.offsetWidth;
-      if (measured) zoomCtrlW.current = measured;
-      const controlW = measured ?? zoomCtrlW.current;
-      setZoomVisible(
-        docControlFits({
+      if (measured && !docWide && !zoomStackedRef.current)
+        zoomCtrlW.current = measured;
+      const stacked =
+        docControlPose({
           articleRight: a.right,
           containerRight: c.right,
           padRight: docPadR,
-          controlWidth: controlW,
-        }),
-      );
+          rowWidth: zoomCtrlW.current,
+        }) === "column";
+      zoomStackedRef.current = stacked;
+      setZoomStacked(stacked);
     };
     recompute();
     // Three forced-layout reads and a possible render — worth nothing while a
@@ -2659,7 +2756,15 @@ function App() {
     // the comparison in the same commit — the article's padding and the
     // control's own width — and the ResizeObserver only sees the container,
     // which didn't move.
-  }, [sidebarTab, activeFile, activeId, mainSurface, docPinned, docPadR]);
+  }, [
+    sidebarTab,
+    activeFile,
+    activeId,
+    mainSurface,
+    docPinned,
+    docPadR,
+    docWide,
+  ]);
 
   // Position the latch over the visible remnant of the document. The doc
   // column's flow box floors at DOC_MIN now, so "squeezed shut" means the
@@ -3719,6 +3824,9 @@ function App() {
     serversOpen,
     memoryOpen,
     runsOpen,
+    chatOpen,
+    chatId,
+    chatTitle: chats.find((c) => c.companionId === chatId)?.title ?? null,
     activeId,
     planTitle: activeSummary?.planTitle ?? null,
     planProject: activeSummary?.projectPath ?? null,
@@ -4278,6 +4386,32 @@ function App() {
     summaries.find((s) => s.sessionId === activeId)?.attachState ===
     "detached";
   const detached = activeDetached && !detachDismissed;
+  // A restore in flight, by session id. Restoring costs a resumed model turn
+  // and takes several seconds; without this the button looks inert and gets
+  // clicked again — which is not harmless. Every click resumes the SAME
+  // conversation in ANOTHER terminal, and each of those lands its own
+  // ExitPlanMode: on 08/26 three clicks 40 seconds apart put two duplicate
+  // revisions on one plan and left three claudes racing to hold it.
+  //
+  // Cleared by the plan coming back (the session leaves `detached`) or by the
+  // watchdog below, never by the click that set it.
+  const [restoringId, setRestoringId] = useState<string | null>(null);
+  const restoring = !!restoringId && restoringId === activeId;
+  useEffect(() => {
+    if (!restoringId) return;
+    // Reattached: the restore landed and the banner is already gone.
+    const state = summaries.find((s) => s.sessionId === restoringId)?.attachState;
+    if (state && state !== "detached") {
+      setRestoringId(null);
+      return;
+    }
+    // …or it didn't. A stuck flag would disable the only way back, so it
+    // expires on its own — generously, since the wait is a model turn against
+    // a full transcript and the reviewer can always wait longer than we can
+    // predict.
+    const timer = window.setTimeout(() => setRestoringId(null), 120_000);
+    return () => window.clearTimeout(timer);
+  }, [restoringId, summaries]);
   // `waiting` shows the "Claude is working" indicators and gates the
   // submit/approve buttons — true from "Send to Claude Code" until that
   // session's next plan arrives. See isClaudeWorking for the exact rules
@@ -4754,6 +4888,11 @@ function App() {
     data: string,
     failNote: string,
     sessionId?: string | null,
+    /** Set when `id` is a shell that just spawned: hold the write until it has
+     *  drawn its prompt, so the command is echoed once rather than twice. See
+     *  `SHELL_PROMPT`. Costs no wall-clock — a shell mid-rc could not have run
+     *  the command yet either way. */
+    freshShell?: boolean,
   ) => {
     const journal = (stage: string, detail?: string) => {
       if (!sessionId) return;
@@ -4764,7 +4903,18 @@ function App() {
       }).catch(() => {});
     };
     const deps = sessionId ? { ...tauriHandoffDeps, journal } : tauriHandoffDeps;
-    void deliverToTerminal(deps, id, [{ stage: "launch", data }]).then((r) => {
+    const step: HandoffStep = freshShell
+      ? {
+          stage: "launch",
+          data,
+          awaitBefore: SHELL_PROMPT,
+          awaitTimeoutMs: PROMPT_TIMEOUT_MS,
+          // A prompt we failed to recognise is not a reason to wait longer —
+          // write immediately and wear the double echo.
+          fallbackSettleMs: 0,
+        }
+      : { stage: "launch", data };
+    void deliverToTerminal(deps, id, [step]).then((r) => {
       if (!r.ok) {
         journal("handoff_failed", `${r.stage}: ${r.reason}`);
         setToast({
@@ -4775,19 +4925,77 @@ function App() {
     });
   };
 
+  /** What `prepare_restore` resolved against the transcripts on disk. */
+  interface RestorePrep {
+    /** The cwd the resume must run from — the session's STARTUP cwd. */
+    cwd: string | null;
+    /** A transcript for this id exists; without one there is nothing to resume. */
+    found: boolean;
+    /** It lives somewhere other than the plan's project path. */
+    relocated: boolean;
+    /** Its plan file already holds the restore marker, so the resumed session
+     *  has one tool call to make instead of three. */
+    primed: boolean;
+  }
+
+  // A session with no transcript on disk can't be resumed at all — `claude
+  // --resume` will report "No conversation found" from every cwd, then start a
+  // FRESH conversation. The restore still lands (the sentinel carries the held
+  // plan's id, so the daemon rebinds it), but the plan's own history is gone
+  // from that session's context, and the reviewer deserves to know which of the
+  // two just happened. The usual cause is transcript saving being off — a
+  // `claude` launched with an inherited CLAUDE_CODE_CHILD_SESSION marker.
+  const NO_TRANSCRIPT_NOTE =
+    "Copied — but Claude has no saved transcript for this session, so it will " +
+    "resume as a fresh conversation without the plan's history.";
+
+  // Ask the backend where this conversation actually lives. Never throws the
+  // restore away on failure: the plan's project path is the guess this used to
+  // make unconditionally, so falling back to it is a return to the old
+  // behaviour rather than a dead end.
+  const resolveResumeCwd = async (
+    sessionId: string,
+    projectPath: string | null | undefined,
+  ): Promise<RestorePrep> => {
+    const fallback: RestorePrep = {
+      cwd: projectPath || null,
+      found: true,
+      relocated: false,
+      primed: false,
+    };
+    try {
+      const r = await invoke<RestorePrep>("prepare_restore", {
+        sessionId,
+        projectPath: projectPath || null,
+      });
+      return r ?? fallback;
+    } catch {
+      return fallback;
+    }
+  };
+
   // One-click recovery for a detached plan: open a terminal in the session's
   // project dir and resume the exact Claude Code conversation with an initial,
   // user-attested prompt that re-presents the plan. Because the resumed session
   // keeps the same session_id, its ExitPlanMode POST reattaches to this review —
   // comments, revisions and reopen history intact (no phantom new review).
-  const restorePlanSession = () => {
+  const restorePlanSession = async () => {
     if (!session) return;
-    const cwd = session.projectPath || null;
+    // One at a time. See `restoringId`.
+    if (restoringId) return;
+    setRestoringId(session.sessionId);
+    // Where the conversation can actually be resumed from — the cwd it STARTED
+    // in, which is not always the plan's project path (a session launched from
+    // `~` and `cd`'d into the repo files its transcript under `~`). Resolved
+    // against the transcripts on disk; falls back to the project path.
+    const target = await resolveResumeCwd(session.sessionId, session.projectPath);
+    const cwd = target.cwd;
     const cmd = `${buildResumeCommand(
       session.sessionId,
       new Date(),
       cwd,
       rescindedIds.has(session.sessionId),
+      target.primed,
     )}\r`;
     // Arm a one-shot restore so the resumed session's re-presented plan is
     // labeled "vN restored" rather than counted as a fresh version/thread.
@@ -4795,20 +5003,30 @@ function App() {
     suppressTerminalRevealFocus();
     setTermFullscreen(false);
     revealTerm();
-    const id = terminalsRef.current?.openSessionTerminal(cwd) ?? null;
+    // The terminal opens in the PLAN's directory — the one the reviewer thinks
+    // in — and the command's own `cd` takes it wherever the transcript lives.
+    const id =
+      terminalsRef.current?.openSessionTerminal(session.projectPath || null) ??
+      null;
     if (id) {
       typeIntoTerminal(
         id,
         cmd,
         "Couldn't type the resume command",
         session.sessionId,
+        true,
       );
     }
     // Hide the banner while the resume runs; the re-presented plan flips
     // attachState back to held, which clears the derived state for real.
     setDetachDismissed(true);
-    setToast("Resuming the session in the terminal below ↓");
-    setTimeout(() => setToast(null), 4000);
+    setToast(
+      target.found
+        ? "Resuming the session below ↓ — the plan comes back when it answers"
+        : "No saved transcript for this session — resuming as a fresh " +
+          "conversation below ↓",
+    );
+    setTimeout(() => setToast(null), target.found ? 6000 : 8000);
   };
 
   // Candidate project directories for the drafter's launch picker: every review
@@ -4872,6 +5090,11 @@ function App() {
     prompt: string;
     projectPath: string | null;
     draftId: string | null;
+    /** The chat this graduated from, when it graduated from one. Makes the
+     *  spawned plan session a CHILD of the conversation in the session tree —
+     *  months later, "why did we build this" walks back from the plan to the
+     *  talk that produced it. */
+    chatId?: string | null;
     restore: LaunchRestore;
   }):
     | { ok: true; terminalId: string }
@@ -4917,6 +5140,7 @@ function App() {
       markdown: trimmed,
       projectPath: req.projectPath,
       draftId: req.draftId,
+      chatId: req.chatId ?? null,
       origin: req.origin,
     }).catch((err: unknown) => {
       const reason = String(err);
@@ -5138,21 +5362,27 @@ function App() {
 
   // Fallback for a Claude running in a terminal Redline doesn't own: copy the
   // resume command so the user can paste it into their own terminal.
-  const copyRestoreCommand = () => {
+  const copyRestoreCommand = async () => {
     if (!session) return;
     // Same one-shot restore arming as restorePlanSession — the resumed plan,
     // whichever terminal runs it, should land as "vN restored".
     void invoke("arm_restore", { sessionId: session.sessionId });
+    const target = await resolveResumeCwd(session.sessionId, session.projectPath);
     void navigator.clipboard?.writeText(
       buildResumeCommand(
         session.sessionId,
         new Date(),
-        session.projectPath || null,
+        target.cwd,
         rescindedIds.has(session.sessionId),
+        target.primed,
       ),
     );
-    setToast("Resume command copied — paste it into a shell prompt");
-    setTimeout(() => setToast(null), 4000);
+    setToast(
+      target.found
+        ? "Resume command copied — paste it into a shell prompt"
+        : NO_TRANSCRIPT_NOTE,
+    );
+    setTimeout(() => setToast(null), 8000);
   };
 
   // Local date/time stamp embedded in export file names.
@@ -5699,6 +5929,117 @@ function App() {
     setFrontDoorText("");
     setFrontDoorAttachments([]);
   };
+
+  // The Front Door's island opening into a CHAT — the same slot and the same
+  // spring the Drafter already occupies, because it is the same gesture: the
+  // sentence you were typing becomes the thing you are now inside.
+  //
+  // The mint is awaited, but nothing waits on the await: the surface switches
+  // and the spring starts on the gesture frame, and `chatOpening` holds a
+  // placeholder for the round-trip rather than letting the previous
+  // conversation flash up in the half-second before the new one exists.
+  const chatFromFrontDoor = async () => {
+    const prompt = composePrompt(frontDoorText, frontDoorAttachments);
+    if (!prompt) return;
+    // Measured HERE, synchronously, while the island is still on screen — one
+    // render later it is gone. This is the box the room springs out of.
+    const island = document.querySelector(".rl-fd-island");
+    const r = island?.getBoundingClientRect();
+    setSwapFrom(
+      r && r.width > 0
+        ? { left: r.left, top: r.top, width: r.width, height: r.height }
+        : null,
+    );
+    setQuietOpen(true);
+    setChatOpening(true);
+    selectSurface("chat");
+    try {
+      // The provisional title is the opening sentence, trimmed to 80 by
+      // `companion_create`. It is a placeholder, not a name: the backend
+      // replaces it with a real one after the first reply lands, unless the
+      // user renames it themselves first.
+      const chat = await invoke<Companion>("companion_create", {
+        title: frontDoorText.trim(),
+      });
+      setChatId(chat.companionId);
+      // The room sends it, not App — see `ChatRoomProps.seed` for why that
+      // ordering is what keeps the first bubble from flickering out.
+      setChatSeed({ companionId: chat.companionId, text: prompt });
+      refreshChats();
+      setFrontDoorText("");
+      setFrontDoorAttachments([]);
+    } catch (e) {
+      // The sentence is still in the composer — nothing was taken away.
+      setToast(`Couldn't start the chat — ${e}`);
+      setTimeout(() => setToast(null), 6000);
+      selectSurface("document");
+    } finally {
+      setChatOpening(false);
+    }
+  };
+
+  // Open an existing conversation (a recent-chat pill). No spring: this is
+  // navigation, not the island becoming something.
+  const openChat = (id: string) => {
+    setChatId(id);
+    setChatSeed(null);
+    setSwapFrom(null);
+    selectSurface("chat");
+  };
+
+  // A chat graduating. The reply to the handoff turn IS the brief, and this
+  // listens at APP level rather than in the room for the same reason the
+  // mission's synthesis does: the distillation keeps running after the user
+  // switches surfaces, and the handoff must still land when the panel that
+  // asked for it is long unmounted.
+  const chatHandoff = async (payload: {
+    companionId: string;
+    target: string;
+    markdown: string;
+  }) => {
+    const markdown = payload.markdown.trim();
+    if (!markdown) return;
+    if (payload.target === "drafter") {
+      await openDrafterWithMarkdown(markdown);
+      setToast("Chat opened in the drafter ✍️");
+      setTimeout(() => setToast(null), 4000);
+      return;
+    }
+    const project = resolveLaunchProject(markdown, null, {
+      projectOptions,
+      openFolder: sidebarTab.kind === "folder" ? sidebarTab.id : null,
+      lastLaunchProject,
+    });
+    selectSurface("document");
+    const r = launchPlan({
+      origin: "chat",
+      prompt: markdown,
+      projectPath: project,
+      // No document to inherit — and inheriting whatever the Drafter happens
+      // to have open would file this plan under an unrelated draft.
+      draftId: null,
+      chatId: payload.companionId,
+      // Nothing owed back: the conversation is untouched and still there.
+      restore: { kind: "none" },
+    });
+    if (!r.ok) {
+      setToast(`Couldn't launch the plan — ${r.reason}`);
+      setTimeout(() => setToast(null), 6000);
+    }
+  };
+  const chatHandoffRef = useRef(chatHandoff);
+  chatHandoffRef.current = chatHandoff;
+  useEffect(() => {
+    const p = listen<{ companionId: string; target: string; markdown: string }>(
+      "companion-handoff-done",
+      (e) => {
+        void chatHandoffRef.current(e.payload);
+      },
+    );
+    return () => {
+      void p.then((un) => un());
+    };
+  }, []);
 
   // Sending from the Drafter. The document STAYS — visible, editable, exactly
   // where it was. The front door clears its composer because the sentence moved
@@ -6995,6 +7336,8 @@ function App() {
                 // the island rather than only in a corner toast.
                 refusal={frontDoorRefusal}
                 onDrafter={drafterFromFrontDoor}
+                onChat={() => void chatFromFrontDoor()}
+                chatEnabled={surfaceEnabled(effectiveWorkspace, "chat")}
                 destination={frontDoorDest}
                 onDestinationChange={setFrontDoorDest}
                 onCancelPending={() => {
@@ -7019,6 +7362,13 @@ function App() {
                   if (manifest) enterHarness(manifest);
                 }}
                 hero={activeHarness?.manifest.hero ?? null}
+                // Recent chats — the contextual way back into a conversation.
+                // Bounded: this is a way in, not an index; the room's own
+                // `Chats ▾` holds the full list.
+                chats={chats
+                  .slice(0, 4)
+                  .map((c) => ({ id: c.companionId, title: c.title }))}
+                onOpenChat={openChat}
                 // One native capture at a time, no session id — the voice
                 // panel owns the mic whenever it is open.
                 dictationEnabled={!voiceOpen}
@@ -7081,6 +7431,51 @@ function App() {
             // `from` is null for the header and command-palette routes: they
             // have no island to spring from, so SpringSwap renders the body
             // untouched.
+            const chatRoomBody =
+              chatOpening || !chatId ? (
+                <EmptyState title="Chat" body="Starting a conversation…" />
+              ) : (
+                <Suspense
+                  fallback={<EmptyState title="Chat" body="Opening the room…" />}
+                >
+                  <ChatRoom
+                    // Keyed by the thread: the composer draft is stored per
+                    // chat and `usePersistedState` reads its key once, so
+                    // switching conversations is a REMOUNT by design rather
+                    // than one chat's half-typed thought carried into another.
+                    key={chatId}
+                    companionId={chatId}
+                    onSelectChat={openChat}
+                    onEmpty={() => {
+                      setChatId(null);
+                      selectSurface("document");
+                    }}
+                    // The agent's read-only file tools are scoped to whatever
+                    // folder the user is browsing; HOME when there is none.
+                    cwd={sidebarTab.kind === "folder" ? sidebarTab.id : null}
+                    dictationEnabled={!voiceOpen}
+                    onClose={() => selectSurface("document")}
+                    seed={
+                      chatSeed?.companionId === chatId ? chatSeed.text : null
+                    }
+                    onSeedConsumed={() => setChatSeed(null)}
+                  />
+                </Suspense>
+              );
+            // The chat springs out of the island exactly as the Drafter does —
+            // same slot, same `SpringSwap`, same `from` measured on the
+            // gesture. `from` is null for the recent-chat pills: navigation
+            // has no island to grow from, and SpringSwap then renders the body
+            // untouched.
+            const chatSurface = (
+              <SpringSwap
+                from={swapFrom}
+                onArrived={() => setSwapFrom(null)}
+                leaving={swapFrom ? documentBody : null}
+              >
+                {chatRoomBody}
+              </SpringSwap>
+            );
             const drafterSurface = (
               <SpringSwap
                 from={swapFrom}
@@ -7107,6 +7502,7 @@ function App() {
               servers: serversBody,
               memory: memoryBody,
               runs: runsBody,
+              chat: chatSurface,
             };
             const secondaryBody =
               mainSurface === "document"
@@ -7145,21 +7541,24 @@ function App() {
                 measureKey={docWide}
               />
             )}
-          {/* Floating document zoom + width control — pinned to the pane
-              (doesn't scroll with the plan). Hidden over the folder file viewer.
+          {/* Floating document zoom + line-width control — pinned to the pane
+              (doesn't scroll with the plan). A document always has it; the only
+              thing that goes without is the folder file viewer, which isn't one.
 
-              In wide view it stacks into a narrow column: full-bleed text leaves
-              no horizontal gutter to lie in, but the vertical one is free, and
-              standing up is what keeps the way back OUT of wide view on screen
-              (a horizontal row here would trip the overlap check and hide the
-              only affordance that undoes the mode). `column-reverse` so the
-              order still reads + above − with the mode toggle on top. */}
+              It stacks into a narrow column whenever the text would otherwise
+              reach it — always in wide view, where full-bleed text leaves no
+              horizontal gutter to lie in, and on any pane too narrow to seat
+              the row. The vertical gutter is free either way, and standing up
+              is what keeps the way back OUT of wide view on screen: the toggle
+              that undoes the mode lives in here, so this control shrinking is
+              always the right answer and disappearing never is.
+              `column-reverse` so the order still reads + above − with the mode
+              toggle on top. */}
           {(mainSurface === "document" ? docSurfaceActive : drafterOpen) &&
-            !(sidebarTab.kind === "folder" && activeFile) &&
-            zoomVisible && (
+            !(sidebarTab.kind === "folder" && activeFile) && (
             <div
               ref={zoomCtrlRef}
-              className={`absolute flex items-center gap-1 rounded-full${docWide ? " flex-col-reverse" : ""}`}
+              className={`absolute flex items-center gap-1 rounded-full${zoomColumn ? " flex-col-reverse" : ""}`}
               style={{
                 right: "16px",
                 bottom: "16px",
@@ -7180,9 +7579,10 @@ function App() {
                   fontSize: "10px",
                   // Stacked, the readout sets the whole column's width — so it
                   // drops the "%" and its reserved room for the three digits it
-                  // actually needs. The column has to stay inside the article's
-                  // 64px right padding or it lands on the text.
-                  minWidth: docWide ? "22px" : "34px",
+                  // actually needs. Every px here is a px of gutter the column
+                  // needs to clear the text, and on the panes that force the
+                  // stack there are few going spare.
+                  minWidth: zoomColumn ? "22px" : "34px",
                   color: "var(--color-ink-muted)",
                   background: "transparent",
                   border: "none",
@@ -7190,7 +7590,7 @@ function App() {
                 }}
               >
                 {Math.round(docZoom * 100)}
-                {docWide ? "" : "%"}
+                {zoomColumn ? "" : "%"}
               </button>
               <ZoomButton label="+" title="Zoom in (⌘+)" onClick={zoomIn} />
               <ZoomButton
@@ -7590,17 +7990,24 @@ function App() {
                     <button
                       type="button"
                       onClick={restorePlanSession}
+                      disabled={restoring}
+                      title={
+                        restoring
+                          ? "Resuming the conversation and re-presenting the plan — this takes a few seconds."
+                          : undefined
+                      }
                       className="rounded px-2 py-1"
                       style={{
                         background: "var(--color-anchor-bg)",
                         color: "var(--color-anchor-text)",
                         border: "1px solid var(--color-rule)",
-                        cursor: "pointer",
+                        cursor: restoring ? "default" : "pointer",
                         fontSize: "12px",
                         fontWeight: 600,
+                        opacity: restoring ? 0.6 : 1,
                       }}
                     >
-                      Restore plan session
+                      {restoring ? "Restoring…" : "Restore plan session"}
                     </button>
                     <button
                       type="button"
@@ -7830,8 +8237,21 @@ function App() {
             label="terminal"
             collapsed={termCollapsed}
             dragging={termDragging}
-            onToggle={toggleTerm}
+            // The top-edge caret IS the dock's fullscreen control now: centre
+            // pill ⤢ to fill the window, the same pill ⤡ to come back. A
+            // collapsed dock keeps the plain re-open caret, so `onToggle`
+            // still means "show me the terminal" in that state.
+            toggleMode="fullscreen"
+            onToggle={termCollapsed ? revealTerm : enterTermFullscreen}
             onPointerDown={startTermDrag}
+            // Collapse loses the centre pill, so it gets its own — the drag
+            // has a 120px floor and can never close the dock.
+            action={{
+              glyph: "⌄",
+              label: "Collapse terminal",
+              onClick: toggleTerm,
+            }}
+            actionVisible="expanded"
           />
         )}
         <div
@@ -7868,6 +8288,8 @@ function App() {
                 label="terminal"
                 collapsed={false}
                 dragging={false}
+                // Same pill, mirrored glyph: ⤡ undoes the ⤢ that got here.
+                toggleMode="fullscreen"
                 onToggle={() => setTermFullscreen(false)}
                 onPointerDown={() => {}}
                 fullscreen
@@ -7878,13 +8300,6 @@ function App() {
           <TerminalTabs
             ref={terminalsRef}
             theme={theme}
-            fullscreen={termFullscreen}
-            onFullscreenChange={(v) => {
-              // The dock's own ⤢. Going fullscreen is an open gesture, so it
-              // breaks the mask; leaving it never needs to.
-              if (v) setImmersiveBroken(true);
-              setTermFullscreen(v);
-            }}
             onTabsChange={setTermTabCount}
             onTabIdsChange={setLiveTermIds}
             onTileCountChange={handleTileCountChange}

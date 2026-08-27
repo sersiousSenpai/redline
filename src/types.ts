@@ -868,6 +868,13 @@ export interface Companion {
   status: string;
   createdAt: number;
   updatedAt: number;
+  /** Per-conversation `--model` override on top of the `companion` seat.
+   *  Absent means "the seat's own model". */
+  model?: string;
+  /** Per-conversation `--effort` override. Same contract as `model`. */
+  effort?: string;
+  /** The user renamed this chat, so the auto-titling pass leaves it alone. */
+  titleIsUserSet?: boolean;
 }
 
 /** One persisted Companion turn, surface-tagged with where the user was. */

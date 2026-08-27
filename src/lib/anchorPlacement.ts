@@ -47,10 +47,28 @@ export interface Placement {
   /** False when the anchor has scrolled out of `bounds`. An overlay whose
    *  anchor isn't on screen must UNMOUNT, not hover at the edge. */
   visible: boolean;
+  /** How tall the overlay may actually be on the side it landed on — the room
+   *  that is really there (`roomBelow - gap - margin`, or `roomAbove - …`),
+   *  floored so it is never budgeted to nothing.
+   *
+   *  This is the fourth lie: a panel that caps itself at `60vh` is quoting a
+   *  fraction of the WINDOW, which has nothing to do with the room left below
+   *  its anchor. A tile low in the grid gets 280px of room and lays out 540px,
+   *  and because the panel is `position: fixed` nothing can scroll the overhang
+   *  back — the rows rendered last are simply unreachable. Give the panel's
+   *  scroller THIS number instead and the overflow becomes scrollable.
+   *
+   *  Additive: `left`/`top`/`side`/`visible` are unchanged by its arrival, so
+   *  callers that ignore it (AnchoredOverlay) keep their behaviour exactly. */
+  maxHeight: number;
 }
 
 const DEFAULT_GAP = 8;
 const DEFAULT_MARGIN = 8;
+/** Below this a "budget" is no longer a budget, it is a sliver. When both sides
+ *  are this cramped the viewport itself is the problem and a scrollable stub
+ *  beats a zero-height panel. */
+const MIN_BUDGET = 96;
 
 /** Place `size` against `target`, inside `bounds`. Coordinates in and out are
  *  viewport coordinates (what `getBoundingClientRect` gives you), so the caller
@@ -99,7 +117,14 @@ export function placeByRect(
     bounds.right - size.width - margin,
   );
 
-  return { left, top, side, visible };
+  // The height budget is the room on the side we actually landed on — not a
+  // viewport fraction, and not `size.height`, which is what the panel WANTED.
+  const maxHeight = Math.max(
+    MIN_BUDGET,
+    (side === "above" ? roomAbove : roomBelow) - gap - margin,
+  );
+
+  return { left, top, side, visible, maxHeight };
 }
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -108,6 +133,19 @@ function clamp(v: number, lo: number, hi: number): number {
   // half.
   if (hi < lo) return lo;
   return Math.max(lo, Math.min(v, hi));
+}
+
+/** The window as an `AnchorRect`. A header menu's bounds ARE the viewport —
+ *  lie #2 above is about overlays *inside a pane* borrowing these bounds, not
+ *  about the menus for which they are correct. Shared so viewport-anchored
+ *  menus and pane-anchored overlays go through one function. */
+export function viewportBounds(): AnchorRect {
+  return {
+    left: 0,
+    top: 0,
+    right: window.innerWidth,
+    bottom: window.innerHeight,
+  };
 }
 
 /** A DOMRect-ish from an element, or null. Kept here so callers don't each

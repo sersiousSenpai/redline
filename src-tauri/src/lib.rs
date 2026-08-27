@@ -68,6 +68,7 @@ mod review_feedback;
 mod runwatch;
 #[cfg(target_os = "macos")]
 mod scroller_guard;
+mod webview_guard;
 mod seat;
 mod shipwright;
 mod shots;
@@ -2164,16 +2165,15 @@ async fn handle_prompts_ingest(
                 // session — claude hadn't spawned) to the session that now runs
                 // it, then let the transcript stamp its model. This is the seam
                 // that makes launched prompts reachable by the model backfill at
-                // all, and it applies to every door: only the drafter's launch
-                // carries a thread to bind through.
-                let bound = match claim.draft_id.as_deref() {
-                    Some(draft_id) => {
-                        if let Err(e) =
-                            ledger::record_session_link(&db, "session", sid, "drafter", draft_id)
-                        {
-                            tracing::warn!(error = %e, "failed to link launched session to its draft");
+                // all, and it applies to every door: only the doors that own a
+                // thread — a Drafter document, or a chat that graduated — carry
+                // one to bind through.
+                let bound = match claim.thread.as_ref() {
+                    Some((kind, id)) => {
+                        if let Err(e) = ledger::record_session_link(&db, "session", sid, kind, id) {
+                            tracing::warn!(error = %e, kind = %kind, "failed to link launched session to its origin thread");
                         }
-                        db.bind_drafter_prompt_session(&bh, draft_id, sid)
+                        db.bind_threaded_prompt_session(&bh, kind, id, sid)
                     }
                     None => db.bind_launch_prompt_session(&bh, sid),
                 };
@@ -2837,6 +2837,37 @@ async fn marketplace_install(
     Ok(())
 }
 
+/// GET `/v1/liveness` — the identity card a booting sibling's preflight
+/// reads off :7676 before deciding what "port in use" means: a Redline with
+/// a window is a live instance to defer to; a Redline without one is a
+/// headless leftover (window died, daemon survived by design) to retire via
+/// `/v1/admin/shutdown`. Open by the read convention; `app` pins the answer
+/// to this daemon rather than whatever else might squat on the port.
+async fn handle_liveness(State(app_state): State<AppState>) -> impl IntoResponse {
+    let has_window = !app_state.app_handle.webview_windows().is_empty();
+    Json(json!({
+        "app": "redline",
+        "pid": std::process::id(),
+        "hasWindow": has_window,
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
+}
+
+/// POST `/v1/admin/shutdown` — gracefully retire this instance: answer, then
+/// run the normal exit path (`RunEvent::Exit` snapshots the ledger and kills
+/// every child agent/PTY) and release :1420/:7676 for the caller. Master
+/// token only; the preflight authenticates with the on-disk `daemon.token`.
+/// The exit is deferred a beat so the acknowledgment actually flushes.
+async fn handle_admin_shutdown(State(app_state): State<AppState>) -> impl IntoResponse {
+    tracing::info!("daemon shutdown requested (retiring this instance for a booting sibling)");
+    let app = app_state.app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        app.exit(0);
+    });
+    Json(json!({ "ok": true, "pid": std::process::id() }))
+}
+
 async fn run_server(state: AppState) {
     // Keep handles for the post-bind status update before the router consumes `state`.
     let daemon_status = state.daemon_status.clone();
@@ -3001,6 +3032,11 @@ async fn run_server(state: AppState) {
         // identity-guarded in the handler (name must match the grant).
         .route("/v1/extensions", get(handle_extensions_list))
         .route("/v1/extensions/:name/panel", post(handle_extension_panel))
+        // Instance control plane: the boot preflight's "who holds this port"
+        // probe, and the master-token-only graceful retirement it invokes
+        // against a headless incumbent (window gone, daemon alive).
+        .route("/v1/liveness", get(handle_liveness))
+        .route("/v1/admin/shutdown", post(handle_admin_shutdown))
         // Control-plane auth (Shardplate Phase 2): every request is checked
         // against the frozen v1 contract in `auth::ROUTE_TABLE` — mutating
         // routes demand the per-boot bearer token (or a scoped extension
@@ -3996,18 +4032,30 @@ async fn handle_global_consult(
                 .into_response();
         }
         "companion" => {
-            return (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "the companion cannot consult itself",
-            )
-                .into_response();
+            // Chats ARE consultable. The blanket 422 this replaces was correct
+            // when there was exactly one Companion; with named chat threads the
+            // brainstorm is where the good thinking accumulates, and it already
+            // appeared in /v1/global/agents — so refusing meant advertising a
+            // colleague who then declined. The self-consult case is still
+            // refused, by the busy reservation inside `consult`.
+            let chat = handle.state::<companion::CompanionState>().inner().clone();
+            let label = app_state
+                .store
+                .database()
+                .thread_label("companion", &req.id)
+                .unwrap_or_else(|| "a chat".to_string());
+            tokio::time::timeout(outer, chat.consult(req.id.clone(), question))
+                .await
+                .map_err(|_| "the consult timed out".to_string())
+                .and_then(|r| r)
+                .map(|digest| (digest, label))
         }
         other => {
             return (
                 StatusCode::BAD_REQUEST,
                 format!(
                     "unknown surface `{other}` — one of \
-                     browse|plan|mission|linked|drafter|shipwright"
+                     browse|plan|mission|linked|drafter|companion|shipwright"
                 ),
             )
                 .into_response();
@@ -4103,6 +4151,28 @@ async fn handle_global_agents(State(app_state): State<AppState>) -> axum::respon
             })
         })
         .collect();
+    // Chats — the unbound rooms. The comment above has named them since the
+    // Companion was a singleton, but nothing ever built the list; now that a
+    // chat is a named, consultable thread, a colleague map that omits it is a
+    // colleague you cannot find.
+    let companion_state = handle.state::<companion::CompanionState>();
+    let chats: Vec<serde_json::Value> = db
+        .list_companions()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|c| {
+            let (count, _) = db.thread_stats("companion", &c.companion_id).unwrap_or((0, None));
+            serde_json::json!({
+                "surface": "companion",
+                "id": c.companion_id,
+                "label": c.title,
+                "status": c.status,
+                "messageCount": count,
+                "consultable": true,
+                "busy": companion_state.is_running(&c.companion_id),
+            })
+        })
+        .collect();
     let reviews: Vec<serde_json::Value> = db
         .list_code_reviews()
         .unwrap_or_default()
@@ -4143,11 +4213,14 @@ async fn handle_global_agents(State(app_state): State<AppState>) -> axum::respon
         "browserTabs": tabs,
         "missions": missions,
         "linked": linkeds,
+        "chats": chats,
         "reviews": reviews,
         "shipwright": shipwright,
-        "notes": "consult browse|plan|mission|linked|drafter|shipwright via \
-                  /v1/global/consult (the shipwright's id is `-`, or a repo path); \
-                  voice threads are read-only at /v1/context/threads/voice/<id>",
+        "notes": "consult browse|plan|mission|linked|drafter|companion|shipwright \
+                  via /v1/global/consult (the shipwright's id is `-`, or a repo \
+                  path; a chat's is its companion id — you cannot consult the \
+                  chat you are in); voice threads are read-only at \
+                  /v1/context/threads/voice/<id>",
     }))
     .into_response()
 }
@@ -8309,6 +8382,178 @@ fn arm_restore(store: tauri::State<'_, SessionStore>, session_id: String) {
     store.arm_restore(&session_id);
 }
 
+/// Where `claude --resume <id>` can actually find a session.
+///
+/// Claude Code scopes resumable sessions per project directory, and it derives
+/// that directory from the cwd the session STARTED in — not the cwd it is in
+/// now. A session launched from `~` that later `cd`s into `~/dialcrown` files
+/// its transcript under `~/.claude/projects/-Users-me/`, so resuming it from
+/// `~/dialcrown` fails with "No conversation found with session ID" even though
+/// the conversation is right there on disk. Redline only ever knew the plan's
+/// project path (the cwd at hook time), which is exactly the wrong one in that
+/// case — so it asked, and got told no.
+#[derive(Debug, Default, serde::Serialize)]
+struct ResumeTarget {
+    /// The cwd the resume command should run from. `None` only when there is
+    /// nothing better to offer than the caller's own guess.
+    cwd: Option<String>,
+    /// Did a transcript for this id turn up at all? False means the session was
+    /// never saved (transcript saving off — see the child-session env marker) and
+    /// no cwd will resume it.
+    found: bool,
+    /// The transcript lives under a different cwd than the plan's project path:
+    /// the case that used to fail outright.
+    relocated: bool,
+    /// The session's plan file now holds the restore marker, written HERE
+    /// rather than by the resumed model. See `prime_plan_file`.
+    primed: bool,
+}
+
+/// Session ids come from our own DB, but they end up in a path join — keep them
+/// to the shape Claude Code actually issues so a doctored one can't walk out of
+/// the projects directory.
+fn is_plain_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// The first cwd a transcript records — the directory the session was launched
+/// from, which is the one Claude Code named its project folder after. Later
+/// records carry whatever the session `cd`'d to, so only the first one answers
+/// "where can this be resumed from".
+///
+/// Reads a bounded prefix: the answer is in the opening records, and these files
+/// run to megabytes.
+fn startup_cwd_from_transcript(path: &std::path::Path) -> Option<String> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path).ok()?;
+    for line in std::io::BufReader::new(file).lines().take(200) {
+        let Ok(line) = line else { break };
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if let Some(cwd) = v.get("cwd").and_then(Value::as_str) {
+            if !cwd.is_empty() {
+                return Some(cwd.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Find a session's transcript anywhere under `~/.claude/projects`.
+///
+/// A scan rather than a computed folder name: Claude Code flattens `/` and `.`
+/// (and possibly more, over time) into `-` when it names a project folder, and
+/// that mangling is its business, not ours. Thirty-odd `stat`s cost nothing and
+/// can't drift out of sync with a rule we don't own.
+fn find_transcript(session_id: &str) -> Option<std::path::PathBuf> {
+    if !is_plain_session_id(session_id) {
+        return None;
+    }
+    let base = std::path::PathBuf::from(fsbrowse::home_dir()?)
+        .join(".claude")
+        .join("projects");
+    let file = format!("{session_id}.jsonl");
+    for entry in std::fs::read_dir(base).ok()?.flatten() {
+        let candidate = entry.path().join(&file);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// The plan file a session writes its plan into — `~/.claude/plans/<slug>.md`,
+/// named once per session and stable across resumes (verified against Claude
+/// Code 2.1.222: a resumed session in plan mode reports the same path it used
+/// before). The transcript names it every time the session touched it, so the
+/// LAST mention is the file in force.
+///
+/// This is what lets a restore cost one tool call instead of three: knowing the
+/// path, Redline can write the marker itself.
+fn plan_file_from_transcript(path: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let needle = "/.claude/plans/";
+    let mut found = None;
+    let mut from = 0usize;
+    while let Some(hit) = text[from..].find(needle) {
+        let start = from + hit;
+        // Back up to the start of the absolute path; a transcript quotes it
+        // inside JSON, so any quote/space/newline bounds it.
+        let head = text[..start]
+            .rfind(['"', ' ', '\n', '\\', '(', '`'])
+            .map_or(0, |i| i + 1);
+        // …and forward to the extension.
+        if let Some(rel_end) = text[start..].find(".md") {
+            let end = start + rel_end + 3;
+            let candidate = &text[head..end];
+            if candidate.starts_with('/') && !candidate.contains(['"', ' ', '\n']) {
+                found = Some(candidate.to_string());
+            }
+            from = end;
+        } else {
+            break;
+        }
+    }
+    found
+}
+
+/// Write the restore marker into the session's plan file, so the resumed model
+/// has nothing left to do but call `ExitPlanMode`.
+///
+/// This takes nothing from the user that the restore didn't already take: the
+/// old three-step handshake had the model `Write` this very marker over this
+/// very file. All that changes is who does the write — and a local file write
+/// costs microseconds where a model round trip costs seconds.
+///
+/// Only ever writes over a file that already EXISTS. A plan file that has been
+/// cleaned up means the resumed session will mint a new name we can't predict,
+/// and priming a path nobody will read would report a readiness we don't have.
+fn prime_plan_file(plan_file: &str, session_id: &str) -> bool {
+    let path = std::path::Path::new(plan_file);
+    if !path.is_file() {
+        return false;
+    }
+    std::fs::write(path, format!("{REDLINE_RESTORE_PREFIX}:{session_id} -->\n")).is_ok()
+}
+
+/// Everything a "Restore plan session" needs to know, resolved against the
+/// transcripts on disk: where the conversation can be resumed from, whether it
+/// exists at all, and whether its plan file has been primed with the restore
+/// marker (which lets the caller ask for a one-tool-call handshake).
+#[tauri::command]
+fn prepare_restore(session_id: String, project_path: Option<String>) -> ResumeTarget {
+    let Some(transcript) = find_transcript(&session_id) else {
+        return ResumeTarget {
+            cwd: project_path,
+            found: false,
+            relocated: false,
+            primed: false,
+        };
+    };
+    let primed = plan_file_from_transcript(&transcript)
+        .is_some_and(|f| prime_plan_file(&f, &session_id));
+    let Some(cwd) = startup_cwd_from_transcript(&transcript) else {
+        return ResumeTarget {
+            cwd: project_path,
+            found: true,
+            relocated: false,
+            primed,
+        };
+    };
+    let relocated = project_path.as_deref().is_some_and(|p| p != cwd);
+    ResumeTarget {
+        cwd: Some(cwd),
+        found: true,
+        relocated,
+        primed,
+    }
+}
+
 /// Reveal the main window. The window starts hidden and is shown once the
 /// frontend has rendered its first themed frame, so launch never flashes white.
 #[tauri::command]
@@ -8316,6 +8561,34 @@ fn show_main_window(app: AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.show();
         let _ = win.set_focus();
+    }
+}
+
+/// Re-create the main window on a running instance that has none — the
+/// single-instance handoff's answer to a headless incumbent (window died,
+/// process lived on). Built from the same `tauri.conf.json` window config as
+/// first boot, so it inherits the label ("main" by default), chrome, and the
+/// hidden-until-painted reveal: the frontend calls `show_main_window` once
+/// themed, with the same show-anyway fallback as setup so a JS error can't
+/// leave the new window invisible forever.
+fn resurrect_main_window(app: &AppHandle) {
+    let Some(config) = app.config().app.windows.first().cloned() else {
+        tracing::error!("no window config to resurrect the main window from");
+        return;
+    };
+    let win = tauri::WebviewWindowBuilder::from_config(app, &config)
+        .and_then(|b| b.build());
+    match win {
+        Ok(win) => {
+            tracing::info!("re-created the main window on a headless instance");
+            let fallback = win.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(2000)).await;
+                let _ = fallback.show();
+                let _ = fallback.set_focus();
+            });
+        }
+        Err(e) => tracing::error!(error = %e, "could not re-create the main window"),
     }
 }
 
@@ -8523,7 +8796,7 @@ fn browser_enable_autoresize(app: AppHandle, label: String) -> Result<(), String
 /// and as an immediate eval into the already-loaded page so a toggle applies
 /// now. An empty `css` removes the stylesheet. The CSS is JSON-encoded into a
 /// safe JS string literal so it can't break out of the snippet.
-#[cfg(target_os = "macos")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn view_inject_js(css: &str) -> String {
     let css_lit = serde_json::to_string(css).unwrap_or_else(|_| "\"\"".into());
     format!(
@@ -8568,7 +8841,7 @@ unsafe fn ns_string(s: &str) -> *mut objc2::runtime::AnyObject {
 ///    Exit reverses and bubbles the same way. Cross-origin-legal: only
 ///    `postMessage`, `event.source`/`contentWindow` identity, and styling the
 ///    parent-owned iframe element — never touching a cross-origin document.
-#[cfg(target_os = "macos")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn fullscreen_shim_js() -> &'static str {
     r#"(function(){
   if (window.__redline_fs_installed) return;
@@ -8659,7 +8932,7 @@ fn fullscreen_shim_js() -> &'static str {
 /// links are left untouched — they navigate normally. Sub-frames relay their
 /// captures to the top frame via `postMessage` (the queue only lives at top,
 /// which is what the native eval reads).
-#[cfg(target_os = "macos")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn newtab_shim_js() -> &'static str {
     r#"(function(){
   if (window.__redline_newtab_installed) return;
@@ -8732,6 +9005,263 @@ fn newtab_shim_js() -> &'static str {
 })();"#
 }
 
+/// Document-start user script (MAIN FRAME ONLY) that draws Redline's
+/// highlight-to-chat action bar inside the page. Finishing a selection pops a
+/// small bar offering Ask about this · Define · Explain · Research · Copy ·
+/// ＋ List; everything except Copy is queued on `window.__redline_selections`,
+/// which the pane drains in the same 250 ms poll that already carries the
+/// fullscreen flag and the new-tab queue.
+///
+/// Why the bar is drawn in-page rather than in React: the child webview is an
+/// OS layer composited ABOVE the React DOM, and `window.getSelection()` in the
+/// host document never sees page text — the same constraint that makes
+/// bookmarks and view filters native popup menus. A native menu would float
+/// correctly but only after a poll round-trip, which reads as lag on a gesture
+/// this frequent.
+///
+/// Four details are load-bearing:
+///  • The bar lives in a CLOSED shadow root on `documentElement` (stable across
+///    `body` replacement) with `:host{all:initial}`, so page CSS can't reach it
+///    and it can't leak styles into the page.
+///  • Every button `preventDefault()`s its `mousedown`. Without it the click
+///    collapses the very selection the bar exists to act on — the same line
+///    that is load-bearing in `SelectionMenu.tsx` and the Drafter's toolbar.
+///  • It positions ABSOLUTELY in document coordinates rather than
+///    `position:fixed`. Redline's own "View" filters set `filter:` on `html`,
+///    and a filtered element becomes the containing block for fixed
+///    descendants — under 🎨 Dark a fixed bar would anchor to the top of the
+///    *document*, not the viewport. Absolute coordinates resolve against the
+///    same origin either way. That filter would also tint the bar, so it
+///    counter-inverts itself when the page filter contains `invert`.
+///  • `window.__redline_sel_off` gates it at runtime, so unchecking the
+///    settings toggle takes the bar off the already-loaded page immediately
+///    (see `selection_teardown_js`) instead of waiting for a navigation.
+///
+/// Selections inside a sub-frame don't offer the bar: it's registered main
+/// frame only so ad/embed iframes never sprout a second one, and translating a
+/// cross-origin child's range rect into top-frame coordinates isn't worth it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn selection_shim_js() -> &'static str {
+    r##"(function(){
+  // Cleared before the install guard so re-enabling the toggle revives a shim
+  // that is already installed on this page.
+  try{ window.__redline_sel_off = false; }catch(e){}
+  if (window.__redline_sel_installed) return;
+  window.__redline_sel_installed = true;
+  var MAXQ=10, MAXLEN=4000, MINLEN=3, HOST_ATTR='data-redline-selection';
+  var ACTIONS=[['ask','Ask about this'],['define','Define'],['explain','Explain'],
+               ['research','Research'],['copy','Copy'],['list','＋ List']];
+  var seq=0, host=null, bar=null, pending=null, timer=0, suppressUntil=0;
+
+  function off(){ try{ return !!window.__redline_sel_off; }catch(e){ return false; } }
+  // Never hijack typing: a selection anchored in a field or a rich-text editor
+  // belongs to that editor, not to us.
+  function editable(node){
+    var n=node;
+    while (n && n.nodeType===3) n=n.parentNode;
+    while (n && n.nodeType===1){
+      var t=(n.tagName||'').toLowerCase();
+      if (t==='input'||t==='textarea'||t==='select') return true;
+      if (n.isContentEditable) return true;
+      n=n.parentNode;
+    }
+    return false;
+  }
+  function clean(s){
+    return String(s||'').replace(/[ \t ]+/g,' ').replace(/\n{3,}/g,'\n\n').trim();
+  }
+  function rectOf(sel){
+    try{
+      var r=sel.getRangeAt(0).getBoundingClientRect();
+      if (r && (r.width||r.height)) return r;
+      var rs=sel.getRangeAt(0).getClientRects();
+      if (rs && rs.length) return rs[0];
+    }catch(e){}
+    return null;
+  }
+  function build(){
+    if (bar) return bar;
+    host=document.createElement('div');
+    host.setAttribute(HOST_ATTR,'');
+    var root=host.attachShadow({mode:'closed'});
+    var st=document.createElement('style');
+    st.textContent=':host{all:initial}'+
+      '.rl{position:absolute;z-index:2147483647;display:none;align-items:center;gap:1px;padding:3px;'+
+      'border-radius:9px;white-space:nowrap;-webkit-user-select:none;user-select:none;'+
+      'font:500 12px/1.25 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;'+
+      'background:#fff;color:#1c1c1e;border:1px solid rgba(0,0,0,.14);box-shadow:0 6px 22px rgba(0,0,0,.20)}'+
+      '.rl button{all:unset;cursor:default;padding:4px 8px;border-radius:6px;font:inherit;color:inherit}'+
+      '.rl button:hover{background:rgba(0,0,0,.08)}'+
+      '.rl .sep{width:1px;align-self:stretch;margin:2px 3px;background:rgba(0,0,0,.13)}'+
+      '@media (prefers-color-scheme:dark){'+
+      '.rl{background:#26262a;color:#f2f2f5;border-color:rgba(255,255,255,.16);box-shadow:0 6px 22px rgba(0,0,0,.55)}'+
+      '.rl button:hover{background:rgba(255,255,255,.14)}'+
+      '.rl .sep{background:rgba(255,255,255,.18)}}';
+    root.appendChild(st);
+    bar=document.createElement('div');
+    bar.className='rl';
+    ACTIONS.forEach(function(a){
+      if (a[0]==='copy'){ var sp=document.createElement('div'); sp.className='sep'; bar.appendChild(sp); }
+      var b=document.createElement('button');
+      b.type='button';
+      b.setAttribute('data-rl-action',a[0]);
+      b.textContent=a[1];
+      // LOAD-BEARING: the default mousedown would collapse the selection this
+      // bar exists to act on, so the click would arrive with nothing selected.
+      b.addEventListener('mousedown',function(e){ e.preventDefault(); e.stopPropagation(); },true);
+      b.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); pick(a[0],b); },true);
+      bar.appendChild(b);
+    });
+    root.appendChild(bar);
+    return bar;
+  }
+  function attach(){
+    if (!host) build();
+    // Re-attach after an SPA swapped the document out from under us.
+    if (!host.isConnected){ try{ document.documentElement.appendChild(host); }catch(e){} }
+  }
+  // A Redline "View" filter tints the whole html subtree, ours included. The
+  // dark preset is invert+hue-rotate, which is its own inverse — applying it
+  // again on the bar hands back the colours as authored. The tint-only presets
+  // (sepia/gray/dim/contrast) are left alone: mildly tinted but perfectly legible.
+  function counterFilter(){
+    var f='';
+    try{ var cs=getComputedStyle(document.documentElement); f=cs.webkitFilter||cs.filter||''; }catch(e){}
+    var v=/invert/.test(f)?'invert(100%) hue-rotate(180deg)':'';
+    bar.style.webkitFilter=v; bar.style.filter=v;
+  }
+  function place(r){
+    attach();
+    counterFilter();
+    bar.style.display='flex';
+    bar.style.visibility='hidden';
+    bar.style.top='0px'; bar.style.left='0px';
+    var w=bar.offsetWidth, h=bar.offsetHeight;
+    var sx=window.pageXOffset||0, sy=window.pageYOffset||0;
+    var vw=window.innerWidth||0, vh=window.innerHeight||0;
+    var top=r.top-h-10;                                  // above the passage…
+    if (top<8) top=Math.min(vh-h-8, r.bottom+10);        // …flipped below when there's no room
+    top=Math.max(8, top);
+    var left=Math.max(8, Math.min(r.left+r.width/2-w/2, vw-w-8));
+    bar.style.top=Math.round(top+sy)+'px';
+    bar.style.left=Math.round(left+sx)+'px';
+    bar.style.visibility='visible';
+  }
+  function hide(){ if (bar) bar.style.display='none'; }
+  function evaluate(){
+    if (off()){ pending=null; hide(); return; }
+    if (Date.now()<suppressUntil) return;
+    var s=null;
+    try{ s=window.getSelection(); }catch(e){}
+    if (!s || s.isCollapsed || !s.rangeCount){ pending=null; hide(); return; }
+    if (editable(s.anchorNode) || editable(s.focusNode)){ pending=null; hide(); return; }
+    var text=clean(s.toString());
+    if (text.length<MINLEN){ pending=null; hide(); return; }
+    var r=rectOf(s);
+    if (!r){ pending=null; hide(); return; }
+    if (text.length>MAXLEN) text=text.slice(0,MAXLEN);
+    pending={ text:text, url:location.href, title:document.title||'' };
+    place(r);
+  }
+  function schedule(ms){
+    if (timer) clearTimeout(timer);
+    timer=setTimeout(function(){ timer=0; evaluate(); }, ms);
+  }
+  // `navigator.clipboard` needs a secure context and can be refused outright in
+  // a WKWebView; the legacy path runs inside the click's user activation and
+  // just works. Selecting the scratch textarea churns the page selection, hence
+  // the short suppression window so the flash isn't eaten by `selectionchange`.
+  function copyText(t){
+    var ta=document.createElement('textarea');
+    ta.value=t;
+    ta.setAttribute('readonly','');
+    ta.style.cssText='position:fixed;top:-2000px;left:-2000px;opacity:0';
+    (document.body||document.documentElement).appendChild(ta);
+    var ok=false;
+    try{ ta.select(); ta.setSelectionRange(0,ta.value.length); ok=document.execCommand('copy'); }catch(e){}
+    try{ ta.parentNode.removeChild(ta); }catch(e){}
+    return ok;
+  }
+  function pick(action,btn){
+    var p=pending;
+    if (!p){ hide(); return; }
+    if (action==='copy'){
+      suppressUntil=Date.now()+1200;
+      var was=btn.textContent;
+      btn.textContent=copyText(p.text)?'Copied':'Copy failed';
+      setTimeout(function(){ try{ btn.textContent=was; }catch(e){} hide(); },700);
+      return;
+    }
+    var q=window.__redline_selections=window.__redline_selections||[];
+    q.push({ id:++seq, action:action, text:p.text, url:p.url, title:p.title });
+    if (q.length>MAXQ) q.splice(0,q.length-MAXQ);   // bound if the pane isn't draining
+    pending=null;
+    hide();
+    // Collapse the selection, and not only for the visual "that landed" beat:
+    // the `mouseup` preceding this click has already scheduled an evaluate, and
+    // with the range still live that pass would pop the bar straight back up.
+    try{ window.getSelection().removeAllRanges(); }catch(e){}
+  }
+
+  document.addEventListener('selectionchange',function(){ schedule(180); },true);
+  document.addEventListener('mouseup',function(){ schedule(10); },true);
+  document.addEventListener('keyup',function(e){
+    if (e.shiftKey || e.key==='a' || e.metaKey || e.ctrlKey) schedule(10);
+  },true);
+  document.addEventListener('mousedown',function(e){
+    if (!bar || bar.style.display==='none') return;
+    var path=(e.composedPath&&e.composedPath())||[];
+    if (host && path.indexOf(host)!==-1) return;      // a click on the bar itself
+    hide();
+  },true);
+  window.addEventListener('scroll',hide,true);
+  window.addEventListener('resize',hide);
+  document.addEventListener('keydown',function(e){
+    if (e.key==='Escape'||e.keyCode===27) hide();
+  },true);
+})();"##
+}
+
+/// Take the selection action bar off the already-loaded page. Eval'd (never
+/// registered) whenever `install_user_scripts` runs with the toggle off, so
+/// unchecking "Highlight actions" is felt on the page you're reading rather
+/// than on the next navigation. The flag is what the installed shim checks, so
+/// this survives the fact that we can't un-run an IIFE.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn selection_teardown_js() -> &'static str {
+    r##"(function(){
+  try{ window.__redline_sel_off = true; }catch(e){}
+  try{
+    var h=document.querySelector('[data-redline-selection]');
+    if (h && h.parentNode) h.parentNode.removeChild(h);
+  }catch(e){}
+})();"##
+}
+
+/// Every document-start user script Redline installs on a browser tab, as
+/// `(source, main_frame_only)`. Pure and platform-independent on purpose: the
+/// objc registration below can't be unit-tested, but *which* scripts a given
+/// (filter, toggle) pair produces is exactly the part worth a test.
+///
+/// The fullscreen and new-tab shims run in EVERY frame (the embed handshake and
+/// a `target="_blank"` link in a sub-frame both need that); the selection bar
+/// and the view filter are main-frame only, so ad/embed iframes neither sprout
+/// a second bar nor get inverted.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn browser_user_scripts(css: &str, selection_actions: bool) -> Vec<(String, bool)> {
+    let mut out = vec![
+        (fullscreen_shim_js().to_string(), false),
+        (newtab_shim_js().to_string(), false),
+    ];
+    if selection_actions {
+        out.push((selection_shim_js().to_string(), true));
+    }
+    if !css.is_empty() {
+        out.push((view_inject_js(css), true));
+    }
+    out
+}
+
 /// Add one document-start `WKUserScript` to a content controller. SAFETY: caller
 /// is on the UI thread inside `with_webview`; `ucc` is the live
 /// `WKUserContentController`. injectionTime 0 = AtDocumentStart. The controller
@@ -8756,24 +9286,31 @@ unsafe fn add_user_script(
 }
 
 /// Install Redline's document-start user scripts on a browser tab, replacing any
-/// previously installed ones. The fullscreen shim is ALWAYS installed (all
-/// frames, so the embed handshake works); the "View" filter CSS is installed
-/// only when `css` is non-empty (main frame only, as before). Both sources are
-/// also eval'd into the already-loaded page for immediate effect. Centralizing
-/// this keeps `browser_set_view` from wiping the shim when it swaps filters.
+/// previously installed ones. `browser_user_scripts` decides the set; this
+/// function is only the objc registration plus an eval of each source into the
+/// already-loaded page, so a toggle takes effect on the page you're reading
+/// rather than on the next navigation. Centralizing it keeps `browser_set_view`
+/// from wiping the shims when it swaps filters.
+///
+/// Two sources are eval'd but never registered, because they exist to *undo*
+/// something on the live page: `view_inject_js("")` strips the filter stylesheet
+/// on a reset (skipping it left "Reset to normal" visually stuck), and
+/// `selection_teardown_js` takes down the highlight bar when the toggle is off.
 #[cfg(target_os = "macos")]
-fn install_user_scripts(wv: &tauri::Webview, css: &str) -> Result<(), String> {
-    let shim = fullscreen_shim_js();
-    // Always build the view JS: for a non-empty filter it sets the stylesheet;
-    // for an EMPTY css (a reset) it *removes* the `__redline_view__` style. We
-    // only install it as a document-start user script when non-empty, but we
-    // always eval it (see below) so a reset clears the already-loaded page too.
-    let view = view_inject_js(css);
-    let install_view = !css.is_empty();
-    let newtab = newtab_shim_js();
-    let shim_owned = shim.to_string();
-    let newtab_owned = newtab.to_string();
-    let view_owned = view.clone();
+fn install_user_scripts(
+    wv: &tauri::Webview,
+    css: &str,
+    selection_actions: bool,
+) -> Result<(), String> {
+    let scripts = browser_user_scripts(css, selection_actions);
+    let mut evals: Vec<String> = scripts.iter().map(|(src, _)| src.clone()).collect();
+    if css.is_empty() {
+        evals.push(view_inject_js(css));
+    }
+    if !selection_actions {
+        evals.push(selection_teardown_js().to_string());
+    }
+    let registered = scripts;
     wv.with_webview(move |pw| {
         let ptr = pw.inner() as *mut objc2::runtime::AnyObject;
         // SAFETY: `with_webview` runs on the UI thread and `inner()` is the live
@@ -8787,25 +9324,15 @@ fn install_user_scripts(wv: &tauri::Webview, css: &str) -> Result<(), String> {
             let ucc: *mut objc2::runtime::AnyObject =
                 objc2::msg_send![config, userContentController];
             let _: () = objc2::msg_send![ucc, removeAllUserScripts];
-            // Shim in every frame (top page + sub-frames) for the embed handshake.
-            add_user_script(ucc, &shim_owned, false);
-            // New-tab interceptor in every frame (a target=_blank link can live in
-            // a sub-frame; it relays its capture up to the top-frame queue).
-            add_user_script(ucc, &newtab_owned, false);
-            // View filter only on the main frame (don't invert ad/embed iframes).
-            if install_view {
-                add_user_script(ucc, &view_owned, true);
+            for (source, main_frame_only) in &registered {
+                add_user_script(ucc, source, *main_frame_only);
             }
         }
     })
     .map_err(|e| e.to_string())?;
-    // Apply to the page that's already loaded so the change is instant. The view
-    // JS is eval'd even on a reset (empty css) — that's what strips the live
-    // page's filter; skipping it left "Reset to normal" visually stuck until the
-    // next navigation.
-    wv.eval(shim).map_err(|e| e.to_string())?;
-    wv.eval(newtab).map_err(|e| e.to_string())?;
-    wv.eval(&view).map_err(|e| e.to_string())?;
+    for source in &evals {
+        wv.eval(source).map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -8816,39 +9343,51 @@ fn install_user_scripts(wv: &tauri::Webview, css: &str) -> Result<(), String> {
 /// toggle takes effect immediately. An empty `css` clears the filter. macOS-
 /// only; a no-op elsewhere. The CSS comes from the pane's own presets.
 #[tauri::command]
-fn browser_set_view(app: AppHandle, label: String, css: String) -> Result<(), String> {
+fn browser_set_view(
+    app: AppHandle,
+    label: String,
+    css: String,
+    selection_actions: Option<bool>,
+) -> Result<(), String> {
     let wv = app
         .get_webview(&label)
         .ok_or_else(|| format!("browser webview '{label}' not found"))?;
     #[cfg(target_os = "macos")]
     {
-        // Reinstall ALL of Redline's user scripts (fullscreen shim + this filter)
-        // so swapping the filter never drops the shim.
-        install_user_scripts(&wv, &css)?;
+        // Reinstall ALL of Redline's user scripts (shims + selection bar + this
+        // filter) so swapping the filter never drops one of the others —
+        // `install_user_scripts` rebuilds the whole set from scratch.
+        install_user_scripts(&wv, &css, selection_actions.unwrap_or(true))?;
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (wv, css);
+        let _ = (wv, css, selection_actions);
     }
     Ok(())
 }
 
-/// Install Redline's always-on browser user scripts (currently the in-window
-/// fullscreen shim) on a freshly created tab, with no view filter. Invoked once
-/// at tab creation so video fullscreen works even before any "View" filter is
-/// applied; `browser_set_view` later re-installs the shim alongside its CSS.
+/// Install Redline's always-on browser user scripts (the in-window fullscreen
+/// shim, the new-tab interceptor, and — when the toggle is on — the
+/// highlight-to-chat selection bar) on a freshly created tab, with no view
+/// filter. Invoked at tab creation AND on every wake from suspension, so video
+/// fullscreen and the selection bar work before any "View" filter is applied;
+/// `browser_set_view` later re-installs the same set alongside its CSS.
 /// Also installs the new-window UI delegate here (once per webview, NOT from
 /// `install_user_scripts`, which re-runs on every view-filter swap and would
 /// otherwise churn the delegate and drop any open popups). macOS-only; a no-op
 /// elsewhere.
 #[tauri::command]
-fn browser_install_shims(app: AppHandle, label: String) -> Result<(), String> {
+fn browser_install_shims(
+    app: AppHandle,
+    label: String,
+    selection_actions: Option<bool>,
+) -> Result<(), String> {
     let wv = app
         .get_webview(&label)
         .ok_or_else(|| format!("browser webview '{label}' not found"))?;
     #[cfg(target_os = "macos")]
     {
-        install_user_scripts(&wv, "")?;
+        install_user_scripts(&wv, "", selection_actions.unwrap_or(true))?;
         // Give this webview OAuth/SSO popup support (window.open with features →
         // a real popup window with a live opener). Best-effort: a failure here
         // must not block the tab from working.
@@ -8858,7 +9397,7 @@ fn browser_install_shims(app: AppHandle, label: String) -> Result<(), String> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = wv;
+        let _ = (wv, selection_actions);
     }
     Ok(())
 }
@@ -9233,9 +9772,9 @@ fn ledger_set_capture_external(
         .map_err(|e| e.to_string())
 }
 
-/// Record a plan launch, from whichever of Redline's three doors made it: the
-/// Front Door's one sentence, the Prompt Drafter's document, or the browser's
-/// Send to Claude Code. The plan session doesn't exist yet (claude hasn't
+/// Record a plan launch, from whichever of Redline's doors made it: the Front
+/// Door's one sentence, the Prompt Drafter's document, the browser's Send to
+/// Claude Code, or a chat graduating. The plan session doesn't exist yet (claude hasn't
 /// spawned), so there's no claude session id here; the launched body is
 /// registered against the agent guard so the eventual hook fire for the spawned
 /// session doesn't double-record it, and against the launch guard so that same
@@ -9254,6 +9793,11 @@ fn record_plan_launch(
     markdown: String,
     project_path: Option<String>,
     draft_id: Option<String>,
+    // The chat this launch graduated from, when it came from one. Its plan
+    // session becomes a CHILD of the conversation in the session tree — the
+    // whole payoff of graduating rather than retyping: months later, "why did
+    // we build this" walks back from the plan to the talk that produced it.
+    chat_id: Option<String>,
     origin: Option<String>,
 ) -> Result<(), String> {
     let body = markdown.trim().to_string();
@@ -9263,30 +9807,44 @@ fn record_plan_launch(
     // An unknown origin degrades to the door that has a document, matching what
     // the caller must have been — never a guess that widens the lie.
     let origin = origin
-        .filter(|o| matches!(o.as_str(), "front-door" | "drafter" | "browser"))
+        .filter(|o| matches!(o.as_str(), "front-door" | "drafter" | "browser" | "chat"))
         .unwrap_or_else(|| "drafter".to_string());
     let bh = ledger::body_hash(&body);
     let db = store.database();
     let draft_id = draft_id.filter(|d| !d.trim().is_empty());
-    let thread = draft_id.as_ref().map(|d| {
+    let chat_id = chat_id.filter(|c| !c.trim().is_empty());
+    // The thread this launch belongs to. A document and a chat are the same
+    // shape here — a durable thread the spawned plan session descends from —
+    // so one block serves both rather than a second, drifting copy. A chat
+    // wins when both are present: `drafterDraftId` is whatever document
+    // happens to be open, and inheriting it would file the graduation under an
+    // unrelated draft.
+    let owner: Option<(&'static str, &String)> = chat_id
+        .as_ref()
+        .map(|c| ("companion", c))
+        .or_else(|| draft_id.as_ref().map(|d| ("drafter", d)));
+    let thread = owner.map(|(kind, id)| {
         let surface = active_surface.kind_and_id();
         let parent = ledger::resolve_parent(
             None,
             active_mission.active_id().as_deref(),
             surface.as_ref().map(|(k, i)| (k.as_str(), i.as_str())),
-            "drafter",
+            kind,
         );
         if let Some((pk, pid)) = &parent {
-            let _ = ledger::record_session_link(&db, "drafter", d, pk, pid);
+            let _ = ledger::record_session_link(&db, kind, id, pk, pid);
         }
         ledger::ThreadRef {
-            thread_kind: "drafter",
-            thread_id: d.clone(),
+            thread_kind: kind,
+            thread_id: id.clone(),
             parent_session_id: parent
                 .filter(|(pk, _)| pk == "session")
                 .map(|(_, pid)| pid),
         }
     });
+    // What the friction/journal/guard rows key on: the thread that owns this
+    // launch, whichever kind it is.
+    let owner_id: Option<String> = owner.map(|(_, id)| id.clone());
     let input = ledger::PromptInput {
         source: ledger::PromptSource::DrafterLaunch,
         origin: ledger::Origin::Redline,
@@ -9317,17 +9875,17 @@ fn record_plan_launch(
         let _ = db.record_friction(
             "plan_launch_unrecorded",
             Some(&origin),
-            draft_id.as_deref(),
+            owner_id.as_deref(),
             Some(&e),
         );
         return Err(e);
     }
     ledger::register_agent_prompt(&body);
-    ledger::register_plan_launch(&bh, &origin, draft_id.as_deref());
+    ledger::register_plan_launch(&bh, &origin, owner.map(|(k, i)| (k, i.as_str())));
     let _ = db.append_journal(
         "drafter_launch",
         Some(&origin),
-        draft_id.as_deref(),
+        owner_id.as_deref(),
         None,
         None,
     );
@@ -10716,12 +11274,19 @@ fn classmem_rename_node(
 }
 
 /// Pop up the native browser "Settings" menu over the embedded browser (HTML
-/// can't overlay a native webview, same as bookmarks/view). `tandem` is the
-/// current state of tandem agent mode so the item shows a check. The click
-/// returns through `on_menu_event` as `bset-tandem`, forwarded to the frontend
-/// as a `browser-settings-action` event; the pane flips the persisted flag.
+/// can't overlay a native webview, same as bookmarks/view). `tandem` and
+/// `highlight` are the current states of tandem agent mode and the
+/// highlight-to-chat action bar, so each item shows the right check. A click
+/// returns through `on_menu_event` — which forwards anything `bset-`-prefixed
+/// as a `browser-settings-action` event — and the pane flips that persisted flag.
 #[tauri::command]
-fn show_browser_settings_menu(app: AppHandle, tandem: bool, x: f64, y: f64) -> Result<(), String> {
+fn show_browser_settings_menu(
+    app: AppHandle,
+    tandem: bool,
+    highlight: bool,
+    x: f64,
+    y: f64,
+) -> Result<(), String> {
     let win = menu_anchor_window(&app).ok_or_else(|| "no main window".to_string())?;
     let toggle = CheckMenuItem::with_id(
         &app,
@@ -10732,8 +11297,18 @@ fn show_browser_settings_menu(app: AppHandle, tandem: bool, x: f64, y: f64) -> R
         None::<&str>,
     )
     .map_err(|e| e.to_string())?;
+    let highlight_item = CheckMenuItem::with_id(
+        &app,
+        "bset-highlight",
+        "Highlight actions",
+        true,
+        highlight,
+        None::<&str>,
+    )
+    .map_err(|e| e.to_string())?;
     let menu = MenuBuilder::new(&app)
         .item(&toggle)
+        .item(&highlight_item)
         .build()
         .map_err(|e| e.to_string())?;
     win.popup_menu_at(&menu, tauri::LogicalPosition::new(x, y))
@@ -10916,7 +11491,7 @@ pub fn run() {
     #[cfg(target_os = "macos")]
     scroller_guard::pin_scroller_style();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         // Must be the first plugin (Tauri v2 requirement). A second `redline`
         // launch hands off to the running instance and focuses its window
         // instead of opening a daemon-less duplicate that can't bind :7676 and
@@ -10931,6 +11506,12 @@ pub fn run() {
                 let _ = w.unminimize();
                 let _ = w.show();
                 let _ = w.set_focus();
+            } else {
+                // Headless incumbent: the window died (webview crash, close)
+                // but the process — daemon, PTYs, held reviews — lived on.
+                // The relaunch's intent is plainly "give me Redline back", so
+                // re-present a main window instead of doing nothing.
+                resurrect_main_window(app);
             }
         }))
         .plugin(tauri_plugin_opener::init())
@@ -10938,7 +11519,12 @@ pub fn run() {
         // `redline://` deep links — the viewer's "Open in Redline" link lands a
         // shared plan as a full native review. Handled in the frontend via the
         // JS plugin's onOpenUrl (both cold-start and running-instance).
-        .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_deep_link::init());
+    // Dead-webview revival is a WKWebView concern; the hook only exists on
+    // macOS/iOS builds (see webview_guard.rs for the policy).
+    #[cfg(target_os = "macos")]
+    let builder = builder.on_web_content_process_terminate(webview_guard::on_terminate);
+    builder
         .invoke_handler(tauri::generate_handler![
             extensions_list,
             extension_set_enabled,
@@ -11027,6 +11613,7 @@ pub fn run() {
             get_daemon_status,
             claim_review,
             arm_restore,
+            prepare_restore,
             show_main_window,
             get_hook_status,
             install_hook,
@@ -11245,10 +11832,13 @@ pub fn run() {
             companion::companion_create,
             companion::companion_list,
             companion::companion_get_thread,
+            companion::companion_rename,
+            companion::companion_set_model,
             companion::companion_delete,
             companion::companion_send,
             companion::companion_turn_status,
             companion::companion_cancel,
+            companion::companion_unqueue,
             companion::companion_kill_all,
             draft_suggestions_pending,
             draft_suggestion_resolve,
@@ -11385,6 +11975,15 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .expect("could not resolve app data dir");
+            // This boot's master token, on disk (0600) for the dev preflight:
+            // a later `npm run tauri dev` finds a headless leftover of this
+            // instance holding :1420/:7676 and needs a credential we spawned
+            // nothing to hand it. Boot survives a failed write — only the
+            // retire-a-headless-instance path degrades (to a manual kill).
+            match auth::persist_daemon_token(&data_dir) {
+                Ok(path) => tracing::info!(path = %path.display(), "persisted daemon token"),
+                Err(e) => tracing::warn!(error = %e, "could not persist daemon token"),
+            }
             let db_path = data_dir.join("redline.db");
             tracing::info!(path = %db_path.display(), "opening sqlite database");
             let db = Arc::new(
@@ -11947,6 +12546,76 @@ mod tests {
     use super::*;
     use crate::db::Database;
 
+    /// The selection bar is a user script like any other, so what it costs to
+    /// get wrong is a tab that silently loses it. These pin the *set* — the one
+    /// part of `install_user_scripts` that isn't objc.
+    #[test]
+    fn browser_user_scripts_includes_the_selection_bar_only_when_enabled() {
+        let on = browser_user_scripts("", true);
+        assert!(on.iter().any(|(src, _)| src.contains("__redline_sel_installed")));
+        let off = browser_user_scripts("", false);
+        assert!(!off.iter().any(|(src, _)| src.contains("__redline_sel_installed")));
+        // Both shims survive either way — the toggle is not allowed to drop them.
+        for set in [&on, &off] {
+            assert!(set.iter().any(|(src, _)| src.contains("__redline_fs_installed")));
+            assert!(set.iter().any(|(src, _)| src.contains("__redline_newtab_installed")));
+        }
+    }
+
+    #[test]
+    fn browser_user_scripts_keeps_the_view_filter_conditional_and_main_frame_only() {
+        // No filter → no view script at all (an empty css is a *reset*, applied
+        // by eval, never registered).
+        assert!(!browser_user_scripts("", true)
+            .iter()
+            .any(|(src, _)| src.contains("__redline_view__")));
+        let with_css = browser_user_scripts("html{filter:invert(100%)}", true);
+        let view = with_css
+            .iter()
+            .find(|(src, _)| src.contains("__redline_view__"))
+            .expect("view filter script");
+        assert!(view.1, "the filter must not invert ad/embed iframes");
+        // …and neither may the selection bar sprout a second copy in one.
+        let sel = with_css
+            .iter()
+            .find(|(src, _)| src.contains("__redline_sel_installed"))
+            .expect("selection script");
+        assert!(sel.1, "the selection bar is main frame only");
+        // The fullscreen embed handshake and the new-tab relay need every frame.
+        for (src, main_only) in &with_css {
+            if src.contains("__redline_fs_installed") || src.contains("__redline_newtab_installed") {
+                assert!(!main_only);
+            }
+        }
+    }
+
+    #[test]
+    fn selection_shim_carries_its_guard_and_every_action_id() {
+        let js = selection_shim_js();
+        // The double install (user script *and* the eval into the loaded page)
+        // must be a no-op the second time.
+        assert!(js.contains("if (window.__redline_sel_installed) return;"));
+        // …but the runtime off-switch is cleared BEFORE that guard, or
+        // re-checking the setting could never revive an installed shim.
+        let cleared = js.find("__redline_sel_off = false").expect("off-switch clear");
+        let guard = js.find("if (window.__redline_sel_installed) return;").unwrap();
+        assert!(cleared < guard);
+        for action in ["'ask'", "'define'", "'explain'", "'research'", "'copy'", "'list'"] {
+            assert!(js.contains(action), "missing action {action}");
+        }
+        // Every queued action lands on the queue the pane drains.
+        assert!(js.contains("window.__redline_selections"));
+        // The one line that makes the whole gesture work.
+        assert!(js.contains("e.preventDefault(); e.stopPropagation(); },true);"));
+    }
+
+    #[test]
+    fn selection_teardown_flips_the_runtime_flag() {
+        let js = selection_teardown_js();
+        assert!(js.contains("__redline_sel_off = true"));
+        assert!(js.contains("data-redline-selection"));
+    }
+
     /// `same_tab_url` has to agree with `sameTabUrl` in browseList.ts, because
     /// the frontend's dedupe decides whether the active label changes and this
     /// decides whether that counts as success. A drift between the two shows up
@@ -12086,6 +12755,119 @@ mod tests {
         assert_eq!(0u32.div_ceil(SNAP_WORDS_PER_MINUTE).max(1), 1);
         assert_eq!(1u32.div_ceil(SNAP_WORDS_PER_MINUTE).max(1), 1);
         assert_eq!(201u32.div_ceil(SNAP_WORDS_PER_MINUTE).max(1), 2);
+    }
+
+    /// The resume cwd comes from the FIRST cwd a transcript records — the
+    /// directory the session was launched from. A session that `cd`s elsewhere
+    /// (the dialcrown case: started in `~`, worked in `~/dialcrown`) is still
+    /// only resumable from where it started.
+    #[test]
+    fn startup_cwd_is_the_first_one_recorded_not_the_last() {
+        let dir = std::env::temp_dir().join(format!("rl-resume-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let path = dir.join("t.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                // Claude Code's opening record carries no cwd at all.
+                "{\"type\":\"mode\",\"mode\":\"default\"}\n",
+                "{\"type\":\"user\",\"cwd\":\"/Users/me\"}\n",
+                "{\"type\":\"assistant\",\"cwd\":\"/Users/me\"}\n",
+                "{\"type\":\"user\",\"cwd\":\"/Users/me/dialcrown\"}\n",
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            startup_cwd_from_transcript(&path).as_deref(),
+            Some("/Users/me")
+        );
+
+        // An empty cwd is not an answer — keep looking.
+        let blank = dir.join("blank.jsonl");
+        std::fs::write(
+            &blank,
+            concat!(
+                "{\"type\":\"user\",\"cwd\":\"\"}\n",
+                "{\"type\":\"user\",\"cwd\":\"/Users/me/repo\"}\n",
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            startup_cwd_from_transcript(&blank).as_deref(),
+            Some("/Users/me/repo")
+        );
+
+        // No cwd anywhere, unparseable lines, and a missing file all decline
+        // rather than guess — the caller falls back to the project path.
+        let none = dir.join("none.jsonl");
+        std::fs::write(&none, "{\"type\":\"user\"}\nnot json\n").unwrap();
+        assert_eq!(startup_cwd_from_transcript(&none), None);
+        assert_eq!(startup_cwd_from_transcript(&dir.join("nope.jsonl")), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The plan file is read out of the transcript, last mention wins — a
+    /// session that changed plan files mid-life is on its newest one.
+    #[test]
+    fn plan_file_is_the_last_one_the_transcript_names() {
+        let dir = std::env::temp_dir().join(format!("rl-planfile-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let path = dir.join("t.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"tool\":\"Write\",\"file_path\":\"/Users/me/.claude/plans/old-name.md\"}\n",
+                "{\"text\":\"wrote /Users/me/.claude/plans/wild-treasure.md ok\"}\n",
+                "{\"type\":\"user\",\"cwd\":\"/Users/me\"}\n",
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            plan_file_from_transcript(&path).as_deref(),
+            Some("/Users/me/.claude/plans/wild-treasure.md")
+        );
+
+        // A transcript that never entered plan mode has no plan file, and a
+        // missing transcript is not an error — both fall back to asking the
+        // model to write the marker itself.
+        let bare = dir.join("bare.jsonl");
+        std::fs::write(&bare, "{\"type\":\"user\",\"cwd\":\"/Users/me\"}\n").unwrap();
+        assert_eq!(plan_file_from_transcript(&bare), None);
+        assert_eq!(plan_file_from_transcript(&dir.join("nope.jsonl")), None);
+
+        // Priming refuses to invent a plan file: a path that isn't there means
+        // the resumed session will mint a name we can't predict.
+        assert!(!prime_plan_file(
+            dir.join("absent.md").to_str().unwrap(),
+            "abc-123"
+        ));
+
+        // …and over a real one it writes exactly the sentinel the daemon's
+        // `restore_handshake` recognises.
+        let plan = dir.join("plan.md");
+        std::fs::write(&plan, "# An old plan body\n").unwrap();
+        assert!(prime_plan_file(plan.to_str().unwrap(), "abc-123"));
+        let written = std::fs::read_to_string(&plan).unwrap();
+        assert_eq!(restore_handshake(&written), Some(Some("abc-123".into())));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Session ids are joined into a path, so anything that isn't the shape
+    /// Claude Code issues is refused before it can climb out of the projects
+    /// directory.
+    #[test]
+    fn session_ids_that_could_walk_the_filesystem_are_refused() {
+        assert!(is_plain_session_id("4bf30a9f-3f6f-4e9d-8970-389c70869612"));
+        assert!(is_plain_session_id("agent_a55a04f7bc248b80f"));
+        assert!(!is_plain_session_id(""));
+        assert!(!is_plain_session_id("../../etc/passwd"));
+        assert!(!is_plain_session_id("a/b"));
+        assert!(!is_plain_session_id("a.jsonl"));
+        assert!(!is_plain_session_id(&"x".repeat(129)));
     }
 
     /// The transcript backfill: newest `message.model` wins, and a transcript

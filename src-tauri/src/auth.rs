@@ -66,7 +66,7 @@ use serde_json::json;
 /// {{REDLINE_DAEMON_TOKEN}}"` (curl >= 8.3).
 pub const ENV_DAEMON_TOKEN: &str = "REDLINE_DAEMON_TOKEN";
 
-/// How a route is guarded. The three classes are the whole story of the
+/// How a route is guarded. The four classes are the whole story of the
 /// v1 contract; every route declares exactly one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteClass {
@@ -80,6 +80,13 @@ pub enum RouteClass {
     /// Bearer token required: the master per-boot token, or an extension
     /// token whose grant includes this scope.
     Protected(&'static str),
+    /// Bearer token required and it must be THE master token — extension
+    /// tokens never qualify, whatever their scopes. For control-plane verbs
+    /// no extension has any business holding (today: `/v1/admin/shutdown`,
+    /// which a booting sibling's preflight uses to retire a headless
+    /// incumbent). Deliberately not a scope: scopes are requestable in
+    /// extension manifests, and this must never be.
+    MasterOnly,
 }
 
 /// One row of the frozen v1 contract. `path` is the axum route pattern
@@ -591,6 +598,22 @@ pub const ROUTE_TABLE: &[RouteSpec] = &[
         request: "JSON {markdown}",
         response: "JSON {ok}",
     },
+    RouteSpec {
+        method: "GET",
+        path: "/v1/liveness",
+        class: RouteClass::Open,
+        purpose: "Identity card for a booting sibling: is this daemon Redline, and does it still have a window? (The dev preflight decides retire-vs-refuse on `hasWindow`.)",
+        request: "—",
+        response: "JSON {app: \"redline\", pid, hasWindow, version}",
+    },
+    RouteSpec {
+        method: "POST",
+        path: "/v1/admin/shutdown",
+        class: RouteClass::MasterOnly,
+        purpose: "Gracefully retire this instance (persist, kill children, release :1420/:7676). Called by a booting sibling's preflight against a headless incumbent, authenticated with the on-disk `daemon.token`.",
+        request: "— (empty body)",
+        response: "JSON {ok, pid}; the process runs its exit cleanup and terminates moments later",
+    },
 ];
 
 /// Look up the contract row for a request. `path` must be the registered
@@ -602,12 +625,47 @@ pub fn route_spec(path: &str, method: &str) -> Option<&'static RouteSpec> {
 }
 
 /// The per-boot master token. Minted lazily on first use (the middleware
-/// and the first agent spawn race benignly through the `OnceLock`); never
-/// persisted — a relaunch mints a fresh one and every child spawned by the
-/// new process gets the new value.
+/// and the first agent spawn race benignly through the `OnceLock`). A
+/// relaunch mints a fresh one and every child spawned by the new process
+/// gets the new value; the only copy outside process memory is the 0600
+/// `daemon.token` file written by [`persist_daemon_token`] — same-user
+/// only, and overwritten by every boot, so a stale file authenticates
+/// against nothing.
 pub fn daemon_token() -> &'static str {
     static TOKEN: OnceLock<String> = OnceLock::new();
     TOKEN.get_or_init(mint_token)
+}
+
+/// File under the app data dir carrying [`daemon_token`] for this boot.
+/// Read by `scripts/preflight-dev.mjs` (a booting sibling shares the user
+/// but not the incumbent's environment) to authorize `/v1/admin/shutdown`
+/// against a headless incumbent.
+pub const TOKEN_FILE: &str = "daemon.token";
+
+/// Persist this boot's master token to `<dir>/daemon.token`, owner-only.
+/// Called once at setup, after the app data dir is known. Permissions are
+/// fixed before the token bytes land so the file is never readable by
+/// another user, even transiently.
+pub fn persist_daemon_token(dir: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    use std::io::Write;
+    let path = dir.join(TOKEN_FILE);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path)?;
+    #[cfg(unix)]
+    {
+        // `mode` only applies on create; an existing file from a prior boot
+        // keeps its old bits, so pin them explicitly.
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(daemon_token().as_bytes())?;
+    Ok(path)
 }
 
 /// A fresh scoped token for one extension for this boot (`extension.rs`
@@ -699,6 +757,7 @@ pub enum Denial {
     MissingToken { scope: &'static str },
     BadToken,
     ScopeNotGranted { scope: &'static str },
+    MasterTokenRequired,
 }
 
 impl Denial {
@@ -714,6 +773,9 @@ impl Denial {
             Denial::ScopeNotGranted { scope } => {
                 format!("extension token lacks the `{scope}` scope")
             }
+            Denial::MasterTokenRequired => {
+                "this route accepts only the per-boot master token (Redline's own surfaces and the boot preflight; extension tokens never qualify)".to_string()
+            }
         }
     }
 }
@@ -726,6 +788,14 @@ pub fn authorize(path: &str, method: &str, bearer: Option<&str>) -> Result<(), D
     let spec = route_spec(path, method).ok_or(Denial::UnknownRoute)?;
     let scope = match spec.class {
         RouteClass::Open | RouteClass::HookContract => return Ok(()),
+        // One arm for missing, wrong, and extension tokens alike: the answer
+        // never distinguishes "unknown token" from "known but insufficient".
+        RouteClass::MasterOnly => {
+            return match bearer {
+                Some(token) if ct_eq(token, daemon_token()) => Ok(()),
+                _ => Err(Denial::MasterTokenRequired),
+            };
+        }
         RouteClass::Protected(scope) => scope,
     };
     let token = bearer.ok_or(Denial::MissingToken { scope })?;
@@ -796,6 +866,7 @@ pub fn render_api_doc() -> String {
     out.push_str("  Callers must not expand the variable through a shell (agent bash sandboxes reject commands containing expansion). Have curl import it instead, keeping the URL first so command-prefix permission rules still match:\n\n");
     out.push_str("  ```\n  curl -s http://127.0.0.1:7676/v1/… \\\n    --variable %REDLINE_DAEMON_TOKEN= \\\n    --expand-header \"Authorization: Bearer {{REDLINE_DAEMON_TOKEN}}\" \\\n    -X POST -H 'Content-Type: application/json' -d '{…}'\n  ```\n\n");
     out.push_str("  Both flags require **curl >= 8.3**. The trailing `=` is an empty default: without it curl aborts with `variable expansion failure`; with it an unset token yields a clean 401. macOS ships curl 8.4 on 14+, but 7.x on 11–13.\n\n");
+    out.push_str("- **token: master only** — requires the per-boot master token itself; extension tokens never qualify, whatever their scopes. Reserved for control-plane verbs (instance retirement). The token is also persisted to `<app_data_dir>/daemon.token` (0600) so a booting sibling's preflight — same user, no inherited env — can authenticate against a headless incumbent.\n\n");
     out.push_str("Unregistered routes fail closed: a route added to the router without a `ROUTE_TABLE` entry answers 401.\n\n");
     out.push_str("## Routes\n\n");
     out.push_str("| Method | Path | Auth | Purpose | Request | Response |\n");
@@ -805,6 +876,7 @@ pub fn render_api_doc() -> String {
             RouteClass::Open => "open".to_string(),
             RouteClass::HookContract => "hook contract".to_string(),
             RouteClass::Protected(scope) => format!("token: `{scope}`"),
+            RouteClass::MasterOnly => "token: master only".to_string(),
         };
         out.push_str(&format!(
             "| {} | `{}` | {} | {} | {} | {} |\n",
@@ -913,6 +985,61 @@ mod tests {
         // Work-graph reads follow the house read convention: open.
         assert_eq!(authorize("/v1/work/ready", "GET", None), Ok(()));
         assert_eq!(authorize("/v1/work/:id", "GET", None), Ok(()));
+        // The preflight's identity probe must work with zero credentials.
+        assert_eq!(authorize("/v1/liveness", "GET", None), Ok(()));
+    }
+
+    /// `/v1/admin/shutdown` is the one master-only route: no token, a wrong
+    /// token, and a fully-scoped extension token must all bounce identically;
+    /// only the per-boot master token retires the instance.
+    #[test]
+    fn admin_shutdown_accepts_only_the_master_token() {
+        let _guard = grants_test_lock();
+        clear_grants_for_test();
+        register_grant(
+            "ext-token-omni".to_string(),
+            ExtensionGrant {
+                name: "omni".to_string(),
+                scopes: KNOWN_SCOPES.iter().map(|s| s.to_string()).collect(),
+            },
+        );
+        for bearer in [None, Some("wrong-token"), Some("ext-token-omni")] {
+            assert_eq!(
+                authorize("/v1/admin/shutdown", "POST", bearer),
+                Err(Denial::MasterTokenRequired),
+                "bearer {bearer:?} must not pass a master-only route"
+            );
+        }
+        assert_eq!(
+            authorize("/v1/admin/shutdown", "POST", Some(daemon_token())),
+            Ok(())
+        );
+        clear_grants_for_test();
+    }
+
+    /// The persisted token file is byte-identical to the in-memory token and
+    /// owner-only, and a re-persist (same boot or a stale file from a prior
+    /// boot with looser bits) converges to the same state.
+    #[test]
+    fn persisted_token_file_matches_and_is_owner_only() {
+        let dir = std::env::temp_dir().join(format!("redline-token-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("tempdir");
+        // A stale world-readable file from a hypothetical prior boot.
+        let stale = dir.join(TOKEN_FILE);
+        std::fs::write(&stale, "stale").expect("seed stale file");
+        let path = persist_daemon_token(&dir).expect("persist token");
+        assert_eq!(path, stale);
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read token file"),
+            daemon_token()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).expect("stat").permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "token file must be owner-only");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

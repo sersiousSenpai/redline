@@ -18,6 +18,8 @@ The local daemon on `127.0.0.1:7676` (loopback only) is Redline's extension API.
 
   Both flags require **curl >= 8.3**. The trailing `=` is an empty default: without it curl aborts with `variable expansion failure`; with it an unset token yields a clean 401. macOS ships curl 8.4 on 14+, but 7.x on 11–13.
 
+- **token: master only** — requires the per-boot master token itself; extension tokens never qualify, whatever their scopes. Reserved for control-plane verbs (instance retirement). The token is also persisted to `<app_data_dir>/daemon.token` (0600) so a booting sibling's preflight — same user, no inherited env — can authenticate against a headless incumbent.
+
 Unregistered routes fail closed: a route added to the router without a `ROUTE_TABLE` entry answers 401.
 
 ## Routes
@@ -83,6 +85,8 @@ Unregistered routes fail closed: a route added to the router without a `ROUTE_TA
 | POST | `/v1/work/:id/close` | token: `work.claim` | Close a work item with a recorded reason; 409 when already closed | JSON {reason?, author?} | JSON {item} as closed |
 | GET | `/v1/extensions` | open | Installed extensions with live status (kind, scopes, events, strikes, panel) | — | JSON extension list |
 | POST | `/v1/extensions/:name/panel` | token: `ui.panel` | Replace the extension's sanitized markdown panel (the sanctioned UI slot; `name` must match the bearer's grant) | JSON {markdown} | JSON {ok} |
+| GET | `/v1/liveness` | open | Identity card for a booting sibling: is this daemon Redline, and does it still have a window? (The dev preflight decides retire-vs-refuse on `hasWindow`.) | — | JSON {app: "redline", pid, hasWindow, version} |
+| POST | `/v1/admin/shutdown` | token: master only | Gracefully retire this instance (persist, kill children, release :1420/:7676). Called by a booting sibling's preflight against a headless incumbent, authenticated with the on-disk `daemon.token`. | — (empty body) | JSON {ok, pid}; the process runs its exit cleanup and terminates moments later |
 
 ## Scopes
 

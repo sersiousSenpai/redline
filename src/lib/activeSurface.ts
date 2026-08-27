@@ -16,6 +16,7 @@ export interface SurfaceInfo {
     | "servers"
     | "memory"
     | "runs"
+    | "chat"
     | "terminal"
     | "welcome";
   id: string | null;
@@ -32,6 +33,13 @@ export interface SurfaceInputs {
   serversOpen: boolean;
   memoryOpen: boolean;
   runsOpen: boolean;
+  /** The chat room is the selected surface. Unlike the other center-pane
+   *  occupants a chat has an id and a name, because it is a THREAD — and the
+   *  agent in it needs to recognize its own room (see `surface_line`'s
+   *  self-reference guard). */
+  chatOpen: boolean;
+  chatId: string | null;
+  chatTitle: string | null;
   /** The active plan review session, when one is selected. */
   activeId: string | null;
   planTitle: string | null;
@@ -113,6 +121,19 @@ export function deriveActiveSurface(s: SurfaceInputs): SurfaceInfo {
       kind: "runs",
       id: null,
       label: "Runs",
+      detail: null,
+      projectPath: null,
+    };
+  }
+  if (s.chatOpen) {
+    // A chat is unbound by construction — no document, no project, no plan
+    // margin. It carries an id and a title all the same: it is one named
+    // conversation, and the agent inside it keys on that id.
+    return {
+      ...base,
+      kind: "chat",
+      id: s.chatId,
+      label: s.chatTitle,
       detail: null,
       projectPath: null,
     };

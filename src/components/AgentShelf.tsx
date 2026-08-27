@@ -453,7 +453,14 @@ function AgentRow({
             panelRef={() => {}}
             style={{ ...folderAt, width: "180px" }}
           >
-            <div className="flex flex-col p-1">
+            {/* A scroller, because Panel is now height-bounded by the room
+                its placement found. A folder list is user-grown: without
+                this it would be clipped by Panel's `overflow: hidden`
+                instead of scrolling. */}
+            <div
+              className="rl-thin-scroll-y flex flex-col p-1"
+              style={{ minHeight: 0, overflowY: "auto" }}
+            >
               {[{ folderId: null as string | null, name: "No folder" }]
                 .concat(folders)
                 .map((f) => (

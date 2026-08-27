@@ -254,16 +254,64 @@ describe("gutters", () => {
     expect(bottom?.pos).toBeCloseTo(0.5, 12);
   });
 
-  it("a container too small for both minima collapses the clamp to the midpoint", () => {
+  it("a DEGENERATE container pins the handle; a merely small one stays draggable", () => {
     const s2 = shape(2, 1, 2, [2]);
-    const gs = gutters(s2, evenFractions(s2), { width: 500, height: 200 });
-    expect(gs[0].min).toBeCloseTo(0.5, 12);
-    expect(gs[0].max).toBeCloseTo(0.5, 12);
-    // Degenerate container (zero/NaN) pins the handle rather than yielding
-    // NaN or a negative span.
+    // Zero/NaN container: pin rather than yield NaN or a negative span.
     const dead = gutters(s2, evenFractions(s2), { width: 0, height: 0 });
     expect(dead[0].min).toBeCloseTo(0.5, 12);
     expect(dead[0].max).toBeCloseTo(0.5, 12);
+
+    // A 500px-wide pair of tiles is under `2 × MIN_TILE_W` and used to pin
+    // too. It shouldn't: the tiles are real, just small, and a pinned handle
+    // is a grid that has silently stopped being tunable. The minimum becomes
+    // 60% of the 250px nominal tile.
+    const small = gutters(s2, evenFractions(s2), { width: 500, height: 200 });
+    expect(small[0].min).toBeCloseTo((250 * 0.6) / 500, 12);
+    expect(small[0].max).toBeCloseTo(1 - (250 * 0.6) / 500, 12);
+    expect(small[0].min).toBeLessThan(small[0].max);
+  });
+
+  it("the fixed minima are untouched wherever they already worked", () => {
+    // The relaxation must be invisible at every density whose nominal tile is
+    // still at or above the constant — otherwise it is a behaviour change
+    // dressed as a fix. 1728/3 = 576 wide and 582/2 = 291 tall both clear it.
+    const s5 = shape(5, 2, 3, [3, 2]);
+    const gs = gutters(s5, evenFractions(s5), size);
+    const col = gs.find((g) => g.id === "col-0-1");
+    const row = gs.find((g) => g.id === "row-1");
+    expect(col?.min).toBeCloseTo(MIN_TILE_W / size.width, 12);
+    expect(row?.min).toBeCloseTo(MIN_TILE_H / size.height, 12);
+  });
+
+  it("a dense row stays draggable — 5 columns on a wide dock", () => {
+    // The B2 case: at 14 tiles a row holds 5 columns, so an adjacent pair
+    // spans 2 × 1728/5 ≈ 691px — under `2 × MIN_TILE_W`. With the fixed
+    // minimum every handle in the row pinned to its midpoint.
+    const s14 = shape(14, 3, 5, [5, 5, 4]);
+    const gs = gutters(s14, evenFractions(s14), FULLSCREEN);
+    const cols = gs.filter((g) => g.axis === "x");
+    expect(cols.length).toBe(4 + 4 + 3);
+    for (const g of cols) {
+      expect(g.min).toBeLessThan(g.max);
+      expect(g.pos).toBeGreaterThanOrEqual(g.min);
+      expect(g.pos).toBeLessThanOrEqual(g.max);
+    }
+    // A five-column row: pair span 2/5, minimum 60% of the 1/5 nominal tile,
+    // so 0.4 - 2 × 0.12 of range. Under the fixed MIN_TILE_W the same pair
+    // needed 2 × 360/1728 = 0.4167 > 0.4 and collapsed to its midpoint.
+    const first = cols[0];
+    expect(first.max - first.min).toBeCloseTo(0.4 - 2 * 0.12, 12);
+    expect(2 * (MIN_TILE_W / FULLSCREEN.width)).toBeGreaterThan(0.4);
+
+    // Rows are 970/3 ≈ 323px, still clear of MIN_TILE_H — so the fixed
+    // minimum still governs the vertical handles. Assert the RANGE, since
+    // `min`/`max` are absolute positions offset by the pair's start.
+    for (const g of gs.filter((x) => x.axis === "y")) {
+      expect(g.max - g.min).toBeCloseTo(
+        2 / 3 - (2 * MIN_TILE_H) / FULLSCREEN.height,
+        12,
+      );
+    }
   });
 });
 
@@ -348,6 +396,20 @@ describe("dockHeightForTiles", () => {
   it("caps at the document's floor (docMinHFor)", () => {
     // 400px window: doc floor 220 → dock can never exceed 180.
     expect(dockHeightForTiles(7, { width: 1728, height: 400 }, 120)).toBe(180);
+  });
+
+  it("adds one step for the 8-14 range, leaving 1-7 byte-identical", () => {
+    // The 0.6 branch still ends at 7...
+    expect(dockHeightForTiles(7, win, 0)).toBe(dockHeightForTiles(5, win, 0));
+    // ...and 8 upward asks for more.
+    expect(dockHeightForTiles(8, win, 0)).toBeGreaterThan(
+      dockHeightForTiles(7, win, 0),
+    );
+    expect(dockHeightForTiles(8, win, 0)).toBe(Math.round(970 * 0.72));
+    // Still capped by the document's floor, however many tiles.
+    expect(
+      dockHeightForTiles(14, { width: 1728, height: 400 }, 120),
+    ).toBeLessThanOrEqual(400 - 220);
   });
 });
 

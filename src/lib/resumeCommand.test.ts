@@ -11,19 +11,44 @@ describe("buildResumeCommand", () => {
     expect(cmd).toMatch(/^claude --resume 'abc-123' --permission-mode plan /);
   });
 
-  it("tells Claude to re-establish plan mode without fetching or retyping the plan", () => {
+  it("tells Claude to re-establish the hold without fetching or retyping the plan", () => {
     const cmd = buildResumeCommand("abc-123", NOW);
-    // The old prompt claimed the resumed session was already in plan mode; it
-    // isn't, which forced an expensive recovery dance.
-    expect(cmd).not.toContain("already in plan mode");
-    expect(cmd).toContain("not in plan mode");
-    // The lightweight sequence: EnterPlanMode, drop the marker, ExitPlanMode.
-    expect(cmd).toContain("call EnterPlanMode");
+    // Un-primed, the model writes the marker itself and exits plan mode.
+    // (the prompt is shell-quoted, so an apostrophe would appear escaped)
+    expect(cmd).toContain("as your plan file");
     expect(cmd).toContain("call ExitPlanMode");
     // The marker carries the held plan's session id so the daemon can rebind
     // the restore even when the handshake lands under a forked/foreign id.
     expect(cmd).toContain(restoreSentinel("abc-123"));
     expect(cmd).toContain("<!-- REDLINE_RESTORE:abc-123 -->");
+  });
+
+  it("asks for ONE tool call once Redline has primed the plan file", () => {
+    // Each step of the handshake is a model round trip against a resumed
+    // session's full context — 4-6s apiece measured on a 1.7MB transcript.
+    // Priming the file in Rust turns three of them into one.
+    const primed = buildResumeCommand("abc-123", NOW, null, false, true);
+    expect(primed).toContain("already been written for you");
+    expect(primed).toContain("Call ExitPlanMode now");
+    expect(primed).toContain(restoreSentinel("abc-123"));
+    // No Write step to pay for.
+    expect(primed).not.toContain("as your plan file");
+    // …and no exploring on the way there.
+    expect(primed).toContain("do not explore the codebase");
+  });
+
+  it("never spends a round trip entering plan mode it is already in", () => {
+    // `--permission-mode plan` lands a RESUMED session in plan mode on 2.1.222
+    // (it did not on 2.1.178). EnterPlanMode survives only as a conditional
+    // fallback, never as an instruction to open with.
+    for (const cmd of [
+      buildResumeCommand("abc-123", NOW),
+      buildResumeCommand("abc-123", NOW, null, false, true),
+    ]) {
+      expect(cmd).toContain("--permission-mode plan");
+      expect(cmd).not.toContain("Just call EnterPlanMode");
+      expect(cmd).toContain("If you are not in plan mode, call EnterPlanMode");
+    }
   });
 
   it("never makes Claude curl the daemon or retype the plan body on restore", () => {

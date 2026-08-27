@@ -5,6 +5,7 @@ import {
   DOC_PAD_R_NARROW,
   DOC_PAD_R_WIDE,
   docControlFits,
+  docControlPose,
 } from "./docControl";
 
 // The pane's right edge, as an arbitrary viewport coordinate.
@@ -64,5 +65,55 @@ describe("docControlFits — wide view", () => {
         controlWidth: ROW_W,
       }),
     ).toBe(false);
+  });
+});
+
+describe("docControlPose — yields, never vanishes", () => {
+  const pose = (articleRight: number, padRight: number) =>
+    docControlPose({
+      articleRight,
+      containerRight: RIGHT,
+      padRight,
+      rowWidth: ROW_W,
+    });
+
+  it("lies down as a row while the gutter can seat one", () => {
+    expect(pose(RIGHT - 300, DOC_PAD_R_NARROW)).toBe("row");
+  });
+
+  it("stands up instead of disappearing once the text closes in", () => {
+    // The exact geometry that used to return `false` and unmount the control.
+    expect(docControlFits({
+      articleRight: RIGHT,
+      containerRight: RIGHT,
+      padRight: DOC_PAD_R_NARROW,
+      controlWidth: ROW_W,
+    })).toBe(false);
+    expect(pose(RIGHT, DOC_PAD_R_NARROW)).toBe("column");
+  });
+
+  it("stays a column at every wide-view pane width", () => {
+    // Full bleed: the article's right edge IS the pane's, so the row never
+    // fits and the stacked pose is the only one — including the toggle that
+    // is the sole way back out of the mode.
+    for (const width of [400, 700, 1200, 2400]) {
+      const right = 100 + width;
+      expect(
+        docControlPose({
+          articleRight: right,
+          containerRight: right,
+          padRight: DOC_PAD_R_WIDE,
+          rowWidth: ROW_W,
+        }),
+        `pane ${width}px`,
+      ).toBe("column");
+    }
+  });
+
+  it("never answers with a third, hidden pose", () => {
+    // Sweep from acres of gutter down to a pane the text overruns entirely.
+    for (let articleRight = RIGHT - 400; articleRight <= RIGHT + 200; articleRight += 20) {
+      expect(["row", "column"]).toContain(pose(articleRight, DOC_PAD_R_NARROW));
+    }
   });
 });

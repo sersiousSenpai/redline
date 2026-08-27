@@ -18,7 +18,7 @@
 import type { ProjectOption } from "../components/ProjectPicker";
 import { guessProjectForPlan } from "./guessProject";
 import type { ExtensionToolchain, ReadinessItem } from "./readiness";
-import { blockingItems } from "./readiness";
+import { blockingItems, chatBlockingItems } from "./readiness";
 
 // ── Project resolution ──────────────────────────────────────────────────────
 
@@ -128,6 +128,15 @@ export function attemptLaunch(readiness: ReadinessItem[]): LaunchAttempt {
   return { kind: "go" };
 }
 
+/** `attemptLaunch` for the chat route — the narrower gate. See
+ *  `chatBlockingItems` for why a chat is neither the plan case nor the
+ *  Drafter case. */
+export function attemptChat(readiness: ReadinessItem[]): LaunchAttempt {
+  const blocking = chatBlockingItems(readiness);
+  if (blocking.length > 0) return { kind: "blocked", item: blocking[0] };
+  return { kind: "go" };
+}
+
 /** After a fix resolves true: the next thing still blocking, or null when the
  *  path is clear and the held ⏎ should carry through. Taking `fixedId` rather
  *  than reading a stale list is what makes "fix it and it just goes" work. */
@@ -152,8 +161,10 @@ export function staleBlocker(
 
 /** Which door a launch came through. Ground truth for the lake's `surface`
  *  column — it used to be hardcoded `"drafter"` on the Rust side, which filed
- *  every front-door and browser launch as a drafter launch. */
-export type LaunchOrigin = "front-door" | "drafter" | "browser";
+ *  every front-door and browser launch as a drafter launch. `"chat"` is not
+ *  cosmetic for the same reason: `record_plan_launch` stores this verbatim, so
+ *  a graduation mislabelled as a front-door launch poisons the lake. */
+export type LaunchOrigin = "front-door" | "drafter" | "browser" | "chat";
 
 /** What a surface gets back if its launch dies before a plan arrives.
  *

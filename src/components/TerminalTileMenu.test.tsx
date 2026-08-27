@@ -68,7 +68,6 @@ function makeActions(): TileActions {
     onNewRepo: vi.fn(),
     onZoomTile: vi.fn(),
     onFocusTile: vi.fn(),
-    onToggleFullscreen: vi.fn(),
     onHintTile: vi.fn(),
     onRefreshCwds: vi.fn(),
   };

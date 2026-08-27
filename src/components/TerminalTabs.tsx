@@ -75,8 +75,6 @@ interface Tab {
 
 interface TerminalTabsProps {
   theme: string;
-  fullscreen: boolean;
-  onFullscreenChange: (v: boolean) => void;
   onTabsChange: (count: number) => void;
   /** The live terminal ids, whenever that SET changes (not on every cwd or
    *  title update). A host driving a specific terminal — the front door
@@ -110,9 +108,16 @@ interface TerminalTabsProps {
 }
 
 /** UI policy: how many tiles the grid will show at once. Deliberately absent
- *  from every geometry function — the shape math handles any n, so raising
- *  this is a one-line policy change, not a structural one. */
-const MAX_TILES = 7;
+ *  from every geometry function — the shape math handles any n (tested to
+ *  n=24), so raising this is a one-line policy change, not a structural one.
+ *
+ *  At 14 the tiles are small, which is the point: a wall of agents you can see
+ *  at a glance beats seven you have to cycle. Two neighbouring caps are
+ *  deliberately left alone because both degrade gracefully rather than
+ *  failing — `MAX_WEBGL` (TerminalView) now binds, so tiles past the eighth
+ *  keep xterm's DOM renderer, and `MAX_STORED_SHAPES` still covers the wider
+ *  spread of `n@rowsxcols` keys. */
+const MAX_TILES = 14;
 
 /** How many repos the menu offers and how deep the click-order memory runs. */
 const MAX_MENU_REPOS = 12;
@@ -220,8 +225,6 @@ export const TerminalTabs = memo(
   function TerminalTabs(
     {
       theme,
-      fullscreen,
-      onFullscreenChange,
       onTabsChange,
       onTabIdsChange,
       onTileCountChange,
@@ -944,8 +947,6 @@ export const TerminalTabs = memo(
     focusTile,
     hintTile,
     refreshAllCwds,
-    onFullscreenChange,
-    fullscreen,
   });
   handlersRef.current = {
     showInTile,
@@ -957,8 +958,6 @@ export const TerminalTabs = memo(
     focusTile,
     hintTile,
     refreshAllCwds,
-    onFullscreenChange,
-    fullscreen,
   };
   const tileActions = useMemo<TileActions>(
     () => ({
@@ -970,8 +969,6 @@ export const TerminalTabs = memo(
         handlersRef.current.openRepoTerminal(tile, path),
       onZoomTile: (tile) => handlersRef.current.zoomTile(tile),
       onFocusTile: (tile) => handlersRef.current.focusTile(tile),
-      onToggleFullscreen: () =>
-        handlersRef.current.onFullscreenChange(!handlersRef.current.fullscreen),
       onHintTile: (tile) => handlersRef.current.hintTile(tile),
       onRefreshCwds: () => handlersRef.current.refreshAllCwds(),
     }),
@@ -1022,6 +1019,24 @@ export const TerminalTabs = memo(
           const hiddenByZoom = zoomed !== null && !isZoomed;
           const visible = tiled && !collapsed && !hiddenByZoom;
           const ident = identity.byId.get(t.id);
+          // What this terminal is on, beside its name. Same derivation the
+          // tile menu uses — a held plan's title, else the shell's laundered
+          // OSC 0/2 window title — just no longer confined to the ▾ dropdown.
+          //
+          // Passed as PRIMITIVES, deliberately. TerminalTileHeader is memo'd
+          // with the default shallow compare, so a fresh `{text, held}` object
+          // per render would re-render all fourteen headers on every OSC-title
+          // tick; two scalars re-render only the tile whose title actually
+          // changed. For the same reason this stays OUT of the `identity`
+          // memo — that memo's stability is what keeps the headers cheap, and
+          // `menuData` depends on it.
+          const work = ident
+            ? workSignal(
+                heldPlanTitles?.get(t.id),
+                termTitles.get(t.id),
+                ident.dir,
+              )
+            : null;
           return (
             <div
               key={t.id}
@@ -1042,8 +1057,9 @@ export const TerminalTabs = memo(
                     identity={ident}
                     focused={tileIndex === focusIdx}
                     overflow={tileIndex === focusIdx ? overflow : null}
-                    fullscreen={fullscreen}
                     zoomed={isZoomed}
+                    workText={work?.text ?? null}
+                    workHeld={work?.held ?? false}
                     actions={tileActions}
                   />
                 </ErrorBoundary>
