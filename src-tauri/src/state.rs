@@ -711,6 +711,13 @@ pub struct BrowseList {
 /// One line of a `BrowseList`. `kind` is the template's own vocabulary
 /// ("bug" | "fix" | "improvement" | "note"); `sort_idx` is the user's order,
 /// rewritten wholesale on a drag rather than nudged.
+///
+/// `page_url` / `page_title` are the page the item was written ON — a list
+/// built during a walkthrough crosses many screens, and the list row's single
+/// title records only where the list was STARTED. `locator` is the pointer to
+/// the component the note is about ("Search bar"), resolved from the element
+/// the user highlighted. All three are optional: an item typed with nothing
+/// selected, on a page whose URL we could not read, is still a valid item.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowseListItem {
@@ -720,6 +727,9 @@ pub struct BrowseListItem {
     pub body: String,
     pub done: bool,
     pub sort_idx: i64,
+    pub page_url: Option<String>,
+    pub page_title: Option<String>,
+    pub locator: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }

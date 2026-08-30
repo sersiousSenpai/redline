@@ -694,7 +694,19 @@ export interface BrowseList {
   updatedAt: number;
 }
 
-/** One line of a `BrowseList`. `kind` is the template's own vocabulary. */
+/** One line of a `BrowseList`. `kind` is the template's own vocabulary.
+ *
+ *  `pageUrl` / `pageTitle` are the page the item was written ON, captured at
+ *  add time — a list built during a GUI walkthrough spans many screens, and
+ *  the list's own provenance line (one URL, from whenever the list was started)
+ *  answers the wrong question. They are nullable because rows written before
+ *  this existed have no page, and because a capture can fail.
+ *
+ *  `locator` is the resolved pointer to the component the note is about
+ *  ("Search bar"), written deterministically at add time from the highlighted
+ *  element and then refined in the background by the `browse_locator` seat.
+ *  Null means the item was written without a highlight — the common case, and
+ *  not a defect. */
 export interface BrowseListItem {
   id: string;
   browseId: string;
@@ -702,6 +714,9 @@ export interface BrowseListItem {
   body: string;
   done: boolean;
   sortIdx: number;
+  pageUrl: string | null;
+  pageTitle: string | null;
+  locator: string | null;
   createdAt: number;
   updatedAt: number;
 }

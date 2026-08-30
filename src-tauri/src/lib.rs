@@ -7,6 +7,7 @@ mod auth;
 mod bookshelf;
 mod browse;
 mod browse_list;
+mod browse_locate;
 #[cfg(target_os = "macos")]
 mod browser_popup;
 mod bundle;
@@ -9048,10 +9049,11 @@ fn selection_shim_js() -> &'static str {
   try{ window.__redline_sel_off = false; }catch(e){}
   if (window.__redline_sel_installed) return;
   window.__redline_sel_installed = true;
-  var MAXQ=10, MAXLEN=4000, MINLEN=3, HOST_ATTR='data-redline-selection';
+  var MAXQ=10, MAXLEN=4000, MINLEN=3, MAXHTML=1200, HOST_ATTR='data-redline-selection';
   var ACTIONS=[['ask','Ask about this'],['define','Define'],['explain','Explain'],
                ['research','Research'],['copy','Copy'],['list','＋ List']];
-  var seq=0, host=null, bar=null, pending=null, timer=0, suppressUntil=0;
+  var seq=0, host=null, bar=null, noteRow=null, noteInput=null;
+  var pending=null, timer=0, suppressUntil=0, composing=false;
 
   function off(){ try{ return !!window.__redline_sel_off; }catch(e){ return false; } }
   // Never hijack typing: a selection anchored in a field or a rich-text editor
@@ -9068,8 +9070,9 @@ fn selection_shim_js() -> &'static str {
     return false;
   }
   function clean(s){
-    return String(s||'').replace(/[ \t ]+/g,' ').replace(/\n{3,}/g,'\n\n').trim();
+    return String(s||'').replace(/[ \t ]+/g,' ').replace(/\n{3,}/g,'\n\n').trim();
   }
+  function flat(s){ return clean(s).replace(/\s+/g,' '); }
   function rectOf(sel){
     try{
       var r=sel.getRangeAt(0).getBoundingClientRect();
@@ -9079,6 +9082,182 @@ fn selection_shim_js() -> &'static str {
     }catch(e){}
     return null;
   }
+
+  // ── Describing the element the user highlighted ────────────────────────────
+  // The point of all of this is one short phrase on a list item: "Search bar".
+  // The shim's job is to gather the raw material honestly; deciding which field
+  // wins lives in src/lib/pageLocator.ts, where it is pure and testable. So this
+  // reports what the DOM says and never editorialises.
+  var INLINE={span:1,em:1,strong:1,b:1,i:1,u:1,s:1,small:1,mark:1,code:1,font:1,
+              abbr:1,time:1,sup:1,sub:1,cite:1,q:1,var:1,kbd:1,samp:1,bdi:1,bdo:1,wbr:1,br:1};
+  var TEST_ATTRS=['data-testid','data-test-id','data-test','data-cy','data-qa','data-automation-id'];
+  var NAME_ATTRS=['aria-label','data-label','data-name'];
+
+  function attrOf(el,names){
+    if (!el || !el.getAttribute) return '';
+    for (var i=0;i<names.length;i++){
+      var v=el.getAttribute(names[i]);
+      if (v && flat(v)) return flat(v).slice(0,160);
+    }
+    return '';
+  }
+  function tagOf(el){ return ((el&&el.tagName)||'').toLowerCase(); }
+  function textOf(el){
+    var t='';
+    try{ t = el.innerText || el.textContent || ''; }catch(e){}
+    return flat(t).slice(0,200);
+  }
+  function classesOf(el){
+    var raw='';
+    // SVG elements carry an SVGAnimatedString, not a string.
+    try{ raw = (typeof el.className==='string') ? el.className : (el.getAttribute('class')||''); }catch(e){}
+    return flat(raw).split(' ').filter(function(c){ return c && c.length<=40; }).slice(0,6);
+  }
+  function labelFor(el){
+    var lb=attrOf(el,['aria-labelledby']);
+    if (lb){
+      try{ var n=document.getElementById(lb.split(' ')[0]); if (n) return textOf(n).slice(0,120); }catch(e){}
+    }
+    try{ if (el.labels && el.labels.length) return textOf(el.labels[0]).slice(0,120); }catch(e){}
+    var id=el.getAttribute && el.getAttribute('id');
+    if (id){
+      try{
+        var esc=(window.CSS&&CSS.escape)?CSS.escape(id):id.replace(/["\\]/g,'\\$&');
+        var l=document.querySelector('label[for="'+esc+'"]');
+        if (l) return textOf(l).slice(0,120);
+      }catch(e){}
+    }
+    return '';
+  }
+  // The nearest thing to an accessible name, in the order a screen reader would
+  // find one. Short visible text counts for the elements whose text IS their
+  // name (a button, a link, a heading); for a paragraph it would just be the
+  // passage the user already highlighted.
+  function nameOf(el){
+    var v=attrOf(el,NAME_ATTRS);
+    if (v) return v;
+    v=labelFor(el);
+    if (v) return v;
+    var tag=tagOf(el);
+    if (tag==='input'||tag==='textarea'||tag==='select'){
+      v=attrOf(el,['placeholder','name','title']);
+      if (v) return v;
+    }
+    if (tag==='img'||tag==='svg') { v=attrOf(el,['alt','title']); if (v) return v; }
+    if (tag==='a'||tag==='button'||tag==='label'||tag==='summary'||/^h[1-6]$/.test(tag)){
+      var t=textOf(el);
+      if (t && t.length<=60) return t;
+    }
+    return attrOf(el,['title']);
+  }
+  function testIdOf(el){ return attrOf(el,TEST_ATTRS); }
+  // A named element is one somebody labelled on purpose. That is the only
+  // signal worth CLIMBING for: everything else is available on the element the
+  // selection actually landed in.
+  function named(el){ return !!(testIdOf(el) || attrOf(el,NAME_ATTRS) || attrOf(el,['aria-labelledby'])); }
+
+  function elementFor(sel){
+    var node=null;
+    try{ node=sel.getRangeAt(0).commonAncestorContainer; }catch(e){}
+    if (!node) node=sel.anchorNode;
+    while (node && node.nodeType!==1) node=node.parentNode;
+    if (!node) return null;
+    // Out of pure text wrappers: a <span> inside a heading is not a component.
+    var hops=0;
+    while (node && INLINE[tagOf(node)] && node.parentNode && node.parentNode.nodeType===1 && hops++<5){
+      if (named(node)) break;
+      node=node.parentNode;
+    }
+    if (!node || node.nodeType!==1) return null;
+    if (named(node)) return node;
+    // Nothing here is named — look a little way up for something that is,
+    // which is how "the text inside a card" resolves to the card.
+    var up=node, steps=0;
+    while (up && steps++<4){
+      if (named(up)) return up;
+      up=up.parentNode;
+      if (!up || up.nodeType!==1) break;
+    }
+    return node;
+  }
+  var LANDMARK_TAGS={section:1,article:1,nav:1,header:1,footer:1,aside:1,main:1,form:1,dialog:1,figure:1,li:1,table:1};
+  function landmarkOf(el){
+    var n=el, steps=0;
+    while (n && n.nodeType===1 && steps++<8){
+      if (LANDMARK_TAGS[tagOf(n)] || attrOf(n,['role'])){
+        var name=attrOf(n,NAME_ATTRS) || labelFor(n) || attrOf(n,['title']) || testIdOf(n);
+        if (name) return name.slice(0,120);
+      }
+      n=n.parentNode;
+    }
+    return '';
+  }
+  function headingOf(el){
+    var n=el, steps=0;
+    while (n && n.nodeType===1 && steps++<8){
+      var sib=n.previousElementSibling, scanned=0;
+      while (sib && scanned++<12){
+        if (/^h[1-6]$/.test(tagOf(sib))) return textOf(sib).slice(0,160);
+        var inner=null;
+        try{ inner=sib.querySelector('h1,h2,h3,h4,h5,h6'); }catch(e){}
+        if (inner) return textOf(inner).slice(0,160);
+        sib=sib.previousElementSibling;
+      }
+      n=n.parentNode;
+    }
+    return '';
+  }
+  function stepOf(el){
+    var t=tagOf(el);
+    var id=el.getAttribute && el.getAttribute('id');
+    if (id && id.length<=40) return t+'#'+id;
+    var cls=classesOf(el);
+    return cls.length ? t+'.'+cls[0] : t;
+  }
+  function pathOf(el){
+    var out=[], n=el, steps=0;
+    while (n && n.nodeType===1 && tagOf(n)!=='html' && steps++<6){
+      out.unshift(stepOf(n));
+      n=n.parentNode;
+    }
+    return out.join(' > ');
+  }
+  function describe(sel){
+    var el=null;
+    try{ el=elementFor(sel); }catch(e){}
+    if (!el) return null;
+    var out=null;
+    try{
+      out={
+        tag: tagOf(el),
+        role: attrOf(el,['role']),
+        name: nameOf(el),
+        id: (el.getAttribute && el.getAttribute('id')) || '',
+        testId: testIdOf(el),
+        classes: classesOf(el),
+        path: pathOf(el),
+        landmark: landmarkOf(el),
+        heading: headingOf(el),
+        text: textOf(el)
+      };
+      // Raw markup for the background naming agent only — nothing on the
+      // deterministic path reads it, so a page that refuses `outerHTML` costs
+      // nothing.
+      try{ out.html=String(el.outerHTML||'').slice(0,MAXHTML); }catch(e){}
+    }catch(e){ return null; }
+    return out;
+  }
+  // What the side pane reads when the user types their note there instead of
+  // in the bar. Published on every evaluate, cleared the moment the selection
+  // is: an item must never be anchored to something the user stopped pointing at.
+  function publish(){
+    try{
+      window.__redline_sel_last = pending ? {
+        text: pending.text, locator: pending.locator, ts: Date.now()
+      } : null;
+    }catch(e){}
+  }
+
   function build(){
     if (bar) return bar;
     host=document.createElement('div');
@@ -9086,22 +9265,32 @@ fn selection_shim_js() -> &'static str {
     var root=host.attachShadow({mode:'closed'});
     var st=document.createElement('style');
     st.textContent=':host{all:initial}'+
-      '.rl{position:absolute;z-index:2147483647;display:none;align-items:center;gap:1px;padding:3px;'+
-      'border-radius:9px;white-space:nowrap;-webkit-user-select:none;user-select:none;'+
+      '.wrap{position:absolute;z-index:2147483647;display:none;flex-direction:column;gap:4px;padding:3px;'+
+      'border-radius:9px;-webkit-user-select:none;user-select:none;'+
       'font:500 12px/1.25 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;'+
       'background:#fff;color:#1c1c1e;border:1px solid rgba(0,0,0,.14);box-shadow:0 6px 22px rgba(0,0,0,.20)}'+
-      '.rl button{all:unset;cursor:default;padding:4px 8px;border-radius:6px;font:inherit;color:inherit}'+
-      '.rl button:hover{background:rgba(0,0,0,.08)}'+
-      '.rl .sep{width:1px;align-self:stretch;margin:2px 3px;background:rgba(0,0,0,.13)}'+
+      '.row{display:flex;align-items:center;gap:1px;white-space:nowrap}'+
+      '.wrap button{all:unset;cursor:default;padding:4px 8px;border-radius:6px;font:inherit;color:inherit}'+
+      '.wrap button:hover{background:rgba(0,0,0,.08)}'+
+      '.wrap .sep{width:1px;align-self:stretch;margin:2px 3px;background:rgba(0,0,0,.13)}'+
+      '.note{display:none;align-items:center;gap:4px;padding:0 2px 2px}'+
+      '.note input{all:unset;-webkit-user-select:text;user-select:text;width:280px;padding:5px 7px;'+
+      'border-radius:6px;font:inherit;color:inherit;background:rgba(0,0,0,.05);'+
+      'border:1px solid rgba(0,0,0,.12)}'+
+      '.note button.go{background:#0a67d0;color:#fff;padding:5px 9px}'+
+      '.note button.go:hover{background:#0a5ab6}'+
       '@media (prefers-color-scheme:dark){'+
-      '.rl{background:#26262a;color:#f2f2f5;border-color:rgba(255,255,255,.16);box-shadow:0 6px 22px rgba(0,0,0,.55)}'+
-      '.rl button:hover{background:rgba(255,255,255,.14)}'+
-      '.rl .sep{background:rgba(255,255,255,.18)}}';
+      '.wrap{background:#26262a;color:#f2f2f5;border-color:rgba(255,255,255,.16);box-shadow:0 6px 22px rgba(0,0,0,.55)}'+
+      '.wrap button:hover{background:rgba(255,255,255,.14)}'+
+      '.wrap .sep{background:rgba(255,255,255,.18)}'+
+      '.note input{background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.18)}}';
     root.appendChild(st);
     bar=document.createElement('div');
-    bar.className='rl';
+    bar.className='wrap';
+    var row=document.createElement('div');
+    row.className='row';
     ACTIONS.forEach(function(a){
-      if (a[0]==='copy'){ var sp=document.createElement('div'); sp.className='sep'; bar.appendChild(sp); }
+      if (a[0]==='copy'){ var sp=document.createElement('div'); sp.className='sep'; row.appendChild(sp); }
       var b=document.createElement('button');
       b.type='button';
       b.setAttribute('data-rl-action',a[0]);
@@ -9110,8 +9299,38 @@ fn selection_shim_js() -> &'static str {
       // bar exists to act on, so the click would arrive with nothing selected.
       b.addEventListener('mousedown',function(e){ e.preventDefault(); e.stopPropagation(); },true);
       b.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); pick(a[0],b); },true);
-      bar.appendChild(b);
+      row.appendChild(b);
     });
+    bar.appendChild(row);
+
+    // The note row. `＋ List` used to file the highlighted TEXT as the item,
+    // which is the wrong half: the passage is WHERE, and what the user has to
+    // say about it is the item. So the tap opens a field for the note and the
+    // passage becomes the location instead.
+    noteRow=document.createElement('div');
+    noteRow.className='note';
+    noteInput=document.createElement('input');
+    noteInput.type='text';
+    noteInput.setAttribute('maxlength','500');
+    var go=document.createElement('button');
+    go.type='button';
+    go.className='go';
+    go.textContent='Add';
+    // The input MUST keep the default mousedown (it needs focus); the button
+    // must not (it would blur the field and collapse the page selection).
+    go.addEventListener('mousedown',function(e){ e.preventDefault(); e.stopPropagation(); },true);
+    go.addEventListener('click',function(e){ e.preventDefault(); e.stopPropagation(); commitNote(); },true);
+    noteInput.addEventListener('keydown',function(e){
+      e.stopPropagation();
+      if (e.key==='Enter'){ e.preventDefault(); commitNote(); }
+      else if (e.key==='Escape'){ e.preventDefault(); closeNote(); hide(); }
+    },true);
+    // Typing churns `selectionchange`; without this the bar would re-evaluate
+    // and re-place itself under the caret on every keystroke.
+    noteInput.addEventListener('keyup',function(e){ e.stopPropagation(); },true);
+    noteRow.appendChild(noteInput);
+    noteRow.appendChild(go);
+    bar.appendChild(noteRow);
     root.appendChild(bar);
     return bar;
   }
@@ -9147,20 +9366,45 @@ fn selection_shim_js() -> &'static str {
     bar.style.left=Math.round(left+sx)+'px';
     bar.style.visibility='visible';
   }
-  function hide(){ if (bar) bar.style.display='none'; }
+  function closeNote(){
+    composing=false;
+    if (noteRow){ noteRow.style.display='none'; noteInput.value=''; }
+  }
+  function hide(){ closeNote(); if (bar) bar.style.display='none'; }
+  function openNote(){
+    if (!pending) return;
+    composing=true;
+    var excerpt=pending.text.length>24 ? pending.text.slice(0,24)+'…' : pending.text;
+    noteInput.placeholder='What about “'+excerpt+'”?';
+    noteRow.style.display='flex';
+    // Re-place: the bar just grew a row and would otherwise overlap the passage.
+    var r=null;
+    try{ r=rectOf(window.getSelection()); }catch(e){}
+    if (r) place(r);
+    try{ noteInput.focus(); noteInput.select(); }catch(e){}
+  }
+  function commitNote(){
+    var note=flat(noteInput.value);
+    if (!note){ try{ noteInput.focus(); }catch(e){} return; }
+    emit('list', note);
+  }
   function evaluate(){
-    if (off()){ pending=null; hide(); return; }
+    if (off()){ pending=null; publish(); hide(); return; }
+    // Mid-note the selection is not the question any more — the field is. Any
+    // re-evaluation here would move the bar out from under the user's caret.
+    if (composing) return;
     if (Date.now()<suppressUntil) return;
     var s=null;
     try{ s=window.getSelection(); }catch(e){}
-    if (!s || s.isCollapsed || !s.rangeCount){ pending=null; hide(); return; }
-    if (editable(s.anchorNode) || editable(s.focusNode)){ pending=null; hide(); return; }
+    if (!s || s.isCollapsed || !s.rangeCount){ pending=null; publish(); hide(); return; }
+    if (editable(s.anchorNode) || editable(s.focusNode)){ pending=null; publish(); hide(); return; }
     var text=clean(s.toString());
-    if (text.length<MINLEN){ pending=null; hide(); return; }
+    if (text.length<MINLEN){ pending=null; publish(); hide(); return; }
     var r=rectOf(s);
-    if (!r){ pending=null; hide(); return; }
+    if (!r){ pending=null; publish(); hide(); return; }
     if (text.length>MAXLEN) text=text.slice(0,MAXLEN);
-    pending={ text:text, url:location.href, title:document.title||'' };
+    pending={ text:text, url:location.href, title:document.title||'', locator:describe(s) };
+    publish();
     place(r);
   }
   function schedule(ms){
@@ -9182,6 +9426,21 @@ fn selection_shim_js() -> &'static str {
     try{ ta.parentNode.removeChild(ta); }catch(e){}
     return ok;
   }
+  function emit(action,note){
+    var p=pending;
+    if (!p){ hide(); return; }
+    var q=window.__redline_selections=window.__redline_selections||[];
+    q.push({ id:++seq, action:action, text:p.text, url:p.url, title:p.title,
+             note:note||'', locator:p.locator||null });
+    if (q.length>MAXQ) q.splice(0,q.length-MAXQ);   // bound if the pane isn't draining
+    pending=null;
+    publish();
+    hide();
+    // Collapse the selection, and not only for the visual "that landed" beat:
+    // the `mouseup` preceding this click has already scheduled an evaluate, and
+    // with the range still live that pass would pop the bar straight back up.
+    try{ window.getSelection().removeAllRanges(); }catch(e){}
+  }
   function pick(action,btn){
     var p=pending;
     if (!p){ hide(); return; }
@@ -9192,20 +9451,16 @@ fn selection_shim_js() -> &'static str {
       setTimeout(function(){ try{ btn.textContent=was; }catch(e){} hide(); },700);
       return;
     }
-    var q=window.__redline_selections=window.__redline_selections||[];
-    q.push({ id:++seq, action:action, text:p.text, url:p.url, title:p.title });
-    if (q.length>MAXQ) q.splice(0,q.length-MAXQ);   // bound if the pane isn't draining
-    pending=null;
-    hide();
-    // Collapse the selection, and not only for the visual "that landed" beat:
-    // the `mouseup` preceding this click has already scheduled an evaluate, and
-    // with the range still live that pass would pop the bar straight back up.
-    try{ window.getSelection().removeAllRanges(); }catch(e){}
+    // ＋ List asks for the note first; every other action is already a complete
+    // instruction and goes straight out.
+    if (action==='list'){ openNote(); return; }
+    emit(action,'');
   }
 
   document.addEventListener('selectionchange',function(){ schedule(180); },true);
   document.addEventListener('mouseup',function(){ schedule(10); },true);
   document.addEventListener('keyup',function(e){
+    if (composing) return;
     if (e.shiftKey || e.key==='a' || e.metaKey || e.ctrlKey) schedule(10);
   },true);
   document.addEventListener('mousedown',function(e){
@@ -9214,9 +9469,12 @@ fn selection_shim_js() -> &'static str {
     if (host && path.indexOf(host)!==-1) return;      // a click on the bar itself
     hide();
   },true);
-  window.addEventListener('scroll',hide,true);
-  window.addEventListener('resize',hide);
+  // The bar is positioned in PAGE coordinates, so it rides a scroll correctly;
+  // hiding is a deliberate "you've moved on" — which a half-typed note is not.
+  window.addEventListener('scroll',function(){ if (!composing) hide(); },true);
+  window.addEventListener('resize',function(){ if (!composing) hide(); });
   document.addEventListener('keydown',function(e){
+    if (composing) return;                            // the field owns Escape
     if (e.key==='Escape'||e.keyCode===27) hide();
   },true);
 })();"##
@@ -9231,6 +9489,9 @@ fn selection_shim_js() -> &'static str {
 fn selection_teardown_js() -> &'static str {
     r##"(function(){
   try{ window.__redline_sel_off = true; }catch(e){}
+  // With the bar gone the user can no longer see OR clear what they have
+  // highlighted, so an add must stop silently anchoring to it.
+  try{ window.__redline_sel_last = null; }catch(e){}
   try{
     var h=document.querySelector('[data-redline-selection]');
     if (h && h.parentNode) h.parentNode.removeChild(h);
@@ -11670,6 +11931,7 @@ pub fn run() {
             browse_list::browse_list_remove,
             browse_list::browse_list_reorder,
             browse_list::browse_list_clear,
+            browse_locate::browse_list_locate,
             mission::mission_create,
             mission::mission_list,
             mission::mission_set_goal,
@@ -12607,6 +12869,19 @@ mod tests {
         assert!(js.contains("window.__redline_selections"));
         // The one line that makes the whole gesture work.
         assert!(js.contains("e.preventDefault(); e.stopPropagation(); },true);"));
+        // ＋ List asks for the note instead of filing the highlighted passage as
+        // one: the passage is WHERE, the note is WHAT.
+        assert!(js.contains("if (action==='list'){ openNote(); return; }"));
+        // The side-pane composer reads its location from this, so it has to be
+        // published on every evaluate AND cleared when the selection goes.
+        assert!(js.contains("window.__redline_sel_last"));
+        assert!(js.contains("pending=null; publish(); hide(); return;"));
+        // The material the pointer is resolved from.
+        for field in ["testId:", "landmark:", "heading:", "path:", "classes:"] {
+            assert!(js.contains(field), "locator is missing {field}");
+        }
+        // Typing a note must not re-place the bar under the caret.
+        assert!(js.contains("if (composing) return;"));
     }
 
     #[test]
@@ -12614,6 +12889,9 @@ mod tests {
         let js = selection_teardown_js();
         assert!(js.contains("__redline_sel_off = true"));
         assert!(js.contains("data-redline-selection"));
+        // With no bar there is no way to see what is highlighted, so nothing
+        // may still be silently anchoring to it.
+        assert!(js.contains("__redline_sel_last = null"));
     }
 
     /// `same_tab_url` has to agree with `sameTabUrl` in browseList.ts, because

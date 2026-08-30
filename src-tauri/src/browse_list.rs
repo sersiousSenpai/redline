@@ -104,12 +104,25 @@ pub fn browse_list_start(
 /// Append one item and hand the row back, so the panel renders the real record
 /// (id and sort index included) rather than an optimistic guess it would then
 /// have to reconcile.
+///
+/// `page_url` / `page_title` are captured by the CALLER at the moment of the
+/// add, from the live webview — not read from the list row. That is the whole
+/// point: the list's own title says where the list was started, and by item
+/// four the user is three screens away. The panel groups on what lands here.
+///
+/// `locator` is the deterministic pointer computed from whatever the user had
+/// highlighted (src/lib/pageLocator.ts). It arrives already resolved so an item
+/// is anchored the instant it is written; `browse_locate.rs` may replace it
+/// with a better phrase moments later, and may equally never run.
 #[tauri::command]
 pub fn browse_list_add(
     state: tauri::State<'_, BrowseListState>,
     browse_id: String,
     kind: String,
     body: String,
+    page_url: Option<String>,
+    page_title: Option<String>,
+    locator: Option<String>,
 ) -> Result<BrowseListItem, String> {
     let body = body.trim();
     if body.is_empty() {
@@ -136,6 +149,9 @@ pub fn browse_list_add(
             .db
             .next_browse_list_sort(&browse_id)
             .map_err(|e| format!("failed to place item: {e}"))?,
+        page_url: clean_opt(page_url),
+        page_title: clean_opt(page_title),
+        locator: clean_opt(locator),
         created_at: now,
         updated_at: now,
     };
@@ -158,6 +174,7 @@ pub fn browse_list_update(
     body: Option<String>,
     kind: Option<String>,
     done: Option<bool>,
+    locator: Option<String>,
 ) -> Result<BrowseListItem, String> {
     let mut it = state
         .db
@@ -180,6 +197,12 @@ pub fn browse_list_update(
     }
     if let Some(d) = done {
         it.done = d;
+    }
+    // The one field an edit to nothing legitimately CLEARS. A wrong pointer is
+    // worse than none — it aims the reader at the wrong component — so "" is
+    // the user detaching it, not a mistake to be ignored the way a blank body is.
+    if let Some(l) = locator {
+        it.locator = clean_opt(Some(l));
     }
     it.updated_at = now_millis();
     state
@@ -242,6 +265,13 @@ pub fn browse_list_clear(
         .db
         .delete_browse_list(&browse_id)
         .map_err(|e| format!("failed to clear list: {e}"))
+}
+
+/// Trim, and treat blank as absent. Every one of these fields crosses in from
+/// a web page via the panel, where "" and "   " mean the same thing as null and
+/// storing them would make `page_url IS NULL` stop meaning "no page".
+fn clean_opt(v: Option<String>) -> Option<String> {
+    v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
 /// Keep `updated_at` honest on the list row when its items change. Best-effort:
@@ -307,6 +337,9 @@ mod tests {
                 body: (*body).into(),
                 done: false,
                 sort_idx: sort,
+                page_url: None,
+                page_title: None,
+                locator: None,
                 created_at: now,
                 updated_at: now,
             };
@@ -346,6 +379,9 @@ mod tests {
                 body: "x".into(),
                 done: false,
                 sort_idx: 7,
+                page_url: None,
+                page_title: None,
+                locator: None,
                 created_at: now,
                 updated_at: now,
             })
@@ -384,6 +420,9 @@ mod tests {
             body: "x".into(),
             done: false,
             sort_idx: 0,
+            page_url: None,
+            page_title: None,
+            locator: None,
             created_at: now,
             updated_at: now,
         })
@@ -412,6 +451,9 @@ mod tests {
             body: "keep me".into(),
             done: false,
             sort_idx: 0,
+            page_url: None,
+            page_title: None,
+            locator: None,
             created_at: created,
             updated_at: created,
         })

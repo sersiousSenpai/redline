@@ -763,6 +763,17 @@ impl Database {
                 updated_at INTEGER NOT NULL
             );
 
+            -- `page_url` / `page_title` are the page the item was written ON,
+            -- captured at add time. The list row's own title records where the
+            -- LIST was started, which answers the wrong question: a walkthrough
+            -- crosses many screens, and "line spacing is off" is unactionable
+            -- without the one it was seen on. Nullable — rows written before
+            -- this existed have no page, and a capture can fail.
+            --
+            -- `locator` is the resolved pointer to the component the note is
+            -- about ("Search bar"): written deterministically from the element
+            -- the user highlighted, then refined in the background by the
+            -- `browse_locator` seat. Null is the ordinary case (no highlight).
             CREATE TABLE IF NOT EXISTS browse_list_items (
                 id         TEXT PRIMARY KEY,
                 browse_id  TEXT NOT NULL,
@@ -770,6 +781,9 @@ impl Database {
                 body       TEXT NOT NULL,
                 done       INTEGER NOT NULL DEFAULT 0,
                 sort_idx   INTEGER NOT NULL,
+                page_url   TEXT,
+                page_title TEXT,
+                locator    TEXT,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             );
@@ -1786,6 +1800,14 @@ impl Database {
         // the dedupe and the hash chain all rest on — folding a caption into
         // `text` would silently re-key the page.
         let _ = conn.execute("ALTER TABLE browse_events ADD COLUMN caption TEXT", []);
+
+        // Per-item page + component pointer (see the table comment above). Three
+        // nullable adds, so an existing list keeps every item and simply reports
+        // "no page recorded" for the ones written before Redline was capturing
+        // one — an item the panel can't place is still an item it must draw.
+        let _ = conn.execute("ALTER TABLE browse_list_items ADD COLUMN page_url TEXT", []);
+        let _ = conn.execute("ALTER TABLE browse_list_items ADD COLUMN page_title TEXT", []);
+        let _ = conn.execute("ALTER TABLE browse_list_items ADD COLUMN locator TEXT", []);
 
         // Pictures of Redline's OWN surfaces, keyed by the ledger event they
         // record. Its own table rather than a column, because these hang off
@@ -10173,23 +10195,13 @@ impl Database {
     ) -> rusqlite::Result<Vec<BrowseListItem>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, browse_id, kind, body, done, sort_idx, created_at, updated_at
+            "SELECT id, browse_id, kind, body, done, sort_idx,
+                    page_url, page_title, locator, created_at, updated_at
              FROM browse_list_items
              WHERE browse_id = ?1
              ORDER BY sort_idx, created_at, id",
         )?;
-        let rows = stmt.query_map(params![browse_id], |row| {
-            Ok(BrowseListItem {
-                id: row.get(0)?,
-                browse_id: row.get(1)?,
-                kind: row.get(2)?,
-                body: row.get(3)?,
-                done: row.get::<_, i64>(4)? != 0,
-                sort_idx: row.get(5)?,
-                created_at: row.get(6)?,
-                updated_at: row.get(7)?,
-            })
-        })?;
+        let rows = stmt.query_map(params![browse_id], row_to_browse_list_item)?;
         rows.collect()
     }
 
@@ -10197,8 +10209,9 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO browse_list_items
-                (id, browse_id, kind, body, done, sort_idx, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                (id, browse_id, kind, body, done, sort_idx,
+                 page_url, page_title, locator, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 it.id,
                 it.browse_id,
@@ -10206,6 +10219,9 @@ impl Database {
                 it.body,
                 it.done as i64,
                 it.sort_idx,
+                it.page_url,
+                it.page_title,
+                it.locator,
                 it.created_at,
                 it.updated_at,
             ],
@@ -10229,21 +10245,11 @@ impl Database {
     pub fn get_browse_list_item(&self, id: &str) -> rusqlite::Result<Option<BrowseListItem>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, browse_id, kind, body, done, sort_idx, created_at, updated_at
+            "SELECT id, browse_id, kind, body, done, sort_idx,
+                    page_url, page_title, locator, created_at, updated_at
              FROM browse_list_items WHERE id = ?1",
             params![id],
-            |row| {
-                Ok(BrowseListItem {
-                    id: row.get(0)?,
-                    browse_id: row.get(1)?,
-                    kind: row.get(2)?,
-                    body: row.get(3)?,
-                    done: row.get::<_, i64>(4)? != 0,
-                    sort_idx: row.get(5)?,
-                    created_at: row.get(6)?,
-                    updated_at: row.get(7)?,
-                })
-            },
+            row_to_browse_list_item,
         )
         .optional()
     }
@@ -10255,7 +10261,8 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE browse_list_items
-                SET kind = ?2, body = ?3, done = ?4, sort_idx = ?5, updated_at = ?6
+                SET kind = ?2, body = ?3, done = ?4, sort_idx = ?5,
+                    page_url = ?6, page_title = ?7, locator = ?8, updated_at = ?9
              WHERE id = ?1",
             params![
                 it.id,
@@ -10263,10 +10270,36 @@ impl Database {
                 it.body,
                 it.done as i64,
                 it.sort_idx,
+                it.page_url,
+                it.page_title,
+                it.locator,
                 it.updated_at,
             ],
         )?;
         Ok(())
+    }
+
+    /// Write ONLY the component pointer.
+    ///
+    /// The background locator agent finishes long after the item was written,
+    /// and the user has very likely edited the body in the meantime — a
+    /// read-modify-write of the whole row here would silently restore the text
+    /// they just changed. `updated_at` is deliberately left alone too: the
+    /// agent refining a pointer is not the user touching the item.
+    ///
+    /// Returns whether a row was actually hit, so the caller can stay quiet
+    /// about an item the user deleted while the agent was thinking.
+    pub fn set_browse_list_item_locator(
+        &self,
+        id: &str,
+        locator: &str,
+    ) -> rusqlite::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE browse_list_items SET locator = ?2 WHERE id = ?1",
+            params![id, locator],
+        )?;
+        Ok(n > 0)
     }
 
     pub fn delete_browse_list_item(&self, id: &str) -> rusqlite::Result<()> {
@@ -12613,6 +12646,27 @@ impl Database {
         )?;
         Ok(())
     }
+}
+
+/// One `browse_list_items` row → a `BrowseListItem`.
+///
+/// Shared by the by-id read and the per-tab list so the two can never drift on
+/// column order — the failure mode of duplicating an 11-column mapping is a
+/// silent field swap, not a compile error.
+fn row_to_browse_list_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<BrowseListItem> {
+    Ok(BrowseListItem {
+        id: row.get(0)?,
+        browse_id: row.get(1)?,
+        kind: row.get(2)?,
+        body: row.get(3)?,
+        done: row.get::<_, i64>(4)? != 0,
+        sort_idx: row.get(5)?,
+        page_url: row.get(6)?,
+        page_title: row.get(7)?,
+        locator: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
+    })
 }
 
 fn session_status_str(s: SessionStatus) -> &'static str {

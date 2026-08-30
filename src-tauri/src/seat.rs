@@ -56,6 +56,7 @@ pub const KNOWN_SEATS: &[&str] = &[
     "seatassign",
     "ai_review",
     "ai_commit",
+    "browse_locator",
     "orchestrator",
     "fork_plan",
     "fork_review",
@@ -190,6 +191,13 @@ pub const DEFAULT_CHARTERS: &[(&str, &str, &str)] = &[
         "Drafts a commit message, branch name and PR description from the \
          review diff.",
         "When you open the push dialog on a review.",
+    ),
+    (
+        "browse_locator",
+        "Names the component a browser working-list note is about, from the \
+         element the user highlighted.",
+        "In the background, each time you add a list item with something \
+         highlighted on the page.",
     ),
     (
         "orchestrator",

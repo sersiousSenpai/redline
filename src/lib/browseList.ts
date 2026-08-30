@@ -12,6 +12,7 @@
 // what the handed-off document says.
 
 import type { BrowseList, BrowseListItem } from "../types";
+import { normalizeLocator } from "./pageLocator";
 
 // ── Templates ───────────────────────────────────────────────────────────────
 
@@ -170,6 +171,110 @@ export function sameTabUrl(a: string, b: string): boolean {
   return path(ua) === path(ub) && ua.search === ub.search;
 }
 
+// ── Pages ───────────────────────────────────────────────────────────────────
+
+/** The identity of a *page* for grouping purposes.
+ *
+ *  A list built during a GUI walkthrough is written across many screens, and
+ *  the question each item silently answers is "where was I when I saw this".
+ *  So items group by the page they were written on, not by the one URL the list
+ *  happened to be started from.
+ *
+ *  Normalization is deliberately narrow. Host is lowercased and a trailing
+ *  slash dropped, because `/jobs` and `/jobs/` are one screen. The query string
+ *  and the hash are KEPT: `?tab=applied` and `#/settings` are how real apps
+ *  address a screen, and folding them together would merge two pages the user
+ *  visited separately and file their notes under one heading.
+ *
+ *  Explicitly NOT `sameTabUrl`: that one answers "is this the same dev server"
+ *  and collapses every path on a localhost port into one tab, which is right
+ *  for tab identity and exactly wrong here — collapsing paths is the bug this
+ *  grouping exists to fix. An unparseable URL is its own key rather than being
+ *  merged into "no page". */
+export function pageKeyOf(url: string | null | undefined): string {
+  const raw = (url ?? "").trim();
+  if (!raw) return "";
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return raw;
+  }
+  const path = u.pathname.replace(/\/+$/, "") || "/";
+  return `${u.protocol}//${u.host.toLowerCase()}${path}${u.search}${u.hash}`;
+}
+
+/** The heading a page section shows.
+ *
+ *  The path is the label, not the host: during a walkthrough every item is on
+ *  the same origin and repeating `localhost:3000` on every heading is pure
+ *  noise, while `/jobs/42` is the thing the user is actually looking at. An
+ *  off-origin page keeps its host, because there the host IS the news. The
+ *  page's own `<title>` rides along when it adds something the path doesn't. */
+export function pageLabelOf(
+  url: string | null | undefined,
+  title?: string | null,
+): string {
+  const t = (title ?? "").replace(/\s+/g, " ").trim();
+  const raw = (url ?? "").trim();
+  if (!raw) return t || "No page recorded";
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return t || raw;
+  }
+  const path = `${u.pathname.replace(/\/+$/, "") || "/"}${u.search}${u.hash}`;
+  const where = isLocalhostUrl(raw) ? path : `${u.host}${path === "/" ? "" : path}`;
+  if (!t) return where;
+  // A title that just repeats the host (what the tab poll writes when it has
+  // nothing better) adds nothing to a label that already names the path.
+  if (t.toLowerCase() === u.host.toLowerCase()) return where;
+  return `${t} — ${where}`;
+}
+
+/** One page's worth of a list. */
+export interface PageSection {
+  /** `pageKeyOf` of the items in it. `""` is the legacy/uncaptured group. */
+  key: string;
+  label: string;
+  /** The full URL, for the heading's tooltip and the handoff document. */
+  url: string | null;
+  items: BrowseListItem[];
+}
+
+/** Group a list into page sections, in the user's own order.
+ *
+ *  Sections are ordered by where their FIRST item sits in the list, so the
+ *  sections appear in the order the user walked the app — and coming back to a
+ *  page they already have a section for appends to that section rather than
+ *  opening a second one further down. Within a section the items keep
+ *  `sortIdx`, so a drag still means what it looked like.
+ *
+ *  Items with no captured page (written before this existed, or captured on a
+ *  page whose URL we could not read) collect under one "No page recorded"
+ *  section rather than being hidden — an item the panel does not draw is an
+ *  item the user loses. */
+export function groupByPage(items: BrowseListItem[]): PageSection[] {
+  const ordered = [...items].sort((a, b) => a.sortIdx - b.sortIdx);
+  const byKey = new Map<string, PageSection>();
+  for (const item of ordered) {
+    const key = pageKeyOf(item.pageUrl);
+    let section = byKey.get(key);
+    if (!section) {
+      section = {
+        key,
+        label: pageLabelOf(item.pageUrl, item.pageTitle),
+        url: item.pageUrl ?? null,
+        items: [],
+      };
+      byKey.set(key, section);
+    }
+    section.items.push(item);
+  }
+  return [...byKey.values()];
+}
+
 // ── The handoff document ────────────────────────────────────────────────────
 
 /** The tab a list was built against, for the provenance line. */
@@ -182,6 +287,32 @@ export interface ListSource {
  *  has to render as a single numbered item, so it folds. */
 const oneLine = (body: string) => body.replace(/\s*\n+\s*/g, " ").trim();
 
+/** One item as the handoff writes it: `**kind** · [location] — note`.
+ *
+ *  The bracketing is not decoration. The receiving agent gets a line that mixes
+ *  two authors — a pointer Redline resolved from the DOM and a sentence the
+ *  user typed — and it has to know which is which: it should act on the note
+ *  and merely *navigate* by the location. The legend in `renderListMarkdown`
+ *  states that contract once, and this shape is what it describes.
+ *
+ *  Every piece is optional and drops out cleanly: a single-kind template writes
+ *  no kind, an item written without a highlight writes no bracket, and an item
+ *  with neither is just the user's sentence. */
+export function formatItemLine(
+  item: Pick<BrowseListItem, "body" | "kind" | "done" | "locator">,
+  template: ListTemplate,
+): string {
+  const parts: string[] = [];
+  if (template.kinds.length > 1) {
+    parts.push(`**${KIND_LABEL[sectionFor(template, item.kind)].toLowerCase()}**`);
+  }
+  const locator = normalizeLocator(item.locator);
+  const body = oneLine(item.body);
+  const said = locator ? `[${locator}] — ${body}` : body;
+  parts.push(item.done ? `~~${said}~~` : said);
+  return parts.join(" · ");
+}
+
 /** Render the list as the markdown BOTH handoffs send.
  *
  *  One function on purpose. "Open in Drafter" and "Send to Claude Code" are
@@ -189,10 +320,14 @@ const oneLine = (body: string) => body.replace(/\s*\n+\s*/g, " ").trim();
  *  eventually disagree about what the list said — the exact failure that makes
  *  a handoff untrustworthy.
  *
- *  Sections follow the template's order; numbering restarts within each
- *  section, so "item 3" in the panel is "item 3" in the document. Done items
- *  are struck rather than dropped: what you decided was already handled is
- *  context the agent needs, not noise. */
+ *  Sections are PAGES, in the order the user walked them, each headed by its
+ *  own URL: the receiving agent's first question about "line spacing is off" is
+ *  which screen, and a single provenance line at the top of the document
+ *  answered that only for a list that never left one page. Numbering restarts
+ *  within each page, so "item 3" in the panel is "item 3" in the document.
+ *
+ *  Done items are struck rather than dropped: what you decided was already
+ *  handled is context the agent needs, not noise. */
 export function renderListMarkdown(
   list: Pick<BrowseList, "template" | "title">,
   items: BrowseListItem[],
@@ -210,17 +345,34 @@ export function renderListMarkdown(
     out.push(`From ${provenance.join(" — ")}`, "");
   }
 
-  const ordered = [...items].sort((a, b) => a.sortIdx - b.sortIdx);
+  const sections = groupByPage(items);
+  // State the format once, so the agent reading this can tell Redline's words
+  // from the user's. Only claimed when the document actually contains one.
+  const legendParts = [
+    template.kinds.length > 1 ? "`**kind**`" : null,
+    sections.some((s) => s.items.some((i) => normalizeLocator(i.locator)))
+      ? "`[location]`"
+      : null,
+  ].filter(Boolean) as string[];
+  if (legendParts.length) {
+    out.push(
+      `Each item reads ${legendParts.join(" · ")} · the note. ` +
+        `${legendParts.join(" and ")} ${legendParts.length > 1 ? "were" : "was"} ` +
+        "resolved by Redline from the page; everything after them is the user's " +
+        "own words.",
+      "",
+    );
+  }
+
   let wrote = false;
-  for (const kind of template.kinds) {
-    const inSection = ordered.filter((i) => sectionFor(template, i.kind) === kind);
-    if (inSection.length === 0) continue;
+  for (const section of sections) {
     wrote = true;
-    // A one-kind template's section heading would just repeat the title.
-    if (template.kinds.length > 1) out.push(`## ${KIND_LABEL[kind]}`, "");
-    inSection.forEach((item, i) => {
-      const body = oneLine(item.body);
-      out.push(`${i + 1}. ${item.done ? `~~${body}~~` : body}`);
+    out.push(`## ${section.label}`, "");
+    if (section.url && section.url.trim() !== section.label) {
+      out.push(section.url.trim(), "");
+    }
+    section.items.forEach((item, i) => {
+      out.push(`${i + 1}. ${formatItemLine(item, template)}`);
     });
     out.push("");
   }
@@ -231,10 +383,15 @@ export function renderListMarkdown(
 
 /** The quote block `💬` drops into the page-discussion composer. The index is
  *  the one shown in the panel, so the user and the agent are pointing at the
- *  same line. */
-export function quoteItem(item: Pick<BrowseListItem, "body">, index: number): string {
+ *  same line. The location pointer rides along — it is the difference between
+ *  asking about "line spacing is off" and asking about the search bar. */
+export function quoteItem(
+  item: Pick<BrowseListItem, "body" | "locator">,
+  index: number,
+): string {
+  const locator = normalizeLocator(item.locator);
   const lines = item.body.trim().split("\n");
-  const head = `> Item ${index}: ${lines[0] ?? ""}`.trimEnd();
+  const head = `> Item ${index}: ${locator ? `[${locator}] — ` : ""}${lines[0] ?? ""}`.trimEnd();
   const rest = lines.slice(1).map((line) => `> ${line}`.trimEnd());
   // The trailing blank line is what leaves the caret below the quote rather
   // than inside it — the user's question is theirs, not part of the item.

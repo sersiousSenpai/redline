@@ -38,6 +38,12 @@ import {
   promptForSelection,
   type SelectionEvent,
 } from "../lib/browseSelection";
+import {
+  fallbackLocator,
+  parsePageContext,
+  type PageContext,
+  type RawLocator,
+} from "../lib/pageLocator";
 import { SAFARI_UA } from "../lib/safariUA";
 // `BrowserPane` is a static import in App, so it sits in the boot path. The
 // list panel only exists once a user picks the pill, so it has no business
@@ -532,16 +538,78 @@ function BrowserPaneBase({
   // the DB on mount and has no reason to poll).
   const [listReloadKey, setListReloadKey] = useState(0);
 
+  /** One read of the live page: where it is, and what is highlighted on it.
+   *
+   *  Two facts the working list needs and could not get. The tab's polled
+   *  `url` is a second stale at worst, but the `title` it carries is only ever
+   *  the hostname, and the highlighted element was never reachable at all —
+   *  the selection lives in an OS-composited child webview that the host
+   *  document's `getSelection()` cannot see.
+   *
+   *  `__redline_sel_last` is published by the selection shim; `location.href`
+   *  and `document.title` are read straight from the page, so a capture still
+   *  works with highlight actions switched off (no shim → no selection, which
+   *  is exactly right: with the bar gone the user cannot see what they would be
+   *  anchoring to). Reuses the proven string-returning eval — no new plumbing. */
+  const capturePage = useCallback(async (): Promise<PageContext | null> => {
+    const id = activeIdRef.current;
+    if (!wvMapRef.current.has(id)) return null;
+    // The panel polls this while it is mounted, and it stays mounted under a
+    // surface that covers the pane. Nobody is highlighting a page they cannot
+    // see, so the honest answer there is "nothing" — and it costs no eval.
+    if (!visibleRef.current || document.hidden) return null;
+    try {
+      const raw = await invoke<string>("browser_eval_result", {
+        label: `browser-${id}`,
+        script:
+          "(function(){try{return JSON.stringify({url:location.href," +
+          "title:document.title||'',sel:window.__redline_sel_last||null})}" +
+          'catch(e){return "{}"}})()',
+      });
+      return parsePageContext(JSON.parse(raw || "{}"));
+    } catch {
+      // A page that refuses the eval, or a webview torn down mid-capture. The
+      // item is still written — unplaced, which is what it was before.
+      return null;
+    }
+  }, []);
+
+  /** Hand one item to the background naming agent.
+   *
+   *  Fire-and-forget on purpose: the item is already written and already
+   *  carries the deterministic pointer, so this is a refinement racing nothing.
+   *  It reports through the `browse-list-located` event rather than a return
+   *  value, so the panel updates whether or not the caller is still mounted —
+   *  and a rejection here is a no-op, never a visible failure on a write that
+   *  already succeeded. */
+  const refineLocator = useCallback(
+    (itemId: string, selection: string, locator: RawLocator | null) => {
+      if (!locator) return;
+      void invoke("browse_list_locate", {
+        itemId,
+        selection,
+        elementJson: JSON.stringify(locator).slice(0, 4000),
+      }).catch(() => {});
+    },
+    [],
+  );
+
   /** ＋ List, from the in-page highlight bar.
    *
    *  `browse_list_add` refuses an item with no list (browse_list.rs) — which is
    *  why the chat's "＋ Add as item" is offered only once one exists. From a
-   *  highlight, creating it IS the right move. It reads the tab's real list
+   *  highlight, creating it IS the right move.
+   *
+   *  The item is the NOTE the user typed into the bar, not the passage they
+   *  highlighted: the passage is where they were pointing, and filing it as the
+   *  item wrote the page's own words into the user's list.
+   *
+   *  It reads the tab's real list
    *  rather than trusting `listedTabs` (only populated once the panel has been
    *  open) and rather than calling `browse_list_start` blindly, which would
    *  silently re-point an existing list at the punch-list template. */
   const addSelectionToList = useCallback(
-    async (browseId: string, body: string, title: string) => {
+    async (browseId: string, ev: SelectionEvent) => {
       try {
         const existing = await invoke<BrowseListView | null>("browse_list_get", {
           browseId,
@@ -551,14 +619,21 @@ function BrowserPaneBase({
           await invoke("browse_list_start", {
             browseId,
             template,
-            title: title.trim() || null,
+            title: ev.title.trim() || null,
           });
         }
-        await invoke("browse_list_add", {
+        // The bar's own `url`/`title` win over a fresh capture here: they were
+        // read at the instant of the tap, and an SPA route change between the
+        // tap and this write would file the item under the page they left.
+        const item = await invoke<{ id: string }>("browse_list_add", {
           browseId,
           kind: templateFor(template).defaultKind,
-          body,
+          body: ev.note,
+          pageUrl: ev.url || null,
+          pageTitle: ev.title || null,
+          locator: fallbackLocator(ev.locator) || null,
         });
+        refineLocator(item.id, ev.text, ev.locator);
         setListedTabs((prev) => (prev[browseId] ? prev : { ...prev, [browseId]: true }));
         setListReloadKey((n) => n + 1);
         // Show where it went. A write with no visible landing place reads as a
@@ -570,7 +645,7 @@ function BrowserPaneBase({
         console.error("highlight ＋ List failed", e);
       }
     },
-    [setChatHere],
+    [setChatHere, refineLocator],
   );
 
   /** One action off the in-page selection bar.
@@ -593,7 +668,7 @@ function BrowserPaneBase({
         tabs.find((t) => t.id === discussionId)?.browseId ?? activeBrowseIdRef.current;
       if (!browseId) return;
       if (ev.action === "list") {
-        void addSelectionToList(browseId, ev.text, ev.title);
+        void addSelectionToList(browseId, ev);
         return;
       }
       setChatSeed({
@@ -2544,6 +2619,8 @@ function BrowserPaneBase({
                     key={`${discussionTab.browseId}:${listReloadKey}`}
                     browseId={discussionTab.browseId}
                     source={{ url: discussionTab.url, title: discussionTab.title }}
+                    capturePage={capturePage}
+                    onLocate={refineLocator}
                     onClose={() => setChatHere({ open: false })}
                     onSendToDrafter={onSendToDrafter}
                     onSendToRedline={onSendToRedline}

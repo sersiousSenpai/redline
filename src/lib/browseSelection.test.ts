@@ -20,6 +20,8 @@ const ev = (
   text,
   url: "https://example.com/a",
   title: "A page",
+  note: "",
+  locator: null,
 });
 
 describe("parseSelectionEvents", () => {
@@ -35,6 +37,8 @@ describe("parseSelectionEvents", () => {
       text: "ansatz",
       url: "u",
       title: "t",
+      note: "",
+      locator: null,
     });
   });
 
@@ -55,7 +59,7 @@ describe("parseSelectionEvents", () => {
       { action: "ask" }, // no text
       { action: "ask", text: "   " }, // whitespace only
       { action: "summarise", text: "not an action we have" },
-      { action: "list", text: "keeps this one" },
+      { action: "list", text: "keeps this one", note: "and its note" },
     ]);
     expect(out).toHaveLength(1);
     expect(out[0].action).toBe("list");
@@ -69,6 +73,8 @@ describe("parseSelectionEvents", () => {
       text: "padded",
       url: "",
       title: "",
+      note: "",
+      locator: null,
     });
   });
 
@@ -137,5 +143,56 @@ describe("autoSends", () => {
     for (const a of ["define", "explain", "research", "list"] as SelectionAction[]) {
       expect(autoSends(a)).toBe(true);
     }
+  });
+});
+
+describe("the ＋ List tap", () => {
+  // The bar used to file the highlighted PASSAGE as the list item. That wrote
+  // the page's own words into the user's list; the passage is where they were
+  // pointing, and the note is what they had to say about it.
+  it("carries the typed note and the element, not just the passage", () => {
+    const [out] = parseSelectionEvents([
+      {
+        id: 1,
+        action: "list",
+        text: "Search jobs",
+        url: "http://localhost:3000/jobs",
+        title: "Jobs",
+        note: "  line   spacing is off  ",
+        locator: { tag: "input", name: "Search jobs", classes: ["search-bar"] },
+      },
+    ]);
+    expect(out.note).toBe("line spacing is off");
+    expect(out.text).toBe("Search jobs");
+    expect(out.locator?.tag).toBe("input");
+  });
+
+  it("drops a list tap with no note rather than filing the passage as one", () => {
+    expect(
+      parseSelectionEvents([
+        { id: 1, action: "list", text: "Search jobs", url: "u", title: "t" },
+      ]),
+    ).toEqual([]);
+    // …while every other action is unaffected by the absence of a note.
+    expect(
+      parseSelectionEvents([
+        { id: 1, action: "define", text: "Search jobs", url: "u", title: "t" },
+      ]),
+    ).toHaveLength(1);
+  });
+
+  it("keeps a junk locator out of the item entirely", () => {
+    const [out] = parseSelectionEvents([
+      {
+        id: 1,
+        action: "list",
+        text: "Search jobs",
+        url: "u",
+        title: "t",
+        note: "off",
+        locator: { tag: 42, classes: "not an array" },
+      },
+    ]);
+    expect(out.locator).toBeNull();
   });
 });

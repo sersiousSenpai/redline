@@ -12,6 +12,8 @@
  *  into the message the page-discussion agent actually receives.
  */
 
+import { parseLocator, type RawLocator } from "./pageLocator";
+
 /** `copy` never reaches here — the shim handles it entirely in-page, so the
  *  clipboard write happens inside the click's user activation. */
 export type SelectionAction = "ask" | "define" | "explain" | "research" | "list";
@@ -24,6 +26,14 @@ export interface SelectionEvent {
   text: string;
   url: string;
   title: string;
+  /** `list` only: what the user typed into the bar's note field. The passage is
+   *  WHERE they were pointing; this is what they had to say about it, and it —
+   *  not the passage — becomes the list item. Empty for every other action. */
+  note: string;
+  /** The element the passage sits in, as the page described it. Feeds the
+   *  location pointer (src/lib/pageLocator.ts); null when the page offered
+   *  nothing usable, which costs the item its pointer and nothing else. */
+  locator: RawLocator | null;
 }
 
 const ACTIONS: readonly SelectionAction[] = [
@@ -72,12 +82,21 @@ export function parseSelectionEvents(raw: unknown): SelectionEvent[] {
     if (!ACTIONS.includes(action as SelectionAction)) continue;
     const text = typeof o.text === "string" ? clampSelection(o.text) : "";
     if (!text) continue;
+    const note =
+      typeof o.note === "string" ? o.note.replace(/\s+/g, " ").trim().slice(0, 500) : "";
+    // A `list` tap with no note is not an item. The bar refuses to submit an
+    // empty field, so this only fires for a malformed queue — and writing the
+    // highlighted passage as the item instead (the old behaviour) files the
+    // page's words as if they were the user's.
+    if (action === "list" && !note) continue;
     out.push({
       id: typeof o.id === "number" && Number.isFinite(o.id) ? o.id : 0,
       action: action as SelectionAction,
       text,
       url: typeof o.url === "string" ? o.url : "",
       title: typeof o.title === "string" ? o.title : "",
+      note,
+      locator: parseLocator(o.locator),
     });
   }
   return out;

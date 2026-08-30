@@ -246,6 +246,20 @@ pub const SEAT_FACTS: &[SeatFact] = &[
         note: None,
     },
     SeatFact {
+        seat: "browse_locator",
+        label: "Browser list locator",
+        role: "Names the component a browser working-list note is about (\"Search \
+               bar\") from the element the user highlighted. One tiny \
+               schema-constrained answer, no tools, fired on every highlighted \
+               add — so it runs often and each run is trivial.",
+        traits: &["background", "latency_sensitive"],
+        note: Some(
+            "The item is ALREADY written with a deterministic pointer resolved \
+             from the DOM; this seat only replaces it when it can do better, and \
+             a failure is invisible. Optimise for cost and speed, not ceiling.",
+        ),
+    },
+    SeatFact {
         seat: "orchestrator",
         label: "Plan orchestrator",
         role: "Visible terminal session that executes an approved plan as a \
