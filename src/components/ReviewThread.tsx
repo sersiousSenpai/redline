@@ -1,18 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { useState } from "react";
 
+import { useAgentTurn } from "../hooks/useAgentTurn";
 import { useAutoGrow } from "../hooks/useAutoGrow";
 
-import type {
-  ForkCancelledEvent,
-  ForkDeltaEvent,
-  ForkDoneEvent,
-  ForkErrorEvent,
-  ThreadMessage,
-} from "../types";
+import type { ThreadMessage } from "../types";
 import { MarkdownView } from "./MarkdownView";
 import { WorkingIndicator } from "./WorkingIndicator";
 
@@ -21,6 +14,10 @@ import { WorkingIndicator } from "./WorkingIndicator";
 // `thread_messages` persistence, but keyed on (reviewId, annotationId) and
 // driven by `review_thread_send` — a fresh read-only agent grounded on the
 // diff range (there is no plan session to fork in a code review).
+//
+// Streaming runs on the shared `useAgentTurn` lifecycle (T3.4), so switching
+// panes mid-turn and coming back restores the partial reply instead of
+// resuming blank.
 
 interface ReviewThreadProps {
   reviewId: string;
@@ -32,124 +29,55 @@ interface ReviewThreadProps {
 }
 
 export function ReviewThread({ reviewId, annotationId, kind = "annotation" }: ReviewThreadProps) {
-  const [messages, setMessages] = useState<ThreadMessage[]>([]);
-  const [streamText, setStreamText] = useState<string | null>(null);
   const [input, setInput] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const streaming = streamText !== null;
-
   const inputRef = useAutoGrow<HTMLTextAreaElement>(input);
 
-  const idsRef = useRef({ reviewId, annotationId });
-  idsRef.current = { reviewId, annotationId };
-
-  // Persisted turns (survive relaunch — the fork session id rides the
-  // annotation row, so follow-ups resume the same conversation).
-  useEffect(() => {
-    let alive = true;
-    void invoke<ThreadMessage[]>("get_thread", {
+  const turn = useAgentTurn<ThreadMessage>({
+    surface: "fork",
+    key: `${reviewId}:${annotationId}`,
+    idField: null,
+    // The fork events name the scope `sessionId` for every family; here that
+    // scope is the review, and the item is the annotation or question.
+    idFields: { sessionId: reviewId, commentId: annotationId },
+    historyCmd: "get_thread",
+    historyArgs: { sessionId: reviewId, commentId: annotationId },
+    commands: {
+      // Storage, events and cancel are shared across the fork families; only
+      // the first-turn grounding — and so the send command — differs by kind.
+      send: kind === "question" ? "review_question_send" : "review_thread_send",
+      status: "fork_thread_status",
+      cancel: "fork_thread_cancel",
+    },
+    statusArgs: { scopeId: reviewId, itemId: annotationId },
+    cancelArgs: { sessionId: reviewId, commentId: annotationId },
+    // `Turns::begin` rejects-when-busy: no queue to type ahead into.
+    queueing: false,
+    sendFailPrefix: "Couldn't reach the review agent",
+    buildSendArgs: (text) =>
+      kind === "question"
+        ? { reviewId, questionId: annotationId, text }
+        : { reviewId, annotationId, text },
+    makeMessage: ({ id, role, body, status }) => ({
+      id,
       sessionId: reviewId,
       commentId: annotationId,
-    })
-      .then((rows) => {
-        if (alive) setMessages(rows);
-      })
-      .catch(() => {});
-    // Seed streaming state from the fork registry: an in-flight turn survives
-    // this component unmounting (pane switches), and here streaming is just
-    // `streamText !== null` — start it as an empty stream so the indicator
-    // shows; deltas append from there.
-    void invoke<{ streaming: boolean; startedAt: number | null }>(
-      "fork_thread_status",
-      { scopeId: reviewId, itemId: annotationId },
-    )
-      .then((s) => {
-        if (alive && s.streaming) setStreamText((t) => t ?? "");
-      })
-      .catch(() => {});
-    return () => {
-      alive = false;
-    };
-  }, [reviewId, annotationId]);
-
-  useEffect(() => {
-    let alive = true;
-    const mine = (p: { sessionId: string; commentId: string }) =>
-      p.sessionId === idsRef.current.reviewId &&
-      p.commentId === idsRef.current.annotationId;
-
-    const deltaP = listen<ForkDeltaEvent>("fork-delta", (e) => {
-      if (!alive || !mine(e.payload)) return;
-      setStreamText((t) => (t ?? "") + e.payload.text);
-    });
-    const doneP = listen<ForkDoneEvent>("fork-done", (e) => {
-      if (!alive || !mine(e.payload)) return;
-      setStreamText(null);
-      setMessages((m) => [
-        ...m,
-        {
-          id: e.payload.messageId,
-          sessionId: e.payload.sessionId,
-          commentId: e.payload.commentId,
-          role: "assistant",
-          body: e.payload.body,
-          status: "complete",
-          createdAt: Date.now(),
-        },
-      ]);
-    });
-    const errP = listen<ForkErrorEvent>("fork-error", (e) => {
-      if (!alive || !mine(e.payload)) return;
-      setStreamText(null);
-      setError(e.payload.error);
-    });
-    const cancelP = listen<ForkCancelledEvent>("fork-cancelled", (e) => {
-      if (!alive || !mine(e.payload)) return;
-      setStreamText(null);
-    });
-    return () => {
-      alive = false;
-      void deltaP.then((un) => un());
-      void doneP.then((un) => un());
-      void errP.then((un) => un());
-      void cancelP.then((un) => un());
-    };
-  }, []);
+      role,
+      body,
+      status,
+      createdAt: Date.now(),
+    }),
+  });
+  const { messages, liveText } = turn;
+  const streaming = turn.status === "streaming";
 
   const send = () => {
     const text = input.trim();
     if (!text || streaming) return;
-    setError(null);
     setInput("");
-    setMessages((m) => [
-      ...m,
-      {
-        id: `local-${Date.now()}`,
-        sessionId: reviewId,
-        commentId: annotationId,
-        role: "user",
-        body: text,
-        status: "complete",
-        createdAt: Date.now(),
-      },
-    ]);
-    setStreamText("");
-    const call =
-      kind === "question"
-        ? invoke("review_question_send", { reviewId, questionId: annotationId, text })
-        : invoke("review_thread_send", { reviewId, annotationId, text });
-    void call.catch((err) => {
-      setStreamText(null);
-      setError(err instanceof Error ? err.message : String(err));
-    });
+    turn.send(text);
   };
 
-  const cancel = () => {
-    void invoke("fork_thread_cancel", {
-      sessionId: reviewId,
-      commentId: annotationId,
-    }).catch(() => {});
-  };
+  const cancel = turn.cancel;
 
   return (
     <div className="rl-review-thread">
@@ -168,14 +96,15 @@ export function ReviewThread({ reviewId, annotationId, kind = "annotation" }: Re
       ))}
       {streaming && (
         <div className="rl-review-thread-msg" data-role="assistant">
-          {streamText ? (
-            <MarkdownView body={streamText} compact />
+          {liveText ? (
+            <MarkdownView body={liveText} compact />
           ) : (
-            <WorkingIndicator />
+            // Backend clock, so a pane switch mid-turn comes back showing the
+            // true elapsed wait rather than restarting the counter.
+            <WorkingIndicator startedAt={turn.startedAt ?? undefined} />
           )}
         </div>
       )}
-      {error && <div className="rl-review-thread-error">{error}</div>}
       <div className="rl-review-thread-composer">
         <textarea
           ref={inputRef}

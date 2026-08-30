@@ -445,7 +445,7 @@ struct PendingReviewEntry {
 }
 
 #[derive(Clone)]
-struct PendingReviews {
+pub(crate) struct PendingReviews {
     map: Arc<StdMutex<HashMap<String, PendingReviewEntry>>>,
     next_token: Arc<AtomicU64>,
 }
@@ -498,6 +498,11 @@ impl PendingReviews {
     /// A curl is currently held for this review (Submit will answer it live).
     fn has(&self, review_id: &str) -> bool {
         self.map.lock().unwrap().contains_key(review_id)
+    }
+    /// Every review holding a curl right now. The abandoned-run sweep's
+    /// evidence that a quiet run is waiting on a human rather than dead.
+    pub(crate) fn held_ids(&self) -> Vec<String> {
+        self.map.lock().unwrap().keys().cloned().collect()
     }
 }
 
@@ -816,12 +821,61 @@ fn watchdog_step(
 /// reports whether the state actually changed; only a real transition emits.
 fn advance_run_state(app: &AppHandle, store: &SessionStore, session_id: &str, state: &str) {
     if store.set_run_state(session_id, state) {
+        // Landing a run closes out the work that run opened. Every close path
+        // in `db.rs` already existed and none of them was ever reached from a
+        // transition — `work_items` carries 595 rows and has never closed one,
+        // so "open work" had stopped meaning anything.
+        //
+        // The scope is deliberately narrow: items whose origin IS this plan
+        // session. Exit-report residue (origin `"plan_run"`) stays open on
+        // purpose — that is precisely the work the run did NOT deliver, and
+        // landing the run is not evidence it got done. Librarian items keep
+        // their own close-then-recur cycle.
+        if run_state_closes_work(state) {
+            close_run_work_items(&store.database(), session_id);
+        }
         let _ = app.emit(
             "run-state-changed",
             SessionEvent {
                 session_id: session_id.to_string(),
             },
         );
+    }
+}
+
+/// Which run states retire the run's open work. Exactly one: `landed` is the
+/// only transition that means "this run is done". `stalled` explicitly does
+/// not — a stalled run's work is still owed.
+fn run_state_closes_work(state: &str) -> bool {
+    state == "landed"
+}
+
+/// Close the work a landed run opened. Returns the ids that moved.
+///
+/// The seam behind `advance_run_state`'s `landed` transition, factored out so
+/// it is testable without an `AppHandle`. Scope is deliberately narrow: items
+/// whose origin IS this plan session. Exit-report residue (origin
+/// `"plan_run"`) stays open on purpose — that is precisely the work the run
+/// did NOT deliver, and landing the run is not evidence it got done. Librarian
+/// items keep their own close-then-recur cycle.
+fn close_run_work_items(db: &Database, session_id: &str) -> Vec<String> {
+    match db.close_open_work_items_for_origin("session", session_id, "landed", ledger::now_millis())
+    {
+        Ok(ids) => {
+            if !ids.is_empty() {
+                tracing::info!(
+                    session_id,
+                    count = ids.len(),
+                    items = ?ids,
+                    "run landed — closed its session-origin work items"
+                );
+            }
+            ids
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, session_id, "failed to close work items on landing");
+            Vec::new()
+        }
     }
 }
 
@@ -876,6 +930,45 @@ fn orchestrate_stall_should_fire(run_state: Option<&str>) -> bool {
     run_state == Some("orchestrating")
 }
 
+/// The run states the abandoned-run sweep may touch.
+///
+/// `orchestrating` is the 5-minute launch watchdog's territory (above);
+/// `awaiting_review` is a deliberate overnight park, not an abandonment; and
+/// `landed` / `stalled` are already terminal. What is left is a run that
+/// claimed the work (`running`) or opened a review (`in_code_review`) and then
+/// went silent — the live DB has one sitting in exactly that shape for 18+
+/// days, because nothing was watching for it.
+pub(crate) const ABANDONED_RUN_STATES: &[&str] = &["running", "in_code_review"];
+
+/// How long a run may sit untouched before the sweep calls it abandoned. A
+/// day, deliberately generous: a real run can be quiet for a long stretch, and
+/// the cost of a false positive is only a chip that reads `stalled` until the
+/// next beacon overwrites it.
+pub(crate) const ABANDONED_RUN_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Pure decision for the abandoned-run sweep — every clause must hold.
+///
+/// Evidence-gated rather than timer-only: a run that is quiet BECAUSE a human
+/// is looking at it is not abandoned, and stalling it would be a lie the user
+/// then has to undo. So the two ways a run can legitimately be waiting are
+/// both vetoes — a held plan POST for this session, and a held code review
+/// that resolves back to it (the T4.1 link chain).
+///
+/// Self-correcting by construction: `set_run_state` enforces no ordering, so a
+/// late real beacon simply overwrites `stalled`.
+pub(crate) fn abandoned_run_should_stall(
+    run_state: Option<&str>,
+    idle_ms: i64,
+    window_ms: i64,
+    held_post: bool,
+    review_link_live: bool,
+) -> bool {
+    run_state.is_some_and(|s| ABANDONED_RUN_STATES.contains(&s))
+        && idle_ms > window_ms
+        && !held_post
+        && !review_link_live
+}
+
 /// One-shot stall detection for an orchestrated launch, in the
 /// `arm_revise_watchdog` shape. A later beacon simply overwrites `stalled`
 /// (`set_run_state` enforces no ordering — the beacons are the truth), so a
@@ -904,6 +997,42 @@ fn arm_orchestrate_stall_watchdog(app: AppHandle, store: SessionStore, session_i
 fn orchestration_review_links() -> &'static StdMutex<HashMap<String, String>> {
     static G: OnceLock<StdMutex<HashMap<String, String>>> = OnceLock::new();
     G.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+/// The settings key mirroring one orchestrate -> review link.
+fn orch_review_link_key(review_id: &str) -> String {
+    format!("orch_review_link:{review_id}")
+}
+
+/// Record which plan session a code review closes out — in memory AND on disk.
+///
+/// The map above is this boot's fast path and dies with the process, which is
+/// exactly the failure this fixes: a LIVE (held) orchestrated review that
+/// outlives a restart loses its plan link, so the human's verdict lands on
+/// nothing and the run's chip is stranded mid-flight. The parked path already
+/// had durability through `queue::note_parked`; this gives the held path the
+/// same, using the settings table already open in front of us.
+fn register_orchestration_review_link(db: &Database, review_id: &str, plan_sid: &str) {
+    orchestration_review_links()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(review_id.to_string(), plan_sid.to_string());
+    if let Err(e) = db.set_setting(&orch_review_link_key(review_id), plan_sid) {
+        tracing::warn!(error = %e, review_id, "failed to persist the orchestrate->review link");
+    }
+}
+
+/// Resolve a review back to its plan session: this boot's map first (always
+/// current), then the overnight queue's parked entry, then the durable mirror.
+/// `None` means the review isn't orchestrated at all.
+fn orchestration_review_link(db: &Database, review_id: &str) -> Option<String> {
+    orchestration_review_links()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(review_id)
+        .cloned()
+        .or_else(|| queue::parked_plan_for_review(db, review_id))
+        .or_else(|| db.get_setting(&orch_review_link_key(review_id)))
 }
 
 /// Safety net for a revise whose feedback was delivered into a held POST that
@@ -4379,12 +4508,10 @@ async fn handle_review_start(
             Some(&format!("round {}", session.round)),
         );
         if let Some(plan_sid) = q.plan.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            // Both links: the in-memory map (this boot's verdict path) and
-            // the durable queue entry (survives the overnight restart).
-            orchestration_review_links()
-                .lock()
-                .unwrap()
-                .insert(session.review_id.clone(), plan_sid.to_string());
+            // Both links: the in-memory map (this boot's verdict path) plus a
+            // durable mirror, and the queue entry (which the overnight runner
+            // reads on its own).
+            register_orchestration_review_link(&db, &session.review_id, plan_sid);
             queue::note_parked(&db, plan_sid, &session.review_id);
             advance_run_state(
                 &app_state.app_handle,
@@ -4458,13 +4585,11 @@ async fn handle_review_start(
     );
 
     // Orchestrated run: remember which plan session this review closes out
-    // and flip its chip to `in_code_review`. Re-registered every round (the
-    // link map is in-memory; the review outlives any single curl).
+    // and flip its chip to `in_code_review`. Re-registered every round, and
+    // mirrored to disk — a held review outlives any single curl, and now also
+    // outlives a restart.
     if let Some(plan_sid) = q.plan.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        orchestration_review_links()
-            .lock()
-            .unwrap()
-            .insert(session.review_id.clone(), plan_sid.to_string());
+        register_orchestration_review_link(&db, &session.review_id, plan_sid);
         advance_run_state(
             &app_state.app_handle,
             &app_state.store,
@@ -4535,12 +4660,7 @@ fn submit_review_feedback(
         // the annotations are stored for the follow-up session; nothing is
         // running to hand them to.
         let db = review_state.db.clone();
-        let plan_sid = orchestration_review_links()
-            .lock()
-            .unwrap()
-            .get(&review_id)
-            .cloned()
-            .or_else(|| queue::parked_plan_for_review(&db, &review_id));
+        let plan_sid = orchestration_review_link(&db, &review_id);
         let run_state = plan_sid.as_deref().and_then(|sid| db.get_run_state(sid));
         let verdict = parked_verdict(plan_sid.is_some(), run_state.as_deref(), approve);
         if verdict == ParkedVerdict::NotParked {
@@ -4636,16 +4756,25 @@ fn submit_review_feedback(
     // sign-off that ends the run's review — the chip walks to `landed` so no
     // "in code review" indication lingers once the reviewer has accepted.
     {
-        let plan_sid = orchestration_review_links()
-            .lock()
-            .unwrap()
-            .get(&review_id)
-            .cloned();
+        // The full chain, not just the map: a review held across a restart
+        // has an empty map and would otherwise silently strand its run chip.
+        let plan_sid = orchestration_review_link(&review_state.db, &review_id);
         if let Some(plan_sid) = plan_sid {
             advance_run_state(&app, &store, &plan_sid, review_verdict_run_state(approve));
         }
     }
     tx.send(payload).map_err(|_| {
+        // The curl died between `pending.take` and this send: the reviewer's
+        // whole round — every annotation, the verdict, the run-state walk
+        // above — went nowhere, and they find out from an error toast. The
+        // run chip has already moved, which is why this is worth counting:
+        // it is the shape of a review that "succeeded" and delivered nothing.
+        db::note_friction(
+            "review_submit_lost",
+            Some("review"),
+            Some(&review_id),
+            Some(if approve { "approve" } else { "feedback" }),
+        );
         "the review curl is no longer listening — re-run /redline-code-review".to_string()
     })
 }
@@ -14376,5 +14505,186 @@ mod tests {
         ));
         assert!(!ask.contains('\n'), "reason must be one line, got: {ask}");
         assert!(ask.contains("redline-plan-review"));
+    }
+
+    // --- T4.1: the orchestrate -> review link survives a restart ------------
+
+    /// The in-memory link map is this boot's fast path and dies with the
+    /// process. A live orchestrated review outlives a restart (the human comes
+    /// back to it in the morning), and before the durable mirror its verdict
+    /// landed on nothing: `advance_run_state` was never called and the run's
+    /// chip sat in `in_code_review` forever. The live DB has exactly one such
+    /// session, stuck 18+ days.
+    #[test]
+    fn review_link_survives_link_map_loss() {
+        let db = Database::open_in_memory().unwrap();
+        let review_id = "rev-t41";
+        let plan_sid = "plan-t41";
+
+        register_orchestration_review_link(&db, review_id, plan_sid);
+        assert_eq!(
+            orchestration_review_link(&db, review_id).as_deref(),
+            Some(plan_sid),
+            "the map serves the link while the process lives"
+        );
+
+        // The restart: the process-global map is gone, the DB is not.
+        orchestration_review_links()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(review_id);
+        assert_eq!(
+            orchestration_review_link(&db, review_id).as_deref(),
+            Some(plan_sid),
+            "the durable mirror is what makes the morning verdict land"
+        );
+
+        // A review that was never orchestrated still resolves to nothing —
+        // the fallback must not invent a link.
+        assert_eq!(orchestration_review_link(&db, "rev-unknown"), None);
+    }
+
+    // --- T4.2: landing a run closes the work it opened ----------------------
+
+    /// `work_items` carried 595 rows and had never closed one — every close
+    /// path existed, none was reached from a transition. Landing is the
+    /// transition that means "done"; nothing else is.
+    #[test]
+    fn landing_a_run_closes_its_sessions_open_items() {
+        use crate::work::WorkItem;
+        let db = Database::open_in_memory().unwrap();
+        let item = |id: &str, origin_kind: &str, origin_id: &str, status: &str| WorkItem {
+            id: id.to_string(),
+            title: format!("item {id}"),
+            body: None,
+            status: status.to_string(),
+            priority: 2,
+            kind: "task".to_string(),
+            assignee: None,
+            claimed_at: None,
+            lease_expires_at: None,
+            closed_at: None,
+            close_reason: None,
+            defer_until: None,
+            origin_kind: Some(origin_kind.to_string()),
+            origin_id: Some(origin_id.to_string()),
+            project_path: Some("/repo".to_string()),
+            pinned: false,
+            created_at: 1,
+            updated_at: 1,
+        };
+        // Two open items this session opened…
+        db.insert_work_item(&item("w-1", "session", "s1", "open")).unwrap();
+        db.insert_work_item(&item("w-2", "session", "s1", "open")).unwrap();
+        // …one already closed (must not be re-stamped)…
+        db.insert_work_item(&item("w-3", "session", "s1", "closed")).unwrap();
+        // …the exit-report residue, which is exactly the UNDELIVERED work…
+        db.insert_work_item(&item("w-4", "plan_run", "s1", "open")).unwrap();
+        // …and another session's work.
+        db.insert_work_item(&item("w-5", "session", "s2", "open")).unwrap();
+
+        // Only `landed` retires work.
+        assert!(run_state_closes_work("landed"));
+        for s in ["running", "in_code_review", "awaiting_review", "stalled", "orchestrating"] {
+            assert!(!run_state_closes_work(s), "{s} must not close work");
+        }
+
+        let mut moved = close_run_work_items(&db, "s1");
+        moved.sort();
+        assert_eq!(moved, vec!["w-1".to_string(), "w-2".to_string()]);
+
+        let status = |id: &str| db.get_work_item(id).expect("row").status;
+        assert_eq!(status("w-1"), "closed");
+        assert_eq!(status("w-2"), "closed");
+        assert_eq!(
+            db.get_work_item("w-1").unwrap().close_reason.as_deref(),
+            Some("landed"),
+            "the reason names the transition that closed it"
+        );
+        assert_eq!(
+            status("w-4"),
+            "open",
+            "exit-report residue IS the undelivered work — landing is not evidence it got done"
+        );
+        assert_eq!(status("w-5"), "open", "another session's work is untouched");
+
+        // The already-closed row keeps its original stamp.
+        assert_eq!(db.get_work_item("w-3").unwrap().close_reason, None);
+
+        // Idempotent: landing twice moves nothing the second time.
+        assert!(close_run_work_items(&db, "s1").is_empty());
+    }
+
+    // --- T4.3: the abandoned-run sweep --------------------------------------
+
+    /// The decision table, in the shape of `watchdog_step_decision_table`.
+    /// Every clause is a veto, because the cost of a false positive is a chip
+    /// that lies to the user about a run that is actually fine.
+    #[test]
+    fn abandoned_run_decision_table() {
+        let window = ABANDONED_RUN_WINDOW.as_millis() as i64;
+        let day = window + 1;
+
+        // The shape the sweep exists for: a run that claimed the work, or
+        // opened a review, and then went silent for a day.
+        assert!(
+            abandoned_run_should_stall(Some("running"), day, window, false, false),
+            "a silent `running` run is abandoned"
+        );
+        assert!(
+            abandoned_run_should_stall(Some("in_code_review"), day, window, false, false),
+            "a silent `in_code_review` run is abandoned"
+        );
+
+        // States the sweep must not touch.
+        for state in [
+            // the 5-minute launch watchdog's territory
+            Some("orchestrating"),
+            // a deliberate overnight park
+            Some("awaiting_review"),
+            // already terminal
+            Some("landed"),
+            Some("stalled"),
+            // never orchestrated at all
+            None,
+        ] {
+            assert!(
+                !abandoned_run_should_stall(state, day, window, false, false),
+                "must not stall {state:?}"
+            );
+        }
+
+        // Inside the window: not yet.
+        assert!(!abandoned_run_should_stall(Some("running"), window, window, false, false));
+        assert!(!abandoned_run_should_stall(Some("running"), 0, window, false, false));
+
+        // The two vetoes: a human is demonstrably still holding it.
+        assert!(
+            !abandoned_run_should_stall(Some("running"), day, window, true, false),
+            "a held plan POST means Claude is blocked waiting on the reviewer"
+        );
+        assert!(
+            !abandoned_run_should_stall(Some("in_code_review"), day, window, false, true),
+            "a held code review linked to this run is the opposite of abandoned"
+        );
+        assert!(
+            !abandoned_run_should_stall(Some("running"), day, window, true, true),
+            "both vetoes together still veto"
+        );
+    }
+
+    /// `held_ids` is the sweep's evidence source; pin that it reports exactly
+    /// the reviews holding a curl.
+    #[test]
+    fn pending_reviews_reports_its_held_ids() {
+        let pending = PendingReviews::new();
+        assert!(pending.held_ids().is_empty());
+        let (_rx, _token) = pending.register("rev-1");
+        assert_eq!(pending.held_ids(), vec!["rev-1".to_string()]);
+        let _ = pending.take("rev-1");
+        assert!(
+            pending.held_ids().is_empty(),
+            "a released curl stops vetoing the sweep"
+        );
     }
 }

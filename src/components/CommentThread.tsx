@@ -2,17 +2,9 @@
 // Copyright 2026 Yusuf Al-Bazian
 import { memo, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { useAdjustDiscussionZoom } from "./DiscussionViewContext";
-import type {
-  Comment,
-  CommentAttachment,
-  ForkCancelledEvent,
-  ForkDeltaEvent,
-  ForkDoneEvent,
-  ForkErrorEvent,
-  ThreadMessage,
-} from "../types";
+import type { Comment, CommentAttachment, ThreadMessage } from "../types";
+import { useAgentTurn } from "../hooks/useAgentTurn";
 import { useAttachmentCapture } from "../hooks/useAttachmentCapture";
 // The rider note a transcript produces — also used to detect that an attached
 // rider is stale (the discussion continued after attaching).
@@ -34,11 +26,6 @@ interface CommentThreadProps {
 
 type ThreadStatus = "idle" | "streaming" | "error";
 
-// Monotonic ids for optimistic / synthetic messages — never collide with the
-// backend's UUIDs.
-let tmpSeq = 0;
-const tmpId = () => `tmp-${++tmpSeq}`;
-
 /** The opening message when the reviewer clicks "Discuss" — the comment's own
  *  text, or a sensible stand-in for comments whose body isn't prose. */
 function discussSeed(c: Comment): string {
@@ -52,7 +39,8 @@ function discussSeed(c: Comment): string {
 
 /** A per-comment discussion with a Claude Code fork of the main session.
  *  Rendered inside `CommentCard`; collapses to a one-line summary. Mirrors
- *  `TerminalView`'s listen()/unlisten streaming pattern for `fork-*` events. */
+ *  Streaming runs on the shared `useAgentTurn` lifecycle (T3.2), so a
+ *  mid-turn remount restores the partial reply instead of resuming blank. */
 // Memoized: receives only `sessionId` + `comment`, both identity-stable from
 // the parent card, so it sits out the comment pane's frequent re-renders (focus
 // flips, divider drags, zoom changes). It only re-renders when *its* comment
@@ -67,20 +55,73 @@ export const CommentThread = memo(function CommentThread({
   // The shared text size is applied via the `--rl-discussion-zoom` CSS var set
   // once on the discussion pane; here we only need the stable adjuster for A−/A+.
   const adjustZoom = useAdjustDiscussionZoom();
-  const [messages, setMessages] = useState<ThreadMessage[]>([]);
-  const [liveText, setLiveText] = useState("");
-  const [status, setStatus] = useState<ThreadStatus>("idle");
   const [expanded, setExpanded] = useState(false);
   // Per-discussion focus: lifts the 320px message-list cap so the full reply
   // renders in place. Independent of collapse; defaults on so a discussion opens
   // at full height (structured replies + diagrams are meant to be read in full).
   // The reviewer can still collapse to compact via the ⤡ button.
   const [enlarged, setEnlarged] = useState(true);
-  const [loaded, setLoaded] = useState(false);
   const [draft, setDraft] = useState("");
-  // When the current wait began (set on send) — drives the WorkingIndicator's
-  // elapsed counter through the dead air before the first delta.
-  const [workStartedAt, setWorkStartedAt] = useState<number | null>(null);
+  // Attachments ride the optimistic user row. `makeMessage` reads this the
+  // instant `turn.send` mints that row — synchronously — and `send` clears it
+  // immediately after, so it can never leak into a later turn.
+  const pendingAttachments = useRef<CommentAttachment[] | undefined>(undefined);
+
+  // The shared streaming lifecycle (T3.2). Everything this thread used to
+  // hand-roll is now the machine the five chat surfaces already use — and it
+  // brings three things the hand-rolled version never had: seq-guarded deltas
+  // (a delta the probe already folded in is dropped instead of doubled), a
+  // mid-turn remount restored from `fork_thread_status.partial` instead of
+  // resuming blank, and a 10s self-heal for a lost terminal event.
+  //
+  // The fork family joins through the config extensions rather than by being
+  // renamed: its registry key is the PAIR `(sessionId, commentId)`, its
+  // commands are `fork_thread_*` with `get_thread` for history, and
+  // `Turns::begin` rejects-when-busy so there is no queue to type ahead into.
+  const turn = useAgentTurn<ThreadMessage>({
+    surface: "fork",
+    key: `${sessionId}:${commentId}`,
+    idField: null,
+    idFields: { sessionId, commentId },
+    historyCmd: "get_thread",
+    historyArgs: { sessionId, commentId },
+    commands: {
+      send: "fork_thread_send",
+      status: "fork_thread_status",
+      cancel: "fork_thread_cancel",
+    },
+    statusArgs: { scopeId: sessionId, itemId: commentId },
+    cancelArgs: { sessionId, commentId },
+    queueing: false,
+    sendFailPrefix: "Couldn't reach the discussion fork",
+    buildSendArgs: (text, extra) => {
+      const attachments = (extra as CommentAttachment[] | undefined) ?? [];
+      return {
+        sessionId,
+        commentId,
+        text,
+        // The fork has `Read`, so naming the paths is all it needs to look at
+        // what the reviewer just dropped in.
+        attachments: attachments.length > 0 ? attachments : null,
+      };
+    },
+    makeMessage: ({ id, role, body, status }) => ({
+      id,
+      sessionId,
+      commentId,
+      role,
+      body,
+      status,
+      createdAt: Date.now(),
+      attachments: role === "user" ? pendingAttachments.current : undefined,
+    }),
+  });
+  const { messages, liveText, loaded } = turn;
+  const status: ThreadStatus = turn.status;
+  // When the current wait began — drives the WorkingIndicator's elapsed
+  // counter through the dead air before the first delta. Backend clock now,
+  // so a remount mid-turn shows the true elapsed time instead of restarting.
+  const workStartedAt = turn.startedAt;
   // When the reviewer manually collapses an expanded thread, suppress the
   // streaming auto-expand until the next send — otherwise a long Claude reply
   // keeps re-opening a thread they're deliberately trying to set aside.
@@ -95,158 +136,29 @@ export const CommentThread = memo(function CommentThread({
     onAutoOpenConsumed?.();
   }, [autoOpen, onAutoOpenConsumed]);
 
-  // Load persisted turns + subscribe to this comment's fork events. Re-runs if
-  // the card is reused for another (session, comment) — App.tsx keys by both.
+  // Auto-expand as the reply streams in — unless the reviewer just folded
+  // this thread away on purpose. (Previously done inside the delta listener;
+  // watching `liveText` also catches a stream restored from the probe on a
+  // mid-turn remount, which the listener never saw.)
   useEffect(() => {
-    let alive = true;
-    setLoaded(false);
-    setMessages([]);
-    setLiveText("");
-    setStatus("idle");
-
-    void invoke<ThreadMessage[]>("get_thread", { sessionId, commentId })
-      .then((rows) => {
-        if (!alive) return;
-        setMessages(rows);
-        setLoaded(true);
-      })
-      .catch(() => {
-        if (alive) setLoaded(true);
-      });
-
-    // Streaming state is component-local, but the fork registry survives a
-    // session switch — seed from it so a remount mid-turn shows the spinner
-    // (and elapsed counter) again instead of a silently "idle" thread. The
-    // fork-* listeners below take over from the next event on.
-    void invoke<{ streaming: boolean; startedAt: number | null }>(
-      "fork_thread_status",
-      { scopeId: sessionId, itemId: commentId },
-    )
-      .then((s) => {
-        if (!alive || !s.streaming) return;
-        setStatus("streaming");
-        setWorkStartedAt(s.startedAt ?? Date.now());
-      })
-      .catch(() => {});
-
-    const mine = (p: { sessionId: string; commentId: string }) =>
-      p.sessionId === sessionId && p.commentId === commentId;
-
-    // StrictMode runs setup→cleanup→setup; the cleanup's unlisten resolves
-    // async, so between the second setup and that resolve there are briefly
-    // two live handlers. The `alive` closure capture lets the stale generation
-    // no-op, preventing a duplicate message append.
-    const deltaP = listen<ForkDeltaEvent>("fork-delta", (e) => {
-      if (!alive) return;
-      if (!mine(e.payload)) return;
-      setStatus("streaming");
-      if (!userCollapsedRef.current) setExpanded(true);
-      setLiveText((t) => t + e.payload.text);
-    });
-    const doneP = listen<ForkDoneEvent>("fork-done", (e) => {
-      if (!alive) return;
-      if (!mine(e.payload)) return;
-      setMessages((m) => [
-        ...m,
-        {
-          id: e.payload.messageId,
-          sessionId,
-          commentId,
-          role: "assistant",
-          body: e.payload.body,
-          status: "complete",
-          createdAt: Date.now(),
-        },
-      ]);
-      setLiveText("");
-      setStatus("idle");
-    });
-    const errorP = listen<ForkErrorEvent>("fork-error", (e) => {
-      if (!alive) return;
-      if (!mine(e.payload)) return;
-      setMessages((m) => [
-        ...m,
-        {
-          id: tmpId(),
-          sessionId,
-          commentId,
-          role: "assistant",
-          body: e.payload.error,
-          status: "error",
-          createdAt: Date.now(),
-        },
-      ]);
-      setLiveText("");
-      setStatus("error");
-    });
-    const cancelP = listen<ForkCancelledEvent>("fork-cancelled", (e) => {
-      if (!alive) return;
-      if (!mine(e.payload)) return;
-      setLiveText("");
-      setStatus("idle");
-    });
-
-    return () => {
-      alive = false;
-      void deltaP.then((un) => un());
-      void doneP.then((un) => un());
-      void errorP.then((un) => un());
-      void cancelP.then((un) => un());
-    };
-  }, [sessionId, commentId]);
+    if (liveText && !userCollapsedRef.current) setExpanded(true);
+  }, [liveText]);
 
   function send(text: string, attachments: CommentAttachment[] = []) {
     const trimmed = text.trim();
+    // The fork registry rejects-when-busy; the hook drops a mid-turn send too,
+    // but bail here so the auto-expand below doesn't fire for a no-op.
     if (!trimmed || status === "streaming") return;
-    // Optimistic user turn — the backend also persists it.
-    setMessages((m) => [
-      ...m,
-      {
-        id: tmpId(),
-        sessionId,
-        commentId,
-        role: "user",
-        body: trimmed,
-        status: "complete",
-        createdAt: Date.now(),
-        attachments: attachments.length > 0 ? attachments : undefined,
-      },
-    ]);
-    setLiveText("");
-    setStatus("streaming");
-    setWorkStartedAt(Date.now());
     // A fresh send re-grants the auto-expand-on-delta behavior — the user
     // just asked something, so they want to see the reply unfold.
     userCollapsedRef.current = false;
     setExpanded(true);
-    void invoke("fork_thread_send", {
-      sessionId,
-      commentId,
-      text: trimmed,
-      // The fork has `Read`, so naming the paths is all it needs to look at
-      // what the reviewer just dropped in.
-      attachments: attachments.length > 0 ? attachments : null,
-    }).catch((err) => {
-      setStatus("error");
-      setMessages((m) => [
-        ...m,
-        {
-          id: tmpId(),
-          sessionId,
-          commentId,
-          role: "assistant",
-          body: `Couldn't reach the discussion fork: ${err}`,
-          status: "error",
-          createdAt: Date.now(),
-        },
-      ]);
-    });
+    pendingAttachments.current = attachments.length > 0 ? attachments : undefined;
+    turn.send(trimmed, { extra: attachments });
+    pendingAttachments.current = undefined;
   }
 
-  function cancel() {
-    void invoke("fork_thread_cancel", { sessionId, commentId }).catch(() => {});
-  }
-
+  const cancel = turn.cancel;
 
   // Route a read-only discussion into the main revise loop: attach the
   // transcript to the comment as its rider note, so the next Submit carries
@@ -295,9 +207,7 @@ export const CommentThread = memo(function CommentThread({
         ),
       );
     }
-    setMessages([]);
-    setLiveText("");
-    setStatus("idle");
+    turn.clear();
     setExpanded(false);
     setDraft("");
   }

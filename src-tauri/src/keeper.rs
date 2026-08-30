@@ -43,7 +43,7 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 
 use serde_json::Value;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::classmem::{self, auto_collapse_safe, subtree_stats, ClassNode};
@@ -905,6 +905,89 @@ fn stall_watch_act(ctx: &WatchCtx, now: i64) {
     });
 }
 
+// --- abandoned-run sweep ----------------------------------------------------
+
+/// How often the abandoned-run sweep evaluates. Cheap (one in-memory
+/// `store.list()` plus, only when something is ripe, one link lookup per held
+/// review), and the window it enforces is a day — a slow cadence is fine.
+const ABANDONED_RUN_SWEEP_EVERY: Duration = Duration::from_secs(30 * 60);
+
+/// Sessions whose chip is in a state the sweep may touch, with the timestamp
+/// the window is measured from. `updated_at` is the session's last activity of
+/// ANY kind, which is exactly the "nothing has happened here" signal wanted.
+fn abandoned_run_candidates(ctx: &WatchCtx) -> Vec<(String, i64, Option<String>)> {
+    ctx.store
+        .list()
+        .into_iter()
+        .filter(|s| {
+            s.run_state
+                .as_deref()
+                .is_some_and(|r| crate::ABANDONED_RUN_STATES.contains(&r))
+        })
+        .map(|s| (s.session_id, s.updated_at, s.run_state))
+        .collect()
+}
+
+fn abandoned_run_predicate(ctx: &WatchCtx, _now: i64) -> bool {
+    !abandoned_run_candidates(ctx).is_empty()
+}
+
+/// Walk every run that claimed work and then went silent for a day to
+/// `stalled` — unless a human is demonstrably still holding it.
+fn abandoned_run_act(ctx: &WatchCtx, now: i64) {
+    let candidates = abandoned_run_candidates(ctx);
+    if candidates.is_empty() {
+        return;
+    }
+    let window_ms = crate::ABANDONED_RUN_WINDOW.as_millis() as i64;
+    // Every plan session a currently-held code review closes out. Resolved
+    // through the T4.1 chain, so a review held across a restart still vetoes.
+    let live_links: HashSet<String> = ctx
+        .app
+        .try_state::<crate::PendingReviews>()
+        .map(|pr| pr.held_ids())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|rid| crate::orchestration_review_link(&ctx.db, &rid))
+        .collect();
+
+    // The run-state walk rides `spawn_blocking` (the house pattern — see
+    // `mirror_act`) so the bus tick never blocks on the database.
+    let app = ctx.app.clone();
+    let store = ctx.store.clone();
+    let pending = ctx.pending.clone();
+    tokio::task::spawn_blocking(move || {
+        for (sid, updated_at, run_state) in candidates {
+            if !crate::abandoned_run_should_stall(
+                run_state.as_deref(),
+                now - updated_at,
+                window_ms,
+                pending.has(&sid),
+                live_links.contains(&sid),
+            ) {
+                continue;
+            }
+            let idle_h = (now - updated_at) / 3_600_000;
+            tracing::info!(
+                session_id = %sid,
+                run_state = ?run_state,
+                idle_hours = idle_h,
+                "abandoned-run sweep: walking a silent run to stalled"
+            );
+            crate::db::note_friction(
+                "run_stalled",
+                Some("orchestration"),
+                Some(&sid),
+                Some(&format!(
+                    "{} for {idle_h}h with no beacon",
+                    run_state.as_deref().unwrap_or("?")
+                )),
+            );
+            crate::advance_run_state(&app, &store, &sid, "stalled");
+        }
+    });
+}
+
 // --- review-staleness sweep -------------------------------------------------
 
 /// Suspects from the previous sweep: sessions observed once with a persisted
@@ -1228,6 +1311,14 @@ pub(crate) static WATCHES: &[Watch] = &[
         gate: always,
         predicate: stall_watch_predicate,
         act: stall_watch_act,
+    },
+    Watch {
+        name: "abandoned-run-sweep",
+        target_role: "orchestrator",
+        cadence: ABANDONED_RUN_SWEEP_EVERY,
+        gate: always,
+        predicate: abandoned_run_predicate,
+        act: abandoned_run_act,
     },
     Watch {
         name: "review-staleness-sweep",

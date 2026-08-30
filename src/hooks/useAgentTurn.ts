@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-//! ONE lifecycle for every streaming chat surface (browse, linked, mission,
-//! memchat, companion), replacing the copy-pasted component-local machinery whose state
-//! died on every surface switch. The backend turn registry is the durable
-//! truth; this hook makes a remount lossless:
+//! ONE lifecycle for every streaming chat surface — browse, linked, mission,
+//! memchat, companion, and the discussion forks (plan comment threads, drafter
+//! sidecars, review annotation/question threads) — replacing the copy-pasted
+//! component-local machinery whose state died on every surface switch. The
+//! backend turn registry is the durable truth; this hook makes a remount
+//! lossless:
 //!
 //! - Mount subscribes the `${surface}-*` events FIRST, and only then fires the
 //!   thread load + `${surface}_turn_status` probe in parallel — with the
@@ -41,7 +43,13 @@ export type AgentSurface =
   // command family is `companion_send` / `_turn_status` / `_cancel` /
   // `_unqueue` and the events are `companion-delta|done|error|cancelled|
   // queue-advanced` — so nothing is renamed to join.
-  | "companion";
+  | "companion"
+  // The discussion forks: plan-comment threads, drafter-comment sidecars and
+  // review annotation/question threads. One backend registry keyed by
+  // `fork_key(scope, item)`, one `fork-*` event family — but none of the
+  // naming conventions above hold, which is what `idFields`, `commands`,
+  // `statusArgs`/`cancelArgs` and `queueing` exist for.
+  | "fork";
 
 export interface AgentTurnConfig<M extends TurnMessage> {
   surface: AgentSurface;
@@ -52,11 +60,38 @@ export interface AgentTurnConfig<M extends TurnMessage> {
    *  status/cancel commands. `null` = singleton: every event is ours and the
    *  commands take no key. */
   idField: string | null;
+  /** Composite event matching for a registry keyed on more than one field:
+   *  the fork registry keys on `{sessionId, commentId}`, so neither field
+   *  alone identifies a thread. Every entry must match the event payload.
+   *  Supersedes `idField`/`key` for matching when present; `key` still names
+   *  the controller's identity for remounts. */
+  idFields?: Record<string, string>;
   /** The persisted-thread command (names predate the shared contract:
    *  `get_browse_thread`, `linked_get_thread`, `get_mission_thread`,
    *  `memchat_thread`). */
   historyCmd: string;
   historyArgs?: Record<string, unknown>;
+  /** Command-name overrides for a surface that predates the `${surface}_*`
+   *  convention. The fork family is `fork_thread_send` / `fork_thread_status`
+   *  / `fork_thread_cancel`, and its `send` differs per consumer
+   *  (`draft_thread_send`, `review_thread_send`, `review_question_send`). */
+  commands?: {
+    send?: string;
+    status?: string;
+    cancel?: string;
+    unqueue?: string;
+  };
+  /** Args for the status command when they aren't `{[idField]: key}` —
+   *  `fork_thread_status` takes `{scopeId, itemId}`. */
+  statusArgs?: Record<string, unknown>;
+  /** Args for the cancel command when they aren't `{[idField]: key}` —
+   *  `fork_thread_cancel` takes `{sessionId, commentId}`. */
+  cancelArgs?: Record<string, unknown>;
+  /** False for a registry that rejects-when-busy rather than queueing
+   *  (`Turns::begin` in `fork.rs`). Sends then never carry `queue: true`, a
+   *  send attempted mid-turn is dropped instead of drawn as a queued bubble,
+   *  and `unqueue` is a no-op. Defaults to true. */
+  queueing?: boolean;
   /** Error-bubble prefix for a send that never reached the backend,
    *  e.g. "Couldn't reach the browse agent". */
   sendFailPrefix: string;
@@ -155,8 +190,31 @@ export class AgentTurnController<M extends TurnMessage> {
   }
 
   private mine(payload: Record<string, unknown>): boolean {
-    const { idField, key } = this.cfg();
+    const { idField, idFields, key } = this.cfg();
+    // A composite key needs EVERY field to match: `fork-delta` carries both
+    // `sessionId` and `commentId`, and two comments in one session (or the
+    // same comment id across two sessions) would otherwise cross-talk.
+    if (idFields) {
+      return Object.entries(idFields).every(([field, want]) => payload[field] === want);
+    }
     return idField == null || payload[idField] === key;
+  }
+
+  /** The backend command for one leg of the lifecycle: the `${surface}_*`
+   *  convention unless the config names something else. */
+  private cmd(kind: "send" | "status" | "cancel" | "unqueue"): string {
+    const cfg = this.cfg();
+    const override = cfg.commands?.[kind];
+    if (override) return override;
+    return kind === "status" ? `${cfg.surface}_turn_status` : `${cfg.surface}_${kind}`;
+  }
+
+  /** Args for the status/cancel commands. They are the key args unless the
+   *  surface names its own (the fork family spells the same pair
+   *  `{scopeId, itemId}` for status and `{sessionId, commentId}` for cancel). */
+  private argsFor(kind: "status" | "cancel"): Record<string, unknown> {
+    const cfg = this.cfg();
+    return (kind === "status" ? cfg.statusArgs : cfg.cancelArgs) ?? this.keyArgs();
   }
 
   private keyArgs(): Record<string, unknown> {
@@ -232,6 +290,9 @@ export class AgentTurnController<M extends TurnMessage> {
     const trimmed = text.trim();
     if (!trimmed || !this.alive) return;
     const cfg = this.cfg();
+    // A registry that rejects-when-busy has no queue to type ahead into: the
+    // send would come back an error and the optimistic row would be a lie.
+    if (cfg.queueing === false && this.state.phase === "streaming") return;
     const id = tmpId(cfg.surface);
     this.dispatch({
       type: "send-optimistic",
@@ -260,8 +321,8 @@ export class AgentTurnController<M extends TurnMessage> {
     if (!this.alive) return;
     try {
       const outcome = await this.io.invoke<SendOutcome | undefined>(
-        `${cfg.surface}_send`,
-        { ...args, queue: true },
+        this.cmd("send"),
+        cfg.queueing === false ? args : { ...args, queue: true },
       );
       if (this.alive && outcome) {
         this.dispatch({
@@ -291,9 +352,7 @@ export class AgentTurnController<M extends TurnMessage> {
   }
 
   cancel(): void {
-    void this.io
-      .invoke(`${this.cfg().surface}_cancel`, this.keyArgs())
-      .catch(() => {});
+    void this.io.invoke(this.cmd("cancel"), this.argsFor("cancel")).catch(() => {});
   }
 
   /** Pull a queued send back out of the backend queue. Resolves to its text
@@ -301,8 +360,10 @@ export class AgentTurnController<M extends TurnMessage> {
    *  then stays, because it IS (or is about to be) the streaming turn. */
   async unqueue(messageId: string): Promise<string | null> {
     const cfg = this.cfg();
+    // Nothing was ever queued on a rejects-when-busy registry.
+    if (cfg.queueing === false) return null;
     try {
-      const text = await this.io.invoke<string | null>(`${cfg.surface}_unqueue`, {
+      const text = await this.io.invoke<string | null>(this.cmd("unqueue"), {
         ...this.keyArgs(),
         messageId,
       });
@@ -332,11 +393,10 @@ export class AgentTurnController<M extends TurnMessage> {
   }
 
   private async probe(): Promise<void> {
-    const { surface } = this.cfg();
     try {
       const s = await this.io.invoke<TurnStatus>(
-        `${surface}_turn_status`,
-        this.keyArgs(),
+        this.cmd("status"),
+        this.argsFor("status"),
       );
       if (this.alive) this.dispatch({ type: "probe", status: s });
     } catch {
@@ -358,13 +418,9 @@ export class AgentTurnController<M extends TurnMessage> {
   }
 
   private async healTick(): Promise<void> {
-    const cfg = this.cfg();
     let s: TurnStatus;
     try {
-      s = await this.io.invoke<TurnStatus>(
-        `${cfg.surface}_turn_status`,
-        this.keyArgs(),
-      );
+      s = await this.io.invoke<TurnStatus>(this.cmd("status"), this.argsFor("status"));
     } catch {
       return; // no verdict — leave the counter alone
     }

@@ -635,6 +635,13 @@ export interface TurnStatus {
   queued: QueuedTurn[];
 }
 
+// The `fork-*` wire payloads, mirroring `fork.rs`'s ForkDelta / ForkDone /
+// ForkError / ForkCancelled. Since T3.2–T3.4 no component subscribes to these
+// directly — `useAgentTurn` reads them structurally through its own
+// DeltaPayload/DonePayload/ErrorPayload — so these stay as the TypeScript
+// record of the contract the Rust side emits, and as the reference when a new
+// field lands on it.
+
 /** A chunk of streaming assistant text for a comment's fork thread. */
 export interface ForkDeltaEvent {
   sessionId: SessionId;

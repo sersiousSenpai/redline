@@ -266,10 +266,18 @@ pub fn pty_spawn(
     // terminals never see it — that asymmetry IS the auth model.
     cmd.env(crate::auth::ENV_DAEMON_TOKEN, crate::auth::daemon_token());
 
-    let mut child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| format!("failed to spawn {shell}: {e}"))?;
+    let mut child = pair.slave.spawn_command(cmd).map_err(|e| {
+        // The terminal is the app's busiest surface and emitted NOTHING into
+        // the evidence pipeline — a shell that won't start was invisible to
+        // every digest that ranks what to fix.
+        crate::db::note_friction(
+            "pty_spawn_failed",
+            Some("terminal"),
+            None,
+            Some(&format!("{shell}: {e}")),
+        );
+        format!("failed to spawn {shell}: {e}")
+    })?;
     drop(pair.slave);
 
     let killer = child.clone_killer();
@@ -287,6 +295,7 @@ pub fn pty_spawn(
     let pump = Pump::new();
     let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
     let expected_exit = Arc::new(AtomicBool::new(false));
+    let expected_exit_for_reaper = expected_exit.clone();
 
     guard.insert(
         id.clone(),
@@ -379,7 +388,17 @@ pub fn pty_spawn(
     // the successor's PtySession, closing its master and EOF-killing its shell.
     let id_for_reaper = id;
     std::thread::spawn(move || {
-        let _ = child.wait();
+        let status = child.wait();
+        // An intentional kill (remount cleanup, tab close, app exit) is not
+        // friction; a shell that died on its own is.
+        if !expected_exit_for_reaper.load(Ordering::SeqCst) {
+            let detail = match &status {
+                Ok(st) if st.success() => "shell exited unexpectedly (status 0)".to_string(),
+                Ok(st) => format!("shell exited unexpectedly with {st:?}"),
+                Err(e) => format!("wait() failed: {e}"),
+            };
+            crate::db::note_friction("pty_exit", Some("terminal"), None, Some(&detail));
+        }
         if let Some(state) = app.try_state::<PtyState>() {
             // Never lock a session while holding the registry lock (that
             // inverts the lock order used everywhere else). Snapshot the

@@ -2,7 +2,8 @@
 // Copyright 2026 Yusuf Al-Bazian
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -614,7 +615,55 @@ pub struct Database {
     conn: Mutex<Connection>,
 }
 
+/// Latches the one-time poison report. The report itself writes a
+/// `friction_events` row, which re-enters `lock_conn` — without this the first
+/// poisoned lock would recurse forever.
+static POISON_REPORTED: AtomicBool = AtomicBool::new(false);
+
 impl Database {
+    /// The ONLY way production code takes the connection.
+    ///
+    /// The crate builds with `panic = "unwind"` deliberately, so a panic inside
+    /// any closure that holds this guard unwinds and poisons the mutex. With a
+    /// bare `.unwrap()` every subsequent lock — that is, every Tauri command and
+    /// every bridge route in the app — panics forever while the window stays up
+    /// and looks alive. Recovering the guard is the house pattern already used
+    /// for the PTY registry (`pty::lock_ok`), the grant registry (`auth.rs`) and
+    /// the seat store (`seat.rs`).
+    ///
+    /// Recovery is safe here for the same reason it is safe there: the guarded
+    /// value stays coherent. rusqlite rolls an open transaction back when the
+    /// `Transaction` is dropped during the unwind, so the `Connection` a
+    /// poisoned lock hands back is a connection with no half-applied write on
+    /// it — the panicking statement is simply undone.
+    fn lock_conn(&self) -> MutexGuard<'_, Connection> {
+        match self.conn.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                let guard = poisoned.into_inner();
+                if !POISON_REPORTED.swap(true, Ordering::SeqCst) {
+                    // `note_friction` writes through this same non-reentrant
+                    // mutex, so the guard has to be released before reporting
+                    // and re-taken after. The latch above stops the report's
+                    // own `lock_conn` from reporting again.
+                    drop(guard);
+                    tracing::error!(
+                        "db connection mutex was poisoned by a panic inside a db closure; \
+                         recovering the guard so commands keep working"
+                    );
+                    note_friction(
+                        "db_lock_poisoned",
+                        Some("db"),
+                        None,
+                        Some("recovered a poisoned Mutex<Connection>"),
+                    );
+                    return self.conn.lock().unwrap_or_else(|e| e.into_inner());
+                }
+                guard
+            }
+        }
+    }
+
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -663,14 +712,14 @@ impl Database {
     /// bound (the plan doesn't depend on their values here).
     #[cfg(test)]
     pub fn explain_query_plan(&self, sql: &str) -> rusqlite::Result<String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(3))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?.join(" | "))
     }
 
     fn migrate(&self) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS sessions (
@@ -2561,6 +2610,96 @@ impl Database {
             );
             "#,
         )?;
+        // One-time data repair, gated on its own marker (T1.2). It runs here,
+        // in startup migration, rather than as a maintenance action the user
+        // presses: the polluted rows feed automated ranking (Librarian,
+        // Shipwright, `build_digest`) on EVERY run, so leaving them in place
+        // until somebody remembers to clean up means every ranking in between
+        // is wrong.
+        Self::repair_superseded_agent_comments(&conn)?;
+        Ok(())
+    }
+
+    /// The `submitted` half of an agent replay, retired.
+    ///
+    /// Before `add_comment` converged agent-authored duplicates (T1.1), a
+    /// replayed agent submission minted a second copy of every finding. The
+    /// live record's clearest case is session `5f85766f`: fourteen
+    /// `author='voice'` comments sit `submitted` on v4, and the byte-identical
+    /// fourteen sit `resolved` on v5, written minutes later after a restored
+    /// revision hid the originals from the UI. The v4 rows are answered work
+    /// that no longer knows it — pure noise in every open-comment count.
+    ///
+    /// The repair is deliberately the narrowest thing that fixes it:
+    ///
+    /// - `withdrawn` already exists in the lifecycle and already drops out of
+    ///   open counts, so nothing downstream needs to learn a new state;
+    /// - no resolution data is touched, so the answered copy stays the record;
+    /// - **agent authors only** — two identical human comments are legitimate
+    ///   (verified in the live DB: zero human rows match this predicate);
+    /// - the surviving copy must be strictly LATER and actually answered
+    ///   (`resolved`/`accepted`), which is what makes the earlier row
+    ///   superseded rather than merely similar.
+    ///
+    /// Exactly-once via the `repair_ghost_comments_v1` marker, so a restart
+    /// can't re-withdraw a comment the reviewer deliberately reopened.
+    /// (Rotating `VACUUM INTO` backups already cover the escape hatch.)
+    fn repair_superseded_agent_comments(conn: &Connection) -> rusqlite::Result<()> {
+        const MARKER: &str = "repair_ghost_comments_v1";
+        let already: Option<String> = conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = ?1",
+                params![MARKER],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if already.is_some() {
+            return Ok(());
+        }
+
+        // One predicate, used for both the log and the update, so what gets
+        // reported can never drift from what gets changed.
+        const SUPERSEDED: &str = "status = 'submitted'
+               AND author IS NOT NULL
+               AND EXISTS (
+                   SELECT 1 FROM comments c2
+                    WHERE c2.session_id = comments.session_id
+                      AND c2.author = comments.author
+                      AND c2.body = comments.body
+                      AND c2.id <> comments.id
+                      AND c2.status IN ('resolved', 'accepted')
+                      AND c2.created_at > comments.created_at
+               )";
+
+        let affected = {
+            let mut stmt =
+                conn.prepare(&format!("SELECT session_id, id FROM comments WHERE {SUPERSEDED}"))?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+
+        let changed = conn.execute(
+            &format!("UPDATE comments SET status = 'withdrawn' WHERE {SUPERSEDED}"),
+            [],
+        )?;
+        // A silent data repair is not a repair — name every row that moved.
+        for (session_id, id) in &affected {
+            tracing::info!(
+                session_id = %session_id,
+                comment_id = %id,
+                "ghost repair: withdrew a superseded agent comment"
+            );
+        }
+        if changed > 0 {
+            tracing::info!(count = changed, "ghost repair: done");
+        }
+        conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![MARKER, changed.to_string()],
+        )?;
         Ok(())
     }
 
@@ -2578,7 +2717,7 @@ impl Database {
     /// written by a pre-`updated_at` build (the migration backfill's target).
     #[cfg(test)]
     pub(crate) fn zero_updated_at(&self, session_id: &str) {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE sessions SET updated_at = 0 WHERE session_id = ?1",
             params![session_id],
@@ -2587,7 +2726,7 @@ impl Database {
     }
 
     pub fn get_setting(&self, key: &str) -> Option<String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT value FROM app_settings WHERE key = ?1",
             params![key],
@@ -2597,7 +2736,7 @@ impl Database {
     }
 
     pub fn set_setting(&self, key: &str, value: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO app_settings (key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -2607,7 +2746,7 @@ impl Database {
     }
 
     pub fn upsert_session(&self, session: &ReviewSession) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO sessions (session_id, project_path, project_name, created_at, status, attach_state, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
@@ -2635,7 +2774,7 @@ impl Database {
         session_id: &str,
         revision: &Revision,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO revisions (session_id, version_number, received_at, raw_plan_markdown, thread_start, restored)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -2664,7 +2803,7 @@ impl Database {
     /// Insert a prompt row, deduped on (body_hash, claude_session_id). Returns
     /// the new row id, or `None` if an identical prompt was already stored.
     pub fn insert_prompt(&self, p: &crate::ledger::PromptRow) -> rusqlite::Result<Option<i64>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let changed = conn.execute(
             "INSERT INTO prompts
                 (ts, source, origin, surface, role, user_text, session_id, claude_session_id,
@@ -2702,7 +2841,7 @@ impl Database {
     /// model — the cheap guard that keeps the hook hot path from re-reading a
     /// transcript tail once everything is already stamped.
     pub fn session_needs_model(&self, claude_session_id: &str) -> bool {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM prompts
                 WHERE claude_session_id = ?1 AND model IS NULL)",
@@ -2722,7 +2861,7 @@ impl Database {
         claude_session_id: &str,
         model: &str,
     ) -> rusqlite::Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE prompts SET model = ?2, model_source = 'transcript'
              WHERE claude_session_id = ?1 AND model IS NULL",
@@ -2757,7 +2896,7 @@ impl Database {
         thread_id: &str,
         claude_session_id: &str,
     ) -> rusqlite::Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE OR IGNORE prompts SET claude_session_id = ?4
              WHERE body_hash = ?1 AND thread_kind = ?2 AND thread_id = ?3
@@ -2777,7 +2916,7 @@ impl Database {
         body_hash: &str,
         claude_session_id: &str,
     ) -> rusqlite::Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE OR IGNORE prompts SET claude_session_id = ?2
              WHERE body_hash = ?1 AND thread_id IS NULL AND claude_session_id IS NULL",
@@ -2788,7 +2927,7 @@ impl Database {
     /// `(prompt_id, model)` for every prompt with a stamped model — the Memory
     /// inspector joins this onto its event rows for the per-row chip + filter.
     pub fn list_prompt_models(&self) -> rusqlite::Result<Vec<(i64, String)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt =
             conn.prepare("SELECT id, model FROM prompts WHERE model IS NOT NULL")?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -2806,7 +2945,7 @@ impl Database {
         &self,
         r: &crate::ledger::BrowseEventRow,
     ) -> rusqlite::Result<Option<i64>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let last: Option<String> = conn
             .query_row(
                 "SELECT context_hash FROM browse_events
@@ -2835,7 +2974,7 @@ impl Database {
         let Some(plan) = crate::query::plan_fts_query(query) else {
             return Ok(Vec::new());
         };
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         // Same AND-then-OR cascade as the prompt arm. Columns are weighted
         // `title 5 / url 2 / text 1`: a term in a page's title says the page is
         // ABOUT it; the same term buried in 3 KB of DOM text says it appeared.
@@ -2969,7 +3108,7 @@ impl Database {
                     COALESCE(NULLIF(p.body, ''), p.gist),
                     p.thread_kind, p.thread_id, p.parent_session_id, p.model";
         let plan = crate::query::plan_fts_query(trimmed);
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
 
         if let Some(plan) = &plan {
             for stage in [MatchStage::And, MatchStage::Or] {
@@ -3078,7 +3217,7 @@ impl Database {
             .replace('_', "\\_");
         let pat = format!("%{escaped}%");
         let limit = limit.clamp(1, 200);
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut out: Vec<GrepHit> = Vec::new();
 
         // The trigram index answers a `LIKE '%…%'` on its own column directly —
@@ -3180,7 +3319,7 @@ impl Database {
         if ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let marks = vec!["?"; ids.len()].join(", ");
         let mut stmt = conn.prepare(&format!(
             "SELECT id, context_hash FROM browse_events WHERE id IN ({marks})"
@@ -3200,7 +3339,7 @@ impl Database {
         &self,
         id: i64,
     ) -> rusqlite::Result<Option<(String, Option<String>, String, String)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT url, title, text, context_hash FROM browse_events WHERE id = ?1",
             params![id],
@@ -3214,7 +3353,7 @@ impl Database {
     /// viewer, the bundle join, the mirror, the context routes) transparently
     /// sees the gist and no caller has to special-case compaction.
     pub fn get_prompt_body(&self, id: i64) -> rusqlite::Result<Option<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT COALESCE(gist, body) FROM prompts WHERE id = ?1",
             params![id],
@@ -3244,7 +3383,7 @@ impl Database {
         gist_source: &str,
         actor: &str,
     ) -> rusqlite::Result<Option<i64>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         // Read the original body + hash under the same lock, then swap — all
         // atomic with the ledger append below so the chain can't race.
         let row: Option<(String, String)> = conn
@@ -3335,7 +3474,7 @@ impl Database {
     /// the whole point of the chain is that corrupt bytes can't quietly become
     /// the record.
     pub fn restore_prompt_body(&self, prompt_id: i64) -> rusqlite::Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let row: Option<(String, String, Vec<u8>)> = conn
             .query_row(
                 "SELECT body_hash, algo, blob FROM prompt_archive WHERE prompt_id = ?1",
@@ -3381,7 +3520,7 @@ impl Database {
     /// visible symptom was that search "felt wrong". Cheap enough for the
     /// memory-status poll (one grouped scan of a small table).
     pub fn corpus_composition(&self) -> rusqlite::Result<Vec<(String, i64, i64)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT COALESCE(role, 'unclassified') AS r, COUNT(*),
                     COALESCE(SUM(LENGTH(CAST(COALESCE(NULLIF(body, ''), gist, '') AS BLOB))), 0)
@@ -3398,7 +3537,7 @@ impl Database {
     /// running — and nobody was watching, so compaction was quietly degrading to
     /// "keep the first 240 characters" while reporting a 59:1 reclaim.
     pub fn gist_source_counts(&self) -> rusqlite::Result<(i64, i64)> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT
                 COALESCE(SUM(CASE WHEN gist_source = 'agent' THEN 1 ELSE 0 END), 0),
@@ -3415,7 +3554,7 @@ impl Database {
     /// Point every row with this `context_hash` at a shot. Content-addressed,
     /// so one capture serves every tab that saw the same page.
     pub fn set_shot_key_for_hash(&self, context_hash: &str, key: &str) -> rusqlite::Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE browse_events SET shot_key = ?2 WHERE context_hash = ?1",
             params![context_hash, key],
@@ -3426,7 +3565,7 @@ impl Database {
     /// caller deletes the file; this is the half that makes it disappear from
     /// the UI even if the unlink fails.
     pub fn clear_shot_key(&self, key: &str) -> rusqlite::Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute("UPDATE browse_events SET shot_key = NULL WHERE shot_key = ?1", params![key])
     }
 
@@ -3438,7 +3577,7 @@ impl Database {
     /// "unreferenced" and swept on the first pass, which is precisely the
     /// one-writer-erases-another's-files bug this design exists to avoid.
     pub fn referenced_shot_keys(&self) -> rusqlite::Result<std::collections::HashSet<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut out = std::collections::HashSet::new();
         let mut stmt = conn.prepare(
             "SELECT DISTINCT shot_key FROM browse_events WHERE shot_key IS NOT NULL
@@ -3454,7 +3593,7 @@ impl Database {
     /// The newest decision event of a kind on a session — what a surface shot
     /// keys itself to.
     pub fn latest_decision_seq(&self, session_id: &str, kind: &str) -> rusqlite::Result<Option<i64>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT MAX(seq) FROM ledger_events WHERE session_id = ?1 AND kind = ?2",
             params![session_id, kind],
@@ -3470,7 +3609,7 @@ impl Database {
         shot_key: &str,
         theme: Option<&str>,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO surface_shots (seq, surface, shot_key, theme, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)
@@ -3491,7 +3630,7 @@ impl Database {
         if seqs.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let marks = vec!["?"; seqs.len()].join(", ");
         let mut stmt = conn.prepare(&format!(
             "SELECT seq, shot_key, theme FROM surface_shots WHERE seq IN ({marks})"
@@ -3509,7 +3648,7 @@ impl Database {
 
     /// Clearing a surface shot removes its row too.
     pub fn clear_surface_shot(&self, key: &str) -> rusqlite::Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute("DELETE FROM surface_shots WHERE shot_key = ?1", params![key])
     }
 
@@ -3528,7 +3667,7 @@ impl Database {
         &self,
         limit: i64,
     ) -> rusqlite::Result<Vec<(i64, String, String, String)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, url, COALESCE(title, ''), shot_key
              FROM browse_events
@@ -3556,7 +3695,7 @@ impl Database {
     /// all rest on, so folding a caption into `text` would silently re-key the
     /// page and orphan its own picture.
     pub fn set_caption_for_hash(&self, context_hash: &str, caption: &str) -> rusqlite::Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE browse_events SET caption = ?2 WHERE context_hash = ?1",
             params![context_hash, caption],
@@ -3565,7 +3704,7 @@ impl Database {
 
     /// `(with_pictures, dark_pages)` for Health.
     pub fn shot_stats(&self) -> rusqlite::Result<(i64, i64)> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT
                 (SELECT COUNT(DISTINCT shot_key) FROM browse_events WHERE shot_key IS NOT NULL),
@@ -3579,7 +3718,7 @@ impl Database {
     /// The `context_hash` for one browse event — the capture path needs it to
     /// mint a content-addressed key.
     pub fn context_hash_for_browse_id(&self, id: i64) -> rusqlite::Result<Option<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT context_hash FROM browse_events WHERE id = ?1",
             params![id],
@@ -3603,7 +3742,7 @@ impl Database {
         if ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let marks = vec!["?"; ids.len()].join(", ");
         let mut stmt = conn.prepare(&format!(
             "SELECT prompt_id, MIN(seq) FROM ledger_events
@@ -3626,7 +3765,7 @@ impl Database {
         if seqs.is_empty() {
             return Ok(Vec::new());
         }
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let marks = vec!["?"; seqs.len()].join(", ");
         let mut stmt = conn.prepare(&format!(
             "SELECT le.seq, le.ts, le.kind, le.ref_kind, le.ref_id, le.session_id,
@@ -3662,7 +3801,7 @@ impl Database {
         model: &str,
         limit: i64,
     ) -> rusqlite::Result<Vec<(String, i64, String, String)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut out = Vec::new();
 
         // Prompts: the user's own words (or an agent row's `user_text`, which
@@ -3760,7 +3899,7 @@ impl Database {
         source_hash: &str,
         chunks: &[(crate::embed::Chunk, crate::embed::QVec)],
     ) -> rusqlite::Result<()> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         tx.execute(
             "DELETE FROM embeddings
@@ -3798,7 +3937,7 @@ impl Database {
         &self,
         model: &str,
     ) -> rusqlite::Result<Vec<(i64, String, i64, crate::embed::QVec)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, target_kind, target_id, scale, vec
              FROM embeddings WHERE model = ?1 ORDER BY id ASC",
@@ -3819,7 +3958,7 @@ impl Database {
     /// `(chunks, pending, distinct_targets)` for a model — what Health shows,
     /// so a half-built index is VISIBLE rather than silently degrading recall.
     pub fn embedding_stats(&self, model: &str) -> rusqlite::Result<(i64, i64)> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let chunks: i64 = conn.query_row(
             "SELECT COUNT(*) FROM embeddings WHERE model = ?1",
             params![model],
@@ -3847,7 +3986,7 @@ impl Database {
     /// Drop every vector. The index is derived, so this is always safe and
     /// always recoverable — the keeper's watch rebuilds it.
     pub fn clear_embeddings(&self) -> rusqlite::Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let n = conn.execute("DELETE FROM embeddings", [])?;
         if let Ok(mut guard) = crate::embed::cache().write() {
             *guard = None;
@@ -3859,7 +3998,7 @@ impl Database {
     /// number, so invalidation never depends on anyone remembering to clear it
     /// (the `build_stats_cached` idiom).
     pub fn max_embedding_id(&self) -> rusqlite::Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row("SELECT COALESCE(MAX(id), 0) FROM embeddings", [], |r| r.get(0))
     }
 
@@ -3872,7 +4011,7 @@ impl Database {
     /// it self-reports a planner regression — which is the only way a retrieval
     /// change shows up as anything other than "Ask feels slower again".
     pub fn prefetch_hit_rate(&self) -> rusqlite::Result<(i64, i64)> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT COALESCE(SUM(CASE WHEN label = 'hit' THEN 1 ELSE 0 END), 0), COUNT(*)
              FROM context_journal WHERE kind = 'memchat_prefetch'",
@@ -3885,7 +4024,7 @@ impl Database {
     /// they occupy — the honest counterpart to `compaction_stats`' reclaim
     /// number, which reads as pure profit until you can see the cost.
     pub fn archive_stats(&self) -> rusqlite::Result<(i64, i64)> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT COUNT(*), COALESCE(SUM(LENGTH(blob)), 0) FROM prompt_archive",
             [],
@@ -3915,7 +4054,7 @@ impl Database {
         size_floor: i64,
         machine_cold_before_ts: i64,
     ) -> rusqlite::Result<Vec<(i64, i64, String, Option<String>)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT p.id, LENGTH(CAST(p.body AS BLOB)) AS bytes,
                     COALESCE(p.role, 'user') AS role, l.node_id
@@ -3945,7 +4084,7 @@ impl Database {
     /// the keeper's summarizer (and its deterministic fallback) gist from. Only
     /// warm rows are returned; an already-compacted id is silently skipped.
     pub fn get_prompt_bodies(&self, ids: &[i64]) -> rusqlite::Result<Vec<(i64, String)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut out = Vec::with_capacity(ids.len());
         let mut stmt =
             conn.prepare("SELECT body FROM prompts WHERE id = ?1 AND gist IS NULL")?;
@@ -3963,7 +4102,7 @@ impl Database {
     /// Aggregate compaction stats for the memory pill/inspector:
     /// `(compacted_count, reclaimed_bytes, newest_compacted_at?)`.
     pub fn compaction_stats(&self) -> rusqlite::Result<(i64, i64, Option<i64>)> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT COUNT(*),
                     COALESCE(SUM(original_bytes), 0),
@@ -3989,7 +4128,7 @@ impl Database {
         parent_id: &str,
         created_at: i64,
     ) -> rusqlite::Result<Option<i64>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let changed = conn.execute(
             "INSERT INTO session_tree (child_kind, child_id, parent_kind, parent_id, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)
@@ -4008,7 +4147,7 @@ impl Database {
         child_kind: &str,
         child_id: &str,
     ) -> rusqlite::Result<Option<(String, String)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT parent_kind, parent_id FROM session_tree
              WHERE child_kind = ?1 AND child_id = ?2",
@@ -4024,7 +4163,7 @@ impl Database {
     /// presence IS "this session is an orchestrator" — used by `handle_plan`
     /// to refuse an orchestrator that tries to plan instead of execute.
     pub fn orchestrator_parent_session(&self, claude_session_id: &str) -> Option<String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT parent_id FROM session_tree
              WHERE child_kind = 'session' AND child_id = ?1 AND parent_kind = 'session'",
@@ -4042,7 +4181,7 @@ impl Database {
         parent_kind: &str,
         parent_id: &str,
     ) -> rusqlite::Result<Vec<(String, String, i64)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT child_kind, child_id, created_at FROM session_tree
              WHERE parent_kind = ?1 AND parent_id = ?2 ORDER BY created_at ASC",
@@ -4067,7 +4206,7 @@ impl Database {
         const JOURNAL_KEEP_ROWS: i64 = 2000;
         const JOURNAL_KEEP_MS: i64 = 14 * 24 * 60 * 60 * 1000;
         let now = crate::ledger::now_millis();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO context_journal (ts, kind, surface_kind, surface_id, label, detail)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -4089,7 +4228,7 @@ impl Database {
         since_id: i64,
         limit: i64,
     ) -> rusqlite::Result<Vec<JournalRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, ts, kind, surface_kind, surface_id, label, detail
              FROM context_journal WHERE id > ?1 ORDER BY id ASC LIMIT ?2",
@@ -4111,7 +4250,7 @@ impl Database {
     /// The newest journal row id (0 when empty) — the seq a reader can resume
     /// its delta from.
     pub fn journal_head(&self) -> rusqlite::Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT COALESCE(MAX(id), 0) FROM context_journal",
             [],
@@ -4124,7 +4263,7 @@ impl Database {
     // -----------------------------------------------------------------------
 
     pub fn insert_companion(&self, c: &crate::state::Companion) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO companion_sessions
                 (companion_id, title, status, created_at, updated_at, model, effort)
@@ -4144,7 +4283,7 @@ impl Database {
 
     /// All companion sessions, most recently active first.
     pub fn list_companions(&self) -> rusqlite::Result<Vec<crate::state::Companion>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT companion_id, title, status, created_at, updated_at, model, effort,
                     title_is_user_set
@@ -4169,7 +4308,7 @@ impl Database {
     /// `None` means "use the `companion` seat's own flags" — the override is
     /// additive, never a second source of truth for the seat.
     pub fn get_companion_seat(&self, companion_id: &str) -> (Option<String>, Option<String>) {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT model, effort FROM companion_sessions WHERE companion_id = ?1",
             params![companion_id],
@@ -4185,7 +4324,7 @@ impl Database {
         model: Option<&str>,
         effort: Option<&str>,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE companion_sessions SET model = ?2, effort = ?3 WHERE companion_id = ?1",
             params![companion_id, model, effort],
@@ -4202,7 +4341,7 @@ impl Database {
         title: &str,
         by_user: bool,
     ) -> rusqlite::Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let sql = if by_user {
             "UPDATE companion_sessions SET title = ?2, title_is_user_set = 1
              WHERE companion_id = ?1"
@@ -4216,7 +4355,7 @@ impl Database {
 
     /// Completed assistant turns as of this chat's last CLI-session rotation.
     pub fn get_companion_rotated_at(&self, companion_id: &str) -> i64 {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT rotated_at_turns FROM companion_sessions WHERE companion_id = ?1",
             params![companion_id],
@@ -4232,7 +4371,7 @@ impl Database {
         companion_id: &str,
         at_turns: i64,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE companion_sessions SET rotated_at_turns = ?2 WHERE companion_id = ?1",
             params![companion_id, at_turns],
@@ -4241,7 +4380,7 @@ impl Database {
     }
 
     pub fn delete_companion(&self, companion_id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "DELETE FROM companion_messages WHERE companion_id = ?1",
             params![companion_id],
@@ -4254,7 +4393,7 @@ impl Database {
     }
 
     pub fn get_companion_session(&self, companion_id: &str) -> Option<String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT claude_session_id FROM companion_sessions WHERE companion_id = ?1",
             params![companion_id],
@@ -4269,7 +4408,7 @@ impl Database {
         companion_id: &str,
         claude_session_id: &str,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE companion_sessions SET claude_session_id = ?2 WHERE companion_id = ?1",
             params![companion_id, claude_session_id],
@@ -4279,7 +4418,7 @@ impl Database {
 
     /// Forget an over-limit companion session so the next turn starts fresh.
     pub fn clear_companion_session(&self, companion_id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE companion_sessions SET claude_session_id = NULL WHERE companion_id = ?1",
             params![companion_id],
@@ -4289,7 +4428,7 @@ impl Database {
 
     /// The journal high-water mark this companion has already absorbed.
     pub fn get_companion_journal_seq(&self, companion_id: &str) -> i64 {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT last_journal_seq FROM companion_sessions WHERE companion_id = ?1",
             params![companion_id],
@@ -4303,7 +4442,7 @@ impl Database {
         companion_id: &str,
         seq: i64,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE companion_sessions SET last_journal_seq = MAX(last_journal_seq, ?2)
              WHERE companion_id = ?1",
@@ -4316,7 +4455,7 @@ impl Database {
         &self,
         msg: &crate::state::CompanionMessage,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO companion_messages
                 (id, companion_id, role, body, status, surface_kind, surface_id,
@@ -4350,7 +4489,7 @@ impl Database {
         &self,
         companion_id: &str,
     ) -> rusqlite::Result<Vec<crate::state::CompanionMessage>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, companion_id, role, body, status, surface_kind, surface_id,
                     surface_label, created_at
@@ -4394,7 +4533,7 @@ impl Database {
         doc_json: Option<&str>,
     ) -> rusqlite::Result<()> {
         let now = crate::ledger::now_millis();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO drafts (draft_id, title, project_path, doc_markdown, doc_json, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
@@ -4415,7 +4554,7 @@ impl Database {
         &self,
         draft_id: &str,
     ) -> rusqlite::Result<Option<(Option<String>, Option<String>, String, i64)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT title, project_path, doc_markdown, updated_at
              FROM drafts WHERE draft_id = ?1",
@@ -4432,7 +4571,7 @@ impl Database {
         &self,
         draft_id: &str,
     ) -> rusqlite::Result<Option<(Option<String>, String, Option<String>)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT doc_json, doc_markdown, project_path FROM drafts WHERE draft_id = ?1",
             params![draft_id],
@@ -4445,7 +4584,7 @@ impl Database {
 
     /// Every shelf document, most-recently-updated first.
     pub fn list_drafts(&self) -> rusqlite::Result<Vec<BookshelfDraft>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT d.draft_id, d.title, d.project_path, d.folder_id, d.created_at, d.updated_at,
                     (SELECT COUNT(*) FROM draft_sources s WHERE s.draft_id = d.draft_id),
@@ -4476,7 +4615,7 @@ impl Database {
     /// Flip a document's template flag. Content is untouched — a template is an
     /// ordinary document the dropdown offers to instantiate.
     pub fn set_draft_template(&self, draft_id: &str, is_template: bool) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE drafts SET is_template = ?2 WHERE draft_id = ?1",
             params![draft_id, is_template as i64],
@@ -4514,7 +4653,7 @@ impl Database {
     /// and orders the shelf; opening a document must not reorder it.
     pub fn touch_draft(&self, draft_id: &str) -> rusqlite::Result<()> {
         let now = crate::ledger::now_millis();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE drafts SET open_count = open_count + 1, last_opened_at = ?2
              WHERE draft_id = ?1",
@@ -4530,7 +4669,7 @@ impl Database {
     /// it, and `upsert_draft` reads this flag rather than trusting them.
     pub fn rename_draft(&self, draft_id: &str, title: &str) -> rusqlite::Result<()> {
         let now = crate::ledger::now_millis();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE drafts SET title = ?2, title_is_user_set = 1, updated_at = ?3
              WHERE draft_id = ?1",
@@ -4543,7 +4682,7 @@ impl Database {
     /// the whole reason the tree is an adjacency list.
     pub fn move_draft(&self, draft_id: &str, folder_id: Option<&str>) -> rusqlite::Result<()> {
         let now = crate::ledger::now_millis();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE drafts SET folder_id = ?2, updated_at = ?3 WHERE draft_id = ?1",
             params![draft_id, folder_id, now],
@@ -4553,7 +4692,7 @@ impl Database {
 
     /// What deleting this document destroys — for the confirm dialog.
     pub fn draft_delete_impact(&self, draft_id: &str) -> rusqlite::Result<DeleteImpact> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         Self::draft_impact_locked(&conn, draft_id)
     }
 
@@ -4578,7 +4717,7 @@ impl Database {
     /// of the Bookshelf this destroys the only copy of the document, which is
     /// why the caller gates it behind a typed-title confirm.
     pub fn delete_draft(&self, draft_id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         Self::delete_draft_locked(&conn, draft_id)
     }
 
@@ -4601,7 +4740,7 @@ impl Database {
     /// Every folder, parent-then-name ordered (the tree is built client-side by
     /// the same `buildTree` pattern the memory and review trees use).
     pub fn list_folders(&self) -> rusqlite::Result<Vec<BookshelfFolder>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT folder_id, parent_id, name, created_at FROM bookshelf_folders
              ORDER BY parent_id IS NOT NULL, parent_id, name COLLATE NOCASE",
@@ -4624,7 +4763,7 @@ impl Database {
         name: &str,
     ) -> rusqlite::Result<()> {
         let now = crate::ledger::now_millis();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO bookshelf_folders (folder_id, parent_id, name, created_at)
              VALUES (?1, ?2, ?3, ?4)",
@@ -4634,7 +4773,7 @@ impl Database {
     }
 
     pub fn rename_folder(&self, folder_id: &str, name: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE bookshelf_folders SET name = ?2 WHERE folder_id = ?1",
             params![folder_id, name],
@@ -4651,7 +4790,7 @@ impl Database {
         folder_id: &str,
         new_parent: Option<&str>,
     ) -> Result<(), String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let edges = Self::folder_edges_locked(&conn).map_err(|e| e.to_string())?;
         if let Some(reason) = folder_move_rejection(&edges, folder_id, new_parent) {
             return Err(reason);
@@ -4674,7 +4813,7 @@ impl Database {
 
     /// What deleting this folder destroys, counting its whole subtree.
     pub fn folder_delete_impact(&self, folder_id: &str) -> rusqlite::Result<DeleteImpact> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let edges = Self::folder_edges_locked(&conn)?;
         let subtree = folder_subtree(&edges, folder_id);
         let mut impact = DeleteImpact {
@@ -4704,7 +4843,7 @@ impl Database {
     /// Returns the ids of the documents that went, so the caller can remove
     /// their source directories too.
     pub fn delete_folder(&self, folder_id: &str) -> rusqlite::Result<Vec<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let edges = Self::folder_edges_locked(&conn)?;
         let subtree = folder_subtree(&edges, folder_id);
         let mut deleted: Vec<String> = Vec::new();
@@ -4741,7 +4880,7 @@ impl Database {
         file_path: Option<&str>,
     ) -> rusqlite::Result<()> {
         let now = crate::ledger::now_millis();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO draft_sources
                 (id, draft_id, kind, ref_id, url, title, excerpt, file_path, created_at)
@@ -4752,7 +4891,7 @@ impl Database {
     }
 
     pub fn list_draft_sources(&self, draft_id: &str) -> rusqlite::Result<Vec<DraftSource>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, draft_id, kind, ref_id, url, title, excerpt, file_path, created_at
              FROM draft_sources WHERE draft_id = ?1 ORDER BY created_at ASC, id ASC",
@@ -4776,7 +4915,7 @@ impl Database {
     /// Delete one source row, returning its `file_path` so the caller can
     /// remove the backing file under `<app_data_dir>/bookshelf/<draft_id>/`.
     pub fn delete_draft_source(&self, id: &str) -> rusqlite::Result<Option<(String, String)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let row: Option<(String, Option<String>)> = conn
             .query_row(
                 "SELECT draft_id, file_path FROM draft_sources WHERE id = ?1",
@@ -4820,7 +4959,7 @@ impl Database {
             }
         });
         let now = crate::ledger::now_millis();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO friction_events (ts, kind, surface, session_id, detail)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -4838,7 +4977,7 @@ impl Database {
     /// Friction kinds inside `window_ms`, most-frequent first.
     pub fn friction_summary(&self, window_ms: i64) -> rusqlite::Result<Vec<FrictionCount>> {
         let cutoff = crate::ledger::now_millis() - window_ms.max(0);
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT kind, COUNT(*), MAX(ts),
                     (SELECT detail FROM friction_events f2
@@ -4869,7 +5008,7 @@ impl Database {
         if f.summary.trim().is_empty() || f.category.trim().is_empty() {
             return Ok(None);
         }
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let dup: i64 = conn.query_row(
             "SELECT COUNT(*) FROM shipwright_findings WHERE category = ?1 AND summary = ?2",
             params![f.category, f.summary],
@@ -4906,7 +5045,7 @@ impl Database {
         &self,
         include_dismissed: bool,
     ) -> rusqlite::Result<Vec<ShipwrightFinding>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let sql = if include_dismissed {
             "SELECT id, run_id, category, summary, evidence, proposal, guard, files,
                     status, dismissed, draft_id, created_at, resolved_at
@@ -4949,7 +5088,7 @@ impl Database {
     ) -> rusqlite::Result<()> {
         let now = crate::ledger::now_millis();
         let dismissed = i64::from(status == "dismissed");
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE shipwright_findings
              SET status = ?2,
@@ -4966,7 +5105,7 @@ impl Database {
     /// input to shipped-**detection**. The caller compares each `files` entry
     /// against the paths a later commit touched; nothing here is self-declared.
     pub fn shipwright_unshipped(&self) -> rusqlite::Result<Vec<(String, String)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, COALESCE(files, '[]') FROM shipwright_findings
              WHERE status = 'accepted'",
@@ -4977,7 +5116,7 @@ impl Database {
 
     /// Accept/dismiss/ship rates per category — the agent's own track record.
     pub fn shipwright_scores(&self) -> rusqlite::Result<Vec<CategoryScore>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT category, COUNT(*),
                     SUM(status IN ('accepted','shipped')),
@@ -5016,7 +5155,7 @@ impl Database {
         project_path: &str,
         limit: i64,
     ) -> rusqlite::Result<Vec<(String, i64, String, Option<String>)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT c.session_id, c.reopen_history, c.body, c.reopen_note
              FROM comments c JOIN sessions s ON s.session_id = c.session_id
@@ -5055,7 +5194,7 @@ impl Database {
         project_path: &str,
         limit: i64,
     ) -> rusqlite::Result<Vec<(String, String, String)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT c.session_id, c.edit_original, c.edit_revised
              FROM comments c JOIN sessions s ON s.session_id = c.session_id
@@ -5077,7 +5216,7 @@ impl Database {
         repo_path: &str,
         limit: i64,
     ) -> rusqlite::Result<Vec<(String, i64, String)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT review_id, round, source FROM review_sessions
              WHERE repo_path = ?1 AND round > 1
@@ -5092,7 +5231,7 @@ impl Database {
     /// Re-anchoring success on returned review requests for this repo:
     /// `(placed, orphans)` summed across every return.
     pub fn share_anchoring_for_repo(&self, project_path: &str) -> rusqlite::Result<(i64, i64)> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT COALESCE(SUM(r.placed), 0), COALESCE(SUM(r.orphans), 0)
              FROM share_returns r JOIN sessions s ON s.session_id = r.session_id
@@ -5108,7 +5247,7 @@ impl Database {
         &self,
         project_path: &str,
     ) -> rusqlite::Result<Vec<(String, i64)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT g.op, COUNT(*) FROM draft_suggestions g
              JOIN drafts d ON d.draft_id = g.draft_id
@@ -5127,7 +5266,7 @@ impl Database {
         project_path: &str,
         limit: i64,
     ) -> rusqlite::Result<Vec<(String, String, i64)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT s.session_id, s.project_name, s.created_at
              FROM sessions s
@@ -5149,7 +5288,7 @@ impl Database {
         &self,
         msg: &crate::state::DraftChatMessage,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO draft_chat_messages (id, draft_id, role, body, status, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -5170,7 +5309,7 @@ impl Database {
         &self,
         draft_id: &str,
     ) -> rusqlite::Result<Vec<crate::state::DraftChatMessage>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, draft_id, role, body, status, created_at
              FROM draft_chat_messages WHERE draft_id = ?1 ORDER BY created_at ASC, id ASC",
@@ -5190,7 +5329,7 @@ impl Database {
 
     /// The draft chat's resumable claude session id, if any.
     pub fn get_draft_chat_session(&self, draft_id: &str) -> Option<String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT claude_session_id FROM draft_chat_threads WHERE draft_id = ?1",
             params![draft_id],
@@ -5205,7 +5344,7 @@ impl Database {
         draft_id: &str,
         claude_session_id: &str,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO draft_chat_threads (draft_id, claude_session_id)
              VALUES (?1, ?2)
@@ -5217,7 +5356,7 @@ impl Database {
 
     /// Forget an over-limit draft-chat session so the next turn starts fresh.
     pub fn clear_draft_chat_session(&self, draft_id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE draft_chat_threads SET claude_session_id = NULL WHERE draft_id = ?1",
             params![draft_id],
@@ -5228,7 +5367,7 @@ impl Database {
     /// The doc hash the draft's agent last saw (drives the "the draft has
     /// changed — re-read it" follow-up header).
     pub fn get_draft_chat_doc_hash(&self, draft_id: &str) -> Option<String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT last_doc_hash FROM draft_chat_threads WHERE draft_id = ?1",
             params![draft_id],
@@ -5239,7 +5378,7 @@ impl Database {
     }
 
     pub fn set_draft_chat_doc_hash(&self, draft_id: &str, hash: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO draft_chat_threads (draft_id, last_doc_hash)
              VALUES (?1, ?2)
@@ -5252,7 +5391,7 @@ impl Database {
     /// Drop a draft's discussion thread + resumable session (explicit draft
     /// delete only — "New draft" keeps history).
     pub fn delete_draft_chat(&self, draft_id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "DELETE FROM draft_chat_messages WHERE draft_id = ?1",
             params![draft_id],
@@ -5271,7 +5410,7 @@ impl Database {
         &self,
         msg: &crate::state::MemChatMessage,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO mem_chat_messages (id, thread_id, role, body, status, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -5291,7 +5430,7 @@ impl Database {
         &self,
         thread_id: &str,
     ) -> rusqlite::Result<Vec<crate::state::MemChatMessage>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, thread_id, role, body, status, created_at
              FROM mem_chat_messages WHERE thread_id = ?1 ORDER BY created_at ASC, id ASC",
@@ -5310,7 +5449,7 @@ impl Database {
     }
 
     pub fn get_mem_chat_session(&self, thread_id: &str) -> Option<String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT claude_session_id FROM mem_chat_threads WHERE thread_id = ?1",
             params![thread_id],
@@ -5321,7 +5460,7 @@ impl Database {
     }
 
     pub fn set_mem_chat_session(&self, thread_id: &str, session_id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO mem_chat_threads (thread_id, claude_session_id)
              VALUES (?1, ?2)
@@ -5332,7 +5471,7 @@ impl Database {
     }
 
     pub fn clear_mem_chat_session(&self, thread_id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE mem_chat_threads SET claude_session_id = NULL WHERE thread_id = ?1",
             params![thread_id],
@@ -5343,7 +5482,7 @@ impl Database {
     /// The ledger high-water mark the Ask agent last saw (its follow-up header
     /// says whether the record grew since). `None` before the first turn.
     pub fn get_mem_chat_last_seq(&self, thread_id: &str) -> Option<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT last_seq FROM mem_chat_threads WHERE thread_id = ?1",
             params![thread_id],
@@ -5354,7 +5493,7 @@ impl Database {
     }
 
     pub fn set_mem_chat_last_seq(&self, thread_id: &str, seq: i64) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO mem_chat_threads (thread_id, last_seq)
              VALUES (?1, ?2)
@@ -5368,7 +5507,7 @@ impl Database {
     /// reset. The turns already captured in the lake stay there (the thread
     /// rows are presentation, not the record).
     pub fn delete_mem_chat(&self, thread_id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "DELETE FROM mem_chat_messages WHERE thread_id = ?1",
             params![thread_id],
@@ -5382,7 +5521,7 @@ impl Database {
 
     /// Insert a draft comment (the drafter sidecar).
     pub fn insert_draft_comment(&self, c: &crate::state::DraftComment) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO draft_comments
                 (id, draft_id, block_id, sel_char_start, sel_char_end, sel_quoted_text,
@@ -5409,7 +5548,7 @@ impl Database {
         &self,
         draft_id: &str,
     ) -> rusqlite::Result<Vec<crate::state::DraftComment>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, draft_id, block_id, sel_char_start, sel_char_end, sel_quoted_text,
                     body, author, created_at, fork_session_id
@@ -5437,7 +5576,7 @@ impl Database {
         &self,
         id: &str,
     ) -> rusqlite::Result<Option<crate::state::DraftComment>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT id, draft_id, block_id, sel_char_start, sel_char_end, sel_quoted_text,
                     body, author, created_at, fork_session_id
@@ -5463,7 +5602,7 @@ impl Database {
 
     /// Delete a draft comment + its discussion thread rows.
     pub fn delete_draft_comment(&self, draft_id: &str, id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute("DELETE FROM draft_comments WHERE id = ?1", params![id])?;
         conn.execute(
             "DELETE FROM thread_messages WHERE session_id = ?1 AND comment_id = ?2",
@@ -5474,7 +5613,7 @@ impl Database {
 
     /// The draft comment's resumable discussion-fork session id.
     pub fn get_draft_comment_fork_session(&self, id: &str) -> Option<String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT fork_session_id FROM draft_comments WHERE id = ?1",
             params![id],
@@ -5489,7 +5628,7 @@ impl Database {
         id: &str,
         fork_session_id: &str,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE draft_comments SET fork_session_id = ?2 WHERE id = ?1",
             params![id, fork_session_id],
@@ -5502,7 +5641,7 @@ impl Database {
         &self,
         s: &crate::state::DraftSuggestion,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO draft_suggestions
                 (id, draft_id, op, block_id, original, markdown, agent_id, body, status, created_at)
@@ -5529,7 +5668,7 @@ impl Database {
         &self,
         draft_id: &str,
     ) -> rusqlite::Result<Vec<crate::state::DraftSuggestion>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, draft_id, op, block_id, original, markdown, agent_id, body, status, created_at
              FROM draft_suggestions
@@ -5556,7 +5695,7 @@ impl Database {
     /// Resolve a suggestion: `applied` or `rejected`. Returns whether a pending
     /// row was actually transitioned.
     pub fn resolve_draft_suggestion(&self, id: &str, status: &str) -> rusqlite::Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let changed = conn.execute(
             "UPDATE draft_suggestions SET status = ?2
              WHERE id = ?1 AND status = 'pending'",
@@ -5571,7 +5710,7 @@ impl Database {
     /// removed from the document, so there is nothing an undo could return
     /// to pending.
     pub fn unresolve_draft_suggestion(&self, id: &str) -> rusqlite::Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let changed = conn.execute(
             "UPDATE draft_suggestions SET status = 'pending'
              WHERE id = ?1 AND status = 'applied'",
@@ -5584,7 +5723,7 @@ impl Database {
     /// builder — a crash or a closed window skipped the discard. Swept at the
     /// start of every new preview.
     pub fn list_stale_preview_drafts(&self, cutoff_ms: i64) -> rusqlite::Result<Vec<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT draft_id FROM drafts
              WHERE draft_id LIKE 'preview-%' AND updated_at < ?1",
@@ -5596,7 +5735,7 @@ impl Database {
     // --- Agent shelf (harness program A2) ---
 
     pub fn insert_harness_agent(&self, a: &HarnessAgent) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO harness_agents
                 (agent_id, name, instruction, folder_id, starred, created_at, updated_at,
@@ -5618,7 +5757,7 @@ impl Database {
     }
 
     pub fn get_harness_agent(&self, agent_id: &str) -> rusqlite::Result<Option<HarnessAgent>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT agent_id, name, instruction, folder_id, starred, created_at, updated_at,
                     last_run_at, run_count
@@ -5631,7 +5770,7 @@ impl Database {
 
     /// Every shelf agent, most-recently-updated first (the drafts ordering).
     pub fn list_harness_agents(&self) -> rusqlite::Result<Vec<HarnessAgent>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT agent_id, name, instruction, folder_id, starred, created_at, updated_at,
                     last_run_at, run_count
@@ -5664,7 +5803,7 @@ impl Database {
         instruction: &str,
     ) -> rusqlite::Result<bool> {
         let now = crate::ledger::now_millis();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let changed = conn.execute(
             "UPDATE harness_agents SET name = ?2, instruction = ?3, updated_at = ?4
              WHERE agent_id = ?1",
@@ -5680,7 +5819,7 @@ impl Database {
         agent_id: &str,
         starred: bool,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE harness_agents SET starred = ?2 WHERE agent_id = ?1",
             params![agent_id, starred as i64],
@@ -5694,7 +5833,7 @@ impl Database {
         agent_id: &str,
         folder_id: Option<&str>,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE harness_agents SET folder_id = ?2 WHERE agent_id = ?1",
             params![agent_id, folder_id],
@@ -5703,7 +5842,7 @@ impl Database {
     }
 
     pub fn delete_harness_agent(&self, agent_id: &str) -> rusqlite::Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let changed = conn.execute(
             "DELETE FROM harness_agents WHERE agent_id = ?1",
             params![agent_id],
@@ -5742,7 +5881,7 @@ impl Database {
     /// editing, and must not reorder the shelf.
     pub fn touch_harness_agent_run(&self, agent_id: &str) -> rusqlite::Result<()> {
         let now = crate::ledger::now_millis();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE harness_agents SET run_count = run_count + 1, last_run_at = ?2
              WHERE agent_id = ?1",
@@ -5789,7 +5928,7 @@ impl Database {
         let Some((table, _, _)) = Self::thread_table(kind) else {
             return Ok(false);
         };
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let sql = format!("UPDATE {table} SET status = ?2 WHERE id = ?1");
         Ok(conn.execute(&sql, params![message_id, status])? > 0)
     }
@@ -5800,7 +5939,7 @@ impl Database {
         let Some((table, _, _)) = Self::thread_table(kind) else {
             return Ok(false);
         };
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let sql = format!("DELETE FROM {table} WHERE id = ?1");
         Ok(conn.execute(&sql, params![message_id])? > 0)
     }
@@ -5810,7 +5949,7 @@ impl Database {
     /// them to `unsent` so the UI offers "wasn't sent — resend" instead of a
     /// phantom chip. Swept across every queue-capable surface.
     pub fn sweep_queued_to_unsent(&self) -> rusqlite::Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut flipped = 0;
         for kind in ["browse", "linked", "mission", "memchat", "companion"] {
             let (table, _, _) = Self::thread_table(kind).expect("queue-capable kinds are mapped");
@@ -5833,7 +5972,7 @@ impl Database {
         let Some((table, key, body)) = Self::thread_table(kind) else {
             return Ok(None);
         };
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         // `{body} AS body` is the alias that lets `voice_messages.text` ride the
         // same reader as every `body` column.
         let sql = format!(
@@ -5859,7 +5998,7 @@ impl Database {
         let Some((table, key, _)) = Self::thread_table(kind) else {
             return Ok((0, None));
         };
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let sql = format!("SELECT COUNT(*), MAX(created_at) FROM {table} WHERE {key} = ?1");
         conn.query_row(&sql, params![id], |r| Ok((r.get(0)?, r.get(1)?)))
     }
@@ -5896,7 +6035,7 @@ impl Database {
             ),
             _ => return None,
         };
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(sql, params![key], |r| r.get::<_, Option<String>>(0))
             .ok()
             .flatten()
@@ -5914,7 +6053,7 @@ impl Database {
         &self,
         f: &crate::context::PromptFilters,
     ) -> rusqlite::Result<Vec<crate::classmem::LakeItem>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         // Build a parameterized WHERE; each clause pushes a bound value so no
         // caller string ever reaches the SQL text.
         // `p.body` alone was a live bug here: compaction writes `body = ''`, so
@@ -6050,7 +6189,7 @@ impl Database {
         &self,
         session_id: &str,
     ) -> rusqlite::Result<Vec<crate::ledger::LedgerEventRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT seq, ts, kind, author, prompt_id, session_id, version_number,
                     ref_kind, ref_id, payload_hash, prev_hash, entry_hash
@@ -6069,7 +6208,7 @@ impl Database {
         since_seq: i64,
         limit: i64,
     ) -> rusqlite::Result<Vec<crate::ledger::LedgerEventRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT seq, ts, kind, author, prompt_id, session_id, version_number,
                     ref_kind, ref_id, payload_hash, prev_hash, entry_hash
@@ -6091,7 +6230,7 @@ impl Database {
         &self,
         f: &crate::context::LedgerFilters,
     ) -> rusqlite::Result<Vec<crate::context::TimelineItem>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         // Two user_notes probes, joined once for the whole page: `n_on` is the
         // note/star ANNOTATING this event (target_kind='ledger_event'); `n_own`
         // is a `note` event's OWN readable row — its standalone row by id, or
@@ -6447,7 +6586,7 @@ impl Database {
     /// Prompt ids captured under a mission — the mission-scope filter for export
     /// bundles (ledger_events has no `mission_id`; the prompt row carries it).
     pub fn mission_prompt_ids(&self, mission_id: &str) -> rusqlite::Result<Vec<i64>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare("SELECT id FROM prompts WHERE mission_id = ?1")?;
         let rows = stmt.query_map(params![mission_id], |r| r.get::<_, i64>(0))?;
         rows.collect()
@@ -6461,7 +6600,7 @@ impl Database {
         session_id: &str,
         version_number: i64,
     ) -> rusqlite::Result<Option<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT raw_plan_markdown FROM revisions WHERE session_id = ?1 AND version_number = ?2",
             params![session_id, version_number],
@@ -6479,7 +6618,7 @@ impl Database {
         since_seq: i64,
         limit: i64,
     ) -> rusqlite::Result<Vec<crate::mirror::MirrorRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT le.seq, le.ts, le.kind, le.author, le.prompt_id, le.session_id,
                     le.version_number, le.ref_kind, le.ref_id, le.payload_hash,
@@ -6523,7 +6662,7 @@ impl Database {
     /// Prompt counts grouped by UTC day (`YYYY-MM-DD`), oldest day first —
     /// `/v1/context/stats` day histogram.
     pub fn prompt_counts_by_day(&self) -> rusqlite::Result<Vec<(String, i64)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT strftime('%Y-%m-%d', ts / 1000, 'unixepoch') AS day, COUNT(*)
              FROM prompts GROUP BY day ORDER BY day ASC",
@@ -6534,7 +6673,7 @@ impl Database {
 
     /// Prompt counts grouped by capture surface — `/v1/context/stats`.
     pub fn prompt_counts_by_surface(&self) -> rusqlite::Result<Vec<(String, i64)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT surface, COUNT(*) FROM prompts GROUP BY surface ORDER BY COUNT(*) DESC",
         )?;
@@ -6544,7 +6683,7 @@ impl Database {
 
     /// Ledger event counts grouped by kind — `/v1/context/stats`.
     pub fn event_counts_by_kind(&self) -> rusqlite::Result<Vec<(String, i64)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT kind, COUNT(*) FROM ledger_events GROUP BY kind ORDER BY COUNT(*) DESC",
         )?;
@@ -6555,7 +6694,7 @@ impl Database {
     /// Ledger event counts grouped by author — the Timeline's actor facet
     /// (`local_author()` vs the agent seat names P0 made distinct).
     pub fn event_counts_by_author(&self) -> rusqlite::Result<Vec<(String, i64)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT author, COUNT(*) FROM ledger_events GROUP BY author ORDER BY COUNT(*) DESC",
         )?;
@@ -6659,7 +6798,7 @@ impl Database {
             ),
             ("classifier", "class_runs", "started_at", "1", ""),
         ];
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         SOURCES
             .iter()
             .map(|(seat, from, ts, pred, distinct_on)| {
@@ -6709,7 +6848,7 @@ impl Database {
     /// available proxy for "how hard is the thinking on this surface". Returns
     /// `(surface, count, median_bytes, p90_bytes)`, heaviest surface first.
     pub fn prompt_length_by_surface(&self) -> rusqlite::Result<Vec<(String, i64, i64, i64)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         // Percentiles without a window function: rank rows per surface and pick
         // the row at the requested fraction. `prompts` is small enough that the
         // ordering cost is irrelevant, and this stays portable across the
@@ -6751,7 +6890,7 @@ impl Database {
         scope: &str,
         head_hash: Option<&str>,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO plan_exports (session_id, scope, head_hash, exported_at)
              VALUES (?1, ?2, ?3, ?4)
@@ -6767,7 +6906,7 @@ impl Database {
     /// Librarian's deferred F6 "un-exported approved plan" friction, now real.
     /// Returns `(session_id, project_name, approved_at)`, oldest first.
     pub fn un_exported_approved_sessions(&self) -> rusqlite::Result<Vec<(String, String, i64)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT s.session_id, s.project_name, s.created_at
              FROM sessions s
@@ -6792,7 +6931,7 @@ impl Database {
         &self,
         a: &crate::ledger::LedgerAppend,
     ) -> rusqlite::Result<crate::ledger::LedgerEventRow> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         Self::append_ledger_event_locked(&conn, a)
     }
 
@@ -6866,7 +7005,7 @@ impl Database {
         &self,
         limit: i64,
     ) -> rusqlite::Result<Vec<crate::ledger::LedgerEventRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT seq, ts, kind, author, prompt_id, session_id, version_number,
                     ref_kind, ref_id, payload_hash, prev_hash, entry_hash
@@ -6899,7 +7038,7 @@ impl Database {
         version_number: i64,
         payload_hash: &str,
     ) -> rusqlite::Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let n: i64 = conn.query_row(
             "SELECT COUNT(*) FROM ledger_events
              WHERE kind = 'revision' AND session_id = ?1
@@ -6919,7 +7058,7 @@ impl Database {
         ref_id: &str,
         payload_hash: &str,
     ) -> rusqlite::Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let n: i64 = conn.query_row(
             "SELECT COUNT(*) FROM ledger_events
              WHERE kind = ?1 AND ref_kind = ?2 AND ref_id = ?3 AND payload_hash = ?4",
@@ -6980,7 +7119,7 @@ impl Database {
         }
         // The anchor row must still hash to what we recorded.
         let stored: Option<String> = {
-            let conn = self.conn.lock().unwrap();
+            let conn = self.lock_conn();
             conn.query_row(
                 "SELECT entry_hash FROM ledger_events WHERE seq = ?1",
                 params![anchor_seq],
@@ -7007,7 +7146,7 @@ impl Database {
         }
 
         // Walk only the suffix.
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT seq, ts, kind, author, prompt_id, session_id, version_number,
                     ref_kind, ref_id, payload_hash, prev_hash, entry_hash
@@ -7060,7 +7199,7 @@ impl Database {
     /// Re-walk the whole chain, recomputing each `entry_hash` from stored fields
     /// and checking `prev_hash` linkage. Reports the first seq that fails.
     pub fn verify_ledger_chain(&self) -> rusqlite::Result<crate::ledger::ChainVerdict> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT seq, ts, kind, author, prompt_id, session_id, version_number,
                     ref_kind, ref_id, payload_hash, prev_hash, entry_hash
@@ -7134,7 +7273,7 @@ impl Database {
     /// copy even while the app runs). The crown-jewels backup that protects the
     /// chain itself; mirror/export are secondary content copies.
     pub fn snapshot_to(&self, dest: &Path) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         // VACUUM INTO requires the destination not already exist.
         let _ = std::fs::remove_file(dest);
         conn.execute("VACUUM INTO ?1", params![dest.to_string_lossy()])?;
@@ -7152,7 +7291,7 @@ impl Database {
         &self,
         rows: &[(String, String, Option<String>)],
     ) -> rusqlite::Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let now = crate::ledger::now_millis();
         let mut seeded = 0;
         for (id, title, project) in rows {
@@ -7189,7 +7328,7 @@ impl Database {
 
     /// Every class node (proposed + accepted), for tree building in Rust.
     pub fn list_class_nodes(&self) -> rusqlite::Result<Vec<crate::classmem::ClassNode>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, parent_id, kind, title, summary, project_path, ip_name,
                     status, pinned, curated_by, created_at, updated_at
@@ -7200,7 +7339,7 @@ impl Database {
     }
 
     pub fn get_class_node(&self, id: &str) -> rusqlite::Result<Option<crate::classmem::ClassNode>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT id, parent_id, kind, title, summary, project_path, ip_name,
                     status, pinned, curated_by, created_at, updated_at
@@ -7216,7 +7355,7 @@ impl Database {
         &self,
         node_id: &str,
     ) -> rusqlite::Result<Vec<crate::classmem::ClassLink>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, node_id, target_kind, target_id, note, status, created_at
              FROM class_links WHERE node_id = ?1 ORDER BY id ASC",
@@ -7242,7 +7381,7 @@ impl Database {
         &self,
         parent_id: &str,
     ) -> rusqlite::Result<Vec<crate::classmem::ClassNode>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, parent_id, kind, title, summary, project_path, ip_name,
                     status, pinned, curated_by, created_at, updated_at
@@ -7266,7 +7405,7 @@ impl Database {
         if parent_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut out = Vec::new();
         // Chunked so a very wide node can't build a statement past SQLite's
         // variable limit.
@@ -7303,7 +7442,7 @@ impl Database {
         if seqs.is_empty() {
             return Ok(out);
         }
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         // Chunked so a very wide node can't exceed SQLite's bound-parameter cap.
         for chunk in seqs.chunks(400) {
             let marks = vec!["?"; chunk.len()].join(", ");
@@ -7350,7 +7489,7 @@ impl Database {
             .replace('\\', "\\\\")
             .replace('%', "\\%")
             .replace('_', "\\_");
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {} FROM user_notes
              WHERE text LIKE ?1 ESCAPE '\\'
@@ -7399,7 +7538,7 @@ impl Database {
         let Some(plan) = crate::query::plan_fts_query(q) else {
             return Ok(Vec::new());
         };
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let now = crate::ledger::now_millis();
         for stage in [MatchStage::And, MatchStage::Or] {
             let Some(match_q) = plan.match_for(stage) else { continue };
@@ -7444,7 +7583,7 @@ impl Database {
         p: &crate::classmem::Proposal,
     ) -> rusqlite::Result<crate::classmem::StagedOutcome> {
         use crate::classmem::{Proposal, StagedOutcome};
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let now = crate::ledger::now_millis();
         let exists = |id: &str| -> rusqlite::Result<bool> {
             let n: i64 = conn.query_row(
@@ -7649,7 +7788,7 @@ impl Database {
     /// ever orphaned under a proposed parent). Returns the ids newly flipped to
     /// accepted (for ledger events). Idempotent on already-accepted nodes.
     pub fn accept_class_node(&self, id: &str) -> rusqlite::Result<Vec<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         Self::accept_node_chain(&conn, id)
     }
 
@@ -7691,7 +7830,7 @@ impl Database {
     /// `actor` lands in `curated_by`: the classifier's seat name on the
     /// auto-organize path, the local human on a manual accept-all.
     pub fn accept_all_pending(&self, actor: &str) -> rusqlite::Result<Vec<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let now = crate::ledger::now_millis();
         let author = actor.to_string();
         let mut stmt = conn.prepare("SELECT id FROM class_nodes WHERE status = 'proposed'")?;
@@ -7714,7 +7853,7 @@ impl Database {
     /// Accept a proposed link, ensuring its node (and ancestors) are accepted.
     /// Returns (node_id, newly-accepted ancestor node ids).
     pub fn accept_class_link(&self, link_id: i64) -> rusqlite::Result<Option<(String, Vec<String>)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let node_id: Option<String> = conn
             .query_row(
                 "SELECT node_id FROM class_links WHERE id = ?1",
@@ -7741,7 +7880,7 @@ impl Database {
         &self,
         link_id: i64,
     ) -> rusqlite::Result<Option<(String, String, String)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let row: Option<(String, String, String)> = conn
             .query_row(
                 "SELECT node_id, target_kind, target_id FROM class_links WHERE id = ?1",
@@ -7758,7 +7897,7 @@ impl Database {
     /// Reject (delete) a node and its whole proposed/accepted subtree + links.
     /// Used to reject a proposed node; also the cleanup primitive for merges.
     pub fn reject_class_node(&self, id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         Self::delete_node_subtree(&conn, id)
     }
 
@@ -7795,13 +7934,13 @@ impl Database {
     }
 
     pub fn reject_class_link(&self, link_id: i64) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute("DELETE FROM class_links WHERE id = ?1", params![link_id])?;
         Ok(())
     }
 
     pub fn set_class_node_pinned(&self, id: &str, pinned: bool) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE class_nodes SET pinned = ?2, updated_at = ?3 WHERE id = ?1",
             params![id, pinned as i64, crate::ledger::now_millis()],
@@ -7810,7 +7949,7 @@ impl Database {
     }
 
     pub fn rename_class_node(&self, id: &str, title: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE class_nodes SET title = ?2, updated_at = ?3 WHERE id = ?1",
             params![id, title, crate::ledger::now_millis()],
@@ -7836,7 +7975,7 @@ impl Database {
 
     /// The pending structural proposals (promote/split/merge/collapse).
     pub fn list_class_proposals(&self) -> rusqlite::Result<Vec<crate::classmem::ClassProposalRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, run_id, op, node_id, parent_id, title, summary, extra_json,
                     rationale, status, created_at
@@ -7849,7 +7988,7 @@ impl Database {
     /// How many structural proposals are held awaiting review — the ambient
     /// pill/hero count, so the held-op channel is visible without loading rows.
     pub fn count_pending_class_proposals(&self) -> rusqlite::Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT COUNT(*) FROM class_proposals WHERE status = 'proposed'",
             [],
@@ -7861,7 +8000,7 @@ impl Database {
         &self,
         id: i64,
     ) -> rusqlite::Result<Option<crate::classmem::ClassProposalRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT id, run_id, op, node_id, parent_id, title, summary, extra_json,
                     rationale, status, created_at
@@ -7874,7 +8013,7 @@ impl Database {
 
     pub fn reject_class_proposal(&self, id: i64) -> rusqlite::Result<()> {
         {
-            let conn = self.conn.lock().unwrap();
+            let conn = self.lock_conn();
             // Reject just drops the row — so without this, every rejection of a
             // classifier proposal left no trace at all of the agent having been
             // wrong. Read the op first, while the row still exists.
@@ -7913,7 +8052,7 @@ impl Database {
             Some(p) => p,
             None => return Ok(None),
         };
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let now = crate::ledger::now_millis();
         let detail: String = match p.op.as_str() {
             "promote" => {
@@ -8119,7 +8258,7 @@ impl Database {
         rationale: &str,
         actor: &str,
     ) -> rusqlite::Result<crate::classmem::SupersessionOutcome> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         Self::apply_supersession_locked(&conn, old_seq, new_seq, rationale, actor)
     }
 
@@ -8231,7 +8370,7 @@ impl Database {
         if seqs.is_empty() {
             return Ok(out);
         }
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         for chunk in seqs.chunks(400) {
             let marks = vec!["?"; chunk.len()].join(", ");
             let mut stmt = conn.prepare(&format!(
@@ -8285,7 +8424,7 @@ impl Database {
                 "one act per call: set exactly one of `text` / `starred`".into(),
             ));
         }
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
 
         // Resolve the row: by explicit id, else by target (creating on first
         // touch), else a fresh standalone.
@@ -8445,7 +8584,7 @@ impl Database {
         target_kind: &str,
         target_id: &str,
     ) -> rusqlite::Result<Option<crate::context::UserNote>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             &format!(
                 "SELECT {} FROM user_notes WHERE target_kind = ?1 AND target_id = ?2",
@@ -8464,7 +8603,7 @@ impl Database {
         starred_only: bool,
         limit: i64,
     ) -> rusqlite::Result<Vec<crate::context::UserNote>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {} FROM user_notes WHERE (?1 = 0 OR starred = 1)
              ORDER BY updated_at DESC, id DESC LIMIT ?2",
@@ -8494,7 +8633,7 @@ impl Database {
         if cite_seqs.is_empty() || summary.trim().is_empty() {
             return Ok(None);
         }
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let node_exists: i64 = conn.query_row(
             "SELECT COUNT(*) FROM class_nodes WHERE id = ?1",
             params![node_id],
@@ -8553,7 +8692,7 @@ impl Database {
         node_id: &str,
         include_dismissed: bool,
     ) -> rusqlite::Result<Vec<crate::classmem::ClassObservation>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, node_id, summary, cite_seqs, created_seq, pinned, dismissed, created_at
              FROM class_observations
@@ -8581,7 +8720,7 @@ impl Database {
     pub fn newest_observation_per_node(
         &self,
     ) -> rusqlite::Result<std::collections::HashMap<String, i64>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT node_id, MAX(created_at) FROM class_observations
              WHERE dismissed = 0 GROUP BY node_id",
@@ -8596,7 +8735,7 @@ impl Database {
     /// caller can record the `class_curate` event. The row is kept (not
     /// deleted) so the dedup guard keeps holding.
     pub fn set_observation_dismissed(&self, id: i64) -> rusqlite::Result<Option<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let node: Option<String> = conn
             .query_row(
                 "SELECT node_id FROM class_observations WHERE id = ?1",
@@ -8620,7 +8759,7 @@ impl Database {
         id: i64,
         pinned: bool,
     ) -> rusqlite::Result<Option<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let node: Option<String> = conn
             .query_row(
                 "SELECT node_id FROM class_observations WHERE id = ?1 AND dismissed = 0",
@@ -8646,7 +8785,7 @@ impl Database {
         node_id: &str,
         limit: i64,
     ) -> rusqlite::Result<Vec<(i64, String, i64, Option<String>)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT le.seq, le.kind, le.ts,
                     COALESCE(NULLIF(substr(p.body, 1, 240), ''), p.gist)
@@ -8675,7 +8814,7 @@ impl Database {
     /// The maximum ledger seq (the delta ceiling for a classifier run). 0 if the
     /// chain is empty.
     pub fn max_ledger_seq(&self) -> rusqlite::Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row("SELECT COALESCE(MAX(seq), 0) FROM ledger_events", [], |r| r.get(0))
     }
 
@@ -8685,7 +8824,7 @@ impl Database {
     /// exists so a retrieval agent can be told *what* grew instead of just
     /// *that* it grew, and skip a re-walk the delta doesn't touch.
     pub fn ledger_delta_summary(&self, since_seq: i64) -> rusqlite::Result<Vec<(String, i64)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT kind, COUNT(*) FROM ledger_events
              WHERE seq > ?1 GROUP BY kind ORDER BY COUNT(*) DESC, kind ASC",
@@ -8699,7 +8838,7 @@ impl Database {
     /// The seq the last completed classifier run consumed up to — the delta
     /// floor for the next run. 0 when no run has completed.
     pub fn last_run_seq_to(&self) -> rusqlite::Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT COALESCE(MAX(seq_to), 0) FROM class_runs WHERE status = 'done'",
             [],
@@ -8708,16 +8847,27 @@ impl Database {
     }
 
     /// Friction rows for the Orchestration digest: every `in_review` session with
-    /// its unresolved-comment count (comments whose resolution was never accepted)
-    /// and `created_at`, oldest first. Returns `(session_id, project_name,
-    /// created_at, unresolved_count)`. Pure read; the orchestrator ranks these.
+    /// its **open**-comment count and `created_at`, oldest first. Returns
+    /// `(session_id, project_name, created_at, unresolved_count)`. Pure read;
+    /// the orchestrator ranks these.
+    ///
+    /// Open means the comment is still waiting on somebody: `draft` (written,
+    /// not submitted), `submitted` (sent, no resolution back yet), `reopened`
+    /// (resolution rejected, going round again). `resolved` and `accepted` are
+    /// answered; `withdrawn` is gone.
+    ///
+    /// This deliberately does NOT key off `resolution_accepted_at`. That column
+    /// is written only by an explicit reviewer Accept (`accept_resolution`), so
+    /// counting `IS NULL` scored every answered-but-never-formally-accepted
+    /// comment as friction — which is most of them, and it drowned every
+    /// downstream ranking (Librarian, Shipwright, `build_digest`) in noise.
     pub fn in_review_friction(&self) -> rusqlite::Result<Vec<(String, String, i64, i64)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT s.session_id, s.project_name, s.created_at,
                 (SELECT COUNT(*) FROM comments c
                    WHERE c.session_id = s.session_id
-                     AND c.resolution_accepted_at IS NULL) AS unresolved
+                     AND c.status IN ('draft', 'submitted', 'reopened')) AS unresolved
              FROM sessions s
              WHERE s.status = 'in_review'
              ORDER BY s.created_at ASC",
@@ -8736,7 +8886,7 @@ impl Database {
     }
 
     pub fn insert_class_run(&self, seq_from: i64, seq_to: i64) -> rusqlite::Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO class_runs (started_at, status, seq_from, seq_to)
              VALUES (?1, 'running', ?2, ?3)",
@@ -8752,7 +8902,7 @@ impl Database {
         claude_session_id: Option<&str>,
         summary: &str,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE class_runs SET status = ?2, finished_at = ?3, claude_session_id = ?4, summary = ?5
              WHERE id = ?1",
@@ -8762,7 +8912,7 @@ impl Database {
     }
 
     pub fn latest_class_run(&self) -> rusqlite::Result<Option<crate::classmem::ClassRun>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT id, started_at, finished_at, status, seq_from, seq_to, claude_session_id, summary
              FROM class_runs ORDER BY id DESC LIMIT 1",
@@ -8791,7 +8941,7 @@ impl Database {
         since_seq: i64,
         limit: i64,
     ) -> rusqlite::Result<Vec<crate::classmem::LakeItem>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         // Surface browse-event content too (they carry no prompt row): a
         // `browse_event` ledger row joins `browse_events` by ref_id, so the
         // classifier sees the page text (as `body`) under a synthetic
@@ -8881,7 +9031,7 @@ impl Database {
     pub fn list_class_nodes_with_counts(
         &self,
     ) -> rusqlite::Result<Vec<(crate::classmem::ClassNode, i64)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT n.id, n.parent_id, n.kind, n.title, n.summary, n.project_path,
                     n.ip_name, n.status, n.pinned, n.curated_by, n.created_at, n.updated_at,
@@ -8902,7 +9052,7 @@ impl Database {
     pub fn node_direct_link_activity(
         &self,
     ) -> rusqlite::Result<std::collections::HashMap<String, (i64, Option<i64>)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT l.node_id, COUNT(*),
                     MAX(CASE WHEN l.target_kind IN ('prompt','decision','ledger')
@@ -8925,7 +9075,7 @@ impl Database {
     /// The lake's temporal envelope (oldest/newest ledger ts) — the reference
     /// frame coldness is measured against (never wall-clock).
     pub fn lake_envelope(&self) -> rusqlite::Result<crate::classmem::LakeEnvelope> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT COALESCE(MIN(ts), 0), COALESCE(MAX(ts), 0) FROM ledger_events",
             [],
@@ -8946,7 +9096,7 @@ impl Database {
     pub fn list_session_tree_rows(
         &self,
     ) -> rusqlite::Result<Vec<(String, String, String, String)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT child_kind, child_id, parent_kind, parent_id
              FROM session_tree ORDER BY id ASC",
@@ -8961,7 +9111,7 @@ impl Database {
     /// Map's `supersedes` edges resolve these seqs to their class/session
     /// endpoints via `resolve_map_endpoints`.
     pub fn list_supersession_pairs(&self) -> rusqlite::Result<Vec<(i64, i64)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT old_seq, new_seq FROM supersessions ORDER BY old_seq ASC",
         )?;
@@ -8975,7 +9125,7 @@ impl Database {
     /// `ledger_events.session_id`; `session` targets ARE the session id.
     /// DISTINCT, so a class citing one session five times contributes one pair.
     pub fn class_session_pairs(&self) -> rusqlite::Result<Vec<(String, String)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT DISTINCT l.node_id, le.session_id
                FROM class_links l
@@ -9000,7 +9150,7 @@ impl Database {
         &self,
         seqs: &[i64],
     ) -> rusqlite::Result<std::collections::HashMap<i64, (Option<String>, Option<String>)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT le.session_id,
                     (SELECT cl.node_id FROM class_links cl
@@ -9054,7 +9204,7 @@ impl Database {
     /// under an already-held lock; this locking wrapper exists for tests.
     #[cfg(test)]
     pub fn subtree_has_pin(&self, id: &str) -> rusqlite::Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         Self::subtree_pinned(&conn, id)
     }
 
@@ -9066,7 +9216,7 @@ impl Database {
             return None;
         }
         let seq: i64 = target_id.trim().parse().ok()?;
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT le.kind, p.body
              FROM ledger_events le LEFT JOIN prompts p ON le.prompt_id = p.id
@@ -9096,7 +9246,7 @@ impl Database {
     /// annotation, and/or the session's plan heading when available; a decision
     /// whose referents were deleted still yields its ledger facts.
     pub fn decision_event_context(&self, seq: i64) -> rusqlite::Result<Option<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let row: Option<(String, i64, Option<String>, Option<String>, Option<String>)> = conn
             .query_row(
                 "SELECT kind, ts, session_id, ref_kind, ref_id
@@ -9174,7 +9324,7 @@ impl Database {
         version_number: u32,
         comment: &Comment,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let (edit_original, edit_revised) = match &comment.edit {
             Some(e) => (Some(e.original.as_str()), Some(e.revised.as_str())),
             None => (None, None),
@@ -9246,7 +9396,7 @@ impl Database {
     }
 
     pub fn update_comment(&self, session_id: &str, comment: &Comment) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let (edit_original, edit_revised) = match &comment.edit {
             Some(e) => (Some(e.original.as_str()), Some(e.revised.as_str())),
             None => (None, None),
@@ -9330,7 +9480,7 @@ impl Database {
     /// Record a minted share link (idempotent on request_id — a re-record
     /// from the localStorage migration overwrites with identical data).
     pub fn record_share(&self, share: &ShareRecord) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT OR REPLACE INTO shares (
                 request_id, session_id, reviewer_name, note, base_version, created_at
@@ -9350,13 +9500,13 @@ impl Database {
     /// Forget a share. Its returns (and their imported comments) stay — they
     /// are the session's history, not the link's.
     pub fn delete_share(&self, request_id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute("DELETE FROM shares WHERE request_id = ?1", params![request_id])?;
         Ok(())
     }
 
     pub fn list_shares(&self, session_id: &str) -> rusqlite::Result<Vec<ShareRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT request_id, session_id, reviewer_name, note, base_version, created_at
              FROM shares WHERE session_id = ?1 ORDER BY created_at DESC",
@@ -9375,7 +9525,7 @@ impl Database {
     }
 
     pub fn record_share_return(&self, ret: &ShareReturnRecord) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let comment_ids_json =
             serde_json::to_string(&ret.comment_ids).unwrap_or_else(|_| "[]".to_string());
         conn.execute(
@@ -9402,7 +9552,7 @@ impl Database {
         &self,
         session_id: &str,
     ) -> rusqlite::Result<Vec<ShareReturnRecord>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, request_id, session_id, reviewer_name, imported_at,
                     landed_version, placed, orphans, comment_ids
@@ -9432,7 +9582,7 @@ impl Database {
         session_id: &str,
         state: &str,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE sessions SET attach_state = ?1 WHERE session_id = ?2",
             params![state, session_id],
@@ -9449,7 +9599,7 @@ impl Database {
     /// enforcement, the beacons are the truth.
     pub fn set_run_state(&self, session_id: &str, state: &str) -> rusqlite::Result<bool> {
         let changed = {
-            let conn = self.conn.lock().unwrap();
+            let conn = self.lock_conn();
             let prev: Option<Option<String>> = conn
                 .query_row(
                     "SELECT run_state FROM sessions WHERE session_id = ?1",
@@ -9487,7 +9637,7 @@ impl Database {
     /// A session's current run state (orchestrated runs only; `None` for a
     /// plain Approve or an unknown session).
     pub fn get_run_state(&self, session_id: &str) -> Option<String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT run_state FROM sessions WHERE session_id = ?1",
             params![session_id],
@@ -9507,7 +9657,7 @@ impl Database {
         script_path: Option<&str>,
         workflow_ran: bool,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO plan_runs (plan_session_id, report_json, script_path, workflow_ran,
                                     resolution, resolution_note, resolved_at, created_at)
@@ -9539,7 +9689,7 @@ impl Database {
         resolution: &str,
         note: Option<&str>,
     ) -> rusqlite::Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let n = conn.execute(
             "UPDATE plan_runs SET resolution = ?1, resolution_note = ?2, resolved_at = ?3
              WHERE plan_session_id = ?4",
@@ -9549,7 +9699,7 @@ impl Database {
     }
 
     pub fn get_plan_run(&self, plan_session_id: &str) -> Option<PlanRunRow> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT plan_session_id, report_json, script_path, workflow_ran,
                     resolution, resolution_note, resolved_at, created_at
@@ -9582,7 +9732,7 @@ impl Database {
         cwd: Option<&str>,
         terminal_id: Option<&str>,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO orchestrations (plan_session_id, claude_session_id, transcript_path,
                                          cwd, started_at, run_id, transcript_dir, script_path, mode,
@@ -9623,7 +9773,7 @@ impl Database {
         script_path: Option<&str>,
         mode: Option<&str>,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE orchestrations SET
                 run_id = COALESCE(?2, run_id),
@@ -9637,7 +9787,7 @@ impl Database {
     }
 
     pub fn get_orchestration(&self, plan_session_id: &str) -> Option<OrchestrationRow> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT o.plan_session_id, o.claude_session_id, o.transcript_path, o.cwd,
                     o.started_at, o.run_id, o.transcript_dir, o.script_path, o.mode,
@@ -9654,7 +9804,7 @@ impl Database {
     /// Every anchored run, newest launch first, with the live run-state joined
     /// in (the History tab's data source and the rehydration sweep's input).
     pub fn list_orchestrations(&self) -> rusqlite::Result<Vec<OrchestrationRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT o.plan_session_id, o.claude_session_id, o.transcript_path, o.cwd,
                     o.started_at, o.run_id, o.transcript_dir, o.script_path, o.mode,
@@ -9692,7 +9842,7 @@ impl Database {
     /// Returns whether anything was cleared. Journals as `run_state: cleared`.
     pub fn clear_run_state(&self, session_id: &str) -> rusqlite::Result<bool> {
         let changed = {
-            let conn = self.conn.lock().unwrap();
+            let conn = self.lock_conn();
             conn.execute(
                 "UPDATE sessions SET run_state = NULL, run_updated_at = NULL
                  WHERE session_id = ?1 AND run_state IS NOT NULL",
@@ -9716,7 +9866,7 @@ impl Database {
     /// shows nothing rather than a stale corpse (a re-run's upsert would reset
     /// the columns anyway; the delete is about honest emptiness).
     pub fn delete_orchestration(&self, plan_session_id: &str) -> rusqlite::Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let n = conn.execute(
             "DELETE FROM orchestrations WHERE plan_session_id = ?1",
             params![plan_session_id],
@@ -9726,7 +9876,7 @@ impl Database {
 
     /// Drop a run's exit report (the `reset_run` counterpart for `plan_runs`).
     pub fn delete_plan_run(&self, plan_session_id: &str) -> rusqlite::Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let n = conn.execute(
             "DELETE FROM plan_runs WHERE plan_session_id = ?1",
             params![plan_session_id],
@@ -9737,7 +9887,7 @@ impl Database {
     /// The most recent `approval` ledger event for a session — the decision an
     /// un-approve supersedes.
     pub fn latest_approval_seq(&self, session_id: &str) -> Option<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT seq FROM ledger_events
              WHERE kind = 'approval' AND session_id = ?1
@@ -9763,7 +9913,7 @@ impl Database {
         new_seq: i64,
         rationale: &str,
     ) -> rusqlite::Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let new_str = new_seq.to_string();
         // Field order frozen — it is the payload-hash identity (the
         // `apply_supersession_locked` shape).
@@ -9798,7 +9948,7 @@ impl Database {
     /// Startup sweep: a held POST never survives a restart, so every session
     /// persisted as 'held' was orphaned by the previous instance.
     pub fn detach_held_sessions(&self) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE sessions SET attach_state = 'detached' WHERE attach_state = 'held'",
             [],
@@ -9815,7 +9965,7 @@ impl Database {
         comment_id: &str,
         version_number: u32,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE comments SET version_number = ?1 WHERE session_id = ?2 AND id = ?3",
             params![version_number, session_id, comment_id],
@@ -9824,7 +9974,7 @@ impl Database {
     }
 
     pub fn delete_comment(&self, session_id: &str, comment_id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         // Cascade the comment's discussion thread. Comment ids are reused
         // (`c-{max+1}`), so leaving these rows would resurface a deleted
         // comment's answer under the next comment that inherits its id.
@@ -9849,7 +9999,7 @@ impl Database {
     /// table by hand), so a straight per-table column UPDATE is safe and
     /// order-independent. Caller guarantees `new_id` holds no session yet.
     pub fn rekey_session(&self, old_id: &str, new_id: &str) -> rusqlite::Result<()> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         // Foreign keys are enforced on this connection, and the session-scoped
         // tables form a chain (comments/briefs → revisions → sessions). Renaming
@@ -9886,7 +10036,7 @@ impl Database {
     pub fn rekey_attachment_paths(&self, old_id: &str, new_id: &str) -> rusqlite::Result<()> {
         let from = format!("/attachments/{old_id}/");
         let to = format!("/attachments/{new_id}/");
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         for table in ["comments", "thread_messages"] {
             conn.execute(
                 &format!(
@@ -9900,7 +10050,7 @@ impl Database {
     }
 
     pub fn delete_session(&self, session_id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "DELETE FROM thread_messages WHERE session_id = ?1",
             params![session_id],
@@ -9933,7 +10083,7 @@ impl Database {
     // struct) so resuming a fork never reads a stale in-memory value.
 
     pub fn insert_thread_message(&self, msg: &ThreadMessage) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO thread_messages
                 (id, session_id, comment_id, role, body, status, created_at,
@@ -9959,7 +10109,7 @@ impl Database {
         session_id: &str,
         comment_id: &str,
     ) -> rusqlite::Result<Vec<ThreadMessage>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, session_id, comment_id, role, body, status, created_at,
                     attachments
@@ -9983,7 +10133,7 @@ impl Database {
     }
 
     pub fn delete_thread(&self, session_id: &str, comment_id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "DELETE FROM thread_messages WHERE session_id = ?1 AND comment_id = ?2",
             params![session_id, comment_id],
@@ -9996,7 +10146,7 @@ impl Database {
         session_id: &str,
         comment_id: &str,
     ) -> Option<String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT fork_session_id FROM comments WHERE session_id = ?1 AND id = ?2",
             params![session_id, comment_id],
@@ -10012,7 +10162,7 @@ impl Database {
         comment_id: &str,
         fork_session_id: &str,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE comments SET fork_session_id = ?1 WHERE session_id = ?2 AND id = ?3",
             params![fork_session_id, session_id, comment_id],
@@ -10025,7 +10175,7 @@ impl Database {
         session_id: &str,
         comment_id: &str,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE comments SET fork_session_id = NULL WHERE session_id = ?1 AND id = ?2",
             params![session_id, comment_id],
@@ -10037,7 +10187,7 @@ impl Database {
     /// agent — used by `handle_plan` to ignore stray `ExitPlanMode` POSTs from a
     /// fork agent.
     pub fn is_known_fork_session(&self, session_id: &str) -> bool {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT 1 FROM comments WHERE fork_session_id = ?1
              UNION ALL
@@ -10055,7 +10205,7 @@ impl Database {
     // session id is tracked in `browse_threads`, not on any in-memory struct.
 
     pub fn insert_browse_message(&self, msg: &BrowseMessage) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO browse_messages
                 (id, browse_id, role, body, status, created_at)
@@ -10073,7 +10223,7 @@ impl Database {
     }
 
     pub fn load_browse_thread(&self, browse_id: &str) -> rusqlite::Result<Vec<BrowseMessage>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, browse_id, role, body, status, created_at
              FROM browse_messages
@@ -10095,7 +10245,7 @@ impl Database {
 
     /// Delete a tab's whole thread: its turns and its persisted agent session.
     pub fn delete_browse_thread(&self, browse_id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "DELETE FROM browse_messages WHERE browse_id = ?1",
             params![browse_id],
@@ -10108,7 +10258,7 @@ impl Database {
     }
 
     pub fn get_browse_session(&self, browse_id: &str) -> Option<String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT claude_session_id FROM browse_threads WHERE browse_id = ?1",
             params![browse_id],
@@ -10123,7 +10273,7 @@ impl Database {
         browse_id: &str,
         claude_session_id: &str,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO browse_threads (browse_id, claude_session_id)
              VALUES (?1, ?2)
@@ -10140,7 +10290,7 @@ impl Database {
     /// makes the next turn start a fresh session (re-embedding a snapshot) instead
     /// of re-sending the over-limit context forever. The visible thread is kept.
     pub fn clear_browse_session(&self, browse_id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "DELETE FROM browse_threads WHERE browse_id = ?1",
             params![browse_id],
@@ -10156,7 +10306,7 @@ impl Database {
     // See browse_list.rs.
 
     pub fn get_browse_list(&self, browse_id: &str) -> rusqlite::Result<Option<BrowseList>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT browse_id, template, title, created_at, updated_at
              FROM browse_lists WHERE browse_id = ?1",
@@ -10178,7 +10328,7 @@ impl Database {
     /// upsert keeps `created_at` — switching template is an edit of the same
     /// list, not a new one, and the items carry over.
     pub fn upsert_browse_list(&self, l: &BrowseList) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO browse_lists (browse_id, template, title, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5)
@@ -10193,7 +10343,7 @@ impl Database {
         &self,
         browse_id: &str,
     ) -> rusqlite::Result<Vec<BrowseListItem>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, browse_id, kind, body, done, sort_idx,
                     page_url, page_title, locator, created_at, updated_at
@@ -10206,7 +10356,7 @@ impl Database {
     }
 
     pub fn insert_browse_list_item(&self, it: &BrowseListItem) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO browse_list_items
                 (id, browse_id, kind, body, done, sort_idx,
@@ -10233,7 +10383,7 @@ impl Database {
     /// lands after everything the user can see — including after a reorder that
     /// rewrote the indices.
     pub fn next_browse_list_sort(&self, browse_id: &str) -> rusqlite::Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let max: Option<i64> = conn.query_row(
             "SELECT MAX(sort_idx) FROM browse_list_items WHERE browse_id = ?1",
             params![browse_id],
@@ -10243,7 +10393,7 @@ impl Database {
     }
 
     pub fn get_browse_list_item(&self, id: &str) -> rusqlite::Result<Option<BrowseListItem>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT id, browse_id, kind, body, done, sort_idx,
                     page_url, page_title, locator, created_at, updated_at
@@ -10258,7 +10408,7 @@ impl Database {
     /// which reads the row, applies the patch and calls this — so there is one
     /// place that knows which fields an edit may touch.
     pub fn update_browse_list_item(&self, it: &BrowseListItem) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE browse_list_items
                 SET kind = ?2, body = ?3, done = ?4, sort_idx = ?5,
@@ -10294,7 +10444,7 @@ impl Database {
         id: &str,
         locator: &str,
     ) -> rusqlite::Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let n = conn.execute(
             "UPDATE browse_list_items SET locator = ?2 WHERE id = ?1",
             params![id, locator],
@@ -10303,7 +10453,7 @@ impl Database {
     }
 
     pub fn delete_browse_list_item(&self, id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute("DELETE FROM browse_list_items WHERE id = ?1", params![id])?;
         Ok(())
     }
@@ -10312,7 +10462,7 @@ impl Database {
     /// not belong to this tab are ignored rather than reassigned — a reorder
     /// must never be able to steal another tab's item.
     pub fn reorder_browse_list(&self, browse_id: &str, ids: &[String]) -> rusqlite::Result<()> {
-        let mut conn = self.conn.lock().unwrap();
+        let mut conn = self.lock_conn();
         let tx = conn.transaction()?;
         for (i, id) in ids.iter().enumerate() {
             tx.execute(
@@ -10328,7 +10478,7 @@ impl Database {
     /// `delete_browse_thread`: clearing means the list is gone, not emptied,
     /// so the next open lands back on the template chooser.
     pub fn delete_browse_list(&self, browse_id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "DELETE FROM browse_list_items WHERE browse_id = ?1",
             params![browse_id],
@@ -10347,7 +10497,7 @@ impl Database {
     // browse helpers above but keyed by `mission_id`. See mission.rs.
 
     pub fn insert_mission(&self, m: &Mission) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO missions
                 (mission_id, title, goal, status, created_at, updated_at)
@@ -10358,7 +10508,7 @@ impl Database {
     }
 
     pub fn get_mission(&self, mission_id: &str) -> rusqlite::Result<Option<Mission>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT mission_id, title, goal, status, created_at, updated_at
              FROM missions WHERE mission_id = ?1",
@@ -10380,7 +10530,7 @@ impl Database {
     /// Missions newest-first (active before archived, then by recency), for the
     /// start/switch/resume menu.
     pub fn list_missions(&self) -> rusqlite::Result<Vec<Mission>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT mission_id, title, goal, status, created_at, updated_at
              FROM missions
@@ -10407,7 +10557,7 @@ impl Database {
         goal: &str,
         updated_at: i64,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE missions SET title = ?2, goal = ?3, updated_at = ?4
              WHERE mission_id = ?1",
@@ -10417,7 +10567,7 @@ impl Database {
     }
 
     pub fn get_mission_session(&self, mission_id: &str) -> Option<String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT claude_session_id FROM missions WHERE mission_id = ?1",
             params![mission_id],
@@ -10432,7 +10582,7 @@ impl Database {
         mission_id: &str,
         claude_session_id: &str,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE missions SET claude_session_id = ?2 WHERE mission_id = ?1",
             params![mission_id, claude_session_id],
@@ -10444,7 +10594,7 @@ impl Database {
     /// the context-overflow recovery (an overflowed session would otherwise be
     /// resumed, and fail, forever).
     pub fn clear_mission_session(&self, mission_id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE missions SET claude_session_id = NULL WHERE mission_id = ?1",
             params![mission_id],
@@ -10455,7 +10605,7 @@ impl Database {
     /// Save a mission's tab workspace (JSON). Deliberately does NOT bump
     /// `updated_at` — tab churn shouldn't reorder the mission list.
     pub fn set_mission_tabs(&self, mission_id: &str, tabs_json: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE missions SET tabs_json = ?2 WHERE mission_id = ?1",
             params![mission_id, tabs_json],
@@ -10464,7 +10614,7 @@ impl Database {
     }
 
     pub fn get_mission_tabs(&self, mission_id: &str) -> Option<String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT tabs_json FROM missions WHERE mission_id = ?1",
             params![mission_id],
@@ -10478,7 +10628,7 @@ impl Database {
     /// caller purges the saved tabs' browse threads first (those are keyed by
     /// `browse_id`, independent of the mission row).
     pub fn delete_mission(&self, mission_id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "DELETE FROM mission_findings WHERE mission_id = ?1",
             params![mission_id],
@@ -10494,7 +10644,7 @@ impl Database {
     // --- Mission findings (pins) -------------------------------------------
 
     pub fn insert_finding(&self, f: &MissionFinding) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO mission_findings
                 (id, mission_id, browse_id, source_url, source_title, body, note, created_at)
@@ -10514,7 +10664,7 @@ impl Database {
     }
 
     pub fn list_findings(&self, mission_id: &str) -> rusqlite::Result<Vec<MissionFinding>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, mission_id, browse_id, source_url, source_title, body, note, created_at
              FROM mission_findings
@@ -10537,7 +10687,7 @@ impl Database {
     }
 
     pub fn delete_finding(&self, finding_id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "DELETE FROM mission_findings WHERE id = ?1",
             params![finding_id],
@@ -10551,7 +10701,7 @@ impl Database {
     /// `(browse_id, source_url)`: a second click flips `verdict` and bumps
     /// `updated_at` while keeping the original `created_at`.
     pub fn upsert_source_feedback(&self, f: &SourceFeedback) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO source_feedback
                 (id, browse_id, source_url, source_title, domain, verdict, created_at, updated_at)
@@ -10578,7 +10728,7 @@ impl Database {
     /// All verdicts recorded on a tab's thread, so the sources strip can restore
     /// its up/down state after a reload.
     pub fn get_source_feedback(&self, browse_id: &str) -> rusqlite::Result<Vec<SourceFeedback>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, browse_id, source_url, source_title, domain, verdict, created_at, updated_at
              FROM source_feedback
@@ -10604,7 +10754,7 @@ impl Database {
     /// first. Feeds the learned "preferred / avoided sources" line injected into
     /// the tandem agent prompt.
     pub fn domain_feedback_summary(&self) -> rusqlite::Result<Vec<(String, i64)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT domain, SUM(verdict) AS score
              FROM source_feedback
@@ -10620,7 +10770,7 @@ impl Database {
     // --- Mission chat turns ------------------------------------------------
 
     pub fn insert_mission_message(&self, msg: &MissionMessage) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO mission_messages
                 (id, mission_id, role, body, status, created_at)
@@ -10631,7 +10781,7 @@ impl Database {
     }
 
     pub fn load_mission_thread(&self, mission_id: &str) -> rusqlite::Result<Vec<MissionMessage>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, mission_id, role, body, status, created_at
              FROM mission_messages
@@ -10657,7 +10807,7 @@ impl Database {
     // See linked.rs.
 
     pub fn insert_linked(&self, l: &Linked) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO linked_sessions
                 (linked_id, title, status, created_at, updated_at)
@@ -10670,7 +10820,7 @@ impl Database {
     /// Linked discussions newest-first (active before archived, then recency),
     /// for the start/switch/resume menu.
     pub fn list_linked(&self) -> rusqlite::Result<Vec<Linked>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT linked_id, title, status, created_at, updated_at
              FROM linked_sessions
@@ -10689,7 +10839,7 @@ impl Database {
     }
 
     pub fn get_linked_session(&self, linked_id: &str) -> Option<String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT claude_session_id FROM linked_sessions WHERE linked_id = ?1",
             params![linked_id],
@@ -10704,7 +10854,7 @@ impl Database {
         linked_id: &str,
         claude_session_id: &str,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE linked_sessions SET claude_session_id = ?2 WHERE linked_id = ?1",
             params![linked_id, claude_session_id],
@@ -10717,7 +10867,7 @@ impl Database {
     /// source: re-forking a browse session AFTER the linked chat has lived its
     /// own life would resurrect a stale context, not recover this one.
     pub fn clear_linked_session(&self, linked_id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE linked_sessions
                 SET claude_session_id = NULL, fork_from_session_id = NULL
@@ -10737,7 +10887,7 @@ impl Database {
         origin: &str,
         fork_from_session_id: &str,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO linked_sessions
                 (linked_id, title, status, created_at, updated_at,
@@ -10763,7 +10913,7 @@ impl Database {
     /// NULL), so a failed first turn re-forks and an established chat never
     /// re-forks.
     pub fn get_linked_fork_from(&self, linked_id: &str) -> Option<(String, Option<String>)> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT fork_from_session_id, converted_origin FROM linked_sessions
               WHERE linked_id = ?1 AND claude_session_id IS NULL",
@@ -10781,7 +10931,7 @@ impl Database {
     /// Save a linked discussion's tab workspace (JSON). Like the mission helper,
     /// this does NOT bump `updated_at` — tab churn shouldn't reorder the list.
     pub fn set_linked_tabs(&self, linked_id: &str, tabs_json: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE linked_sessions SET tabs_json = ?2 WHERE linked_id = ?1",
             params![linked_id, tabs_json],
@@ -10790,7 +10940,7 @@ impl Database {
     }
 
     pub fn get_linked_tabs(&self, linked_id: &str) -> Option<String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT tabs_json FROM linked_sessions WHERE linked_id = ?1",
             params![linked_id],
@@ -10804,7 +10954,7 @@ impl Database {
     /// browse thread — consults live in those tabs' own discussions, which the
     /// user may still want.
     pub fn delete_linked(&self, linked_id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "DELETE FROM linked_messages WHERE linked_id = ?1",
             params![linked_id],
@@ -10817,7 +10967,7 @@ impl Database {
     }
 
     pub fn insert_linked_message(&self, msg: &LinkedMessage) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO linked_messages
                 (id, linked_id, role, body, status, tab_browse_id, tab_n, tab_title, tab_url, created_at)
@@ -10839,7 +10989,7 @@ impl Database {
     }
 
     pub fn load_linked_thread(&self, linked_id: &str) -> rusqlite::Result<Vec<LinkedMessage>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, linked_id, role, body, status, tab_browse_id, tab_n, tab_title, tab_url, created_at
              FROM linked_messages
@@ -10870,7 +11020,7 @@ impl Database {
     /// Paths are returned verbatim (may no longer exist on disk — the caller
     /// filters).
     pub fn list_project_paths(&self) -> rusqlite::Result<Vec<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT project_path AS path FROM sessions
              WHERE project_path IS NOT NULL AND project_path <> ''
@@ -10900,7 +11050,7 @@ impl Database {
         last_args: Option<&str>,
         now: i64,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO dev_servers
                  (project_path, project_name, port, url, stack, run_command,
@@ -10933,7 +11083,7 @@ impl Database {
     /// verbatim — the caller filters out the ones that are live right now and
     /// the ones whose project directory has since disappeared.
     pub fn list_dev_servers(&self, limit: i64) -> rusqlite::Result<Vec<DevServerRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, project_path, project_name, port, url, stack, run_command,
                     last_seen_at, thumb_path
@@ -10961,7 +11111,7 @@ impl Database {
     /// prune and not an existence prune: an unmounted volume or a repo that is
     /// briefly moved must not destroy its history.
     pub fn prune_dev_servers(&self, keep: i64) -> rusqlite::Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "DELETE FROM dev_servers WHERE id NOT IN (
                  SELECT id FROM dev_servers ORDER BY last_seen_at DESC LIMIT ?1
@@ -10975,7 +11125,7 @@ impl Database {
     /// worth a test, so tests can read it directly.
     #[cfg(test)]
     pub fn dev_server_first_seen(&self, id: i64) -> rusqlite::Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT first_seen_at FROM dev_servers WHERE id = ?1",
             params![id],
@@ -10995,7 +11145,7 @@ impl Database {
         port: u16,
         path: &str,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE dev_servers SET thumb_path = ?3
              WHERE project_path = ?1 AND port = ?2",
@@ -11023,7 +11173,7 @@ impl Database {
     }
 
     pub fn upsert_code_review(&self, r: &CodeReviewSession) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO review_sessions
                  (review_id, repo_path, source, base_ref, commit_sha, terminal_id, round, created_at)
@@ -11050,7 +11200,7 @@ impl Database {
     }
 
     pub fn get_code_review(&self, review_id: &str) -> Option<CodeReviewSession> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             &format!(
                 "SELECT {} FROM review_sessions WHERE review_id = ?1",
@@ -11063,7 +11213,7 @@ impl Database {
     }
 
     pub fn list_code_reviews(&self) -> rusqlite::Result<Vec<CodeReviewSession>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {} FROM review_sessions ORDER BY created_at DESC",
             Self::REVIEW_SESSION_COLS
@@ -11076,7 +11226,7 @@ impl Database {
     /// `/redline-code-review` in the same repo continues the SAME review (next
     /// round) instead of minting a parallel one.
     pub fn latest_code_review_for_repo(&self, repo_path: &str) -> Option<CodeReviewSession> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             &format!(
                 "SELECT {} FROM review_sessions WHERE repo_path = ?1
@@ -11090,7 +11240,7 @@ impl Database {
     }
 
     pub fn delete_code_review(&self, review_id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "DELETE FROM review_annotations WHERE review_id = ?1",
             params![review_id],
@@ -11129,7 +11279,7 @@ impl Database {
     }
 
     pub fn insert_review_push(&self, p: &PushRecord) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             &format!(
                 "INSERT INTO review_pushes ({})
@@ -11155,7 +11305,7 @@ impl Database {
     /// The newest push recorded for a review — the one the feedback payload
     /// reports.
     pub fn latest_push_for_review(&self, review_id: &str) -> Option<PushRecord> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             &format!(
                 "SELECT {} FROM review_pushes WHERE review_id = ?1
@@ -11197,7 +11347,7 @@ impl Database {
     }
 
     pub fn insert_review_annotation(&self, a: &ReviewAnnotation) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             &format!(
                 "INSERT INTO review_annotations ({})
@@ -11233,7 +11383,7 @@ impl Database {
     /// carry-forward pass re-homes an annotation's round/lines/status through
     /// this same path.
     pub fn update_review_annotation(&self, a: &ReviewAnnotation) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE review_annotations SET
                  round = ?1, file_path = ?2, side = ?3, start_line = ?4, end_line = ?5,
@@ -11263,7 +11413,7 @@ impl Database {
     }
 
     pub fn delete_review_annotation(&self, review_id: &str, id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "DELETE FROM review_annotations WHERE review_id = ?1 AND id = ?2",
             params![review_id, id],
@@ -11275,7 +11425,7 @@ impl Database {
         &self,
         review_id: &str,
     ) -> rusqlite::Result<Vec<ReviewAnnotation>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {} FROM review_annotations WHERE review_id = ?1
              ORDER BY file_path, start_line, created_at",
@@ -11293,7 +11443,7 @@ impl Database {
         review_id: &str,
         id: &str,
     ) -> Option<String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT fork_session_id FROM review_annotations
              WHERE review_id = ?1 AND id = ?2",
@@ -11310,7 +11460,7 @@ impl Database {
         id: &str,
         fork_session_id: &str,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE review_annotations SET fork_session_id = ?3
              WHERE review_id = ?1 AND id = ?2",
@@ -11324,7 +11474,7 @@ impl Database {
         review_id: &str,
         id: &str,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE review_annotations SET fork_session_id = NULL
              WHERE review_id = ?1 AND id = ?2",
@@ -11339,7 +11489,7 @@ impl Database {
         file_path: &str,
         viewed_at: i64,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO review_viewed (review_id, file_path, viewed_at)
              VALUES (?1, ?2, ?3)
@@ -11350,7 +11500,7 @@ impl Database {
     }
 
     pub fn unmark_review_viewed(&self, review_id: &str, file_path: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "DELETE FROM review_viewed WHERE review_id = ?1 AND file_path = ?2",
             params![review_id, file_path],
@@ -11359,7 +11509,7 @@ impl Database {
     }
 
     pub fn list_review_viewed(&self, review_id: &str) -> rusqlite::Result<Vec<String>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT file_path FROM review_viewed WHERE review_id = ?1 ORDER BY file_path",
         )?;
@@ -11374,7 +11524,7 @@ impl Database {
         review_id: &str,
         source: &str,
     ) -> rusqlite::Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "DELETE FROM review_annotations
              WHERE review_id = ?1 AND source = ?2 AND status = 'draft'",
@@ -11401,7 +11551,7 @@ impl Database {
     }
 
     pub fn insert_review_question(&self, q: &ReviewQuestion) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             &format!(
                 "INSERT INTO review_questions ({})
@@ -11423,7 +11573,7 @@ impl Database {
     }
 
     pub fn list_review_questions(&self, review_id: &str) -> rusqlite::Result<Vec<ReviewQuestion>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {} FROM review_questions WHERE review_id = ?1
              ORDER BY file_path, start_line, created_at",
@@ -11434,7 +11584,7 @@ impl Database {
     }
 
     pub fn delete_review_question(&self, review_id: &str, id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "DELETE FROM review_questions WHERE review_id = ?1 AND id = ?2",
             params![review_id, id],
@@ -11449,7 +11599,7 @@ impl Database {
         review_id: &str,
         id: &str,
     ) -> Option<String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT fork_session_id FROM review_questions WHERE review_id = ?1 AND id = ?2",
             params![review_id, id],
@@ -11465,7 +11615,7 @@ impl Database {
         id: &str,
         session: &str,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE review_questions SET fork_session_id = ?1 WHERE review_id = ?2 AND id = ?3",
             params![session, review_id, id],
@@ -11479,7 +11629,7 @@ impl Database {
     // process is disposable (`voice.rs`); this row is the memory.
 
     pub fn get_voice_fork_session(&self, session_id: &str) -> Option<String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT fork_session_id FROM voice_sessions WHERE session_id = ?1",
             params![session_id],
@@ -11493,7 +11643,7 @@ impl Database {
         session_id: &str,
         fork_session_id: &str,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO voice_sessions (session_id, fork_session_id)
              VALUES (?1, ?2)
@@ -11504,7 +11654,7 @@ impl Database {
     }
 
     pub fn clear_voice_fork_session(&self, session_id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "DELETE FROM voice_sessions WHERE session_id = ?1",
             params![session_id],
@@ -11517,7 +11667,7 @@ impl Database {
     // `VoiceMessage` for why these rows exist at all.
 
     pub fn insert_voice_message(&self, msg: &VoiceMessage) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO voice_messages (id, session_key, role, text, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -11531,7 +11681,7 @@ impl Database {
     /// and the marker that follows it can land in the same millisecond, and a
     /// uuid tiebreak would invert them.
     pub fn list_voice_messages(&self, session_key: &str) -> rusqlite::Result<Vec<VoiceMessage>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, session_key, role, text, created_at
              FROM voice_messages
@@ -11554,7 +11704,7 @@ impl Database {
     /// `clear_voice_fork_session` by `voice_forget`, so "forget" is a true
     /// reset: neither the agent's recollection nor the screen survives it.
     pub fn clear_voice_messages(&self, session_key: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "DELETE FROM voice_messages WHERE session_key = ?1",
             params![session_key],
@@ -11585,7 +11735,7 @@ impl Database {
     }
 
     pub fn insert_comment_offer(&self, offer: &CommentOffer) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO comment_offers
                 (id, session_id, message_id, block_id, body, label, agent_id, status, created_at)
@@ -11606,7 +11756,7 @@ impl Database {
     }
 
     pub fn get_comment_offer(&self, id: &str) -> rusqlite::Result<Option<CommentOffer>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, session_id, message_id, block_id, body, label, agent_id, status, created_at
              FROM comment_offers WHERE id = ?1",
@@ -11619,7 +11769,7 @@ impl Database {
     /// tiebreak as `list_voice_messages`: two offers staged in one turn can land
     /// in the same millisecond, and a uuid tiebreak would invert them.
     pub fn list_open_comment_offers(&self, session_id: &str) -> rusqlite::Result<Vec<CommentOffer>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, session_id, message_id, block_id, body, label, agent_id, status, created_at
              FROM comment_offers
@@ -11642,7 +11792,7 @@ impl Database {
         session_id: &str,
         message_id: &str,
     ) -> rusqlite::Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE comment_offers SET message_id = ?2
               WHERE session_id = ?1 AND message_id IS NULL AND status = 'pending'
@@ -11655,7 +11805,7 @@ impl Database {
     /// How many offers this turn has already staged — the server-side cap. Same
     /// `"you"`-line floor as `bind_comment_offers`.
     pub fn count_open_offers_this_turn(&self, session_id: &str) -> rusqlite::Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT COUNT(*) FROM comment_offers
               WHERE session_id = ?1 AND message_id IS NULL AND status = 'pending'
@@ -11670,7 +11820,7 @@ impl Database {
     /// only the first caller sees `true`, which is what makes a double-tap
     /// (or a tap racing a dismiss) land exactly one comment.
     pub fn claim_comment_offer(&self, id: &str) -> rusqlite::Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let changed = conn.execute(
             "UPDATE comment_offers SET status = 'added' WHERE id = ?1 AND status = 'pending'",
             params![id],
@@ -11681,7 +11831,7 @@ impl Database {
     /// Undo a claim whose write then failed, so the chip survives a transient
     /// error instead of vanishing with nothing to show for it.
     pub fn release_comment_offer(&self, id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE comment_offers SET status = 'pending' WHERE id = ?1 AND status = 'added'",
             params![id],
@@ -11692,7 +11842,7 @@ impl Database {
     /// Resolve an offer without writing it (`dismissed`). Returns whether a
     /// pending row was actually transitioned — mirrors `resolve_draft_suggestion`.
     pub fn resolve_comment_offer(&self, id: &str, status: &str) -> rusqlite::Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let changed = conn.execute(
             "UPDATE comment_offers SET status = ?2 WHERE id = ?1 AND status = 'pending'",
             params![id, status],
@@ -11704,7 +11854,7 @@ impl Database {
     /// `voice_forget` — a chip outliving the conversation it came from would be
     /// an offer with no visible provenance.
     pub fn clear_comment_offers(&self, session_id: &str) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "DELETE FROM comment_offers WHERE session_id = ?1",
             params![session_id],
@@ -11731,7 +11881,7 @@ impl Database {
     /// an optional `session_id` narrowing on each, so the two readers cannot
     /// drift in what they reconstruct.
     fn load_sessions(&self, only: Option<&str>) -> rusqlite::Result<HashMap<String, ReviewSession>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut sessions: HashMap<String, ReviewSession> = HashMap::new();
         let binds: Vec<String> = only.map(str::to_string).into_iter().collect();
         let refs = || -> Vec<&dyn rusqlite::ToSql> {
@@ -11949,7 +12099,7 @@ impl Database {
     /// Insert a freshly minted work item. The caller (`work.rs`) owns id
     /// minting and vocabulary validation; this is the dumb row write.
     pub fn insert_work_item(&self, item: &crate::work::WorkItem) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO work_items (id, title, body, status, priority, kind,
                 assignee, claimed_at, lease_expires_at, closed_at, close_reason,
@@ -11982,7 +12132,7 @@ impl Database {
     }
 
     pub fn get_work_item(&self, id: &str) -> Option<crate::work::WorkItem> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             &format!(
                 "SELECT {} FROM work_items WHERE id = ?1",
@@ -12003,7 +12153,7 @@ impl Database {
         project: Option<&str>,
         limit: i64,
     ) -> rusqlite::Result<Vec<crate::work::WorkItem>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {} FROM work_items
              WHERE (?1 IS NULL OR status = ?1)
@@ -12027,7 +12177,7 @@ impl Database {
         &self,
         limit: i64,
     ) -> rusqlite::Result<Vec<crate::work::WorkItem>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(&format!(
             "SELECT {} FROM work_items
              WHERE status != 'closed'
@@ -12063,7 +12213,7 @@ impl Database {
         now: i64,
         limit: i64,
     ) -> rusqlite::Result<Vec<crate::work::WorkItem>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(&format!(
             "WITH RECURSIVE deferred_down(id) AS (
                  SELECT id FROM work_items
@@ -12109,7 +12259,7 @@ impl Database {
         now: i64,
         lease_expires_at: Option<i64>,
     ) -> rusqlite::Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let n = conn.execute(
             "UPDATE work_items
              SET status = 'claimed', assignee = ?2, claimed_at = ?3,
@@ -12129,7 +12279,7 @@ impl Database {
     /// growth. An item claimed with `lease_expires_at = NULL` never expires
     /// (an explicit open-ended claim).
     pub fn expire_work_leases(&self, now: i64) -> rusqlite::Result<usize> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "UPDATE work_items
              SET status = 'open', assignee = NULL, claimed_at = NULL,
@@ -12150,7 +12300,7 @@ impl Database {
         reason: Option<&str>,
         now: i64,
     ) -> rusqlite::Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let n = conn.execute(
             "UPDATE work_items
              SET status = 'closed', closed_at = ?3, close_reason = ?2,
@@ -12159,6 +12309,48 @@ impl Database {
             params![id, reason, now],
         )?;
         Ok(n > 0)
+    }
+
+    /// Close every still-open item whose origin is `(origin_kind, origin_id)`,
+    /// returning the ids that moved.
+    ///
+    /// The counterpart to `close_work_item` for a transition that retires a
+    /// whole batch at once. `work_items` had 595 rows and zero ever closed —
+    /// not because closing was unimplemented (all of it is right here) but
+    /// because nothing in the app ever called it, so the graph only ever grew
+    /// and "open work" stopped meaning anything.
+    ///
+    /// Origin is provenance, not ownership (see the schema law): this is a
+    /// facet query over breadcrumbs, never a join.
+    pub fn close_open_work_items_for_origin(
+        &self,
+        origin_kind: &str,
+        origin_id: &str,
+        reason: &str,
+        now: i64,
+    ) -> rusqlite::Result<Vec<String>> {
+        let conn = self.lock_conn();
+        let ids = {
+            let mut stmt = conn.prepare(
+                "SELECT id FROM work_items
+                  WHERE origin_kind = ?1 AND origin_id = ?2 AND status != 'closed'",
+            )?;
+            let rows = stmt
+                .query_map(params![origin_kind, origin_id], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+            rows
+        };
+        if ids.is_empty() {
+            return Ok(ids);
+        }
+        conn.execute(
+            "UPDATE work_items
+                SET status = 'closed', closed_at = ?4, close_reason = ?3,
+                    updated_at = ?4
+              WHERE origin_kind = ?1 AND origin_id = ?2 AND status != 'closed'",
+            params![origin_kind, origin_id, reason, now],
+        )?;
+        Ok(ids)
     }
 
     /// Insert a typed edge; idempotent on the `(from, to, type)` identity.
@@ -12171,7 +12363,7 @@ impl Database {
         created_by: Option<&str>,
         now: i64,
     ) -> rusqlite::Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let n = conn.execute(
             "INSERT OR IGNORE INTO work_edges (from_id, to_id, type, created_by, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -12185,7 +12377,7 @@ impl Database {
         &self,
         id: &str,
     ) -> rusqlite::Result<Vec<crate::work::WorkEdge>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT from_id, to_id, type, created_by, created_at FROM work_edges
              WHERE from_id = ?1 OR to_id = ?1
@@ -12216,7 +12408,7 @@ impl Database {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let ph = (1..=ids.len())
             .map(|i| format!("?{i}"))
             .collect::<Vec<_>>()
@@ -12247,7 +12439,7 @@ impl Database {
     /// Direct child ids of a hierarchical item id (`<parent>.N` — one more
     /// dotted level only, not grandchildren). Feeds child-ordinal minting.
     pub fn work_child_ids(&self, parent: &str) -> Vec<String> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let Ok(mut stmt) = conn.prepare(
             "SELECT id FROM work_items
              WHERE id LIKE ?1 || '.%' AND id NOT LIKE ?1 || '.%.%'",
@@ -12269,7 +12461,7 @@ impl Database {
         last_run_at: Option<i64>,
         items_filed_delta: i64,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO seat_stats (seat, last_run_at, items_filed, updated_at)
              VALUES (?1, ?2, MAX(0, ?3), ?4)
@@ -12286,7 +12478,7 @@ impl Database {
     }
 
     pub fn get_seat_stat(&self, seat: &str) -> Option<SeatStatRow> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.query_row(
             "SELECT seat, last_run_at, items_filed, updated_at
              FROM seat_stats WHERE seat = ?1",
@@ -12304,7 +12496,7 @@ impl Database {
     }
 
     pub fn list_seat_stats(&self) -> rusqlite::Result<Vec<SeatStatRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT seat, last_run_at, items_filed, updated_at
              FROM seat_stats ORDER BY seat",
@@ -12334,7 +12526,7 @@ impl Database {
         cache_creation_tokens: i64,
         spawns: i64,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO seat_burn (seat, day, input_tokens, output_tokens,
                 cache_read_tokens, cache_creation_tokens, spawns, updated_at)
@@ -12362,7 +12554,7 @@ impl Database {
 
     /// Per-seat totals across all days (`day` = None in the rollup rows).
     pub fn seat_burn_totals_by_seat(&self) -> rusqlite::Result<Vec<SeatBurnRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT seat, SUM(input_tokens), SUM(output_tokens),
                     SUM(cache_read_tokens), SUM(cache_creation_tokens), SUM(spawns)
@@ -12385,7 +12577,7 @@ impl Database {
     /// Per-day totals across all seats (`seat` = None), newest day first,
     /// bounded by `limit`.
     pub fn seat_burn_totals_by_day(&self, limit: i64) -> rusqlite::Result<Vec<SeatBurnRow>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT day, SUM(input_tokens), SUM(output_tokens),
                     SUM(cache_read_tokens), SUM(cache_creation_tokens), SUM(spawns)
@@ -12413,7 +12605,7 @@ impl Database {
     /// queued run that parks lands in `awaiting_review`, so nothing re-queues).
     /// Oldest first (FIFO); returns `(session_id, project_path, project_name)`.
     pub fn list_queue_ready_sessions(&self) -> rusqlite::Result<Vec<(String, String, String)>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT session_id, project_path, project_name FROM sessions
              WHERE status = 'approved' AND run_state IS NULL
@@ -12447,7 +12639,7 @@ impl Database {
         origin_id: Option<&str>,
         title: Option<&str>,
     ) -> rusqlite::Result<Option<crate::work::WorkItem>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         match conn.query_row(
             &format!(
                 "SELECT {} FROM work_items
@@ -12631,7 +12823,7 @@ impl Database {
         doc_markdown: &str,
     ) -> rusqlite::Result<()> {
         let now = crate::ledger::now_millis();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO drafts (draft_id, title, project_path, doc_markdown, doc_json, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?5)
@@ -19265,5 +19457,592 @@ body.
         );
         assert_eq!(ready[0].1, "/repo/a-approved", "repo path rides along");
         assert_eq!(ready[0].2, "a-approved", "project name rides along");
+    }
+
+    // --- T0.1: the friction metric measures OPEN comments -------------------
+
+    /// A shared fixture for the friction metric: one `in_review` session
+    /// carrying one comment in each of the six lifecycle states, with the
+    /// `resolution_accepted_at` column deliberately populated the way the live
+    /// DB populates it (only on an explicit reviewer Accept).
+    fn friction_fixture() -> Database {
+        use crate::state::{
+            AttachState, Comment, CommentKind, CommentStatus, Resolution, ReviewSession, Revision,
+            SessionStatus,
+        };
+        let db = Database::open_in_memory().unwrap();
+        db.upsert_session(&ReviewSession {
+            session_id: "s-friction".to_string(),
+            project_path: "/repo/friction".to_string(),
+            project_name: "friction".to_string(),
+            created_at: 1_000,
+            revisions: Vec::new(),
+            status: SessionStatus::InReview,
+            attach_state: AttachState::Idle,
+            updated_at: 1_000,
+            run_state: None,
+        })
+        .unwrap();
+        db.insert_revision(
+            "s-friction",
+            &Revision {
+                version_number: 1,
+                received_at: 1_000,
+                raw_plan_markdown: "# plan".to_string(),
+                sections: Vec::new(),
+                comments: Vec::new(),
+                thread_start: true,
+                restored: false,
+            },
+        )
+        .unwrap();
+
+        let mk = |id: &str, status: CommentStatus, resolution: Option<Resolution>| Comment {
+            id: id.to_string(),
+            kind: CommentKind::Feedback,
+            scope: None,
+            anchor_id: "A.1".to_string(),
+            block_id: None,
+            body: format!("body for {id}"),
+            structural: None,
+            edit: None,
+            created_at: 1_000,
+            status,
+            resolution,
+            selection: None,
+            reopen_note: None,
+            reopen_history: Vec::new(),
+            actionable: false,
+            author: None,
+            agent_state: None,
+            reviewer: None,
+            external_created_at: None,
+            share_request_id: None,
+            attachments: Vec::new(),
+        };
+        let answered = |accepted_at: Option<i64>| {
+            Some(Resolution {
+                body: "done".to_string(),
+                appeared_in_version: 2,
+                accepted_at,
+            })
+        };
+
+        // Open — each of these is still waiting on somebody.
+        db.insert_comment("s-friction", 1, &mk("c-001", CommentStatus::Draft, None)).unwrap();
+        db.insert_comment("s-friction", 1, &mk("c-002", CommentStatus::Submitted, None)).unwrap();
+        db.insert_comment("s-friction", 1, &mk("c-003", CommentStatus::Reopened, None)).unwrap();
+        // Closed. `c-004` is the population that broke the old metric: Claude
+        // answered it, the reviewer never pressed Accept, so
+        // `resolution_accepted_at` stays NULL forever.
+        db.insert_comment("s-friction", 1, &mk("c-004", CommentStatus::Resolved, answered(None)))
+            .unwrap();
+        db.insert_comment(
+            "s-friction",
+            1,
+            &mk("c-005", CommentStatus::Accepted, answered(Some(2_000))),
+        )
+        .unwrap();
+        db.insert_comment("s-friction", 1, &mk("c-006", CommentStatus::Withdrawn, None)).unwrap();
+        db
+    }
+
+    /// The metric counts comments whose STATUS is open, not comments the
+    /// reviewer never formally accepted. Six comments, one per state, must
+    /// score 3 — draft + submitted + reopened.
+    #[test]
+    fn in_review_friction_counts_open_statuses_not_acceptance() {
+        let db = friction_fixture();
+
+        let rows = db.in_review_friction().unwrap();
+        assert_eq!(rows.len(), 1, "one in_review session");
+        let (session_id, project_name, created_at, unresolved) = rows[0].clone();
+        assert_eq!(session_id, "s-friction");
+        assert_eq!(project_name, "friction");
+        assert_eq!(created_at, 1_000);
+        assert_eq!(
+            unresolved, 3,
+            "draft + submitted + reopened are open; resolved, accepted and \
+             withdrawn are not"
+        );
+
+        // The regression this test exists for: with the old
+        // `resolution_accepted_at IS NULL` rule the same fixture scored 5,
+        // because everything except the explicitly-accepted `c-005` matched.
+        let by_never_accepted: i64 = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM comments
+                   WHERE session_id = 's-friction' AND resolution_accepted_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(by_never_accepted, 5, "the old rule over-counted by 2");
+        assert!(
+            unresolved < by_never_accepted,
+            "the open-status rule must be strictly tighter than the acceptance rule"
+        );
+    }
+
+    /// A resolved comment the reviewer never accepted is answered, not
+    /// friction — the single most common shape in the live DB.
+    #[test]
+    fn in_review_friction_ignores_resolved_but_never_accepted() {
+        use crate::state::CommentStatus;
+        let db = friction_fixture();
+
+        // Withdraw the three open ones; nothing open is left.
+        for id in ["c-001", "c-002", "c-003"] {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE comments SET status = ?2 WHERE session_id = 's-friction' AND id = ?1",
+                params![id, CommentStatus::Withdrawn.as_str()],
+            )
+            .unwrap();
+        }
+
+        let rows = db.in_review_friction().unwrap();
+        assert_eq!(
+            rows[0].3, 0,
+            "a session whose only remaining comments are resolved/accepted/withdrawn \
+             carries no friction"
+        );
+    }
+
+    // --- T0.2: the connection mutex survives a panic ------------------------
+
+    /// The failure this guard exists for, reproduced end to end. A panic
+    /// inside a closure that holds the connection guard poisons the mutex;
+    /// before `lock_conn()` every later lock unwrapped that `PoisonError` and
+    /// panicked — forever — while the window stayed up and looked alive.
+    ///
+    /// The source invariant that keeps production off the bare `.unwrap()`
+    /// lives in `tests/poison_guard.rs`.
+    #[test]
+    fn poisoned_conn_recovers() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        db.set_setting("before", "written").unwrap();
+
+        // Exactly the production shape: the guard is live while the stack
+        // unwinds, which is what poisons the mutex.
+        let poisoner = Arc::clone(&db);
+        let joined = std::thread::spawn(move || {
+            let _guard = poisoner.conn.lock().unwrap();
+            panic!("deliberate panic inside a db closure");
+        })
+        .join();
+        assert!(joined.is_err(), "the helper thread must actually have panicked");
+        assert!(db.conn.is_poisoned(), "and the mutex must actually be poisoned");
+
+        // Every one of these goes through lock_conn().
+        assert_eq!(
+            db.get_setting("before").as_deref(),
+            Some("written"),
+            "data written before the poison is still readable"
+        );
+        db.set_setting("after", "still writable").unwrap();
+        assert_eq!(
+            db.get_setting("after").as_deref(),
+            Some("still writable"),
+            "and writes still land"
+        );
+
+        // A method with a different shape (prepare + query_map), to prove the
+        // recovery is at the lock and not in one lucky code path.
+        assert!(
+            db.in_review_friction().is_ok(),
+            "prepared-statement reads work on a recovered connection too"
+        );
+    }
+
+    // --- T1.1: agent-authored comments converge instead of duplicating -------
+
+    /// Fixture shared by the convergence tests: a one-revision session and a
+    /// request builder whose author is the only thing that varies.
+    fn convergence_store() -> SessionStore {
+        let store = make_store();
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("s", "/tmp/s", md.to_string(), reparse_sections(md), true, false);
+        store
+    }
+
+    fn agent_req(
+        author: Option<&str>,
+        kind: crate::state::CommentKind,
+        body: &str,
+    ) -> NewCommentRequest {
+        NewCommentRequest {
+            id: None,
+            kind,
+            scope: None,
+            anchor_id: "A".to_string(),
+            block_id: Some("rl:blk-1".to_string()),
+            structural: None,
+            body: body.to_string(),
+            edit: None,
+            selection: None,
+            author: author.map(|a| a.to_string()),
+            reviewer: None,
+            external_created_at: None,
+            share_request_id: None,
+            attachments: Vec::new(),
+        }
+    }
+
+    /// A replayed agent finding returns the comment that already exists —
+    /// same id, same timestamp — instead of minting a ghost. Everything that
+    /// makes it a *different* finding still mints.
+    #[test]
+    fn agent_duplicate_feedback_converges_to_existing_comment() {
+        use crate::state::CommentKind;
+        let store = convergence_store();
+
+        let first = store
+            .add_comment("s", agent_req(Some("voice"), CommentKind::Feedback, "anchor drifts"))
+            .unwrap();
+        assert_eq!(first.id, "c-001");
+
+        // The replay: byte-identical, and with incidental whitespace, since
+        // the payload is re-serialized on the way back in.
+        let replay = store
+            .add_comment("s", agent_req(Some("voice"), CommentKind::Feedback, "anchor drifts"))
+            .unwrap();
+        assert_eq!(replay.id, "c-001", "a replayed agent finding must converge");
+        assert_eq!(replay.created_at, first.created_at, "and keep its identity");
+        let padded = store
+            .add_comment("s", agent_req(Some("voice"), CommentKind::Feedback, "  anchor drifts \n"))
+            .unwrap();
+        assert_eq!(padded.id, "c-001", "convergence is on the trimmed body");
+
+        // Different body, different author, different kind — all new work.
+        let other_body = store
+            .add_comment("s", agent_req(Some("voice"), CommentKind::Feedback, "other point"))
+            .unwrap();
+        assert_eq!(other_body.id, "c-002");
+        let other_author = store
+            .add_comment(
+                "s",
+                agent_req(Some("claude-code"), CommentKind::Feedback, "anchor drifts"),
+            )
+            .unwrap();
+        assert_eq!(other_author.id, "c-003", "two agents can raise the same point");
+        let other_kind = store
+            .add_comment("s", agent_req(Some("voice"), CommentKind::Question, "anchor drifts"))
+            .unwrap();
+        assert_eq!(other_kind.id, "c-004", "a question is not the feedback");
+
+        let total = store.get("s").unwrap().revisions.last().unwrap().comments.len();
+        assert_eq!(total, 4);
+    }
+
+    /// The exact `5f85766f` shape: submit, restore the session, then let the
+    /// agent replay its feedback against the restored revision. The originals
+    /// were carried forward, not deleted, so the replay must find them.
+    #[test]
+    fn agent_duplicate_across_restored_revision_converges() {
+        use crate::state::CommentKind;
+        let store = convergence_store();
+
+        let original = store
+            .add_comment("s", agent_req(Some("voice"), CommentKind::Feedback, "anchor drifts"))
+            .unwrap();
+        store.mark_submitted("s");
+        store.restore_latest("s").expect("restored");
+
+        let replay = store
+            .add_comment("s", agent_req(Some("voice"), CommentKind::Feedback, "anchor drifts"))
+            .unwrap();
+        assert_eq!(
+            replay.id, original.id,
+            "the restored revision hides the original from the UI, not from the store"
+        );
+
+        let session = store.get("s").unwrap();
+        let ghosts = session
+            .revisions
+            .iter()
+            .flat_map(|r| r.comments.iter())
+            .filter(|c| c.body == "anchor drifts")
+            .count();
+        assert_eq!(ghosts, 1, "one finding, one comment, across every revision");
+    }
+
+    /// Once a finding is answered it is finished business — an agent raising
+    /// the same point afterwards is genuinely new, and must not be swallowed.
+    #[test]
+    fn agent_duplicate_after_resolution_mints_a_new_comment() {
+        use crate::state::CommentKind;
+        let store = convergence_store();
+
+        let first = store
+            .add_comment("s", agent_req(Some("voice"), CommentKind::Feedback, "anchor drifts"))
+            .unwrap();
+        store.mark_submitted("s");
+        let mut resolutions = HashMap::new();
+        resolutions.insert(first.id.clone(), "fixed in v2".to_string());
+        store.attach_resolutions("s", &resolutions, 1);
+
+        let again = store
+            .add_comment("s", agent_req(Some("voice"), CommentKind::Feedback, "anchor drifts"))
+            .unwrap();
+        assert_ne!(again.id, first.id, "a resolved comment does not absorb a fresh raise");
+    }
+
+    /// Human comments keep minting. A reviewer typing the same correction on
+    /// two blocks is legitimate and happens in the live record — the
+    /// convergence rule is scoped to agent authors on purpose.
+    #[test]
+    fn human_identical_edits_still_mint_new_ids() {
+        use crate::state::{CommentKind, EditPayload};
+        let store = convergence_store();
+
+        let mut req = || {
+            let mut r = agent_req(None, CommentKind::Edit, "tighten this");
+            r.edit = Some(EditPayload {
+                original: "the thing".to_string(),
+                revised: "this".to_string(),
+            });
+            r
+        };
+        let a = store.add_comment("s", req()).unwrap();
+        let b = store.add_comment("s", req()).unwrap();
+        assert_eq!(a.id, "c-001");
+        assert_eq!(b.id, "c-002", "identical human edits stay distinct comments");
+
+        // And an agent edit with a DIFFERENT payload is different work even
+        // when the prose body matches.
+        let mut agent_edit = || {
+            let mut r = agent_req(Some("claude-code"), CommentKind::Edit, "tighten this");
+            r.edit = Some(EditPayload {
+                original: "the thing".to_string(),
+                revised: "this".to_string(),
+            });
+            r
+        };
+        let c = store.add_comment("s", agent_edit()).unwrap();
+        let c_replay = store.add_comment("s", agent_edit()).unwrap();
+        assert_eq!(c_replay.id, c.id, "an identical agent edit converges");
+        let mut different = agent_edit();
+        different.edit = Some(EditPayload {
+            original: "the thing".to_string(),
+            revised: "that".to_string(),
+        });
+        let d = store.add_comment("s", different).unwrap();
+        assert_ne!(d.id, c.id, "a different revised text is a different edit");
+    }
+
+    // --- T1.3: the resolution ledger emits stay wired -----------------------
+
+    /// Accepting a resolution is a decision, and the ledger row must point at
+    /// the COMMENT — not the session — or the Timeline can't tell which
+    /// finding was accepted.
+    #[test]
+    fn accepting_a_resolution_records_a_comment_scoped_ledger_event() {
+        use crate::state::CommentKind;
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let store = SessionStore::new(db.clone());
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("s", "/tmp/s", md.to_string(), reparse_sections(md), true, false);
+
+        let c = store
+            .add_comment("s", agent_req(None, CommentKind::Feedback, "narrow this"))
+            .unwrap();
+        store.mark_submitted("s");
+        let mut resolutions = HashMap::new();
+        resolutions.insert(c.id.clone(), "narrowed".to_string());
+        store.attach_resolutions("s", &resolutions, 2);
+        assert!(store.accept_resolution("s", &c.id));
+
+        let events = db.list_session_events("s").unwrap();
+        let resolution: Vec<_> = events.iter().filter(|e| e.kind == "resolution").collect();
+        assert_eq!(resolution.len(), 1, "exactly one resolution event");
+        assert_eq!(resolution[0].ref_kind.as_deref(), Some("comment"));
+        assert_eq!(
+            resolution[0].ref_id.as_deref(),
+            Some(c.id.as_str()),
+            "the event names the accepted comment"
+        );
+        assert_eq!(resolution[0].session_id.as_deref(), Some("s"));
+    }
+
+    /// Reopening is the other half of the loop and is scoped the same way.
+    #[test]
+    fn reopening_records_a_comment_scoped_reopen_event() {
+        use crate::state::CommentKind;
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let store = SessionStore::new(db.clone());
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("s", "/tmp/s", md.to_string(), reparse_sections(md), true, false);
+
+        let c = store
+            .add_comment("s", agent_req(None, CommentKind::Feedback, "narrow this"))
+            .unwrap();
+        store.mark_submitted("s");
+        let mut resolutions = HashMap::new();
+        resolutions.insert(c.id.clone(), "narrowed".to_string());
+        store.attach_resolutions("s", &resolutions, 2);
+        assert!(store.reopen_resolution("s", &c.id, Some("still too broad"), false));
+
+        let events = db.list_session_events("s").unwrap();
+        let reopen: Vec<_> = events.iter().filter(|e| e.kind == "reopen").collect();
+        assert_eq!(reopen.len(), 1, "exactly one reopen event");
+        assert_eq!(reopen[0].ref_kind.as_deref(), Some("comment"));
+        assert_eq!(
+            reopen[0].ref_id.as_deref(),
+            Some(c.id.as_str()),
+            "a session-scoped reopen would lose which finding came back"
+        );
+    }
+
+    // --- T1.2: the one-time ghost repair ------------------------------------
+
+    /// Reproduces the live `5f85766f` shape and every near miss it must leave
+    /// alone: the ghost flips, a human duplicate doesn't, an agent duplicate
+    /// with no answered twin doesn't, and a second run is a no-op.
+    #[test]
+    fn ghost_repair_withdraws_only_superseded_agent_rows() {
+        use crate::state::{
+            AttachState, Comment, CommentKind, CommentStatus, Resolution, ReviewSession, Revision,
+            SessionStatus,
+        };
+        let db = Database::open_in_memory().unwrap();
+        db.upsert_session(&ReviewSession {
+            session_id: "s-ghost".to_string(),
+            project_path: "/repo/ghost".to_string(),
+            project_name: "ghost".to_string(),
+            created_at: 1,
+            revisions: Vec::new(),
+            status: SessionStatus::InReview,
+            attach_state: AttachState::Idle,
+            updated_at: 1,
+            run_state: None,
+        })
+        .unwrap();
+        db.insert_revision(
+            "s-ghost",
+            &Revision {
+                version_number: 1,
+                received_at: 1,
+                raw_plan_markdown: "# plan".to_string(),
+                sections: Vec::new(),
+                comments: Vec::new(),
+                thread_start: true,
+                restored: false,
+            },
+        )
+        .unwrap();
+
+        let mk = |id: &str, author: Option<&str>, status: CommentStatus, body: &str, at: i64| {
+            Comment {
+                id: id.to_string(),
+                kind: CommentKind::Feedback,
+                scope: None,
+                anchor_id: "A".to_string(),
+                block_id: None,
+                body: body.to_string(),
+                structural: None,
+                edit: None,
+                created_at: at,
+                status,
+                resolution: matches!(status, CommentStatus::Resolved | CommentStatus::Accepted)
+                    .then(|| Resolution {
+                        body: "answered".to_string(),
+                        appeared_in_version: 1,
+                        accepted_at: None,
+                    }),
+                selection: None,
+                reopen_note: None,
+                reopen_history: Vec::new(),
+                actionable: false,
+                author: author.map(|a| a.to_string()),
+                agent_state: None,
+                reviewer: None,
+                external_created_at: None,
+                share_request_id: None,
+                attachments: Vec::new(),
+            }
+        };
+        let insert = |c: &Comment| db.insert_comment("s-ghost", 1, c).unwrap();
+
+        // The ghost: agent-authored, submitted, answered later by an identical
+        // row. This is the exact 5f85766f pair.
+        insert(&mk("c-001", Some("voice"), CommentStatus::Submitted, "anchor drifts", 100));
+        insert(&mk("c-002", Some("voice"), CommentStatus::Resolved, "anchor drifts", 200));
+        // A human duplicate in the same shape — must survive untouched.
+        insert(&mk("c-003", None, CommentStatus::Submitted, "same problem here", 100));
+        insert(&mk("c-004", None, CommentStatus::Resolved, "same problem here", 200));
+        // An agent duplicate with no ANSWERED twin — still open work.
+        insert(&mk("c-005", Some("voice"), CommentStatus::Submitted, "still open", 100));
+        insert(&mk("c-006", Some("voice"), CommentStatus::Submitted, "still open", 200));
+        // A different agent said the same thing — not the same finding.
+        insert(&mk("c-007", Some("claude-code"), CommentStatus::Submitted, "anchor drifts", 100));
+        // And the ANSWERED row itself is never touched, in either direction:
+        // the later copy is the one that carries the resolution.
+
+        let status_of = |id: &str| -> String {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT status FROM comments WHERE session_id = 's-ghost' AND id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+
+        // `open_in_memory` already ran the migration once and latched the
+        // marker, so clear it to exercise the repair against these rows.
+        let run_repair = || {
+            let conn = db.conn.lock().unwrap();
+            Database::repair_superseded_agent_comments(&conn).unwrap();
+        };
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "DELETE FROM app_settings WHERE key = 'repair_ghost_comments_v1'",
+                [],
+            )
+            .unwrap();
+        }
+        run_repair();
+
+        assert_eq!(status_of("c-001"), "withdrawn", "the ghost is retired");
+        assert_eq!(status_of("c-002"), "resolved", "the answered copy is the record");
+        assert_eq!(status_of("c-003"), "submitted", "human duplicates are legitimate");
+        assert_eq!(status_of("c-004"), "resolved");
+        assert_eq!(status_of("c-005"), "submitted", "no answered twin, still open work");
+        assert_eq!(status_of("c-006"), "submitted");
+        assert_eq!(
+            status_of("c-007"),
+            "submitted",
+            "a different agent raising the same point is a different finding"
+        );
+
+        // Resolution data is untouched — the repair only moves `status`.
+        let res: Option<String> = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT resolution_body FROM comments WHERE session_id = 's-ghost' AND id = 'c-002'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(res.as_deref(), Some("answered"));
+
+        // Exactly-once: a fresh ghost appearing after the marker is latched is
+        // NOT swept — T1.1 is what stops new ones, not a recurring sweep.
+        insert(&mk("c-008", Some("voice"), CommentStatus::Submitted, "late ghost", 300));
+        insert(&mk("c-009", Some("voice"), CommentStatus::Resolved, "late ghost", 400));
+        run_repair();
+        assert_eq!(status_of("c-008"), "submitted", "the second run is a no-op");
+
+        // And the marker records how many rows moved.
+        assert_eq!(
+            db.get_setting("repair_ghost_comments_v1").as_deref(),
+            Some("1"),
+            "the marker carries the repair's own count"
+        );
     }
 }

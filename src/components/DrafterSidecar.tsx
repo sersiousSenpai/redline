@@ -1,17 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 
-import type {
-  DraftComment,
-  ForkCancelledEvent,
-  ForkDeltaEvent,
-  ForkDoneEvent,
-  ForkErrorEvent,
-  ThreadMessage,
-} from "../types";
+import type { DraftComment, ThreadMessage } from "../types";
+import { useAgentTurn } from "../hooks/useAgentTurn";
 import { MarkdownView } from "./MarkdownView";
 import { WorkingIndicator } from "./WorkingIndicator";
 
@@ -29,7 +21,8 @@ interface DrafterSidecarProps {
  *  with a "Discuss" thread — a fresh read-only claude fork scoped to propose
  *  edits against its own anchored block only (the daemon enforces the scope).
  *  Same `fork-*` wire shape as plan/review threads, keyed
- *  `(draftId, comment.id)`. */
+ *  `(draftId, comment.id)`, and running on the same shared `useAgentTurn`
+ *  lifecycle (T3.3). */
 export function DrafterSidecar({
   draftId,
   comments,
@@ -100,11 +93,6 @@ export function DrafterSidecar({
   );
 }
 
-type ThreadStatus = "idle" | "streaming" | "error";
-
-let tmpSeq = 0;
-const tmpId = () => `dtmp-${++tmpSeq}`;
-
 function DraftCommentCard({
   draftId,
   comment,
@@ -120,10 +108,6 @@ function DraftCommentCard({
 }) {
   const commentId = comment.id;
   const [expanded, setExpanded] = useState(false);
-  const [messages, setMessages] = useState<ThreadMessage[]>([]);
-  const [liveText, setLiveText] = useState("");
-  const [status, setStatus] = useState<ThreadStatus>("idle");
-  const [draft, setDraft] = useState("");
   const cardRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -131,122 +115,6 @@ function DraftCommentCard({
       cardRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
     }
   }, [focused]);
-
-  // Load persisted turns + subscribe to this comment's fork events (only while
-  // the thread is expanded — cards are cheap until opened).
-  useEffect(() => {
-    if (!expanded) return;
-    let alive = true;
-    void invoke<ThreadMessage[]>("get_thread", {
-      sessionId: draftId,
-      commentId,
-    })
-      .then((rows) => alive && setMessages(rows))
-      .catch(() => {});
-
-    // Seed streaming state from the fork registry — an in-flight turn
-    // survives unmount/remount (draft switches), but this component's status
-    // is local and would otherwise read idle until the next delta.
-    void invoke<{ streaming: boolean; startedAt: number | null }>(
-      "fork_thread_status",
-      { scopeId: draftId, itemId: commentId },
-    )
-      .then((s) => {
-        if (alive && s.streaming) setStatus("streaming");
-      })
-      .catch(() => {});
-
-    const mine = (p: { sessionId: string; commentId: string }) =>
-      p.sessionId === draftId && p.commentId === commentId;
-    const deltaP = listen<ForkDeltaEvent>("fork-delta", (e) => {
-      if (!alive || !mine(e.payload)) return;
-      setStatus("streaming");
-      setLiveText((t) => t + e.payload.text);
-    });
-    const doneP = listen<ForkDoneEvent>("fork-done", (e) => {
-      if (!alive || !mine(e.payload)) return;
-      setMessages((m) => [
-        ...m,
-        {
-          id: e.payload.messageId,
-          sessionId: draftId,
-          commentId,
-          role: "assistant",
-          body: e.payload.body,
-          status: "complete",
-          createdAt: Date.now(),
-        },
-      ]);
-      setLiveText("");
-      setStatus("idle");
-    });
-    const errP = listen<ForkErrorEvent>("fork-error", (e) => {
-      if (!alive || !mine(e.payload)) return;
-      setMessages((m) => [
-        ...m,
-        {
-          id: tmpId(),
-          sessionId: draftId,
-          commentId,
-          role: "assistant",
-          body: e.payload.error,
-          status: "error",
-          createdAt: Date.now(),
-        },
-      ]);
-      setLiveText("");
-      setStatus("error");
-    });
-    const cancelP = listen<ForkCancelledEvent>("fork-cancelled", (e) => {
-      if (!alive || !mine(e.payload)) return;
-      setLiveText("");
-      setStatus("idle");
-    });
-    return () => {
-      alive = false;
-      void deltaP.then((un) => un());
-      void doneP.then((un) => un());
-      void errP.then((un) => un());
-      void cancelP.then((un) => un());
-    };
-  }, [expanded, draftId, commentId]);
-
-  function send(text: string) {
-    const trimmed = text.trim();
-    if (!trimmed || status === "streaming") return;
-    setMessages((m) => [
-      ...m,
-      {
-        id: tmpId(),
-        sessionId: draftId,
-        commentId,
-        role: "user",
-        body: trimmed,
-        status: "complete",
-        createdAt: Date.now(),
-      },
-    ]);
-    setStatus("streaming");
-    void invoke("draft_thread_send", {
-      draftId,
-      commentId,
-      text: trimmed,
-    }).catch((err) => {
-      setStatus("error");
-      setMessages((m) => [
-        ...m,
-        {
-          id: tmpId(),
-          sessionId: draftId,
-          commentId,
-          role: "assistant",
-          body: `Couldn't reach the discussion agent: ${err}`,
-          status: "error",
-          createdAt: Date.now(),
-        },
-      ]);
-    });
-  }
 
   return (
     <div
@@ -309,96 +177,149 @@ function DraftCommentCard({
           🗑
         </button>
       </div>
-      {expanded && (
-        <div
-          className="flex flex-col gap-1.5 pt-1"
-          style={{ borderTop: "1px solid var(--color-rule)" }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          {messages.map((m) => (
-            <div key={m.id} className="flex flex-col gap-0.5">
-              <span
-                style={{
-                  fontSize: "9px",
-                  fontWeight: 600,
-                  textTransform: "uppercase",
-                  letterSpacing: "0.07em",
-                  color:
-                    m.role === "user"
-                      ? "var(--color-ink-muted)"
-                      : "var(--color-info)",
-                }}
-              >
-                {m.role === "user" ? "You" : "Agent"}
-              </span>
-              {m.status === "error" ? (
-                <div
-                  style={{
-                    fontSize: "11.5px",
-                    whiteSpace: "pre-wrap",
-                    color: "var(--color-warning)",
-                  }}
-                >
-                  {m.body}
-                </div>
-              ) : (
-                <MarkdownView body={m.body} compact rich />
-              )}
-            </div>
-          ))}
-          {status === "streaming" && (
-            <div style={{ fontSize: "11.5px", color: "var(--color-ink-muted)" }}>
-              {liveText ? (
-                <MarkdownView body={liveText} compact />
-              ) : (
-                <WorkingIndicator compact />
-              )}
-            </div>
-          )}
-          <div className="flex items-end gap-1">
-            <textarea
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  send(draft);
-                  setDraft("");
-                }
-              }}
-              placeholder="Ask about this part…"
-              rows={1}
-              disabled={status === "streaming"}
-              className="flex-1 rounded px-1.5 py-1"
+      {expanded && <DraftThread draftId={draftId} commentId={commentId} />}
+    </div>
+  );
+}
+
+
+/** One comment's discussion, mounted only while the card is expanded — the
+ *  cards themselves stay cheap, which is why this is its own component rather
+ *  than a conditional hook in the card.
+ *
+ *  The streaming lifecycle is the shared one (T3.3): seq-guarded deltas, a
+ *  mid-turn remount restored from `fork_thread_status.partial` — which matters
+ *  more here than anywhere, because collapsing and re-opening a card IS a
+ *  remount — and the 10s self-heal for a lost terminal event. */
+function DraftThread({ draftId, commentId }: { draftId: string; commentId: string }) {
+  const [draft, setDraft] = useState("");
+
+  const turn = useAgentTurn<ThreadMessage>({
+    surface: "fork",
+    key: `${draftId}:${commentId}`,
+    idField: null,
+    // The fork events spell the scope `sessionId` for every family; for a
+    // drafter thread that scope IS the draft id.
+    idFields: { sessionId: draftId, commentId },
+    historyCmd: "get_thread",
+    historyArgs: { sessionId: draftId, commentId },
+    commands: {
+      send: "draft_thread_send",
+      status: "fork_thread_status",
+      cancel: "fork_thread_cancel",
+    },
+    statusArgs: { scopeId: draftId, itemId: commentId },
+    cancelArgs: { sessionId: draftId, commentId },
+    // `Turns::begin` rejects-when-busy: no queue to type ahead into.
+    queueing: false,
+    sendFailPrefix: "Couldn't reach the discussion agent",
+    // …but `draft_thread_send` names the scope `draftId`, not `sessionId`.
+    buildSendArgs: (text) => ({ draftId, commentId, text }),
+    makeMessage: ({ id, role, body, status }) => ({
+      id,
+      sessionId: draftId,
+      commentId,
+      role,
+      body,
+      status,
+      createdAt: Date.now(),
+    }),
+  });
+  const { messages, liveText, status } = turn;
+  const streaming = status === "streaming";
+
+  const send = (text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed || streaming) return;
+    turn.send(trimmed);
+  };
+
+  return (
+    <div
+      className="flex flex-col gap-1.5 pt-1"
+      style={{ borderTop: "1px solid var(--color-rule)" }}
+      onClick={(e) => e.stopPropagation()}
+    >
+      {messages.map((m) => (
+        <div key={m.id} className="flex flex-col gap-0.5">
+          <span
+            style={{
+              fontSize: "9px",
+              fontWeight: 600,
+              textTransform: "uppercase",
+              letterSpacing: "0.07em",
+              color:
+                m.role === "user" ? "var(--color-ink-muted)" : "var(--color-info)",
+            }}
+          >
+            {m.role === "user" ? "You" : "Agent"}
+          </span>
+          {m.status === "error" ? (
+            <div
               style={{
                 fontSize: "11.5px",
-                border: "1px solid var(--color-rule)",
-                background: "var(--color-paper)",
-                color: "var(--color-ink)",
-                fontFamily: "inherit",
-                resize: "none",
-              }}
-            />
-            <button
-              type="button"
-              onClick={() => {
-                send(draft);
-                setDraft("");
-              }}
-              disabled={!draft.trim() || status === "streaming"}
-              className="rounded px-1.5 py-1"
-              style={{
-                fontSize: "10.5px",
-                background: "var(--color-info)",
-                color: "var(--color-on-accent)",
-                opacity: draft.trim() && status !== "streaming" ? 1 : 0.5,
+                whiteSpace: "pre-wrap",
+                color: "var(--color-warning)",
               }}
             >
-              ↑
-            </button>
-          </div>
+              {m.body}
+            </div>
+          ) : (
+            <MarkdownView body={m.body} compact rich />
+          )}
+        </div>
+      ))}
+      {streaming && (
+        <div style={{ fontSize: "11.5px", color: "var(--color-ink-muted)" }}>
+          {liveText ? (
+            <MarkdownView body={liveText} compact />
+          ) : (
+            <WorkingIndicator compact startedAt={turn.startedAt ?? undefined} />
+          )}
         </div>
       )}
+      <div className="flex items-end gap-1">
+        <textarea
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              send(draft);
+              setDraft("");
+            }
+          }}
+          placeholder="Ask about this part…"
+          rows={1}
+          disabled={streaming}
+          className="flex-1 rounded px-1.5 py-1"
+          style={{
+            fontSize: "11.5px",
+            border: "1px solid var(--color-rule)",
+            background: "var(--color-paper)",
+            color: "var(--color-ink)",
+            fontFamily: "inherit",
+            resize: "none",
+          }}
+        />
+        <button
+          type="button"
+          onClick={() => {
+            send(draft);
+            setDraft("");
+          }}
+          disabled={!draft.trim() || streaming}
+          className="rounded px-1.5 py-1"
+          style={{
+            fontSize: "10.5px",
+            background: "var(--color-info)",
+            color: "var(--color-on-accent)",
+            opacity: draft.trim() && !streaming ? 1 : 0.5,
+          }}
+        >
+          ↑
+        </button>
+      </div>
     </div>
   );
 }

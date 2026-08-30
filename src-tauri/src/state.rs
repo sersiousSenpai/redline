@@ -1368,7 +1368,7 @@ impl SessionStore {
         }
         for c in &carried {
             if let Err(e) = self.db.set_comment_revision(session_id, &c.id, version_number) {
-                tracing::error!(error = %e, "failed to persist carried-forward comment");
+                note_comment_persist_failure(session_id, "carried-forward comment", &e);
             }
         }
         session.revisions[last_idx].comments.extend(carried);
@@ -1467,6 +1467,50 @@ impl SessionStore {
                 return Ok(existing.clone());
             }
         }
+        // Agent-authored comments converge on CONTENT, not on an id — the same
+        // idempotency contract as above, reached the only way an agent can
+        // reach it.
+        //
+        // `add_feedback_core` -> `add_comment` is a fire-and-forget route: the
+        // voice agent and `claude-code` re-POST the same finding when a turn is
+        // retried or replayed, and a restored revision hides the originals from
+        // the UI without removing them — so the replay looked like new work and
+        // minted a second copy of every finding. Session `5f85766f` carries 14
+        // such ghosts: byte-identical `author='voice'` rows that inflate every
+        // open-comment count downstream of them.
+        //
+        // Only OPEN comments absorb a replay. A resolved/accepted/withdrawn row
+        // is finished business; an agent re-raising the same point afterwards is
+        // genuinely a new comment.
+        //
+        // Human comments are deliberately exempt. A reviewer writing "same
+        // problem here" against two different blocks is legitimate, happens in
+        // the live record, and must keep minting distinct ids.
+        if let Some(author) = request.author.as_deref() {
+            let body_key = request.body.trim();
+            let edit_matches = |c: &Comment| match (&c.edit, &request.edit) {
+                (Some(a), Some(b)) => a.original == b.original && a.revised == b.revised,
+                (None, None) => true,
+                _ => false,
+            };
+            if let Some(existing) = session
+                .revisions
+                .iter()
+                .flat_map(|r| r.comments.iter())
+                .find(|c| {
+                    matches!(
+                        c.status,
+                        CommentStatus::Draft | CommentStatus::Submitted | CommentStatus::Reopened
+                    ) && c.author.as_deref() == Some(author)
+                        && c.kind == request.kind
+                        && c.body.trim() == body_key
+                        && (request.kind != CommentKind::Edit || edit_matches(c))
+                })
+            {
+                return Ok(existing.clone());
+            }
+        }
+
         let id = match request.id.as_deref().filter(|id| !id.is_empty()) {
             Some(id) => id.to_string(),
             None => {
@@ -1524,7 +1568,7 @@ impl SessionStore {
             .db
             .insert_comment(session_id, latest.version_number, &comment)
         {
-            tracing::error!(error = %e, "failed to persist comment");
+            note_comment_persist_failure(session_id, "comment", &e);
             return Err(format!("failed to persist comment: {e}"));
         }
         latest.comments.push(comment.clone());
@@ -1565,7 +1609,7 @@ impl SessionStore {
                     comment.selection = Some(selection);
                 }
                 if let Err(e) = self.db.update_comment(session_id, comment) {
-                    tracing::error!(error = %e, "failed to persist comment update");
+                    note_comment_persist_failure(session_id, "comment update", &e);
                 }
                 return Some(comment.clone());
             }
@@ -1717,7 +1761,7 @@ impl SessionStore {
                     comment.status = CommentStatus::Resolved;
                     matched.insert(comment.id.clone(), true);
                     if let Err(e) = self.db.update_comment(session_id, comment) {
-                        tracing::error!(error = %e, "failed to persist resolution attach");
+                        note_comment_persist_failure(session_id, "resolution attach", &e);
                     }
                 }
             }
@@ -2004,7 +2048,7 @@ impl SessionStore {
                     }
                     comment.status = CommentStatus::Accepted;
                     if let Err(e) = self.db.update_comment(session_id, comment) {
-                        tracing::error!(error = %e, "failed to persist accept");
+                        note_comment_persist_failure(session_id, "accept", &e);
                     }
                     // Polis ledger: accepting a resolution is a decision.
                     let ph = crate::ledger::decision_payload_hash(&[
@@ -2059,7 +2103,7 @@ impl SessionStore {
                 if comment.id == comment_id && comment.author.is_some() {
                     comment.agent_state = state;
                     if let Err(e) = self.db.update_comment(session_id, comment) {
-                        tracing::error!(error = %e, "failed to persist agent state");
+                        note_comment_persist_failure(session_id, "agent state", &e);
                     }
                     return true;
                 }
@@ -2100,7 +2144,7 @@ impl SessionStore {
                         res.accepted_at = None;
                     }
                     if let Err(e) = self.db.update_comment(session_id, comment) {
-                        tracing::error!(error = %e, "failed to persist reopen");
+                        note_comment_persist_failure(session_id, "reopen", &e);
                     }
                     // Polis ledger: reopening a resolution (optionally as a
                     // directive) is a decision, with its note in the hash.
@@ -2183,7 +2227,7 @@ impl SessionStore {
                                 }
                             }
                             if let Err(e) = self.db.update_comment(session_id, comment) {
-                                tracing::error!(error = %e, "failed to persist discussion attach");
+                                note_comment_persist_failure(session_id, "discussion attach", &e);
                             }
                             return Ok(());
                         }
@@ -2216,6 +2260,25 @@ pub struct ResolutionAttachReport {
 
 fn parse_comment_id(id: &str) -> Option<u32> {
     id.strip_prefix("c-").and_then(|n| n.parse().ok())
+}
+
+/// A comment write that never reached SQLite.
+///
+/// These were `tracing::error!` and nothing else: a log line in a console
+/// nobody has open, for the one failure mode that silently loses a reviewer's
+/// own work on the app's flagship surface. Now it also lands a
+/// `friction_events` row, so the digests that rank what to fix can actually
+/// see it. Deliberately not an `Err` return — the in-memory write already
+/// happened and the caller's contract is unchanged; this is instrumentation,
+/// not a behavior change.
+fn note_comment_persist_failure(session_id: &str, what: &str, e: &impl std::fmt::Display) {
+    tracing::error!(error = %e, session_id, what, "failed to persist a comment write");
+    crate::db::note_friction(
+        "comment_persist_failed",
+        Some("plan"),
+        Some(session_id),
+        Some(&format!("{what}: {e}")),
+    );
 }
 
 pub fn now_millis() -> i64 {

@@ -1467,6 +1467,15 @@ fn finish_error(
     if let Err(e) = db.insert_thread_message(&msg) {
         tracing::warn!(error = %e, "failed to persist error thread message");
     }
+    // `fork` is the second-busiest prompt surface in the app; a turn that ends
+    // without a reply is the failure its users actually feel, and it emitted
+    // nothing into the evidence pipeline.
+    crate::db::note_friction(
+        "fork_turn_failed",
+        Some("fork"),
+        Some(session_id),
+        Some(&error.chars().take(200).collect::<String>()),
+    );
     let _ = app.emit(
         "fork-error",
         ForkError {

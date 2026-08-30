@@ -537,6 +537,26 @@ function ZoomButton({
   );
 }
 
+/** The standard per-surface crash-containment fallback (T2.1).
+ *
+ *  14 of the 21 recorded runtime failures were WKWebView render errors and 12
+ *  took the whole app down, because the only boundaries in the tree were the
+ *  header, the content area and the root — so a cold or stale lazy chunk in
+ *  ONE surface blanked every surface. A boundary sitting directly above each
+ *  lazily-loaded surface settles that failure at surface granularity instead,
+ *  and names the surface in the `render_crash` friction row it writes
+ *  (`ErrorBoundary.componentDidCatch` -> `record_render_crash`).
+ *
+ *  Deliberately a fallback factory rather than a wrapper component: the
+ *  literal `<ErrorBoundary region="…">` stays at each call site, which is what
+ *  `src/lib/surfaceBoundaries.test.ts` reads. */
+const surfaceFallback =
+  (region: string) => (err: Error, reset: () => void) => (
+    <div className="flex-1 overflow-hidden flex items-center justify-center">
+      <BoundaryFallback region={region} error={err} reset={reset} />
+    </div>
+  );
+
 function App() {
   const [summaries, setSummaries] = useState<SessionSummary[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -7005,64 +7025,66 @@ function App() {
                   )
                 }
               >
-                <PromptDrafter
-                  // Remount on the open document so TipTap picks up its content:
-                  // `content` is captured once, at editor creation.
-                  key={drafterDraftId ?? ""}
-                  draftId={drafterDraftId ?? ""}
-                  doc={drafterMount.doc}
-                  onPersist={drafterPersist}
-                  projectOptions={projectOptions}
-                  selectedProject={drafterProjectPath}
-                  onSelectedProjectChange={setDrafterProjectPath}
-                  onLaunch={launchFromDrafter}
-                  readiness={readiness}
-                  onFix={applyReadinessFix}
-                  // ONLY this document's launch. One pending state serves every
-                  // door, so a card keyed to another document (or to the front
-                  // door) would claim a launch that isn't this one's.
-                  pending={
-                    pendingLaunch?.origin === "drafter" &&
-                    pendingLaunch.draftId === drafterDraftId
-                      ? pendingLaunch
-                      : null
-                  }
-                  onDismissPending={() => setPendingLaunch(null)}
-                  sources={drafterSources}
-                  onAttachFiles={attachDrafterFiles}
-                  onRemoveSource={removeDrafterSource}
-                  templates={drafterTemplates}
-                  onUseTemplate={useDrafterTemplate}
-                  // The floating Discuss pill inside the drafter pane opens the
-                  // draft's voice panel — the one discussion surface (talk or
-                  // type). Hidden while the panel is up.
-                  onDiscuss={
-                    voiceEnabled && drafterDraftId && !drafterVoiceOpen
-                      ? () => setDrafterVoiceOpen(true)
-                      : null
-                  }
-                  onOpenShelf={() => setDrafterShelfOpen(true)}
-                  onOpenAgents={() => setAgentShelfOpen(true)}
-                  // Only when the drafter is living inside the Front Door's
-                  // island; reached by its own route there is nothing to go
-                  // back to.
-                  // Back to the Front Door, which is the Document surface's
-                  // resting state and always has been.
-                  onExit={() => selectSurface("document")}
-                  saveState={drafterSaveState}
-                  consumeSeed={consumeLandingSeed}
-                  registerLiveMarkdown={registerDrafterLiveMarkdown}
-                  documentsMenu={
-                    <DocumentsMenu
-                      openIds={drafterOpenIds}
-                      activeId={drafterDraftId}
-                      defaultProject={drafterProjectPath}
-                      side="above"
-                      onActivate={setDrafterDraftId}
-                      onCloseDoc={closeDrafterDoc}
-                    />
-                  }
-                />
+                <ErrorBoundary region="drafter" fallback={surfaceFallback("drafter")}>
+                  <PromptDrafter
+                    // Remount on the open document so TipTap picks up its content:
+                    // `content` is captured once, at editor creation.
+                    key={drafterDraftId ?? ""}
+                    draftId={drafterDraftId ?? ""}
+                    doc={drafterMount.doc}
+                    onPersist={drafterPersist}
+                    projectOptions={projectOptions}
+                    selectedProject={drafterProjectPath}
+                    onSelectedProjectChange={setDrafterProjectPath}
+                    onLaunch={launchFromDrafter}
+                    readiness={readiness}
+                    onFix={applyReadinessFix}
+                    // ONLY this document's launch. One pending state serves every
+                    // door, so a card keyed to another document (or to the front
+                    // door) would claim a launch that isn't this one's.
+                    pending={
+                      pendingLaunch?.origin === "drafter" &&
+                      pendingLaunch.draftId === drafterDraftId
+                        ? pendingLaunch
+                        : null
+                    }
+                    onDismissPending={() => setPendingLaunch(null)}
+                    sources={drafterSources}
+                    onAttachFiles={attachDrafterFiles}
+                    onRemoveSource={removeDrafterSource}
+                    templates={drafterTemplates}
+                    onUseTemplate={useDrafterTemplate}
+                    // The floating Discuss pill inside the drafter pane opens the
+                    // draft's voice panel — the one discussion surface (talk or
+                    // type). Hidden while the panel is up.
+                    onDiscuss={
+                      voiceEnabled && drafterDraftId && !drafterVoiceOpen
+                        ? () => setDrafterVoiceOpen(true)
+                        : null
+                    }
+                    onOpenShelf={() => setDrafterShelfOpen(true)}
+                    onOpenAgents={() => setAgentShelfOpen(true)}
+                    // Only when the drafter is living inside the Front Door's
+                    // island; reached by its own route there is nothing to go
+                    // back to.
+                    // Back to the Front Door, which is the Document surface's
+                    // resting state and always has been.
+                    onExit={() => selectSurface("document")}
+                    saveState={drafterSaveState}
+                    consumeSeed={consumeLandingSeed}
+                    registerLiveMarkdown={registerDrafterLiveMarkdown}
+                    documentsMenu={
+                      <DocumentsMenu
+                        openIds={drafterOpenIds}
+                        activeId={drafterDraftId}
+                        defaultProject={drafterProjectPath}
+                        side="above"
+                        onActivate={setDrafterDraftId}
+                        onCloseDoc={closeDrafterDoc}
+                      />
+                    }
+                  />
+                </ErrorBoundary>
               </Suspense>
             );
             // An orchestrated run wraps the review pane in its RunReport
@@ -7085,11 +7107,13 @@ function App() {
                 onStandDown={(sid) => void standDownRun(sid)}
               />
             ) : (
-              <ReviewPanel
-                review={codeReview}
-                projectOptions={projectOptions}
-                onClose={() => selectSurface("document")}
-              />
+              <ErrorBoundary region="review pane" fallback={surfaceFallback("review pane")}>
+                <ReviewPanel
+                  review={codeReview}
+                  projectOptions={projectOptions}
+                  onClose={() => selectSurface("document")}
+                />
+              </ErrorBoundary>
             );
             const serversBody = (
               <ServersPane
@@ -7109,27 +7133,31 @@ function App() {
               // (Also the boundary itself: `lazy` with no Suspense above it
               // throws to the content-area ErrorBoundary on a cold chunk.)
               <Suspense fallback={null}>
-                <MemorySurface
-                  activeSessionId={session?.sessionId ?? null}
-                  activeSessionName={session?.projectName ?? null}
-                />
+                <ErrorBoundary region="memory" fallback={surfaceFallback("memory")}>
+                  <MemorySurface
+                    activeSessionId={session?.sessionId ?? null}
+                    activeSessionName={session?.projectName ?? null}
+                  />
+                </ErrorBoundary>
               </Suspense>
             );
             const runsBody = (
               <Suspense fallback={<EmptyState title="Runs" body="Opening the monitor…" />}>
-                <OrchestrationSurface
-                  active={runsOpen}
-                  summaries={summaries}
-                  activePlanSessionId={activeId}
-                  onOpenRunReport={(sid) => {
-                    setRunReportFor(sid);
-                    selectSurface("review");
-                  }}
-                  onRetryLaunch={(sid) => void relaunchOrchestrator(sid)}
-                  onResetRun={(sid) => void resetRunFor(sid)}
-                  onUnapprove={(sid) => void unapproveSession(sid)}
-                  onStandDown={(sid) => void standDownRun(sid)}
-                />
+                <ErrorBoundary region="runs" fallback={surfaceFallback("runs")}>
+                  <OrchestrationSurface
+                    active={runsOpen}
+                    summaries={summaries}
+                    activePlanSessionId={activeId}
+                    onOpenRunReport={(sid) => {
+                      setRunReportFor(sid);
+                      selectSurface("review");
+                    }}
+                    onRetryLaunch={(sid) => void relaunchOrchestrator(sid)}
+                    onResetRun={(sid) => void resetRunFor(sid)}
+                    onUnapprove={(sid) => void unapproveSession(sid)}
+                    onStandDown={(sid) => void standDownRun(sid)}
+                  />
+                </ErrorBoundary>
               </Suspense>
             );
             // Exactly one surface owns the pane; a non-document surface splits
@@ -7210,17 +7238,19 @@ function App() {
             {joinedRoom && collaboratorCollab && (
               <div style={{ display: joinedActive ? undefined : "none" }}>
                 <Suspense fallback={null}>
-                  <PlanEditor
-                    key={`joined:${collabRevisionKey(joinedRoom.config)}`}
-                    markdown=""
-                    sections={[]}
-                    comments={collabComments}
-                    revisionKey={collabRevisionKey(joinedRoom.config)}
-                    onAddComment={yjsBackend?.addComment}
-                    onUpdateComment={yjsBackend?.updateComment}
-                    onDeleteComment={yjsBackend?.deleteComment}
-                    collab={collaboratorCollab}
-                  />
+                  <ErrorBoundary region="collab plan editor" fallback={surfaceFallback("collab plan editor")}>
+                    <PlanEditor
+                      key={`joined:${collabRevisionKey(joinedRoom.config)}`}
+                      markdown=""
+                      sections={[]}
+                      comments={collabComments}
+                      revisionKey={collabRevisionKey(joinedRoom.config)}
+                      onAddComment={yjsBackend?.addComment}
+                      onUpdateComment={yjsBackend?.updateComment}
+                      onDeleteComment={yjsBackend?.deleteComment}
+                      collab={collaboratorCollab}
+                    />
+                  </ErrorBoundary>
                 </Suspense>
               </div>
             )}
@@ -7275,24 +7305,26 @@ function App() {
                   {/* Clean slate: the latest revision renders with no diff
                       highlights and only its own comments — prior rounds live
                       on the previous version (revisions navigator). */}
-                  <PlanEditor
-                    markdown={latest?.rawPlanMarkdown ?? ""}
-                    sections={sections}
-                    comments={latestComments}
-                    revisionKey={`${activeId ?? ""}:${
-                      threadRevisions[0]?.versionNumber ?? 0
-                    }:${latest?.versionNumber ?? 0}`}
-                    sessionId={activeId ?? undefined}
-                    onAddComment={addEditorComment}
-                    onUpdateComment={updateComment}
-                    onDeleteComment={deleteComment}
-                    focusedCommentId={focusedCommentId}
-                    focusNonce={focusNonce}
-                    onHighlightClick={handleHighlightClick}
-                    actionsRef={planActionsRef}
-                    onLockedEdit={lockedEditToast}
-                    collab={ownerCollab}
-                  />
+                  <ErrorBoundary region="plan editor" fallback={surfaceFallback("plan editor")}>
+                    <PlanEditor
+                      markdown={latest?.rawPlanMarkdown ?? ""}
+                      sections={sections}
+                      comments={latestComments}
+                      revisionKey={`${activeId ?? ""}:${
+                        threadRevisions[0]?.versionNumber ?? 0
+                      }:${latest?.versionNumber ?? 0}`}
+                      sessionId={activeId ?? undefined}
+                      onAddComment={addEditorComment}
+                      onUpdateComment={updateComment}
+                      onDeleteComment={deleteComment}
+                      focusedCommentId={focusedCommentId}
+                      focusNonce={focusNonce}
+                      onHighlightClick={handleHighlightClick}
+                      actionsRef={planActionsRef}
+                      onLockedEdit={lockedEditToast}
+                      collab={ownerCollab}
+                    />
+                  </ErrorBoundary>
                 </Suspense>
               )
             ) : (
@@ -7380,42 +7412,44 @@ function App() {
               );
             const browserBody = (
               <Suspense fallback={null}>
-              <BrowserPane
-                onClose={() => selectSurface("document")}
-                visible={browserVisible}
-                projectDir={sidebarTab.kind === "folder" ? sidebarTab.id : null}
-                // Drop a plan/prompt drafted while browsing into a fresh Redline
-                // plan session: close the browser overlay, confirm the target
-                // repo, then launch the plan in the terminal (see handler).
-                onSendToRedline={sendBrowserDraftToRedline}
-                // Or open the reply in the Prompt Drafter (repo pre-guessed)
-                // to shape it before sending.
-                onSendToDrafter={sendBrowserToDrafter}
-                // A synthesized mission brief seeds the Prompt Drafter.
-                onSynthesizeToDrafter={seedDrafterFromMission}
-                // "Open" on a Localhost card. A prop, not an event: this pane
-                // mounts only when the browser surface is selected, so an event
-                // emitted at selection time would beat its own listener.
-                openRequest={browserOpenRequest}
-                // Cleared once acted on — a request that lingers replays on
-                // every remount (the pane's nonce guard resets with it).
-                onOpenRequestConsumed={() => setBrowserOpenRequest(null)}
-                // Re-sync the native webview whenever a surrounding pane toggles
-                // and reflows the slot without a drag (e.g. closing the comment
-                // pane, which otherwise leaves the webview stranded at its old
-                // size with a gap of blank space).
-                // Terminal state is part of the key: discrete opens (divider
-                // caret, footer button, ⇧↓, programmatic runDevServer/restore)
-                // reflow the slot with no drag, and without a re-sync the
-                // native webview keeps painting at its old taller rect over
-                // the terminal dock. The GRID key (tile count + rows) stands
-                // where tab count used to: a new terminal that lands untiled
-                // changes no geometry, while a tile row changes everything.
-                // Immersive entry and every chrome reveal move the slot as
-                // surely as a pane toggle does, and the native webview only
-                // re-reads its rect when this key changes.
-                layoutKey={`${paneCollapsed}|${sidebarCollapsed}|${docVisible}|${splitVertical}|${liveFlags.curtain}|${voiceDocked}|${termCollapsed}|${termHeight}|${termFullscreen}|${termTiles.count}x${termTiles.rows}|${immersive}|${chromeRevealed}`}
-              />
+              <ErrorBoundary region="browser" fallback={surfaceFallback("browser")}>
+                <BrowserPane
+                  onClose={() => selectSurface("document")}
+                  visible={browserVisible}
+                  projectDir={sidebarTab.kind === "folder" ? sidebarTab.id : null}
+                  // Drop a plan/prompt drafted while browsing into a fresh Redline
+                  // plan session: close the browser overlay, confirm the target
+                  // repo, then launch the plan in the terminal (see handler).
+                  onSendToRedline={sendBrowserDraftToRedline}
+                  // Or open the reply in the Prompt Drafter (repo pre-guessed)
+                  // to shape it before sending.
+                  onSendToDrafter={sendBrowserToDrafter}
+                  // A synthesized mission brief seeds the Prompt Drafter.
+                  onSynthesizeToDrafter={seedDrafterFromMission}
+                  // "Open" on a Localhost card. A prop, not an event: this pane
+                  // mounts only when the browser surface is selected, so an event
+                  // emitted at selection time would beat its own listener.
+                  openRequest={browserOpenRequest}
+                  // Cleared once acted on — a request that lingers replays on
+                  // every remount (the pane's nonce guard resets with it).
+                  onOpenRequestConsumed={() => setBrowserOpenRequest(null)}
+                  // Re-sync the native webview whenever a surrounding pane toggles
+                  // and reflows the slot without a drag (e.g. closing the comment
+                  // pane, which otherwise leaves the webview stranded at its old
+                  // size with a gap of blank space).
+                  // Terminal state is part of the key: discrete opens (divider
+                  // caret, footer button, ⇧↓, programmatic runDevServer/restore)
+                  // reflow the slot with no drag, and without a re-sync the
+                  // native webview keeps painting at its old taller rect over
+                  // the terminal dock. The GRID key (tile count + rows) stands
+                  // where tab count used to: a new terminal that lands untiled
+                  // changes no geometry, while a tile row changes everything.
+                  // Immersive entry and every chrome reveal move the slot as
+                  // surely as a pane toggle does, and the native webview only
+                  // re-reads its rect when this key changes.
+                  layoutKey={`${paneCollapsed}|${sidebarCollapsed}|${docVisible}|${splitVertical}|${liveFlags.curtain}|${voiceDocked}|${termCollapsed}|${termHeight}|${termFullscreen}|${termTiles.count}x${termTiles.rows}|${immersive}|${chromeRevealed}`}
+                />
+              </ErrorBoundary>
               </Suspense>
             );
             // What the editor mounts with, resolved HERE rather than pushed at
@@ -7438,28 +7472,30 @@ function App() {
                 <Suspense
                   fallback={<EmptyState title="Chat" body="Opening the room…" />}
                 >
-                  <ChatRoom
-                    // Keyed by the thread: the composer draft is stored per
-                    // chat and `usePersistedState` reads its key once, so
-                    // switching conversations is a REMOUNT by design rather
-                    // than one chat's half-typed thought carried into another.
-                    key={chatId}
-                    companionId={chatId}
-                    onSelectChat={openChat}
-                    onEmpty={() => {
-                      setChatId(null);
-                      selectSurface("document");
-                    }}
-                    // The agent's read-only file tools are scoped to whatever
-                    // folder the user is browsing; HOME when there is none.
-                    cwd={sidebarTab.kind === "folder" ? sidebarTab.id : null}
-                    dictationEnabled={!voiceOpen}
-                    onClose={() => selectSurface("document")}
-                    seed={
-                      chatSeed?.companionId === chatId ? chatSeed.text : null
-                    }
-                    onSeedConsumed={() => setChatSeed(null)}
-                  />
+                  <ErrorBoundary region="chat" fallback={surfaceFallback("chat")}>
+                    <ChatRoom
+                      // Keyed by the thread: the composer draft is stored per
+                      // chat and `usePersistedState` reads its key once, so
+                      // switching conversations is a REMOUNT by design rather
+                      // than one chat's half-typed thought carried into another.
+                      key={chatId}
+                      companionId={chatId}
+                      onSelectChat={openChat}
+                      onEmpty={() => {
+                        setChatId(null);
+                        selectSurface("document");
+                      }}
+                      // The agent's read-only file tools are scoped to whatever
+                      // folder the user is browsing; HOME when there is none.
+                      cwd={sidebarTab.kind === "folder" ? sidebarTab.id : null}
+                      dictationEnabled={!voiceOpen}
+                      onClose={() => selectSurface("document")}
+                      seed={
+                        chatSeed?.companionId === chatId ? chatSeed.text : null
+                      }
+                      onSeedConsumed={() => setChatSeed(null)}
+                    />
+                  </ErrorBoundary>
                 </Suspense>
               );
             // The chat springs out of the island exactly as the Drafter does —

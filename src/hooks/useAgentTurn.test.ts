@@ -555,3 +555,173 @@ describe("the companion surface", () => {
     ctl.detach();
   });
 });
+
+// --- T3.1: the fork contract ------------------------------------------------
+//
+// The fork family (plan comment threads, drafter sidecars, review annotation
+// and question threads) shares this machine but breaks all three naming
+// conventions: its registry key is a PAIR, its commands are `fork_thread_*`
+// with a per-consumer `send`, and `Turns::begin` rejects-when-busy instead of
+// queueing. These pin the three config extensions that let it join.
+
+const forkStatus = (over: Partial<TurnStatus> = {}): TurnStatus => ({
+  streaming: false,
+  startedAt: null,
+  partial: null,
+  seq: 0,
+  queued: [],
+  ...over,
+});
+
+function forkCfg(
+  over: Partial<AgentTurnConfig<TurnMessage>> = {},
+): AgentTurnConfig<TurnMessage> {
+  return {
+    surface: "fork",
+    key: "s-1:c-001",
+    idField: null,
+    idFields: { sessionId: "s-1", commentId: "c-001" },
+    historyCmd: "get_thread",
+    historyArgs: { sessionId: "s-1", commentId: "c-001" },
+    commands: {
+      send: "fork_thread_send",
+      status: "fork_thread_status",
+      cancel: "fork_thread_cancel",
+    },
+    statusArgs: { scopeId: "s-1", itemId: "c-001" },
+    cancelArgs: { sessionId: "s-1", commentId: "c-001" },
+    queueing: false,
+    sendFailPrefix: "Couldn't reach the discussion fork",
+    buildSendArgs: (text) => ({ sessionId: "s-1", commentId: "c-001", text }),
+    makeMessage: ({ id, role, body, status }) => ({ id, role, body, status, createdAt: 999 }),
+    ...over,
+  };
+}
+
+function forkIo() {
+  const h = fakeIo();
+  h.invokeImpl.set("get_thread", () => []);
+  h.invokeImpl.set("fork_thread_status", () => forkStatus());
+  h.invokeImpl.set("fork_thread_send", () => undefined);
+  h.invokeImpl.set("fork_thread_cancel", () => undefined);
+  return h;
+}
+
+describe("fork contract", () => {
+  it("matches on the composite key, not on either field alone", async () => {
+    const { io, emit, invokeImpl } = forkIo();
+    invokeImpl.set("fork_thread_status", () => forkStatus());
+    const ctl = new AgentTurnController<TurnMessage>(() => forkCfg(), io);
+    await ctl.attach();
+    await flush();
+
+    // Right session, wrong comment.
+    emit("fork-delta", { sessionId: "s-1", commentId: "c-002", text: "X", seq: 1 });
+    // Right comment, wrong session — the shape that made two open threads
+    // cross-talk when a single id was the whole test.
+    emit("fork-delta", { sessionId: "s-2", commentId: "c-001", text: "Y", seq: 1 });
+    expect(ctl.getState().liveText).toBe("");
+    expect(ctl.getState().phase).toBe("idle");
+
+    emit("fork-delta", { sessionId: "s-1", commentId: "c-001", text: "A", seq: 1 });
+    expect(ctl.getState().liveText).toBe("A");
+    expect(ctl.getState().phase).toBe("streaming");
+    ctl.detach();
+  });
+
+  it("routes every leg through the configured command names and args", async () => {
+    const { io, invoke, invokeImpl } = forkIo();
+    invokeImpl.set("draft_thread_send", () => undefined);
+    const ctl = new AgentTurnController<TurnMessage>(
+      () => forkCfg({ commands: { ...forkCfg().commands, send: "draft_thread_send" } }),
+      io,
+    );
+    await ctl.attach();
+    await flush();
+
+    // Status: `fork_thread_status`, and it takes scopeId/itemId — NOT the
+    // sessionId/commentId every other fork command takes.
+    expect(invoke.mock.calls.find((c) => c[0] === "fork_thread_status")?.[1]).toEqual({
+      scopeId: "s-1",
+      itemId: "c-001",
+    });
+    expect(invoke.mock.calls.find((c) => c[0] === "get_thread")?.[1]).toEqual({
+      sessionId: "s-1",
+      commentId: "c-001",
+    });
+
+    // Send: the per-consumer override wins over `${surface}_send`.
+    ctl.send("why this way?");
+    await flush();
+    const sent = invoke.mock.calls.find((c) => c[0] === "draft_thread_send");
+    expect(sent?.[1]).toEqual({ sessionId: "s-1", commentId: "c-001", text: "why this way?" });
+    expect(invoke.mock.calls.some((c) => c[0] === "fork_send")).toBe(false);
+
+    // Cancel: its own arg names again.
+    ctl.cancel();
+    await flush();
+    expect(invoke.mock.calls.find((c) => c[0] === "fork_thread_cancel")?.[1]).toEqual({
+      sessionId: "s-1",
+      commentId: "c-001",
+    });
+    ctl.detach();
+  });
+
+  it("never queues on a rejects-when-busy registry", async () => {
+    const { io, emit, invoke, invokeImpl } = forkIo();
+    invokeImpl.set("fork_thread_status", () => forkStatus());
+    const ctl = new AgentTurnController<TurnMessage>(() => forkCfg(), io);
+    await ctl.attach();
+    await flush();
+
+    ctl.send("first");
+    await flush();
+    // No `queue: true` — the fork send command has no such parameter.
+    const args = invoke.mock.calls.find((c) => c[0] === "fork_thread_send")?.[1];
+    expect(args).toEqual({ sessionId: "s-1", commentId: "c-001", text: "first" });
+    expect(ctl.getState().phase).toBe("streaming");
+
+    // A second send mid-turn is dropped rather than drawn as a queued bubble
+    // the backend would immediately reject.
+    const before = ctl.getState().messages.length;
+    ctl.send("second");
+    await flush();
+    expect(ctl.getState().messages.length).toBe(before);
+    expect(invoke.mock.calls.filter((c) => c[0] === "fork_thread_send").length).toBe(1);
+
+    // And once the turn settles, sending works again.
+    emit("fork-done", {
+      sessionId: "s-1",
+      commentId: "c-001",
+      messageId: "m-1",
+      body: "because.",
+    });
+    expect(ctl.getState().phase).toBe("idle");
+    ctl.send("second");
+    await flush();
+    expect(invoke.mock.calls.filter((c) => c[0] === "fork_thread_send").length).toBe(2);
+
+    // Unqueue is inert — nothing was ever queued.
+    await expect(ctl.unqueue("m-1")).resolves.toBe(null);
+    expect(invoke.mock.calls.some((c) => c[0] === "fork_unqueue")).toBe(false);
+    ctl.detach();
+  });
+
+  it("restores a mid-turn stream from the probe and folds only new deltas", async () => {
+    const { io, emit, invokeImpl } = forkIo();
+    invokeImpl.set("fork_thread_status", () =>
+      forkStatus({ streaming: true, startedAt: 500, partial: "AB", seq: 2 }),
+    );
+    const ctl = new AgentTurnController<TurnMessage>(() => forkCfg(), io);
+    await ctl.attach();
+    await flush();
+    expect(ctl.getState().phase).toBe("streaming");
+    expect(ctl.getState().liveText).toBe("AB");
+    expect(ctl.getState().startedAt).toBe(500);
+
+    emit("fork-delta", { sessionId: "s-1", commentId: "c-001", text: "B", seq: 2 });
+    emit("fork-delta", { sessionId: "s-1", commentId: "c-001", text: "C", seq: 3 });
+    expect(ctl.getState().liveText).toBe("ABC");
+    ctl.detach();
+  });
+});
