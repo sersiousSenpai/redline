@@ -108,6 +108,7 @@ Directions we're exploring, in no particular order:
 - **Loop orchestrator** — turn an approved plan into parallel, individually-verified subtasks, each executed in an isolated git worktree and graded by an independent reviewer (a prototype lives on the `feature/loop-orchestrator` branch; not in the product).
 - **Multiplayer** — several reviewers in one document at once, each paired with their own agent, over a CRDT (Yjs/Hocuspocus).
 - **Documents beyond Claude Code plans** — a born-in-app Word-class editor with clean `.docx` export, and eventually high-fidelity import of arbitrary `.docx` files. See [docs/document-ide-northstar.md](docs/document-ide-northstar.md).
+- **Mobile** — an owner-first phone app that unblocks a held plan from anywhere, over an outbound, end-to-end-encrypted tunnel to your own Mac (no inbound port; the daemon keeps its loopback-only bind). See [docs/mobile-northstar.md](docs/mobile-northstar.md).
 - Finer-grained comment anchoring (sentence- and word-level).
 - Windows and Linux support.
 

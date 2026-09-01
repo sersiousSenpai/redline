@@ -923,11 +923,17 @@ Not yet built:
   (§8.4). Born-in-app `.docx` *export* ships today; arbitrary *import* does not.
 - **Side-by-side revision diff view.** Diff is implicit in the editor's redline
   marks; there is no v1↔v2 split pane.
+- **Mobile.** An owner-first phone client that reaches a held plan over an outbound,
+  end-to-end-encrypted tunnel — the daemon keeps its loopback-only bind and release
+  authority stays physical (the phone sends a *signed decision record*; the Mac
+  executes `approve_plan` locally). See `docs/mobile-northstar.md`.
 - **Search / filter on comments.**
 - **Desktop notifications** and **daemon auto-start** (login-item / `launchd`).
 - **Custom anchoring.** Anchors are auto-generated; no UI override.
 - **Windows / Linux.** macOS only today (dictation is macOS-native).
 
 For the strategic arc behind these, see
-[docs/document-ide-northstar.md](docs/document-ide-northstar.md).
+[docs/document-ide-northstar.md](docs/document-ide-northstar.md) (the document-IDE
+direction) and [docs/mobile-northstar.md](docs/mobile-northstar.md) (the mobile and
+remote-access direction).
 ```
