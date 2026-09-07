@@ -417,18 +417,131 @@ extraction — a lever list for it belongs to its own session.
 `real_db_gardener_ticks_behave` on a copy of the newest backup
 (5735 events / 2164 prompts / 8,671,323 B / 244 objects unchanged; 20× `Ran`, 0 appended), `npx tsc` + vitest (1893 green). New repo CI: green on all seven jobs — <https://github.com/sersiousSenpai/polis-memory/actions/runs/34105353695>.
 
+## Sessions B1 ∥ E1 — instruments + baseline, the `polis` binary + MCP read + restore (built 2026-09-07, parallel sessions in the new repo)
+
+The first two sessions after Program A ran side by side as two agents on two
+worktrees of `polis-memory` (branches `b1-instrument`, `e1-mcp`, both from
+fe2bafd), merged onto main as af5fa59, and land in Redline as a rev bump plus
+E1's Redline half. Redline pins that rev (`src-tauri/Cargo.toml`, seven
+lines now — `polis-mcp` joined).
+
+### B1 — instrument + baseline (`docs/bench.md`, `bench/results/`)
+
+**Instruments.** `polis_core::latency` (pure: a 256-sample ring per op,
+process-global, a `Timer` guard, nearest-rank percentiles; core's deps still
+exactly serde/serde_json/sha2); `ContextStats.latency` on
+`GET /v1/context/stats` and `MemoryApi::stats`; `polis_memory::latency`
+spans (`ms`) + ring on every pack arm, `context`, `grep`, the write paths
+and the gardener passes; polis-server's route layer records
+`route:<pattern>`. `corpus.rs` (seeded SplitMix64 generator fitted to the
+real lake, writing through the store's own paths) at 1k / 10k / 100k;
+`canary.rs` (the §5.3 set + the regression rule); `eval.rs` (Recall@k, MRR,
+pack-contains-gold, bytes/arms, results writer, the CI gate, the real-DB
+instrument `POLIS_REAL_DB=<copy>`, the calibration; `--features eval`);
+`benches/memory.rs` (criterion 0.7). CI gained an `eval` job (gate + `bench
+--no-run`).
+
+**Schema (a real migration — the reason for the golden regeneration below).**
+`class_runs` + `duration_ms INTEGER, items INTEGER, ops INTEGER, model TEXT,
+outcome TEXT, canary_before REAL, canary_after REAL, error TEXT` (additive
+ALTERs in `Migration::additive`); `STORE_SCHEMA_VERSION` 1 → 2, so an
+existing store re-runs the block once (`last_attach().migrated = true`, then
+a no-op). `organize_once` fills the first six; the canary pair is B3's.
+
+**Baseline (this machine, 2026-09-07; §6.1 rows in `docs/perf-budget.md`).**
+Synthetic 1k / 10k / 100k, criterion means: pack warm 4.7 / 24.9 / 101 ms,
+cold 4.9 / 24.8 / 101, grep 1.6 / 7.5 / 31, context 4.7 / 25.3 / 100,
+semantic 0.21 / 2.2 / 18.2, fused pack 5.5 / 30.3 / 138, ingest 0.33 / 0.39
+/ 0.53 — every 10k row holds. Real DB copy (2,164 prompts): pack p50/p95
+14/27 ms, cold 19, context 19/32, grep 8/8; canary set (201 packs) p50
+3.36 s against the 3 s row (12% over — the browse arm's FTS5 MATCH is 9 of
+the pack's 14 ms), p95 3.47 s within 8 s. Accuracy (reachability, not
+relevance): synthetic Recall@5/10/20 0.97, MRR 0.95; real copy 0.66/0.70/0.70,
+MRR 0.59, canary 0.751 over 201 (Decision 55/100, Supersession 1/1,
+PromptSpan 45/50, ClassReach 50/50, BrowseTitle 25/50; no notes exist). All
+45 Decision misses sit past the pack's 40-link per-node cap of their class
+(34 in one 317-link class) — the fan-out gap §6.3 names, not the canary.
+
+**Calibration.** Ten reseeded freezes: aggregate σ 0.006 on both lakes (3σ
+0.017), PromptSpan σ 0.018–0.023, the zero-tolerance subjects σ 0. The
+plan's rule stands — `recall_after < recall_before − max(0.05, 3/N)`, zero
+tolerance on Supersession/Note — the floor is 3× the observed noise and only
+binds below N = 60. For B3: a run that files a previously unfiled decision
+changes the probe set, so each run compares against its own frozen set.
+Deferred: leave-one-out filing consistency (needs centroids, Program C);
+semantic indexing at 100k is throughput-bound (C2).
+
+### E1 — the `polis` binary, MCP read, restore (`docs/mcp.md`)
+
+**`crates/polis-mcp`** (rmcp 3.2 — which raised the workspace MSRV 1.85 →
+1.88, its own commit): the read surface over `Arc<dyn MemoryApi>` — 15 tools,
+all `readOnlyHint` + `idempotentHint`, every result `structuredContent` + a
+text summary citing `#seq`: `memory_search` (START HERE), `memory_context`,
+`memory_grep`, `memory_tree`, `memory_node`, `memory_timeline`,
+`memory_stats`, `memory_verify` (each with an optional `scope`), plus seven
+aliases for the old proxy's names (`answer_pack`, `search_memory`,
+`grep_memory`, `query_prompts`, `session_history`, `stats`,
+`search_browsing`; `memory_tree` kept its name); resources `polis://tree`,
+`polis://node/{id}`, `polis://event/{seq}`; prompt `memory-grounding`; the
+`instructions` string names shared hits as third-party content. Backends:
+Local (any `MemoryApi`) and `RemoteApi` (an HTTP client over polis-server's
+routes; `ureq`, not reqwest — the trait is synchronous and a blocking reqwest
+cannot run inside the MCP server's runtime). **rmcp's streamable HTTP service
+mounts into axum 0.7** (http 1 / tower-service 0.3 line up), so Redline
+serves `/mcp` itself; no bundled binary.
+
+**Restore plumbing.** `PolisStore::snapshot_to` (`VACUUM INTO`),
+`quick_check`, `open_read_only`; `polis_memory::backup` (`BackupPolicy` 6 h /
+keep 7, `backup_now`, `prune`, `verify_snapshot` = schema check + chain walk
+— FTS5's integrity pass refuses a read-only connection, so `quick_check`
+runs on the live file, `newest_verifying`, `restore` keeping the live file as
+`polis.db.bad`); gardener `backup_dir` / `backup_every_ms` / `backup_keep` +
+`last_backup_ms` and one delimited block at the top of `step`.
+
+**The `polis` binary** (`polis-memory` feature `cli`; never enabled by a host
+— `polis_deps_stay_lean` pins it off): `init` (home, `polis.db`, 0600 `token`,
+`config.toml`; identity keys are E2), `serve` (127.0.0.1:7677, `/mcp` nested,
+`serve.json`, the gardener loop under `gardener.lock`, backup on start / 6 h
+/ shutdown with verify + keep 7; non-loopback refuses without `--token-file`),
+`mcp` (Remote when `serve.json` is alive, else Local; `--remote`), `hook
+install|uninstall|status` (the command is `<abs polis> capture`, no shell
+quoting), `capture` (daemon if alive, else local; exit 0, 1 s), `search`,
+`context`, `grep`, `tree`, `stats`, `verify`, `doctor` (offers restore on a
+red chain or a failed `quick_check`), `restore [--from]`, `backup`, `mcp
+install --client claude|codex|project`. Release binary 8,760,320 B (thin
+LTO, 1 CGU, stripped) against the plan's 12–16 MB. Smoke, end to end with
+no daemon and then with one: init → capture → search returns the seq →
+stdio MCP `memory_search` → serve → `curl /mcp` initialize → capture via the
+daemon → shutdown snapshot verified → corrupt the file → doctor red + offers
+restore → restore → verify green.
+
+**Redline half (a5da4f2).** The daemon serves `/mcp` as a ROUTE
+(`any_service`), not a nest: axum 0.7's `nest_service` gives a nested tail no
+`MatchedPath`, which the fail-closed `require_daemon_auth` needs — three
+`Open` rows (`POST/GET/DELETE /mcp`) in `ROUTE_TABLE`, `docs/api-v1.md`
+regenerated, and `merged_router_serves_mcp_initialize_and_tools_list` drives
+a real `initialize` + `tools/list` through the merged router under the auth
+layer. `crates/redline-mcp` deleted; `mcp.rs` is the HTTP snippet
+(`claude mcp add --transport http redline http://127.0.0.1:7676/mcp`);
+`mcpBinBytes` retired from the size budget, the size/release/ci workflows,
+`redline.sh` and the docs; `size_guard::mcp_proxy_stays_split_and_lean`
+rewritten (no proxy crate, the app's reqwest never regains `blocking`,
+`/mcp` served by `polis_mcp`); skills `context-analysis` v3 / `sensei` v2
+teach the new tools and the transport. **`session_history` is not what the
+old tool served:** Redline's `HostResolver::thread_messages("session", id)`
+is the discussion thread, not the plan-session history
+(`/v1/context/sessions/:id/history`, which stays a plain localhost GET); both
+skills say so. `Database::snapshot_to` went (the store's, through `Deref`,
+is the same `VACUUM INTO`; the Deref method-name guard caught the collision).
+
 ## Sessions ahead
 
-Program A is complete. What follows lives in the new repo and lands in
-Redline as rev bumps of the six `src-tauri/Cargo.toml` lines (one commit
-each; `polis_deps_stay_lean` holds the features):
+Programs B and E continue in the new repo, landing here as rev bumps:
 
 | Program | Session | Work |
 |---|---|---|
-| B (autonomy) | B1 | baseline measurements (the canary's unit, organize p50, the pack cost) on the real corpus |
-| E (MCP, identity, sharing) | E1 | `polis-mcp` + the `/mcp` mount + the `cli` feature; the classmemory skill text becomes a template (it still names `127.0.0.1:7676`) |
-
-B1 and E1 touch disjoint areas and can run as parallel sessions.
+| B (autonomy) | B2 | retire-marks, `class_run_ops`, pre-images, `revert_run`, `GardenerRevert`; the Redline run timeline + Undo |
+| E (MCP, identity, sharing) | E2 | keys + device sub-principals, `PrincipalBind`, scope columns, the write tools and routes, signed export/import; `session_history` needs a host hook if it is to answer the plan-session history |
 
 ## How to run
 

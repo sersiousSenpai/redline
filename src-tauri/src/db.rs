@@ -12312,7 +12312,10 @@ mod tests {
         assert!(report.migrated, "the first attach runs the idempotent block once");
         assert_eq!(db.meta("lexical_version").unwrap().as_deref(), Some(legacy_lexical.as_str()));
         assert_eq!(db.meta("corpus_role_version").unwrap().as_deref(), Some(legacy_role.as_str()));
-        assert_eq!(db.meta("schema_version").unwrap().as_deref(), Some("1"));
+        // The store's own version, not a literal: a store schema bump (B1's
+        // class_runs columns took it 1 → 2) is a real migration the first
+        // attach runs once — still zero events, still the same bodies.
+        assert_eq!(db.meta("schema_version").unwrap().as_deref(), Some(polis_store::meta::STORE_SCHEMA_VERSION));
         {
             let conn = db.conn.lock().unwrap();
             assert_eq!(

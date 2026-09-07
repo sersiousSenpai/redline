@@ -120,7 +120,7 @@ CREATE TABLE class_runs (
                 seq_to INTEGER,
                 claude_session_id TEXT,
                 summary TEXT
-            );
+            , duration_ms INTEGER, items INTEGER, ops INTEGER, model TEXT, outcome TEXT, canary_before REAL, canary_after REAL, error TEXT);
 
 -- table supersessions (supersessions)
 CREATE TABLE supersessions (
