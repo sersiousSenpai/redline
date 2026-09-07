@@ -21,13 +21,22 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ledger::ChainVerdict;
+use std::future::Future;
+use std::pin::Pin;
+
+use crate::ledger::{ChainVerdict, Origin};
 use crate::pack::AnswerPack;
 use crate::proposal::Proposal;
 use crate::types::{
-    ClassLink, ClassNode, ClassObservation, ContextStats, GrepHit, GrepScope, LakeItem,
-    LedgerFilters, MemoryMapView, StageResult, TimelineItem,
+    BrowseHit, ClassLink, ClassNode, ClassObservation, ContextStats, GrepHit, GrepScope,
+    LakeItem, LedgerFilters, MemoryMapView, PromptFilters, StageResult, TimelineItem,
 };
+
+/// The one asynchronous return in the surface: a boxed, `Send` future, so the
+/// trait stays object-safe with no `async_trait` dependency in this crate.
+/// Only [`MemoryApi::organize`] uses it — it drives a model, and a model turn
+/// is the one thing here that cannot be answered inline.
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Who is asking, and over whose memory. Every field is optional: an empty
 /// scope is "this principal, everything local", which is all a solo install
@@ -260,6 +269,127 @@ pub struct WriteReceipt {
     pub id: Option<i64>,
 }
 
+/// `GET /v1/memory/context`: the answer pack rendered as ONE grounding block
+/// a model can be handed verbatim (the discussion prefetch's shape), budgeted
+/// by `max_tokens` (default 2000, ~4 bytes a token).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ContextRequest {
+    pub q: String,
+    /// An explicit node to resolve instead of resolving from `q`.
+    pub node: Option<String>,
+    pub max_tokens: Option<usize>,
+    pub scope: Scope,
+}
+
+/// The rendered block, or `None` when the record has nothing on the question
+/// (rendered as absence on purpose — the block is honest about itself, and an
+/// empty block would read as "searched and found nothing" either way).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextBlock {
+    pub text: Option<String>,
+    /// The terms the plan actually searched for — what the block is about.
+    pub terms: Vec<String>,
+}
+
+/// One turn of a host-side conversation thread (`/v1/memory/threads` today,
+/// `/v1/context/threads/:kind/:id` in Redline): the host owns the message
+/// tables and answers through `HostResolver::thread_messages`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadMessage {
+    pub role: String,
+    pub body: String,
+    pub created_at: i64,
+}
+
+// ---------------------------------------------------------------------------
+// Capture, browse, maintenance
+// ---------------------------------------------------------------------------
+
+/// The capture hook's row (`POST /v1/prompts/ingest`): what the user typed
+/// into a session, recorded as a `hook`-sourced prompt with the role the
+/// corpus classifier assigns it. Distinct from [`IngestRequest`] on purpose:
+/// that is an import with its own clock and provenance; this is live capture
+/// and keeps the exact row shape the hook always produced.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureRequest {
+    pub body: String,
+    /// Whether the session ran in a project the host tracks (`Redline`) or
+    /// anywhere else (`External`) — the host's `IngestObserver` decides.
+    pub origin: Origin,
+    /// `pty` | `external` (the origin's surface name, as recorded).
+    pub surface: String,
+    /// The harness session id the hook payload carried.
+    pub session: Option<String>,
+    /// The session's working directory.
+    pub project: Option<String>,
+}
+
+/// `POST /v1/memory/browse`: one browsing event (a page came on screen, text
+/// was selected, a form was submitted, the page was left) into the lake.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct BrowseRequest {
+    /// `navigate` | `select` | `submit` | `leave`; defaults to `navigate`.
+    pub action: Option<String>,
+    /// The tab's thread key, so events group per tab.
+    pub browse_id: Option<String>,
+    pub url: String,
+    pub title: Option<String>,
+    /// Normalized on-screen content (hashed; retained for lexical retrieval).
+    pub text: String,
+    /// Who performed the act: absent is the local human; an agent driving the
+    /// tab passes its seat name.
+    pub author: Option<String>,
+    pub scope: Scope,
+}
+
+/// `POST /v1/memory/organize`: what one classifier pass did.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrganizeReceipt {
+    /// False when the lake delta was empty and the classifier never ran.
+    pub ran: bool,
+    pub auto_applied: bool,
+    pub summary: String,
+    pub seq_from: i64,
+    pub seq_to: i64,
+    pub staged: StageResult,
+}
+
+/// `POST /v1/memory/reindex`: how much of the semantic backlog one call
+/// embedded, and with what. `provider = "absent"` and `embedded = 0` is the
+/// no-embedder state — reported, never an error.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReindexReceipt {
+    pub embedded: usize,
+    pub provider: String,
+}
+
+/// `GET /v1/memory/health`: is the record intact and what is the install
+/// able to do. `model: None` is the no-model state (R12) — the deterministic
+/// tiers still run and this reports it rather than erroring.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthReport {
+    /// The chain verdict's `ok`, lifted for a one-glance read.
+    pub ok: bool,
+    pub chain: ChainVerdict,
+    pub head_seq: i64,
+    pub total_prompts: i64,
+    pub class_nodes: i64,
+    /// The model backend's name, or `None` for no model.
+    pub model: Option<String>,
+    /// The semantic arm's provider kind (`absent` when none).
+    pub embedder: String,
+    pub schema_version: Option<String>,
+    pub lexical_version: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // The trait
 // ---------------------------------------------------------------------------
@@ -289,9 +419,28 @@ pub trait MemoryApi: Send + Sync {
     fn map(&self, scope: &Scope) -> Result<MemoryMapView, MemoryError>;
     /// Re-walk the chain genesis→head.
     fn verify(&self) -> Result<ChainVerdict, MemoryError>;
+    /// The filtered lake read (`GET /v1/context/prompts`): every filter ANDed,
+    /// `substring` planned through the lexical index, byte-bounded.
+    fn list_prompts(&self, filters: &PromptFilters, scope: &Scope) -> Result<Vec<LakeItem>, MemoryError>;
+    /// Lexical (BM25) search over the browsing stream.
+    fn browse_search(&self, q: &str, limit: i64, scope: &Scope) -> Result<Vec<BrowseHit>, MemoryError>;
+    /// One session-tree node with its parent and child digests — the
+    /// traversable spine of memory-by-session. The shape is the route's JSON.
+    fn thread_tree(&self, kind: &str, id: &str, scope: &Scope) -> Result<serde_json::Value, MemoryError>;
+    /// A host thread's tail, byte-bounded, with its label:
+    /// `{kind, id, label, messages}`. `None` for a kind the host has no table
+    /// for (the route 404s).
+    fn thread(&self, kind: &str, id: &str, limit: i64, scope: &Scope) -> Result<Option<serde_json::Value>, MemoryError>;
+    /// The answer pack rendered as one grounding block.
+    fn context(&self, req: &ContextRequest) -> Result<ContextBlock, MemoryError>;
+    /// Intactness and capability in one read.
+    fn health(&self) -> Result<HealthReport, MemoryError>;
 
     // --- writes -----------------------------------------------------------
 
+    /// The capture hook's row. `Ok(None)` is the store's own dedup (same body
+    /// already the newest row of that session) — nothing written.
+    fn capture(&self, req: &CaptureRequest) -> Result<Option<i64>, MemoryError>;
     fn remember(&self, req: &RememberRequest) -> Result<WriteReceipt, MemoryError>;
     fn ingest(&self, req: &IngestRequest) -> Result<IngestReceipt, MemoryError>;
     fn annotate(&self, req: &AnnotateRequest) -> Result<WriteReceipt, MemoryError>;
@@ -300,6 +449,17 @@ pub trait MemoryApi: Send + Sync {
     /// Stage parsed proposals into the gardener's queue under the same
     /// adjudication as its own — `POST /v1/memory/proposals`.
     fn stage_proposals(&self, proposals: &[Proposal], actor: &str) -> Result<StageResult, MemoryError>;
+    /// One browsing event into the lake. `seq: None` is the per-tab
+    /// consecutive-duplicate suppression — nothing written.
+    fn browse(&self, req: &BrowseRequest) -> Result<WriteReceipt, MemoryError>;
+
+    // --- maintenance ------------------------------------------------------
+
+    /// One classifier pass over the lake delta, now. The one asynchronous
+    /// method (it drives the model); `Unavailable` when no model is configured.
+    fn organize(&self, scope: &Scope) -> BoxFuture<'_, Result<OrganizeReceipt, MemoryError>>;
+    /// Embed one call's worth of the semantic backlog.
+    fn reindex(&self, scope: &Scope) -> Result<ReindexReceipt, MemoryError>;
 }
 
 #[cfg(test)]
@@ -328,6 +488,20 @@ mod tests {
         let r: ForgetRequest =
             serde_json::from_str(r#"{"targetKind":"prompt","targetId":"12"}"#).unwrap();
         assert_eq!(r.confirm, "", "absent confirmation is not confirmation");
+    }
+
+    #[test]
+    fn the_new_receipts_report_absence_as_data_not_error() {
+        let h = HealthReport::default();
+        assert_eq!(h.model, None, "no model is a state, not a fault");
+        let r: ReindexReceipt = serde_json::from_str(r#"{"embedded":0,"provider":"absent"}"#).unwrap();
+        assert_eq!(r.provider, "absent");
+        let b: BrowseRequest = serde_json::from_str(r#"{"url":"https://x","text":"t"}"#).unwrap();
+        assert_eq!(b.action, None, "defaults to navigate at the store");
+        let c: ContextRequest = serde_json::from_str(r#"{"q":"postgres"}"#).unwrap();
+        assert_eq!(c.max_tokens, None);
+        let v = serde_json::to_value(ThreadMessage { role: "user".into(), body: "b".into(), created_at: 5 }).unwrap();
+        assert_eq!(v["createdAt"], 5, "the host row's camelCase shape");
     }
 
     #[test]

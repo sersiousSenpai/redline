@@ -31,6 +31,7 @@ members = [
     "crates/polis/polis-embed",
     "crates/polis/polis-llm",
     "crates/polis/polis-memory",
+    "crates/polis/polis-server",
 ]
 default-members = [
     ".",
@@ -42,6 +43,7 @@ default-members = [
     "crates/polis/polis-embed",
     "crates/polis/polis-llm",
     "crates/polis/polis-memory",
+    "crates/polis/polis-server",
 ]
 
 [lib]
@@ -139,6 +141,11 @@ polis-llm = { path = "crates/polis/polis-llm" }
 # THE crate an integrator adds (A5): the Polis handle, retrieval, the gardener,
 # export, the mirror. `apple` = the on-device embedder this app has always used.
 polis-memory = { path = "crates/polis/polis-memory", features = ["apple"] }
+# The HTTP surface (A6): the memory + context routes this daemon used to
+# define inline, the ROUTES table its auth contract maps in, the capture
+# route with Redline's `IngestObserver` behind it, and the hook installer.
+# Default features only: `standalone` (bind + token) is the `polis` daemon's.
+polis-server = { path = "crates/polis/polis-server" }
 # Deflate for the compaction archive (`prompt_archive`): a cold compaction
 # releases a body at ~59:1 and used to be irrecoverable. Already present in the
 # dependency tree (via `png` → `tauri-utils`), so naming it here is a visibility

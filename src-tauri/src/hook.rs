@@ -882,6 +882,26 @@ mod tests {
         std::env::temp_dir().join(format!("redline-hook-{}.json", uuid::Uuid::new_v4()))
     }
 
+    /// The command Redline writes into `~/.claude/settings.json`, byte for
+    /// byte. Pinned BEFORE the capture half moved onto
+    /// `polis_server::hook::CaptureHookSpec` (Session A6), so the move is
+    /// provably a no-op for every settings file already on disk: a changed
+    /// byte here would make `capture_current` report every install stale and
+    /// rewrite it on the next boot.
+    #[test]
+    fn capture_command_is_pinned() {
+        assert_eq!(
+            capture_command(),
+            "resp=$(curl -s --max-time 1 -X POST -H 'Content-Type: application/json' \
+             -H \"X-Redline-Agent: ${REDLINE_AGENT_SEAT:-}\" \
+             -H \"X-Redline-Restore: ${REDLINE_RESTORE_TARGET:-}\" \
+             -H \"X-Redline-Restore-Primed: ${REDLINE_RESTORE_PRIMED:-}\" \
+             -H \"X-Redline-Restore-Rescinded: ${REDLINE_RESTORE_RESCINDED:-}\" \
+             --data-binary @- http://127.0.0.1:7676/v1/prompts/ingest 2>/dev/null); \
+             case \"$resp\" in *hookSpecificOutput*) printf '%s' \"$resp\";; esac; exit 0"
+        );
+    }
+
     #[test]
     fn capture_install_uninstall_round_trip() {
         let path = tmppath();

@@ -17,7 +17,9 @@ use polis_core::coldness::{auto_collapse_safe, subtree_stats, BranchStat, LakeEn
 #[allow(unused_imports)]
 use polis_core::ledger::{now_millis, EventKind, LedgerEventRow};
 #[allow(unused_imports)]
+use polis_core::api::ContextBlock;
 use polis_core::pack::*;
+use polis_core::query::plan_fts_query;
 #[allow(unused_imports)]
 use polis_core::proposal::{parse_proposals, parse_supersede_verdicts, Proposal, SupersedeVerdict, SUPERSEDE_CONFIDENCE_MIN};
 #[allow(unused_imports)]
@@ -34,12 +36,9 @@ use crate::organize::AUTO_APPLY_KEY;
 use crate::Polis;
 
 /// Clamp + default for `GET /v1/context/prompts`'s `?limit=`.
-pub const PROMPT_LIMIT_MAX: i64 = 200;
-
-/// Clamp + default `GET /v1/context/prompts`'s `?limit=`.
-pub fn clamp_prompt_limit(raw: Option<i64>) -> i64 {
-    raw.unwrap_or(PROMPT_LIMIT_MAX).clamp(1, PROMPT_LIMIT_MAX)
-}
+// The limit and its clamp live in `polis_core::types` since A6 (the server
+// clamps the same query the facade does); re-exported so the old path holds.
+pub use polis_core::types::{clamp_prompt_limit, PROMPT_LIMIT_MAX};
 
 /// Run a filtered prompt query and enforce the response byte budget. The DB
 /// caps each body at 4000 chars already; this additionally drops trailing items
@@ -688,6 +687,52 @@ pub fn build_thread_tree(polis: &Polis<'_>, kind: &str, id: &str) -> serde_json:
         })),
         "children": child_digests,
     })
+}
+
+/// A host thread's tail as `GET /v1/context/threads/:kind/:id` serves it
+/// (Session A6): the host's rows (`HostResolver::thread_messages`), each body
+/// capped, then the leading turns dropped once the byte budget is spent —
+/// the tail wins. `None` for a kind the host has no table for (the route
+/// 404s). The body is the route's assembly, moved verbatim.
+pub fn thread_view(polis: &Polis<'_>, kind: &str, id: &str, limit: i64) -> Option<serde_json::Value> {
+    let msgs = polis.host.thread_messages(kind, id, limit)?;
+    // Byte-bound the response like /v1/context/prompts: cap each body,
+    // then drop leading turns once the budget is spent (tail wins).
+    let mut msgs = msgs;
+    for m in &mut msgs {
+        if m.body.chars().count() > 4000 {
+            m.body = m.body.chars().take(4000).collect::<String>() + "…";
+        }
+    }
+    let mut total = 0usize;
+    let mut start = msgs.len();
+    for (i, m) in msgs.iter().enumerate().rev() {
+        total += 120 + m.body.len();
+        if total > MAX_CONTEXT_BYTES {
+            break;
+        }
+        start = i;
+    }
+    let tail = &msgs[start..];
+    Some(serde_json::json!({
+        "kind": kind,
+        "id": id,
+        "label": polis.thread_label(kind, id),
+        "messages": tail,
+    }))
+}
+
+/// The answer pack rendered as ONE grounding block (`GET /v1/memory/context`,
+/// the MCP `memory_context` tool): the discussion prefetch's exact shape —
+/// plan the question, build the pack, render it honest about what it searched
+/// and trimmed. `text: None` when the record has nothing on it.
+pub fn context_block(polis: &Polis<'_>, q: &str, node: Option<&str>, max_bytes: usize) -> ContextBlock {
+    let plan = plan_fts_query(q);
+    let terms = plan.as_ref().map(|p| p.terms.clone()).unwrap_or_default();
+    let mut pack = build_answer_pack(polis, Some(q), node, INLINE_PACK_LIMIT);
+    enforce_pack_budget(&mut pack);
+    let text = render_answer_pack_block(&pack, plan.as_ref(), max_bytes);
+    ContextBlock { text, terms }
 }
 
 // ---------------------------------------------------------------------------

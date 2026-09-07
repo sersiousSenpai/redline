@@ -3337,6 +3337,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "polis-server"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "http-body-util",
+ "polis-core",
+ "polis-memory",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tracing",
+]
+
+[[package]]
 name = "polis-store"
 version = "0.1.0"
 dependencies = [
@@ -3673,6 +3688,7 @@ dependencies = [
  "polis-embed",
  "polis-llm",
  "polis-memory",
+ "polis-server",
  "polis-store",
  "portable-pty",
  "pulldown-cmark",

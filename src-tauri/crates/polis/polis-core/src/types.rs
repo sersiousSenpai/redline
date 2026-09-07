@@ -91,8 +91,8 @@ pub struct LakeItem {
 }
 
 /// Outcome counts from staging a batch of proposals.
-#[derive(Debug, Default, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct StageResult {
     pub created_nodes: usize,
     pub staged_links: usize,
@@ -431,6 +431,17 @@ pub struct AppliedReorg {
     pub node_id: String,
     pub detail: String,
 }
+
+/// Cap (and default) for the filtered lake read (`/v1/context/prompts`).
+pub const PROMPT_LIMIT_MAX: i64 = 200;
+
+pub fn clamp_prompt_limit(raw: Option<i64>) -> i64 {
+    raw.unwrap_or(PROMPT_LIMIT_MAX).clamp(1, PROMPT_LIMIT_MAX)
+}
+
+/// The most lake items one classifier pass (and one `/v1/memory/prompts`
+/// page) takes — the delta cap the organizer and the route share.
+pub const MAX_DELTA_ITEMS: usize = 400;
 
 /// Filters for `GET /v1/context/prompts` (all optional, ANDed). `substring` is
 /// bound as a `LIKE` parameter in `db::list_context_prompts` — never

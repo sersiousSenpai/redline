@@ -108,7 +108,8 @@ impl CorpusRole {
 
 /// Whether a captured prompt belongs to a Redline-managed session or an
 /// external `claude` session that happened to trip the global hook.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Origin {
     Redline,
     External,
@@ -380,8 +381,8 @@ pub struct BrowseEventRow<'a> {
 }
 
 /// The result of verifying the whole chain.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct ChainVerdict {
     pub ok: bool,
     pub checked: i64,

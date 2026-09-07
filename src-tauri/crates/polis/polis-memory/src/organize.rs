@@ -46,7 +46,8 @@ pub const CLASSIFIER_ACTOR: &str = "classifier";
 
 /// Cap on how much delta the classifier is fed / how many links a node returns —
 /// keeps the spawn prompt and route responses bounded on a long history.
-pub const MAX_DELTA_ITEMS: usize = 400;
+// Shared with the `/v1/memory/prompts` page since A6 — lives in `polis_core::types`.
+pub use polis_core::types::MAX_DELTA_ITEMS;
 
 /// Byte bound on the classifier's baked-in corpus, mirroring code.rs's 60KB.
 pub const MAX_CORPUS_BYTES: usize = 60_000;

@@ -34,22 +34,26 @@ pub use polis_llm;
 pub use polis_store;
 
 use polis_core::api::{
-    AnnotateRequest, ForgetReceipt, ForgetRequest, GrepRequest, IngestReceipt, IngestRequest,
-    NodeView, PromptsRequest, RememberRequest, Scope, SearchRequest, SupersedeReceipt,
-    SupersedeRequest, TreeNodeView, TreeRequest, WriteReceipt,
+    AnnotateRequest, BoxFuture, BrowseRequest, CaptureRequest, ContextBlock, ContextRequest,
+    ForgetReceipt, ForgetRequest, GrepRequest, HealthReport, IngestReceipt, IngestRequest,
+    NodeView, OrganizeReceipt, PromptsRequest, ReindexReceipt, RememberRequest, Scope,
+    SearchRequest, SupersedeReceipt, SupersedeRequest, TreeNodeView, TreeRequest, WriteReceipt,
 };
 use polis_core::host::HostResolver;
 use polis_core::ledger::{ChainVerdict, CorpusRole, Origin, PromptSource};
 use polis_core::pack::{clamp_answer_pack_limit, AnswerPack};
 use polis_core::proposal::Proposal;
 use polis_core::types::{
-    ContextStats, GrepHit, LakeItem, LedgerFilters, MemoryMapView, NoteOutcome, NoteWrite,
-    StageResult, SupersessionOutcome, TimelineItem,
+    BrowseHit, ContextStats, GrepHit, LakeItem, LedgerFilters, MemoryMapView, NoteOutcome,
+    NoteWrite, PromptFilters, StageResult, SupersessionOutcome, TimelineItem,
 };
 use polis_core::{MemoryApi, MemoryError};
 use polis_embed::{Embedder, ProviderKind, SemanticHit};
 use polis_llm::{Agent, UsageSink};
-use polis_store::record::{record_prompt, record_prompt_at, PromptInput};
+use polis_store::record::{
+    record_browse_event, record_prompt, record_prompt_at, BrowseAction, BrowseEventInput,
+    PromptInput,
+};
 use polis_store::search::GrepError;
 use polis_store::{PolisStore, StoreError};
 
@@ -253,6 +257,70 @@ impl MemoryApi for PolisHandle {
         self.store.verify_ledger_chain().map_err(store_err)
     }
 
+    fn list_prompts(&self, filters: &PromptFilters, _scope: &Scope) -> Result<Vec<LakeItem>, MemoryError> {
+        retrieval::list_prompts(&self.view(), filters).map_err(MemoryError::Store)
+    }
+
+    fn browse_search(&self, q: &str, limit: i64, _scope: &Scope) -> Result<Vec<BrowseHit>, MemoryError> {
+        self.store.search_browse_events(q, limit.clamp(1, 100)).map_err(store_err)
+    }
+
+    fn thread_tree(&self, kind: &str, id: &str, _scope: &Scope) -> Result<serde_json::Value, MemoryError> {
+        Ok(retrieval::build_thread_tree(&self.view(), kind, id))
+    }
+
+    fn thread(&self, kind: &str, id: &str, limit: i64, _scope: &Scope) -> Result<Option<serde_json::Value>, MemoryError> {
+        Ok(retrieval::thread_view(&self.view(), kind, id, limit.clamp(1, 200)))
+    }
+
+    fn context(&self, req: &ContextRequest) -> Result<ContextBlock, MemoryError> {
+        // ~4 bytes a token; the prefetch's own ceiling bounds a runaway ask.
+        let max_bytes = req.max_tokens.unwrap_or(2_000).clamp(50, 25_000) * 4;
+        Ok(retrieval::context_block(&self.view(), &req.q, req.node.as_deref(), max_bytes))
+    }
+
+    fn health(&self) -> Result<HealthReport, MemoryError> {
+        let view = self.view();
+        let chain = self.store.verify_ledger_chain().map_err(store_err)?;
+        let head_seq = self.store.max_ledger_seq().map_err(store_err)?;
+        let class_nodes = self.store.list_class_nodes().map_err(store_err)?.len() as i64;
+        let total_prompts = retrieval::build_stats_cached(&view).total_prompts;
+        Ok(HealthReport {
+            ok: chain.ok,
+            chain,
+            head_seq,
+            total_prompts,
+            class_nodes,
+            model: self.agent.as_ref().map(|a| a.name().to_string()),
+            embedder: view.provider_kind().as_str().to_string(),
+            schema_version: view.get_setting(polis_store::meta::SCHEMA_VERSION_KEY),
+            lexical_version: view.get_setting(polis_store::meta::LEXICAL_VERSION_KEY),
+        })
+    }
+
+    fn capture(&self, req: &CaptureRequest) -> Result<Option<i64>, MemoryError> {
+        // The hook's row, exactly as Redline's ingest route always built it
+        // (`source: Hook`, the captured-text role classifier, no seat, no
+        // model — the transcript backfill stamps that later).
+        let input = PromptInput {
+            source: PromptSource::Hook,
+            origin: req.origin,
+            surface: req.surface.clone(),
+            role: CorpusRole::classify_captured(&req.body),
+            user_text: None,
+            session_id: None,
+            claude_session_id: req.session.clone(),
+            mission_id: None,
+            project_path: req.project.clone(),
+            body: req.body.clone(),
+            thread: None,
+            author: None,
+            model: None,
+            model_source: None,
+        };
+        record_prompt(&self.store, input).map_err(MemoryError::Store)
+    }
+
     fn remember(&self, req: &RememberRequest) -> Result<WriteReceipt, MemoryError> {
         if req.text.trim().is_empty() {
             return Err(MemoryError::Rejected("nothing to remember".into()));
@@ -376,7 +444,64 @@ impl MemoryApi for PolisHandle {
     fn stage_proposals(&self, proposals: &[Proposal], _actor: &str) -> Result<StageResult, MemoryError> {
         organize::stage_proposals(&self.view(), None, proposals).map_err(|e| MemoryError::Store(e.to_string()))
     }
+
+    fn browse(&self, req: &BrowseRequest) -> Result<WriteReceipt, MemoryError> {
+        if req.url.trim().is_empty() {
+            return Err(MemoryError::Rejected("a browse event needs a url".into()));
+        }
+        let action = match req.action.as_deref().unwrap_or("navigate") {
+            "navigate" => BrowseAction::Navigate,
+            "select" => BrowseAction::Select,
+            "submit" => BrowseAction::Submit,
+            "leave" => BrowseAction::Leave,
+            other => return Err(MemoryError::Rejected(format!("unknown browse action `{other}`"))),
+        };
+        let seq = record_browse_event(
+            &self.store,
+            BrowseEventInput {
+                action,
+                browse_id: req.browse_id.clone(),
+                url: req.url.clone(),
+                title: req.title.clone(),
+                text: req.text.clone(),
+                from_event_id: None,
+                author: req.author.clone(),
+            },
+        )
+        .map_err(MemoryError::Store)?;
+        Ok(WriteReceipt { seq, id: None })
+    }
+
+    fn organize(&self, _scope: &Scope) -> BoxFuture<'_, Result<OrganizeReceipt, MemoryError>> {
+        Box::pin(async move {
+            let view = self.view();
+            match organize::organize_once(&view).await {
+                Ok(o) => Ok(OrganizeReceipt {
+                    ran: o.ran,
+                    auto_applied: o.auto_applied,
+                    summary: o.summary,
+                    seq_from: o.seq_from,
+                    seq_to: o.seq_to,
+                    staged: o.staged,
+                }),
+                Err(e) if e == agent::NO_MODEL => Err(MemoryError::Unavailable(e)),
+                Err(e) => Err(MemoryError::Store(e)),
+            }
+        })
+    }
+
+    fn reindex(&self, _scope: &Scope) -> Result<ReindexReceipt, MemoryError> {
+        let view = self.view();
+        let provider = view.provider_kind().as_str().to_string();
+        let embedded = index_tick(&view, REINDEX_MAX_TARGETS);
+        Ok(ReindexReceipt { embedded, provider })
+    }
 }
+
+/// How much of the semantic backlog one `reindex` call embeds. Bounded so a
+/// route call is a bounded amount of work; a caller drains a large backlog by
+/// calling again (the gardener's own tick keeps draining it regardless).
+pub const REINDEX_MAX_TARGETS: usize = 256;
 
 fn note_receipt(outcome: NoteOutcome) -> Result<WriteReceipt, MemoryError> {
     match outcome {
@@ -437,5 +562,66 @@ mod tests {
         let f = api.forget(&ForgetRequest { target_kind: "prompt".into(), target_id: "1".into(), confirm: "forget".into(), ..Default::default() }).unwrap();
         assert!(f.forgotten);
         assert!(api.verify().unwrap().ok, "forget keeps the chain green");
+    }
+
+    /// The A6 additions: the hook's capture row, a browse event, the filtered
+    /// reads, health in the no-model state, and a reindex with no embedder —
+    /// every one answered, none an error.
+    #[test]
+    fn the_capture_browse_and_maintenance_methods_answer_over_an_empty_install() {
+        let h = handle();
+        let api: &dyn MemoryApi = &h;
+        let seq = api
+            .capture(&CaptureRequest {
+                body: "captured by the hook".into(),
+                origin: Origin::External,
+                surface: "external".into(),
+                session: Some("sess-1".into()),
+                project: Some("/tmp/p".into()),
+            })
+            .unwrap();
+        assert_eq!(seq, Some(1));
+        let again = api
+            .capture(&CaptureRequest {
+                body: "captured by the hook".into(),
+                origin: Origin::External,
+                surface: "external".into(),
+                session: Some("sess-1".into()),
+                project: Some("/tmp/p".into()),
+            })
+            .unwrap();
+        assert_eq!(again, None, "the store's own dedup");
+        let items = api.list_prompts(&PromptFilters { limit: 10, ..Default::default() }, &Scope::default()).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].surface.as_deref(), Some("external"));
+
+        let b = api
+            .browse(&BrowseRequest { url: "https://example.test/a".into(), text: "Example page".into(), title: Some("Example".into()), ..Default::default() })
+            .unwrap();
+        assert_eq!(b.seq, Some(2));
+        assert!(api.browse(&BrowseRequest { url: "".into(), ..Default::default() }).is_err());
+        assert!(api.browse(&BrowseRequest { url: "https://x".into(), action: Some("teleport".into()), ..Default::default() }).is_err());
+        assert!(!api.browse_search("Example", 10, &Scope::default()).unwrap().is_empty());
+
+        assert!(api.thread("browse", "nope", 10, &Scope::default()).unwrap().is_none(), "NoHost owns no threads");
+        let tree = api.thread_tree("session", "s1", &Scope::default()).unwrap();
+        assert_eq!(tree["node"]["kind"], "session");
+
+        let health = api.health().unwrap();
+        assert!(health.ok);
+        assert_eq!(health.head_seq, 2);
+        assert_eq!(health.model, None, "no model → reported, not an error");
+        assert_eq!(health.embedder, "absent");
+        assert_eq!(health.schema_version.as_deref(), Some(polis_store::meta::STORE_SCHEMA_VERSION));
+
+        let r = api.reindex(&Scope::default()).unwrap();
+        assert_eq!((r.embedded, r.provider.as_str()), (0, "absent"));
+
+        let block = api.context(&ContextRequest { q: "captured hook".into(), ..Default::default() }).unwrap();
+        assert!(!block.terms.is_empty(), "the plan names what it searched");
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let o = rt.block_on(api.organize(&Scope::default()));
+        assert!(matches!(o, Err(MemoryError::Unavailable(_))), "no model → unavailable, never a fault: {o:?}");
     }
 }

@@ -1,0 +1,34 @@
+[package]
+name = "polis-server"
+version = "0.1.0"
+description = "Polis Memory HTTP surface: an axum router over `dyn MemoryApi`, the ROUTES table it is generated from (the source of api-v1.md and the typed clients), the capture-hook ingest route with its host observer, the capture-hook installer, and — behind `standalone` — a bound, token-guarded server for the `polis` daemon."
+authors = ["Yusuf Al-Bazian"]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/sersiousSenpai/polis-memory"
+
+[features]
+default = []
+# Bind + token auth for the standalone daemon. Off for a host (Redline) that
+# merges the router under its own listener and its own auth middleware.
+standalone = ["tokio/net", "tokio/macros"]
+
+[dependencies]
+polis-core = { path = "../polis-core" }
+# The same axum a host merges into — 0.7 (hyper 1). `matched-path` is what the
+# standalone auth middleware and a host's route table key on.
+axum = { version = "0.7", features = ["json", "query", "matched-path", "tokio"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# `rt` for `spawn_blocking` around the heavy reads; the runtime itself is the
+# host's (or the standalone feature's).
+tokio = { version = "1", features = ["rt"] }
+tracing = "0.1"
+
+[dev-dependencies]
+# The real handle over an in-memory store, so the router tests serve real
+# answers rather than a hand-written fake of the whole surface.
+polis-memory = { path = "../polis-memory" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
