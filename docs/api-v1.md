@@ -26,6 +26,9 @@ Unregistered routes fail closed: a route added to the router without a `ROUTE_TA
 
 | Method | Path | Auth | Purpose | Request | Response |
 |---|---|---|---|---|---|
+| POST | `/mcp` | open | MCP (streamable HTTP): a JSON-RPC message — initialize, tools/list, tools/call, resources, prompts; read tools only | JSON-RPC 2.0 body; Accept: application/json, text/event-stream; Mcp-Session-Id after initialize | JSON or an SSE stream carrying the result; Mcp-Session-Id header on initialize |
+| GET | `/mcp` | open | MCP (streamable HTTP): the server→client event stream for an open session | Accept: text/event-stream; Mcp-Session-Id | text/event-stream |
+| DELETE | `/mcp` | open | MCP (streamable HTTP): end a session | Mcp-Session-Id | 202 / 204 |
 | GET | `/viewer` | open | Redirect to /viewer/ so relative asset refs resolve | — | 308 → /viewer/ |
 | GET | `/viewer/` | open | Async-share viewer page (sender's local preview) | — | text/html viewer bundle index |
 | GET | `/viewer/*path` | open | Async-share viewer static assets (legacy standalone bundle) | path of the bundled asset | asset bytes with content type |

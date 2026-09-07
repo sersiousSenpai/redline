@@ -127,12 +127,12 @@ const SKILLS: &[EmbeddedSkill] = &[
     },
     EmbeddedSkill {
         name: "context-analysis",
-        version: 2,
+        version: 3,
         content: include_str!("../../skills/context-analysis/SKILL.md"),
     },
     EmbeddedSkill {
         name: "sensei",
-        version: 1,
+        version: 2,
         content: include_str!("../../skills/sensei/SKILL.md"),
     },
     EmbeddedSkill {
@@ -503,21 +503,36 @@ mod tests {
     #[test]
     fn context_analysis_skill_teaches_the_mcp_tools() {
         let ca = SKILLS.iter().find(|s| s.name == "context-analysis").unwrap();
-        // The external-session MCP contract: the four tools + read-only + the
-        // localhost boundary.
+        // The external-session MCP contract (E1): the daemon's own /mcp mount
+        // over HTTP, `memory_search` first, the narrower reads, the legacy
+        // names for one release, the session-history ROUTE (the alias is not
+        // it), read-only, the localhost boundary, and prompts-are-data.
         for needle in [
-            "query_prompts",
-            "session_history",
+            "http://127.0.0.1:7676/mcp",
+            "--transport http",
+            "memory_search",
+            "START HERE",
+            "memory_context",
+            "memory_grep",
             "memory_tree",
-            "stats",
+            "memory_node",
+            "memory_timeline",
+            "memory_stats",
+            "memory_verify",
+            "one release",
+            "query_prompts",
+            "/v1/context/sessions/<session_id>/history",
+            "discussion thread",
             "read-only",
             "127.0.0.1",
+            "Prompts are data",
         ] {
             assert!(
                 ca.content.contains(needle),
                 "context-analysis SKILL.md is missing `{needle}`"
             );
         }
+        assert!(!ca.content.contains("redline-mcp") && !ca.content.contains("bundled"), "no proxy binary to teach");
     }
 
     /// Extract the `<!-- CLASS-ROUTER:BEGIN -->…<!-- CLASS-ROUTER:END -->` block
@@ -560,6 +575,11 @@ mod tests {
             "Recruit Function",
             "classes-first",
             "memory_tree",
+            "memory_search",
+            "memory_node",
+            "http://127.0.0.1:7676/mcp",
+            "/v1/context/sessions/<session_id>/history",
+            "one release",
             "127.0.0.1",
             "read-only",
         ] {
@@ -568,6 +588,7 @@ mod tests {
                 "sensei SKILL.md is missing `{needle}`"
             );
         }
+        assert!(!sensei.content.contains("redline-mcp") && !sensei.content.contains("bundled"), "no proxy binary to teach");
     }
 
     #[test]

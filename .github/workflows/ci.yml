@@ -2,7 +2,7 @@
 #
 #   rust      — the full cargo test suite on macos-14 (goldens, route-drift,
 #               perf-guard and size-guard source invariants all live there,
-#               plus the redline-mcp workspace member via default-members).
+#               plus the extension crates via default-members).
 #               The frontend is built first: tauri's context codegen resolves
 #               `frontendDist` (../dist), and the daemon's dev fallback serves
 #               viewer assets from that directory on disk.

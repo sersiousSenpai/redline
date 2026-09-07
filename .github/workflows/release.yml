@@ -22,8 +22,8 @@
 #     latest.json on the GitHub release (tauri-plugin-updater; source builds
 #     keep the git-pull update path unchanged and first-class forever)
 #   - dsymutil + Sentry dSYM upload (lands with the telemetry decision)
-#   - co-locating the lean redline-mcp binary inside the .app bundle
-#     (docs/local-only-audit.md)
+#   (the redline-mcp co-location item retired 2026-09-07: the daemon serves
+#   MCP itself at /mcp — docs/local-only-audit.md)
 name: Release
 
 on:

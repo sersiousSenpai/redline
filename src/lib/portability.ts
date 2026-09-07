@@ -18,10 +18,16 @@ export interface MirrorStatus {
   noteCount: number;
 }
 
-/** The `mcp_config_snippet` command's shape. */
+/**
+ * The `mcp_config_snippet` command's shape: the `~/.claude.json` snippet
+ * (`type: http`), the daemon's MCP URL it names, and the one-line
+ * `claude mcp add` that writes the same thing. No binary path any more — the
+ * daemon serves MCP itself at `/mcp`.
+ */
 export interface McpConfig {
-  binPath: string;
   snippet: string;
+  url: string;
+  command: string;
 }
 
 /** The scopes `export_context_bundle` accepts. */

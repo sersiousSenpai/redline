@@ -10,10 +10,12 @@ posture: it adds **no new Redline-originated network operation**. The capture
 hook POSTs to loopback; the backup routine writes to local disk.
 
 The Polis context-access + portability layer (Phase 4) also adds **no new
-egress**. Its two new touchpoints are both local: the **memory mirror** writes
-plain-markdown notes to a user-chosen local directory, and the **MCP server** is
-a stdio proxy (`redline-mcp`) that binds nothing and only forwards localhost
-GETs to the daemon on behalf of an external `claude` session. Both are
+egress**. Its two touchpoints are both local: the **memory mirror** writes
+plain-markdown notes to a user-chosen local directory, and the **MCP server**
+is the daemon itself — `polis-mcp`'s read tools served at
+`127.0.0.1:7676/mcp` (streamable HTTP) on the listener that already exists,
+for an external `claude` session to add with one line. (Until 2026-09-07 this
+was a stdio proxy binary, `redline-mcp`; it retired with Polis E1.) Both are
 enumerated below.
 
 The Memory surface's Map + Health treemap (Second Brain P5) add **nothing to
@@ -39,7 +41,7 @@ routable one.
 | **UserPromptSubmit capture hook → daemon** | Claude Code → `127.0.0.1:7676/v1/prompts/ingest` | **New (Phase 1).** Command-type curl, `--max-time 1`, always `exit 0` (fail-open). Payload is the hook's own stdin JSON. |
 | Agent curl bridge → daemon | browse/mission/linked/code/memory-Ask/Librarian agents → `127.0.0.1:7676/*` | Scoped `Bash(curl -s http://127.0.0.1:7676/*)` allow; localhost only. The Memory Ask agent (Second Brain P4, `memchat.rs`) reads only the existing `/v1/memory/*` + `/v1/context/*` GET routes through this same allow — no new route, no new egress path. The Librarian (Second Brain P6 gave the pre-existing `librarian_agent` spawn its Health-tab strip) is the same shape: read-only GETs over this allow, digest baked into the prompt, result rendered in-app and persisted only to localStorage. |
 | Restore / agent-in-doc curl | Claude Code → `127.0.0.1:7676/*` | Same scoped allow. |
-| **MCP proxy → daemon** | **`redline-mcp` (external session) → `127.0.0.1:7676/v1/context/*`, `/v1/memory/*`** | **New (Phase 4).** A stdio JSON-RPC proxy (`crates/redline-mcp`) an *external* `claude` session installs. It **binds nothing**, holds no data, and issues only read-only localhost GETs (override target via `REDLINE_DAEMON_ADDR`, still loopback). Internal agents keep `--strict-mcp-config` and never use it. |
+| **MCP client → daemon** | **an external `claude` session → `127.0.0.1:7676/mcp`** | **Phase 4, reshaped 2026-09-07 (Polis E1).** The daemon serves the Model Context Protocol itself (`polis_mcp::http_service` nested at `/mcp`, streamable HTTP) on the same loopback listener as every other route: no new socket, no new process, no binary. Read tools only (`memory_search`, `memory_context`, `memory_grep`, `memory_tree`, `memory_node`, `memory_timeline`, `memory_stats`, `memory_verify`, plus the legacy names for one release); the mount is an `Open` row in `auth::ROUTE_TABLE`, like the reads it is built on. Nothing about it leaves the machine. |
 
 ## Local-disk touchpoints (no egress)
 
@@ -160,20 +162,23 @@ Redline's tracked projects. Those are tagged `origin=external` and stored only
 while `redline.capture.externalSessions` is on (default on; toggle in the Ledger
 pane footer). Nothing about capture leaves the machine either way.
 
-## MCP server (`redline-mcp`)
+## MCP server (the daemon's `/mcp` mount)
 
-The MCP server ships with core as its own workspace member
-(`crates/redline-mcp`), built by the same `cargo` build as the app
-(`default-members`). It
-is a **stdio** proxy: an external `claude` session spawns it, and it forwards
-each tool call as a read-only localhost GET to the running daemon. It opens no
-listening socket and stores nothing.
+Since 2026-09-07 (Polis E1) the daemon serves MCP itself: `polis-mcp`'s
+streamable-HTTP service is nested at `/mcp` in the same axum router, on the
+same `127.0.0.1:7676` listener, under the same auth middleware. An external
+`claude` session adds it with `claude mcp add --transport http redline
+http://127.0.0.1:7676/mcp` (or the `type: http` snippet the settings surface
+shows) and gets the read tools over the user's memory — `memory_search`
+first — while Redline is open. Nothing is spawned, no second socket opens, no
+binary ships; the `redline-mcp` stdio proxy and its `resolve_mcp_bin` path
+lookup are gone, and so is the packaging note that asked the bundle to
+co-locate it.
 
-- **Path:** the app resolves it next to the main executable (`resolve_mcp_bin`),
-  and the settings surface hands the user a `~/.claude.json` snippet pointing at
-  that path. **Packaging note:** the release `.app`/DMG bundle must co-locate the
-  `redline-mcp` binary beside the app binary for the snippet's path to resolve
-  for end users (a dev `cargo build` already places both in `target/<profile>/`).
+- **Loopback only, read-only:** the mount answers on the daemon's loopback
+  address and exposes no write tool (those arrive with identity in Polis E2
+  and will be token-guarded like every other write). A sub-path under `/mcp`
+  is not a route and is answered 404 by the MCP service itself.
 - **Internal agents are unaffected:** they keep `--strict-mcp-config` and reach
   the same routes over the curl bridge. Re-enabling MCP for internal roles is
   deliberately rejected (see `docs/protocol-verification.md`).

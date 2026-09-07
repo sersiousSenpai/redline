@@ -85,7 +85,6 @@ function strayAnalysisArtifacts() {
 }
 
 const binaryPath = join(root, "src-tauri", "target", "release", "redline");
-const mcpBinPath = join(root, "src-tauri", "target", "release", "redline-mcp");
 const boot = bootPathJs();
 const checks = [
   {
@@ -93,20 +92,10 @@ const checks = [
     actual: existsSync(binaryPath) ? statSync(binaryPath).size : null,
     limit: budget.binaryBytes,
   },
-  {
-    name: "mcp proxy binary (src-tauri/target/release/redline-mcp)",
-    actual: existsSync(mcpBinPath) ? statSync(mcpBinPath).size : null,
-    limit: budget.mcpBinBytes,
-    // MEASURE THIS ONE ON ITS OWN FEATURE SET, or the number is meaningless:
-    //   cargo build --release -p redline-mcp     → 1.52 MB   (in budget)
-    //   cargo build --release  (whole workspace) → 5.30 MB   (321% — a lie)
-    // Cargo unifies features per invocation, so a workspace-wide build hands
-    // the proxy the APP's reqwest features (TLS, charset sniffing, proxy
-    // detection) on top of its own `default-features = false`. That is exactly
-    // the size lever this crate exists to hold, defeated by how it was built —
-    // not a regression. Verified 2026-08-16.
-    hint: "measure with `cargo build --release -p redline-mcp` — a workspace-wide build unifies the app's reqwest features into it",
-  },
+  // The `redline-mcp` proxy row retired 2026-09-07 (Polis E1): the daemon
+  // serves MCP itself at /mcp from polis-mcp, so there is no second binary to
+  // budget. (Its lesson stays: a workspace-wide build feature-unifies reqwest
+  // into every member — measure a member on its own feature set.)
   {
     name: `boot-path JS (${boot ? boot.parts.join(" + ") : "dist/index.html entry + modulepreloads"})`,
     actual: boot ? boot.total : null,

@@ -6,30 +6,23 @@ authors = ["Yusuf Al-Bazian"]
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/sersiousSenpai/redline"
-# `tauri dev` invokes a bare `cargo run`, which sees every default-member bin
-# (redline + redline-mcp) and refuses to pick. This selects the app — and
-# narrows that `cargo run` to this package, so dev iteration no longer rebuilds
-# the proxy (`cargo build` / `cargo test` / `tauri build` still do).
+# `tauri dev` invokes a bare `cargo run`; this pins it to the app package so
+# a future default-member bin can never make it refuse to pick.
 default-run = "redline"
 
-# Workspace so the `redline-mcp` stdio proxy builds as its OWN crate instead of
-# a `src/bin/` of this package (size lever, docs/perf-budget.md "Size budget"):
-# as a package bin it linked all of `redline_lib` — tauri, whisper, syntect —
-# and weighed ~28 MB; on its own dependency graph it is ~2 MB. Neither package
-# depends on the other. `cargo build` / `cargo test` / `tauri dev` all invoke
-# cargo without `-p`, so default-members keeps the proxy building (and its
-# tests running) in every flow — dropping it from default-members would
-# silently stop producing `target/<profile>/redline-mcp`, which the settings
-# surface's `~/.claude.json` snippet points at.
+# Workspace for the extension crates (the ABI every extension compiles
+# against, and the SDK). The `redline-mcp` stdio proxy that used to live here
+# retired on 2026-09-07: the daemon serves MCP itself at `/mcp` (streamable
+# HTTP, `polis-mcp`), so an external session needs no bundled binary. `cargo
+# build` / `cargo test` / `tauri dev` invoke cargo without `-p`, so
+# default-members keeps the extension crates building and tested.
 [workspace]
 members = [
-    "crates/redline-mcp",
     "crates/redline-extension-abi",
     "crates/redline-extension-sdk",
 ]
 default-members = [
     ".",
-    "crates/redline-mcp",
     "crates/redline-extension-abi",
     "crates/redline-extension-sdk",
 ]
@@ -90,8 +83,9 @@ two-face = { version = "0.5", default-features = false, features = ["syntect-def
 # HTTP client for the voice agent's premium (cloud) TTS — the synth call is made
 # from Rust so the user's API key never enters the webview and there's no browser
 # CORS. Default TLS (Security.framework on macOS), JSON bodies. `blocking` is
-# deliberately ABSENT: its only user was the `redline-mcp` proxy, now its own
-# workspace member with its own leaner reqwest (size lever, docs/perf-budget.md).
+# deliberately ABSENT: its only user was the retired `redline-mcp` proxy, and
+# the feature is a size lever nothing in the app needs (docs/perf-budget.md;
+# `size_guard.rs` pins its absence).
 reqwest = { version = "0.13.4", features = ["json"] }
 # Resample the microphone's hardware-rate PCM (44.1/48 kHz) down to the 16 kHz
 # mono Whisper expects. Pure Rust (no C build); used by the batch Whisper
@@ -120,26 +114,32 @@ wasmi = "1.1"
 # answer-pack types and budget, bundle verification and the MemoryApi trait.
 # Pure (serde + sha2), so it adds nothing to the binary that was not already
 # linked.
-polis-core = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "fe2bafdbf65ae48e25229e142d350f059b3c541d" }
+polis-core = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "f323289bf0e3a843194609eb1edc9ebb3c5c2e06" }
 # The memory schema + its own `polis_meta` versioning + the cross-process-safe
 # chain append (A2). Same rusqlite as the app, so one SQLite is linked.
-polis-store = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "fe2bafdbf65ae48e25229e142d350f059b3c541d" }
+polis-store = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "f323289bf0e3a843194609eb1edc9ebb3c5c2e06" }
 # The semantic arm (A3): providers, vector cache, search, index tick. `apple`
 # is the on-device backend this app has always used; the objc2 crates it needs
 # were already in the graph (below), so the feature costs no new build edge.
-polis-embed = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "fe2bafdbf65ae48e25229e142d350f059b3c541d", features = ["apple"] }
+polis-embed = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "f323289bf0e3a843194609eb1edc9ebb3c5c2e06", features = ["apple"] }
 # The Agent trait the memory seats speak (A4). Default features only: the
 # CLI backends; the HTTP backends would add a second reqwest to this graph.
-polis-llm = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "fe2bafdbf65ae48e25229e142d350f059b3c541d" }
+polis-llm = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "f323289bf0e3a843194609eb1edc9ebb3c5c2e06" }
 # THE crate an integrator adds (A5): the Polis handle, retrieval, the gardener,
 # export, the mirror, the classmemory skill text. `apple` = the on-device
 # embedder this app has always used.
-polis-memory = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "fe2bafdbf65ae48e25229e142d350f059b3c541d", features = ["apple"] }
+polis-memory = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "f323289bf0e3a843194609eb1edc9ebb3c5c2e06", features = ["apple"] }
 # The HTTP surface (A6): the memory + context routes this daemon used to
 # define inline, the ROUTES table its auth contract maps in, the capture
 # route with Redline's `IngestObserver` behind it, and the hook installer.
 # Default features only: `standalone` (bind + token) is the `polis` daemon's.
-polis-server = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "fe2bafdbf65ae48e25229e142d350f059b3c541d" }
+polis-server = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "f323289bf0e3a843194609eb1edc9ebb3c5c2e06" }
+# The Model Context Protocol surface (E1): the read tools over the same
+# `MemoryApi`, served by this daemon at `/mcp` (streamable HTTP) so an
+# external `claude mcp add --transport http` needs no bundled binary — the
+# `redline-mcp` proxy crate retired with it. Default features only: `remote`
+# (an HTTP client for the `polis` binary) would add a second HTTP stack.
+polis-mcp = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "f323289bf0e3a843194609eb1edc9ebb3c5c2e06" }
 # Deflate for the compaction archive (`prompt_archive`): a cold compaction
 # releases a body at ~59:1 and used to be irrecoverable. Already present in the
 # dependency tree (via `png` → `tauri-utils`), so naming it here is a visibility

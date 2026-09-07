@@ -106,13 +106,8 @@ if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
 fi
 
 npm run tauri build
-
-# Rebuild the MCP proxy on its own dependency graph. The joint tauri build
-# above produces target/release/redline-mcp with workspace-unified (fatter)
-# reqwest features; this `-p` pass — a cached relink, seconds — leaves the
-# lean artifact that scripts/size-budget.json pins (~1.5 MB vs ~3 MB) and
-# that release packaging will co-locate beside the app binary.
-(cd src-tauri && cargo build --release -p redline-mcp)
+# (The `-p redline-mcp` relink that used to follow retired 2026-09-07: the
+# daemon serves MCP itself at /mcp from polis-mcp; no second binary ships.)
 
 APP_SRC="src-tauri/target/release/bundle/macos/Redline.app"
 if [ ! -d "$APP_SRC" ]; then

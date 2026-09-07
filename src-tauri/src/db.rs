@@ -4443,16 +4443,12 @@ impl Database {
         rows.collect()
     }
 
-    /// Snapshot the whole database to `dest` via `VACUUM INTO` (a consistent
-    /// copy even while the app runs). The crown-jewels backup that protects the
-    /// chain itself; mirror/export are secondary content copies.
-    pub fn snapshot_to(&self, dest: &Path) -> rusqlite::Result<()> {
-        let conn = self.lock_conn();
-        // VACUUM INTO requires the destination not already exist.
-        let _ = std::fs::remove_file(dest);
-        conn.execute("VACUUM INTO ?1", params![dest.to_string_lossy()])?;
-        Ok(())
-    }
+    // `snapshot_to` (VACUUM INTO) is `PolisStore`'s since Polis E1
+    // (`polis_store::PolisStore::snapshot_to`, reached through `Deref`); the
+    // Redline copy that lived here was byte-equivalent minus its
+    // remove-the-destination-first line, which `snapshot_database` in lib.rs
+    // now does before the call. Kept off this impl so the two never collide
+    // (`tests/polis_store_guard.rs`).
 
     // ------------------------------------------------------------------
     // Polis ClassMemory (Phase 2): the catalog over the lake

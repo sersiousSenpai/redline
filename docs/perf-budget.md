@@ -273,9 +273,10 @@ invariants run there), tsc + vite build + vitest on ubuntu (ditto
 `src-tauri/deny.toml`. `size.yml` checks the byte budgets on main pushes +
 nightly + manual dispatch — deliberately NOT on PRs, because the honest
 artifact is the real release binary (a 15–25 min build); it mirrors
-`scripts/redline.sh`'s sequence exactly (joint `tauri build`, then the lean
-`-p redline-mcp` relink) and runs `check-size.mjs --strict`, uploading the
-output as a `size-report` artifact. `release.yml` builds per-arch DMGs on
+`scripts/redline.sh`'s sequence exactly (the joint `tauri build`; the lean
+`-p redline-mcp` relink that used to follow retired 2026-09-07 with the
+proxy) and runs `check-size.mjs --strict`, uploading the output as a
+`size-report` artifact. `release.yml` builds per-arch DMGs on
 `v*` tags (dry-runnable via workflow_dispatch; ad-hoc signed until the
 Developer ID secrets land).
 
@@ -324,7 +325,7 @@ the re-merge guards instead.
 | lib `crate-type = ["rlib"]` only | **landed** | build time + target/ footprint, not shipped size |
 | `panic = "abort"` | **rejected permanently** | would save ~2 MB but breaks `catch_unwind` panic containment (and the extension host's crash isolation is built on it) |
 | `opt-level = "s"` | pending, gated | adopt only if first-open highlight of a large TSX stays in budget (syntect throughput is a product invariant); fallback: per-package `opt-level = 3` pins for syntect/onig |
-| `redline-mcp` workspace split (own crate, own `reqwest(blocking)`) | **landed** (pinned by `size_guard.rs::mcp_proxy_stays_split_and_lean`; ceiling in `size-budget.json`) | measured: the mcp binary ~28 MB → **1.50 MB** (release, own feature set: no TLS/charset/proxy-detection); app drops the `blocking` feature |
+| `redline-mcp` workspace split (own crate, own `reqwest(blocking)`) | **retired 2026-09-07** — the daemon mounts `/mcp` from `polis-mcp` (Polis E1: streamable HTTP over the same `MemoryApi`), so no proxy binary ships and `mcpBinBytes` left `size-budget.json`; `size_guard.rs::mcp_proxy_stays_split_and_lean` now pins the two things that outlived it: the app's reqwest never regains `blocking`, and `/mcp` is served by `polis_mcp` | historical: the proxy measured ~28 MB → 1.50 MB on its own graph; the `blocking` drop stays in the app |
 | grammar-dump trim (curated syntect set built in `build.rs`) | pending, optional | −1.5 to −3 MB `__const` |
 | lazy `PromptDrafter` / `VoicePanel` / `ShareSnapshotDialog` / xterm loader / hljs `lib/common` | **landed** (pinned by `sizeGuard.test.ts`) | measured: boot-path JS 3.06 MB → **1.10 MB** (`manualChunks` tried and rejected — co-location, see above) |
 | viewer as second Rollup entry (dedupe mermaid/katex) | **landed** | measured: `dist-viewer/` (4.2 MB resource) retired; `dist/` total 8.6 → 7.71 MB **including** the viewer |

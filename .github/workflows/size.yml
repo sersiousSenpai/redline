@@ -7,9 +7,9 @@
 # grammar dumps.
 #
 # The build sequence mirrors scripts/redline.sh exactly: the joint
-# `tauri build` feature-unifies reqwest across workspace members (that IS
-# the shipped app binary), then a cached `-p redline-mcp` relink restores
-# the lean proxy artifact that scripts/size-budget.json pins.
+# `tauri build` (that IS the shipped app binary). The `-p redline-mcp` relink
+# that used to follow retired 2026-09-07 — the daemon serves MCP itself at
+# /mcp from polis-mcp, so no second binary is measured.
 name: Size
 
 on:
@@ -43,9 +43,6 @@ jobs:
       # cargo build with assets embedded — the binary the budget means.
       - name: Release build
         run: npx tauri build --bundles app
-      - name: Relink lean redline-mcp
-        working-directory: src-tauri
-        run: cargo build --release -p redline-mcp
       # `shell: bash` gives -o pipefail, so the tee can't mask a breach.
       - name: Check size budgets
         shell: bash

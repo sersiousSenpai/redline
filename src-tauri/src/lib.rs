@@ -51,9 +51,9 @@ mod librarian;
 mod local_install;
 mod marketplace;
 mod seatassign;
-/// App-side MCP remnant: the `~/.claude.json` snippet generator for the
-/// settings surface. The protocol core + proxy binary moved to the
-/// `crates/redline-mcp` workspace member (size lever — see that crate's docs).
+/// The MCP snippet generator for the settings surface. The protocol itself is
+/// served by the daemon at `/mcp` (`polis_mcp::http_service`, nested in
+/// `run_server`); no proxy binary ships any more.
 pub mod mcp;
 
 /// The memory schema's DDL from a fresh database — the referee
@@ -2336,6 +2336,8 @@ fn snapshot_database(db: &db::Database, data_dir: &std::path::Path, keep: usize)
     // now_millis() is 13 digits until ~year 2286, so filenames sort
     // chronologically by plain lexical order.
     let dest = dir.join(format!("redline-{}.db", ledger::now_millis()));
+    // VACUUM INTO refuses an existing destination (a same-millisecond retry).
+    let _ = std::fs::remove_file(&dest);
     if let Err(e) = db.snapshot_to(&dest) {
         tracing::warn!(error = %e, "ledger DB snapshot failed");
         return;
@@ -3034,6 +3036,9 @@ async fn handle_admin_shutdown(State(app_state): State<AppState>) -> impl IntoRe
 }
 
 async fn run_server(state: AppState) {
+    // The Model Context Protocol surface (E1): polis-mcp's read tools over
+    // the same `MemoryApi` this state already holds, nested at `/mcp` below.
+    let memory_api = state.polis.api.clone();
     // Keep handles for the post-bind status update before the router consumes `state`.
     let daemon_status = state.daemon_status.clone();
     let app_handle = state.app_handle.clone();
@@ -3124,6 +3129,17 @@ async fn run_server(state: AppState) {
         // rows stay in `ROUTE_TABLE`), so the fail-closed rule holds across
         // the merge. All still ride the same pre-authorized `curl` allow.
         .merge(polis_server::router())
+        // MCP (E1): `polis_mcp`'s streamable-HTTP service — the read tools
+        // (`memory_search` first), resources and the grounding prompt over the
+        // same handle — so `claude mcp add --transport http redline
+        // http://127.0.0.1:7676/mcp` needs no bundled binary (the `redline-mcp`
+        // proxy retired). Mounted as a ROUTE (`any_service`), not nested: the
+        // transport's GET/POST/DELETE all hit exactly `/mcp`, axum sets
+        // `MatchedPath` = "/mcp" for it, and `auth::ROUTE_TABLE` carries the
+        // three Open rows. (`nest_service` would also serve `/mcp/anything`
+        // with NO MatchedPath — outside the table, rmcp being path-agnostic —
+        // so it is not used; a sub-path here is the router's own 404.)
+        .route("/mcp", axum::routing::any_service(polis_mcp::http_service(memory_api)))
         // Context access (Phase 3): the Librarian agent's friction digest —
         // ground-truth counts/staleness (backlog, held proposals, stalled
         // reviews, bulging branches). Read-only; rides the same `curl` allow.
@@ -10814,26 +10830,16 @@ struct CodeHealthQ {
 // Polis context access + portability commands (Phase 4)
 // ---------------------------------------------------------------------------
 
-/// Resolve the absolute path to the co-shipped `redline-mcp` binary — it sits
-/// next to the main executable (dev: `target/<profile>/redline-mcp`; bundled:
-/// alongside the app binary). Falls back to the bare name (PATH lookup).
-fn resolve_mcp_bin() -> String {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("redline-mcp")))
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| "redline-mcp".to_string())
-}
-
-/// The copyable `~/.claude.json` MCP snippet + the resolved binary path, for the
-/// settings surface. External `claude` sessions install this to query Redline's
-/// memory; internal agents never use MCP (they keep `--strict-mcp-config`).
+/// The copyable `~/.claude.json` MCP snippet, the daemon's MCP URL and the
+/// one-line `claude mcp add`, for the settings surface. External `claude`
+/// sessions reach the memory over the daemon's `/mcp` (streamable HTTP, read
+/// tools only); internal agents never use MCP (they keep `--strict-mcp-config`).
 #[tauri::command]
 fn mcp_config_snippet() -> Result<serde_json::Value, String> {
-    let bin = resolve_mcp_bin();
     Ok(serde_json::json!({
-        "binPath": bin,
-        "snippet": mcp::claude_config_snippet(&bin),
+        "snippet": mcp::claude_config_snippet(),
+        "url": mcp::MCP_URL,
+        "command": mcp::claude_add_command(),
     }))
 }
 

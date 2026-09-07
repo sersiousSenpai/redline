@@ -10,9 +10,9 @@
 //!   claude sessions anywhere on the machine via the globally installed
 //!   hooks/skills. Those sessions are not Redline children and cannot carry
 //!   a per-boot secret, so they stay open by design.
-//! - **Read-only** routes stay open for now so the external `redline-mcp`
-//!   facade keeps working with zero configuration; tokenizing reads is an
-//!   explicit second pass.
+//! - **Read-only** routes stay open for now so an external session's MCP
+//!   client (the daemon's own `/mcp` mount, read tools only) keeps working
+//!   with zero configuration; tokenizing reads is an explicit second pass.
 //!
 //! Everything else — the agent-write routes — requires a bearer token:
 //! either the per-boot master token (handed to every process Redline spawns
@@ -130,6 +130,41 @@ pub use redline_extension_abi::scopes::{
 /// `lib.rs` byte for byte, and another that the merged router serves every
 /// polis row under this auth.
 pub const ROUTE_TABLE: &[RouteSpec] = &[
+    // The Model Context Protocol mount (E1): `polis_mcp::http_service`,
+    // served at `/mcp` in `run_server` as a route (`any_service`). Streamable
+    // HTTP speaks three verbs at that one path — POST (a message), GET (the
+    // server→client event stream), DELETE (end the session) — and axum sets
+    // `MatchedPath` = "/mcp" for it, so these three rows are what the
+    // middleware sees. Read tools only (`memory_search`, `memory_context`,
+    // `memory_grep`, `memory_tree`, `memory_node`, `memory_timeline`,
+    // `memory_stats`, `memory_verify` + the legacy aliases), so Open, like the
+    // reads it is built on. Not `nest_service`: that would also serve
+    // `/mcp/anything` with no MatchedPath at all (outside this table), and
+    // rmcp is path-agnostic. A sub-path is the router's own 404.
+    RouteSpec {
+        method: "POST",
+        path: "/mcp",
+        class: RouteClass::Open,
+        purpose: "MCP (streamable HTTP): a JSON-RPC message — initialize, tools/list, tools/call, resources, prompts; read tools only",
+        request: "JSON-RPC 2.0 body; Accept: application/json, text/event-stream; Mcp-Session-Id after initialize",
+        response: "JSON or an SSE stream carrying the result; Mcp-Session-Id header on initialize",
+    },
+    RouteSpec {
+        method: "GET",
+        path: "/mcp",
+        class: RouteClass::Open,
+        purpose: "MCP (streamable HTTP): the server→client event stream for an open session",
+        request: "Accept: text/event-stream; Mcp-Session-Id",
+        response: "text/event-stream",
+    },
+    RouteSpec {
+        method: "DELETE",
+        path: "/mcp",
+        class: RouteClass::Open,
+        purpose: "MCP (streamable HTTP): end a session",
+        request: "Mcp-Session-Id",
+        response: "202 / 204",
+    },
     RouteSpec {
         method: "GET",
         path: "/viewer",
@@ -997,6 +1032,90 @@ mod tests {
         assert_eq!(rt.block_on(app.clone().oneshot(open)).unwrap().status(), StatusCode::OK);
         let write = Request::builder().method("POST").uri("/v1/memory/remember").header("content-type", "application/json").body(Body::from(r#"{"text":"x","asUser":true}"#)).unwrap();
         assert_eq!(rt.block_on(app.clone().oneshot(write)).unwrap().status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// The MCP mount, through the merged router under THIS middleware: a real
+    /// `initialize` POST to `/mcp` is 200 with a session id (the row is in the
+    /// table — a missing row would be a 401), a `tools/list` on that session
+    /// names `memory_search`, a `/mcp/x` sub-path is the router's own 404
+    /// (mounted as a route, not nested — a nested tail would carry no
+    /// MatchedPath and rmcp would serve it anyway), and the mount's
+    /// `MatchedPath` is exactly "/mcp" — what the three table rows are keyed on.
+    #[test]
+    fn merged_router_serves_mcp_initialize_and_tools_list() {
+        use axum::body::Body;
+        use axum::http::Request as HttpRequest;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let handle = polis_memory::PolisHandle::new(db.polis_store(), None, db.clone(), db.clone());
+        let api: std::sync::Arc<dyn polis_core::MemoryApi> = std::sync::Arc::new(handle);
+        let state = polis_server::PolisState::bare(api.clone());
+        // What the middleware sees at the mount point, recorded by a probe
+        // layer placed INSIDE the auth layer (so it runs only when auth passed).
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>> = Default::default();
+        let probe = seen.clone();
+        let app = polis_server::router::<polis_server::PolisState>()
+            .route("/mcp", axum::routing::any_service(polis_mcp::http_service(api)))
+            .layer(axum::middleware::from_fn(move |req: axum::extract::Request, next: axum::middleware::Next| {
+                let probe = probe.clone();
+                async move {
+                    probe.lock().unwrap().push(req.extensions().get::<MatchedPath>().map(|m| m.as_str().to_string()));
+                    next.run(req).await
+                }
+            }))
+            .layer(axum::middleware::from_fn(require_daemon_auth))
+            .with_state(state);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let post = |body: &str, session: Option<&str>| {
+            // `Host` as a real client sends it: rmcp validates it against its
+            // loopback allow-list (a DNS-rebinding guard) before anything else.
+            let mut b = HttpRequest::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header("host", "127.0.0.1:7676")
+                .header("content-type", "application/json")
+                .header("accept", "application/json, text/event-stream");
+            if let Some(s) = session {
+                b = b.header("mcp-session-id", s);
+            }
+            b.body(Body::from(body.to_string())).unwrap()
+        };
+        // initialize → 200 + Mcp-Session-Id, no token needed (an Open row).
+        let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"redline-test","version":"0"}}}"#;
+        let resp = rt.block_on(app.clone().oneshot(post(init, None))).unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "initialize through the merged router");
+        let session = resp
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+            .expect("initialize answers with an Mcp-Session-Id");
+        let body = String::from_utf8_lossy(&rt.block_on(resp.into_body().collect()).unwrap().to_bytes()).to_string();
+        assert!(body.contains("\"serverInfo\"") && body.contains("polis-memory"), "the initialize result rides the body: {body}");
+        // The client's initialized notification, then tools/list on the session.
+        let notified = rt.block_on(app.clone().oneshot(post(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#, Some(&session)))).unwrap();
+        assert!(notified.status().is_success(), "notifications/initialized: {}", notified.status());
+        let resp = rt.block_on(app.clone().oneshot(post(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#, Some(&session)))).unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = String::from_utf8_lossy(&rt.block_on(resp.into_body().collect()).unwrap().to_bytes()).to_string();
+        for tool in ["memory_search", "memory_context", "memory_grep", "memory_tree", "memory_node", "memory_timeline", "memory_stats", "memory_verify", "answer_pack", "query_prompts"] {
+            assert!(body.contains(&format!("\"name\":\"{tool}\"")), "tools/list names {tool}: {body}");
+        }
+        assert!(!body.contains("memory_remember") && !body.contains("memory_forget"), "no write tools on this surface");
+        // A sub-path is not a route: the router's own 404 (empty body), never
+        // rmcp answering as if it were the mount.
+        let sub = rt.block_on(app.clone().oneshot(HttpRequest::builder().uri("/mcp/nope").header("host", "127.0.0.1:7676").body(Body::empty()).unwrap())).unwrap();
+        assert_eq!(sub.status(), StatusCode::NOT_FOUND);
+        let sub_body = rt.block_on(sub.into_body().collect()).unwrap().to_bytes();
+        assert!(sub_body.is_empty(), "a sub-path is unrouted, not served: {}", String::from_utf8_lossy(&sub_body));
+        // The mount point's MatchedPath is "/mcp" — the three rows' key.
+        let paths = seen.lock().unwrap().clone();
+        assert!(paths.iter().filter(|p| p.as_deref() == Some("/mcp")).count() >= 3, "every /mcp request matched \"/mcp\": {paths:?}");
+        assert!(paths.contains(&None), "the sub-path carried no MatchedPath: {paths:?}");
+        for method in ["GET", "POST", "DELETE"] {
+            assert_eq!(route_spec("/mcp", method).map(|r| r.class), Some(RouteClass::Open), "{method} /mcp is an Open row");
+        }
     }
 
     #[test]

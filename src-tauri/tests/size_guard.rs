@@ -5,7 +5,7 @@
 //! the same source-invariant pattern `perf_guard.rs` uses for command hygiene.
 
 static MANIFEST: &str = include_str!("../Cargo.toml");
-static MCP_MANIFEST: &str = include_str!("../crates/redline-mcp/Cargo.toml");
+static LIB_SRC: &str = include_str!("../src/lib.rs");
 
 #[test]
 fn release_profile_keeps_size_levers() {
@@ -36,50 +36,45 @@ fn panic_strategy_stays_unwind() {
 
 #[test]
 fn mcp_proxy_stays_split_and_lean() {
-    // The workspace split is a size lever: as a src/bin/ of the app package
-    // the proxy linked all of redline_lib (~28 MB); as its own crate it is
-    // ~2 MB. default-members keeps it building under plain `cargo build` /
-    // `tauri dev`, which invoke cargo without `-p` — the settings surface's
-    // ~/.claude.json snippet points at target/<profile>/redline-mcp.
-    // Layout-agnostic (the member lists grew with the B3 extension crates):
-    // the proxy must appear in BOTH lists, and "." must stay a default
-    // member so plain `cargo build` / `tauri dev` still build the app.
-    let section = |name: &str| -> &str {
-        let start = MANIFEST.find(name).unwrap_or(0);
-        let rest = &MANIFEST[start..];
-        let end = rest[name.len()..]
-            .find(']')
-            .map(|i| i + name.len() + 1)
-            .unwrap_or(rest.len());
-        &rest[..end]
-    };
-    let members = section("members = [");
-    let default_members = section("default-members = [");
-    assert!(
-        members.contains("\"crates/redline-mcp\"")
-            && default_members.contains("\"crates/redline-mcp\"")
-            && default_members.contains("\".\""),
-        "src-tauri/Cargo.toml lost the redline-mcp workspace membership — \
-         folding the proxy back into the app package re-fattens it to ~28 MB \
-         (docs/perf-budget.md 'Size budget')"
-    );
+    // History: the `redline-mcp` stdio proxy was a workspace member with its
+    // own lean reqwest, so that an external session's MCP binary weighed
+    // ~1.5 MB instead of linking all of redline_lib (~28 MB). On 2026-09-07
+    // (Polis E1) the proxy retired: the daemon serves MCP itself at `/mcp`
+    // (`polis_mcp::http_service`, streamable HTTP over the same MemoryApi),
+    // so there is no binary to keep lean. Two things survive as levers:
+    //
+    // 1. The app's reqwest never regains `blocking` — the proxy was its only
+    //    user, and the feature is exactly the kind of dependency that rides
+    //    into the app binary through feature unification.
     assert!(
         !MANIFEST.contains("\"blocking\""),
-        "the app's reqwest regained the `blocking` feature — its only user \
-         was the redline-mcp proxy, which now carries its own reqwest in \
-         crates/redline-mcp (docs/perf-budget.md 'Size budget')"
+        "the app's reqwest regained the `blocking` feature — nothing in the app \
+         needs it since the redline-mcp proxy retired (docs/perf-budget.md \
+         'Size budget')"
     );
-    // Comment lines are exempt: the manifest's own header explains this rule
-    // by name, which must not itself trip the guard.
-    let mcp_code = MCP_MANIFEST
+    // 2. No crate, member or bin named `redline-mcp` comes back — the
+    //    `default-run` note in the manifest explains why a second default
+    //    member bin is a trap for `tauri dev`.
+    let manifest_code = MANIFEST
         .lines()
         .filter(|l| !l.trim_start().starts_with('#'))
         .collect::<String>();
     assert!(
-        !mcp_code.contains("redline_lib") && !mcp_code.contains("path = \"../..\""),
-        "crates/redline-mcp must never depend on redline_lib — that link is \
-         exactly what the workspace split removed; share code by moving it \
-         into the proxy crate, not by importing the app"
+        !manifest_code.contains("redline-mcp") && !manifest_code.contains("redline_mcp"),
+        "src-tauri/Cargo.toml names redline-mcp again — the proxy retired; MCP is \
+         the daemon's `/mcp` mount"
+    );
+    assert!(
+        !std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/crates/redline-mcp")).exists(),
+        "crates/redline-mcp came back — MCP is served by polis-mcp at /mcp"
+    );
+    // …and `/mcp` IS served, by polis-mcp, in the daemon router (a source
+    // scrape of lib.rs, the same style as auth.rs's drift test).
+    assert!(
+        LIB_SRC.contains(".route(\"/mcp\", axum::routing::any_service(polis_mcp::http_service("),
+        "lib.rs no longer serves polis_mcp::http_service at /mcp (as a route, not a \
+         nest — see auth.rs) — an external session's `claude mcp add --transport \
+         http` would have nothing to reach"
     );
 }
 
@@ -178,16 +173,15 @@ fn core_has_no_native_deps_by_default() {
 #[test]
 fn polis_deps_stay_lean() {
     let packages = polis_packages();
-    for required in ["polis-core", "polis-store", "polis-embed", "polis-llm", "polis-memory", "polis-server"] {
+    for required in ["polis-core", "polis-store", "polis-embed", "polis-llm", "polis-memory", "polis-server", "polis-mcp"] {
         assert!(
             packages.iter().any(|p| p.name == required),
             "{required} is not in Redline's dependency graph — the guard would pass vacuously"
         );
     }
 
-    // 1. Nothing under polis-memory depends on the app. The same law
-    //    `mcp_proxy_stays_split_and_lean` holds for redline-mcp; here it is
-    //    what makes the crates extractable at all.
+    // 1. Nothing under polis-memory depends on the app — what makes the
+    //    crates extractable at all.
     for p in &packages {
         let name = &p.name;
         for line in manifest_code(&p.manifest).lines().map(str::trim) {
@@ -213,8 +207,9 @@ fn polis_deps_stay_lean() {
     );
 
     // 3. What this manifest ASKS for: `apple` on the two embedding crates and
-    //    nothing else — never a fattening feature.
-    const FATTENING: &[&str] = &["cli", "standalone", "anthropic", "openai-compat"];
+    //    nothing else — never a fattening feature (`remote` on polis-mcp is the
+    //    `polis` binary's HTTP client; this daemon serves MCP in-process).
+    const FATTENING: &[&str] = &["cli", "standalone", "anthropic", "openai-compat", "remote"];
     let mut asked = 0;
     for line in MANIFEST.lines().map(str::trim) {
         if !line.starts_with("polis-") || !line.contains('=') {

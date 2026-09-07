@@ -1086,7 +1086,8 @@ export function SettingsTab({
             training contract + <code>context-analysis</code> tools).
           </li>
           <li style={{ marginBottom: 4 }}>
-            <strong>Wire the MCP snippet</strong> below into the recruit's{" "}
+            <strong>Point the recruit at the daemon's MCP</strong> — the{" "}
+            <code>claude mcp add</code> line below, or the snippet into its{" "}
             <code>~/.claude.json</code>.
           </li>
           <li>
@@ -1166,11 +1167,28 @@ export function SettingsTab({
       <section>
         <div style={sectionTitle}>Query from an external Claude (MCP)</div>
         <p style={{ ...note, marginBottom: 8 }}>
-          Add this to <code>~/.claude.json</code> to give any external{" "}
-          <code>claude</code> session read-only tools over your Redline memory.
+          Redline serves MCP itself while it runs — streamable HTTP at{" "}
+          <code>{mcp?.url ?? "http://127.0.0.1:7676/mcp"}</code>, loopback only,
+          read-only tools (<code>memory_search</code> first). Any external{" "}
+          <code>claude</code> session adds it with one line, or with the
+          snippet in <code>~/.claude.json</code>. No binary to install.
         </p>
         {mcp && (
           <>
+            <pre
+              style={{
+                fontSize: 11,
+                fontFamily: "var(--font-mono, monospace)",
+                background: "var(--color-bg-elevated)",
+                border: "1px solid var(--color-rule)",
+                borderRadius: 3,
+                padding: 10,
+                overflowX: "auto",
+                marginBottom: 8,
+              }}
+            >
+              {mcp.command}
+            </pre>
             <pre
               style={{
                 fontSize: 11,
