@@ -13,6 +13,11 @@ use crate::binprobe;
 use serde_json::Value;
 use tokio::process::Command;
 
+// The stream-json line classifier is `polis_llm::claude_cli` since Session A4
+// of the Polis extraction; re-exported so every `crate::claude_proc::{…}`
+// import across the surfaces is unchanged.
+pub use polis_llm::claude_cli::{classify_line, StreamLine};
+
 /// Resolve the absolute path to the `claude` binary. A Finder-launched macOS
 /// app gets a minimal PATH with no shell rc, so `Command::new("claude")` can
 /// fail even though `claude` works in a terminal. Three layers:
@@ -394,91 +399,6 @@ pub async fn collect_turn_seated(
     let out = collect_turn(stdout, stderr).await;
     crate::meter::book(db, seat, &out.meter);
     out
-}
-
-/// What one `--output-format stream-json` line means to a process reader.
-/// See `docs/protocol-verification.md` Experiment (i) for the captured shapes.
-#[derive(Debug, PartialEq)]
-pub enum StreamLine {
-    /// `system`/`init` — carries the session id.
-    Init(String),
-    /// A `text_delta` chunk of the assistant's reply.
-    Delta(String),
-    /// `result` success — the authoritative final text + session id.
-    Final {
-        text: String,
-        session_id: Option<String>,
-    },
-    /// `result` with `is_error` — a failed turn.
-    Failed(String),
-    /// Everything else (status, hook events, the cumulative `assistant`
-    /// snapshot, thinking `signature_delta`s, …) — produces no output.
-    Ignore,
-}
-
-/// Classify a single parsed JSONL line. Pure — unit-tested against captured
-/// fixtures. The `text_delta` discrimination is load-bearing: thinking blocks
-/// also stream `content_block_delta`s, but with `delta.type == "signature_delta"`.
-pub fn classify_line(v: &Value) -> StreamLine {
-    match v.get("type").and_then(Value::as_str) {
-        Some("system") if v.get("subtype").and_then(Value::as_str) == Some("init") => {
-            match v.get("session_id").and_then(Value::as_str) {
-                Some(sid) => StreamLine::Init(sid.to_string()),
-                None => StreamLine::Ignore,
-            }
-        }
-        Some("stream_event") => {
-            let event = &v["event"];
-            let is_text_delta = event.get("type").and_then(Value::as_str)
-                == Some("content_block_delta")
-                && event
-                    .get("delta")
-                    .and_then(|d| d.get("type"))
-                    .and_then(Value::as_str)
-                    == Some("text_delta");
-            if is_text_delta {
-                match event["delta"].get("text").and_then(Value::as_str) {
-                    Some(text) if !text.is_empty() => StreamLine::Delta(text.to_string()),
-                    _ => StreamLine::Ignore,
-                }
-            } else {
-                StreamLine::Ignore
-            }
-        }
-        Some("result") => {
-            let session_id = v
-                .get("session_id")
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            if v.get("is_error").and_then(Value::as_bool) == Some(true) {
-                // The subtype fallback is a MACHINE KEY, not a message. When
-                // `result` is empty (the overload/capacity case) this yields
-                // the bare `error_during_execution`, and `is_transient` below
-                // matches on that literal substring — as does
-                // `seat::is_resume_failure`. Do NOT humanise it here: friendly
-                // text at the source silently breaks the classification for
-                // every surface. `StreamLine::Failed` stays raw; humanising
-                // happens at the persist/display boundary, in
-                // `describe_turn_error`. Guarded by `classify_result_error`.
-                let msg = v
-                    .get("result")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.trim().is_empty())
-                    .or_else(|| v.get("subtype").and_then(Value::as_str))
-                    .unwrap_or("claude reported an error")
-                    .to_string();
-                StreamLine::Failed(msg)
-            } else {
-                let text = v
-                    .get("result")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                StreamLine::Final { text, session_id }
-            }
-        }
-        _ => StreamLine::Ignore,
-    }
 }
 
 // --- Failed-turn vocabulary -------------------------------------------------
@@ -919,52 +839,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn classify_init_captures_session_id() {
-        let line = r#"{"type":"system","subtype":"init","session_id":"fork-abc","tools":["Read"]}"#;
-        assert_eq!(parse(line), StreamLine::Init("fork-abc".to_string()));
-    }
-
-    #[test]
-    fn classify_text_delta_is_a_delta() {
-        let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"hello"}}}"#;
-        assert_eq!(parse(line), StreamLine::Delta("hello".to_string()));
-    }
-
-    #[test]
-    fn classify_signature_delta_is_ignored() {
-        // Thinking blocks stream content_block_delta with a signature_delta —
-        // it must NOT render as assistant text.
-        let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EtgEg...=="}}}"#;
-        assert_eq!(parse(line), StreamLine::Ignore);
-    }
-
-    #[test]
-    fn classify_assistant_snapshot_is_ignored() {
-        // The cumulative `assistant` message would double-render against the
-        // text deltas — it must be ignored.
-        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}"#;
-        assert_eq!(parse(line), StreamLine::Ignore);
-    }
-
-    #[test]
-    fn classify_result_success() {
-        let line = r#"{"type":"result","subtype":"success","is_error":false,"result":"final answer","session_id":"fork-abc"}"#;
-        assert_eq!(
-            parse(line),
-            StreamLine::Final {
-                text: "final answer".to_string(),
-                session_id: Some("fork-abc".to_string()),
-            },
-        );
-    }
-
-    #[test]
-    fn classify_result_error() {
-        let line = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"boom"}"#;
-        assert_eq!(parse(line), StreamLine::Failed("boom".to_string()));
-    }
-
     /// `StreamLine::Failed` must stay RAW. `is_transient` matches the literal
     /// substring `error_during_execution`, and `seat::is_resume_failure` reads
     /// it too — humanising at the source silently breaks the classification for
@@ -1058,16 +932,4 @@ mod tests {
         assert_eq!(describe_run_error(generic), generic);
     }
 
-    #[test]
-    fn classify_misc_events_ignored() {
-        for line in [
-            r#"{"type":"system","subtype":"hook_started","hook_name":"SessionStart"}"#,
-            r#"{"type":"system","subtype":"status","status":"requesting"}"#,
-            r#"{"type":"rate_limit_event"}"#,
-            r#"{"type":"stream_event","event":{"type":"message_stop"}}"#,
-            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}"#,
-        ] {
-            assert_eq!(parse(line), StreamLine::Ignore, "should ignore: {line}");
-        }
-    }
 }

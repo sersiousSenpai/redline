@@ -26,6 +26,7 @@ pub mod bundle;
 pub mod coldness;
 pub mod dedup;
 pub mod gist;
+pub mod host;
 pub mod json;
 pub mod ledger;
 pub mod pack;
@@ -66,6 +67,7 @@ mod guards {
             ("coldness.rs", include_str!("coldness.rs")),
             ("dedup.rs", include_str!("dedup.rs")),
             ("gist.rs", include_str!("gist.rs")),
+            ("host.rs", include_str!("host.rs")),
             ("json.rs", include_str!("json.rs")),
             ("ledger.rs", include_str!("ledger.rs")),
             ("pack.rs", include_str!("pack.rs")),

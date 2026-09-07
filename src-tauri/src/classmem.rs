@@ -26,12 +26,9 @@
 //! machine-parsed the same way the mission orchestrator's is.
 
 use std::collections::HashMap;
-use std::process::Stdio;
 
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, BufReader};
 
-use crate::claude_proc::{classify_line, resolve_claude_bin, StreamLine};
 use crate::db::Database;
 use crate::ledger::{self, now_millis, DecisionInput, EventKind};
 
@@ -441,94 +438,46 @@ fn head_tail_1line(s: &str, head: usize, tail: usize) -> String {
     format!("{h} … {t}")
 }
 
-/// Run the classifier headless to completion and return its final text. The tool
-/// surface matches the browse/mission agents (curl bridge to the localhost
-/// daemon so it can read `/v1/memory/*`), with MCP stripped. The delta corpus is
-/// baked into `prompt` so the core loop doesn't depend on the agent curling.
+/// Run the classifier headless to completion and return its final text and
+/// session id. Since Session A4 of the Polis extraction the spawn is the
+/// memory agent's (`polis_host::agent()` — Redline's own `claude -p` with the
+/// same bridge block, seat flags and hook guard); the pass books what the
+/// turn spent through the usage sink on BOTH exits, as it always did.
 pub async fn run_classifier(
     db: &Database,
     cwd: &str,
     prompt: String,
 ) -> Result<(String, Option<String>), String> {
-    let claude_bin = tokio::task::spawn_blocking(resolve_claude_bin)
+    run_memory_agent(db, "classifier", cwd, prompt, Some("proposals"))
         .await
-        .map_err(|e| e.to_string())?;
-    // The classifier is a Redline-internal agent; headless `-p` fires the global
-    // UserPromptSubmit hook, so register its exact prompt with the dedup guard
-    // BEFORE spawning — otherwise the hook would capture the classifier's own
-    // (huge) prompt into the lake, and the next run would try to classify it.
-    ledger::register_agent_prompt(&prompt);
-    let args = crate::claude_proc::bridge_args("classifier", prompt, None);
-    let mut cmd = crate::claude_proc::claude_command_for_seat("classifier", &claude_bin);
-    let mut child = cmd
-        .current_dir(cwd)
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                format!(
-                    "could not find the `claude` CLI (looked for `{claude_bin}`). \
-                     Install Claude Code, or launch Redline from a terminal."
-                )
-            } else {
-                format!("failed to spawn the classifier: {e}")
-            }
-        })?;
-    let stdout = child.stdout.take().ok_or("classifier stdout unavailable")?;
-    let stderr = child.stderr.take().ok_or("classifier stderr unavailable")?;
+        .map(|reply| (reply.text, reply.session_id))
+}
 
-    let mut reader = BufReader::new(stdout).lines();
-    let mut session: Option<String> = None;
-    let mut final_text: Option<String> = None;
-    let mut errored: Option<String> = None;
-    let mut meter = crate::meter::TurnMeter::new();
-    while let Ok(Some(line)) = reader.next_line().await {
-        let Ok(v) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        // Second pass over the same value — the ONE accounting rule. A
-        // daemon seat has no pane to stream to, but it burns real tokens.
-        meter.observe(&v);
-        match classify_line(&v) {
-            StreamLine::Init(sid) => session = Some(sid),
-            StreamLine::Final { text, session_id } => {
-                final_text = Some(text);
-                if let Some(sid) = session_id {
-                    session = Some(sid);
-                }
-            }
-            StreamLine::Failed(msg) => errored = Some(msg),
-            _ => {}
+/// One memory-seat turn through the [`polis_llm::Agent`] seam, with the
+/// turn's cost booked on every exit. Shared by the classifier, the supersede
+/// verifier (both `classifier`) and the keeper's summarizer/observer.
+pub async fn run_memory_agent(
+    db: &Database,
+    seat: &str,
+    cwd: &str,
+    prompt: String,
+    response_key: Option<&'static str>,
+) -> Result<polis_llm::AgentReply, String> {
+    use polis_llm::UsageSink;
+    let agent = crate::polis_host::agent();
+    let mut req = polis_llm::AgentRequest::new(seat, prompt).cwd(cwd);
+    req.response_key = response_key;
+    let sink = crate::polis_host::RedlineUsage::new(db);
+    match agent.run(req).await {
+        Ok(reply) => {
+            sink.book(seat, &reply.usage);
+            Ok(reply)
         }
-    }
-    // Booked before any error return: a failed pass spent its input tokens.
-    crate::meter::book(db, "classifier", &meter);
-    // Drain stderr for diagnostics on failure.
-    let mut errbuf = String::new();
-    {
-        let mut elines = BufReader::new(stderr).lines();
-        while let Ok(Some(l)) = elines.next_line().await {
-            if errbuf.len() < 2000 {
-                errbuf.push_str(&l);
-                errbuf.push('\n');
-            }
+        Err(e) => {
+            // Booked before the error return: a failed pass spent its input tokens.
+            sink.book(seat, &e.usage);
+            Err(e.message)
         }
-    }
-    let _ = child.wait().await;
-    if let Some(msg) = errored {
-        return Err(msg);
-    }
-    match final_text {
-        Some(t) => Ok((t, session)),
-        None => Err(if errbuf.trim().is_empty() {
-            "classifier produced no output".to_string()
-        } else {
-            format!("classifier failed: {}", errbuf.trim())
-        }),
     }
 }
 

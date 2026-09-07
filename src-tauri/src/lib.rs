@@ -75,6 +75,7 @@ mod postboot;
 mod preflight;
 mod project;
 mod plan_meter;
+mod polis_host;
 mod pty;
 mod push;
 mod query;
@@ -13180,6 +13181,8 @@ pub fn run() {
             // (the axum auth middleware, chiefly). Installed once, right after
             // the store exists and before the daemon starts serving.
             db::install_friction_sink(store.database());
+            // The memory seats' agent (Session A4 of the Polis extraction).
+            polis_host::install_agent(Arc::new(polis_host::RedlineAgent));
 
             // Run watchers for the Orchestration Monitor. Rehydrate one per
             // still-live orchestrated run — the durable `orchestrations`

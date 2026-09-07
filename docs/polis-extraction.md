@@ -154,11 +154,56 @@ remain) and the same invariant — no bare unwrap on the shared lock, a
 poison-recovering accessor, a use floor — covers every polis-store module
 (`store_conn_is_never_locked_with_unwrap`).
 
+## Session A4 — `polis-llm` + Redline's host adapters (built 2026-09-06)
+
+The model behind the gardener becomes a trait, and Redline answers the host
+traits.
+
+**`polis-core::host`** (new, pure): `HostResolver` (label, thread stats,
+project roots, revision markdown/title, session status, decision evidence —
+`decision_evidence(seq)`, the real signature, not the plan's `(ref_kind,
+ref_id)` sketch), `IdleSignal`, `Clock`, `GardenerEvents` + `Change`
+(Memory / Catalog / Ledger / Embeddings), and `NoHost` / `SystemClock` for the
+standalone binary and tests. `IngestObserver` is deferred to A6 with the
+ingest route it observes (the handler is its only consumer).
+
+**`polis-llm`** (new): `Agent` (async, object-safe: `AgentRequest { seat,
+prompt, cwd, resume, response_key, max_output_bytes }` → `AgentReply { text,
+json, session_id, usage, clipped }` / `AgentError { kind, message, usage,
+session_id }` — usage rides the error too, so every exit can book),
+`Usage`, `UsageSink` / `NoopSink`, `finish` (the one clip + JSON-extract).
+Backends: `claude_cli::ClaudeCli` (`claude -p … stream-json`, adopts the
+terminal `result.usage`), `codex_cli::CodexCli` (`codex -s read-only -a
+never exec --json …`, resume by thread id, usage off `turn.completed`),
+and behind features `anthropic::AnthropicApi` (`POST /v1/messages`,
+`claude-opus-5`, thinking left at its default, server-side refusal
+fallbacks on, `refusal` → turn error) and `openai_compat::OpenAiCompat`
+(`/chat/completions`). `StreamLine` / `classify_line` moved here verbatim
+from `claude_proc.rs` with seven of their tests (`claude_proc` re-exports;
+the eighth test stays because it pins Redline's `is_transient`).
+
+**`src/polis_host.rs`** (new): `RedlineAgent` — the memory seats' spawn
+UNCHANGED (`resolve_claude_bin`, `register_agent_prompt`, `bridge_args`,
+`claude_command_for_seat`, `collect_turn`'s `TurnMeter` fold); `RedlineUsage`
+— books through `meter::book` via the new `TurnMeter::from_totals`, so the
+seat-burn row is the same four counters and `spawns = 1` (pinned by a
+round-trip test); `RedlineHost` over `Database`; `PtyIdle`; `WallClock`;
+`TauriEvents` (the three window events + the extension host's
+`ledger.changed`). `install_agent` at setup; `agent()` falls back to
+`RedlineAgent` so tests need no setup.
+
+**Rewired:** `classmem::run_classifier` and `keeper::run_keeper_summarizer`
+keep their signatures and go through one `classmem::run_memory_agent(db,
+seat, cwd, prompt, response_key)` — the classifier, the supersede verifier,
+compaction, observations and the shots caption (all five spawn sites) now
+pass through `Agent`, and every exit books through the sink. Error strings
+are seat-named (`keeper produced no output`, was `summarizer …`; nothing
+asserted on it). `ledger.rs`'s guard-arming scrape includes `polis_host.rs`.
+
 ## Sessions ahead
 
 | Session | Work | Gate |
 |---|---|---|
-| A4 | `polis-llm` (`Agent`/`Usage`/`UsageSink`; `claude_cli` incl. moved `classify_line`/`StreamLine`; `codex_cli`; `anthropic`/`openai_compat` behind features) + Redline `polis_host.rs` | classifier/keeper/verifier pass through `Agent`; meter bookings unchanged |
 | A5 | `polis-memory` facade: organize/verify over `&dyn Agent` + `HostResolver`, the retrieval half of `context.rs`, keeper memory passes as `gardener::step`, `bundle`/`mirror`, the `Polis` handle implementing `MemoryApi`, host-neutral `skills/classmemory/SKILL.md` | 20 keeper ticks on a real-DB copy behave as before |
 | A6 | `polis-server`: router over `dyn MemoryApi` + `ROUTES` + ingest/`IngestObserver` + hook installer; Redline merges it, `auth.rs` shrinks by the 11 memory rows, `docs/api-v1.md` regenerates | drift + parity tests green |
 | A7 | Guards (`core_has_no_native_deps_by_default`, `polis_deps_stay_lean`) + `git filter-repo` extraction → `polis-memory` repo; Redline on the git rev | Redline ≤ 27.4 MB from the git dep; new-repo CI green on 3 OSes |
@@ -170,6 +215,7 @@ cd src-tauri
 cargo test -p polis-core                         # 41 tests, no I/O
 cargo test -p polis-store                        # 9 tests: attach, adoption, WAL, cross-process append
 cargo build -p polis-embed --features apple      # the on-device providers (macOS)
+cargo test -p polis-llm --features anthropic,openai-compat   # every backend
 cargo test -p redline --test polis_store_guard   # Deref method-name guard
 REDLINE_REAL_DB=/tmp/real.db cargo test -p redline --lib real_db_attach -- --ignored --nocapture
 cargo test -p redline --test schema_golden       # the DDL referee

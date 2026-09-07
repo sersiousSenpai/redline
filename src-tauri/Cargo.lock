@@ -3309,6 +3309,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "polis-llm"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "polis-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "polis-store"
 version = "0.1.0"
 dependencies = [
@@ -3643,6 +3656,7 @@ dependencies = [
  "objc2-web-kit",
  "polis-core",
  "polis-embed",
+ "polis-llm",
  "polis-store",
  "portable-pty",
  "pulldown-cmark",

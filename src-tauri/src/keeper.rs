@@ -38,18 +38,15 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::process::Stdio;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::classmem::{self, auto_collapse_safe, subtree_stats, ClassNode};
-use crate::claude_proc::{classify_line, resolve_claude_bin, StreamLine};
 use crate::db::Database;
-use crate::ledger::{self, now_millis};
+use crate::ledger::now_millis;
 use crate::state::{AttachState, SessionStatus, SessionStore};
 
 // The deterministic gist and the tolerant JSON extractor live in `polis-core`
@@ -306,57 +303,18 @@ pub fn parse_compaction_actions(text: &str) -> Vec<CompactionAction> {
     out
 }
 
-/// Run the summarizer headless to completion, returning its final text. Same
-/// MCP-stripped `bridge_args` spawn as the classifier/Librarian; the corpus is
-/// baked into `prompt` so it never depends on the agent curling. Registers the
-/// prompt with the dedup guard first so the headless `-p` doesn't leak into the
-/// lake via the global hook.
+/// Run the summarizer headless to completion, returning its final text.
+/// Since Session A4 of the Polis extraction the spawn is the memory agent's
+/// (`polis_host::agent()`, seat `keeper`), through the same seam as the
+/// classifier; the turn's cost is booked on both exits as before.
 pub async fn run_keeper_summarizer(
     db: &Database,
     cwd: &str,
     prompt: String,
 ) -> Result<String, String> {
-    let claude_bin = tokio::task::spawn_blocking(resolve_claude_bin)
+    classmem::run_memory_agent(db, "keeper", cwd, prompt, None)
         .await
-        .map_err(|e| e.to_string())?;
-    ledger::register_agent_prompt(&prompt);
-    let args = crate::claude_proc::bridge_args("keeper", prompt, None);
-    let mut cmd = crate::claude_proc::claude_command_for_seat("keeper", &claude_bin);
-    let mut child = cmd
-        .current_dir(cwd)
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| format!("failed to spawn the keeper summarizer: {e}"))?;
-    let stdout = child.stdout.take().ok_or("summarizer stdout unavailable")?;
-    let mut reader = BufReader::new(stdout).lines();
-    let mut final_text: Option<String> = None;
-    let mut errored: Option<String> = None;
-    let mut meter = crate::meter::TurnMeter::new();
-    while let Ok(Some(line)) = reader.next_line().await {
-        let Ok(v) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        // Second pass over the same value — the ONE accounting rule. A
-        // daemon seat has no pane to stream to, but it burns real tokens.
-        meter.observe(&v);
-        match classify_line(&v) {
-            StreamLine::Final { text, .. } => final_text = Some(text),
-            StreamLine::Failed(msg) => errored = Some(msg),
-            _ => {}
-        }
-    }
-    let _ = child.wait().await;
-    // Booked before the error return below: a failed summarizer spent its
-    // input tokens exactly like a successful one.
-    crate::meter::book(db, "keeper", &meter);
-    if let Some(msg) = errored {
-        return Err(msg);
-    }
-    final_text.ok_or_else(|| "summarizer produced no output".to_string())
+        .map(|reply| reply.text)
 }
 
 // ---------------------------------------------------------------------------

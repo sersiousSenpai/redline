@@ -254,6 +254,30 @@ impl TurnMeter {
         Self::default()
     }
 
+    /// A meter carrying only totals — what a `polis_llm::Usage` becomes on
+    /// its way to `book`. `rev` is 1 when anything was spent or a model was
+    /// named, so `is_empty` and `total_tokens` answer exactly as they would
+    /// for the observed meter the usage came from.
+    pub fn from_totals(
+        model: Option<String>,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_tokens: u64,
+        cache_creation_tokens: u64,
+    ) -> Self {
+        let mut m = Self::default();
+        let spent = input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens > 0;
+        m.model = model;
+        m.input_tokens = input_tokens;
+        m.output_tokens = output_tokens;
+        m.cache_read_tokens = cache_read_tokens;
+        m.cache_creation_tokens = cache_creation_tokens;
+        if spent || m.model.is_some() {
+            m.rev = 1;
+        }
+        m
+    }
+
     /// Whether anything at all has been observed — an all-default meter is
     /// worth neither an event nor a `meter_json` row.
     pub fn is_empty(&self) -> bool {
@@ -1030,10 +1054,8 @@ mod tests {
     #[test]
     fn daemon_seats_fold_and_book() {
         const DAEMONS: &[(&str, &str, &str)] = &[
-            ("keeper.rs", include_str!("keeper.rs"), "keeper"),
             ("librarian.rs", include_str!("librarian.rs"), "librarian"),
             ("shipwright.rs", include_str!("shipwright.rs"), "shipwright"),
-            ("classmem.rs", include_str!("classmem.rs"), "classifier"),
             ("seatassign.rs", include_str!("seatassign.rs"), "seatassign"),
             ("ai_review.rs", include_str!("ai_review.rs"), "ai_review"),
             ("voice.rs", include_str!("voice.rs"), "voice"),
@@ -1049,6 +1071,48 @@ mod tests {
                     || src.contains(&format!("crate::meter::book(db, \"{seat}\"")),
                 "{name} folds a meter it never books to the `{seat}` seat"
             );
+        }
+    }
+
+    /// The memory seats (`classifier`, `keeper`: the classifier, the supersede
+    /// verifier, compaction, observations, the shots caption) spawn through
+    /// the `polis_llm::Agent` seam since Session A4 of the Polis extraction.
+    /// The fold and the booking moved with them and must both still happen:
+    /// `RedlineAgent` drains through `collect_turn` (the `TurnMeter` fold) and
+    /// hands the counters back as `Usage`; `run_memory_agent` books that usage
+    /// through `RedlineUsage` on BOTH exits; `RedlineUsage` books through
+    /// `meter::book`. A memory turn that skipped any link would spend tokens
+    /// nobody counted.
+    #[test]
+    fn memory_seats_fold_in_the_agent_and_book_in_the_runner() {
+        const HOST: &str = include_str!("polis_host.rs");
+        const CLASSMEM: &str = include_str!("classmem.rs");
+        const KEEPER: &str = include_str!("keeper.rs");
+        assert!(
+            HOST.contains("crate::claude_proc::collect_turn(stdout, stderr)"),
+            "RedlineAgent must drain through the meter-folding collector"
+        );
+        assert!(HOST.contains("usage_from_meter(&out.meter)"), "…and hand the folded counters back");
+        assert!(
+            HOST.contains("crate::meter::book(self.db, seat, &m)"),
+            "RedlineUsage must book through meter::book"
+        );
+        assert_eq!(
+            CLASSMEM.matches("sink.book(seat, &").count(),
+            2,
+            "run_memory_agent books on both exits — a failed pass spent its input tokens"
+        );
+        assert!(
+            CLASSMEM.contains("run_memory_agent(db, \"classifier\""),
+            "the classifier runs through the seam"
+        );
+        assert!(
+            KEEPER.contains("classmem::run_memory_agent(db, \"keeper\""),
+            "the keeper runs through the seam"
+        );
+        for (name, src) in [("classmem.rs", CLASSMEM), ("keeper.rs", KEEPER)] {
+            assert_eq!(src.matches("collect_turn(").count(), 0, "{name} must not drain a turn itself any more");
+            assert!(!src.contains("meter.observe(&v)"), "{name} must not fold a meter of its own — the agent does");
         }
     }
 

@@ -767,6 +767,7 @@ mod tests {
             ("linked.rs", include_str!("linked.rs")),
             ("memchat.rs", include_str!("memchat.rs")),
             ("mission.rs", include_str!("mission.rs")),
+            ("polis_host.rs", include_str!("polis_host.rs")),
             ("moot.rs", include_str!("moot.rs")),
             ("queue.rs", include_str!("queue.rs")),
             ("seatassign.rs", include_str!("seatassign.rs")),
