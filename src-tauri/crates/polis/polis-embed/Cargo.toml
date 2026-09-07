@@ -1,0 +1,30 @@
+[package]
+name = "polis-embed"
+version = "0.1.0"
+description = "Polis Memory embeddings: the Embedder trait, on-device Apple backends (feature `apple`), the vector cache, brute-force cosine search over the store's int8 index, and the bounded index tick."
+authors = ["Yusuf Al-Bazian"]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/sersiousSenpai/polis-memory"
+
+[features]
+default = []
+# Apple's on-device NLEmbedding / NLContextualEmbedding (macOS only): an OS
+# service, zero model bytes in the binary. Off by default so a Linux or Windows
+# build of the store never sees an objc2 crate; Redline turns it on.
+apple = ["dep:objc2", "dep:block2", "dep:objc2-foundation", "dep:objc2-natural-language"]
+
+[dependencies]
+polis-core = { path = "../polis-core" }
+polis-store = { path = "../polis-store" }
+tracing = "0.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# The same objc2 0.6 family Redline links (wry/tauri already carry it).
+objc2 = { version = "0.6", optional = true }
+block2 = { version = "0.6", optional = true }
+objc2-foundation = { version = "0.3.2", optional = true }
+# Default features off: only the two embedding APIs and the language constant.
+objc2-natural-language = { version = "0.3.2", default-features = false, features = [
+    "std", "NLEmbedding", "NLContextualEmbedding", "NLLanguage", "block2",
+], optional = true }

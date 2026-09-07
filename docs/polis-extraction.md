@@ -106,11 +106,58 @@ adopted, zero events, bodies/gists byte-unchanged, chain head unchanged, no
 schema object dropped/rebuilt/added besides `polis_meta`, chain green, reopen
 on the fast path). The A1 schema golden passed UNCHANGED after the move.
 
+## Session A3 — the store's methods + `polis-embed` (built 2026-09-06, three commits)
+
+~120 `Database` methods become `PolisStore` methods, verbatim except for
+`crate::` paths, in three commits by table group. Redline reaches every one
+through `Deref` and no call site changed. The pattern-slicing script that did
+it classified each `impl Database` method by the tables its SQL literals name;
+memory-only methods moved, host-only stayed, and the six mixed ones were
+decided by hand (below).
+
+| Commit | Store modules | Methods | Also |
+|---|---|---|---|
+| 1/3 | `prompts`, `compaction`, `chain`, `search` | 48 (+ `row_to_user_note`, `row_to_class_node` early, because search needs them) | polis-core gains the store-side row/outcome types (`ClassProposalRow`, `ClassRun`, `SupersessionOutcome`, `StagedOutcome`, `AppliedReorg`, `DECISION_KINDS`, `PromptFilters`, `NoteWrite`, `NoteOutcome`, `MirrorRow`) and `polis_core::vec` (chunking, int8 quantize/cosine/pack/unpack, with their six tests) |
+| 2/3 | `catalog`, `supersessions`, `notes`, `observations` | 52 (+ `new_node_id`, uuid is the store's) | the host's `append_ledger_event_locked` deleted with its last caller |
+| 3/3 | `browse`, `embeddings`, `session_tree`, `exports` | 20 | **`polis-embed`**: `Embedder`, `ProviderKind`, the Apple backends behind feature `apple`, `VectorCache`, `semantic_search(store, embedder, …)`, `index_tick(store, embedder, …)`; Redline's `embed.rs` keeps provider SELECTION (the `app_settings` cloud opt-in, `CloudEmbedder` on Redline's reqwest/tokio, `provider_for`) and two signature-preserving wrappers |
+
+Free items that moved with their methods: `GrepError`, `GREP_MIN_LITERAL`,
+`GREP_EXCERPT_CHARS`, `PROMPT_TEXT`, `ARCHIVE_ALGO`, `deflate_body`,
+`inflate_body`, the `VERIFY_*` anchor keys, `USER_NOTE_COLS` (all re-exported
+from `db.rs` where anything still names them).
+
+**Stayed on `Database`, and why** — the seams `HostResolver` (A4/A5) will
+formalize:
+
+| Method | Reason |
+|---|---|
+| `query_ledger_events` (the Timeline) | joins `surface_shots` (host) for a picture on non-browse events; calls the store's `filings_for_targets` / `row_to_ledger_event` through Deref |
+| `decision_event_context` | joins `comments`, `review_annotations`, `revisions` — the plan's `HostResolver::decision_evidence` |
+| `referenced_shot_keys` | `browse_events` × `surface_shots`; `shots.rs` stays in Redline |
+| `un_exported_approved_sessions` | `plan_exports` × `sessions` |
+| `seat_activity` | a host report that happens to count `class_runs` |
+| `reject_class_proposal` | records a friction row (host); the row delete is now the store's `delete_class_proposal` |
+| `clear_embeddings` | drops the in-memory vector cache (an embed-layer concern) around the store's `delete_all_embeddings` |
+| `snapshot_to` | `VACUUM INTO` of the WHOLE file — the host's backup; Polis gets its own in E1 |
+
+Semantic changes, each named: the incremental verify's `(lastSeq, headHash)`
+anchor lives in `polis_meta` (one full re-walk on first attach, then
+incremental); `accept_node_chain` takes the author it stamps instead of
+reading the host's `local_author()` (the store carries `author`, Redline
+passes `local_author()` at attach); the two `#[cfg(test)]` wrappers
+(`apply_supersession`, `subtree_has_pin`) are plain methods in the store
+because a crate's cfg(test) does not reach a host's tests.
+
+Guards followed the code: `classifier_delta_takes_no_query` reads the store's
+catalog source; the poison guard's `lock_conn()` floor is 200 (289 sites
+remain) and the same invariant — no bare unwrap on the shared lock, a
+poison-recovering accessor, a use floor — covers every polis-store module
+(`store_conn_is_never_locked_with_unwrap`).
+
 ## Sessions ahead
 
 | Session | Work | Gate |
 |---|---|---|
-| A3 | `polis-store` methods in three commits by group; `record.rs`; `polis-embed` (`embed.rs` + `apple` feature) | green after each commit |
 | A4 | `polis-llm` (`Agent`/`Usage`/`UsageSink`; `claude_cli` incl. moved `classify_line`/`StreamLine`; `codex_cli`; `anthropic`/`openai_compat` behind features) + Redline `polis_host.rs` | classifier/keeper/verifier pass through `Agent`; meter bookings unchanged |
 | A5 | `polis-memory` facade: organize/verify over `&dyn Agent` + `HostResolver`, the retrieval half of `context.rs`, keeper memory passes as `gardener::step`, `bundle`/`mirror`, the `Polis` handle implementing `MemoryApi`, host-neutral `skills/classmemory/SKILL.md` | 20 keeper ticks on a real-DB copy behave as before |
 | A6 | `polis-server`: router over `dyn MemoryApi` + `ROUTES` + ingest/`IngestObserver` + hook installer; Redline merges it, `auth.rs` shrinks by the 11 memory rows, `docs/api-v1.md` regenerates | drift + parity tests green |
@@ -122,6 +169,7 @@ on the fast path). The A1 schema golden passed UNCHANGED after the move.
 cd src-tauri
 cargo test -p polis-core                         # 41 tests, no I/O
 cargo test -p polis-store                        # 9 tests: attach, adoption, WAL, cross-process append
+cargo build -p polis-embed --features apple      # the on-device providers (macOS)
 cargo test -p redline --test polis_store_guard   # Deref method-name guard
 REDLINE_REAL_DB=/tmp/real.db cargo test -p redline --lib real_db_attach -- --ignored --nocapture
 cargo test -p redline --test schema_golden       # the DDL referee

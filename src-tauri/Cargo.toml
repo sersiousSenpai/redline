@@ -28,6 +28,7 @@ members = [
     "crates/redline-extension-sdk",
     "crates/polis/polis-core",
     "crates/polis/polis-store",
+    "crates/polis/polis-embed",
 ]
 default-members = [
     ".",
@@ -36,6 +37,7 @@ default-members = [
     "crates/redline-extension-sdk",
     "crates/polis/polis-core",
     "crates/polis/polis-store",
+    "crates/polis/polis-embed",
 ]
 
 [lib]
@@ -123,6 +125,10 @@ polis-core = { path = "crates/polis/polis-core" }
 # The memory schema + its own `polis_meta` versioning + the cross-process-safe
 # chain append (A2). Same rusqlite as the app, so one SQLite is linked.
 polis-store = { path = "crates/polis/polis-store" }
+# The semantic arm (A3): providers, vector cache, search, index tick. `apple`
+# is the on-device backend this app has always used; the objc2 crates it needs
+# were already in the graph (below), so the feature costs no new build edge.
+polis-embed = { path = "crates/polis/polis-embed", features = ["apple"] }
 # Deflate for the compaction archive (`prompt_archive`): a cold compaction
 # releases a body at ~59:1 and used to be irrecoverable. Already present in the
 # dependency tree (via `png` → `tauri-utils`), so naming it here is a visibility

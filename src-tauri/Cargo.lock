@@ -3296,6 +3296,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "polis-embed"
+version = "0.1.0"
+dependencies = [
+ "block2",
+ "objc2",
+ "objc2-foundation",
+ "objc2-natural-language",
+ "polis-core",
+ "polis-store",
+ "tracing",
+]
+
+[[package]]
 name = "polis-store"
 version = "0.1.0"
 dependencies = [
@@ -3629,6 +3642,7 @@ dependencies = [
  "objc2-speech",
  "objc2-web-kit",
  "polis-core",
+ "polis-embed",
  "polis-store",
  "portable-pty",
  "pulldown-cmark",

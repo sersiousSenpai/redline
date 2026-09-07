@@ -73,6 +73,10 @@ fn store_conn_is_never_locked_with_unwrap() {
         ("prompts.rs", include_str!("../crates/polis/polis-store/src/prompts.rs")),
         ("search.rs", include_str!("../crates/polis/polis-store/src/search.rs")),
         ("supersessions.rs", include_str!("../crates/polis/polis-store/src/supersessions.rs")),
+        ("browse.rs", include_str!("../crates/polis/polis-store/src/browse.rs")),
+        ("embeddings.rs", include_str!("../crates/polis/polis-store/src/embeddings.rs")),
+        ("exports.rs", include_str!("../crates/polis/polis-store/src/exports.rs")),
+        ("session_tree.rs", include_str!("../crates/polis/polis-store/src/session_tree.rs")),
     ];
     let mut uses = 0;
     for (name, src) in STORE {
