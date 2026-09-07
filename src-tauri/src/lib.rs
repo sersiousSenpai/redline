@@ -1366,6 +1366,17 @@ struct AppState {
     /// from the frontend by `surface_set_active`. Backs `GET /v1/surface/active`
     /// and the Companion's grounding.
     active_surface: ActiveSurface,
+    /// Polis Memory's router state (Session A6 of the extraction): the owned
+    /// `MemoryApi` handle, Redline's ingest observer, and the event bus its
+    /// writes report on. The `FromRef` below is what lets
+    /// `polis_server::router()` merge into this state.
+    polis: polis_server::PolisState,
+}
+
+impl axum::extract::FromRef<AppState> for polis_server::PolisState {
+    fn from_ref(state: &AppState) -> Self {
+        state.polis.clone()
+    }
 }
 
 /// The active mission's identity + goal, mirrored from the frontend (which owns
@@ -2346,18 +2357,11 @@ fn snapshot_database(db: &db::Database, data_dir: &std::path::Path, keep: usize)
     }
 }
 
-/// Extract the submitted prompt text from a UserPromptSubmit payload. Empirical:
-/// claude 2.1.199 delivers it at `prompt` (verified via the hook rig; see
-/// docs/protocol-verification.md). We accept `user_input` too so a future key
-/// rename degrades gracefully rather than silently capturing empties.
-fn ingest_prompt_text(v: &serde_json::Value) -> String {
-    v.get("prompt")
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| v.get("user_input").and_then(serde_json::Value::as_str))
-        .unwrap_or("")
-        .trim()
-        .to_string()
-}
+// The capture route and its payload reader live in `polis_server::ingest`
+// since Session A6 of the Polis extraction; the reader is re-imported here
+// so the golden payload test below still names it.
+#[allow(unused_imports)]
+use polis_server::ingest_prompt_text;
 
 /// How much of a transcript's tail the model backfill reads. Transcripts reach
 /// many MB; the newest assistant message is what carries the answer, so the
@@ -2454,251 +2458,13 @@ fn classify_prompt_origin(db: &db::Database, cwd: Option<&str>) -> ledger::Origi
     ledger::Origin::External
 }
 
-/// `POST /v1/prompts/ingest` — the UserPromptSubmit capture hook's sink. Records
-/// interactive prompts (PTY plan sessions + external sessions) into the ledger.
-/// Fail-open: any error returns 200 so the hook never blocks prompt submission.
-async fn handle_prompts_ingest(
-    State(app_state): State<AppState>,
-    headers: axum::http::HeaderMap,
-    body: axum::body::Bytes,
-) -> axum::response::Response {
-    // 64KB cap (reject oversized payloads without parsing).
-    if body.len() > 64 * 1024 {
-        return (StatusCode::OK, Json(serde_json::json!({ "skipped": "too_large" })))
-            .into_response();
-    }
-    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body) else {
-        return (StatusCode::OK, Json(serde_json::json!({ "skipped": "unparseable" })))
-            .into_response();
-    };
-    let prompt = ingest_prompt_text(&v);
-    if prompt.is_empty() {
-        return (StatusCode::OK, Json(serde_json::json!({ "skipped": "empty" }))).into_response();
-    }
-    let claude_session_id = v
-        .get("session_id")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
-    let cwd = v
-        .get("cwd")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
-
-    // A headless `claude -p` fires this hook too, so Redline's own spawned
-    // agents would be double-captured (Rust site + hook). The Rust site is
-    // authoritative; it registers the body before spawn, so claim-and-skip here.
-    //
-    // The header is the primary mechanism and the hash guard is the fallback,
-    // not the other way round: the guard can only recognize a body Rust predicts
-    // byte-exactly, once, within 300s, while the header rides the spawn's own
-    // environment and so also covers what an agent composes for itself mid-run
-    // (sub-agent Task prompts, retries, resumed turns) — the residue that put
-    // 4.32 MB of Redline's own instruction text into the searchable lake.
-    //
-    // Both are evaluated, and `claim_agent_prompt` runs FIRST and unconditionally
-    // so the registration is consumed either way; the handoffs below (draft →
-    // session, orchestration → run monitor) hang off this same branch and must
-    // run for a header-marked spawn too — the overnight queue's orchestrator is
-    // spawned through `claude_command_for_seat`, so it arrives here carrying the
-    // header, and skipping early would cost it its `running` beacon and its
-    // run-watcher anchor.
-    let agent_seat = headers
-        .get(hook::CAPTURE_AGENT_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-
-    // A restore trigger, answered with the protocol the visible prompt no
-    // longer carries. This is the ONE fire per restore where that is true:
-    // the metadata rides the resumed `claude`'s environment, so it is on every
-    // prompt that session ever submits, and only the arming — placed by the
-    // click that dispatched the command — says which of them Redline wrote.
-    // Claiming it here is therefore both the answer and the exclusion: the
-    // trigger never reaches the lake, and the reviewer's own next prompt in
-    // that same terminal is captured byte-for-byte as it always was.
-    if let Some(body) = restore_context::answer(&headers, &prompt) {
-        return (StatusCode::OK, Json(body)).into_response();
-    }
-
-    let bh = ledger::body_hash(&prompt);
-    let claimed = ledger::claim_agent_prompt(&bh);
-    // Every seat but one means "machine text, skip it". The restore seat is the
-    // exception, and only because its variable outlives its one prompt: the
-    // block above already claimed the trigger, so a `restore`-seated fire that
-    // reaches here is the reviewer typing in a terminal Redline happened to
-    // open for them. Suppressing it would quietly delete their prompts from
-    // their own lake.
-    let seat_suppresses = agent_seat
-        .as_deref()
-        .is_some_and(|s| s != restore_context::RESTORE_SEAT);
-    if claimed || seat_suppresses {
-        // The draft→launched-session handoff: this hook fire is the first
-        // moment the spawned session's claude id is known. When the skipped
-        // body was a drafter launch, link the new session under its draft —
-        // the seam the whole temporal hierarchy hinges on.
-        if let Some(claim) = ledger::claim_plan_launch(&bh) {
-            if let Some(sid) = claude_session_id.as_deref().filter(|s| !s.is_empty()) {
-                let db = app_state.store.database();
-                // Bind the launch-time prompt row (recorded with no claude
-                // session — claude hadn't spawned) to the session that now runs
-                // it, then let the transcript stamp its model. This is the seam
-                // that makes launched prompts reachable by the model backfill at
-                // all, and it applies to every door: only the doors that own a
-                // thread — a Drafter document, or a chat that graduated — carry
-                // one to bind through.
-                // The row's own hash when the door recorded something other
-                // than what it typed (Combine), otherwise the guard key —
-                // `None` is "same as the guard key", so the four original
-                // doors resolve to exactly `bh` as before. Applied in BOTH
-                // arms so the two can never drift, even though only the
-                // threadless arm is reachable from Combine today.
-                let row_key = claim.row_hash.as_deref().unwrap_or(&bh);
-                let bound = match claim.thread.as_ref() {
-                    Some((kind, id)) => {
-                        if let Err(e) = ledger::record_session_link(&db, "session", sid, kind, id) {
-                            tracing::warn!(error = %e, kind = %kind, "failed to link launched session to its origin thread");
-                        }
-                        db.bind_threaded_prompt_session(row_key, kind, id, sid)
-                    }
-                    None => db.bind_launch_prompt_session(row_key, sid),
-                };
-                if let Err(e) = bound {
-                    tracing::warn!(
-                        error = %e, origin = %claim.origin,
-                        "failed to bind launch prompt to its session"
-                    );
-                }
-                backfill_from_transcript(&db, &v, sid);
-            }
-        }
-        // The Orchestrate handoff, same seam: when the skipped body was an
-        // Orchestrate launch, this hook fire is the first moment the
-        // orchestrator session's claude id is known — link it under the plan
-        // session it executes, and flip the run chip to `running` (the claim
-        // itself proves the orchestrator came up, so the beacon fires even if
-        // the payload carried no session id for the lineage row).
-        if let Some(plan_sid) = ledger::claim_orchestration_prompt(&bh) {
-            if let Some(sid) = claude_session_id.as_deref().filter(|s| !s.is_empty()) {
-                let db = app_state.store.database();
-                if let Err(e) =
-                    ledger::record_session_link(&db, "session", sid, "session", &plan_sid)
-                {
-                    tracing::warn!(error = %e, "failed to link orchestrator session to its plan session");
-                }
-                // The one moment the orchestrator's transcript path is in
-                // hand: anchor the run for the live monitor and start its
-                // watcher. Runs execute in arbitrary project dirs — the path
-                // must come from the payload, never be assumed under a
-                // Redline project key.
-                if let Some(tp) = v
-                    .get("transcript_path")
-                    .and_then(serde_json::Value::as_str)
-                    .filter(|p| !p.is_empty())
-                {
-                    // Fold the launch-time terminal stash into the durable
-                    // row (B5) — the one moment the row exists to hold it.
-                    let launch_terminal = app_state
-                        .app_handle
-                        .try_state::<LaunchedTerminals>()
-                        .and_then(|l| l.get(&plan_sid));
-                    match db.upsert_orchestration(
-                        &plan_sid,
-                        sid,
-                        tp,
-                        cwd.as_deref(),
-                        launch_terminal.as_deref(),
-                    ) {
-                        Ok(()) => runwatch::start(
-                            &app_state.app_handle,
-                            app_state.store.clone(),
-                            plan_sid.clone(),
-                        ),
-                        Err(e) => {
-                            tracing::warn!(error = %e, "failed to anchor orchestration for the run monitor")
-                        }
-                    }
-                }
-            }
-            advance_run_state(&app_state.app_handle, &app_state.store, &plan_sid, "running");
-        }
-        return (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "skipped": "agent_dup",
-                "by": if claimed { "guard" } else { "header" },
-                "seat": agent_seat,
-            })),
-        )
-            .into_response();
-    }
-
-    let db = app_state.store.database();
-    let origin = classify_prompt_origin(&db, cwd.as_deref());
-    if origin == ledger::Origin::External {
-        // External-session capture toggle (default on).
-        let capture_external = db
-            .get_setting("redline.capture.externalSessions")
-            .map(|val| val != "false")
-            .unwrap_or(true);
-        if !capture_external {
-            return (StatusCode::OK, Json(serde_json::json!({ "skipped": "external_off" })))
-                .into_response();
-        }
-    }
-    let surface = if origin == ledger::Origin::Redline {
-        "pty"
-    } else {
-        "external"
-    };
-    let sid_for_backfill = claude_session_id.clone();
-    let input = ledger::PromptInput {
-        source: ledger::PromptSource::Hook,
-        origin,
-        surface: surface.to_string(),
-        // The CLI fires `UserPromptSubmit` for its own injections too — a
-        // `<task-notification>` or `<system-reminder>` arrives here shaped
-        // exactly like a keystroke, and 109 of them were 1.78 MB of the lake.
-        // They stay recorded (a task notification reports work the user's
-        // session actually did) but they are not the user talking, and the
-        // Timeline's role facet defaults to the user.
-        role: ledger::CorpusRole::classify_captured(&prompt),
-        user_text: None,
-        session_id: None,
-        claude_session_id,
-        mission_id: None,
-        project_path: cwd,
-        body: prompt,
-        thread: None,
-        author: None, // hook-captured prompts are the human's own
-        model: None,  // interactive sessions carry no seat; the transcript backfill stamps it
-        model_source: None,
-    };
-    let response = match ledger::record_prompt(&db, input) {
-        Ok(Some(seq)) => {
-            let _ = app_state.app_handle.emit("ledger-changed", ());
-            extension_host::publish(
-                ext_events::LEDGER_CHANGED,
-                &ext_events::LedgerChanged { ts_ms: extension_host::now_ms() },
-            );
-            (StatusCode::CREATED, Json(serde_json::json!({ "seq": seq }))).into_response()
-        }
-        Ok(None) => {
-            (StatusCode::OK, Json(serde_json::json!({ "skipped": "dup" }))).into_response()
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "prompt ingest failed");
-            (StatusCode::OK, Json(serde_json::json!({ "skipped": "error" }))).into_response()
-        }
-    };
-    // After the row exists: stamp this session's still-unstamped prompts from
-    // the transcript tail. A brand-new session has no assistant turn yet — its
-    // model lands on the next fire.
-    if let Some(sid) = sid_for_backfill.as_deref().filter(|s| !s.is_empty()) {
-        backfill_from_transcript(&db, &v, sid);
-    }
-    response
-}
+// `POST /v1/prompts/ingest` is `polis_server::ingest::handle_prompts_ingest`
+// (Session A6): the route's own contract — the size cap, the payload shape, the
+// consume-once agent-prompt guard, the row, the response bodies — is the
+// server's; everything in it that was Redline's (the restore-trigger answer,
+// the seat header, the launch and orchestration handoffs, the project
+// registry, the capture setting, the transcript backfill) is
+// `polis_host::RedlineIngest`, the route's `IngestObserver`.
 
 /// Look up a file of the app's built frontend (`dist/`). In a bundled release
 /// the whole dist tree is compiled into the binary (`frontendDist`), so this
@@ -3278,9 +3044,6 @@ async fn run_server(state: AppState) {
         .route("/assets/*path", get(handle_root_asset))
         .route("/v1/plan", post(handle_plan))
         .route("/v1/codex/stop", post(handle_codex_stop))
-        // Polis prompt store (Phase 1): the global UserPromptSubmit capture hook
-        // POSTs its stdin payload here. Fail-open by design — never 500s the hook.
-        .route("/v1/prompts/ingest", post(handle_prompts_ingest))
         // Agent-in-doc (M4): the per-user agent's surface — read the plan's
         // block structure, post a tracked suggestion against a block id.
         .route("/v1/sessions/:session_id/plan", get(handle_get_latest_plan))
@@ -3346,17 +3109,16 @@ async fn run_server(state: AppState) {
         // Both ride the same pre-authorized `curl` allow as `/v1/browser/*`.
         .route("/v1/code/projects", get(handle_code_projects))
         .route("/v1/code/git", get(handle_code_git))
-        // ClassMemory (Phase 2): read-only catalog access for retrieval agents
-        // (the class-router walk) + a staging-only proposals sink. All ride the
-        // same pre-authorized `curl` allow. Nothing here accepts or moves a node
-        // — POST /proposals only stages reviewable rows.
-        .route("/v1/memory/tree", get(handle_memory_tree))
-        .route("/v1/memory/node/:id", get(handle_memory_node))
-        .route("/v1/memory/prompts", get(handle_memory_prompts))
-        // The batched read: one call in place of the tree→node→search walk.
-        .route("/v1/memory/answer-pack", get(handle_memory_answer_pack))
-        .route("/v1/memory/grep", get(handle_memory_grep))
-        .route("/v1/memory/proposals", post(handle_memory_proposals))
+        // Polis Memory (Session A6 of the extraction): the capture route
+        // (`/v1/prompts/ingest`), the ClassMemory reads + proposals sink
+        // (`/v1/memory/*`), the plan's memory writes, and the lake's context
+        // reads (`/v1/context/{prompts,stats,browse/search,threads,tree}`)
+        // are `polis_server::router()`'s — one router shared with the
+        // standalone `polis` daemon, served here under THIS daemon's auth:
+        // every polis row is mapped into `auth::all_routes()` (Redline's own
+        // rows stay in `ROUTE_TABLE`), so the fail-closed rule holds across
+        // the merge. All still ride the same pre-authorized `curl` allow.
+        .merge(polis_server::router())
         // Context access (Phase 3): the Librarian agent's friction digest —
         // ground-truth counts/staleness (backlog, held proposals, stalled
         // reviews, bulging branches). Read-only; rides the same `curl` allow.
@@ -3365,22 +3127,13 @@ async fn run_server(state: AppState) {
         // Companion / voice agent / MCP surface. The Shipwright itself never
         // depends on this: its digest is baked into the spawn prompt.
         .route("/v1/context/codehealth", get(handle_context_codehealth))
-        // Context access (Phase 4): read-only query surface over the lake for
-        // agents (internal via curl, external via the MCP proxy). Filtered
-        // prompts, one session's full history, and aggregate stats. All bounded,
-        // injection-safe (`q` is a bound LIKE), and ride the same `curl` allow.
-        .route("/v1/context/prompts", get(handle_context_prompts))
+        // Context access (Phase 4): one plan session's full history — plan
+        // revisions + comment threads are Redline's own tables, so this read
+        // stays here; the lake reads beside it moved into the polis router.
         .route(
             "/v1/context/sessions/:id/history",
             get(handle_context_session_history),
         )
-        .route("/v1/context/stats", get(handle_context_stats))
-        .route("/v1/context/browse/search", get(handle_browse_search))
-        // Memory-by-session (spine): generic read-only thread fetch across the
-        // per-surface message tables, and the session-tree walk (a node with
-        // its parent + child digests). Companion + external MCP consumers.
-        .route("/v1/context/threads/:kind/:id", get(handle_context_thread))
-        .route("/v1/context/tree/:kind/:id", get(handle_context_tree))
         // Where the user is right now (mirrored ActiveSurface cell) and the
         // context-journal delta — the Companion's passive-awareness reads.
         .route("/v1/surface/active", get(handle_surface_active))
@@ -3432,7 +3185,7 @@ async fn run_server(state: AppState) {
         .route("/v1/liveness", get(handle_liveness))
         .route("/v1/admin/shutdown", post(handle_admin_shutdown))
         // Control-plane auth (Shardplate Phase 2): every request is checked
-        // against the frozen v1 contract in `auth::ROUTE_TABLE` — mutating
+        // against the frozen v1 contract in `auth::all_routes()` — mutating
         // routes demand the per-boot bearer token (or a scoped extension
         // token), hook-contract and read-only routes pass. Fails closed on
         // routes missing from the table, so registering a route here without
@@ -5534,44 +5287,19 @@ async fn handle_code_git(
     }
 }
 
-// --- ClassMemory routes (Phase 2) ------------------------------------------
-
-/// A tree node as returned to a retrieval agent / the pane: the node plus its
-/// total link count (leaf-count badge).
-// The tree/link view rows are `polis-core` API types (Session A1 of the Polis
-// extraction) — the same shape the MCP tools and the generated clients read.
-
-#[derive(Deserialize)]
-struct MemoryTreeQ {
-    project: Option<String>,
-    root: Option<String>,
-}
-
-/// `GET /v1/memory/tree?project=&root=` — the accepted (and proposed) class tree,
-/// flat with link counts (the caller/FE builds the hierarchy). Scoped to a single
-/// root subtree when `root=<id>` or `project=<path>` is given. Read-only.
-async fn handle_memory_tree(
-    State(app_state): State<AppState>,
-    Query(q): Query<MemoryTreeQ>,
-) -> axum::response::Response {
-    let db = app_state.store.database();
-    match polis_memory::retrieval::tree_view(
-        &polis_host::polis_for(&db),
-        q.root.as_deref(),
-        q.project.as_deref(),
-    ) {
-        Ok(views) => Json(serde_json::json!({ "nodes": views })).into_response(),
-        Err(e) => browser_error_response(e.to_string()),
-    }
-}
+// --- ClassMemory (Phase 2) -------------------------------------------------
+// The routes (`/v1/memory/*` and the lake's `/v1/context/*` reads) are
+// `polis_server::routes` since Session A6 of the Polis extraction; what stays
+// here is the Tauri command's node-view helper.
 
 /// Ids of `root` and everything beneath it.
 
 /// A link with a resolved display label + supersession status.
 
-/// Shared node-view assembly for the curl-bridge route AND the Tauri command —
-/// one shape (`{node, children, links, observations}`) so the retrieval agents
-/// and the pane can never drift. `Ok(None)` = no such node.
+/// Node-view assembly for the Tauri command (the curl-bridge route is
+/// `polis_server`'s, over the same facade view) — one shape
+/// (`{node, children, links, observations}`) so the retrieval agents and the
+/// pane can never drift. `Ok(None)` = no such node.
 fn build_node_view(
     db: &crate::db::Database,
     id: &str,
@@ -5582,165 +5310,6 @@ fn build_node_view(
     polis_memory::retrieval::node_view(&polis_host::polis_for(db), id)
         .map(|v| v.map(|n| serde_json::to_value(n).unwrap_or(serde_json::Value::Null)))
         .map_err(|e| e.to_string())
-}
-
-/// `GET /v1/memory/node/:id` — one node, its children, its links (pointers
-/// into the lake, with resolved labels + supersession status), and its
-/// observations. The retrieval agent's descend step.
-async fn handle_memory_node(
-    State(app_state): State<AppState>,
-    Path(id): Path<String>,
-) -> axum::response::Response {
-    let db = app_state.store.database();
-    match build_node_view(&db, &id) {
-        Ok(Some(view)) => Json(view).into_response(),
-        Ok(None) => (StatusCode::NOT_FOUND, "no such class node").into_response(),
-        Err(e) => browser_error_response(e),
-    }
-}
-
-#[derive(Deserialize)]
-struct AnswerPackQ {
-    q: Option<String>,
-    node: Option<String>,
-    limit: Option<i64>,
-}
-
-/// `GET /v1/memory/answer-pack?q=&node=&limit=` — the retrieval agent's ONE
-/// call. Resolves the question to a class node (explicitly via `?node=`, else
-/// by best title match) and returns that node's subtree, links (labelled, with
-/// `supersededBy`) and observations, together with the user's matching notes,
-/// matching lake prompts and matching browsed pages.
-///
-/// It replaces a 5–7 turn walk, so it must never send the agent back into one:
-/// the lexical arms are populated from `?q=` regardless of whether a node
-/// resolved, and a stale `?node=` degrades to the best match instead of an
-/// empty answer. Read-only, byte-bounded.
-async fn handle_memory_answer_pack(
-    State(app_state): State<AppState>,
-    Query(q): Query<AnswerPackQ>,
-) -> axum::response::Response {
-    let db = app_state.store.database();
-    let limit = context::clamp_answer_pack_limit(q.limit);
-    // Assembly touches several tables under the DB lock — off the async
-    // executor's thread, like every other heavy bridge read.
-    let pack = tokio::task::spawn_blocking(move || {
-        context::build_answer_pack(&db, q.q.as_deref(), q.node.as_deref(), limit)
-    })
-    .await;
-    match pack {
-        Ok(pack) => Json(pack).into_response(),
-        Err(e) => browser_error_response(format!("answer-pack assembly failed: {e}")),
-    }
-}
-
-#[derive(Deserialize)]
-struct MemoryGrepQ {
-    q: Option<String>,
-    re: Option<String>,
-    case: Option<String>,
-    scope: Option<String>,
-    limit: Option<i64>,
-}
-
-/// `GET /v1/memory/grep?q=&re=&case=&scope=&limit=` — literal and regex search
-/// over the record, for the things tokenization cannot reach: flags
-/// (`--allowedTools`), paths (`src-tauri/src/db.rs`), error strings,
-/// attributes (`#[serde(rename_all)]`).
-///
-/// `q` is a substring answered from a trigram index and must be at least
-/// `GREP_MIN_LITERAL` characters — shorter is refused by name rather than
-/// silently turned into a scan. `re` is applied in Rust to what the index
-/// returned, so a pathological pattern costs one pass over the candidates
-/// instead of a walk of the corpus under the DB lock.
-///
-/// The bridge allow-list needs no change: `Bash(curl -s
-/// http://127.0.0.1:7676/*)` already covers this in all three quoting variants
-/// (`claude_proc::BRIDGE_INVARIANT_ARGS`).
-async fn handle_memory_grep(
-    State(app_state): State<AppState>,
-    Query(q): Query<MemoryGrepQ>,
-) -> axum::response::Response {
-    let db = app_state.store.database();
-    let literal = q.q.unwrap_or_default();
-    let case_sensitive = matches!(q.case.as_deref(), Some("1") | Some("true"));
-    let scope = db::GrepScope::parse(q.scope.as_deref());
-    let limit = q.limit.unwrap_or(30);
-    let re = q.re;
-    let hits = tokio::task::spawn_blocking(move || {
-        db.grep_memory(&literal, re.as_deref(), case_sensitive, scope, limit)
-    })
-    .await;
-    match hits {
-        Ok(Ok(hits)) => Json(serde_json::json!({ "hits": hits })).into_response(),
-        // A refusal is a 400 WITH its reason in the body: the agent's next move
-        // ("lengthen the needle") is only available if it can read why.
-        Ok(Err(e)) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-        Err(e) => browser_error_response(format!("grep failed: {e}")),
-    }
-}
-
-#[derive(Deserialize)]
-struct MemoryPromptsQ {
-    since_seq: Option<i64>,
-    limit: Option<i64>,
-}
-
-/// `GET /v1/memory/prompts?since_seq=&limit=` — the lake delta (prompts +
-/// decision events) since a seq, oldest first. The classifier's delta input;
-/// also a general context read. Bounded.
-async fn handle_memory_prompts(
-    State(app_state): State<AppState>,
-    Query(q): Query<MemoryPromptsQ>,
-) -> axum::response::Response {
-    let db = app_state.store.database();
-    let limit = q.limit.unwrap_or(200).clamp(1, classmem::MAX_DELTA_ITEMS as i64);
-    let since = q.since_seq.unwrap_or(0).max(0);
-    match db.list_lake_items_since(since, limit) {
-        Ok(mut items) => {
-            // Byte-budget the response, the way `/v1/context/prompts` does.
-            // The item count was capped but the BYTES were not, and this
-            // route's body column is `COALESCE(p.body, be.text, un.text)` —
-            // `be.text` is a whole normalized page, so 400 browse items could
-            // serialize megabytes under the DB lock. The route is live on the
-            // MCP proxy, so a remote caller could ask for that at will.
-            let kept = context::budgeted_item_count(items.iter().map(|i| i.body.as_deref()));
-            items.truncate(kept);
-            Json(serde_json::json!({ "items": items })).into_response()
-        }
-        Err(e) => browser_error_response(e.to_string()),
-    }
-}
-
-/// `POST /v1/memory/proposals` {proposals:[…]} — stage a batch of classifier
-/// proposals as reviewable rows. **Staging only** — nothing is accepted or
-/// moved. Mirrors the parse the internal Organize path uses, so an external tool
-/// (or the classifier itself) can stage over the curl bridge.
-async fn handle_memory_proposals(
-    State(app_state): State<AppState>,
-    body: axum::body::Bytes,
-) -> axum::response::Response {
-    if body.len() > 256_000 {
-        return (StatusCode::PAYLOAD_TOO_LARGE, "proposals payload too large").into_response();
-    }
-    let text = String::from_utf8_lossy(&body);
-    let proposals = classmem::parse_proposals(&text);
-    if proposals.is_empty() {
-        return Json(serde_json::json!({ "ok": true, "staged": classmem::StageResult::default() }))
-            .into_response();
-    }
-    let db = app_state.store.database();
-    match classmem::stage_proposals(&db, None, &proposals) {
-        Ok(staged) => {
-            let _ = app_state.app_handle.emit("classmem-changed", ());
-            Json(serde_json::json!({ "ok": true, "staged": staged })).into_response()
-        }
-        Err(e) => browser_error_response(e),
-    }
 }
 
 #[derive(Deserialize)]
@@ -5764,58 +5333,6 @@ async fn handle_context_overview(
     Json(digest).into_response()
 }
 
-#[derive(Deserialize)]
-struct ContextPromptsQ {
-    session: Option<String>,
-    mission: Option<String>,
-    surface: Option<String>,
-    project: Option<String>,
-    since_seq: Option<i64>,
-    /// Free-text substring — bound as a LIKE parameter in the DB layer.
-    q: Option<String>,
-    limit: Option<i64>,
-    thread_kind: Option<String>,
-    thread_id: Option<String>,
-    parent_session: Option<String>,
-    /// Exact-match filter on the recorded model (`prompts.model`).
-    model: Option<String>,
-    /// Corpus role: `user` (default view) | `agent` | `system`.
-    role: Option<String>,
-    /// Opt in to Redline's own constructed prefaces, which are excluded by
-    /// default. `1`/`true` to include.
-    include_agent: Option<String>,
-}
-
-/// `GET /v1/context/prompts?session=&mission=&surface=&project=&since_seq=&q=&limit=&role=&include_agent=`
-/// — filtered read of the captured-prompt lake. Every filter is ANDed; `q` is
-/// planned through the FTS index (AND→OR→LIKE cascade). `agent` rows are
-/// excluded unless asked for. Oldest-first, byte-bounded. Read-only.
-async fn handle_context_prompts(
-    State(app_state): State<AppState>,
-    Query(q): Query<ContextPromptsQ>,
-) -> axum::response::Response {
-    let db = app_state.store.database();
-    let filters = context::PromptFilters {
-        session_id: q.session,
-        mission_id: q.mission,
-        surface: q.surface,
-        project: q.project,
-        since_seq: q.since_seq,
-        substring: q.q,
-        limit: context::clamp_prompt_limit(q.limit),
-        thread_kind: q.thread_kind,
-        thread_id: q.thread_id,
-        parent_session_id: q.parent_session,
-        model: q.model,
-        role: q.role,
-        include_agent: matches!(q.include_agent.as_deref(), Some("1") | Some("true")),
-    };
-    match context::list_prompts(&db, &filters) {
-        Ok(items) => Json(serde_json::json!({ "items": items })).into_response(),
-        Err(e) => browser_error_response(e),
-    }
-}
-
 /// `GET /v1/context/sessions/:id/history` — one plan session's revision digests,
 /// comment threads, and decision/curation ledger events. Read-only.
 async fn handle_context_session_history(
@@ -5827,16 +5344,6 @@ async fn handle_context_session_history(
         Some(h) => Json(h).into_response(),
         None => (StatusCode::NOT_FOUND, "no such session").into_response(),
     }
-}
-
-/// `GET /v1/context/stats` — aggregate counts (per day / surface / kind /
-/// class / author). Shared with the `context_stats` command: the Memory
-/// surface's facet rails and activity ribbon read the same builder ("no
-/// dashboard UI" was the memory-is-plumbing stance; the Memory-as-a-Second-
-/// Brain plan deliberately overturned it). Read-only.
-async fn handle_context_stats(State(app_state): State<AppState>) -> axum::response::Response {
-    let db = app_state.store.database();
-    Json(context::build_stats_cached(&db)).into_response()
 }
 
 /// `GET /v1/surface/active` — where the user is in the app right now, mirrored
@@ -5865,89 +5372,6 @@ async fn handle_journal_recent(
             let head = db.journal_head().unwrap_or(0);
             Json(serde_json::json!({ "items": rows, "head": head })).into_response()
         }
-        Err(e) => browser_error_response(e.to_string()),
-    }
-}
-
-#[derive(Deserialize)]
-struct ContextThreadQ {
-    limit: Option<i64>,
-}
-
-/// `GET /v1/context/threads/:kind/:id?limit=` — generic read-only fetch of any
-/// surface's discussion thread (browse / linked / mission / companion / drafter
-/// / a plan session's comment threads), tail-bounded, oldest-first.
-async fn handle_context_thread(
-    State(app_state): State<AppState>,
-    Path((kind, id)): Path<(String, String)>,
-    Query(q): Query<ContextThreadQ>,
-) -> axum::response::Response {
-    let db = app_state.store.database();
-    let limit = q.limit.unwrap_or(50).clamp(1, 200);
-    match db.load_thread_generic(&kind, &id, limit) {
-        Ok(Some(msgs)) => {
-            // Byte-bound the response like /v1/context/prompts: cap each body,
-            // then drop leading turns once the budget is spent (tail wins).
-            let mut msgs = msgs;
-            for m in &mut msgs {
-                if m.body.chars().count() > 4000 {
-                    m.body = m.body.chars().take(4000).collect::<String>() + "…";
-                }
-            }
-            let mut total = 0usize;
-            let mut start = msgs.len();
-            for (i, m) in msgs.iter().enumerate().rev() {
-                total += 120 + m.body.len();
-                if total > context::MAX_CONTEXT_BYTES {
-                    break;
-                }
-                start = i;
-            }
-            let tail = &msgs[start..];
-            Json(serde_json::json!({
-                "kind": kind,
-                "id": id,
-                "label": db.thread_label(&kind, &id),
-                "messages": tail,
-            }))
-            .into_response()
-        }
-        Ok(None) => (StatusCode::NOT_FOUND, "unknown thread kind").into_response(),
-        Err(e) => browser_error_response(e.to_string()),
-    }
-}
-
-/// `GET /v1/context/tree/:kind/:id` — one session-tree node with its parent and
-/// child digests (message counts + recency), the traversable spine of
-/// memory-by-session. Read-only.
-async fn handle_context_tree(
-    State(app_state): State<AppState>,
-    Path((kind, id)): Path<(String, String)>,
-) -> axum::response::Response {
-    let db = app_state.store.database();
-    Json(context::build_thread_tree(&db, &kind, &id)).into_response()
-}
-
-#[derive(Deserialize)]
-struct BrowseSearchQ {
-    /// Free-text query — tokenized + quoted into a safe FTS5 MATCH in the DB.
-    q: Option<String>,
-    limit: Option<i64>,
-}
-
-/// `GET /v1/context/browse/search?q=&limit=` — Dojo P3 lexical (BM25) search over
-/// the browsing-behavior stream. High-volume, keyword-heavy browse events get
-/// fuzzy full-text recall here (plans/prompts stay on the vectorless walk).
-/// Read-only; returns `{items:[{id,ts,url,title,snippet,score}]}` best-first.
-async fn handle_browse_search(
-    State(app_state): State<AppState>,
-    Query(q): Query<BrowseSearchQ>,
-) -> axum::response::Response {
-    let db = app_state.store.database();
-    let query = q.q.unwrap_or_default();
-    let limit = q.limit.unwrap_or(20).clamp(1, 100);
-    match db.search_browse_events(&query, limit) {
-        Ok(items) => Json(serde_json::json!({ "items": items })).into_response(),
         Err(e) => browser_error_response(e.to_string()),
     }
 }
@@ -13176,6 +12600,19 @@ pub fn run() {
             let daemon_status = DaemonStatus::new();
             app.manage(daemon_status.clone());
 
+            // Polis Memory's router state (A6): the handle installed above,
+            // Redline's ingest observer (the restore trigger, the launch and
+            // orchestration handoffs, the seat header, the project registry,
+            // the capture setting, the transcript backfill), and the same
+            // event bus the gardener reports on.
+            let polis = polis_server::PolisState {
+                api: polis_host::polis_handle().expect("install_polis ran above"),
+                ingest: Arc::new(polis_host::RedlineIngest::new(
+                    app.handle().clone(),
+                    store.clone(),
+                )),
+                events: Arc::new(polis_host::TauriEvents::new(app.handle().clone())),
+            };
             let app_state = AppState {
                 store: store.clone(),
                 app_handle: app.handle().clone(),
@@ -13192,6 +12629,7 @@ pub fn run() {
                 snapshot_cache,
                 active_mission,
                 active_surface,
+                polis,
             };
             tauri::async_runtime::spawn(run_server(app_state));
             boot_trace::mark(boot_trace::DAEMON_START);
@@ -14215,10 +13653,13 @@ mod tests {
     /// would bind a hash no row has.
     #[test]
     fn both_ingest_bind_arms_follow_the_claim_row_hash() {
-        let body = std::fs::read_to_string(file!()).expect("read own source");
+        // The handoff lives in `RedlineIngest::on_agent_prompt_skipped`
+        // (polis_host.rs) since the capture route moved into polis-server;
+        // the body hash arrives there as `bh: &str`.
+        let body = include_str!("polis_host.rs");
         let at = body
-            .find("let row_key = claim.row_hash.as_deref().unwrap_or(&bh);")
-            .expect("the ingest resolves a row key from the claim");
+            .find("let row_key = claim.row_hash.as_deref().unwrap_or(bh);")
+            .expect("the ingest observer resolves a row key from the claim");
         // The window covers the whole `match claim.thread` block.
         let arms = &body[at..at + 900];
         assert!(
@@ -14230,8 +13671,8 @@ mod tests {
             "the threadless arm still binds the guard key"
         );
         assert!(
-            !arms.contains("bind_launch_prompt_session(&bh"),
-            "a stale &bh bind is left in the ingest"
+            !arms.contains("bind_launch_prompt_session(bh") && !arms.contains("bind_launch_prompt_session(&bh"),
+            "a stale bh bind is left in the ingest observer"
         );
     }
 

@@ -110,8 +110,16 @@ fn flag(v: Option<&str>) -> bool {
 
 /// Read restore metadata out of a capture POST's headers. `None` when this is
 /// not a restore fire, or when the target it claims is not a shape we will echo.
+#[cfg(test)]
 pub fn from_headers(headers: &axum::http::HeaderMap) -> Option<RestoreMeta> {
-    let get = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).map(str::trim);
+    from_lookup(&polis_server::HttpHeaders(headers))
+}
+
+/// The same read over the capture route's header lookup
+/// (`polis_core::host::IngestHeaders`, values already trimmed) — what the
+/// route's observer (`polis_host::RedlineIngest`) hands us since A6.
+pub fn from_lookup(headers: &dyn polis_core::host::IngestHeaders) -> Option<RestoreMeta> {
+    let get = |name: &str| headers.get(name);
     let target = get(HEADER_TARGET).filter(|t| !t.is_empty())?;
     if !valid_target(target) {
         tracing::warn!("ignoring a restore header whose target is not a session id shape");
@@ -214,11 +222,20 @@ pub fn additional_context(meta: &RestoreMeta) -> String {
 /// Consumes the arming, so calling it twice for one restore answers once — and
 /// only for a body that is actually the trigger, so a CLI injection arriving
 /// first cannot spend it.
+#[cfg(test)]
 pub fn answer(
     headers: &axum::http::HeaderMap,
     prompt: &str,
 ) -> Option<serde_json::Value> {
-    let meta = from_headers(headers)?;
+    answer_with(&polis_server::HttpHeaders(headers), prompt)
+}
+
+/// [`answer`] over the route's header lookup — the observer's entry point.
+pub fn answer_with(
+    headers: &dyn polis_core::host::IngestHeaders,
+    prompt: &str,
+) -> Option<serde_json::Value> {
+    let meta = from_lookup(headers)?;
     if !prompt.trim_start().starts_with(TRIGGER_PREFIX) {
         return None;
     }

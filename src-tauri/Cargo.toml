@@ -245,6 +245,11 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
 # Assemble the extension host's inline test fixtures (real wasm modules from
 # `wat` text) — test-only; the shipped host consumes `.wasm` bytes.
 wat = "1"
+# Drive the merged polis router with real requests in `auth.rs`'s
+# `merged_router_covers_every_polis_route` (tower's `oneshot`, the body
+# collector). Both already in the graph; test-only here.
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
 # Parse the Codex config profile Redline writes (`codex_profile.rs`) back out
 # in tests. The contract is delivered to a Codex plan session through that file
 # and nowhere else, so an escaping bug that drops part of it would be silent

@@ -3676,6 +3676,7 @@ dependencies = [
  "base64 0.22.1",
  "block2",
  "flate2",
+ "http-body-util",
  "notify-debouncer-mini",
  "objc2",
  "objc2-app-kit",

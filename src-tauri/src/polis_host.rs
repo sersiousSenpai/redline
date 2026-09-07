@@ -23,18 +23,29 @@
 //!   `&Database`; [`install_polis`] / [`polis_handle`] — the owned
 //!   [`PolisHandle`] (the `MemoryApi`) the router and MCP mount hold (A6).
 //!
-//! `RedlineIngest` (the `IngestObserver`) lands with the ingest route in A6.
+//! - [`RedlineIngest`] — the capture route's `IngestObserver` (A6): every
+//!   fork of `POST /v1/prompts/ingest` that was Redline's and not the
+//!   memory's — the restore-trigger answer, the agent-seat header, the
+//!   launch and orchestration handoffs, the project registry, the capture
+//!   setting, the transcript backfill. The bodies are the old handler's.
 
 use std::sync::{Arc, OnceLock};
 
-use polis_core::host::{Change, Clock, GardenerEvents, HostResolver, IdleSignal};
+use polis_core::api::ThreadMessage;
+use polis_core::host::{
+    Change, Clock, GardenerEvents, HostResolver, IdleSignal, IngestContext, IngestHeaders,
+    IngestObserver,
+};
+use polis_core::ledger::Origin;
 use polis_llm::{async_trait, Agent, AgentError, AgentReply, AgentRequest, Usage, UsageSink};
 use polis_memory::{Polis, PolisHandle};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::db::Database;
+use crate::ledger;
 use crate::meter::TurnMeter;
 use crate::state::SessionStatus;
+use crate::SessionStore;
 
 // ---------------------------------------------------------------------------
 // The agent
@@ -199,6 +210,190 @@ impl HostResolver for Database {
     fn surface_shot_keys(&self, seqs: &[i64]) -> Vec<(i64, String)> {
         Database::surface_shot_keys(self, seqs).unwrap_or_default()
     }
+
+    /// The per-surface `*_messages` tables are Redline's; the thread route
+    /// (`polis_server`'s since A6) reads them through here. A store error
+    /// reads as "no such thread" — the route 404s rather than 502s, which is
+    /// the same answer its callers get for a kind Redline has no table for.
+    fn thread_messages(&self, kind: &str, id: &str, limit: i64) -> Option<Vec<ThreadMessage>> {
+        self.load_thread_generic(kind, id, limit).ok().flatten().map(|msgs| {
+            msgs.into_iter()
+                .map(|m| ThreadMessage { role: m.role, body: m.body, created_at: m.created_at })
+                .collect()
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The capture route's observer
+// ---------------------------------------------------------------------------
+
+/// Redline's side of `POST /v1/prompts/ingest` (served by `polis_server`
+/// since A6): what the handler did that was Redline's and not the memory's.
+/// The route calls these in its fixed order (`IngestObserver`'s docs); each
+/// body is the old handler's block, verbatim, with the handler's locals
+/// (`app_state.store`, `app_state.app_handle`, `claude_session_id`, `v`,
+/// `cwd`) read off `self` and the [`IngestContext`].
+pub struct RedlineIngest {
+    app: AppHandle,
+    store: SessionStore,
+}
+
+impl RedlineIngest {
+    pub fn new(app: AppHandle, store: SessionStore) -> Self {
+        Self { app, store }
+    }
+}
+
+impl IngestObserver for RedlineIngest {
+    /// A restore trigger, answered with the protocol the visible prompt no
+    /// longer carries. This is the ONE fire per restore where that is true:
+    /// the metadata rides the resumed `claude`'s environment, so it is on every
+    /// prompt that session ever submits, and only the arming — placed by the
+    /// click that dispatched the command — says which of them Redline wrote.
+    /// Claiming it here is therefore both the answer and the exclusion: the
+    /// trigger never reaches the lake, and the reviewer's own next prompt in
+    /// that same terminal is captured byte-for-byte as it always was.
+    fn intercept(&self, cx: &IngestContext<'_>) -> Option<serde_json::Value> {
+        crate::restore_context::answer_with(cx.headers, cx.prompt)
+    }
+
+    /// The spawning Agent Seat, off the header the capture command forwards
+    /// from the spawned `claude`'s own environment (`hook::CAPTURE_AGENT_HEADER`).
+    fn agent_seat(&self, headers: &dyn IngestHeaders) -> Option<String> {
+        headers
+            .get(crate::hook::CAPTURE_AGENT_HEADER)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    }
+
+    /// Every seat but one means "machine text, skip it". The restore seat is the
+    /// exception, and only because its variable outlives its one prompt: the
+    /// intercept already claimed the trigger, so a `restore`-seated fire that
+    /// reaches here is the reviewer typing in a terminal Redline happened to
+    /// open for them. Suppressing it would quietly delete their prompts from
+    /// their own lake.
+    fn seat_suppresses(&self, seat: &str) -> bool {
+        seat != crate::restore_context::RESTORE_SEAT
+    }
+
+    fn on_agent_prompt_skipped(&self, cx: &IngestContext<'_>, bh: &str) {
+        let claude_session_id = cx.session_id;
+        let v = cx.payload;
+        let cwd = cx.cwd;
+        // The draft→launched-session handoff: this hook fire is the first
+        // moment the spawned session's claude id is known. When the skipped
+        // body was a drafter launch, link the new session under its draft —
+        // the seam the whole temporal hierarchy hinges on.
+        if let Some(claim) = ledger::claim_plan_launch(bh) {
+            if let Some(sid) = claude_session_id {
+                let db = self.store.database();
+                // Bind the launch-time prompt row (recorded with no claude
+                // session — claude hadn't spawned) to the session that now runs
+                // it, then let the transcript stamp its model. This is the seam
+                // that makes launched prompts reachable by the model backfill at
+                // all, and it applies to every door: only the doors that own a
+                // thread — a Drafter document, or a chat that graduated — carry
+                // one to bind through.
+                // The row's own hash when the door recorded something other
+                // than what it typed (Combine), otherwise the guard key —
+                // `None` is "same as the guard key", so the four original
+                // doors resolve to exactly `bh` as before. Applied in BOTH
+                // arms so the two can never drift, even though only the
+                // threadless arm is reachable from Combine today.
+                let row_key = claim.row_hash.as_deref().unwrap_or(bh);
+                let bound = match claim.thread.as_ref() {
+                    Some((kind, id)) => {
+                        if let Err(e) = ledger::record_session_link(&db, "session", sid, kind, id) {
+                            tracing::warn!(error = %e, kind = %kind, "failed to link launched session to its origin thread");
+                        }
+                        db.bind_threaded_prompt_session(row_key, kind, id, sid)
+                    }
+                    None => db.bind_launch_prompt_session(row_key, sid),
+                };
+                if let Err(e) = bound {
+                    tracing::warn!(
+                        error = %e, origin = %claim.origin,
+                        "failed to bind launch prompt to its session"
+                    );
+                }
+                crate::backfill_from_transcript(&db, v, sid);
+            }
+        }
+        // The Orchestrate handoff, same seam: when the skipped body was an
+        // Orchestrate launch, this hook fire is the first moment the
+        // orchestrator session's claude id is known — link it under the plan
+        // session it executes, and flip the run chip to `running` (the claim
+        // itself proves the orchestrator came up, so the beacon fires even if
+        // the payload carried no session id for the lineage row).
+        if let Some(plan_sid) = ledger::claim_orchestration_prompt(bh) {
+            if let Some(sid) = claude_session_id {
+                let db = self.store.database();
+                if let Err(e) =
+                    ledger::record_session_link(&db, "session", sid, "session", &plan_sid)
+                {
+                    tracing::warn!(error = %e, "failed to link orchestrator session to its plan session");
+                }
+                // The one moment the orchestrator's transcript path is in
+                // hand: anchor the run for the live monitor and start its
+                // watcher. Runs execute in arbitrary project dirs — the path
+                // must come from the payload, never be assumed under a
+                // Redline project key.
+                if let Some(tp) = v
+                    .get("transcript_path")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|p| !p.is_empty())
+                {
+                    // Fold the launch-time terminal stash into the durable
+                    // row (B5) — the one moment the row exists to hold it.
+                    let launch_terminal = self
+                        .app
+                        .try_state::<crate::LaunchedTerminals>()
+                        .and_then(|l| l.get(&plan_sid));
+                    match db.upsert_orchestration(
+                        &plan_sid,
+                        sid,
+                        tp,
+                        cwd,
+                        launch_terminal.as_deref(),
+                    ) {
+                        Ok(()) => crate::runwatch::start(
+                            &self.app,
+                            self.store.clone(),
+                            plan_sid.clone(),
+                        ),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "failed to anchor orchestration for the run monitor")
+                        }
+                    }
+                }
+            }
+            crate::advance_run_state(&self.app, &self.store, &plan_sid, "running");
+        }
+    }
+
+    fn classify_origin(&self, cwd: Option<&str>) -> Origin {
+        crate::classify_prompt_origin(&self.store.database(), cwd)
+    }
+
+    /// External-session capture toggle (default on).
+    fn capture_external(&self) -> bool {
+        self.store
+            .database()
+            .get_setting("redline.capture.externalSessions")
+            .map(|val| val != "false")
+            .unwrap_or(true)
+    }
+
+    /// After the row exists: stamp this session's still-unstamped prompts from
+    /// the transcript tail. A brand-new session has no assistant turn yet — its
+    /// model lands on the next fire.
+    fn on_recorded(&self, cx: &IngestContext<'_>, _seq: Option<i64>) {
+        if let Some(sid) = cx.session_id {
+            crate::backfill_from_transcript(&self.store.database(), cx.payload, sid);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -283,9 +478,8 @@ pub fn install_polis(db: Arc<Database>) {
     let _ = POLIS.set(Arc::new(handle));
 }
 
-/// The installed handle, if setup ran. Consumed by the router and the MCP
-/// mount in A6.
-#[allow(dead_code)]
+/// The installed handle, if setup ran — what `AppState.polis` serves as the
+/// router's `MemoryApi` (and the MCP mount's, E1).
 pub fn polis_handle() -> Option<Arc<PolisHandle>> {
     POLIS.get().cloned()
 }

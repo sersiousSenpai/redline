@@ -234,7 +234,10 @@ mod tests {
     use super::*;
 
     fn tmppath() -> std::path::PathBuf {
-        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        // pid + a per-process counter: two tests on parallel threads can share
+        // a same-microsecond timestamp, and then share (and clobber) a file.
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         std::env::temp_dir().join(format!("polis-hook-{}-{n}.json", std::process::id()))
     }
 

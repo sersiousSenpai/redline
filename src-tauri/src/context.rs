@@ -25,6 +25,7 @@ use crate::state::SessionStatus;
 #[allow(unused_imports)]
 pub use polis_memory::retrieval::{PROMPT_LIMIT_MAX, clamp_prompt_limit};
 
+#[cfg(test)]
 /// Signature-preserving shim (Session A5 of the Polis extraction): the body
 /// is `polis_memory::retrieval::list_prompts`; this reaches it through `polis_for`.
 pub fn list_prompts(db: &Database, filters: &PromptFilters) -> Result<Vec<LakeItem>, String> {

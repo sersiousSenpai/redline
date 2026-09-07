@@ -105,6 +105,9 @@ Delivery is sequential per extension from a bounded queue (overflow drops the ol
 - `browser.drive` — drive the embedded browser (navigate, click, query, download)
 - `consult` — consult other surfaces' agents for digests
 - `memory.propose` — stage reviewable ClassMemory proposals
+- `memory.write` — append to the memory record (remember, annotate, import events, browse events)
+- `memory.forget` — forget a memory body (destructive; granted separately from writing)
+- `memory.organize` — run the memory organizer or semantic indexer on demand
 - `drafter.suggest` — write tracked suggestions into a live draft
 - `review.annotate` — post and clear findings in a live code review
 - `orchestration.report` — file an orchestrated run's structured exit report

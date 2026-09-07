@@ -32,15 +32,6 @@ use crate::db::Database;
 #[allow(unused_imports)]
 pub use polis_memory::organize::{CATALOG_SNAPSHOT_MAX_BYTES, CLASSIFIER_ACTOR, CLASSIFIER_ITEM_HEAD, CLASSIFIER_ITEM_TAIL, GENERAL_ROOT_ID, MAX_CORPUS_BYTES, MAX_DELTA_ITEMS, OrganizeOutcome, build_classifier_prompt, render_catalog_snapshot, root_id_for_path, seed_root_rows};
 
-/// Signature-preserving shim (Session A5 of the Polis extraction): the body
-/// is `polis_memory::organize::stage_proposals`; this reaches it through `polis_for`.
-pub fn stage_proposals(
-    db: &Database,
-    run_id: Option<i64>,
-    proposals: &[Proposal],
-) -> Result<StageResult, String> {
-    polis_memory::organize::stage_proposals(&crate::polis_host::polis_for(db), run_id, proposals)
-}
 
 /// Signature-preserving shim (Session A5 of the Polis extraction): the body
 /// is `polis_memory::organize::organize_once`; this reaches it through `polis_for`.

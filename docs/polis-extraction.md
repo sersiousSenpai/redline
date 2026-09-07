@@ -251,11 +251,78 @@ green. `real_db_attach_is_a_noop` still passes (now `>= 2` keys adopted).
 `the_gates_hold_and_a_run_without_a_model_reports_no_model` pins the gate order
 and the R12 state on a fresh store.
 
+## Session A6 — `polis-server`, the HTTP surface (built 2026-09-07, two commits)
+
+The memory routes leave `lib.rs`; Redline merges the router it used to be.
+
+**`polis-server`** (new; `polis-core` + axum 0.7 + serde + tokio `rt`):
+
+| Item | What | Notes |
+|---|---|---|
+| `router<S>()` | `Router<S>` over `Arc<dyn MemoryApi>` for any host state with `PolisState: FromRef<S>`; handlers take `State<PolisState>` (`api`, `ingest: Arc<dyn IngestObserver>`, `events: Arc<dyn GardenerEvents>`) | Redline: `.merge(polis_server::router())` + `FromRef<AppState>`; standalone: `S = PolisState` |
+| `ROUTES: &[RouteSpec]` | 24 rows, classes `Open \| HookContract \| Write(scope)`, registration order = table order (pinned by `routes_match_router_registrations`; `every_route_in_the_table_is_served` drives each row through the real router) | the source of `docs/api-v1.md`'s polis rows and the G2 clients |
+| `routes.rs` | Redline's 11 handlers moved verbatim onto `MemoryApi` calls — `/v1/memory/{tree,node/:id,prompts,answer-pack,grep,proposals}`, `/v1/context/{prompts,stats,browse/search,threads/:kind/:id,tree/:kind/:id}` — same query shapes, same bodies, same codes (the 502 `{error}` failure shape kept; `MemoryError` maps Rejected→400 with the reason, NotFound→404, Unavailable→503, Store→502) | `/v1/context/sessions/:id/history` STAYS in Redline: `build_session_history` reads plan revisions + comments (host tables); `/v1/context/{overview,codehealth}` stay as planned |
+| §4.4 routes | reads `GET /v1/memory/{context,ledger,verify,health,map}`; writes `POST /v1/memory/{remember,annotate,forget,events,browse,organize,reindex}` | scopes: `memory.write` (remember/annotate/events/browse), `memory.forget` (its own grant — destructive), `memory.organize` (organize/reindex), `memory.propose` (proposals, unchanged). `runs/:id/revert` is B2, `/v1/sync/*` is C, `/mcp` is E1 |
+| `ingest.rs` | `POST /v1/prompts/ingest` moved as a route: the handler body is Redline's, every host-shaped fork asked of the `IngestObserver` in a fixed order — `intercept` → `agent_seat` → the consume-once guard + `seat_suppresses` → (`on_agent_prompt_skipped`, return) → `classify_origin` → `capture_external` → `MemoryApi::capture` → `on_recorded` | the six response bodies (`too_large`, `unparseable`, `empty`, `agent_dup{by,seat}`, `external_off`, `dup`/`error`, 201 `{seq}`) pinned by `the_hook_json_shapes_are_unchanged`; `ingest_prompt_text` moved (Redline re-imports it for its golden payload test) |
+| `hook.rs` | `CaptureHookSpec { ingest_url, headers: [(name, env)], timeout_secs }` → `command()`, `installed_at`, `current_at`, `install_at`, `uninstall_at` — Redline's capture half, generalized | Redline's spec = the daemon URL + 4 shell-expanded headers (`X-Redline-Agent`, the 3 restore headers); its command is **byte-identical**, pinned by `capture_command_is_pinned` (written against the old code first) |
+| `standalone.rs` (feature) | `serve(addr, state, StandaloneAuth{token})`: the three-class token guard over `ROUTES`, fail-closed on unlisted routes, non-loopback bind refused without a token | `cargo test -p polis-server --features standalone` |
+
+**`polis-core`**: `MemoryApi` gained `list_prompts`, `browse_search`,
+`thread_tree`, `thread`, `context`, `health`, `capture`, `browse`,
+`organize` (the ONE async method — a boxed `Send` future, no `async_trait`
+in core) and `reindex`, with `CaptureRequest`, `BrowseRequest`,
+`ContextRequest`/`ContextBlock`, `OrganizeReceipt`, `ReindexReceipt`,
+`HealthReport`, `ThreadMessage`. `host.rs` gained `IngestHeaders`,
+`IngestContext`, `IngestObserver` (every method defaulted; `NoIngestObserver`)
+and `HostResolver::thread_messages` (default `None` — the per-surface
+message tables are the host's). `Origin`, `ChainVerdict`, `StageResult`
+gained serde derives; `PROMPT_LIMIT_MAX` / `clamp_prompt_limit` /
+`MAX_DELTA_ITEMS` moved to `types` (shims in `polis-memory`).
+
+**`polis-memory`**: `PolisHandle` implements the new methods (`capture`
+builds the hook's exact `PromptInput` — `source: Hook`, the captured-text
+role classifier, no seat, no model); `retrieval::thread_view` (the threads
+route's clip + tail-budget assembly, verbatim, over `thread_messages`) and
+`retrieval::context_block` (plan → pack → `render_answer_pack_block`).
+
+**Host side.** `lib.rs`: the 12 `.route(...)` lines are one
+`.merge(polis_server::router())`; `AppState.polis: PolisState` built at setup
+from `polis_handle()` + `RedlineIngest` + `TauriEvents`; the 11 handlers,
+`handle_prompts_ingest` and their query structs deleted (`build_node_view`
+stays for the Tauri command). `polis_host.rs`: `RedlineIngest` (the old
+handler's restore answer, seat header, `RESTORE_SEAT` exemption, the
+launch/orchestration handoff blocks verbatim, `classify_prompt_origin`, the
+`redline.capture.externalSessions` setting, `backfill_from_transcript`) and
+`HostResolver::thread_messages` over `load_thread_generic`.
+`restore_context`: `from_lookup` / `answer_with` over `IngestHeaders` (the
+`HeaderMap` forms are `#[cfg(test)]`). `hook.rs`: the capture half is thin
+wrappers over Redline's `CaptureHookSpec`. `auth.rs`: `ROUTE_TABLE` shrank by
+the 12 rows and **`all_routes()`** = own rows + mapped polis rows
+(`Write(scope)` → `Protected(scope)`); the middleware, `route_spec` and the
+doc render read `all_routes()` — the fail-closed rule made the mapping
+mandatory. `redline-extension-abi` gained the three memory scopes (pinned
+equal to `polis_server::scopes` by `polis_scopes_match_the_extension_abi`).
+`docs/api-v1.md` and `docs/extensions-api.md` regenerated.
+
+**Referees added:** `merged_router_covers_every_polis_route` (the polis
+router under `require_daemon_auth`, over an in-memory `Database`, every row
+with the master token — none 401s, none is an empty 404; without the token
+the reads pass and a write bounces), `polis_rows_join_the_contract_with_their_classes`,
+`routes_match_router_registrations`, `every_route_in_the_table_is_served`,
+`the_hook_json_shapes_are_unchanged`, `the_observer_is_asked_at_every_fork`,
+`capture_command_is_pinned`. The existing drift test
+(`route_table_matches_router_registrations`) still scrapes `lib.rs` against
+Redline's own rows.
+
+**Semantic changes, each named:** a store error under the threads route now
+reads as "unknown thread kind" (404) rather than 502 (`thread_messages` is an
+`Option`); a grep whose store call fails is 502 rather than 400 (the refusal
+path — the only one clients ever saw — is unchanged: 400 with the reason).
+
 ## Sessions ahead
 
 | Session | Work | Gate |
 |---|---|---|
-| A6 | `polis-server`: router over `dyn MemoryApi` + `ROUTES` + ingest/`IngestObserver` + hook installer; Redline merges it, `auth.rs` shrinks by the 11 memory rows, `docs/api-v1.md` regenerates | drift + parity tests green |
 | A7 | Guards (`core_has_no_native_deps_by_default`, `polis_deps_stay_lean`) + `git filter-repo` extraction → `polis-memory` repo; Redline on the git rev | Redline ≤ 27.4 MB from the git dep; new-repo CI green on 3 OSes |
 
 ## How to run what A1 added
@@ -267,6 +334,8 @@ cargo test -p polis-store                        # 9 tests: attach, adoption, WA
 cargo build -p polis-embed --features apple      # the on-device providers (macOS)
 cargo test -p polis-llm --features anthropic,openai-compat   # every backend
 cargo test -p polis-memory --features apple      # the facade, the handle's MemoryApi, the gardener's gates
+cargo test -p polis-server --features standalone # the router ↔ ROUTES pin, every row served, the hook shapes, the token guard
+UPDATE_GOLDEN=1 cargo test -p redline --lib api_doc          # regenerate docs/api-v1.md after a ROUTES / ROUTE_TABLE change
 REDLINE_REAL_DB=/tmp/real.db cargo test -p redline --lib real_db_gardener -- --ignored --nocapture
 cargo test -p redline --test polis_store_guard   # Deref method-name guard
 REDLINE_REAL_DB=/tmp/real.db cargo test -p redline --lib real_db_attach -- --ignored --nocapture

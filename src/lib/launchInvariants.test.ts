@@ -22,6 +22,10 @@ describe("the restore contract spans TS and Rust", () => {
   // just without the hidden protocol, silently, forever.
   const rustEnv = read("src-tauri/src/restore_context.rs");
   const hook = read("src-tauri/src/hook.rs");
+  // The command itself is rendered by the Polis hook installer since the
+  // extraction's Session A6; Redline's hook.rs hands it the (header, env)
+  // pairs and pins the rendered bytes (`capture_command_is_pinned`).
+  const spec = read("src-tauri/crates/polis/polis-server/src/hook.rs");
   const ts = read("src/lib/resumeCommand.ts");
 
   it("names the same three environment variables on both sides", () => {
@@ -56,10 +60,10 @@ describe("the restore contract spans TS and Rust", () => {
 
   it("the capture hook is what carries the environment across", () => {
     // The one place the two halves actually meet. `${VAR:-}` inside DOUBLE
-    // quotes: single quotes would ship the literal variable name.
-    expect(hook).toContain("rc::ENV_TARGET");
-    expect(hook).toContain("rc::HEADER_TARGET");
-    expect(hook).toContain('${{{env_target}:-}}');
+    // quotes: single quotes would ship the literal variable name. Redline
+    // wires the pair; the spec renders every pair the same way.
+    expect(hook).toContain(".with_header(rc::HEADER_TARGET, rc::ENV_TARGET)");
+    expect(spec).toContain('-H \\"{name}: ${{{env}:-}}\\" ');
   });
 });
 

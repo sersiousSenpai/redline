@@ -92,6 +92,7 @@ pub enum RouteClass {
 /// One row of the frozen v1 contract. `path` is the axum route pattern
 /// exactly as registered (`MatchedPath` returns the same string, which is
 /// what makes the middleware lookup exact rather than fuzzy).
+#[derive(Debug, Clone, Copy)]
 pub struct RouteSpec {
     pub method: &'static str,
     pub path: &'static str,
@@ -113,18 +114,21 @@ pub struct RouteSpec {
 /// `(method, path)` — so a flag in the body could never carry its own class.
 pub use redline_extension_abi::scopes::{
     BROWSER_DRIVE as SCOPE_BROWSER_DRIVE, CONSULT as SCOPE_CONSULT,
-    DRAFTER_SUGGEST as SCOPE_DRAFTER_SUGGEST, MEMORY_PROPOSE as SCOPE_MEMORY_PROPOSE,
-    ORCH_REPORT as SCOPE_ORCH_REPORT, PLAN_COMMENT as SCOPE_PLAN_COMMENT,
+    DRAFTER_SUGGEST as SCOPE_DRAFTER_SUGGEST, ORCH_REPORT as SCOPE_ORCH_REPORT, PLAN_COMMENT as SCOPE_PLAN_COMMENT,
     PLAN_OFFER as SCOPE_PLAN_OFFER, PLAN_SUGGEST as SCOPE_PLAN_SUGGEST,
     REVIEW_ANNOTATE as SCOPE_REVIEW_ANNOTATE, UI_PANEL as SCOPE_UI_PANEL,
     WORK_CLAIM as SCOPE_WORK_CLAIM, WORK_FILE as SCOPE_WORK_FILE, KNOWN_SCOPES,
 };
 
-/// The frozen `/v1` contract — every route the daemon serves, in router
-/// registration order. The middleware consults this table on every request
-/// (so it is load-bearing, not documentation-adjacent), `docs/api-v1.md`
-/// is generated from it, and a test asserts it matches the `.route(...)`
-/// registrations in `lib.rs` byte for byte.
+/// Redline's OWN rows of the frozen `/v1` contract, in router registration
+/// order — every route `lib.rs` registers itself. The memory and context
+/// routes are Polis Memory's (`polis_server::ROUTES`, merged into the same
+/// router) and join these in [`all_routes`], which is what the middleware
+/// consults on every request (so it is load-bearing, not
+/// documentation-adjacent) and what `docs/api-v1.md` is generated from. A
+/// test asserts this table matches the `.route(...)` registrations in
+/// `lib.rs` byte for byte, and another that the merged router serves every
+/// polis row under this auth.
 pub const ROUTE_TABLE: &[RouteSpec] = &[
     RouteSpec {
         method: "GET",
@@ -173,14 +177,6 @@ pub const ROUTE_TABLE: &[RouteSpec] = &[
         purpose: "Codex Plan-mode Stop hook: extracts the proposed plan and holds until review resolves",
         request: "JSON Codex Stop payload {session_id, turn_id, permission_mode, last_assistant_message, ...}",
         response: "{} to finish the turn, or {decision:\"block\", reason} to request revision",
-    },
-    RouteSpec {
-        method: "POST",
-        path: "/v1/prompts/ingest",
-        class: RouteClass::HookContract,
-        purpose: "Polis lake capture: the global UserPromptSubmit hook POSTs its stdin payload (fail-open)",
-        request: "JSON hook payload (prompt, session, cwd)",
-        response: "200 always (never blocks the hook)",
     },
     RouteSpec {
         method: "GET",
@@ -360,54 +356,6 @@ pub const ROUTE_TABLE: &[RouteSpec] = &[
     },
     RouteSpec {
         method: "GET",
-        path: "/v1/memory/tree",
-        class: RouteClass::Open,
-        purpose: "ClassMemory catalog tree (retrieval walk entry point)",
-        request: "—",
-        response: "JSON class tree",
-    },
-    RouteSpec {
-        method: "GET",
-        path: "/v1/memory/node/:id",
-        class: RouteClass::Open,
-        purpose: "One ClassMemory node with members",
-        request: "node id in path",
-        response: "JSON node detail",
-    },
-    RouteSpec {
-        method: "GET",
-        path: "/v1/memory/prompts",
-        class: RouteClass::Open,
-        purpose: "Prompts under a class (retrieval leaf read)",
-        request: "?class= node id",
-        response: "JSON prompt list",
-    },
-    RouteSpec {
-        method: "GET",
-        path: "/v1/memory/answer-pack",
-        class: RouteClass::Open,
-        purpose: "Batched retrieval read: node + subtree + links + notes + lexical hits in one call",
-        request: "?q= term, ?node= node id, ?limit= n",
-        response: "JSON answer pack (byte-bounded)",
-    },
-    RouteSpec {
-        method: "GET",
-        path: "/v1/memory/grep",
-        class: RouteClass::Open,
-        purpose: "Literal/regex search over the record — flags, paths, error strings, attributes",
-        request: "?q= literal (>= 3 chars, required), ?re= regex, ?case=1, ?scope=prompts/browse/all, ?limit= n",
-        response: "JSON {hits:[{kind, seq, ts, label, excerpt}]}; 400 with a reason when the literal is too short",
-    },
-    RouteSpec {
-        method: "POST",
-        path: "/v1/memory/proposals",
-        class: RouteClass::Protected(SCOPE_MEMORY_PROPOSE),
-        purpose: "Stage reviewable ClassMemory proposal rows (never accepts or moves a node)",
-        request: "JSON structured proposal ops",
-        response: "JSON staged proposal ids",
-    },
-    RouteSpec {
-        method: "GET",
         path: "/v1/context/overview",
         class: RouteClass::Open,
         purpose: "Librarian friction digest: ground-truth counts and staleness",
@@ -424,51 +372,11 @@ pub const ROUTE_TABLE: &[RouteSpec] = &[
     },
     RouteSpec {
         method: "GET",
-        path: "/v1/context/prompts",
-        class: RouteClass::Open,
-        purpose: "Filtered lake query (bounded, injection-safe LIKE)",
-        request: "?q=&project=&limit=...",
-        response: "JSON prompt rows",
-    },
-    RouteSpec {
-        method: "GET",
         path: "/v1/context/sessions/:id/history",
         class: RouteClass::Open,
         purpose: "One plan session's full history",
         request: "session id in path",
         response: "JSON history",
-    },
-    RouteSpec {
-        method: "GET",
-        path: "/v1/context/stats",
-        class: RouteClass::Open,
-        purpose: "Aggregate lake/catalog stats",
-        request: "—",
-        response: "JSON stats",
-    },
-    RouteSpec {
-        method: "GET",
-        path: "/v1/context/browse/search",
-        class: RouteClass::Open,
-        purpose: "Search captured browsing history",
-        request: "?q=...",
-        response: "JSON hits",
-    },
-    RouteSpec {
-        method: "GET",
-        path: "/v1/context/threads/:kind/:id",
-        class: RouteClass::Open,
-        purpose: "Generic read of any per-surface message thread (memory-by-session spine)",
-        request: "kind + id in path",
-        response: "JSON message list",
-    },
-    RouteSpec {
-        method: "GET",
-        path: "/v1/context/tree/:kind/:id",
-        class: RouteClass::Open,
-        purpose: "Session-tree walk: a node with parent + child digests",
-        request: "kind + id in path",
-        response: "JSON tree node",
     },
     RouteSpec {
         method: "GET",
@@ -616,10 +524,43 @@ pub const ROUTE_TABLE: &[RouteSpec] = &[
     },
 ];
 
+/// Every route this daemon serves, in one table: Redline's own rows
+/// ([`ROUTE_TABLE`]) followed by Polis Memory's (`polis_server::ROUTES`,
+/// mapped onto this contract's classes — a polis `Write(scope)` is a
+/// `Protected(scope)` here, same scope strings, pinned against the extension
+/// ABI by a test). The middleware, the doc render and the drift tests all
+/// read THIS. The fail-closed rule makes the mapping mandatory: a polis route
+/// the merge serves but this table lacks would 401 even with the master
+/// token — `merged_router_covers_every_polis_route` proves it cannot.
+pub fn all_routes() -> &'static [RouteSpec] {
+    static ALL: OnceLock<Vec<RouteSpec>> = OnceLock::new();
+    ALL.get_or_init(|| {
+        let mut rows: Vec<RouteSpec> = ROUTE_TABLE.to_vec();
+        rows.extend(polis_server::ROUTES.iter().map(map_polis_route));
+        rows
+    })
+}
+
+/// A polis row as a row of this contract.
+fn map_polis_route(spec: &polis_server::RouteSpec) -> RouteSpec {
+    RouteSpec {
+        method: spec.method,
+        path: spec.path,
+        class: match spec.class {
+            polis_server::RouteClass::Open => RouteClass::Open,
+            polis_server::RouteClass::HookContract => RouteClass::HookContract,
+            polis_server::RouteClass::Write(scope) => RouteClass::Protected(scope),
+        },
+        purpose: spec.purpose,
+        request: spec.request,
+        response: spec.response,
+    }
+}
+
 /// Look up the contract row for a request. `path` must be the registered
 /// axum pattern (from `MatchedPath`), not the concrete URL.
 pub fn route_spec(path: &str, method: &str) -> Option<&'static RouteSpec> {
-    ROUTE_TABLE
+    all_routes()
         .iter()
         .find(|s| s.path == path && s.method == method)
 }
@@ -858,7 +799,7 @@ pub fn render_api_doc() -> String {
     let mut out = String::new();
     out.push_str("# Redline control-plane API — v1\n\n");
     out.push_str("The local daemon on `127.0.0.1:7676` (loopback only) is Redline's extension API. ");
-    out.push_str("This table is generated from `ROUTE_TABLE` in `src-tauri/src/auth.rs` — the same table the auth middleware enforces on every request — via `UPDATE_GOLDEN=1 cargo test api_doc`. Do not edit by hand.\n\n");
+    out.push_str("This table is generated from `ROUTE_TABLE` in `src-tauri/src/auth.rs` (Redline's own routes) followed by `polis_server::ROUTES` (the Polis Memory routes the daemon merges in, `src-tauri/crates/polis/polis-server/src/lib.rs`) — the same tables the auth middleware enforces on every request — via `UPDATE_GOLDEN=1 cargo test api_doc`. Do not edit by hand.\n\n");
     out.push_str("## Auth classes\n\n");
     out.push_str("- **open** — no credential (read-only surface; may tokenize in a later pass).\n");
     out.push_str("- **hook contract** — no credential *by design*: called by the user's own claude sessions anywhere on the machine through the globally installed hooks/skills, which cannot carry a per-boot secret.\n");
@@ -871,7 +812,7 @@ pub fn render_api_doc() -> String {
     out.push_str("## Routes\n\n");
     out.push_str("| Method | Path | Auth | Purpose | Request | Response |\n");
     out.push_str("|---|---|---|---|---|---|\n");
-    for spec in ROUTE_TABLE {
+    for spec in all_routes() {
         let auth = match spec.class {
             RouteClass::Open => "open".to_string(),
             RouteClass::HookContract => "hook contract".to_string(),
@@ -885,7 +826,7 @@ pub fn render_api_doc() -> String {
     }
     out.push_str("\n## Scopes\n\n");
     for scope in KNOWN_SCOPES {
-        let routes: Vec<String> = ROUTE_TABLE
+        let routes: Vec<String> = all_routes()
             .iter()
             .filter(|s| s.class == RouteClass::Protected(scope))
             .map(|s| format!("`{} {}`", s.method, s.path))
@@ -940,7 +881,7 @@ mod tests {
     #[test]
     fn route_table_has_no_duplicate_method_path_pairs() {
         let mut seen = std::collections::BTreeSet::new();
-        for spec in ROUTE_TABLE {
+        for spec in all_routes() {
             assert!(
                 seen.insert((spec.method, spec.path)),
                 "duplicate ROUTE_TABLE entry: {} {}",
@@ -952,7 +893,7 @@ mod tests {
 
     #[test]
     fn protected_scopes_are_all_known() {
-        for spec in ROUTE_TABLE {
+        for spec in all_routes() {
             if let RouteClass::Protected(scope) = spec.class {
                 assert!(
                     KNOWN_SCOPES.contains(&scope),
@@ -962,6 +903,100 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The polis rows are in the merged contract with their classes intact:
+    /// the hook route open by design, the reads open, every write protected
+    /// under the scope the polis table names.
+    #[test]
+    fn polis_rows_join_the_contract_with_their_classes() {
+        assert_eq!(
+            all_routes().len(),
+            ROUTE_TABLE.len() + polis_server::ROUTES.len(),
+            "every polis row is mapped, none twice"
+        );
+        assert_eq!(route_spec("/v1/prompts/ingest", "POST").unwrap().class, RouteClass::HookContract);
+        assert_eq!(route_spec("/v1/memory/tree", "GET").unwrap().class, RouteClass::Open);
+        assert_eq!(
+            route_spec("/v1/memory/proposals", "POST").unwrap().class,
+            RouteClass::Protected(redline_extension_abi::scopes::MEMORY_PROPOSE)
+        );
+        assert_eq!(
+            route_spec("/v1/memory/forget", "POST").unwrap().class,
+            RouteClass::Protected(redline_extension_abi::scopes::MEMORY_FORGET)
+        );
+        assert!(ROUTE_TABLE.iter().all(|r| !r.path.starts_with("/v1/memory/")), "no memory row stays in Redline's own table");
+    }
+
+    /// The scope strings polis-server writes are the strings the extension
+    /// ABI grants — one vocabulary, so an extension token granted a memory
+    /// scope in a manifest is the same scope the polis route demands.
+    #[test]
+    fn polis_scopes_match_the_extension_abi() {
+        use redline_extension_abi::scopes as abi;
+        assert_eq!(polis_server::scopes::MEMORY_PROPOSE, abi::MEMORY_PROPOSE);
+        assert_eq!(polis_server::scopes::MEMORY_WRITE, abi::MEMORY_WRITE);
+        assert_eq!(polis_server::scopes::MEMORY_FORGET, abi::MEMORY_FORGET);
+        assert_eq!(polis_server::scopes::MEMORY_ORGANIZE, abi::MEMORY_ORGANIZE);
+        for scope in polis_server::scopes::ALL {
+            assert!(KNOWN_SCOPES.contains(scope), "polis scope {scope} is not a known extension scope");
+        }
+    }
+
+    /// The whole point of `all_routes()`: the merged router, under THIS
+    /// middleware, serves every polis row to the master token. Real requests
+    /// through `polis_server::router()` over an in-memory database — a row
+    /// the table lacked would come back 401 (fail closed), a row the router
+    /// lacked would come back an empty 404.
+    #[test]
+    fn merged_router_covers_every_polis_route() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let handle = polis_memory::PolisHandle::new(db.polis_store(), None, db.clone(), db.clone());
+        let state = polis_server::PolisState::bare(std::sync::Arc::new(handle));
+        let app = polis_server::router::<polis_server::PolisState>()
+            .layer(axum::middleware::from_fn(require_daemon_auth))
+            .with_state(state);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        for spec in polis_server::ROUTES {
+            let uri = spec.path.replace(":kind", "session").replace(":id", "x");
+            let body = match spec.path {
+                "/v1/prompts/ingest" => r#"{"prompt":"sweep","session_id":"s","cwd":"/tmp"}"#,
+                "/v1/memory/proposals" => r#"{"proposals":[]}"#,
+                "/v1/memory/remember" => r#"{"text":"kept","asUser":true}"#,
+                "/v1/memory/annotate" => r#"{"targetKind":"none","text":"note"}"#,
+                "/v1/memory/forget" => r#"{"targetKind":"prompt","targetId":"1","confirm":"forget"}"#,
+                "/v1/memory/events" => r#"{"items":[{"body":"imported"}]}"#,
+                "/v1/memory/browse" => r#"{"url":"https://example.test","text":"page"}"#,
+                _ => "",
+            };
+            let req = Request::builder()
+                .method(spec.method)
+                .uri(&uri)
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {}", daemon_token()))
+                .body(Body::from(body))
+                .unwrap();
+            let resp = rt.block_on(app.clone().oneshot(req)).unwrap();
+            let status = resp.status();
+            let bytes = rt.block_on(resp.into_body().collect()).unwrap().to_bytes();
+            assert_ne!(status, StatusCode::UNAUTHORIZED, "{} {} is served but not in all_routes(): {}", spec.method, spec.path, String::from_utf8_lossy(&bytes));
+            assert!(
+                !(status == StatusCode::NOT_FOUND && bytes.is_empty()) && status != StatusCode::METHOD_NOT_ALLOWED,
+                "{} {} is in ROUTES but the merged router answered {status}",
+                spec.method,
+                spec.path
+            );
+        }
+        // And without the token, the classes hold across the merge: the hook
+        // and the reads pass, a write bounces.
+        let open = Request::builder().uri("/v1/memory/verify").body(Body::empty()).unwrap();
+        assert_eq!(rt.block_on(app.clone().oneshot(open)).unwrap().status(), StatusCode::OK);
+        let write = Request::builder().method("POST").uri("/v1/memory/remember").header("content-type", "application/json").body(Body::from(r#"{"text":"x","asUser":true}"#)).unwrap();
+        assert_eq!(rt.block_on(app.clone().oneshot(write)).unwrap().status(), StatusCode::UNAUTHORIZED);
     }
 
     #[test]

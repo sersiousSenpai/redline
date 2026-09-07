@@ -66,6 +66,15 @@ pub mod scopes {
     pub const BROWSER_DRIVE: &str = "browser.drive";
     pub const CONSULT: &str = "consult";
     pub const MEMORY_PROPOSE: &str = "memory.propose";
+    /// Append to the memory record: remember, annotate, import events,
+    /// browse events (`polis_server::scopes::MEMORY_WRITE`, pinned equal).
+    pub const MEMORY_WRITE: &str = "memory.write";
+    /// Forget a memory body — destructive, so its own grant: a token that
+    /// may write must not thereby be able to erase.
+    pub const MEMORY_FORGET: &str = "memory.forget";
+    /// Run the memory organizer or the semantic indexer now (spends the
+    /// model / CPU on demand).
+    pub const MEMORY_ORGANIZE: &str = "memory.organize";
     pub const DRAFTER_SUGGEST: &str = "drafter.suggest";
     pub const REVIEW_ANNOTATE: &str = "review.annotate";
     /// File an orchestrated run's structured exit report (`plan_runs`).
@@ -85,6 +94,9 @@ pub mod scopes {
         BROWSER_DRIVE,
         CONSULT,
         MEMORY_PROPOSE,
+        MEMORY_WRITE,
+        MEMORY_FORGET,
+        MEMORY_ORGANIZE,
         DRAFTER_SUGGEST,
         REVIEW_ANNOTATE,
         ORCH_REPORT,
@@ -104,6 +116,9 @@ pub mod scopes {
             BROWSER_DRIVE => "drive the embedded browser (navigate, click, query, download)",
             CONSULT => "consult other surfaces' agents for digests",
             MEMORY_PROPOSE => "stage reviewable ClassMemory proposals",
+            MEMORY_WRITE => "append to the memory record (remember, annotate, import events, browse events)",
+            MEMORY_FORGET => "forget a memory body (destructive; granted separately from writing)",
+            MEMORY_ORGANIZE => "run the memory organizer or semantic indexer on demand",
             DRAFTER_SUGGEST => "write tracked suggestions into a live draft",
             REVIEW_ANNOTATE => "post and clear findings in a live code review",
             ORCH_REPORT => "file an orchestrated run's structured exit report",

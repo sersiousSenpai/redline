@@ -284,7 +284,11 @@ impl MemoryApi for PolisHandle {
         let chain = self.store.verify_ledger_chain().map_err(store_err)?;
         let head_seq = self.store.max_ledger_seq().map_err(store_err)?;
         let class_nodes = self.store.list_class_nodes().map_err(store_err)?.len() as i64;
-        let total_prompts = retrieval::build_stats_cached(&view).total_prompts;
+        // Counted directly, not through `build_stats_cached`: that cache is
+        // process-global with a wall-clock floor, so two stores in one process
+        // (two tests, or a daemon serving a fresh file) could read each
+        // other's numbers. Health must be this store's.
+        let total_prompts: i64 = self.store.prompt_counts_by_surface().map_err(store_err)?.iter().map(|(_, c)| c).sum();
         Ok(HealthReport {
             ok: chain.ok,
             chain,

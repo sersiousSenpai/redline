@@ -100,9 +100,7 @@ pub struct ShareReturnRecord {
 // extraction); re-exported so every `crate::db::BrowseHit` / `GrepHit` site is
 // unchanged.
 #[allow(unused_imports)]
-pub use polis_core::types::{BrowseHit, GrepHit};
-
-pub use polis_core::types::GrepScope;
+pub use polis_core::types::{BrowseHit, GrepHit, GrepScope};
 // Session A3: the grep + archive vocabulary lives with the store's methods.
 #[allow(unused_imports)]
 pub use polis_store::{GrepError, ARCHIVE_ALGO, GREP_MIN_LITERAL, PROMPT_TEXT};

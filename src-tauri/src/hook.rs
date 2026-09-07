@@ -3,6 +3,7 @@
 use std::fs;
 use std::path::PathBuf;
 
+use polis_server::hook::CaptureHookSpec;
 use serde::Serialize;
 use serde_json::{json, Value};
 
@@ -657,10 +658,10 @@ const CAPTURE_INGEST_URL: &str = "http://127.0.0.1:7676/v1/prompts/ingest";
 /// to predict a byte-exact body.
 pub const CAPTURE_AGENT_HEADER: &str = "X-Redline-Agent";
 
-/// The command-type hook body. Claude pipes the UserPromptSubmit JSON
-/// (`{session_id, cwd, prompt, prompt_id, …}` — verified against claude
-/// 2.1.199, see docs/protocol-verification.md) to this command's stdin;
-/// `--data-binary @-` forwards it verbatim to the ingest route. Always exits 0.
+/// Redline's capture-hook spec — the installer itself is
+/// `polis_server::hook::CaptureHookSpec` (Session A6 of the Polis extraction);
+/// this names what Redline's rendering of it carries, and the command it
+/// renders is pinned byte-for-byte by `capture_command_is_pinned` below.
 ///
 /// The headers use `"…"` (not `'…'`) deliberately: the shell must expand the
 /// variables. `${VAR:-}` keeps each header present-but-empty for a session
@@ -672,33 +673,29 @@ pub const CAPTURE_AGENT_HEADER: &str = "X-Redline-Agent";
 /// `claude`'s environment on a "Restore plan session", and are how the route
 /// recognises the compact restore trigger.
 ///
-/// Stdout is the reason this is no longer a fire-and-forget `>/dev/null`.
+/// Stdout is the reason the command is no longer a fire-and-forget `>/dev/null`.
 /// UserPromptSubmit reads a command hook's stdout as context for the model, so
 /// the route can answer the restore trigger with the full protocol as
 /// `hookSpecificOutput.additionalContext` — the model gets it, the conversation
 /// never shows it. Everything else the route returns is a receipt (`{"seq":…}`)
-/// and must stay invisible, hence the `case` guard rather than an unconditional
-/// echo: only a body actually carrying `hookSpecificOutput` is printed. A
-/// timeout, a closed Redline or a partial read all fall through it silently,
-/// so prompt submission is still never blocked or altered by Redline.
-fn capture_command() -> String {
+/// and must stay invisible, hence the spec's `case` guard rather than an
+/// unconditional echo. A timeout, a closed Redline or a partial read all fall
+/// through it silently, so prompt submission is still never blocked or altered
+/// by Redline.
+fn capture_spec() -> CaptureHookSpec {
     use crate::restore_context as rc;
-    format!(
-        "resp=$(curl -s --max-time 1 -X POST -H 'Content-Type: application/json' \
-         -H \"{CAPTURE_AGENT_HEADER}: ${{{seat}:-}}\" \
-         -H \"{h_target}: ${{{env_target}:-}}\" \
-         -H \"{h_primed}: ${{{env_primed}:-}}\" \
-         -H \"{h_rescinded}: ${{{env_rescinded}:-}}\" \
-         --data-binary @- {CAPTURE_INGEST_URL} 2>/dev/null); \
-         case \"$resp\" in *hookSpecificOutput*) printf '%s' \"$resp\";; esac; exit 0",
-        seat = crate::claude_proc::ENV_AGENT_SEAT,
-        h_target = rc::HEADER_TARGET,
-        h_primed = rc::HEADER_PRIMED,
-        h_rescinded = rc::HEADER_RESCINDED,
-        env_target = rc::ENV_TARGET,
-        env_primed = rc::ENV_PRIMED,
-        env_rescinded = rc::ENV_RESCINDED,
-    )
+    CaptureHookSpec::new(CAPTURE_INGEST_URL)
+        .with_header(CAPTURE_AGENT_HEADER, crate::claude_proc::ENV_AGENT_SEAT)
+        .with_header(rc::HEADER_TARGET, rc::ENV_TARGET)
+        .with_header(rc::HEADER_PRIMED, rc::ENV_PRIMED)
+        .with_header(rc::HEADER_RESCINDED, rc::ENV_RESCINDED)
+}
+
+/// The command-type hook body Redline writes (see `capture_spec`) — read by
+/// the tests only; production renders it through the spec's own methods.
+#[cfg(test)]
+fn capture_command() -> String {
+    capture_spec().command()
 }
 
 /// Is the installed capture hook the command we would write *today*?
@@ -715,41 +712,7 @@ pub fn capture_current() -> bool {
 }
 
 pub fn capture_current_at(path: &std::path::Path) -> bool {
-    let Ok(content) = fs::read_to_string(path) else {
-        return false;
-    };
-    let Ok(json) = serde_json::from_str::<Value>(&content) else {
-        return false;
-    };
-    let want = capture_command();
-    json.pointer("/hooks/UserPromptSubmit")
-        .and_then(|v| v.as_array())
-        .is_some_and(|entries| {
-            entries.iter().filter(|e| entry_is_capture(e)).any(|e| {
-                e.get("hooks")
-                    .and_then(|v| v.as_array())
-                    .is_some_and(|hooks| {
-                        hooks.iter().any(|h| {
-                            h.get("command").and_then(|v| v.as_str()) == Some(want.as_str())
-                        })
-                    })
-            })
-        })
-}
-
-/// Is the entry's `hooks` array one of ours (a command hook whose command
-/// targets the ingest route)?
-fn entry_is_capture(entry: &Value) -> bool {
-    entry
-        .get("hooks")
-        .and_then(|v| v.as_array())
-        .is_some_and(|hooks| {
-            hooks.iter().any(|h| {
-                h.get("command")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|c| c.contains(CAPTURE_INGEST_URL))
-            })
-        })
+    capture_spec().current_at(path)
 }
 
 pub fn capture_installed() -> bool {
@@ -757,15 +720,7 @@ pub fn capture_installed() -> bool {
 }
 
 pub fn capture_installed_at(path: &std::path::Path) -> bool {
-    let Ok(content) = fs::read_to_string(path) else {
-        return false;
-    };
-    let Ok(json) = serde_json::from_str::<Value>(&content) else {
-        return false;
-    };
-    json.pointer("/hooks/UserPromptSubmit")
-        .and_then(|v| v.as_array())
-        .is_some_and(|entries| entries.iter().any(entry_is_capture))
+    capture_spec().installed_at(path)
 }
 
 pub fn install_capture() -> Result<bool, String> {
@@ -777,54 +732,7 @@ pub fn install_capture() -> Result<bool, String> {
 /// command from an older build self-heals); otherwise a new entry is appended.
 /// Preserves any other UserPromptSubmit hooks the user configured.
 pub fn install_capture_at(path: &std::path::Path) -> Result<bool, String> {
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let mut root: Value = if path.exists() {
-        let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
-        if content.trim().is_empty() {
-            json!({})
-        } else {
-            serde_json::from_str(&content)
-                .map_err(|e| format!("existing settings.json is not valid JSON: {e}"))?
-        }
-    } else {
-        json!({})
-    };
-    if !root.is_object() {
-        return Err("settings.json root is not a JSON object".to_string());
-    }
-
-    let cmd = capture_command();
-    let obj = root.as_object_mut().expect("checked above");
-    let hooks_value = obj.entry("hooks".to_string()).or_insert_with(|| json!({}));
-    let hooks_obj = hooks_value
-        .as_object_mut()
-        .ok_or_else(|| "hooks field is not a JSON object".to_string())?;
-    let ups = hooks_obj
-        .entry("UserPromptSubmit".to_string())
-        .or_insert_with(|| json!([]));
-    let ups_arr = ups
-        .as_array_mut()
-        .ok_or_else(|| "hooks.UserPromptSubmit is not a JSON array".to_string())?;
-
-    let mut replaced = false;
-    for entry in ups_arr.iter_mut() {
-        if entry_is_capture(entry) {
-            entry["hooks"] = json!([{ "type": "command", "command": cmd, "timeout": 5 }]);
-            replaced = true;
-            break;
-        }
-    }
-    if !replaced {
-        ups_arr.push(json!({
-            "hooks": [ { "type": "command", "command": cmd, "timeout": 5 } ]
-        }));
-    }
-
-    let serialized = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
-    fs::write(path, format!("{}\n", serialized)).map_err(|e| e.to_string())?;
-    Ok(capture_installed_at(path))
+    capture_spec().install_at(path)
 }
 
 pub fn uninstall_capture() -> Result<bool, String> {
@@ -835,43 +743,7 @@ pub fn uninstall_capture() -> Result<bool, String> {
 /// containers so the file doesn't accumulate stubs (mirrors the ExitPlanMode
 /// uninstall cleanup). Returns whether the hook is still installed afterward.
 pub fn uninstall_capture_at(path: &std::path::Path) -> Result<bool, String> {
-    let Ok(content) = fs::read_to_string(path) else {
-        return Ok(false);
-    };
-    if content.trim().is_empty() {
-        return Ok(false);
-    }
-    let mut root: Value = serde_json::from_str(&content)
-        .map_err(|e| format!("existing settings.json is not valid JSON: {e}"))?;
-
-    if let Some(arr) = root
-        .pointer_mut("/hooks/UserPromptSubmit")
-        .and_then(|v| v.as_array_mut())
-    {
-        arr.retain(|entry| !entry_is_capture(entry));
-    }
-    if root
-        .pointer("/hooks/UserPromptSubmit")
-        .and_then(|v| v.as_array())
-        .is_some_and(|a| a.is_empty())
-    {
-        if let Some(hooks) = root.pointer_mut("/hooks").and_then(|v| v.as_object_mut()) {
-            hooks.remove("UserPromptSubmit");
-        }
-    }
-    if root
-        .pointer("/hooks")
-        .and_then(|v| v.as_object())
-        .is_some_and(|o| o.is_empty())
-    {
-        if let Some(obj) = root.as_object_mut() {
-            obj.remove("hooks");
-        }
-    }
-
-    let serialized = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
-    fs::write(path, format!("{}\n", serialized)).map_err(|e| e.to_string())?;
-    Ok(capture_installed_at(path))
+    capture_spec().uninstall_at(path)
 }
 
 #[cfg(test)]
