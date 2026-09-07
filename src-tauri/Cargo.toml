@@ -27,6 +27,7 @@ members = [
     "crates/redline-extension-abi",
     "crates/redline-extension-sdk",
     "crates/polis/polis-core",
+    "crates/polis/polis-store",
 ]
 default-members = [
     ".",
@@ -34,6 +35,7 @@ default-members = [
     "crates/redline-extension-abi",
     "crates/redline-extension-sdk",
     "crates/polis/polis-core",
+    "crates/polis/polis-store",
 ]
 
 [lib]
@@ -118,6 +120,9 @@ wasmi = "1.1"
 # git rev and then a crates.io version. Pure (serde + sha2), so it adds nothing
 # to the binary that was not already linked.
 polis-core = { path = "crates/polis/polis-core" }
+# The memory schema + its own `polis_meta` versioning + the cross-process-safe
+# chain append (A2). Same rusqlite as the app, so one SQLite is linked.
+polis-store = { path = "crates/polis/polis-store" }
 # Deflate for the compaction archive (`prompt_archive`): a cold compaction
 # releases a body at ~59:1 and used to be irrecoverable. Already present in the
 # dependency tree (via `png` → `tauri-utils`), so naming it here is a visibility

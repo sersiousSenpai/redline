@@ -3296,6 +3296,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "polis-store"
+version = "0.1.0"
+dependencies = [
+ "polis-core",
+ "rusqlite",
+ "tracing",
+]
+
+[[package]]
 name = "polling"
 version = "3.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3616,6 +3625,7 @@ dependencies = [
  "objc2-speech",
  "objc2-web-kit",
  "polis-core",
+ "polis-store",
  "portable-pty",
  "pulldown-cmark",
  "redline-extension-abi",

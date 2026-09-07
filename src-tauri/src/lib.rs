@@ -61,7 +61,8 @@ pub mod mcp;
 /// `polis-store` (Session A2 of the Polis extraction). Public because `db` is
 /// not; the integration test is the only caller.
 pub fn memory_schema_sql() -> String {
-    db::Database::memory_schema_sql().expect("fresh in-memory schema")
+    let db = db::Database::open_in_memory().expect("fresh in-memory database");
+    db.schema_sql().expect("memory schema dump")
 }
 mod memchat;
 mod meter;

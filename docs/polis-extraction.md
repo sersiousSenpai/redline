@@ -72,11 +72,44 @@ non-test lib), and `GrepScope::wants_prompts/wants_browse` became `pub`.
 Also carried on this branch: `tests/golden/stream/*.jsonl` — HEAD's meter
 tests already read them, but they were untracked on `main`.
 
+## Session A2 — `polis-store` attach + schema (built 2026-09-06)
+
+The memory DDL, the lexical layer and the chain append leave `db.rs`;
+`Database` becomes a host that attaches the store to its own connection.
+
+| Store module | Lifted from | What | Notes |
+|---|---|---|---|
+| `schema.rs` | `migrate_v1`'s batch (35 of its 98 statements) + the memory ALTER/index/archive/browse-column blocks + the corpus-role backfill + `embeddings` + the post-lexical provenance columns | `Migration::{tables, additive, embeddings, provenance, verify}`, `MEMORY_TABLES`, `LEXICAL_TABLES`, `schema_sql` (the golden's dump), `SYSTEM_INDEX_CHARS`, `CORPUS_ROLE_VERSION` | Every block keeps its original 8-space body indentation on purpose: multi-line SQL literals are stored by SQLite as written, and the golden proved the move byte-identical without regeneration |
+| `lexical.rs` | the versioned lexical block | `Lexical::ensure`, `TOKENIZER`, `PREFIX_SIZES`, `LEXICAL_VERSION` | reads/writes `polis_meta.lexical_version` instead of `app_settings` |
+| `meta.rs` | new | `polis_meta(key, value)`: `schema_version` / `lexical_version` / `corpus_role_version`; `adopt_legacy` copies the two `app_settings` keys ONCE (first attach, detected by a missing `schema_version`) | **never `PRAGMA user_version`** |
+| `ledger.rs` | `Database::append_ledger_event_locked` (body verbatim as `append_in_txn`) | `append_event`: `BEGIN IMMEDIATE` + jittered retry on BUSY when the connection is in autocommit; joins the caller's transaction otherwise | R9: two processes on one file can no longer both read one head |
+| `lib.rs` | new | `PolisStore::{attach, open, open_in_memory, require_capabilities, run_migrations, conn, shared_connection, last_attach, meta, set_meta, schema_sql, append_event}`, `AttachOptions::{redline, standalone}`, `AttachReport`, `StoreError` | `open` = WAL + `synchronous=NORMAL` + `busy_timeout=5000`; `require_capabilities` = sqlite ≥ 3.34 and `ENABLE_FTS5` in `compile_options` |
+
+Host side (`db.rs`): `Database { conn: Arc<Mutex<Connection>>, polis: PolisStore }`
+with `Deref<Target = PolisStore>`; `open`/`open_in_memory` run the host's own
+`migrate` (now `fn migrate(conn)`) and then `PolisStore::attach(…, AttachOptions::redline())`;
+`verify_schema`'s core-table list drops `prompts`/`ledger_events` (the store
+verifies its own); `append_ledger_event_locked` delegates to the store; the
+lexical constants are re-exported from `polis_store`. Test adapted:
+`corpus_role_backfill_reclassifies_without_touching_the_chain` deletes the
+`polis_meta` key and calls `run_migrations()`.
+
+Attach semantics: `polis_meta` is created → if `schema_version` is absent, the
+two legacy keys are adopted → if any of the three versions is behind, the
+idempotent migration runs once and stamps → `Migration::verify`. An
+already-current store runs no schema SQL (`AttachReport::migrated == false`).
+
+Referees added: `tests/polis_store_guard.rs` (`Database` and `PolisStore`
+share no `self` method — Deref precedence would hide the store's) and
+`real_db_attach_is_a_noop` (`REDLINE_REAL_DB` on a COPY of the live DB: 2 keys
+adopted, zero events, bodies/gists byte-unchanged, chain head unchanged, no
+schema object dropped/rebuilt/added besides `polis_meta`, chain green, reopen
+on the fast path). The A1 schema golden passed UNCHANGED after the move.
+
 ## Sessions ahead
 
 | Session | Work | Gate |
 |---|---|---|
-| A2 | `polis-store` attach + schema: `Database { conn: Arc<Mutex<Connection>>, polis: PolisStore }` + `Deref`; `PolisStore::attach/open/migrate`; `polis_meta` (adopts the two legacy `app_settings` keys before the backfill/lexical blocks); `require_capabilities` (sqlite ≥ 3.34, FTS5); DDL + lexical block out of `migrate_v1`; `BEGIN IMMEDIATE` append. Tests `memory_schema_golden` (unchanged bytes), `real_db_attach_is_a_noop` (`REDLINE_REAL_DB`: zero events appended, chain green, no FTS rebuild), `database_and_store_share_no_method_names`. **The one big `db.rs` edit — check `git status -- src-tauri/src/db.rs` on `main` first.** | all three + suites green on a copy of the live DB |
 | A3 | `polis-store` methods in three commits by group; `record.rs`; `polis-embed` (`embed.rs` + `apple` feature) | green after each commit |
 | A4 | `polis-llm` (`Agent`/`Usage`/`UsageSink`; `claude_cli` incl. moved `classify_line`/`StreamLine`; `codex_cli`; `anthropic`/`openai_compat` behind features) + Redline `polis_host.rs` | classifier/keeper/verifier pass through `Agent`; meter bookings unchanged |
 | A5 | `polis-memory` facade: organize/verify over `&dyn Agent` + `HostResolver`, the retrieval half of `context.rs`, keeper memory passes as `gardener::step`, `bundle`/`mirror`, the `Polis` handle implementing `MemoryApi`, host-neutral `skills/classmemory/SKILL.md` | 20 keeper ticks on a real-DB copy behave as before |
@@ -88,6 +121,9 @@ tests already read them, but they were untracked on `main`.
 ```sh
 cd src-tauri
 cargo test -p polis-core                         # 41 tests, no I/O
+cargo test -p polis-store                        # 9 tests: attach, adoption, WAL, cross-process append
+cargo test -p redline --test polis_store_guard   # Deref method-name guard
+REDLINE_REAL_DB=/tmp/real.db cargo test -p redline --lib real_db_attach -- --ignored --nocapture
 cargo test -p redline --test schema_golden       # the DDL referee
 UPDATE_GOLDEN=1 cargo test -p redline --test schema_golden   # only for a real migration
 cargo test --workspace -- --test-threads=1       # everything

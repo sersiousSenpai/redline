@@ -1,0 +1,18 @@
+[package]
+name = "polis-store"
+version = "0.1.0"
+description = "Polis Memory store: the SQLite schema for the hash-chained lake, the class catalog and the derived lexical layer; attaches to a host connection or opens standalone; cross-process-safe chain append."
+authors = ["Yusuf Al-Bazian"]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/sersiousSenpai/polis-memory"
+
+[dependencies]
+polis-core = { path = "../polis-core" }
+# `bundled` so a `cargo install polis-memory` needs no system SQLite, and so
+# FTS5 + the trigram tokenizer are present — rusqlite 0.31 has no `fts5`
+# feature flag; both arrive with the amalgamation's defaults, and
+# `PolisStore::require_capabilities` checks for them at attach rather than
+# trusting the build.
+rusqlite = { version = "0.31", features = ["bundled"] }
+tracing = "0.1"

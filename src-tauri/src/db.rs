@@ -143,46 +143,6 @@ impl From<rusqlite::Error> for GrepError {
     }
 }
 
-/// The ONE tokenizer every lexical index in this database is built with, in
-/// SQL-escaped form (the inner quotes are doubled for embedding in
-/// `tokenize='…'`).
-///
-/// - `porter` — stemming, so "compacting" finds "compaction". Measured free:
-///   123 KB stemmed vs 125 KB unstemmed over the cleaned corpus.
-/// - `remove_diacritics 2` — the Unicode-correct variant (1 mishandles
-///   multi-codepoint sequences).
-/// - `tokenchars '_-./@'` — keeps `rl_del`, `src/db.rs`, `--allowedTools` and
-///   `user@host` as SINGLE tokens instead of shredding them at every
-///   punctuation mark. This is why the grep arm has less to cover.
-///
-/// One tokenizer for prompts, browse events and the catalog, deliberately: a
-/// query planned for one index has to mean the same thing in the others, or a
-/// term that matched a page silently misses the prompt that discussed it.
-pub const TOKENIZER: &str = "porter unicode61 remove_diacritics 2 tokenchars ''_-./@''";
-
-/// Prefix indexes at 2 and 3 characters — enough for the OR-with-prefix stage of
-/// the query cascade to reach short stems without indexing every prefix length.
-///
-/// Applied to the SMALL indexes only (prompts, the catalog). A prefix index is
-/// not free: adding it to `browse_events_fts`, which covers 5.7 MB of page DOM,
-/// measured **+1.3 MB — it doubled that index** for a stage that runs only when
-/// the precise reading already failed. FTS5 still answers `"term"*` without one
-/// by walking the term-index range, which over 829 documents is nothing. Same
-/// reasoning that keeps browse `text` out of the trigram arm: the big text
-/// column is where index tricks stop paying.
-pub const PREFIX_SIZES: &str = "2 3";
-
-/// How much of a `system` row (a `<task-notification>` / `<system-reminder>`
-/// the CLI injected) enters the searchable text. Enough to name what happened,
-/// not the whole dump — see the `fts_text` note in `migrate`.
-pub const SYSTEM_INDEX_CHARS: usize = 600;
-
-/// Version key for the whole derived lexical layer. Bumping this drops and
-/// rebuilds every FTS table — which is the migration, because an FTS5
-/// tokenizer is fixed at creation time.
-pub const SETTING_LEXICAL_VERSION: &str = "redline.memory.lexicalVersion";
-pub const LEXICAL_VERSION: &str = "2";
-
 /// The ONE expression that reads a prompt's text, for use in a query that has
 /// `prompts` aliased as `p`. Compaction sets `body = ''` (not NULL), so the
 /// obvious `COALESCE(p.body, p.gist)` returns an EMPTY STRING for every
@@ -211,17 +171,6 @@ fn inflate_body(blob: &[u8]) -> std::io::Result<String> {
     flate2::read::DeflateDecoder::new(blob).read_to_string(&mut out)?;
     Ok(out)
 }
-
-/// The `app_settings` key the one-time corpus-role backfill records itself
-/// under, and the version it writes. Bumping the version re-runs the
-/// classification over any row still NULL — it never touches a row that already
-/// has a role, so a user's own correction survives an upgrade.
-///
-/// Phase 2's `fts_text` generated column reads `role`, so it MUST key on this
-/// same counter and run after it: created first, it would compute against NULL
-/// roles and index every preface.
-pub const SETTING_CORPUS_ROLE_VERSION: &str = "redline.memory.corpusRoleVersion";
-pub const CORPUS_ROLE_VERSION: &str = "1";
 
 /// One context-journal row — a meaningful app activity the Companion folds into
 /// its "while you were away" delta (surface switch, revision, nav, pin, …).
@@ -549,8 +498,45 @@ pub fn folder_move_rejection(
     None
 }
 
+// The lexical layer's constants and the version keys moved to `polis-store`
+// with the DDL (Session A2 of the Polis extraction); re-exported for path
+// stability — `#[allow(unused_imports)]` because a shim's names are used
+// elsewhere or in tests, not here.
+#[allow(unused_imports)]
+pub use polis_store::{
+    schema::MEMORY_TABLES, CORPUS_ROLE_VERSION, LEXICAL_VERSION, PREFIX_SIZES, SYSTEM_INDEX_CHARS,
+    TOKENIZER,
+};
+use polis_store::{AttachOptions, PolisStore};
+
 pub struct Database {
-    conn: Mutex<Connection>,
+    /// Shared with the attached `PolisStore` — ONE connection, one lock, so
+    /// the memory tables and the app's own live in one transaction domain.
+    conn: Arc<Mutex<Connection>>,
+    /// Polis Memory's store, attached to the same connection (Session A2 of
+    /// the Polis extraction, docs/polis-extraction.md). Reached through
+    /// `Deref`, so `db.<store method>()` reads as it always has once the
+    /// memory methods move there (A3). `polis_store_guard.rs` pins that the
+    /// two never share a method name — Deref precedence would hide it.
+    polis: PolisStore,
+}
+
+impl std::ops::Deref for Database {
+    type Target = PolisStore;
+    fn deref(&self) -> &PolisStore {
+        &self.polis
+    }
+}
+
+/// `StoreError` → the `rusqlite::Error` the `open` signatures already return.
+fn store_err(e: polis_store::StoreError) -> rusqlite::Error {
+    match e {
+        polis_store::StoreError::Sqlite(e) => e,
+        other => rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+            Some(other.to_string()),
+        ),
+    }
 }
 
 /// Latches the one-time poison report. The report itself writes a
@@ -638,80 +624,19 @@ impl Database {
         ] {
             let _ = conn.execute_batch(pragma);
         }
-        let db = Self {
-            conn: Mutex::new(conn),
-        };
-        db.migrate()?;
+        Self::migrate(&conn)?;
+        let conn = Arc::new(Mutex::new(conn));
+        // The host's own schema first, then the memory store attaches to the
+        // same connection and brings its tables current under its OWN version
+        // key (`polis_meta`) — never `PRAGMA user_version`, which this app
+        // shares with another lineage.
+        let polis = PolisStore::attach(Arc::clone(&conn), AttachOptions::redline())
+            .map_err(store_err)?;
+        let db = Self { conn, polis };
         // The send queues are in-memory: any row still `queued` now belongs
         // to a previous run and will never fire.
         db.sweep_queued_to_unsent()?;
         Ok(db)
-    }
-
-    /// The memory tables — the Polis lake, its lexical layer and the class
-    /// catalog — as `migrate_v1` and the later ALTER/lexical blocks create them.
-    /// `memory_schema_sql` dumps their DDL (tables, indexes, triggers and the
-    /// FTS shadow tables) from a fresh database in creation order; the golden at
-    /// `tests/golden/memory_schema.sql` is the referee while that DDL moves
-    /// byte-for-byte into `polis-store` (Session A2, docs/polis-extraction.md).
-    pub const MEMORY_TABLES: &'static [&'static str] = &[
-        "prompts",
-        "ledger_events",
-        "class_nodes",
-        "class_links",
-        "class_proposals",
-        "class_runs",
-        "supersessions",
-        "class_observations",
-        "user_notes",
-        "plan_exports",
-        "browse_events",
-        "session_tree",
-        "prompt_archive",
-        "embeddings",
-        "prompts_fts",
-        "browse_events_fts",
-        "class_nodes_fts",
-        "prompts_grep",
-        "browse_grep",
-    ];
-
-    /// Every `sqlite_master` row that belongs to a memory table (its own DDL,
-    /// its indexes and triggers, and an FTS table's `<name>_*` shadow tables),
-    /// in creation order, rendered as SQL. A fresh in-memory database, so the
-    /// result is a pure function of the migration code.
-    pub fn memory_schema_sql() -> rusqlite::Result<String> {
-        let db = Database::open_in_memory()?;
-        let conn = db.lock_conn();
-        let mut stmt =
-            conn.prepare("SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY rowid")?;
-        let rows = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, Option<String>>(3)?,
-            ))
-        })?;
-        let mut out = String::from(
-            "-- Memory schema golden: every sqlite_master row of the Polis lake + catalog\n\
-             -- tables from a fresh in-memory Database, in creation order.\n\
-             -- Regenerate: UPDATE_GOLDEN=1 cargo test --test schema_golden\n\n",
-        );
-        for row in rows {
-            let (ty, name, tbl, sql) = row?;
-            let owned = Self::MEMORY_TABLES
-                .iter()
-                .any(|t| tbl == *t || name.starts_with(&format!("{t}_")));
-            if !owned {
-                continue;
-            }
-            match sql {
-                Some(sql) => out.push_str(&format!("-- {ty} {name} ({tbl})\n{sql};\n\n")),
-                None => out.push_str(&format!("-- {ty} {name} ({tbl}) [auto]\n\n")),
-            }
-        }
-        Ok(out)
     }
 
     /// Not `#[cfg(test)]` (it was, until Session A1): `memory_schema_sql` needs a
@@ -719,11 +644,11 @@ impl Database {
     /// is an integration test and links the library as shipped.
     pub fn open_in_memory() -> rusqlite::Result<Self> {
         let conn = Connection::open_in_memory()?;
-        let db = Self {
-            conn: Mutex::new(conn),
-        };
-        db.migrate()?;
-        Ok(db)
+        Self::migrate(&conn)?;
+        let conn = Arc::new(Mutex::new(conn));
+        let polis = PolisStore::attach(Arc::clone(&conn), AttachOptions::redline())
+            .map_err(store_err)?;
+        Ok(Self { conn, polis })
     }
 
     /// The planner's chosen strategy for a statement, joined into one line —
@@ -771,8 +696,7 @@ impl Database {
     /// be **idempotent** — a step that dies half-way leaves the version where
     /// it was, and the next launch simply runs it again from the top. That is
     /// exactly what the pre-versioning code did on every single launch.
-    fn migrate(&self) -> rusqlite::Result<()> {
-        let conn = self.lock_conn();
+    fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
 
         if current == Self::SCHEMA_VERSION {
@@ -798,7 +722,7 @@ impl Database {
             // leave the stamp alone (never downgrade someone else's marker),
             // and carry on. Only a forward stamp whose schema is genuinely
             // missing something we need is refused.
-            Self::verify_schema(&conn).map_err(|_| {
+            Self::verify_schema(conn).map_err(|_| {
                 rusqlite::Error::SqliteFailure(
                     rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
                     Some(format!(
@@ -824,7 +748,7 @@ impl Database {
                 continue;
             }
             tracing::info!(from = current, to = *version, "migrating database schema");
-            step(&conn)?;
+            step(conn)?;
             conn.pragma_update(None, "user_version", *version)?;
         }
 
@@ -832,7 +756,7 @@ impl Database {
         // that hit a partial failure in an earlier build's best-effort
         // migration would otherwise get stamped as current and then fail at
         // read time, one query at a time, forever.
-        Self::verify_schema(&conn)?;
+        Self::verify_schema(conn)?;
         crate::boot_trace::mark(crate::boot_trace::DB_MIGRATE);
         Ok(())
     }
@@ -860,8 +784,6 @@ impl Database {
             "comments",
             "app_settings",
             "thread_messages",
-            "prompts",
-            "ledger_events",
             "drafts",
         ];
         let mut stmt =
@@ -1276,278 +1198,6 @@ impl Database {
                 created_at INTEGER NOT NULL
             );
 
-            -- Polis data lake: the raw, complete prompt store. One row per
-            -- captured prompt (hook / drafter / rust-firstturn / voice). Bodies
-            -- live here (ledger-owned) so a session delete can never orphan the
-            -- hash chain. Dedup on (body_hash, claude_session_id).
-            CREATE TABLE IF NOT EXISTS prompts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ts INTEGER NOT NULL,
-                source TEXT NOT NULL,
-                origin TEXT NOT NULL DEFAULT 'redline',
-                surface TEXT NOT NULL,
-                role TEXT,
-                session_id TEXT,
-                claude_session_id TEXT,
-                mission_id TEXT,
-                project_path TEXT,
-                body TEXT NOT NULL,
-                body_hash TEXT NOT NULL
-            );
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_prompts_dedup
-                ON prompts (body_hash, claude_session_id);
-
-            -- Polis ledger: append-only, hash-chained, author-attributed record
-            -- of prompts, plan revisions, decisions and curation signals.
-            -- entry_hash = sha256(prev_hash ‖ canonical-json(event)); genesis
-            -- prev = 64 zeros. Decision kinds reference an existing row by
-            -- (ref_kind, ref_id) + payload_hash rather than a deletable FK, so
-            -- deleting the referenced session can't break the chain.
-            CREATE TABLE IF NOT EXISTS ledger_events (
-                seq INTEGER PRIMARY KEY AUTOINCREMENT,
-                ts INTEGER NOT NULL,
-                kind TEXT NOT NULL,
-                author TEXT NOT NULL,
-                prompt_id INTEGER,
-                session_id TEXT,
-                version_number INTEGER,
-                ref_kind TEXT,
-                ref_id TEXT,
-                payload_hash TEXT NOT NULL,
-                prev_hash TEXT NOT NULL,
-                entry_hash TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_ledger_kind ON ledger_events (kind);
-            CREATE INDEX IF NOT EXISTS idx_ledger_ref ON ledger_events (ref_kind, ref_id);
-
-            -- Polis ClassMemory (Phase 2): an agent-classified, human-curated,
-            -- vectorless class CATALOG *over* the lake. Nodes only ever hold
-            -- POINTERS (class_links) into the ledger/prompt store — reorganizing
-            -- the tree never touches or re-copies underlying data. A class is
-            -- just a root node (parent_id NULL); depth is emergent (no level
-            -- enum). A `digest` node's `summary` is the agent-written gist of a
-            -- collapsed cold branch, with class_links back to the exact ledger
-            -- rows it cites. Every node/link carries status{proposed,accepted}:
-            -- nothing enters or moves without a user accept.
-            CREATE TABLE IF NOT EXISTS class_nodes (
-                id TEXT PRIMARY KEY,
-                parent_id TEXT,               -- NULL = a root (a class)
-                kind TEXT NOT NULL DEFAULT 'node',   -- node | digest
-                title TEXT NOT NULL,
-                summary TEXT,                 -- digest gist; NULL for plain nodes
-                project_path TEXT,            -- optional binding on any node
-                ip_name TEXT,                 -- whose plan it was (provenance)
-                status TEXT NOT NULL DEFAULT 'proposed',  -- proposed | accepted
-                pinned INTEGER NOT NULL DEFAULT 0,        -- anti-decay marker
-                curated_by TEXT,              -- 'classifier' | author on accept
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_class_nodes_parent ON class_nodes (parent_id);
-            CREATE INDEX IF NOT EXISTS idx_class_nodes_status ON class_nodes (status);
-
-            -- Pointers from a class node into the lake. target_kind is one of
-            -- prompt|session|revision|mission|decision|browse_event; target_id is
-            -- that row's id (prompt id / session id / ledger seq / mission id /
-            -- browse_events id). Reorganizing the tree re-parents nodes; links
-            -- ride along untouched.
-            CREATE TABLE IF NOT EXISTS class_links (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                node_id TEXT NOT NULL,
-                target_kind TEXT NOT NULL,
-                target_id TEXT NOT NULL,
-                note TEXT,
-                status TEXT NOT NULL DEFAULT 'proposed',  -- proposed | accepted
-                created_at INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_class_links_node ON class_links (node_id);
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_class_links_dedup
-                ON class_links (node_id, target_kind, target_id);
-
-            -- Structural reorg proposals (promote/split/merge/collapse) that
-            -- can't be expressed as a single node's status. Additive proposals
-            -- (file/create) stage directly as proposed class_nodes/class_links;
-            -- these operate on EXISTING accepted nodes, so they queue here for
-            -- review. Accept applies the op to the tree + writes a taxonomy_reorg
-            -- ledger event, then drops the row; reject just drops it.
-            CREATE TABLE IF NOT EXISTS class_proposals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                run_id INTEGER,
-                op TEXT NOT NULL,             -- promote | split | merge | collapse
-                node_id TEXT,                 -- primary subject node
-                parent_id TEXT,               -- new parent (promote) / merge target parent
-                title TEXT,                   -- merge target / collapse digest title
-                summary TEXT,                 -- collapse digest gist
-                extra_json TEXT,              -- op-specific payload (split parts, merge ids, cite seqs)
-                rationale TEXT,               -- agent's stated why (size/recency/coherence)
-                status TEXT NOT NULL DEFAULT 'proposed',
-                created_at INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_class_proposals_status ON class_proposals (status);
-
-            -- One classifier pass over the lake delta. Bounds the seq window it
-            -- consumed so the next run is delta-based, and records the claude
-            -- session id + a short summary for the pane.
-            CREATE TABLE IF NOT EXISTS class_runs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                started_at INTEGER NOT NULL,
-                finished_at INTEGER,
-                status TEXT NOT NULL,         -- running | done | error
-                seq_from INTEGER,
-                seq_to INTEGER,
-                claude_session_id TEXT,
-                summary TEXT
-            );
-
-            -- Supersession index: decision old_seq was replaced by new_seq.
-            -- Plain and NEVER hashed — the tamper-evident fact is the
-            -- `supersede` ledger event (event_seq); this table is only the fast
-            -- "is seq X superseded?" lookup so retrieval never re-parses
-            -- payloads. PRIMARY KEY(old_seq) enforces "superseded at most
-            -- once" — a later supersession targets the current chain head.
-            CREATE TABLE IF NOT EXISTS supersessions (
-                old_seq INTEGER PRIMARY KEY,  -- the superseded decision event
-                new_seq INTEGER NOT NULL,     -- the superseding decision event
-                event_seq INTEGER NOT NULL,   -- the supersede ledger event
-                created_at INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_supersessions_new
-                ON supersessions (new_seq);
-
-            -- Second Brain P3: the user's own margin notes + stars over the
-            -- record. Readable and EDITABLE rows in a plain, never-hashed side
-            -- table — the `supersessions` pattern: the tamper-evident facts are
-            -- the `note` ledger events (each act appends one, committing to
-            -- {action, text}); this table only holds the current state so the
-            -- UI never re-parses payloads. One row per annotated target
-            -- (partial unique below); target_kind 'none' rows are standalone
-            -- thoughts, each its own row, referenced by the event as
-            -- (ref_kind='none', ref_id=id). A note is a curation signal for
-            -- the classifier, NEVER provenance. Nothing here is ever deleted.
-            CREATE TABLE IF NOT EXISTS user_notes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                seq INTEGER,                  -- latest `note` ledger event seq
-                target_kind TEXT NOT NULL,    -- ledger_event | class_node | session | none
-                target_id TEXT,               -- event seq / node id / session id; NULL when standalone
-                text TEXT NOT NULL DEFAULT '',
-                starred INTEGER NOT NULL DEFAULT 0,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
-            );
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_user_notes_target
-                ON user_notes (target_kind, target_id) WHERE target_kind <> 'none';
-            CREATE INDEX IF NOT EXISTS idx_user_notes_starred
-                ON user_notes (starred, updated_at);
-
-            -- Agent-written pattern observations over a node's lake items
-            -- (recurrence / trend / co-occurrence). Derived, never ground
-            -- truth: the classifier must never file by one. cite_seqs is a
-            -- non-empty JSON array of the exact ledger seqs the pattern was
-            -- derived from — an uncited observation is rejected upstream.
-            -- Rows retire when their node's subtree collapses/merges away;
-            -- the `observation` ledger events remain as history.
-            CREATE TABLE IF NOT EXISTS class_observations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                node_id TEXT NOT NULL,
-                summary TEXT NOT NULL,
-                cite_seqs TEXT NOT NULL,      -- JSON array of ledger seqs
-                created_seq INTEGER,          -- the observation ledger event seq
-                pinned INTEGER NOT NULL DEFAULT 0,
-                dismissed INTEGER NOT NULL DEFAULT 0,
-                created_at INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_class_observations_node
-                ON class_observations (node_id, dismissed);
-
-            -- Polis Phase 4: which sessions have been exported as a portable
-            -- context bundle. This is the state that finally backs the
-            -- Librarian's deferred F6 "un-exported approved plan" friction signal
-            -- (Spike 3a parked it pending Phase 4). One row per (session, scope)
-            -- export; `head_hash` records the ledger head the bundle pinned, so a
-            -- later chain-growth can distinguish "exported at head X" if we ever
-            -- want staleness. UNIQUE keeps re-exports idempotent on the signal.
-            CREATE TABLE IF NOT EXISTS plan_exports (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                scope TEXT NOT NULL,          -- session | mission | class | full
-                head_hash TEXT,
-                exported_at INTEGER NOT NULL
-            );
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_plan_exports_session
-                ON plan_exports (session_id, scope);
-
-            -- Polis P2 (Dojo "Browsing Behavior"): the pages the user landed on,
-            -- with the normalized on-screen content that was there + a content
-            -- context-hash. Ledger-owned body store: a `browse_event` ledger row
-            -- references a row here by (ref_kind='browse_event', ref_id=id) +
-            -- payload_hash = context_hash, exactly like a decision event, so a
-            -- session delete can never orphan the chain. `text` (title + url +
-            -- headings + body) is retained so later lexical retrieval (P3 FTS5)
-            -- has something to index; `context_hash` groups every event that
-            -- touched the same content across sessions/tabs.
-            CREATE TABLE IF NOT EXISTS browse_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ts INTEGER NOT NULL,
-                action TEXT NOT NULL,          -- verb vocabulary: 'navigate' | 'select' | 'submit' | 'leave'
-                                              -- (enforced by ledger::BrowseAction, not a CHECK — additive widening)
-                browse_id TEXT,               -- the tab's discussion-thread key
-                url TEXT NOT NULL,
-                title TEXT,
-                text TEXT NOT NULL,           -- normalized page content (for P3 FTS)
-                context_hash TEXT NOT NULL,   -- body_hash over `text`
-                from_event_id INTEGER         -- trail edge: preceding browse_events.id (NULL = trail root)
-            );
-            CREATE INDEX IF NOT EXISTS idx_browse_events_hash ON browse_events (context_hash);
-            CREATE INDEX IF NOT EXISTS idx_browse_events_tab ON browse_events (browse_id);
-
-            -- Dojo P3: a lexical (BM25) full-text index over browse events.
-            -- Browsing is high-volume and keyword-heavy, so lexical recall beats
-            -- dense vectors as the first cut — and FTS5 ships with SQLite, so
-            -- there is no new dependency, no embedding model, and retrieval stays
-            -- auditable (you can see which terms matched).
-            --
-            -- DESIGN LAW, amended twice. It first read "only this noisy stream
-            -- gets lexical search; plans/prompts keep the vectorless ClassMemory
-            -- walk", then "…and no embedding model enters the product".
-            --
-            -- What survives, and is now enforced by guard tests rather than by
-            -- convention: **a ranked fuzzy index must not become the taxonomy.**
-            -- In one line — the arms decide what you READ; the tree decides what
-            -- things ARE. Node resolution never consults a lake ranking, no
-            -- retrieval path writes to the catalog, and the classifier's input is
-            -- chain order and never a ranking.
-            --
-            -- What is retired: "lexical vs walk" was never the real distinction,
-            -- and "no embedding model" was a proxy for two concerns (binary size,
-            -- auditability) that are better met directly — by an OS-provided
-            -- embedding service with zero model bytes in the binary, and by
-            -- labeling every hit with the arm that found it.
-            --
-            -- The index definitions themselves live in the versioned lexical
-            -- block further down, not here: they depend on columns added by the
-            -- ALTERs below (`role`, `user_text`, `gist`), and they carry a
-            -- tokenizer that must be able to change without a hand-written
-            -- migration per change.
-
-            -- Memory-by-session: the readable parent/child relation across the
-            -- app's disjoint thread id-spaces. A child (browse tab thread,
-            -- linked discussion, mission, voice session, draft, review, …)
-            -- hangs under a parent session or mission. Referenced by id, never
-            -- FK-cascaded, so deletes can't orphan the ledger; each accepted
-            -- row is committed to the chain by a `session_link` ledger event.
-            CREATE TABLE IF NOT EXISTS session_tree (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                child_kind TEXT NOT NULL,
-                child_id TEXT NOT NULL,
-                parent_kind TEXT NOT NULL,
-                parent_id TEXT NOT NULL,
-                created_at INTEGER NOT NULL
-            );
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_session_tree_child
-                ON session_tree (child_kind, child_id);
-            CREATE INDEX IF NOT EXISTS idx_session_tree_parent
-                ON session_tree (parent_kind, parent_id);
-
             -- Companion passive awareness: an append-only journal of meaningful
             -- app activity (surface switches, revisions, verdicts, navs, pins,
             -- launches, agent turns). NOT part of the tamper-evident record —
@@ -1603,6 +1253,7 @@ impl Database {
                 surface_label TEXT,
                 created_at INTEGER NOT NULL
             );
+
             CREATE INDEX IF NOT EXISTS idx_companion_messages
                 ON companion_messages (companion_id, created_at);
 
@@ -1634,6 +1285,7 @@ impl Database {
                 name TEXT NOT NULL,
                 created_at INTEGER NOT NULL
             );
+
             CREATE INDEX IF NOT EXISTS idx_bookshelf_folders_parent
                 ON bookshelf_folders (parent_id, name);
 
@@ -1650,6 +1302,7 @@ impl Database {
                 file_path TEXT,          -- relative to <app_data_dir>/bookshelf/<draft_id>/
                 created_at INTEGER NOT NULL
             );
+
             CREATE INDEX IF NOT EXISTS idx_draft_sources
                 ON draft_sources (draft_id, created_at);
 
@@ -1665,6 +1318,7 @@ impl Database {
                 kind TEXT NOT NULL,
                 surface TEXT, session_id TEXT, detail TEXT
             );
+
             CREATE INDEX IF NOT EXISTS idx_friction_events
                 ON friction_events (kind, ts);
 
@@ -1689,6 +1343,7 @@ impl Database {
                 dismissed INTEGER NOT NULL DEFAULT 0,
                 draft_id TEXT, created_at INTEGER NOT NULL, resolved_at INTEGER
             );
+
             CREATE UNIQUE INDEX IF NOT EXISTS idx_shipwright_dedupe
                 ON shipwright_findings (category, summary);
 
@@ -1706,6 +1361,7 @@ impl Database {
                 status TEXT NOT NULL,
                 created_at INTEGER NOT NULL
             );
+
             CREATE INDEX IF NOT EXISTS idx_draft_chat_messages
                 ON draft_chat_messages (draft_id, created_at);
 
@@ -1729,6 +1385,7 @@ impl Database {
                 status TEXT NOT NULL,
                 created_at INTEGER NOT NULL
             );
+
             CREATE INDEX IF NOT EXISTS idx_mem_chat_messages
                 ON mem_chat_messages (thread_id, created_at);
 
@@ -1744,6 +1401,7 @@ impl Database {
                 created_at INTEGER NOT NULL,
                 fork_session_id TEXT
             );
+
             CREATE INDEX IF NOT EXISTS idx_draft_comments
                 ON draft_comments (draft_id, created_at);
 
@@ -1762,6 +1420,7 @@ impl Database {
                 status TEXT NOT NULL DEFAULT 'pending',
                 created_at INTEGER NOT NULL
             );
+
             CREATE INDEX IF NOT EXISTS idx_draft_suggestions
                 ON draft_suggestions (draft_id, status, created_at);
 
@@ -1797,6 +1456,7 @@ impl Database {
                 base_version INTEGER NOT NULL,
                 created_at INTEGER NOT NULL
             );
+
             CREATE INDEX IF NOT EXISTS idx_shares_session ON shares (session_id);
 
             -- One row per imported return. landed_version is the revision the
@@ -1813,6 +1473,7 @@ impl Database {
                 orphans INTEGER NOT NULL,
                 comment_ids TEXT NOT NULL DEFAULT '[]'
             );
+
             CREATE INDEX IF NOT EXISTS idx_share_returns_session
                 ON share_returns (session_id, imported_at);
 
@@ -1837,35 +1498,9 @@ impl Database {
                 thumb_path TEXT,
                 UNIQUE (project_path, port)
             );
+
             CREATE INDEX IF NOT EXISTS idx_dev_servers_seen
                 ON dev_servers (last_seen_at DESC);
-
-            -- Retrieval-path indexes. Every one of these covers a query that was
-            -- a full table scan on the read side of the Memory surface — the
-            -- probes an agent's retrieval turn and the Timeline page both pay
-            -- for, per row, under the single connection lock.
-            --
-            -- The Timeline's filing probe asks "which node is this target filed
-            -- under?" — the reverse of `idx_class_links_node`, so it had no
-            -- index at all and scanned the link table once per page row.
-            CREATE INDEX IF NOT EXISTS idx_class_links_target
-                ON class_links (target_kind, target_id, status);
-            -- Ledger lookups by provenance rather than by seq: the prompt join
-            -- direction (`/v1/context/prompts`), the session spine, and the
-            -- activity-ribbon date range.
-            CREATE INDEX IF NOT EXISTS idx_ledger_prompt ON ledger_events (prompt_id);
-            CREATE INDEX IF NOT EXISTS idx_ledger_session ON ledger_events (session_id);
-            CREATE INDEX IF NOT EXISTS idx_ledger_ts ON ledger_events (ts);
-            -- The existing unique index on user_notes is PARTIAL
-            -- (`WHERE target_kind <> 'none'`), so the Timeline's two note joins
-            -- — which don't carry that predicate — couldn't use it.
-            CREATE INDEX IF NOT EXISTS idx_user_notes_target_all
-                ON user_notes (target_kind, target_id);
-            -- `supersessions.old_seq` is the PK, but the batched
-            -- `WHERE old_seq IN (…)` reader wants it as a named index too on
-            -- databases where the table predates the current schema.
-            CREATE INDEX IF NOT EXISTS idx_supersessions_old
-                ON supersessions (old_seq);
             "#,
         )?;
         // Best-effort additive migrations (errors on existing columns are ignored)
@@ -1915,154 +1550,6 @@ impl Database {
             [],
         );
 
-        // Memory-as-plumbing: cold-prompt compaction. When the background keeper
-        // gists a cold body, `gist` holds the summary (NULL = warm/full body),
-        // `compacted_at` stamps it, and `original_bytes` records what was
-        // reclaimed. `body_hash` is NEVER touched — it stays the ORIGINAL (the
-        // tamper-evident fact the ledger commits to, and the dedup key), so the
-        // chain and every bundle stay verifiable after the words are released.
-        let _ = conn.execute("ALTER TABLE prompts ADD COLUMN gist TEXT", []);
-        let _ = conn.execute("ALTER TABLE prompts ADD COLUMN compacted_at INTEGER", []);
-        let _ = conn.execute("ALTER TABLE prompts ADD COLUMN original_bytes INTEGER", []);
-        // `compaction_stats` aggregates over exactly this partial set, on every
-        // memory-status poll. It lives down here rather than in the batch above
-        // because it references migrated columns — the batch runs before the
-        // ALTERs on an upgrade, where `gist` does not exist yet.
-        let _ = conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_prompts_compacted
-                ON prompts (compacted_at) WHERE gist IS NOT NULL",
-            [],
-        );
-
-        // --- Corpus hygiene: what kind of text a lake row IS -----------------
-        //
-        // `prompts.role` shipped in the original DDL and was NULL on every row,
-        // which is how the corpus reached 92.6% machine text unnoticed: 4.32 MB
-        // of leaked agent prefaces, 1.25 MB recorded on purpose, and 1.78 MB of
-        // `<task-notification>`/`<system-reminder>` injections, against ~120 KB
-        // of genuine user prompts. `user_text` carries the human's own words out
-        // of an agent row's constructed body so the lexical index can read the
-        // question instead of the preface. Both are non-hashed and chain-safe —
-        // only `prompt_id` + `body_hash` enter the chained event (the
-        // gist/thread_kind precedent).
-        let _ = conn.execute("ALTER TABLE prompts ADD COLUMN user_text TEXT", []);
-        // Which tier produced a compacted row's gist: `agent` (the keeper's
-        // summarizer ran) or `deterministic` (it didn't, and the fallback kept a
-        // window of the text). Without this the two are indistinguishable after
-        // the fact, which is how 47% of gists came to be raw truncations while
-        // the reclaim number looked like a success.
-        let _ = conn.execute("ALTER TABLE prompts ADD COLUMN gist_source TEXT", []);
-
-        // One-time reclassification of everything captured before the column
-        // was filled. RECLASSIFY, NOT COMPACT — deliberately. Compacting the
-        // 397 machine rows instead would append 397 `compaction` events to a
-        // 2,938-event chain (+13.5%), irreversibly, and destroy the very
-        // evidence needed to audit whether this classification was right. An
-        // UPDATE of a non-hashed column leaves the rows byte-intact, the ledger
-        // untouched, zero new events, and is fully reversible. Reclaiming the
-        // disk is a separate, honest act (`keeper::select_compaction_candidates`
-        // now targets `agent`/`system` first).
-        //
-        // Guarded on a version key, and keyed on the SAME counter as the Phase-2
-        // `fts_text` generated column: that column reads `role`, so if it were
-        // ever created first it would compute against NULL and index every
-        // preface. Ordering here is arithmetic, not preference.
-        {
-            let done: Option<String> = conn
-                .query_row(
-                    "SELECT value FROM app_settings WHERE key = ?1",
-                    params![SETTING_CORPUS_ROLE_VERSION],
-                    |r| r.get(0),
-                )
-                .ok();
-            if done.as_deref() != Some(CORPUS_ROLE_VERSION) {
-                // The order of the CASE arms is the classification, and each arm
-                // is evidence-backed:
-                //   1. the CLI's injections announce themselves by prefix;
-                //   2. `rust_firstturn`/`voice_stream` are Redline's own
-                //      constructed prompts by definition of the source;
-                //   3. the leaked captures came in through the hook wearing no
-                //      such marking — they are recognizable only by shape, and
-                //      "opens with `You are ` and runs past 2 KB" is a first-turn
-                //      preface, not something a person types;
-                //   4. everything else is the user. Defaulting to `user` is the
-                //      conservative direction: a misfiled user prompt stays
-                //      searchable, a misfiled agent prompt disappears from view.
-                let _ = conn.execute(
-                    "UPDATE prompts SET role = CASE
-                        WHEN TRIM(body) LIKE '<task-notification>%'
-                          OR TRIM(body) LIKE '<system-reminder>%'   THEN 'system'
-                        WHEN source IN ('rust_firstturn','voice_stream') THEN 'agent'
-                        WHEN body LIKE 'You are %' AND LENGTH(body) > 2000 THEN 'agent'
-                        ELSE 'user' END
-                     WHERE role IS NULL",
-                    [],
-                );
-                let _ = conn.execute(
-                    "INSERT INTO app_settings (key, value) VALUES (?1, ?2)
-                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    params![SETTING_CORPUS_ROLE_VERSION, CORPUS_ROLE_VERSION],
-                );
-            }
-        }
-        // The lake's read paths, indexed. Every one of these backs a filter the
-        // Timeline or a `/v1/context` route actually offers; without them each
-        // faceted read is a full scan of `prompts` under the connection lock.
-        // Composite `(x, ts)` rather than `(x)` alone because every one of these
-        // reads is ordered by time within its facet.
-        for ddl in [
-            "CREATE INDEX IF NOT EXISTS idx_prompts_ts ON prompts (ts)",
-            "CREATE INDEX IF NOT EXISTS idx_prompts_role ON prompts (role)",
-            "CREATE INDEX IF NOT EXISTS idx_prompts_surface_ts ON prompts (surface, ts)",
-            "CREATE INDEX IF NOT EXISTS idx_prompts_project_ts ON prompts (project_path, ts)",
-            "CREATE INDEX IF NOT EXISTS idx_prompts_session ON prompts (session_id)",
-            "CREATE INDEX IF NOT EXISTS idx_prompts_claude_sess ON prompts (claude_session_id)",
-            "CREATE INDEX IF NOT EXISTS idx_prompts_thread ON prompts (thread_kind, thread_id)",
-            "CREATE INDEX IF NOT EXISTS idx_prompts_model ON prompts (model)",
-        ] {
-            let _ = conn.execute(ddl, []);
-        }
-
-        // Compaction archive. A cold compaction releases the words at 59:1 and
-        // used to be irrecoverable; that is a fine trade for machine text and a
-        // terrible one for anything else, and "fine" was being decided by a
-        // heuristic. Archiving the deflated original makes the decision
-        // reversible, which is what lets the blade stay sharp.
-        //
-        // `body_hash` is stored beside the blob and re-verified on restore: the
-        // archive is derived data outside the hash chain, so nothing may be
-        // trusted back into a prompt row without proving it is the same bytes
-        // the chain committed to. `algo` leaves room for a future codec without
-        // a migration. Forget deletes from here too — forget must mean forget.
-        let _ = conn.execute(
-            "CREATE TABLE IF NOT EXISTS prompt_archive (
-                prompt_id INTEGER PRIMARY KEY,
-                body_hash TEXT NOT NULL,
-                algo TEXT NOT NULL,
-                original_bytes INTEGER NOT NULL,
-                blob BLOB NOT NULL,
-                archived_at INTEGER NOT NULL
-            )",
-            [],
-        );
-
-        // The picture store's pointer. NULL means no picture, and it is stored
-        // rather than derived from `context_hash` because NULL has to be able
-        // to mean three different real things: never captured, policy-denied,
-        // and the user forgot it. A derived key could only ever say "the file
-        // should exist", which is a different claim.
-        let _ = conn.execute("ALTER TABLE browse_events ADD COLUMN shot_key TEXT", []);
-        let _ = conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_browse_events_shot ON browse_events (shot_key)",
-            [],
-        );
-        // A vision-tier caption for a page whose text didn't capture. Kept in
-        // its OWN column and never appended into `text`, because
-        // `context_hash = body_hash(text)` is the identity that the shot key,
-        // the dedupe and the hash chain all rest on — folding a caption into
-        // `text` would silently re-key the page.
-        let _ = conn.execute("ALTER TABLE browse_events ADD COLUMN caption TEXT", []);
-
         // Per-item page + component pointer (see the table comment above). Three
         // nullable adds, so an existing list keeps every item and simply reports
         // "no page recorded" for the ones written before Redline was capturing
@@ -2090,308 +1577,6 @@ impl Database {
             [],
         );
 
-        // Semantic index — a DERIVED index, exactly like `prompts_fts`: not on
-        // the hash chain, droppable, rebuildable from the content tables. That
-        // is what makes an embedding model admissible at all; nothing here is
-        // evidence, so nothing here can corrupt the record.
-        //
-        // `vec` is `dim` int8 bytes of an L2-normalized vector, with its scale
-        // beside it. `source_hash` makes re-runs free (unchanged text is
-        // skipped) and makes a model change a clean re-index rather than a
-        // migration: rows carry the `model` that produced them, and a different
-        // model simply has no rows yet.
-        let _ = conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS embeddings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                target_kind TEXT NOT NULL,       -- prompt | browse_event | class_node
-                target_id INTEGER NOT NULL,
-                chunk_ix INTEGER NOT NULL,
-                char_start INTEGER NOT NULL,
-                char_len INTEGER NOT NULL,
-                dim INTEGER NOT NULL,
-                scale REAL NOT NULL,
-                vec BLOB NOT NULL,
-                model TEXT NOT NULL,
-                source_hash TEXT NOT NULL,
-                created_at INTEGER NOT NULL
-            );
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_embeddings_chunk
-                ON embeddings (target_kind, target_id, chunk_ix, model);
-            CREATE INDEX IF NOT EXISTS idx_embeddings_target
-                ON embeddings (target_kind, target_id);",
-        );
-
-        // --- The lexical layer, versioned ------------------------------------
-        //
-        // Everything here (tokenizer, indexed expression, column weighting) is
-        // DERIVED: droppable and rebuildable from the content tables, never on
-        // the hash chain. So it is versioned as one unit rather than migrated
-        // statement by statement — changing the tokenizer is a version bump, not
-        // a hand-written ALTER, and the rebuild is the migration.
-        //
-        // Two things are load-bearing:
-        //
-        // 1. **Generated columns.** The old triggers indexed
-        //    `COALESCE(gist, body)` while the content table held `body = ''` for
-        //    every compacted row — a divergence that made FTS5's own `'rebuild'`
-        //    command WRONG (it re-reads by column name and would have silently
-        //    dropped 224 gists), which is why the code carried a comment
-        //    forbidding it. Making the indexed text a real generated column of
-        //    the content table removes the divergence by construction: the
-        //    triggers write `new.fts_head`/`new.fts_tail`, `'rebuild'` reads the
-        //    same two columns, and they cannot disagree. `'rebuild'` is now
-        //    correct, and `prompts_fts_rebuild_is_now_correct` pins it.
-        //
-        // 2. **`fts_text` reads `user_text` for an agent row.** This is where
-        //    Phase 1's corpus work turns into index size: porter over the
-        //    cleaned corpus measures 123 KB against today's 2,642 KB. The role
-        //    backfill above MUST have run first or this computes against NULL
-        //    roles and indexes every preface — which is why both key on
-        //    `SETTING_CORPUS_ROLE_VERSION` and run in one migration step.
-        //
-        // The head/tail split lets bm25 weight the opening of a prompt (where a
-        // 6 KB body states its ask) over its interior, at zero extra index bytes
-        // since the two columns are disjoint slices of the same text.
-        // What each role contributes to the searchable text, measured on the
-        // live corpus (1,215 rows / 7.65 MB):
-        //
-        //   agent   447 rows  5.6 MB (73.3%) → its `user_text` only
-        //   system  110 rows  1.8 MB (24.0%) → its first SYSTEM_INDEX_CHARS
-        //   user    658 rows  208 KB ( 2.7%) → all of it
-        //
-        // The `system` rule is the one judgement call here. A
-        // `<task-notification>` is a real event in the user's history — it
-        // reports work their own session did — so it stays in the corpus and on
-        // the Timeline. But it is not their words, and its BODY is a dump of
-        // agent output: indexing all 1.8 MB of it would leave the lexical layer
-        // 90% machine text even after the agent rows are gone, and every
-        // question would compete with agent-speak for recall. The notification
-        // says what finished in its opening lines, so a head window keeps it
-        // findable at ~7% of the bytes.
-        let _ = conn.execute(
-            &format!(
-                "ALTER TABLE prompts ADD COLUMN fts_text TEXT GENERATED ALWAYS AS (
-                    CASE WHEN role = 'agent'  THEN COALESCE(NULLIF(user_text, ''), '')
-                         WHEN role = 'system' THEN substr(COALESCE(NULLIF(body, ''), gist, ''),
-                                                          1, {SYSTEM_INDEX_CHARS})
-                         ELSE COALESCE(NULLIF(body, ''), gist, '') END) VIRTUAL"
-            ),
-            [],
-        );
-        let _ = conn.execute(
-            "ALTER TABLE prompts ADD COLUMN fts_head TEXT
-                GENERATED ALWAYS AS (substr(fts_text, 1, 400)) VIRTUAL",
-            [],
-        );
-        let _ = conn.execute(
-            "ALTER TABLE prompts ADD COLUMN fts_tail TEXT
-                GENERATED ALWAYS AS (substr(fts_text, 401)) VIRTUAL",
-            [],
-        );
-
-        {
-            let built: Option<String> = conn
-                .query_row(
-                    "SELECT value FROM app_settings WHERE key = ?1",
-                    params![SETTING_LEXICAL_VERSION],
-                    |r| r.get(0),
-                )
-                .ok();
-            if built.as_deref() != Some(LEXICAL_VERSION) {
-                // Drop first: an FTS5 table's tokenizer is fixed at creation, so
-                // a tokenizer change is a re-creation. The shadow tables go with
-                // it (DROP on the virtual table removes them).
-                let _ = conn.execute_batch(
-                    "DROP TRIGGER IF EXISTS prompts_fts_ai;
-                     DROP TRIGGER IF EXISTS prompts_fts_ad;
-                     DROP TRIGGER IF EXISTS prompts_fts_au;
-                     DROP TABLE IF EXISTS prompts_fts;
-                     DROP TRIGGER IF EXISTS browse_events_ai;
-                     DROP TRIGGER IF EXISTS browse_events_ad;
-                     DROP TRIGGER IF EXISTS browse_events_au;
-                     DROP TABLE IF EXISTS browse_events_fts;
-                     DROP TRIGGER IF EXISTS class_nodes_fts_ai;
-                     DROP TRIGGER IF EXISTS class_nodes_fts_ad;
-                     DROP TRIGGER IF EXISTS class_nodes_fts_au;
-                     DROP TABLE IF EXISTS class_nodes_fts;
-                     DROP TRIGGER IF EXISTS prompts_grep_ai;
-                     DROP TRIGGER IF EXISTS prompts_grep_ad;
-                     DROP TRIGGER IF EXISTS prompts_grep_au;
-                     DROP TABLE IF EXISTS prompts_grep;
-                     DROP TRIGGER IF EXISTS browse_grep_ai;
-                     DROP TABLE IF EXISTS browse_grep;",
-                );
-                let ddl = format!(
-                    r#"
-                    CREATE VIRTUAL TABLE prompts_fts USING fts5(
-                        fts_head, fts_tail,
-                        content='prompts', content_rowid='id',
-                        tokenize='{TOKENIZER}', prefix='{PREFIX_SIZES}'
-                    );
-                    -- `prompts` is NOT insert-only: compaction rewrites
-                    -- gist/body in place and a forget releases the words, so the
-                    -- full trigger set is required, with FTS5's `'delete'` idiom
-                    -- supplying the OLD text on the way out. Getting this wrong
-                    -- doesn't error — it returns garbage from snippet().
-                    CREATE TRIGGER prompts_fts_ai AFTER INSERT ON prompts BEGIN
-                        INSERT INTO prompts_fts (rowid, fts_head, fts_tail)
-                        VALUES (new.id, new.fts_head, new.fts_tail);
-                    END;
-                    CREATE TRIGGER prompts_fts_ad AFTER DELETE ON prompts BEGIN
-                        INSERT INTO prompts_fts (prompts_fts, rowid, fts_head, fts_tail)
-                        VALUES ('delete', old.id, old.fts_head, old.fts_tail);
-                    END;
-                    CREATE TRIGGER prompts_fts_au AFTER UPDATE ON prompts BEGIN
-                        INSERT INTO prompts_fts (prompts_fts, rowid, fts_head, fts_tail)
-                        VALUES ('delete', old.id, old.fts_head, old.fts_tail);
-                        INSERT INTO prompts_fts (rowid, fts_head, fts_tail)
-                        VALUES (new.id, new.fts_head, new.fts_tail);
-                    END;
-
-                    -- No `prefix=` here, deliberately: see PREFIX_SIZES. This
-                    -- index covers 5.7 MB of page DOM and a prefix index over
-                    -- it measured +1.3 MB, doubling it.
-                    CREATE VIRTUAL TABLE browse_events_fts USING fts5(
-                        title, url, text,
-                        content='browse_events', content_rowid='id',
-                        tokenize='{TOKENIZER}'
-                    );
-                    -- `browse_events` USED to be insert-only, which is why an
-                    -- AFTER INSERT trigger alone was safe. It no longer is:
-                    -- `caption` (the vision tier) is written by an UPDATE, and
-                    -- an external-content FTS table whose content row changes
-                    -- without a matching `'delete'` row does not error — it
-                    -- returns GARBAGE from snippet(), because the index still
-                    -- holds offsets into text that no longer exists. The full
-                    -- trigger set lands HERE, before the caption column is ever
-                    -- written to, and `browse_events_fts_survives_an_update`
-                    -- pins it.
-                    CREATE TRIGGER browse_events_ai AFTER INSERT ON browse_events BEGIN
-                        INSERT INTO browse_events_fts (rowid, title, url, text)
-                        VALUES (new.id, new.title, new.url, new.text);
-                    END;
-                    CREATE TRIGGER browse_events_ad AFTER DELETE ON browse_events BEGIN
-                        INSERT INTO browse_events_fts (browse_events_fts, rowid, title, url, text)
-                        VALUES ('delete', old.id, old.title, old.url, old.text);
-                    END;
-                    CREATE TRIGGER browse_events_au AFTER UPDATE ON browse_events BEGIN
-                        INSERT INTO browse_events_fts (browse_events_fts, rowid, title, url, text)
-                        VALUES ('delete', old.id, old.title, old.url, old.text);
-                        INSERT INTO browse_events_fts (rowid, title, url, text)
-                        VALUES (new.id, new.title, new.url, new.text);
-                    END;
-
-                    -- The catalog gets an index of its own — the highest-leverage
-                    -- single fix in the program. `match_class_nodes` LIKEd the
-                    -- ENTIRE raw query as one `%…%` pattern, so any
-                    -- question-shaped `?q=` resolved no node at all and the
-                    -- answer pack silently degraded to lexical-only. 125 rows;
-                    -- the index is single-digit KB.
-                    CREATE VIRTUAL TABLE class_nodes_fts USING fts5(
-                        title, summary,
-                        content='class_nodes', content_rowid='rowid',
-                        tokenize='{TOKENIZER}', prefix='{PREFIX_SIZES}'
-                    );
-                    CREATE TRIGGER class_nodes_fts_ai AFTER INSERT ON class_nodes BEGIN
-                        INSERT INTO class_nodes_fts (rowid, title, summary)
-                        VALUES (new.rowid, new.title, COALESCE(new.summary, ''));
-                    END;
-                    CREATE TRIGGER class_nodes_fts_ad AFTER DELETE ON class_nodes BEGIN
-                        INSERT INTO class_nodes_fts (class_nodes_fts, rowid, title, summary)
-                        VALUES ('delete', old.rowid, old.title, COALESCE(old.summary, ''));
-                    END;
-                    CREATE TRIGGER class_nodes_fts_au AFTER UPDATE ON class_nodes BEGIN
-                        INSERT INTO class_nodes_fts (class_nodes_fts, rowid, title, summary)
-                        VALUES ('delete', old.rowid, old.title, COALESCE(old.summary, ''));
-                        INSERT INTO class_nodes_fts (rowid, title, summary)
-                        VALUES (new.rowid, new.title, COALESCE(new.summary, ''));
-                    END;
-
-                    -- The grep arm: trigram indexes, which answer arbitrary
-                    -- substring `LIKE '%…%'` from an INDEX instead of a scan.
-                    -- This is the Google-Code-Search shape — an index proposes
-                    -- candidates, a regex verifies them in Rust — and it is the
-                    -- only honest way to reach what tokenization cannot: error
-                    -- strings, `#[serde(rename_all)]`, a fragment of a path.
-                    --
-                    -- A bare `regexp` function over "a candidate set" was
-                    -- rejected: without an index there IS no candidate set, so
-                    -- it degenerates into a 7 MB scan under the connection lock.
-                    --
-                    -- What is deliberately NOT indexed: browse `text`. A
-                    -- trigram index over 5.7 MB of page DOM measured ~5.7 MB of
-                    -- index, and substring search INSIDE a rendered page is not
-                    -- a question anyone asks — you ask WHICH page, and
-                    -- url + title answers that.
-                    CREATE VIRTUAL TABLE prompts_grep USING fts5(
-                        fts_text, content='prompts', content_rowid='id',
-                        tokenize='trigram'
-                    );
-                    CREATE TRIGGER prompts_grep_ai AFTER INSERT ON prompts BEGIN
-                        INSERT INTO prompts_grep (rowid, fts_text) VALUES (new.id, new.fts_text);
-                    END;
-                    CREATE TRIGGER prompts_grep_ad AFTER DELETE ON prompts BEGIN
-                        INSERT INTO prompts_grep (prompts_grep, rowid, fts_text)
-                        VALUES ('delete', old.id, old.fts_text);
-                    END;
-                    CREATE TRIGGER prompts_grep_au AFTER UPDATE ON prompts BEGIN
-                        INSERT INTO prompts_grep (prompts_grep, rowid, fts_text)
-                        VALUES ('delete', old.id, old.fts_text);
-                        INSERT INTO prompts_grep (rowid, fts_text) VALUES (new.id, new.fts_text);
-                    END;
-
-                    CREATE VIRTUAL TABLE browse_grep USING fts5(
-                        url, title, content='browse_events', content_rowid='id',
-                        tokenize='trigram'
-                    );
-                    CREATE TRIGGER browse_grep_ai AFTER INSERT ON browse_events BEGIN
-                        INSERT INTO browse_grep (rowid, url, title)
-                        VALUES (new.id, new.url, COALESCE(new.title, ''));
-                    END;
-                    "#
-                );
-                if let Err(e) = conn.execute_batch(&ddl) {
-                    tracing::warn!(error = %e, "lexical index rebuild failed");
-                }
-                // `'rebuild'` — correct now, for the first time, because every
-                // indexed column resolves against a real column of its content
-                // table. No `%_docsize` guard is needed either: this runs once
-                // per version, not once per boot.
-                for table in [
-                    "prompts_fts",
-                    "browse_events_fts",
-                    "class_nodes_fts",
-                    "prompts_grep",
-                    "browse_grep",
-                ] {
-                    let _ = conn.execute(&format!("INSERT INTO {table}({table}) VALUES('rebuild')"), []);
-                }
-                let _ = conn.execute(
-                    "INSERT INTO app_settings (key, value) VALUES (?1, ?2)
-                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    params![SETTING_LEXICAL_VERSION, LEXICAL_VERSION],
-                );
-            }
-        }
-
-        // Memory-by-session provenance: which interaction thread a prompt
-        // belongs to (browse_id / linked_id / draft_id / …) and the parent plan
-        // session that thread hangs under. Non-hashed (only prompt_id +
-        // body_hash enter the chained event), so purely additive and
-        // chain-safe — the gist/compacted_at precedent.
-        let _ = conn.execute("ALTER TABLE prompts ADD COLUMN thread_kind TEXT", []);
-        let _ = conn.execute("ALTER TABLE prompts ADD COLUMN thread_id TEXT", []);
-        let _ = conn.execute("ALTER TABLE prompts ADD COLUMN parent_session_id TEXT", []);
-
-        // Model provenance: which model actually received a prompt, carried as
-        // ground truth. `model_source` says how we know — 'seat' (the spawn's
-        // own `--model` flag) or 'transcript' (backfilled from the session's
-        // JSONL). NULL means the CLI default applied and we refuse to guess.
-        // Non-hashed (only prompt_id + body_hash enter the chained event), so
-        // additive and chain-safe — the gist/thread_kind precedent.
-        let _ = conn.execute("ALTER TABLE prompts ADD COLUMN model TEXT", []);
-        let _ = conn.execute("ALTER TABLE prompts ADD COLUMN model_source TEXT", []);
-
         // Convert-to-Linked provenance: a linked discussion created FROM a
         // per-tab browse chat records where it came from. `fork_from_session_id`
         // is consumed by the first turn (`--resume <sid> --fork-session`) and
@@ -2409,14 +1594,6 @@ impl Database {
             "ALTER TABLE linked_sessions ADD COLUMN fork_from_session_id TEXT",
             [],
         );
-
-        // Behavioral foundation (P0): the trail edge — which browse event this
-        // one followed from. Non-hashed (only `context_hash` enters the chained
-        // event), so purely additive and chain-safe. NULL = trail root, and
-        // every pre-existing row. The verb widening of `action` needs no
-        // migration: it is enforced in Rust (`ledger::BrowseAction`), not by a
-        // CHECK, and existing rows are all already 'navigate'.
-        let _ = conn.execute("ALTER TABLE browse_events ADD COLUMN from_event_id INTEGER", []);
 
         // Migration: comment ids are session-scoped (`c-001` restarts per
         // session), but legacy databases declared `id TEXT PRIMARY KEY`
@@ -7345,62 +6522,7 @@ impl Database {
         conn: &rusqlite::Connection,
         a: &crate::ledger::LedgerAppend,
     ) -> rusqlite::Result<crate::ledger::LedgerEventRow> {
-        let head: Option<(i64, String)> = conn
-            .query_row(
-                "SELECT seq, entry_hash FROM ledger_events ORDER BY seq DESC LIMIT 1",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        let (prev_seq, prev_hash) = head.unwrap_or((0, crate::ledger::GENESIS_PREV.to_string()));
-        let seq = prev_seq + 1;
-        let canon = crate::ledger::CanonicalEvent {
-            seq,
-            ts: a.ts,
-            kind: a.kind,
-            author: a.author,
-            prompt_id: a.prompt_id,
-            session_id: a.session_id,
-            version_number: a.version_number,
-            ref_kind: a.ref_kind,
-            ref_id: a.ref_id,
-            payload_hash: a.payload_hash,
-        };
-        let entry_hash = crate::ledger::compute_entry_hash(&prev_hash, &canon);
-        conn.execute(
-            "INSERT INTO ledger_events
-                (seq, ts, kind, author, prompt_id, session_id, version_number,
-                 ref_kind, ref_id, payload_hash, prev_hash, entry_hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![
-                seq,
-                a.ts,
-                a.kind,
-                a.author,
-                a.prompt_id,
-                a.session_id,
-                a.version_number,
-                a.ref_kind,
-                a.ref_id,
-                a.payload_hash,
-                prev_hash,
-                entry_hash,
-            ],
-        )?;
-        Ok(crate::ledger::LedgerEventRow {
-            seq,
-            ts: a.ts,
-            kind: a.kind.to_string(),
-            author: a.author.to_string(),
-            prompt_id: a.prompt_id,
-            session_id: a.session_id.map(str::to_string),
-            version_number: a.version_number,
-            ref_kind: a.ref_kind.map(str::to_string),
-            ref_id: a.ref_id.map(str::to_string),
-            payload_hash: a.payload_hash.to_string(),
-            prev_hash,
-            entry_hash,
-        })
+        polis_store::ledger::append_event(conn, a)
     }
 
     /// Most-recent-first ledger events, capped at `limit`.
@@ -17447,6 +16569,117 @@ mod tests {
         println!();
     }
 
+    /// Session A2 of the Polis extraction: attaching the store to a database
+    /// the OLD migrations built (every install before A2) must be a no-op on
+    /// the record — zero events appended, no body mutated, no object dropped,
+    /// recreated or added (so no FTS rebuild), chain green — and must ADOPT the
+    /// two legacy version keys rather than re-run their blocks. The second
+    /// open must take the fast path.
+    ///
+    /// ```text
+    /// cp ~/Library/Application\ Support/com.redline.app/backups/<newest>.db /tmp/real.db
+    /// REDLINE_REAL_DB=/tmp/real.db cargo test --lib real_db_attach -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs REDLINE_REAL_DB pointing at a copy of a live database"]
+    fn real_db_attach_is_a_noop() {
+        let Ok(path) = std::env::var("REDLINE_REAL_DB") else {
+            eprintln!("set REDLINE_REAL_DB to a COPY of a live redline.db");
+            return;
+        };
+        let path = std::path::PathBuf::from(path);
+        let scalar = |c: &rusqlite::Connection, sql: &str| -> i64 {
+            c.query_row(sql, [], |r| r.get(0)).unwrap_or(-1)
+        };
+        let text = |c: &rusqlite::Connection, sql: &str| -> String {
+            c.query_row(sql, [], |r| r.get(0)).unwrap_or_default()
+        };
+        // Every schema object except the store's own meta table: (type, name,
+        // rootpage) in creation order. A rebuilt FTS table, a dropped index or
+        // a newly created object all change this list.
+        let objects = |c: &rusqlite::Connection| -> Vec<(String, String, i64)> {
+            let mut stmt = c
+                .prepare(
+                    "SELECT type, name, rootpage FROM sqlite_master
+                     WHERE name NOT LIKE '%polis_meta%' ORDER BY rowid",
+                )
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        assert_eq!(
+            scalar(&raw, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'polis_meta'"),
+            0,
+            "the copy must be one the store has never attached to"
+        );
+        let events_before = scalar(&raw, "SELECT COALESCE(MAX(seq), 0) FROM ledger_events");
+        let prompts_before = scalar(&raw, "SELECT COUNT(*) FROM prompts");
+        let bytes_before = scalar(
+            &raw,
+            "SELECT COALESCE(SUM(LENGTH(body)), 0) + COALESCE(SUM(LENGTH(gist)), 0) FROM prompts",
+        );
+        let head_before = text(&raw, "SELECT entry_hash FROM ledger_events ORDER BY seq DESC LIMIT 1");
+        let legacy_lexical =
+            text(&raw, "SELECT value FROM app_settings WHERE key = 'redline.memory.lexicalVersion'");
+        let legacy_role = text(
+            &raw,
+            "SELECT value FROM app_settings WHERE key = 'redline.memory.corpusRoleVersion'",
+        );
+        let objects_before = objects(&raw);
+        drop(raw);
+
+        let db = Database::open(&path).unwrap();
+        let report = db.last_attach().clone();
+        assert_eq!(report.adopted_keys, 2, "both legacy version keys adopted");
+        assert!(report.migrated, "the first attach runs the idempotent block once");
+        assert_eq!(db.meta("lexical_version").unwrap().as_deref(), Some(legacy_lexical.as_str()));
+        assert_eq!(db.meta("corpus_role_version").unwrap().as_deref(), Some(legacy_role.as_str()));
+        assert_eq!(db.meta("schema_version").unwrap().as_deref(), Some("1"));
+        {
+            let conn = db.conn.lock().unwrap();
+            assert_eq!(
+                scalar(&conn, "SELECT COALESCE(MAX(seq), 0) FROM ledger_events"),
+                events_before,
+                "zero events appended"
+            );
+            assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM prompts"), prompts_before);
+            assert_eq!(
+                scalar(
+                    &conn,
+                    "SELECT COALESCE(SUM(LENGTH(body)), 0) + COALESCE(SUM(LENGTH(gist)), 0) FROM prompts"
+                ),
+                bytes_before,
+                "no body or gist changed"
+            );
+            assert_eq!(
+                text(&conn, "SELECT entry_hash FROM ledger_events ORDER BY seq DESC LIMIT 1"),
+                head_before
+            );
+            let after = objects(&conn);
+            let missing: Vec<_> = objects_before.iter().filter(|o| !after.contains(o)).collect();
+            let added: Vec<_> = after.iter().filter(|o| !objects_before.contains(o)).collect();
+            assert!(
+                missing.is_empty() && added.is_empty(),
+                "schema objects changed on attach — dropped/rebuilt: {missing:?}, added: {added:?}"
+            );
+        }
+        assert!(db.verify_ledger_chain().unwrap().ok, "the chain still verifies");
+        drop(db);
+
+        let again = Database::open(&path).unwrap();
+        assert!(!again.last_attach().migrated, "a current store runs no schema SQL on reopen");
+        assert_eq!(again.last_attach().adopted_keys, 0);
+        eprintln!(
+            "real_db_attach_is_a_noop: events={events_before} prompts={prompts_before} \
+             bytes={bytes_before} objects={} lexical={legacy_lexical} role={legacy_role}",
+            objects_before.len()
+        );
+    }
+
     /// The one-time reclassification runs over rows captured before the column
     /// was filled, leaves them byte-intact, and appends nothing to the chain.
     #[test]
@@ -17470,19 +16703,16 @@ mod tests {
             let conn = db.conn.lock().unwrap();
             conn.execute("UPDATE prompts SET role = NULL", []).unwrap();
             conn.execute(
-                "DELETE FROM app_settings WHERE key = ?1",
-                params![SETTING_CORPUS_ROLE_VERSION],
+                "DELETE FROM polis_meta WHERE key = ?1",
+                params![polis_store::meta::CORPUS_ROLE_VERSION_KEY],
             )
             .unwrap();
         }
-        // Run the STEP, not the runner. `migrate()` is now a no-op on an
-        // already-current database — that is the whole point of the version
-        // stamp — so re-running it would test the fast path, not the backfill
-        // this case is about.
-        {
-            let conn = db.conn.lock().unwrap();
-            Database::migrate_v1(&conn).unwrap();
-        }
+        // Run the STEP, not the runner. `attach` is a no-op on an
+        // already-current store — that is the whole point of the version
+        // stamp — so re-opening would test the fast path, not the backfill
+        // this case is about. `run_migrations` is the step, unconditionally.
+        db.run_migrations().unwrap();
 
         let role_of = |id: i64| -> String {
             let conn = db.conn.lock().unwrap();
