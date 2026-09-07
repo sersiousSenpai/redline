@@ -71,6 +71,11 @@ mod mission;
 mod parser;
 #[cfg(test)]
 mod perf_guard;
+/// Where the Polis Memory crates' sources are (asked of `cargo metadata`);
+/// the same file the integration tests share as `tests/common`.
+#[cfg(test)]
+#[path = "../tests/common/mod.rs"]
+mod polis_src;
 mod postboot;
 mod preflight;
 mod project;

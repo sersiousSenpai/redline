@@ -3289,6 +3289,7 @@ dependencies = [
 [[package]]
 name = "polis-core"
 version = "0.1.0"
+source = "git+https://github.com/sersiousSenpai/polis-memory?rev=fe2bafdbf65ae48e25229e142d350f059b3c541d#fe2bafdbf65ae48e25229e142d350f059b3c541d"
 dependencies = [
  "serde",
  "serde_json",
@@ -3298,6 +3299,7 @@ dependencies = [
 [[package]]
 name = "polis-embed"
 version = "0.1.0"
+source = "git+https://github.com/sersiousSenpai/polis-memory?rev=fe2bafdbf65ae48e25229e142d350f059b3c541d#fe2bafdbf65ae48e25229e142d350f059b3c541d"
 dependencies = [
  "block2",
  "objc2",
@@ -3311,10 +3313,10 @@ dependencies = [
 [[package]]
 name = "polis-llm"
 version = "0.1.0"
+source = "git+https://github.com/sersiousSenpai/polis-memory?rev=fe2bafdbf65ae48e25229e142d350f059b3c541d#fe2bafdbf65ae48e25229e142d350f059b3c541d"
 dependencies = [
  "async-trait",
  "polis-core",
- "reqwest",
  "serde",
  "serde_json",
  "tokio",
@@ -3324,6 +3326,7 @@ dependencies = [
 [[package]]
 name = "polis-memory"
 version = "0.1.0"
+source = "git+https://github.com/sersiousSenpai/polis-memory?rev=fe2bafdbf65ae48e25229e142d350f059b3c541d#fe2bafdbf65ae48e25229e142d350f059b3c541d"
 dependencies = [
  "polis-core",
  "polis-embed",
@@ -3332,28 +3335,26 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "tokio",
  "tracing",
 ]
 
 [[package]]
 name = "polis-server"
 version = "0.1.0"
+source = "git+https://github.com/sersiousSenpai/polis-memory?rev=fe2bafdbf65ae48e25229e142d350f059b3c541d#fe2bafdbf65ae48e25229e142d350f059b3c541d"
 dependencies = [
  "axum",
- "http-body-util",
  "polis-core",
- "polis-memory",
  "serde",
  "serde_json",
  "tokio",
- "tower",
  "tracing",
 ]
 
 [[package]]
 name = "polis-store"
 version = "0.1.0"
+source = "git+https://github.com/sersiousSenpai/polis-memory?rev=fe2bafdbf65ae48e25229e142d350f059b3c541d#fe2bafdbf65ae48e25229e142d350f059b3c541d"
 dependencies = [
  "flate2",
  "polis-core",

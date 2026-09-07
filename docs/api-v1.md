@@ -1,6 +1,6 @@
 # Redline control-plane API — v1
 
-The local daemon on `127.0.0.1:7676` (loopback only) is Redline's extension API. This table is generated from `ROUTE_TABLE` in `src-tauri/src/auth.rs` (Redline's own routes) followed by `polis_server::ROUTES` (the Polis Memory routes the daemon merges in, `src-tauri/crates/polis/polis-server/src/lib.rs`) — the same tables the auth middleware enforces on every request — via `UPDATE_GOLDEN=1 cargo test api_doc`. Do not edit by hand.
+The local daemon on `127.0.0.1:7676` (loopback only) is Redline's extension API. This table is generated from `ROUTE_TABLE` in `src-tauri/src/auth.rs` (Redline's own routes) followed by `polis_server::ROUTES` (the Polis Memory routes the daemon merges in — `crates/polis-server/src/lib.rs` of https://github.com/sersiousSenpai/polis-memory, at the rev `src-tauri/Cargo.toml` pins) — the same tables the auth middleware enforces on every request — via `UPDATE_GOLDEN=1 cargo test api_doc`. Do not edit by hand.
 
 ## Auth classes
 

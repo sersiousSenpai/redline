@@ -1002,13 +1002,14 @@ mod tests {
     /// would turn the taxonomy into a function of search behaviour.
     #[test]
     fn retrieval_modules_never_write_the_catalog() {
-        const RETRIEVAL: &[(&str, &str)] = &[
-            // The two pure modules now live in polis-core; the shims at
-            // `src/query.rs` / `src/dedup.rs` are one re-export each, so the
-            // guard reads the moved sources or it guards nothing.
-            ("query.rs", include_str!("../crates/polis/polis-core/src/query.rs")),
-            ("dedup.rs", include_str!("../crates/polis/polis-core/src/dedup.rs")),
-            ("embed.rs", include_str!("embed.rs")),
+        // The two pure modules live in polis-core (a git dependency since
+        // the extraction's A7); the shims at `src/query.rs` / `src/dedup.rs`
+        // are one re-export each, so the guard reads the moved sources —
+        // from wherever cargo checked the crate out — or it guards nothing.
+        let retrieval: Vec<(&str, String)> = vec![
+            ("query.rs", crate::polis_src::polis_source("polis-core", "src/query.rs")),
+            ("dedup.rs", crate::polis_src::polis_source("polis-core", "src/dedup.rs")),
+            ("embed.rs", include_str!("embed.rs").to_string()),
         ];
         // Every catalog-mutating entry point on `Database`.
         const WRITES: &[&str] = &[
@@ -1019,7 +1020,7 @@ mod tests {
             "revert_link",
             "clear_embeddings", // …and even the index's own reset is not theirs
         ];
-        for (name, src) in RETRIEVAL {
+        for (name, src) in &retrieval {
             for w in WRITES {
                 assert!(
                     !src.contains(w),
@@ -1036,9 +1037,10 @@ mod tests {
     #[test]
     fn classifier_delta_takes_no_query() {
         // The delta reader is a `PolisStore` method since Session A3 of the
-        // Polis extraction; the guard reads the moved source.
-        const SRC: &str = include_str!("../crates/polis/polis-store/src/catalog.rs");
-        let body = SRC
+        // Polis extraction; the guard reads the moved source from the
+        // dependency's checkout.
+        let src = crate::polis_src::polis_source("polis-store", "src/catalog.rs");
+        let body = src
             .split_once("pub fn list_lake_items_since(")
             .expect("the classifier's delta reader exists")
             .1;

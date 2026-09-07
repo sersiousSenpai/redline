@@ -7,6 +7,8 @@
 //! name. Associated functions (no `self`) are exempt: they are always
 //! path-qualified, so `Database::open` and `PolisStore::open` cannot collide.
 
+mod common;
+
 use std::collections::BTreeSet;
 
 fn method_names(src: &str, impl_header: &str) -> BTreeSet<String> {
@@ -51,9 +53,9 @@ fn method_names(src: &str, impl_header: &str) -> BTreeSet<String> {
 #[test]
 fn database_and_store_share_no_method_names() {
     let db = include_str!("../src/db.rs");
-    let store = include_str!("../crates/polis/polis-store/src/lib.rs");
+    let store = common::polis_source("polis-store", "src/lib.rs");
     let db_methods = method_names(db, "impl Database {");
-    let store_methods = method_names(store, "impl PolisStore {");
+    let store_methods = method_names(&store, "impl PolisStore {");
     assert!(db_methods.len() > 100, "the scrape found only {} Database methods", db_methods.len());
     assert!(store_methods.len() >= 5, "the scrape found only {} PolisStore methods", store_methods.len());
     let shared: Vec<&String> = db_methods.intersection(&store_methods).collect();

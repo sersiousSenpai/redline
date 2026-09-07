@@ -13,6 +13,8 @@
 //! `db::tests::poisoned_conn_recovers`, which lives next to the other 150-odd
 //! db tests because it has to reach the private `conn` field.
 
+mod common;
+
 static DB_RS: &str = include_str!("../src/db.rs");
 
 /// Production code takes the connection through `lock_conn()` and nowhere
@@ -63,29 +65,34 @@ fn db_conn_is_never_locked_with_unwrap() {
 /// pattern — and never with a bare unwrap. Same invariant, second crate.
 #[test]
 fn store_conn_is_never_locked_with_unwrap() {
-    const STORE: &[(&str, &str)] = &[
-        ("lib.rs", include_str!("../crates/polis/polis-store/src/lib.rs")),
-        ("catalog.rs", include_str!("../crates/polis/polis-store/src/catalog.rs")),
-        ("chain.rs", include_str!("../crates/polis/polis-store/src/chain.rs")),
-        ("compaction.rs", include_str!("../crates/polis/polis-store/src/compaction.rs")),
-        ("notes.rs", include_str!("../crates/polis/polis-store/src/notes.rs")),
-        ("observations.rs", include_str!("../crates/polis/polis-store/src/observations.rs")),
-        ("prompts.rs", include_str!("../crates/polis/polis-store/src/prompts.rs")),
-        ("search.rs", include_str!("../crates/polis/polis-store/src/search.rs")),
-        ("supersessions.rs", include_str!("../crates/polis/polis-store/src/supersessions.rs")),
-        ("browse.rs", include_str!("../crates/polis/polis-store/src/browse.rs")),
-        ("embeddings.rs", include_str!("../crates/polis/polis-store/src/embeddings.rs")),
-        ("exports.rs", include_str!("../crates/polis/polis-store/src/exports.rs")),
-        ("session_tree.rs", include_str!("../crates/polis/polis-store/src/session_tree.rs")),
-    ];
+    // The store is a dependency since the extraction's Session A7; its
+    // sources are read from wherever cargo checked it out (tests/common).
+    let store: Vec<(&str, String)> = [
+        "lib.rs",
+        "catalog.rs",
+        "chain.rs",
+        "compaction.rs",
+        "notes.rs",
+        "observations.rs",
+        "prompts.rs",
+        "search.rs",
+        "supersessions.rs",
+        "browse.rs",
+        "embeddings.rs",
+        "exports.rs",
+        "session_tree.rs",
+    ]
+    .into_iter()
+    .map(|f| (f, common::polis_source("polis-store", &format!("src/{f}"))))
+    .collect();
     let mut uses = 0;
-    for (name, src) in STORE {
+    for (name, src) in &store {
         let bare = src.matches("self.conn.lock().unwrap()").count() + src.matches(".lock().unwrap()").count();
         assert_eq!(bare, 0, "polis-store/{name} takes the connection with a bare unwrap");
         uses += src.matches("self.conn()").count();
     }
     assert!(
-        STORE[0].1.contains("conn.lock().unwrap_or_else(|e| e.into_inner())"),
+        store[0].1.contains("conn.lock().unwrap_or_else(|e| e.into_inner())"),
         "PolisStore's lock must recover a poisoned guard with the house pattern"
     );
     assert!(uses > 80, "only {uses} store call sites go through PolisStore::conn() — the sweep regressed");

@@ -110,103 +110,23 @@ fn lib_stays_rlib_only() {
 //     unifies features per graph, so the check reads the RESOLVED feature set
 //     of each polis package, not just the lines in this manifest.
 //
-// Both guards find the crates through `cargo metadata`, so they read the real
-// manifests wherever cargo put them (`crates/polis/…` while staged, the git
-// checkout after the extraction) rather than a path that stops existing.
+// Both guards find the crates through `cargo metadata` (tests/common/mod.rs),
+// so they read the real manifests wherever cargo put them — the git checkout
+// since the extraction — rather than a path that stopped existing.
 // ---------------------------------------------------------------------------
 
-use std::path::PathBuf;
+mod common;
+use common::{dependency_names, manifest_code, polis_packages};
 use std::process::Command;
-use std::sync::OnceLock;
-
-/// `cargo metadata` for this workspace, parsed once. `--locked --offline`:
-/// a test must never rewrite `Cargo.lock` or reach the network — everything
-/// it needs was fetched by the build that produced this test binary.
-fn metadata() -> &'static serde_json::Value {
-    static META: OnceLock<serde_json::Value> = OnceLock::new();
-    META.get_or_init(|| {
-        let out = Command::new(env!("CARGO"))
-            .args(["metadata", "--format-version", "1", "--locked", "--offline"])
-            .arg("--manifest-path")
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
-            .output()
-            .expect("run `cargo metadata`");
-        assert!(
-            out.status.success(),
-            "cargo metadata failed:\n{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        serde_json::from_slice(&out.stdout).expect("cargo metadata is JSON")
-    })
-}
-
-/// Every package in the graph whose name starts with `polis-`, as
-/// `(name, manifest path, source, resolved features)`. Read from the resolve
-/// graph so a crate that arrives later (E1's `polis-mcp`) is covered without
-/// touching this file.
-fn polis_packages() -> Vec<(String, PathBuf, Option<String>, Vec<String>)> {
-    let meta = metadata();
-    let packages = meta["packages"].as_array().expect("packages");
-    let nodes = meta["resolve"]["nodes"].as_array().expect("resolve.nodes");
-    let mut out = Vec::new();
-    for p in packages {
-        let name = p["name"].as_str().unwrap_or_default();
-        if !name.starts_with("polis-") {
-            continue;
-        }
-        let id = p["id"].as_str().expect("package id");
-        let features = nodes
-            .iter()
-            .find(|n| n["id"].as_str() == Some(id))
-            .map(|n| {
-                n["features"]
-                    .as_array()
-                    .map(|f| f.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                    .unwrap_or_default()
-            })
-            .unwrap_or_default();
-        out.push((
-            name.to_string(),
-            PathBuf::from(p["manifest_path"].as_str().expect("manifest_path")),
-            p["source"].as_str().map(String::from),
-            features,
-        ));
-    }
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    out
-}
-
-/// A manifest with its comment lines removed — the crates' own manifests
-/// explain these rules by name, which must not itself trip a scrape.
-fn manifest_code(path: &std::path::Path) -> String {
-    std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
-        .lines()
-        .filter(|l| !l.trim_start().starts_with('#'))
-        .map(|l| l.split('#').next().unwrap_or(l))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// The dependency names a `[dependencies]` table declares, in order.
-fn dependency_names(section: &str) -> Vec<String> {
-    section
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('['))
-        .filter_map(|l| l.split('=').next())
-        .map(|n| n.trim().trim_matches('"').to_string())
-        .collect()
-}
 
 #[test]
 fn core_has_no_native_deps_by_default() {
     let packages = polis_packages();
-    let (_, manifest, _, _) = packages
+    let core = packages
         .iter()
-        .find(|(n, ..)| n == "polis-core")
+        .find(|p| p.name == "polis-core")
         .expect("polis-core is in the graph");
-    let code = manifest_code(manifest);
+    let code = manifest_code(&core.manifest);
 
     // 1. The manifest: exactly the three vocabulary crates, and no table that
     //    could hide a fourth (a `[target.'cfg(…)']` block is how polis-embed
@@ -260,7 +180,7 @@ fn polis_deps_stay_lean() {
     let packages = polis_packages();
     for required in ["polis-core", "polis-store", "polis-embed", "polis-llm", "polis-memory", "polis-server"] {
         assert!(
-            packages.iter().any(|(n, ..)| n == required),
+            packages.iter().any(|p| p.name == required),
             "{required} is not in Redline's dependency graph — the guard would pass vacuously"
         );
     }
@@ -268,8 +188,9 @@ fn polis_deps_stay_lean() {
     // 1. Nothing under polis-memory depends on the app. The same law
     //    `mcp_proxy_stays_split_and_lean` holds for redline-mcp; here it is
     //    what makes the crates extractable at all.
-    for (name, manifest, ..) in &packages {
-        for line in manifest_code(manifest).lines().map(str::trim) {
+    for p in &packages {
+        let name = &p.name;
+        for line in manifest_code(&p.manifest).lines().map(str::trim) {
             let names_the_app = line.starts_with("redline")
                 || line.contains("redline_lib")
                 || line.contains("package = \"redline\"");
@@ -284,7 +205,7 @@ fn polis_deps_stay_lean() {
     // 2. All polis crates come from ONE place. Half by path and half by git
     //    would compile two copies of the vocabulary and unify nothing.
     let sources: std::collections::BTreeSet<Option<&str>> =
-        packages.iter().map(|(_, _, s, _)| s.as_deref()).collect();
+        packages.iter().map(|p| p.source.as_deref()).collect();
     assert_eq!(
         sources.len(),
         1,
@@ -323,7 +244,8 @@ fn polis_deps_stay_lean() {
 
     // 4. What cargo RESOLVED, after unifying every feature request in the
     //    graph — the number that actually decides what gets linked.
-    for (name, _, _, features) in &packages {
+    for p in &packages {
+        let (name, features) = (&p.name, &p.features);
         for f in features {
             assert!(
                 !FATTENING.contains(&f.as_str()),

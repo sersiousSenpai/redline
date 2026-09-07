@@ -105,9 +105,10 @@ const SKILLS: &[EmbeddedSkill] = &[
     EmbeddedSkill {
         name: "classmemory",
         version: 4,
-        // The classmemory skill ships with polis-memory (Session A5 of the Polis
-        // extraction); one file, included from the staging tree.
-        content: include_str!("../crates/polis/skills/classmemory/SKILL.md"),
+        // The classmemory skill ships inside polis-memory (Session A5 of the
+        // Polis extraction; a git dependency since A7): the crate's own bytes,
+        // not a copy.
+        content: polis_memory::skill::CLASSMEMORY_SKILL,
     },
     EmbeddedSkill {
         name: "librarian",

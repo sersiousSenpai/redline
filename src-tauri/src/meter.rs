@@ -1086,7 +1086,7 @@ mod tests {
     #[test]
     fn memory_seats_fold_in_the_agent_and_book_in_the_runner() {
         const HOST: &str = include_str!("polis_host.rs");
-        const AGENT: &str = include_str!("../crates/polis/polis-memory/src/agent.rs");
+        let agent = crate::polis_src::polis_source("polis-memory", "src/agent.rs");
         const CLASSMEM: &str = include_str!("classmem.rs");
         const KEEPER: &str = include_str!("keeper.rs");
         assert!(
@@ -1101,12 +1101,12 @@ mod tests {
         // Since A5 the runner is the facade's (`polis_memory::agent`), and the
         // seam's shape is the same: book on both exits, one seat per pass.
         assert_eq!(
-            AGENT.matches("polis.sink.book(seat, &").count(),
+            agent.matches("polis.sink.book(seat, &").count(),
             2,
             "run_memory_agent books on both exits — a failed pass spent its input tokens"
         );
-        assert!(AGENT.contains("run_memory_agent(polis, \"classifier\""), "the classifier runs through the seam");
-        assert!(AGENT.contains("run_memory_agent(polis, \"keeper\""), "the keeper runs through the seam");
+        assert!(agent.contains("run_memory_agent(polis, \"classifier\""), "the classifier runs through the seam");
+        assert!(agent.contains("run_memory_agent(polis, \"keeper\""), "the keeper runs through the seam");
         for (name, src) in [("classmem.rs", CLASSMEM), ("keeper.rs", KEEPER)] {
             assert_eq!(src.matches("collect_turn(").count(), 0, "{name} must not drain a turn itself any more");
             assert!(!src.contains("meter.observe(&v)"), "{name} must not fold a meter of its own — the agent does");

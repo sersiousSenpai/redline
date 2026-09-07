@@ -26,24 +26,12 @@ members = [
     "crates/redline-mcp",
     "crates/redline-extension-abi",
     "crates/redline-extension-sdk",
-    "crates/polis/polis-core",
-    "crates/polis/polis-store",
-    "crates/polis/polis-embed",
-    "crates/polis/polis-llm",
-    "crates/polis/polis-memory",
-    "crates/polis/polis-server",
 ]
 default-members = [
     ".",
     "crates/redline-mcp",
     "crates/redline-extension-abi",
     "crates/redline-extension-sdk",
-    "crates/polis/polis-core",
-    "crates/polis/polis-store",
-    "crates/polis/polis-embed",
-    "crates/polis/polis-llm",
-    "crates/polis/polis-memory",
-    "crates/polis/polis-server",
 ]
 
 [lib]
@@ -121,31 +109,37 @@ redline-extension-abi = { path = "crates/redline-extension-abi" }
 # sits behind `extension_host::Runtime`; a feature-gated JIT (`ext-jit`)
 # stays purely additive if an extension ever proves compute-bound.
 wasmi = "1.1"
-# Polis Memory core (Program A of the Polis extraction, docs/polis-extraction.md):
-# the ledger vocabulary + hashing, the proposal grammar, the answer-pack types
-# and budget, bundle verification and the MemoryApi trait. Staged under
-# crates/polis/ until A7 extracts the `polis-memory` repo, when this flips to a
-# git rev and then a crates.io version. Pure (serde + sha2), so it adds nothing
-# to the binary that was not already linked.
-polis-core = { path = "crates/polis/polis-core" }
+# Polis Memory (Program A of the Polis extraction, docs/polis-extraction.md):
+# the memory system as six crates from its own repo, pinned by git rev since
+# Session A7 (a crates.io version later). Bump the rev deliberately, in its
+# own commit; `polis_deps_stay_lean` in tests/size_guard.rs pins that these
+# lines never enable a fattening feature (`cli`, `standalone`, `anthropic`,
+# `openai-compat`) and that every polis crate resolves from this one source.
+#
+# The core: the ledger vocabulary + hashing, the proposal grammar, the
+# answer-pack types and budget, bundle verification and the MemoryApi trait.
+# Pure (serde + sha2), so it adds nothing to the binary that was not already
+# linked.
+polis-core = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "fe2bafdbf65ae48e25229e142d350f059b3c541d" }
 # The memory schema + its own `polis_meta` versioning + the cross-process-safe
 # chain append (A2). Same rusqlite as the app, so one SQLite is linked.
-polis-store = { path = "crates/polis/polis-store" }
+polis-store = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "fe2bafdbf65ae48e25229e142d350f059b3c541d" }
 # The semantic arm (A3): providers, vector cache, search, index tick. `apple`
 # is the on-device backend this app has always used; the objc2 crates it needs
 # were already in the graph (below), so the feature costs no new build edge.
-polis-embed = { path = "crates/polis/polis-embed", features = ["apple"] }
+polis-embed = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "fe2bafdbf65ae48e25229e142d350f059b3c541d", features = ["apple"] }
 # The Agent trait the memory seats speak (A4). Default features only: the
 # CLI backends; the HTTP backends would add a second reqwest to this graph.
-polis-llm = { path = "crates/polis/polis-llm" }
+polis-llm = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "fe2bafdbf65ae48e25229e142d350f059b3c541d" }
 # THE crate an integrator adds (A5): the Polis handle, retrieval, the gardener,
-# export, the mirror. `apple` = the on-device embedder this app has always used.
-polis-memory = { path = "crates/polis/polis-memory", features = ["apple"] }
+# export, the mirror, the classmemory skill text. `apple` = the on-device
+# embedder this app has always used.
+polis-memory = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "fe2bafdbf65ae48e25229e142d350f059b3c541d", features = ["apple"] }
 # The HTTP surface (A6): the memory + context routes this daemon used to
 # define inline, the ROUTES table its auth contract maps in, the capture
 # route with Redline's `IngestObserver` behind it, and the hook installer.
 # Default features only: `standalone` (bind + token) is the `polis` daemon's.
-polis-server = { path = "crates/polis/polis-server" }
+polis-server = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "fe2bafdbf65ae48e25229e142d350f059b3c541d" }
 # Deflate for the compaction archive (`prompt_archive`): a cold compaction
 # releases a body at ~59:1 and used to be irrecoverable. Already present in the
 # dependency tree (via `png` → `tauri-utils`), so naming it here is a visibility

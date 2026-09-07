@@ -799,7 +799,7 @@ pub fn render_api_doc() -> String {
     let mut out = String::new();
     out.push_str("# Redline control-plane API — v1\n\n");
     out.push_str("The local daemon on `127.0.0.1:7676` (loopback only) is Redline's extension API. ");
-    out.push_str("This table is generated from `ROUTE_TABLE` in `src-tauri/src/auth.rs` (Redline's own routes) followed by `polis_server::ROUTES` (the Polis Memory routes the daemon merges in, `src-tauri/crates/polis/polis-server/src/lib.rs`) — the same tables the auth middleware enforces on every request — via `UPDATE_GOLDEN=1 cargo test api_doc`. Do not edit by hand.\n\n");
+    out.push_str("This table is generated from `ROUTE_TABLE` in `src-tauri/src/auth.rs` (Redline's own routes) followed by `polis_server::ROUTES` (the Polis Memory routes the daemon merges in — `crates/polis-server/src/lib.rs` of https://github.com/sersiousSenpai/polis-memory, at the rev `src-tauri/Cargo.toml` pins) — the same tables the auth middleware enforces on every request — via `UPDATE_GOLDEN=1 cargo test api_doc`. Do not edit by hand.\n\n");
     out.push_str("## Auth classes\n\n");
     out.push_str("- **open** — no credential (read-only surface; may tokenize in a later pass).\n");
     out.push_str("- **hook contract** — no credential *by design*: called by the user's own claude sessions anywhere on the machine through the globally installed hooks/skills, which cannot carry a per-boot secret.\n");
