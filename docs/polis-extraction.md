@@ -6,7 +6,9 @@ agent-organized class catalog, batched retrieval over both) is becoming
 Redline imports like any other consumer. Program A of that plan is the
 extraction, done one session at a time on the worktree branch
 `feature/polis-extract`, with the crates staged under `src-tauri/crates/polis/`
-until Session A7 lifts them into their own repo.
+until Session A7 lifted them into their own repo
+([`sersiousSenpai/polis-memory`](https://github.com/sersiousSenpai/polis-memory),
+2026-09-07); Redline links them by git rev since.
 
 This document is the running record of that carve: what moved where, what
 stayed and why, the rules each session obeys, and the referees that prove the
@@ -40,6 +42,9 @@ move changed nothing. Update it in the session that moves the code.
 | I/O-free core | `polis-core/src/lib.rs` `guards` | The manifest's dependency list and a source scrape of every module. |
 | Guard arming | `src/ledger.rs` `every_constructed_agent_prompt_is_claimable` | ≥ 20 `register_agent_prompt(` sites across the surfaces still hand the guard a body, not a hash (31 after A1). |
 | Retrieval never writes | `src/context.rs` `retrieval_modules_never_write_the_catalog` | Now reads the MOVED `query.rs` / `dedup.rs` sources, not the one-line shims. |
+| Lean core | `tests/size_guard.rs` `core_has_no_native_deps_by_default` | polis-core's manifest = serde/serde_json/sha2 (no target / build tables) AND `cargo tree` one edge below it links exactly those three. |
+| Lean deps | `tests/size_guard.rs` `polis_deps_stay_lean` | No polis manifest names Redline; one source for every polis crate; Redline asks for `apple` only; the RESOLVED features carry no `cli` / `standalone` / `anthropic` / `openai-compat`. |
+| Sources through the dep | `tests/common/mod.rs` | Every source-scraping guard reads the polis crates wherever cargo put them (`cargo metadata` → `manifest_path`), so the git dependency is scraped exactly as the staged tree was. |
 
 ## Session A1 — `polis-core` (built 2026-09-06)
 
@@ -319,27 +324,132 @@ reads as "unknown thread kind" (404) rather than 502 (`thread_messages` is an
 `Option`); a grep whose store call fails is 502 rather than 400 (the refusal
 path — the only one clients ever saw — is unchanged: 400 with the reason).
 
+## Session A7 — guards, the extraction, Redline on the git dependency (built 2026-09-07, three commits)
+
+**The repo.** [`sersiousSenpai/polis-memory`](https://github.com/sersiousSenpai/polis-memory)
+(public), cut with `git filter-repo` from a fresh `git clone --no-local` of
+this branch — never from the worktree or the main repo. The filter kept
+`src-tauri/crates/polis/` plus the pre-move paths of the three `git mv`'d
+files (`src-tauri/src/query.rs`, `src-tauri/src/dedup.rs`,
+`skills/classmemory/SKILL.md`), and `--path-rename`d the six crates into
+`crates/` (the plan's §4.1 layout). Result: 13 commits — A1–A6's nine plus the
+four Redline commits that first wrote those files — and `git log --follow`
+crosses A1 / A5 into them. The one-line query/dedup shims that rode along were
+dropped from the tree in the root commit. **What cannot be split:** the history
+of every carved body — the store out of `db.rs`, the vocabulary out of
+`ledger.rs`, the organizer and gardener out of `classmem.rs` / `keeper.rs`,
+retrieval out of `context.rs`, `bundle.rs`, `embed.rs`, `claude_proc.rs`,
+`hook.rs`, the routes out of `lib.rs` — stays in this repo; the new README's
+"Where the history is" says so and points back here.
+
+**The root the staging tree never had.** Workspace `Cargo.toml` (six members;
+`[workspace.package]` inherited by every crate: 0.1.0, edition 2021,
+Apache-2.0, repository; **`rust-version = "1.85"`** — the floor the graph set,
+`reqwest` 0.13 and `uuid` 1.23, verified with `cargo +1.85.0 check
+--all-features --locked`; **resolver 3** so the lockfile prefers MSRV-fitting
+versions — the first fresh lockfile had pulled `icu_*` 2.3 / `idna_adapter`
+1.2.2, which want 1.86–1.88; `[workspace.dependencies]` carrying `version`
+beside `path` so `cargo publish` can strip the path), `Cargo.lock`,
+`.gitignore`, `.gitattributes` (`* text=auto eol=lf`), `LICENSE`, `NOTICE`,
+`deny.toml` (header rewritten, allowlist identical to `src-tauri/deny.toml`),
+`README.md` rewritten, and `.github/workflows/ci.yml` now live: test + clippy
+`-D warnings` on macos-14 / ubuntu / windows with default AND all features,
+keyless (no key, no `claude`/`codex`/`ollama`), cargo-deny, an msrv job on the
+pinned `rust-version`, and lean-core (`cargo tree -p polis-core --edges normal
+--depth 1` = serde, serde_json, sha2). The `classmemory` skill moved INSIDE
+`crates/polis-memory/skills/` — a file outside the package root does not ship
+in the `.crate`, and `cargo publish --dry-run --workspace` verifies all six.
+
+**Body changes, each named (rule 1: their own commit, their reason).** Clippy
+at `-D warnings` was never run on these bodies in Redline; the new CI runs
+it. Five mechanical, semantically identical edits: `search.rs`
+`sort_by(|a, b| b.ts.cmp(&a.ts))` → `sort_by_key(|b| Reverse(b.ts))`;
+`record.rs` a doc-comment precedence list rendered as a markdown list;
+`dedup.rs` (test) `&vec![…]` → `&[…]`; `process.rs` (test) `.err().expect()`
+→ `.expect_err()`; `polis-embed` (test) the margin check as a `const {
+assert!(…) }` block. `type_complexity` is allowed workspace-wide (the store's
+documented row tuples). Then CI's first run went red on windows-latest only:
+`routes_match_router_registrations` scrapes `lib.rs` for `"\n}\n"` and the
+runner checks out CRLF — fixed by the `.gitattributes` and by normalizing
+CRLF in the scrape (fe2bafd, the rev Redline pins).
+
+**Redline on the git dependency.** `git rm -r src-tauri/crates/polis`; the six
+members out of both workspace lists; the six deps →
+`{ git = "https://github.com/sersiousSenpai/polis-memory", rev = "fe2bafd…" }`
+with the same features (`apple` on polis-embed and polis-memory, nothing
+else); `Cargo.lock` regenerated. `skill.rs` embeds
+`polis_memory::skill::CLASSMEMORY_SKILL` (the crate's bytes, not a copy).
+Every guard that scraped a staged source now resolves the crate through
+**`tests/common/mod.rs`** — `cargo metadata --locked --offline` → the
+package's `manifest_path` → `polis_source(crate, rel)` — shared by the
+integration tests (`mod common;`) and the lib's unit tests (`lib.rs` mounts
+the same file as `crate::polis_src` under `cfg(test)`): `poison_guard`'s
+store sweep, `polis_store_guard`, `context::retrieval_modules_never_write_the_catalog`
++ `classifier_delta_takes_no_query`, `meter::memory_seats_fold_in_the_agent_and_book_in_the_runner`.
+`launchInvariants.test.ts` (the FE job has no cargo) now reads the
+`${VAR:-}` rendering from Redline's own pinned bytes
+(`capture_command_is_pinned`) instead of the spec's source. `auth.rs`'s doc
+render names the new repo; `docs/api-v1.md` regenerated (one line).
+
+**Guards added (the two the plan named), in `tests/size_guard.rs`:**
+`core_has_no_native_deps_by_default` — polis-core's manifest names exactly
+serde/serde_json/sha2 with no target or build-dependency table AND `cargo
+tree -p polis-core --edges normal --depth 1` links exactly those three (a
+manifest cannot see a dependency that arrived through a feature);
+`polis_deps_stay_lean` — no polis manifest names Redline, every polis crate
+resolves from ONE source, `src-tauri/Cargo.toml` asks for `apple` and nothing
+else, and the RESOLVED feature set of every polis package carries none of
+`cli` / `standalone` / `anthropic` / `openai-compat`. Both were green while
+the crates were still staged (commit 1/3) and again on the git dep.
+
+**Size (release, this machine, `npx tauri build --bundles app`):** main @
+ba3b8cf 30,540,160 B (CI's `size.yml` measured 30.39 MB on the same commit);
+this branch on the staged path deps 31,080,064 B; on the git dep **31,096,528 B**.
+So the budget (28.0 MB in `scripts/size-budget.json`; the plan's gate 27.4 MB)
+was already breached on main by ~2.5 MB before Program A, A1–A6 added
+~0.54 MB (the new §4.4 routes and their serde types, the second `MemoryApi`
+surface, the Codex backend), and the git dependency itself adds +16,464 B (0.05%): not a dependency or a feature (the resolved features are `apple` only; the guards say so) — ~2 KB of it is the longer `~/.cargo/git/checkouts/…` source paths in the 30 panic-location strings, the rest ordinary codegen variance across the re-resolved graph.
+Nothing here loosens the budget; the overage is main's and predates the
+extraction — a lever list for it belongs to its own session.
+
+**Verified on the git dep:** `cargo test --workspace -- --test-threads=1`
+(lib 1121 + every integration target), `cargo deny check licenses`, `real_db_attach_is_a_noop` +
+`real_db_gardener_ticks_behave` on a copy of the newest backup
+(5735 events / 2164 prompts / 8,671,323 B / 244 objects unchanged; 20× `Ran`, 0 appended), `npx tsc` + vitest (1893 green). New repo CI: green on all seven jobs — <https://github.com/sersiousSenpai/polis-memory/actions/runs/34105353695>.
+
 ## Sessions ahead
 
-| Session | Work | Gate |
-|---|---|---|
-| A7 | Guards (`core_has_no_native_deps_by_default`, `polis_deps_stay_lean`) + `git filter-repo` extraction → `polis-memory` repo; Redline on the git rev | Redline ≤ 27.4 MB from the git dep; new-repo CI green on 3 OSes |
+Program A is complete. What follows lives in the new repo and lands in
+Redline as rev bumps of the six `src-tauri/Cargo.toml` lines (one commit
+each; `polis_deps_stay_lean` holds the features):
 
-## How to run what A1 added
+| Program | Session | Work |
+|---|---|---|
+| B (autonomy) | B1 | baseline measurements (the canary's unit, organize p50, the pack cost) on the real corpus |
+| E (MCP, identity, sharing) | E1 | `polis-mcp` + the `/mcp` mount + the `cli` feature; the classmemory skill text becomes a template (it still names `127.0.0.1:7676`) |
+
+B1 and E1 touch disjoint areas and can run as parallel sessions.
+
+## How to run
 
 ```sh
-cd src-tauri
-cargo test -p polis-core                         # 41 tests, no I/O
-cargo test -p polis-store                        # 9 tests: attach, adoption, WAL, cross-process append
-cargo build -p polis-embed --features apple      # the on-device providers (macOS)
-cargo test -p polis-llm --features anthropic,openai-compat   # every backend
-cargo test -p polis-memory --features apple      # the facade, the handle's MemoryApi, the gardener's gates
-cargo test -p polis-server --features standalone # the router ↔ ROUTES pin, every row served, the hook shapes, the token guard
-UPDATE_GOLDEN=1 cargo test -p redline --lib api_doc          # regenerate docs/api-v1.md after a ROUTES / ROUTE_TABLE change
-REDLINE_REAL_DB=/tmp/real.db cargo test -p redline --lib real_db_gardener -- --ignored --nocapture
-cargo test -p redline --test polis_store_guard   # Deref method-name guard
+# The crates — in the polis-memory repo (git clone https://github.com/sersiousSenpai/polis-memory)
+cargo test --workspace                           # every crate, default features
+cargo test --workspace --all-features            # + the HTTP backends, the standalone daemon, the Apple embedder (macOS)
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo deny check licenses
+cargo +1.85.0 check --workspace --all-features --locked   # the MSRV
+cargo publish --dry-run --workspace              # packages + verifies all six in dependency order
+
+# Redline on the git dependency — in src-tauri
+cargo test --workspace -- --test-threads=1       # everything, incl. the guards below
+cargo test --test size_guard                     # core_has_no_native_deps_by_default, polis_deps_stay_lean, …
+cargo test --test polis_store_guard              # Deref method-name guard (reads the store through tests/common)
+cargo test --test poison_guard                   # the lock discipline, db.rs AND the store's modules
+cargo test --test schema_golden                  # the DDL referee (87 rows)
+UPDATE_GOLDEN=1 cargo test --test schema_golden  # only for a real migration
+UPDATE_GOLDEN=1 cargo test -p redline --lib api_doc   # regenerate docs/api-v1.md after a ROUTES / ROUTE_TABLE change
 REDLINE_REAL_DB=/tmp/real.db cargo test -p redline --lib real_db_attach -- --ignored --nocapture
-cargo test -p redline --test schema_golden       # the DDL referee
-UPDATE_GOLDEN=1 cargo test -p redline --test schema_golden   # only for a real migration
-cargo test --workspace -- --test-threads=1       # everything
+REDLINE_REAL_DB=/tmp/real.db cargo test -p redline --lib real_db_gardener -- --ignored --nocapture
+cargo tree -p polis-core --edges normal --depth 1   # serde, serde_json, sha2
 ```
