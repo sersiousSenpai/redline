@@ -23,7 +23,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::db::Database;
-use crate::ledger::LedgerEventRow;
+// The mirror's row type is a `polis-core` type (Session A3 of the Polis
+// extraction); re-exported so `crate::mirror::MirrorRow` still resolves.
+pub use polis_core::types::MirrorRow;
 
 /// The setting key holding the user-chosen mirror directory. Absent/empty ⇒ the
 /// mirror is OFF (nothing is written until a directory is chosen).
@@ -39,27 +41,6 @@ pub const MIRROR_BATCH: i64 = 2000;
 /// Redline-owned subdirectories under the mirror root. Rebuild clears ONLY
 /// these, never the user's own vault files elsewhere in the directory.
 const MANAGED_DIRS: [&str; 4] = ["sessions", "missions", "unfiled", "notes"];
-
-/// A ledger event enriched with its prompt provenance + full body, as read by
-/// `Database::list_mirror_events`. `body` is the full prompt body for prompt
-/// events; `None` for revision/decision events (the writer fills revision
-/// bodies from `revisions.raw_plan_markdown`).
-#[derive(Debug, Clone)]
-pub struct MirrorRow {
-    pub event: LedgerEventRow,
-    pub surface: Option<String>,
-    pub origin: Option<String>,
-    pub role: Option<String>,
-    pub mission_id: Option<String>,
-    pub project_path: Option<String>,
-    pub body: Option<String>,
-    /// Memory-by-session lineage (non-hashed `prompts` columns): the thread
-    /// this prompt belongs to and the parent session it hangs under. Drives
-    /// the `sessions/<parent>/` filing step + `parent:`/`thread:` frontmatter.
-    pub thread_kind: Option<String>,
-    pub thread_id: Option<String>,
-    pub parent_session_id: Option<String>,
-}
 
 /// A single mirror note: a relative path under the mirror root + its full
 /// content. Pure data — `write_notes` is the only thing that touches disk.

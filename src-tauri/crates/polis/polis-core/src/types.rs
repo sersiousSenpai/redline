@@ -362,3 +362,147 @@ impl GrepScope {
         matches!(self, GrepScope::All | GrepScope::Browse)
     }
 }
+
+// ---------------------------------------------------------------------------
+// Session A3: the remaining store-side row and outcome types
+// ---------------------------------------------------------------------------
+
+/// The ledger event kinds that are claims (decisions) — the only kinds a
+/// supersession may connect. Prompts/revisions are history, never superseded.
+pub const DECISION_KINDS: [&str; 3] = ["resolution", "approval", "review_verdict"];
+
+/// Outcome of validating + recording one supersession. `Rejected` is a
+/// guardrail verdict (logged, proposal dropped), never a DB error.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SupersessionOutcome {
+    Applied {
+        /// The seq actually superseded — may differ from the proposed old_seq
+        /// when the op was redirected to the current head of its chain.
+        effective_old: i64,
+        new_seq: i64,
+        event_seq: i64,
+    },
+    Rejected(String),
+}
+
+/// A queued structural reorg proposal (promote/split/merge/collapse/supersede).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClassProposalRow {
+    pub id: i64,
+    pub run_id: Option<i64>,
+    pub op: String,
+    pub node_id: Option<String>,
+    pub parent_id: Option<String>,
+    pub title: Option<String>,
+    pub summary: Option<String>,
+    pub extra_json: Option<String>,
+    pub rationale: Option<String>,
+    pub status: String,
+    pub created_at: i64,
+}
+
+/// One classifier pass over the lake delta.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClassRun {
+    pub id: i64,
+    pub started_at: i64,
+    pub finished_at: Option<i64>,
+    pub status: String, // running | done | error
+    pub seq_from: Option<i64>,
+    pub seq_to: Option<i64>,
+    pub claude_session_id: Option<String>,
+    pub summary: Option<String>,
+}
+
+/// What `Database::stage_proposal` did with one proposal.
+pub enum StagedOutcome {
+    Node,
+    Link { created_node: bool },
+    Structural,
+    Skipped,
+}
+
+/// The result of applying (accepting) a structural proposal — the facts the
+/// caller needs to write the `taxonomy_reorg` ledger event.
+pub struct AppliedReorg {
+    pub op: String,
+    pub node_id: String,
+    pub detail: String,
+}
+
+/// Filters for `GET /v1/context/prompts` (all optional, ANDed). `substring` is
+/// bound as a `LIKE` parameter in `db::list_context_prompts` — never
+/// interpolated into SQL — so an injection-shaped `q` can only ever fail to
+/// match, never alter the query. `limit` is pre-clamped by `clamp_prompt_limit`.
+#[derive(Debug, Clone, Default)]
+pub struct PromptFilters {
+    pub session_id: Option<String>,
+    pub mission_id: Option<String>,
+    pub surface: Option<String>,
+    pub project: Option<String>,
+    pub since_seq: Option<i64>,
+    pub substring: Option<String>,
+    pub limit: i64,
+    /// Memory-by-session filters over the non-hashed provenance columns.
+    pub thread_kind: Option<String>,
+    pub thread_id: Option<String>,
+    pub parent_session_id: Option<String>,
+    /// Exact-match filter on the recorded model (`prompts.model`).
+    pub model: Option<String>,
+    /// Exact corpus-role filter (`user` | `agent` | `system`).
+    pub role: Option<String>,
+    /// Include `agent` rows — Redline's own constructed prefaces. Off by
+    /// default: they are 87% of the corpus by weight and answer nobody's
+    /// question, so a caller has to ask for them on purpose. An explicit
+    /// `role=agent` overrides this, because then the caller HAS asked.
+    pub include_agent: bool,
+}
+
+/// One note-write act from the surface. Exactly ONE of `text` / `starred` per
+/// call — each act appends exactly one `note` ledger event, so the record
+/// stays one-act-one-event. `noteId` addresses a specific row (standalone
+/// edits); otherwise the row is resolved (or created) by target.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct NoteWrite {
+    pub note_id: Option<i64>,
+    /// Defaults to `none` (a standalone note) when absent.
+    pub target_kind: Option<String>,
+    pub target_id: Option<String>,
+    pub text: Option<String>,
+    pub starred: Option<bool>,
+}
+
+/// What a note-write did — the `SupersessionOutcome` shape: rejections are
+/// data, not errors, and a no-op is explicit (it must append NO event).
+#[derive(Debug)]
+pub enum NoteOutcome {
+    /// The act applied; one `note` ledger event was appended.
+    Written(UserNote),
+    /// Nothing changed (same text / same star) — no event appended.
+    Unchanged(UserNote),
+    Rejected(String),
+}
+
+/// A ledger event enriched with its prompt provenance + full body, as read by
+/// `Database::list_mirror_events`. `body` is the full prompt body for prompt
+/// events; `None` for revision/decision events (the writer fills revision
+/// bodies from `revisions.raw_plan_markdown`).
+#[derive(Debug, Clone)]
+pub struct MirrorRow {
+    pub event: LedgerEventRow,
+    pub surface: Option<String>,
+    pub origin: Option<String>,
+    pub role: Option<String>,
+    pub mission_id: Option<String>,
+    pub project_path: Option<String>,
+    pub body: Option<String>,
+    /// Memory-by-session lineage (non-hashed `prompts` columns): the thread
+    /// this prompt belongs to and the parent session it hangs under. Drives
+    /// the `sessions/<parent>/` filing step + `parent:`/`thread:` frontmatter.
+    pub thread_kind: Option<String>,
+    pub thread_id: Option<String>,
+    pub parent_session_id: Option<String>,
+}

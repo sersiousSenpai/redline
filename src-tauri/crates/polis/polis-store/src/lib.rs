@@ -19,13 +19,22 @@ pub mod ledger;
 pub mod lexical;
 pub mod meta;
 pub mod schema;
+pub mod catalog;
+pub mod notes;
+pub mod search;
+pub mod chain;
+pub mod compaction;
+pub mod prompts;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use rusqlite::Connection;
 
+pub use compaction::ARCHIVE_ALGO;
 pub use lexical::{LEXICAL_VERSION, PREFIX_SIZES, TOKENIZER};
+pub use prompts::PROMPT_TEXT;
+pub use search::{GrepError, GREP_MIN_LITERAL};
 pub use schema::{CORPUS_ROLE_VERSION, SYSTEM_INDEX_CHARS};
 
 /// Why the store could not attach or act.
@@ -61,18 +70,36 @@ pub struct AttachOptions {
     /// The host's settings table to adopt legacy version keys from, on the
     /// store's first attach. `None` for a standalone store.
     pub legacy_settings_table: Option<String>,
+    /// The author stamped on events the store writes on its own account
+    /// (curation, supersession on approval). Identity proper is E2's; until
+    /// then this is the host's `local_author()` or the OS login name.
+    pub author: String,
 }
 
 impl AttachOptions {
     /// Attaching to a Redline database: adopt the two `app_settings` keys.
     pub fn redline() -> Self {
-        Self { legacy_settings_table: Some("app_settings".to_string()) }
+        Self { legacy_settings_table: Some("app_settings".to_string()), author: default_author() }
     }
 
     /// A store of its own: nothing to adopt.
     pub fn standalone() -> Self {
-        Self { legacy_settings_table: None }
+        Self { legacy_settings_table: None, author: default_author() }
     }
+
+    pub fn with_author(mut self, author: impl Into<String>) -> Self {
+        self.author = author.into();
+        self
+    }
+}
+
+/// The OS login name, else `"local"` — the same fallback the host's
+/// `local_author()` uses beneath its own override.
+pub fn default_author() -> String {
+    std::env::var("USER")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "local".to_string())
 }
 
 /// What one attach did — for a host's boot trace and for the tests that pin
@@ -89,6 +116,7 @@ pub struct AttachReport {
 pub struct PolisStore {
     conn: Arc<Mutex<Connection>>,
     last_attach: AttachReport,
+    author: String,
 }
 
 /// The minimum SQLite the schema needs (`RETURNING`, generated columns, the
@@ -102,6 +130,7 @@ impl PolisStore {
     /// idempotent migration if any version is behind, and verifies the
     /// tables exist. An already-current store runs no schema SQL.
     pub fn attach(conn: Arc<Mutex<Connection>>, opts: AttachOptions) -> Result<Self, StoreError> {
+        let author = opts.author.clone();
         let report = {
             let c = lock(&conn);
             Self::require_capabilities(&c)?;
@@ -124,7 +153,7 @@ impl PolisStore {
             schema::Migration::verify(&c)?;
             report
         };
-        Ok(Self { conn, last_attach: report })
+        Ok(Self { conn, last_attach: report, author })
     }
 
     /// Open a store file of its own — a standalone Polis. WAL so readers never
@@ -204,6 +233,11 @@ impl PolisStore {
     /// The shared handle — for a host that constructs itself around it.
     pub fn shared_connection(&self) -> Arc<Mutex<Connection>> {
         Arc::clone(&self.conn)
+    }
+
+    /// The author stamped on the store's own writes (see `AttachOptions`).
+    pub fn author(&self) -> &str {
+        &self.author
     }
 
     /// What the last `attach` did.

@@ -99,78 +99,13 @@ pub struct ShareReturnRecord {
 // The read-side hit rows live in `polis-core` (Session A1 of the Polis
 // extraction); re-exported so every `crate::db::BrowseHit` / `GrepHit` site is
 // unchanged.
+#[allow(unused_imports)]
 pub use polis_core::types::{BrowseHit, GrepHit};
 
-/// Shortest literal the grep arm will accept. This is the trigram size, and it
-/// is a hard floor rather than a tuning knob: a two-character needle cannot be
-/// answered from a trigram index at all, so accepting one would silently turn
-/// an indexed lookup into a full scan of the corpus under the connection lock.
-pub const GREP_MIN_LITERAL: usize = 3;
-
-/// Characters of context returned around a grep match.
-const GREP_EXCERPT_CHARS: usize = 240;
-
 pub use polis_core::types::GrepScope;
-
-/// Why a grep was refused. Both variants are named rather than degraded into an
-/// empty result: "nothing matched" and "we declined to look" are different
-/// answers, and a caller can only fix the second if it is told.
-#[derive(Debug, Clone)]
-pub enum GrepError {
-    LiteralTooShort { min: usize, got: usize },
-    BadRegex(String),
-    Db(String),
-}
-
-impl std::fmt::Display for GrepError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            GrepError::LiteralTooShort { min, got } => write!(
-                f,
-                "the literal must be at least {min} characters (got {got}) — shorter than a \
-                 trigram cannot be answered from the index, and scanning the whole record \
-                 instead would be slow rather than helpful"
-            ),
-            GrepError::BadRegex(e) => write!(f, "invalid regex: {e}"),
-            GrepError::Db(e) => write!(f, "{e}"),
-        }
-    }
-}
-
-impl From<rusqlite::Error> for GrepError {
-    fn from(e: rusqlite::Error) -> Self {
-        GrepError::Db(e.to_string())
-    }
-}
-
-/// The ONE expression that reads a prompt's text, for use in a query that has
-/// `prompts` aliased as `p`. Compaction sets `body = ''` (not NULL), so the
-/// obvious `COALESCE(p.body, p.gist)` returns an EMPTY STRING for every
-/// compacted row rather than falling through to the gist — a silent
-/// content-free read, not an error. Two live queries had it; this const exists
-/// so there is one place to be right.
-pub const PROMPT_TEXT: &str = "COALESCE(NULLIF(p.body, ''), p.gist)";
-
-/// The codec `prompt_archive.blob` is written with. Stored per row rather than
-/// assumed, so a future codec is a new value here and not a migration.
-pub const ARCHIVE_ALGO: &str = "deflate";
-
-/// Deflate a released prompt body for the compaction archive.
-fn deflate_body(body: &str) -> std::io::Result<Vec<u8>> {
-    use std::io::Write;
-    let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
-    enc.write_all(body.as_bytes())?;
-    enc.finish()
-}
-
-/// Inflate an archived body. Callers must re-verify the result against the
-/// row's `body_hash` before trusting it — see `restore_prompt_body`.
-fn inflate_body(blob: &[u8]) -> std::io::Result<String> {
-    use std::io::Read;
-    let mut out = String::new();
-    flate2::read::DeflateDecoder::new(blob).read_to_string(&mut out)?;
-    Ok(out)
-}
+// Session A3: the grep + archive vocabulary lives with the store's methods.
+#[allow(unused_imports)]
+pub use polis_store::{GrepError, ARCHIVE_ALGO, GREP_MIN_LITERAL, PROMPT_TEXT};
 
 /// One context-journal row — a meaningful app activity the Companion folds into
 /// its "while you were away" delta (surface switch, revision, nav, pin, …).
@@ -630,7 +565,10 @@ impl Database {
         // same connection and brings its tables current under its OWN version
         // key (`polis_meta`) — never `PRAGMA user_version`, which this app
         // shares with another lineage.
-        let polis = PolisStore::attach(Arc::clone(&conn), AttachOptions::redline())
+        let polis = PolisStore::attach(
+            Arc::clone(&conn),
+            AttachOptions::redline().with_author(crate::ledger::local_author()),
+        )
             .map_err(store_err)?;
         let db = Self { conn, polis };
         // The send queues are in-memory: any row still `queued` now belongs
@@ -646,7 +584,10 @@ impl Database {
         let conn = Connection::open_in_memory()?;
         Self::migrate(&conn)?;
         let conn = Arc::new(Mutex::new(conn));
-        let polis = PolisStore::attach(Arc::clone(&conn), AttachOptions::redline())
+        let polis = PolisStore::attach(
+            Arc::clone(&conn),
+            AttachOptions::redline().with_author(crate::ledger::local_author()),
+        )
             .map_err(store_err)?;
         Ok(Self { conn, polis })
     }
@@ -2238,140 +2179,6 @@ impl Database {
     // Polis ledger (Phase 1): prompt store + hash chain
     // ------------------------------------------------------------------
 
-    /// Insert a prompt row, deduped on (body_hash, claude_session_id). Returns
-    /// the new row id, or `None` if an identical prompt was already stored.
-    pub fn insert_prompt(&self, p: &crate::ledger::PromptRow) -> rusqlite::Result<Option<i64>> {
-        let conn = self.lock_conn();
-        let changed = conn.execute(
-            "INSERT INTO prompts
-                (ts, source, origin, surface, role, user_text, session_id, claude_session_id,
-                 mission_id, project_path, body, body_hash,
-                 thread_kind, thread_id, parent_session_id, model, model_source)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
-             ON CONFLICT(body_hash, claude_session_id) DO NOTHING",
-            params![
-                p.ts,
-                p.source,
-                p.origin,
-                p.surface,
-                p.role,
-                p.user_text,
-                p.session_id,
-                p.claude_session_id,
-                p.mission_id,
-                p.project_path,
-                p.body,
-                p.body_hash,
-                p.thread_kind,
-                p.thread_id,
-                p.parent_session_id,
-                p.model,
-                p.model_source,
-            ],
-        )?;
-        if changed == 0 {
-            return Ok(None);
-        }
-        Ok(Some(conn.last_insert_rowid()))
-    }
-
-    /// Whether any prompt captured under this claude session still lacks a
-    /// model — the cheap guard that keeps the hook hot path from re-reading a
-    /// transcript tail once everything is already stamped.
-    pub fn session_needs_model(&self, claude_session_id: &str) -> bool {
-        let conn = self.lock_conn();
-        conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM prompts
-                WHERE claude_session_id = ?1 AND model IS NULL)",
-            params![claude_session_id],
-            |r| r.get::<_, i64>(0),
-        )
-        .map(|n| n != 0)
-        .unwrap_or(false)
-    }
-
-    /// Backfill the model onto every prompt of a claude session that doesn't
-    /// have one (`model_source = 'transcript'`). Rows already stamped at
-    /// capture (`'seat'`) are never overwritten — capture-time truth outranks
-    /// a backfill. Returns how many rows were stamped.
-    pub fn backfill_session_model(
-        &self,
-        claude_session_id: &str,
-        model: &str,
-    ) -> rusqlite::Result<usize> {
-        let conn = self.lock_conn();
-        conn.execute(
-            "UPDATE prompts SET model = ?2, model_source = 'transcript'
-             WHERE claude_session_id = ?1 AND model IS NULL",
-            params![claude_session_id, model],
-        )
-    }
-
-    /// Bind a drafter-launched prompt row to the session that eventually ran
-    /// it. The launch records with `claude_session_id = NULL` (claude hasn't
-    /// spawned yet); the ingest hook's claim is the first moment the id is
-    /// known. `OR IGNORE` respects the `(body_hash, claude_session_id)` unique
-    /// index — if the hook already captured the same body under that session,
-    /// the drafter row simply stays a launch record.
-    pub fn bind_drafter_prompt_session(
-        &self,
-        body_hash: &str,
-        draft_id: &str,
-        claude_session_id: &str,
-    ) -> rusqlite::Result<usize> {
-        self.bind_threaded_prompt_session(body_hash, "drafter", draft_id, claude_session_id)
-    }
-
-    /// The same bind for any thread that can launch a plan. A chat graduating
-    /// is the second — it owns its launched prompt exactly as a document does,
-    /// and hardcoding `'drafter'` here would have left every graduated prompt
-    /// with a permanently NULL `claude_session_id`, invisible to the transcript
-    /// model backfill.
-    pub fn bind_threaded_prompt_session(
-        &self,
-        body_hash: &str,
-        thread_kind: &str,
-        thread_id: &str,
-        claude_session_id: &str,
-    ) -> rusqlite::Result<usize> {
-        let conn = self.lock_conn();
-        conn.execute(
-            "UPDATE OR IGNORE prompts SET claude_session_id = ?4
-             WHERE body_hash = ?1 AND thread_kind = ?2 AND thread_id = ?3
-               AND claude_session_id IS NULL",
-            params![body_hash, thread_kind, thread_id, claude_session_id],
-        )
-    }
-
-    /// The same bind for a launch that had no document — the Front Door's one
-    /// sentence and the browser's Send. Those prompts are recorded with no
-    /// thread and no claude session (claude hadn't spawned), so without this
-    /// they keep a **permanently NULL** `claude_session_id` and the transcript
-    /// model backfill never reaches them. `thread_id IS NULL` is what keeps
-    /// this off any threaded row; the body hash is what makes it the right one.
-    pub fn bind_launch_prompt_session(
-        &self,
-        body_hash: &str,
-        claude_session_id: &str,
-    ) -> rusqlite::Result<usize> {
-        let conn = self.lock_conn();
-        conn.execute(
-            "UPDATE OR IGNORE prompts SET claude_session_id = ?2
-             WHERE body_hash = ?1 AND thread_id IS NULL AND claude_session_id IS NULL",
-            params![body_hash, claude_session_id],
-        )
-    }
-
-    /// `(prompt_id, model)` for every prompt with a stamped model — the Memory
-    /// inspector joins this onto its event rows for the per-row chip + filter.
-    pub fn list_prompt_models(&self) -> rusqlite::Result<Vec<(i64, String)>> {
-        let conn = self.lock_conn();
-        let mut stmt =
-            conn.prepare("SELECT id, model FROM prompts WHERE model IS NOT NULL")?;
-        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        rows.collect()
-    }
-
     /// Insert a browsing event into the ledger-owned `browse_events` store.
     /// Dedups a *consecutive* re-capture of the same content in the same tab (the
     /// snapshot fires on navigation AND just before a tab is backgrounded, so one
@@ -2401,349 +2208,6 @@ impl Database {
             params![r.ts, r.action, r.browse_id, r.url, r.title, r.text, r.context_hash, r.from_event_id],
         )?;
         Ok(Some(conn.last_insert_rowid()))
-    }
-
-    /// Lexical (BM25) search over browse-event content — the Dojo P3 retrieval
-    /// path for the noisy, keyword-heavy browsing stream (plans/prompts keep the
-    /// vectorless walk). Ranks by FTS5 `bm25`, best first, and returns a matched
-    /// snippet per hit. A query that sanitizes to nothing yields no hits.
-    pub fn search_browse_events(&self, query: &str, limit: i64) -> rusqlite::Result<Vec<BrowseHit>> {
-        use crate::query::MatchStage;
-        let Some(plan) = crate::query::plan_fts_query(query) else {
-            return Ok(Vec::new());
-        };
-        let conn = self.lock_conn();
-        // Same AND-then-OR cascade as the prompt arm. Columns are weighted
-        // `title 5 / url 2 / text 1`: a term in a page's title says the page is
-        // ABOUT it; the same term buried in 3 KB of DOM text says it appeared.
-        //
-        // The ledger `seq` join is what makes a browse hit CITABLE. `BrowseHit`
-        // used to carry `browse_events.id`, but the Ask citation contract is
-        // `#seq` and the Timeline's filter takes seqs — so a page the agent
-        // cited could not be opened. Verified 1:1 and complete on live data
-        // (829 events, 829 ledger rows).
-        for stage in [MatchStage::And, MatchStage::Or] {
-            let Some(match_q) = plan.match_for(stage) else { continue };
-            if match_q.is_empty() {
-                continue;
-            }
-            let mut stmt = conn.prepare(
-                "SELECT be.id, le.seq, be.ts, be.url, be.title,
-                        snippet(browse_events_fts, 2, '[', ']', '…', 12),
-                        bm25(browse_events_fts, 5.0, 2.0, 1.0),
-                        be.shot_key, be.caption
-                 FROM browse_events_fts
-                 JOIN browse_events be ON be.id = browse_events_fts.rowid
-                 LEFT JOIN ledger_events le
-                        ON le.ref_kind = 'browse_event' AND le.ref_id = CAST(be.id AS TEXT)
-                 WHERE browse_events_fts MATCH ?1
-                 ORDER BY bm25(browse_events_fts, 5.0, 2.0, 1.0)
-                 LIMIT ?2",
-            )?;
-            let rows: Vec<BrowseHit> = stmt
-                .query_map(params![match_q, limit.max(1)], |r| {
-                    Ok(BrowseHit {
-                        id: r.get(0)?,
-                        seq: r.get(1)?,
-                        ts: r.get(2)?,
-                        url: r.get(3)?,
-                        title: r.get(4)?,
-                        snippet: r.get(5)?,
-                        score: r.get(6)?,
-                        stage: stage.as_str().to_string(),
-                        shot_key: r.get(7)?,
-                        caption: r.get(8)?,
-                    })
-                })?
-                .collect::<rusqlite::Result<_>>()?;
-            if !rows.is_empty() {
-                return Ok(rows);
-            }
-        }
-        Ok(Vec::new())
-    }
-
-    /// Row → `LakeItem` over the canonical projection every lake reader
-    /// selects (`le.seq … p.model`), so the readers can't drift.
-    fn row_to_lake_item(r: &rusqlite::Row) -> rusqlite::Result<crate::classmem::LakeItem> {
-        let body: Option<String> = r.get(11)?;
-        Ok(crate::classmem::LakeItem {
-            seq: r.get(0)?,
-            ts: r.get(1)?,
-            kind: r.get(2)?,
-            ref_kind: r.get(3)?,
-            ref_id: r.get(4)?,
-            session_id: r.get(5)?,
-            surface: r.get(6)?,
-            origin: r.get(7)?,
-            role: r.get(8)?,
-            mission_id: r.get(9)?,
-            project_path: r.get(10)?,
-            body: body.map(|b| {
-                if b.chars().count() > 4000 {
-                    b.chars().take(4000).collect::<String>() + "…"
-                } else {
-                    b
-                }
-            }),
-            thread_kind: r.get(12)?,
-            thread_id: r.get(13)?,
-            parent_session_id: r.get(14)?,
-            model: r.get(15)?,
-        })
-    }
-
-    /// BM25-ranked search over captured prompt bodies — the answer pack's lake
-    /// arm, and the one place ranking (rather than filtering) is the point: a
-    /// pack has room for ~20 hits, so which 20 matters more than their order in
-    /// the chain.
-    ///
-    /// A compacted prompt matches (and returns) its gist, so releasing the
-    /// words never removes the memory from search — only the released words
-    /// stop matching. Falls back to a bound LIKE for a query that yields no
-    /// FTS tokens.
-    ///
-    /// `le.kind = 'prompt'` is load-bearing: a compacted row also carries a
-    /// `compaction` event pointing at the same `prompt_id`, so without it the
-    /// join returns one hit per event and a compacted prompt would appear
-    /// twice, spending the pack's budget on a duplicate.
-    /// The plain ranked form. Production reads go through
-    /// `search_prompts_ranked`, which also reports the cascade stage; this
-    /// stays as the legible API over the same cascade.
-    #[allow(dead_code)]
-    pub fn search_prompts_fts(
-        &self,
-        q: &str,
-        limit: i64,
-    ) -> rusqlite::Result<Vec<crate::classmem::LakeItem>> {
-        Ok(self.search_prompts_ranked(q, limit)?.into_iter().map(|(it, _)| it).collect())
-    }
-
-    /// The cascade behind `search_prompts_fts`, with each hit labelled by the
-    /// stage that found it.
-    ///
-    /// `AND` first, then `OR` with prefixes, then `LIKE`. The stages are tried
-    /// in order and the FIRST one that returns anything wins — widening is a
-    /// fallback, not a supplement, because mixing a precise hit with a
-    /// one-term-in-nine hit and ranking them together is how "browser" ends up
-    /// beating "browser tab suspension" on a query that named all three.
-    ///
-    /// `bm25(prompts_fts, 3.0, 1.0)` weights the head column 3× over the tail:
-    /// a 6 KB prompt states its ask in its first paragraph, and a match there
-    /// means something different from a match 4 KB in.
-    pub fn search_prompts_ranked(
-        &self,
-        q: &str,
-        limit: i64,
-    ) -> rusqlite::Result<Vec<(crate::classmem::LakeItem, crate::query::MatchStage)>> {
-        use crate::query::MatchStage;
-        let trimmed = q.trim();
-        if trimmed.is_empty() {
-            return Ok(Vec::new());
-        }
-        const COLS: &str = "SELECT le.seq, le.ts, le.kind, le.ref_kind, le.ref_id, le.session_id,
-                    p.surface, p.origin, p.role, p.mission_id, p.project_path,
-                    COALESCE(NULLIF(p.body, ''), p.gist),
-                    p.thread_kind, p.thread_id, p.parent_session_id, p.model";
-        let plan = crate::query::plan_fts_query(trimmed);
-        let conn = self.lock_conn();
-
-        if let Some(plan) = &plan {
-            for stage in [MatchStage::And, MatchStage::Or] {
-                let Some(match_q) = plan.match_for(stage) else { continue };
-                if match_q.is_empty() {
-                    continue;
-                }
-                let mut stmt = conn.prepare(&format!(
-                    "{COLS}
-                     FROM prompts_fts
-                     JOIN prompts p ON p.id = prompts_fts.rowid
-                     JOIN ledger_events le ON le.prompt_id = p.id
-                     WHERE prompts_fts MATCH ?1 AND le.kind = 'prompt'
-                     ORDER BY bm25(prompts_fts, 3.0, 1.0) LIMIT ?2"
-                ))?;
-                let rows: Vec<crate::classmem::LakeItem> = stmt
-                    .query_map(params![match_q, limit.max(1)], Self::row_to_lake_item)?
-                    .collect::<rusqlite::Result<_>>()?;
-                if !rows.is_empty() {
-                    return Ok(rows.into_iter().map(|r| (r, stage)).collect());
-                }
-            }
-        }
-
-        // Stage 3: a bound substring scan. Reached when the query produced no
-        // usable terms at all (all punctuation, a single CJK character) or when
-        // both index stages came back empty.
-        //
-        // It matches against `p.fts_text`, the SAME generated column the index
-        // reads — not against the raw body. Otherwise the fallback quietly
-        // undoes the corpus rule: an agent preface is unreachable through the
-        // index and then perfectly reachable through the LIKE, so the words
-        // Phase 1 removed from the corpus come back the moment a query happens
-        // to miss. The row still RETURNS its display text; only the matching
-        // changes.
-        let escaped = trimmed
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
-        let mut stmt = conn.prepare(&format!(
-            "{COLS}
-                     FROM prompts p
-                     JOIN ledger_events le ON le.prompt_id = p.id
-                     WHERE p.fts_text LIKE ?1 ESCAPE '\\'
-                       AND le.kind = 'prompt'
-                     ORDER BY le.seq DESC LIMIT ?2"
-        ))?;
-        let rows = stmt.query_map(
-            params![format!("%{escaped}%"), limit.max(1)],
-            Self::row_to_lake_item,
-        )?;
-        Ok(rows
-            .collect::<rusqlite::Result<Vec<_>>>()?
-            .into_iter()
-            .map(|r| (r, MatchStage::Like))
-            .collect())
-    }
-
-    /// Substring/regex search over the record — the arm that reaches what
-    /// tokenization cannot: flags (`--allowedTools`), paths
-    /// (`src-tauri/src/db.rs`), error strings, attributes
-    /// (`#[serde(rename_all)]`).
-    ///
-    /// The shape is Google Code Search's: the trigram index proposes candidates
-    /// for the LIKE, and the optional regex VERIFIES them in Rust over what the
-    /// index returned. The regex never touches the database, so a pathological
-    /// pattern costs one Rust pass over ≤`limit` rows instead of a scan under
-    /// the connection lock.
-    ///
-    /// `literal` must be at least `GREP_MIN_LITERAL` characters, because that
-    /// is the trigram size: a shorter needle cannot be answered from the index
-    /// and would silently become a full scan. It is refused BY NAME
-    /// (`GrepError::LiteralTooShort`) rather than quietly scanned — a caller
-    /// that gets a slow answer learns nothing, a caller that gets a named
-    /// refusal learns to lengthen the needle.
-    pub fn grep_memory(
-        &self,
-        literal: &str,
-        re: Option<&str>,
-        case_sensitive: bool,
-        scope: GrepScope,
-        limit: i64,
-    ) -> Result<Vec<GrepHit>, GrepError> {
-        let needle = literal.trim();
-        if needle.chars().count() < GREP_MIN_LITERAL {
-            return Err(GrepError::LiteralTooShort {
-                min: GREP_MIN_LITERAL,
-                got: needle.chars().count(),
-            });
-        }
-        // Compiled BEFORE any query: a bad pattern is the caller's mistake and
-        // should cost nothing.
-        let matcher = re
-            .map(str::trim)
-            .filter(|r| !r.is_empty())
-            .map(|r| {
-                let src = if case_sensitive { r.to_string() } else { format!("(?i){r}") };
-                regex_lite::Regex::new(&src)
-            })
-            .transpose()
-            .map_err(|e| GrepError::BadRegex(e.to_string()))?;
-
-        let escaped = needle
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
-        let pat = format!("%{escaped}%");
-        let limit = limit.clamp(1, 200);
-        let conn = self.lock_conn();
-        let mut out: Vec<GrepHit> = Vec::new();
-
-        // The trigram index answers a `LIKE '%…%'` on its own column directly —
-        // that is the whole reason this tokenizer exists. `case_sensitive` is a
-        // post-filter rather than a second index: two trigram indexes over the
-        // same text would double the cost to serve a rare option.
-        if scope.wants_prompts() {
-            let mut stmt = conn.prepare(
-                "SELECT le.seq, p.id, p.ts, p.surface, p.fts_text
-                 FROM prompts_grep
-                 JOIN prompts p ON p.id = prompts_grep.rowid
-                 JOIN ledger_events le ON le.prompt_id = p.id AND le.kind = 'prompt'
-                 WHERE prompts_grep.fts_text LIKE ?1 ESCAPE '\\'
-                 ORDER BY le.seq DESC LIMIT ?2",
-            )?;
-            let rows = stmt.query_map(params![pat, limit], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, Option<String>>(3)?,
-                    r.get::<_, String>(4)?,
-                ))
-            })?;
-            for row in rows {
-                let (seq, _id, ts, surface, text) = row?;
-                if case_sensitive && !text.contains(needle) {
-                    continue;
-                }
-                if matcher.as_ref().is_some_and(|m| !m.is_match(&text)) {
-                    continue;
-                }
-                out.push(GrepHit {
-                    kind: "prompt".to_string(),
-                    seq: Some(seq),
-                    ts,
-                    label: surface.unwrap_or_else(|| "prompt".to_string()),
-                    excerpt: crate::dedup::excerpt_around(
-                        &text,
-                        std::slice::from_ref(&needle.to_string()),
-                        GREP_EXCERPT_CHARS,
-                    ),
-                });
-            }
-        }
-
-        if scope.wants_browse() {
-            let mut stmt = conn.prepare(
-                "SELECT le.seq, be.id, be.ts, be.url, COALESCE(be.title, '')
-                 FROM browse_grep
-                 JOIN browse_events be ON be.id = browse_grep.rowid
-                 LEFT JOIN ledger_events le
-                        ON le.ref_kind = 'browse_event' AND le.ref_id = CAST(be.id AS TEXT)
-                 WHERE browse_grep.url LIKE ?1 ESCAPE '\\'
-                    OR browse_grep.title LIKE ?1 ESCAPE '\\'
-                 ORDER BY be.ts DESC LIMIT ?2",
-            )?;
-            let rows = stmt.query_map(params![pat, limit], |r| {
-                Ok((
-                    r.get::<_, Option<i64>>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, String>(4)?,
-                ))
-            })?;
-            for row in rows {
-                let (seq, _id, ts, url, title) = row?;
-                let hay = format!("{title} {url}");
-                if case_sensitive && !hay.contains(needle) {
-                    continue;
-                }
-                if matcher.as_ref().is_some_and(|m| !m.is_match(&hay)) {
-                    continue;
-                }
-                out.push(GrepHit {
-                    kind: "browse".to_string(),
-                    seq,
-                    ts,
-                    label: if title.is_empty() { url.clone() } else { title },
-                    excerpt: url,
-                });
-            }
-        }
-
-        out.sort_by(|a, b| b.ts.cmp(&a.ts));
-        out.truncate(limit as usize);
-        Ok(out)
     }
 
     /// `context_hash` (sha256 of the normalized DOM) for a set of browse-event
@@ -2786,207 +2250,6 @@ impl Database {
         .optional()
     }
 
-    /// Fetch a stored prompt body by id. When the row has been compacted, the
-    /// gist stands in for the released body — so every reader (the ledger pane
-    /// viewer, the bundle join, the mirror, the context routes) transparently
-    /// sees the gist and no caller has to special-case compaction.
-    pub fn get_prompt_body(&self, id: i64) -> rusqlite::Result<Option<String>> {
-        let conn = self.lock_conn();
-        conn.query_row(
-            "SELECT COALESCE(gist, body) FROM prompts WHERE id = ?1",
-            params![id],
-            |r| r.get(0),
-        )
-        .optional()
-    }
-
-    /// Compact a cold prompt: swap its stored body for `gist` and emit a
-    /// `compaction` ledger event proving the swap. The original `body_hash`
-    /// stays untouched (the tamper-evident fact + dedup key), so
-    /// `verify_ledger_chain` and `verify_bundle` remain green — they are
-    /// body-blind. Idempotent via the `gist IS NULL` guard: a re-compaction of
-    /// an already-compacted row is a no-op returning `Ok(None)`. On success
-    /// returns the new ledger seq. `reason` distinguishes an automatic gist
-    /// (`"cold"`) from an explicit forget (`"forget"`). `actor` is who released
-    /// the words — the keeper's seat name for an automatic gist, the local
-    /// human for an explicit forget. `gist_source` records which tier wrote the
-    /// gist — `"agent"` (the keeper's summarizer) or `"deterministic"` (the
-    /// fallback window) — so a summarizer that silently stopped running is
-    /// visible on Health instead of hiding behind the reclaim number.
-    pub fn compact_prompt_body(
-        &self,
-        prompt_id: i64,
-        gist: &str,
-        reason: &str,
-        gist_source: &str,
-        actor: &str,
-    ) -> rusqlite::Result<Option<i64>> {
-        let conn = self.lock_conn();
-        // Read the original body + hash under the same lock, then swap — all
-        // atomic with the ledger append below so the chain can't race.
-        let row: Option<(String, String)> = conn
-            .query_row(
-                "SELECT body, body_hash FROM prompts WHERE id = ?1 AND gist IS NULL",
-                params![prompt_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        let Some((body, body_hash)) = row else {
-            return Ok(None); // no such warm prompt (already compacted, or gone)
-        };
-        let original_bytes = body.len() as i64;
-        let ts = crate::ledger::now_millis();
-        // Archive BEFORE the words are released, and only for a `cold`
-        // compaction: cold means "we think you're done with this", which is a
-        // guess and must therefore be reversible. `forget` means the user said
-        // so — it archives nothing and *deletes* any archive an earlier cold
-        // pass left behind, because a forget that leaves a recoverable copy on
-        // disk is not a forget. The two branches are the whole contract.
-        if reason == "cold" {
-            match deflate_body(&body) {
-                Ok(blob) => {
-                    if let Err(e) = conn.execute(
-                        "INSERT INTO prompt_archive
-                            (prompt_id, body_hash, algo, original_bytes, blob, archived_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                         ON CONFLICT(prompt_id) DO UPDATE SET
-                            body_hash = excluded.body_hash, algo = excluded.algo,
-                            original_bytes = excluded.original_bytes,
-                            blob = excluded.blob, archived_at = excluded.archived_at",
-                        params![prompt_id, body_hash, ARCHIVE_ALGO, original_bytes, blob, ts],
-                    ) {
-                        // Best-effort: an archive failure must not block the
-                        // reclaim, but it must not be silent either — an
-                        // un-archived compaction is exactly today's behaviour.
-                        tracing::warn!(error = %e, prompt = prompt_id, "prompt archive write failed");
-                    }
-                }
-                Err(e) => tracing::warn!(error = %e, prompt = prompt_id, "prompt archive deflate failed"),
-            }
-        } else {
-            let _ = conn.execute("DELETE FROM prompt_archive WHERE prompt_id = ?1", params![prompt_id]);
-        }
-        conn.execute(
-            "UPDATE prompts
-                SET gist = ?2, body = '', compacted_at = ?3, original_bytes = ?4,
-                    gist_source = ?5
-             WHERE id = ?1 AND gist IS NULL",
-            params![prompt_id, gist, ts, original_bytes, gist_source],
-        )?;
-        // The compaction event references the prompt and pins the ORIGINAL body
-        // hash + the gist hash + the reason, so "what was forgotten" is provable
-        // even if the prompt row is later purged.
-        let gist_hash = crate::ledger::body_hash(gist);
-        let ph = crate::ledger::decision_payload_hash(&[
-            ("original_body_hash", &body_hash),
-            ("gist_hash", &gist_hash),
-            ("reason", reason),
-        ]);
-        let author = actor.to_string();
-        let pid_str = prompt_id.to_string();
-        let ev = Self::append_ledger_event_locked(
-            &conn,
-            &crate::ledger::LedgerAppend {
-                kind: crate::ledger::EventKind::Compaction.as_str(),
-                author: &author,
-                ts,
-                prompt_id: Some(prompt_id),
-                session_id: None,
-                version_number: None,
-                ref_kind: Some("prompt"),
-                ref_id: Some(pid_str.as_str()),
-                payload_hash: &ph,
-            },
-        )?;
-        Ok(Some(ev.seq))
-    }
-
-    /// Restore a cold-compacted prompt's original body from the archive.
-    ///
-    /// Returns `Ok(false)` when there is nothing archived (never compacted, or
-    /// compacted before archiving existed, or forgotten on purpose). The
-    /// inflated bytes are re-hashed and checked against the archive row's
-    /// `body_hash` before they go anywhere near the prompt row: the archive is
-    /// derived data that lives OUTSIDE the hash chain, so it gets no trust it
-    /// hasn't just earned. A mismatch is an error, never a silent overwrite —
-    /// the whole point of the chain is that corrupt bytes can't quietly become
-    /// the record.
-    pub fn restore_prompt_body(&self, prompt_id: i64) -> rusqlite::Result<bool> {
-        let conn = self.lock_conn();
-        let row: Option<(String, String, Vec<u8>)> = conn
-            .query_row(
-                "SELECT body_hash, algo, blob FROM prompt_archive WHERE prompt_id = ?1",
-                params![prompt_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .optional()?;
-        let Some((archived_hash, algo, blob)) = row else {
-            return Ok(false);
-        };
-        if algo != ARCHIVE_ALGO {
-            return Err(rusqlite::Error::InvalidParameterName(format!(
-                "prompt {prompt_id}: unknown archive codec `{algo}`"
-            )));
-        }
-        let body = inflate_body(&blob).map_err(|e| {
-            rusqlite::Error::InvalidParameterName(format!("prompt {prompt_id}: inflate failed: {e}"))
-        })?;
-        if crate::ledger::body_hash(&body) != archived_hash {
-            return Err(rusqlite::Error::InvalidParameterName(format!(
-                "prompt {prompt_id}: archived body does not match its recorded hash"
-            )));
-        }
-        // The prompt's own `body_hash` is the chain's commitment and is never
-        // rewritten by compaction, so restoring is a pure re-inflation: put the
-        // words back, clear the compaction marks, drop the archive row.
-        let changed = conn.execute(
-            "UPDATE prompts
-                SET body = ?2, gist = NULL, compacted_at = NULL, original_bytes = NULL
-             WHERE id = ?1 AND body_hash = ?3",
-            params![prompt_id, body, archived_hash],
-        )?;
-        if changed == 0 {
-            return Ok(false);
-        }
-        conn.execute("DELETE FROM prompt_archive WHERE prompt_id = ?1", params![prompt_id])?;
-        Ok(true)
-    }
-
-    /// The corpus's own composition: `(role, rows, bytes)` over the whole lake,
-    /// NULL-safe. This is the number that was never on screen — 92.6% of the
-    /// searchable bytes were machine text and nothing reported it, so the only
-    /// visible symptom was that search "felt wrong". Cheap enough for the
-    /// memory-status poll (one grouped scan of a small table).
-    pub fn corpus_composition(&self) -> rusqlite::Result<Vec<(String, i64, i64)>> {
-        let conn = self.lock_conn();
-        let mut stmt = conn.prepare(
-            "SELECT COALESCE(role, 'unclassified') AS r, COUNT(*),
-                    COALESCE(SUM(LENGTH(CAST(COALESCE(NULLIF(body, ''), gist, '') AS BLOB))), 0)
-             FROM prompts GROUP BY r ORDER BY r",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
-        })?;
-        rows.collect()
-    }
-
-    /// `(agent_written, deterministic_fallback)` gist counts. 47% of surviving
-    /// gists were the deterministic fallback — i.e. the summarizer wasn't
-    /// running — and nobody was watching, so compaction was quietly degrading to
-    /// "keep the first 240 characters" while reporting a 59:1 reclaim.
-    pub fn gist_source_counts(&self) -> rusqlite::Result<(i64, i64)> {
-        let conn = self.lock_conn();
-        conn.query_row(
-            "SELECT
-                COALESCE(SUM(CASE WHEN gist_source = 'agent' THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN gist_source <> 'agent' OR gist_source IS NULL
-                                  THEN 1 ELSE 0 END), 0)
-             FROM prompts WHERE gist IS NOT NULL",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-    }
-
     // --- the picture store (Phase 7) ---------------------------------------
 
     /// Point every row with this `context_hash` at a shot. Content-addressed,
@@ -3026,17 +2289,6 @@ impl Database {
             out.insert(row?);
         }
         Ok(out)
-    }
-
-    /// The newest decision event of a kind on a session — what a surface shot
-    /// keys itself to.
-    pub fn latest_decision_seq(&self, session_id: &str, kind: &str) -> rusqlite::Result<Option<i64>> {
-        let conn = self.lock_conn();
-        conn.query_row(
-            "SELECT MAX(seq) FROM ledger_events WHERE session_id = ?1 AND kind = ?2",
-            params![session_id, kind],
-            |r| r.get::<_, Option<i64>>(0),
-        )
     }
 
     /// Record a picture of one of Redline's own surfaces.
@@ -3163,62 +2415,6 @@ impl Database {
             |r| r.get(0),
         )
         .optional()
-    }
-
-    /// `prompt_id → ledger seq` for a set of prompt ids.
-    ///
-    /// The semantic index keys on `prompts.id` (a chunk belongs to a row) while
-    /// every retrieval surface speaks ledger `seq` (a citation belongs to a
-    /// moment). Fusing two ranked lists that key on different id-spaces would
-    /// produce a fusion that agrees with itself about nothing, so the bridge is
-    /// explicit. `le.kind = 'prompt'` is load-bearing: a compacted row also
-    /// carries a `compaction` event with the same `prompt_id`.
-    pub fn seqs_for_prompt_ids(
-        &self,
-        ids: &[i64],
-    ) -> rusqlite::Result<std::collections::HashMap<i64, i64>> {
-        if ids.is_empty() {
-            return Ok(std::collections::HashMap::new());
-        }
-        let conn = self.lock_conn();
-        let marks = vec!["?"; ids.len()].join(", ");
-        let mut stmt = conn.prepare(&format!(
-            "SELECT prompt_id, MIN(seq) FROM ledger_events
-             WHERE kind = 'prompt' AND prompt_id IN ({marks})
-             GROUP BY prompt_id"
-        ))?;
-        let refs: Vec<&dyn rusqlite::ToSql> = ids.iter().map(|i| i as &dyn rusqlite::ToSql).collect();
-        let rows = stmt.query_map(refs.as_slice(), |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
-        })?;
-        rows.collect()
-    }
-
-    /// Full lake items for an exact set of seqs — how a semantic-only hit
-    /// (one no lexical term matched) gets a body to show.
-    pub fn lake_items_for_seqs(
-        &self,
-        seqs: &[i64],
-    ) -> rusqlite::Result<Vec<crate::classmem::LakeItem>> {
-        if seqs.is_empty() {
-            return Ok(Vec::new());
-        }
-        let conn = self.lock_conn();
-        let marks = vec!["?"; seqs.len()].join(", ");
-        let mut stmt = conn.prepare(&format!(
-            "SELECT le.seq, le.ts, le.kind, le.ref_kind, le.ref_id, le.session_id,
-                    p.surface, p.origin, p.role, p.mission_id, p.project_path,
-                    {PROMPT_TEXT},
-                    p.thread_kind, p.thread_id, p.parent_session_id, p.model
-             FROM ledger_events le
-             JOIN prompts p ON p.id = le.prompt_id
-             WHERE le.kind = 'prompt' AND le.seq IN ({marks})
-             ORDER BY le.seq DESC"
-        ))?;
-        let refs: Vec<&dyn rusqlite::ToSql> =
-            seqs.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
-        let rows = stmt.query_map(refs.as_slice(), Self::row_to_lake_item)?;
-        rows.collect()
     }
 
     // --- semantic index (derived; see the `embeddings` DDL) ----------------
@@ -3455,99 +2651,6 @@ impl Database {
              FROM context_journal WHERE kind = 'memchat_prefetch'",
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-    }
-
-    /// How many compacted bodies are still recoverable, and the deflated bytes
-    /// they occupy — the honest counterpart to `compaction_stats`' reclaim
-    /// number, which reads as pure profit until you can see the cost.
-    pub fn archive_stats(&self) -> rusqlite::Result<(i64, i64)> {
-        let conn = self.lock_conn();
-        conn.query_row(
-            "SELECT COUNT(*), COALESCE(SUM(LENGTH(blob)), 0) FROM prompt_archive",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-    }
-
-    /// Compaction candidates: warm prompts (`gist IS NULL`) at least `size_floor`
-    /// bytes. A prompt links into a node by ledger seq
-    /// (`class_links.target_id` = the prompt event's seq), so we resolve
-    /// seq → `prompt_id` here; the keeper groups the rows by prompt and applies
-    /// the role/cold/pinned/size interlocks in pure code.
-    ///
-    /// Warm prompts worth considering for compaction, as flat
-    /// `(id, bytes, role, node_id)` rows — one per accepted class link, or a
-    /// single row with `node_id = NULL` for machine text.
-    ///
-    /// The class-link join is now a LEFT join, because machine text
-    /// (`agent`/`system`) is deliberately kept out of the classifier and so can
-    /// never acquire a link to go cold *through*. Without this it would be
-    /// immortal: excluded from classification by Phase 1.5, and therefore never
-    /// selectable — the 6.9 MB would sit on disk forever while the only rows
-    /// still reachable by the blade were the user's own. Machine rows qualify on
-    /// lake-relative age instead (`machine_cold_before_ts`).
-    pub fn list_compaction_candidates(
-        &self,
-        size_floor: i64,
-        machine_cold_before_ts: i64,
-    ) -> rusqlite::Result<Vec<(i64, i64, String, Option<String>)>> {
-        let conn = self.lock_conn();
-        let mut stmt = conn.prepare(
-            "SELECT p.id, LENGTH(CAST(p.body AS BLOB)) AS bytes,
-                    COALESCE(p.role, 'user') AS role, l.node_id
-             FROM prompts p
-             JOIN ledger_events le ON le.prompt_id = p.id AND le.kind = 'prompt'
-             LEFT JOIN class_links l
-               ON l.target_kind = 'prompt'
-              AND CAST(l.target_id AS INTEGER) = le.seq
-              AND l.status = 'accepted'
-             WHERE p.gist IS NULL
-               AND LENGTH(CAST(p.body AS BLOB)) >= ?1
-               AND (l.node_id IS NOT NULL
-                    OR (COALESCE(p.role, 'user') <> 'user' AND p.ts <= ?2))",
-        )?;
-        let rows = stmt.query_map(params![size_floor, machine_cold_before_ts], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, i64>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, Option<String>>(3)?,
-            ))
-        })?;
-        rows.collect()
-    }
-
-    /// Fetch the full (uncompacted) bodies for a set of prompt ids — the input
-    /// the keeper's summarizer (and its deterministic fallback) gist from. Only
-    /// warm rows are returned; an already-compacted id is silently skipped.
-    pub fn get_prompt_bodies(&self, ids: &[i64]) -> rusqlite::Result<Vec<(i64, String)>> {
-        let conn = self.lock_conn();
-        let mut out = Vec::with_capacity(ids.len());
-        let mut stmt =
-            conn.prepare("SELECT body FROM prompts WHERE id = ?1 AND gist IS NULL")?;
-        for &id in ids {
-            let body: Option<String> = stmt
-                .query_row(params![id], |r| r.get(0))
-                .optional()?;
-            if let Some(b) = body {
-                out.push((id, b));
-            }
-        }
-        Ok(out)
-    }
-
-    /// Aggregate compaction stats for the memory pill/inspector:
-    /// `(compacted_count, reclaimed_bytes, newest_compacted_at?)`.
-    pub fn compaction_stats(&self) -> rusqlite::Result<(i64, i64, Option<i64>)> {
-        let conn = self.lock_conn();
-        conn.query_row(
-            "SELECT COUNT(*),
-                    COALESCE(SUM(original_bytes), 0),
-                    MAX(compacted_at)
-             FROM prompts WHERE gist IS NOT NULL",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
     }
 
@@ -5625,179 +4728,6 @@ impl Database {
     // Phase 4 — context access + portability (routes / export / mirror)
     // -----------------------------------------------------------------------
 
-    /// Filtered prompt query backing `GET /v1/context/prompts`. Every optional
-    /// filter is ANDed; the free-text `substring` is bound (never string-
-    /// interpolated) so an injection-shaped `q` can only ever LIKE-match, not
-    /// alter the SQL. Oldest-first, capped at `limit`.
-    pub fn list_context_prompts(
-        &self,
-        f: &crate::context::PromptFilters,
-    ) -> rusqlite::Result<Vec<crate::classmem::LakeItem>> {
-        let conn = self.lock_conn();
-        // Build a parameterized WHERE; each clause pushes a bound value so no
-        // caller string ever reaches the SQL text.
-        // `p.body` alone was a live bug here: compaction writes `body = ''`, so
-        // this route — which backs the MCP `query_prompts` tool — returned an
-        // empty string for all 224 compacted rows rather than their gists. An
-        // external session grounding itself on the user's memory read them as
-        // content-free. `PROMPT_TEXT` is the one expression that resolves it.
-        let mut sql = format!(
-            "SELECT le.seq, le.ts, le.kind, le.ref_kind, le.ref_id, le.session_id,
-                    p.surface, p.origin, p.role, p.mission_id, p.project_path,
-                    {PROMPT_TEXT},
-                    p.thread_kind, p.thread_id, p.parent_session_id, p.model
-             FROM prompts p
-             JOIN ledger_events le ON le.prompt_id = p.id
-             WHERE 1 = 1"
-        );
-        let mut binds: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        match f.role.as_deref().filter(|s| !s.is_empty()) {
-            Some(role) => {
-                sql.push_str(" AND COALESCE(p.role, 'user') = ?");
-                binds.push(Box::new(role.to_string()));
-            }
-            None if !f.include_agent => {
-                sql.push_str(" AND COALESCE(p.role, 'user') <> 'agent'");
-            }
-            None => {}
-        }
-        if let Some(s) = f.session_id.as_deref().filter(|s| !s.is_empty()) {
-            sql.push_str(" AND p.session_id = ?");
-            binds.push(Box::new(s.to_string()));
-        }
-        if let Some(m) = f.mission_id.as_deref().filter(|s| !s.is_empty()) {
-            sql.push_str(" AND p.mission_id = ?");
-            binds.push(Box::new(m.to_string()));
-        }
-        if let Some(s) = f.surface.as_deref().filter(|s| !s.is_empty()) {
-            sql.push_str(" AND p.surface = ?");
-            binds.push(Box::new(s.to_string()));
-        }
-        if let Some(t) = f.thread_kind.as_deref().filter(|s| !s.is_empty()) {
-            sql.push_str(" AND p.thread_kind = ?");
-            binds.push(Box::new(t.to_string()));
-        }
-        if let Some(t) = f.thread_id.as_deref().filter(|s| !s.is_empty()) {
-            sql.push_str(" AND p.thread_id = ?");
-            binds.push(Box::new(t.to_string()));
-        }
-        if let Some(p) = f.parent_session_id.as_deref().filter(|s| !s.is_empty()) {
-            sql.push_str(" AND p.parent_session_id = ?");
-            binds.push(Box::new(p.to_string()));
-        }
-        if let Some(p) = f.project.as_deref().filter(|s| !s.is_empty()) {
-            sql.push_str(" AND p.project_path = ?");
-            binds.push(Box::new(p.to_string()));
-        }
-        if let Some(m) = f.model.as_deref().filter(|s| !s.is_empty()) {
-            sql.push_str(" AND p.model = ?");
-            binds.push(Box::new(m.to_string()));
-        }
-        if let Some(seq) = f.since_seq {
-            sql.push_str(" AND le.seq > ?");
-            binds.push(Box::new(seq.max(0)));
-        }
-        if let Some(q) = f.substring.as_deref().filter(|s| !s.is_empty()) {
-            // FTS as a FILTER, not a ranker: the clause narrows `prompts`
-            // through the index, and the route's `ORDER BY le.seq` and response
-            // shape are untouched. (bm25 ranking lives in `search_prompts_fts`,
-            // where re-ordering is the point.) Before this, `?q=` was a LIKE
-            // cross-scan of every prompt body joined to the whole chain.
-            //
-            // An unsanitizable query — punctuation only, say — yields no FTS
-            // tokens; fall back to the bound LIKE so it still matches something
-            // rather than erroring or silently returning nothing.
-            // The planner's AND reading is the right one for a FILTER: the
-            // job is narrowing, and every extra word the user types should cut
-            // the list down rather than widen it. (The OR-with-prefix stage is
-            // for RANKED search, where a weak hit still beats no hit.)
-            match crate::query::plan_fts_query(q) {
-                Some(plan) => {
-                    sql.push_str(
-                        " AND p.id IN (SELECT rowid FROM prompts_fts WHERE prompts_fts MATCH ?)",
-                    );
-                    binds.push(Box::new(plan.and_match));
-                }
-                None => {
-                    // Escape LIKE metacharacters so the text matches literally.
-                    let escaped =
-                        q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
-                    sql.push_str(&format!(" AND {PROMPT_TEXT} LIKE ? ESCAPE '\\'"));
-                    binds.push(Box::new(format!("%{escaped}%")));
-                }
-            }
-        }
-        sql.push_str(" ORDER BY le.seq ASC LIMIT ?");
-        binds.push(Box::new(f.limit.max(1)));
-
-        let mut stmt = conn.prepare(&sql)?;
-        let refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
-        let rows = stmt.query_map(refs.as_slice(), |r| {
-            let body: Option<String> = r.get(11)?;
-            Ok(crate::classmem::LakeItem {
-                seq: r.get(0)?,
-                ts: r.get(1)?,
-                kind: r.get(2)?,
-                ref_kind: r.get(3)?,
-                ref_id: r.get(4)?,
-                session_id: r.get(5)?,
-                surface: r.get(6)?,
-                origin: r.get(7)?,
-                role: r.get(8)?,
-                mission_id: r.get(9)?,
-                project_path: r.get(10)?,
-                body: body.map(|b| {
-                    if b.chars().count() > 4000 {
-                        b.chars().take(4000).collect::<String>() + "…"
-                    } else {
-                        b
-                    }
-                }),
-                thread_kind: r.get(12)?,
-                thread_id: r.get(13)?,
-                parent_session_id: r.get(14)?,
-                model: r.get(15)?,
-            })
-        })?;
-        rows.collect()
-    }
-
-    /// All ledger events tied to a session (`session_id` column match),
-    /// oldest-first — the decision-event spine of `GET /v1/context/sessions/:id/
-    /// history`. Prompt, revision, and decision events all carry `session_id`.
-    pub fn list_session_events(
-        &self,
-        session_id: &str,
-    ) -> rusqlite::Result<Vec<crate::ledger::LedgerEventRow>> {
-        let conn = self.lock_conn();
-        let mut stmt = conn.prepare(
-            "SELECT seq, ts, kind, author, prompt_id, session_id, version_number,
-                    ref_kind, ref_id, payload_hash, prev_hash, entry_hash
-             FROM ledger_events WHERE session_id = ?1 ORDER BY seq ASC",
-        )?;
-        let rows = stmt.query_map(params![session_id], Self::row_to_ledger_event)?;
-        rows.collect()
-    }
-
-    /// Every ledger event, oldest-first, optionally after `since_seq` — the
-    /// ordered spine an export bundle / mirror walks. `limit` caps a huge
-    /// history. Ascending (unlike `list_ledger_events`, which is newest-first
-    /// for the pane).
-    pub fn list_ledger_events_asc(
-        &self,
-        since_seq: i64,
-        limit: i64,
-    ) -> rusqlite::Result<Vec<crate::ledger::LedgerEventRow>> {
-        let conn = self.lock_conn();
-        let mut stmt = conn.prepare(
-            "SELECT seq, ts, kind, author, prompt_id, session_id, version_number,
-                    ref_kind, ref_id, payload_hash, prev_hash, entry_hash
-             FROM ledger_events WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(params![since_seq.max(0), limit.max(0)], Self::row_to_ledger_event)?;
-        rows.collect()
-    }
-
     /// Filtered, cursor-paged Timeline query — the Memory surface's spine.
     /// Newest-first; `f.before_seq` chains pages, so (unlike
     /// `list_ledger_events`' single capped read) the whole history is
@@ -5982,7 +4912,7 @@ impl Database {
         let mut stmt = conn.prepare(&sql)?;
         let refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
         let rows = stmt.query_map(refs.as_slice(), |r| {
-            let event = Self::row_to_ledger_event(r)?;
+            let event = PolisStore::row_to_ledger_event(r)?;
             let body: Option<String> = r.get(16)?;
             let body_chars: Option<i64> = r.get(17)?;
             let role: Option<String> = r.get(18)?;
@@ -6144,34 +5074,6 @@ impl Database {
         Ok(out)
     }
 
-    /// Shared row→`LedgerEventRow` mapper (the column order every ledger SELECT
-    /// above uses), so the three readers can't drift.
-    fn row_to_ledger_event(r: &rusqlite::Row) -> rusqlite::Result<crate::ledger::LedgerEventRow> {
-        Ok(crate::ledger::LedgerEventRow {
-            seq: r.get(0)?,
-            ts: r.get(1)?,
-            kind: r.get(2)?,
-            author: r.get(3)?,
-            prompt_id: r.get(4)?,
-            session_id: r.get(5)?,
-            version_number: r.get(6)?,
-            ref_kind: r.get(7)?,
-            ref_id: r.get(8)?,
-            payload_hash: r.get(9)?,
-            prev_hash: r.get(10)?,
-            entry_hash: r.get(11)?,
-        })
-    }
-
-    /// Prompt ids captured under a mission — the mission-scope filter for export
-    /// bundles (ledger_events has no `mission_id`; the prompt row carries it).
-    pub fn mission_prompt_ids(&self, mission_id: &str) -> rusqlite::Result<Vec<i64>> {
-        let conn = self.lock_conn();
-        let mut stmt = conn.prepare("SELECT id FROM prompts WHERE mission_id = ?1")?;
-        let rows = stmt.query_map(params![mission_id], |r| r.get::<_, i64>(0))?;
-        rows.collect()
-    }
-
     /// The raw markdown of one revision (the body a `revision` ledger event
     /// references but does not own) — for snapshotting into a mirror note /
     /// export bundle at write time.
@@ -6187,99 +5089,6 @@ impl Database {
             |r| r.get(0),
         )
         .optional()
-    }
-
-    /// Enriched ledger events (ascending, after `since_seq`) for the portable
-    /// mirror: each event joined to its prompt provenance + full body. Revision
-    /// bodies (`revisions.raw_plan_markdown`) are joined by the mirror writer,
-    /// not here (a `revision` event has no `prompt_id`).
-    pub fn list_mirror_events(
-        &self,
-        since_seq: i64,
-        limit: i64,
-    ) -> rusqlite::Result<Vec<crate::mirror::MirrorRow>> {
-        let conn = self.lock_conn();
-        let mut stmt = conn.prepare(
-            "SELECT le.seq, le.ts, le.kind, le.author, le.prompt_id, le.session_id,
-                    le.version_number, le.ref_kind, le.ref_id, le.payload_hash,
-                    le.prev_hash, le.entry_hash,
-                    p.surface, p.origin, p.role, p.mission_id, p.project_path, p.body,
-                    p.thread_kind, p.thread_id, p.parent_session_id
-             FROM ledger_events le
-             LEFT JOIN prompts p ON le.prompt_id = p.id
-             WHERE le.seq > ?1 ORDER BY le.seq ASC LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(params![since_seq.max(0), limit.max(0)], |r| {
-            Ok(crate::mirror::MirrorRow {
-                event: crate::ledger::LedgerEventRow {
-                    seq: r.get(0)?,
-                    ts: r.get(1)?,
-                    kind: r.get(2)?,
-                    author: r.get(3)?,
-                    prompt_id: r.get(4)?,
-                    session_id: r.get(5)?,
-                    version_number: r.get(6)?,
-                    ref_kind: r.get(7)?,
-                    ref_id: r.get(8)?,
-                    payload_hash: r.get(9)?,
-                    prev_hash: r.get(10)?,
-                    entry_hash: r.get(11)?,
-                },
-                surface: r.get(12)?,
-                origin: r.get(13)?,
-                role: r.get(14)?,
-                mission_id: r.get(15)?,
-                project_path: r.get(16)?,
-                body: r.get(17)?,
-                thread_kind: r.get(18)?,
-                thread_id: r.get(19)?,
-                parent_session_id: r.get(20)?,
-            })
-        })?;
-        rows.collect()
-    }
-
-    /// Prompt counts grouped by UTC day (`YYYY-MM-DD`), oldest day first —
-    /// `/v1/context/stats` day histogram.
-    pub fn prompt_counts_by_day(&self) -> rusqlite::Result<Vec<(String, i64)>> {
-        let conn = self.lock_conn();
-        let mut stmt = conn.prepare(
-            "SELECT strftime('%Y-%m-%d', ts / 1000, 'unixepoch') AS day, COUNT(*)
-             FROM prompts GROUP BY day ORDER BY day ASC",
-        )?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
-        rows.collect()
-    }
-
-    /// Prompt counts grouped by capture surface — `/v1/context/stats`.
-    pub fn prompt_counts_by_surface(&self) -> rusqlite::Result<Vec<(String, i64)>> {
-        let conn = self.lock_conn();
-        let mut stmt = conn.prepare(
-            "SELECT surface, COUNT(*) FROM prompts GROUP BY surface ORDER BY COUNT(*) DESC",
-        )?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
-        rows.collect()
-    }
-
-    /// Ledger event counts grouped by kind — `/v1/context/stats`.
-    pub fn event_counts_by_kind(&self) -> rusqlite::Result<Vec<(String, i64)>> {
-        let conn = self.lock_conn();
-        let mut stmt = conn.prepare(
-            "SELECT kind, COUNT(*) FROM ledger_events GROUP BY kind ORDER BY COUNT(*) DESC",
-        )?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
-        rows.collect()
-    }
-
-    /// Ledger event counts grouped by author — the Timeline's actor facet
-    /// (`local_author()` vs the agent seat names P0 made distinct).
-    pub fn event_counts_by_author(&self) -> rusqlite::Result<Vec<(String, i64)>> {
-        let conn = self.lock_conn();
-        let mut stmt = conn.prepare(
-            "SELECT author, COUNT(*) FROM ledger_events GROUP BY author ORDER BY COUNT(*) DESC",
-        )?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
-        rows.collect()
     }
 
     /// Accepted-class-node counts per root class (title → linked-item count
@@ -6424,43 +5233,6 @@ impl Database {
             .collect()
     }
 
-    /// Prompt body-length distribution per capture surface — the cheapest
-    /// available proxy for "how hard is the thinking on this surface". Returns
-    /// `(surface, count, median_bytes, p90_bytes)`, heaviest surface first.
-    pub fn prompt_length_by_surface(&self) -> rusqlite::Result<Vec<(String, i64, i64, i64)>> {
-        let conn = self.lock_conn();
-        // Percentiles without a window function: rank rows per surface and pick
-        // the row at the requested fraction. `prompts` is small enough that the
-        // ordering cost is irrelevant, and this stays portable across the
-        // bundled SQLite build.
-        let mut stmt = conn.prepare(
-            "SELECT surface, LENGTH(body) AS len FROM prompts ORDER BY surface, len ASC",
-        )?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
-        let mut by_surface: std::collections::HashMap<String, Vec<i64>> =
-            std::collections::HashMap::new();
-        for row in rows {
-            let (surface, len) = row?;
-            by_surface.entry(surface).or_default().push(len);
-        }
-        let pick = |sorted: &[i64], frac: f64| -> i64 {
-            if sorted.is_empty() {
-                return 0;
-            }
-            let idx = ((sorted.len() as f64 - 1.0) * frac).round() as usize;
-            sorted[idx.min(sorted.len() - 1)]
-        };
-        let mut out: Vec<(String, i64, i64, i64)> = by_surface
-            .into_iter()
-            .map(|(surface, lens)| {
-                let n = lens.len() as i64;
-                (surface, n, pick(&lens, 0.5), pick(&lens, 0.9))
-            })
-            .collect();
-        out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-        Ok(out)
-    }
-
     /// Record that a session was exported as a portable bundle (backs the
     /// Librarian's F6 signal). Idempotent per `(session_id, scope)` — a
     /// re-export refreshes `head_hash`/`exported_at`.
@@ -6503,18 +5275,6 @@ impl Database {
         rows.collect()
     }
 
-    /// Append an event to the hash chain. Reads the current head under the write
-    /// lock, computes `entry_hash = sha256(prev_hash ‖ canonical(event))`, and
-    /// inserts with an explicit monotonic `seq` — all atomic under the single
-    /// `Mutex<Connection>` writer, so the chain can't race.
-    pub fn append_ledger_event(
-        &self,
-        a: &crate::ledger::LedgerAppend,
-    ) -> rusqlite::Result<crate::ledger::LedgerEventRow> {
-        let conn = self.lock_conn();
-        Self::append_ledger_event_locked(&conn, a)
-    }
-
     /// The append core, callable with an already-held connection lock so a
     /// caller that mutates a row and appends its proof event (e.g.
     /// `compact_prompt_body`) does both atomically without re-locking.
@@ -6523,275 +5283,6 @@ impl Database {
         a: &crate::ledger::LedgerAppend,
     ) -> rusqlite::Result<crate::ledger::LedgerEventRow> {
         polis_store::ledger::append_event(conn, a)
-    }
-
-    /// Most-recent-first ledger events, capped at `limit`.
-    pub fn list_ledger_events(
-        &self,
-        limit: i64,
-    ) -> rusqlite::Result<Vec<crate::ledger::LedgerEventRow>> {
-        let conn = self.lock_conn();
-        let mut stmt = conn.prepare(
-            "SELECT seq, ts, kind, author, prompt_id, session_id, version_number,
-                    ref_kind, ref_id, payload_hash, prev_hash, entry_hash
-             FROM ledger_events ORDER BY seq DESC LIMIT ?1",
-        )?;
-        let rows = stmt.query_map(params![limit], |r| {
-            Ok(crate::ledger::LedgerEventRow {
-                seq: r.get(0)?,
-                ts: r.get(1)?,
-                kind: r.get(2)?,
-                author: r.get(3)?,
-                prompt_id: r.get(4)?,
-                session_id: r.get(5)?,
-                version_number: r.get(6)?,
-                ref_kind: r.get(7)?,
-                ref_id: r.get(8)?,
-                payload_hash: r.get(9)?,
-                prev_hash: r.get(10)?,
-                entry_hash: r.get(11)?,
-            })
-        })?;
-        rows.collect()
-    }
-
-    /// True if a revision event for this (session, version) already exists with
-    /// the same payload hash — the idempotency guard for the revision path.
-    pub fn revision_event_exists(
-        &self,
-        session_id: &str,
-        version_number: i64,
-        payload_hash: &str,
-    ) -> rusqlite::Result<bool> {
-        let conn = self.lock_conn();
-        let n: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM ledger_events
-             WHERE kind = 'revision' AND session_id = ?1
-               AND version_number = ?2 AND payload_hash = ?3",
-            params![session_id, version_number, payload_hash],
-            |r| r.get(0),
-        )?;
-        Ok(n > 0)
-    }
-
-    /// True if an identical decision event already exists — idempotency guard
-    /// for the decision path.
-    pub fn decision_event_exists(
-        &self,
-        kind: &str,
-        ref_kind: &str,
-        ref_id: &str,
-        payload_hash: &str,
-    ) -> rusqlite::Result<bool> {
-        let conn = self.lock_conn();
-        let n: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM ledger_events
-             WHERE kind = ?1 AND ref_kind = ?2 AND ref_id = ?3 AND payload_hash = ?4",
-            params![kind, ref_kind, ref_id, payload_hash],
-            |r| r.get(0),
-        )?;
-        Ok(n > 0)
-    }
-
-    /// `app_settings` keys holding the last incremental verification anchor.
-    const VERIFY_LAST_SEQ: &'static str = "redline.ledgerVerify.lastSeq";
-    const VERIFY_HEAD_HASH: &'static str = "redline.ledgerVerify.headHash";
-
-    /// Verify only what the chain has grown by since the last verification,
-    /// anchored on the stored `(lastSeq, headHash)` pair.
-    ///
-    /// HONEST TRADE, stated plainly: this cannot detect retroactive tampering
-    /// of rows it already verified — it re-checks the anchor row's stored
-    /// `entry_hash` and then walks forward from there, so an edit to some
-    /// ancient row's `ts` would slip past. That is why the FULL
-    /// `verify_ledger_chain` stays wired to the 6h `ledger-backup` keeper watch
-    /// (inside its `spawn_blocking`): the periodic deep check is what catches
-    /// retroactive edits, and this cheap one is what a 60s status poll can
-    /// afford. On any anchor mismatch — a missing anchor, a rewound chain, an
-    /// anchor row whose hash no longer matches — it falls back to the full walk
-    /// and re-anchors.
-    pub fn verify_ledger_chain_incremental(&self) -> rusqlite::Result<crate::ledger::ChainVerdict> {
-        let head_seq = self.max_ledger_seq()?;
-        let anchor_seq: Option<i64> = self
-            .get_setting(Self::VERIFY_LAST_SEQ)
-            .and_then(|s| s.parse().ok());
-        let anchor_hash = self.get_setting(Self::VERIFY_HEAD_HASH);
-
-        // Re-anchor on the head SEQ (not the row count): the anchor is a row
-        // address, and the two only coincide because the chain is append-only.
-        let full_and_reanchor = |db: &Self| -> rusqlite::Result<crate::ledger::ChainVerdict> {
-            let verdict = db.verify_ledger_chain()?;
-            if verdict.ok {
-                let at = db.max_ledger_seq().unwrap_or(0);
-                let _ = db.set_setting(Self::VERIFY_LAST_SEQ, &at.to_string());
-                let _ = db.set_setting(
-                    Self::VERIFY_HEAD_HASH,
-                    verdict
-                        .head_hash
-                        .as_deref()
-                        .unwrap_or(crate::ledger::GENESIS_PREV),
-                );
-            }
-            Ok(verdict)
-        };
-
-        let (Some(anchor_seq), Some(anchor_hash)) = (anchor_seq, anchor_hash) else {
-            return full_and_reanchor(self);
-        };
-        // A rewound or shrunk chain is not an incremental case.
-        if anchor_seq > head_seq {
-            return full_and_reanchor(self);
-        }
-        // The anchor row must still hash to what we recorded.
-        let stored: Option<String> = {
-            let conn = self.lock_conn();
-            conn.query_row(
-                "SELECT entry_hash FROM ledger_events WHERE seq = ?1",
-                params![anchor_seq],
-                |r| r.get(0),
-            )
-            .optional()?
-        };
-        let anchor_ok = match (&stored, anchor_seq) {
-            // seq 0 = "verified an empty chain"; genesis prev stands in.
-            (None, 0) => anchor_hash == crate::ledger::GENESIS_PREV,
-            (Some(h), _) => *h == anchor_hash,
-            _ => false,
-        };
-        if !anchor_ok {
-            return full_and_reanchor(self);
-        }
-        if head_seq == anchor_seq {
-            return Ok(crate::ledger::ChainVerdict {
-                ok: true,
-                checked: head_seq,
-                first_bad_seq: None,
-                head_hash: Some(anchor_hash),
-            });
-        }
-
-        // Walk only the suffix.
-        let conn = self.lock_conn();
-        let mut stmt = conn.prepare(
-            "SELECT seq, ts, kind, author, prompt_id, session_id, version_number,
-                    ref_kind, ref_id, payload_hash, prev_hash, entry_hash
-             FROM ledger_events WHERE seq > ?1 ORDER BY seq ASC",
-        )?;
-        let rows = stmt.query_map(params![anchor_seq], Self::row_to_ledger_event)?;
-        let mut prev = anchor_hash;
-        let mut checked = anchor_seq;
-        for row in rows {
-            let e = row?;
-            let bad = crate::ledger::ChainVerdict {
-                ok: false,
-                checked,
-                first_bad_seq: Some(e.seq),
-                head_hash: None,
-            };
-            if e.prev_hash != prev {
-                return Ok(bad);
-            }
-            let canon = crate::ledger::CanonicalEvent {
-                seq: e.seq,
-                ts: e.ts,
-                kind: &e.kind,
-                author: &e.author,
-                prompt_id: e.prompt_id,
-                session_id: e.session_id.as_deref(),
-                version_number: e.version_number,
-                ref_kind: e.ref_kind.as_deref(),
-                ref_id: e.ref_id.as_deref(),
-                payload_hash: &e.payload_hash,
-            };
-            if crate::ledger::compute_entry_hash(&e.prev_hash, &canon) != e.entry_hash {
-                return Ok(bad);
-            }
-            prev = e.entry_hash;
-            checked += 1;
-        }
-        drop(stmt);
-        drop(conn);
-        let _ = self.set_setting(Self::VERIFY_LAST_SEQ, &head_seq.to_string());
-        let _ = self.set_setting(Self::VERIFY_HEAD_HASH, &prev);
-        Ok(crate::ledger::ChainVerdict {
-            ok: true,
-            checked,
-            first_bad_seq: None,
-            head_hash: Some(prev),
-        })
-    }
-
-    /// Re-walk the whole chain, recomputing each `entry_hash` from stored fields
-    /// and checking `prev_hash` linkage. Reports the first seq that fails.
-    pub fn verify_ledger_chain(&self) -> rusqlite::Result<crate::ledger::ChainVerdict> {
-        let conn = self.lock_conn();
-        let mut stmt = conn.prepare(
-            "SELECT seq, ts, kind, author, prompt_id, session_id, version_number,
-                    ref_kind, ref_id, payload_hash, prev_hash, entry_hash
-             FROM ledger_events ORDER BY seq ASC",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok(crate::ledger::LedgerEventRow {
-                seq: r.get(0)?,
-                ts: r.get(1)?,
-                kind: r.get(2)?,
-                author: r.get(3)?,
-                prompt_id: r.get(4)?,
-                session_id: r.get(5)?,
-                version_number: r.get(6)?,
-                ref_kind: r.get(7)?,
-                ref_id: r.get(8)?,
-                payload_hash: r.get(9)?,
-                prev_hash: r.get(10)?,
-                entry_hash: r.get(11)?,
-            })
-        })?;
-
-        let mut prev = crate::ledger::GENESIS_PREV.to_string();
-        let mut checked = 0i64;
-        let mut head = None;
-        for row in rows {
-            let e = row?;
-            // Linkage: this row must commit to its actual predecessor.
-            if e.prev_hash != prev {
-                return Ok(crate::ledger::ChainVerdict {
-                    ok: false,
-                    checked,
-                    first_bad_seq: Some(e.seq),
-                    head_hash: None,
-                });
-            }
-            let canon = crate::ledger::CanonicalEvent {
-                seq: e.seq,
-                ts: e.ts,
-                kind: &e.kind,
-                author: &e.author,
-                prompt_id: e.prompt_id,
-                session_id: e.session_id.as_deref(),
-                version_number: e.version_number,
-                ref_kind: e.ref_kind.as_deref(),
-                ref_id: e.ref_id.as_deref(),
-                payload_hash: &e.payload_hash,
-            };
-            let recomputed = crate::ledger::compute_entry_hash(&e.prev_hash, &canon);
-            if recomputed != e.entry_hash {
-                return Ok(crate::ledger::ChainVerdict {
-                    ok: false,
-                    checked,
-                    first_bad_seq: Some(e.seq),
-                    head_hash: None,
-                });
-            }
-            prev = e.entry_hash.clone();
-            head = Some(e.entry_hash);
-            checked += 1;
-        }
-        Ok(crate::ledger::ChainVerdict {
-            ok: true,
-            checked,
-            first_bad_seq: None,
-            head_hash: head,
-        })
     }
 
     /// Snapshot the whole database to `dest` via `VACUUM INTO` (a consistent
@@ -6834,23 +5325,6 @@ impl Database {
         Ok(seeded)
     }
 
-    fn row_to_class_node(r: &rusqlite::Row) -> rusqlite::Result<crate::classmem::ClassNode> {
-        Ok(crate::classmem::ClassNode {
-            id: r.get(0)?,
-            parent_id: r.get(1)?,
-            kind: r.get(2)?,
-            title: r.get(3)?,
-            summary: r.get(4)?,
-            project_path: r.get(5)?,
-            ip_name: r.get(6)?,
-            status: r.get(7)?,
-            pinned: r.get::<_, i64>(8)? != 0,
-            curated_by: r.get(9)?,
-            created_at: r.get(10)?,
-            updated_at: r.get(11)?,
-        })
-    }
-
     /// Every class node (proposed + accepted), for tree building in Rust.
     pub fn list_class_nodes(&self) -> rusqlite::Result<Vec<crate::classmem::ClassNode>> {
         let conn = self.lock_conn();
@@ -6859,7 +5333,7 @@ impl Database {
                     status, pinned, curated_by, created_at, updated_at
              FROM class_nodes ORDER BY title ASC",
         )?;
-        let rows = stmt.query_map([], Self::row_to_class_node)?;
+        let rows = stmt.query_map([], PolisStore::row_to_class_node)?;
         rows.collect()
     }
 
@@ -6870,7 +5344,7 @@ impl Database {
                     status, pinned, curated_by, created_at, updated_at
              FROM class_nodes WHERE id = ?1",
             params![id],
-            Self::row_to_class_node,
+            PolisStore::row_to_class_node,
         )
         .optional()
     }
@@ -6912,7 +5386,7 @@ impl Database {
                     status, pinned, curated_by, created_at, updated_at
              FROM class_nodes WHERE parent_id = ?1 ORDER BY title ASC",
         )?;
-        let rows = stmt.query_map(params![parent_id], Self::row_to_class_node)?;
+        let rows = stmt.query_map(params![parent_id], PolisStore::row_to_class_node)?;
         rows.collect()
     }
 
@@ -6944,159 +5418,12 @@ impl Database {
             ))?;
             let refs: Vec<&dyn rusqlite::ToSql> =
                 chunk.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
-            let rows = stmt.query_map(refs.as_slice(), Self::row_to_class_node)?;
+            let rows = stmt.query_map(refs.as_slice(), PolisStore::row_to_class_node)?;
             for r in rows {
                 out.push(r?);
             }
         }
         Ok(out)
-    }
-
-    /// `link_preview` for a whole page of link targets in ONE query under ONE
-    /// lock, keyed by ledger seq. The per-link version issued a query (and took
-    /// the connection mutex) once per link, which is what made a node with a
-    /// hundred links a hundred round trips through the shared lock.
-    ///
-    /// A compacted prompt yields its gist rather than the emptied body — the
-    /// `list_ledger_events` idiom, so a released body still reads as something.
-    pub fn link_previews_for_seqs(
-        &self,
-        seqs: &[i64],
-    ) -> rusqlite::Result<std::collections::HashMap<i64, String>> {
-        let mut out = std::collections::HashMap::new();
-        if seqs.is_empty() {
-            return Ok(out);
-        }
-        let conn = self.lock_conn();
-        // Chunked so a very wide node can't exceed SQLite's bound-parameter cap.
-        for chunk in seqs.chunks(400) {
-            let marks = vec!["?"; chunk.len()].join(", ");
-            let mut stmt = conn.prepare(&format!(
-                "SELECT le.seq, le.kind, COALESCE(NULLIF(p.body, ''), p.gist)
-                 FROM ledger_events le LEFT JOIN prompts p ON le.prompt_id = p.id
-                 WHERE le.seq IN ({marks})"
-            ))?;
-            let refs: Vec<&dyn rusqlite::ToSql> =
-                chunk.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
-            let rows = stmt.query_map(refs.as_slice(), |r| {
-                let seq: i64 = r.get(0)?;
-                let kind: String = r.get(1)?;
-                let body: Option<String> = r.get(2)?;
-                let label = match body {
-                    Some(b) => b.replace('\n', " ").chars().take(120).collect::<String>(),
-                    None => format!("[{kind} event]"),
-                };
-                Ok((seq, label))
-            })?;
-            for row in rows {
-                let (seq, label) = row?;
-                out.insert(seq, label);
-            }
-        }
-        Ok(out)
-    }
-
-    /// Substring search over the user's own margin notes — the one
-    /// human-authored signal in the lake, which is why the answer pack leads
-    /// with these. A plain bound LIKE is right here: `user_notes` is tiny (one
-    /// row per annotated target), so an FTS index would cost more than it saves.
-    /// Starred notes rank first, then most recently touched.
-    pub fn search_user_notes(
-        &self,
-        q: &str,
-        limit: i64,
-    ) -> rusqlite::Result<Vec<crate::context::UserNote>> {
-        let trimmed = q.trim();
-        if trimmed.is_empty() {
-            return Ok(Vec::new());
-        }
-        let escaped = trimmed
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
-        let conn = self.lock_conn();
-        let mut stmt = conn.prepare(&format!(
-            "SELECT {} FROM user_notes
-             WHERE text LIKE ?1 ESCAPE '\\'
-             ORDER BY starred DESC, updated_at DESC, id DESC LIMIT ?2",
-            Self::USER_NOTE_COLS
-        ))?;
-        let rows = stmt.query_map(
-            params![format!("%{escaped}%"), limit.max(1)],
-            Self::row_to_user_note,
-        )?;
-        rows.collect()
-    }
-
-    /// Class nodes whose title or summary matches a question, best guess first —
-    /// how the answer pack resolves a question to a node when the caller didn't
-    /// name one.
-    ///
-    /// This was the single highest-leverage bug in the retrieval path. It LIKEd
-    /// the **entire raw query** as one `%…%` pattern, so it could only ever
-    /// match a node whose title literally contained the user's whole sentence.
-    /// Every question-shaped `?q=` therefore resolved NO node — verified live:
-    /// `q="what did I decide about the browser tab suspension"` → `node: null`,
-    /// `matchedNodes: []` — and the answer pack silently degraded to
-    /// lexical-only, which reads exactly like "you never thought about this".
-    /// The catalog could not improve its way out either: all 125 nodes have an
-    /// empty `summary`, so even a per-token LIKE would have had only titles.
-    ///
-    /// Now it scores per token through `class_nodes_fts`, with three signals:
-    /// `bm25(title 5, summary 1)`, a recency term on `updated_at`, and
-    /// accepted-before-proposed as the tie-break. The recency term is the piece
-    /// our ranking has been missing everywhere — a class the user touched last
-    /// week is a better answer than one they touched in March, and no amount of
-    /// term overlap says that.
-    ///
-    /// **Design law:** this is node RESOLUTION, and it reads only human-curated
-    /// text (titles and summaries the user accepted). It never consults a lake
-    /// ranking — a vector or bm25 hit on a *prompt* can never create, rename,
-    /// reparent or reorder a class. The arms decide what you read; the tree
-    /// decides what things are.
-    pub fn match_class_nodes(
-        &self,
-        q: &str,
-        limit: i64,
-    ) -> rusqlite::Result<Vec<crate::classmem::ClassNode>> {
-        use crate::query::MatchStage;
-        let Some(plan) = crate::query::plan_fts_query(q) else {
-            return Ok(Vec::new());
-        };
-        let conn = self.lock_conn();
-        let now = crate::ledger::now_millis();
-        for stage in [MatchStage::And, MatchStage::Or] {
-            let Some(match_q) = plan.match_for(stage) else { continue };
-            if match_q.is_empty() {
-                continue;
-            }
-            let mut stmt = conn.prepare(
-                // bm25 is negative-is-better in FTS5, so it is negated into a
-                // score that sorts DESC with the recency bonus. The 0.2 weight
-                // is deliberately small: recency breaks ties between comparable
-                // matches, it does not outrank relevance.
-                // NOT aliased: FTS5 rejects a table alias on both sides of
-                // `MATCH` and in the auxiliary functions, with a "no such
-                // column" that reads like a typo.
-                "SELECT n.id, n.parent_id, n.kind, n.title, n.summary, n.project_path,
-                        n.ip_name, n.status, n.pinned, n.curated_by, n.created_at, n.updated_at
-                 FROM class_nodes_fts
-                 JOIN class_nodes n ON n.rowid = class_nodes_fts.rowid
-                 WHERE class_nodes_fts MATCH ?1
-                 ORDER BY (-bm25(class_nodes_fts, 5.0, 1.0)
-                           + 0.2 * MAX(0.0, 1.0 - (?2 - n.updated_at) / 2592000000.0)
-                           + CASE WHEN n.status = 'accepted' THEN 0.1 ELSE 0.0 END) DESC,
-                          LENGTH(n.title) ASC
-                 LIMIT ?3",
-            )?;
-            let rows: Vec<crate::classmem::ClassNode> = stmt
-                .query_map(params![match_q, now, limit.max(1)], Self::row_to_class_node)?
-                .collect::<rusqlite::Result<_>>()?;
-            if !rows.is_empty() {
-                return Ok(rows);
-            }
-        }
-        Ok(Vec::new())
     }
 
     /// Stage one parsed proposal as reviewable rows (never accepts). Additive
@@ -7916,22 +6243,6 @@ impl Database {
 
     // --- user notes (Second Brain P3) ---
 
-    fn row_to_user_note(r: &rusqlite::Row) -> rusqlite::Result<crate::context::UserNote> {
-        Ok(crate::context::UserNote {
-            id: r.get(0)?,
-            seq: r.get(1)?,
-            target_kind: r.get(2)?,
-            target_id: r.get(3)?,
-            text: r.get(4)?,
-            starred: r.get::<_, i64>(5)? != 0,
-            created_at: r.get(6)?,
-            updated_at: r.get(7)?,
-        })
-    }
-
-    const USER_NOTE_COLS: &'static str =
-        "id, seq, target_kind, target_id, text, starred, created_at, updated_at";
-
     /// Apply one note act atomically: resolve (or create) the `user_notes`
     /// row, apply the text or star change, and append the `note` ledger event
     /// committing to `{action, text}` — the row + its tamper-evident fact under
@@ -7953,7 +6264,7 @@ impl Database {
 
         // Resolve the row: by explicit id, else by target (creating on first
         // touch), else a fresh standalone.
-        let select_one = format!("SELECT {} FROM user_notes", Self::USER_NOTE_COLS);
+        let select_one = format!("SELECT {} FROM user_notes", PolisStore::USER_NOTE_COLS);
         let mut note: Option<crate::context::UserNote> = None;
         let (target_kind, target_id): (String, Option<String>);
         if let Some(id) = w.note_id {
@@ -7961,7 +6272,7 @@ impl Database {
                 .query_row(
                     &format!("{select_one} WHERE id = ?1"),
                     params![id],
-                    Self::row_to_user_note,
+                    PolisStore::row_to_user_note,
                 )
                 .optional()?;
             match found {
@@ -8016,7 +6327,7 @@ impl Database {
                     .query_row(
                         &format!("{select_one} WHERE target_kind = ?1 AND target_id = ?2"),
                         params![tk, tid],
-                        Self::row_to_user_note,
+                        PolisStore::row_to_user_note,
                     )
                     .optional()?;
                 (target_kind, target_id) = (tk.to_string(), Some(tid.to_string()));
@@ -8113,10 +6424,10 @@ impl Database {
         conn.query_row(
             &format!(
                 "SELECT {} FROM user_notes WHERE target_kind = ?1 AND target_id = ?2",
-                Self::USER_NOTE_COLS
+                PolisStore::USER_NOTE_COLS
             ),
             params![target_kind, target_id],
-            Self::row_to_user_note,
+            PolisStore::row_to_user_note,
         )
         .optional()
     }
@@ -8132,11 +6443,11 @@ impl Database {
         let mut stmt = conn.prepare(&format!(
             "SELECT {} FROM user_notes WHERE (?1 = 0 OR starred = 1)
              ORDER BY updated_at DESC, id DESC LIMIT ?2",
-            Self::USER_NOTE_COLS
+            PolisStore::USER_NOTE_COLS
         ))?;
         let rows = stmt.query_map(
             params![starred_only as i64, limit.max(0)],
-            Self::row_to_user_note,
+            PolisStore::row_to_user_note,
         )?;
         rows.collect()
     }
@@ -8335,30 +6646,6 @@ impl Database {
     }
 
     // --- class runs + lake delta ---
-
-    /// The maximum ledger seq (the delta ceiling for a classifier run). 0 if the
-    /// chain is empty.
-    pub fn max_ledger_seq(&self) -> rusqlite::Result<i64> {
-        let conn = self.lock_conn();
-        conn.query_row("SELECT COALESCE(MAX(seq), 0) FROM ledger_events", [], |r| r.get(0))
-    }
-
-    /// What kinds of events landed after `since_seq`, and how many of each —
-    /// the cheap shape of a ledger delta, `(kind, count)` newest-heaviest
-    /// first. A seq PK range scan plus a GROUP BY over a handful of rows; it
-    /// exists so a retrieval agent can be told *what* grew instead of just
-    /// *that* it grew, and skip a re-walk the delta doesn't touch.
-    pub fn ledger_delta_summary(&self, since_seq: i64) -> rusqlite::Result<Vec<(String, i64)>> {
-        let conn = self.lock_conn();
-        let mut stmt = conn.prepare(
-            "SELECT kind, COUNT(*) FROM ledger_events
-             WHERE seq > ?1 GROUP BY kind ORDER BY COUNT(*) DESC, kind ASC",
-        )?;
-        let rows = stmt.query_map(params![since_seq.max(0)], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-        })?;
-        rows.collect()
-    }
 
     /// The seq the last completed classifier run consumed up to — the delta
     /// floor for the next run. 0 when no run has completed.
@@ -8564,7 +6851,7 @@ impl Database {
              FROM class_nodes n ORDER BY n.title ASC",
         )?;
         let rows = stmt.query_map([], |r| {
-            Ok((Self::row_to_class_node(r)?, r.get::<_, i64>(12)?))
+            Ok((PolisStore::row_to_class_node(r)?, r.get::<_, i64>(12)?))
         })?;
         rows.collect()
     }
@@ -8731,38 +7018,6 @@ impl Database {
     pub fn subtree_has_pin(&self, id: &str) -> rusqlite::Result<bool> {
         let conn = self.lock_conn();
         Self::subtree_pinned(&conn, id)
-    }
-
-    /// A short human label for a link target (best-effort). Prompt/decision/
-    /// ledger targets carry a numeric ledger seq — resolve it to the prompt body
-    /// snippet or the event kind. Other kinds render from the id alone.
-    pub fn link_preview(&self, target_kind: &str, target_id: &str) -> Option<String> {
-        if !matches!(target_kind, "prompt" | "decision" | "ledger") {
-            return None;
-        }
-        let seq: i64 = target_id.trim().parse().ok()?;
-        let conn = self.lock_conn();
-        conn.query_row(
-            "SELECT le.kind, p.body
-             FROM ledger_events le LEFT JOIN prompts p ON le.prompt_id = p.id
-             WHERE le.seq = ?1",
-            params![seq],
-            |r| {
-                let kind: String = r.get(0)?;
-                let body: Option<String> = r.get(1)?;
-                Ok(match body {
-                    Some(b) => {
-                        let one = b.replace('\n', " ");
-                        let snip: String = one.chars().take(120).collect();
-                        snip
-                    }
-                    None => format!("[{kind} event]"),
-                })
-            },
-        )
-        .optional()
-        .ok()
-        .flatten()
     }
 
     /// Best-effort evidence bundle for one decision event — what the supersede
@@ -9436,22 +7691,6 @@ impl Database {
             params![plan_session_id],
         )?;
         Ok(n > 0)
-    }
-
-    /// The most recent `approval` ledger event for a session — the decision an
-    /// un-approve supersedes.
-    pub fn latest_approval_seq(&self, session_id: &str) -> Option<i64> {
-        let conn = self.lock_conn();
-        conn.query_row(
-            "SELECT seq FROM ledger_events
-             WHERE kind = 'approval' AND session_id = ?1
-             ORDER BY seq DESC LIMIT 1",
-            params![session_id],
-            |r| r.get(0),
-        )
-        .optional()
-        .ok()
-        .flatten()
     }
 
     /// The sanctioned reversal of an approval: append a `supersede` ledger
@@ -11817,27 +10056,6 @@ impl Database {
         rows.collect()
     }
 
-    /// Ledger events of ONE kind since a wall-clock instant, newest first.
-    /// `ts`, not `seq`: the away feed's watermark is "when the user last
-    /// looked", which is a time, and translating it to a seq would need this
-    /// same table read first.
-    pub fn list_ledger_events_of_kind_since(
-        &self,
-        kind: &str,
-        since_ts: i64,
-        limit: i64,
-    ) -> rusqlite::Result<Vec<crate::ledger::LedgerEventRow>> {
-        let conn = self.lock_conn();
-        let mut stmt = conn.prepare(
-            "SELECT seq, ts, kind, author, prompt_id, session_id, version_number,
-                    ref_kind, ref_id, payload_hash, prev_hash, entry_hash
-             FROM ledger_events WHERE kind = ?1 AND ts >= ?2
-             ORDER BY seq DESC LIMIT ?3",
-        )?;
-        let rows = stmt.query_map(params![kind, since_ts, limit.max(1)], Self::row_to_ledger_event)?;
-        rows.collect()
-    }
-
     /// The claimable frontier — READY SEMANTICS (the law of this query).
     /// An item is ready iff ALL of:
     ///   1. `status = 'open'` — `claimed` / `closed` / `held` are out;
@@ -12748,15 +10966,16 @@ mod batched_read_tests {
 
         // An anchor pointing past the head (a rewound chain) and one whose
         // hash no longer matches both have to re-verify from scratch.
-        db.set_setting(Database::VERIFY_LAST_SEQ, "9999").unwrap();
+        // The anchor lives in the store's own `polis_meta` since Session A3.
+        db.set_meta(PolisStore::VERIFY_LAST_SEQ, "9999").unwrap();
         assert!(db.verify_ledger_chain_incremental().unwrap().ok);
         assert_eq!(
-            db.get_setting(Database::VERIFY_LAST_SEQ).as_deref(),
+            db.meta(PolisStore::VERIFY_LAST_SEQ).unwrap().as_deref(),
             Some("2"),
             "the fallback re-anchors on the real head"
         );
 
-        db.set_setting(Database::VERIFY_HEAD_HASH, &"0".repeat(64))
+        db.set_meta(PolisStore::VERIFY_HEAD_HASH, &"0".repeat(64))
             .unwrap();
         let v = db.verify_ledger_chain_incremental().unwrap();
         assert!(v.ok);
@@ -15948,7 +14167,7 @@ mod tests {
             let conn = db.conn.lock().unwrap();
             conn.execute(
                 "UPDATE prompt_archive SET blob = ?2 WHERE prompt_id = ?1",
-                params![pid, deflate_body("not the original body at all").unwrap()],
+                params![pid, polis_store::compaction::deflate_body("not the original body at all").unwrap()],
             )
             .unwrap();
         }

@@ -32,6 +32,7 @@ pub mod pack;
 pub mod proposal;
 pub mod query;
 pub mod types;
+pub mod vec;
 
 pub use api::{MemoryApi, MemoryError, Scope};
 
@@ -71,6 +72,7 @@ mod guards {
             ("proposal.rs", include_str!("proposal.rs")),
             ("query.rs", include_str!("query.rs")),
             ("types.rs", include_str!("types.rs")),
+            ("vec.rs", include_str!("vec.rs")),
         ];
         for (name, src) in SOURCES {
             for banned in ["rusqlite", "std::fs", "std::net", "std::process", "tokio", "reqwest"] {

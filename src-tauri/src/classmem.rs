@@ -28,7 +28,6 @@
 use std::collections::HashMap;
 use std::process::Stdio;
 
-use serde::Serialize;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -53,7 +52,11 @@ pub use polis_core::proposal::{
     SUPERSEDE_CONFIDENCE_MIN,
 };
 #[allow(unused_imports)]
-pub use polis_core::types::{ClassLink, ClassNode, ClassObservation, LakeItem, StageResult};
+pub use polis_store::catalog::new_node_id;
+pub use polis_core::types::{
+    AppliedReorg, ClassLink, ClassNode, ClassObservation, ClassProposalRow, ClassRun, LakeItem,
+    StageResult, StagedOutcome, SupersessionOutcome, DECISION_KINDS,
+};
 
 /// A general (repo-less) root always seeded alongside the repo roots.
 pub const GENERAL_ROOT_ID: &str = "root-general";
@@ -72,55 +75,6 @@ const MAX_CORPUS_BYTES: usize = 60_000;
 // ---------------------------------------------------------------------------
 // Row types (mirrors of the class_* tables)
 // ---------------------------------------------------------------------------
-
-/// The ledger event kinds that are claims (decisions) — the only kinds a
-/// supersession may connect. Prompts/revisions are history, never superseded.
-pub const DECISION_KINDS: [&str; 3] = ["resolution", "approval", "review_verdict"];
-
-/// Outcome of validating + recording one supersession. `Rejected` is a
-/// guardrail verdict (logged, proposal dropped), never a DB error.
-#[derive(Debug, Clone, PartialEq)]
-pub enum SupersessionOutcome {
-    Applied {
-        /// The seq actually superseded — may differ from the proposed old_seq
-        /// when the op was redirected to the current head of its chain.
-        effective_old: i64,
-        new_seq: i64,
-        event_seq: i64,
-    },
-    Rejected(String),
-}
-
-/// A queued structural reorg proposal (promote/split/merge/collapse/supersede).
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ClassProposalRow {
-    pub id: i64,
-    pub run_id: Option<i64>,
-    pub op: String,
-    pub node_id: Option<String>,
-    pub parent_id: Option<String>,
-    pub title: Option<String>,
-    pub summary: Option<String>,
-    pub extra_json: Option<String>,
-    pub rationale: Option<String>,
-    pub status: String,
-    pub created_at: i64,
-}
-
-/// One classifier pass over the lake delta.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ClassRun {
-    pub id: i64,
-    pub started_at: i64,
-    pub finished_at: Option<i64>,
-    pub status: String, // running | done | error
-    pub seq_from: Option<i64>,
-    pub seq_to: Option<i64>,
-    pub claude_session_id: Option<String>,
-    pub summary: Option<String>,
-}
 
 // ---------------------------------------------------------------------------
 // Seeding
@@ -152,11 +106,6 @@ pub fn seed_root_rows(project_paths: &[String]) -> Vec<(String, String, Option<S
 // Staging (materialize parsed proposals as reviewable rows)
 // ---------------------------------------------------------------------------
 
-/// Fresh node id for a created/staged node.
-pub fn new_node_id() -> String {
-    format!("cn-{}", uuid::Uuid::new_v4().simple())
-}
-
 /// Stage a batch of parsed proposals into reviewable rows. Additive proposals
 /// become `proposed` nodes/links; structural proposals queue in
 /// `class_proposals`. Never accepts anything. Returns per-op counts.
@@ -181,22 +130,6 @@ pub fn stage_proposals(
         }
     }
     Ok(r)
-}
-
-/// What `Database::stage_proposal` did with one proposal.
-pub enum StagedOutcome {
-    Node,
-    Link { created_node: bool },
-    Structural,
-    Skipped,
-}
-
-/// The result of applying (accepting) a structural proposal — the facts the
-/// caller needs to write the `taxonomy_reorg` ledger event.
-pub struct AppliedReorg {
-    pub op: String,
-    pub node_id: String,
-    pub detail: String,
 }
 
 // ---------------------------------------------------------------------------

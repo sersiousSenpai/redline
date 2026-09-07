@@ -3299,9 +3299,13 @@ dependencies = [
 name = "polis-store"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "polis-core",
+ "regex-lite",
  "rusqlite",
+ "serde_json",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

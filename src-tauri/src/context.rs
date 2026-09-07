@@ -15,7 +15,7 @@
 //! *priority order* live in `skills/librarian/SKILL.md` and
 //! `docs/polis-librarian-spike-3a.md`; this module only supplies the numbers.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::classmem::LakeItem;
 use crate::db::Database;
@@ -38,8 +38,8 @@ pub use polis_core::pack::{
 };
 #[allow(unused_imports)]
 pub use polis_core::types::{
-    clamp_ledger_limit, ContextStats, LedgerFilters, MapEdge, MapNode, MemoryMapView,
-    TimelineItem, UserNote, LEDGER_PAGE_MAX, PREVIEW_CHARS,
+    clamp_ledger_limit, ContextStats, LedgerFilters, MapEdge, MapNode, MemoryMapView, NoteOutcome,
+    NoteWrite, PromptFilters, TimelineItem, UserNote, LEDGER_PAGE_MAX, PREVIEW_CHARS,
 };
 
 /// Caps keep the digest bounded on a long history (mirrors `code.rs`'s bounds).
@@ -272,34 +272,6 @@ pub fn clamp_limit(raw: Option<i64>) -> usize {
 // ---------------------------------------------------------------------------
 // Phase 4 route builders: /v1/context/prompts, /sessions/:id/history, /stats
 // ---------------------------------------------------------------------------
-
-/// Filters for `GET /v1/context/prompts` (all optional, ANDed). `substring` is
-/// bound as a `LIKE` parameter in `db::list_context_prompts` — never
-/// interpolated into SQL — so an injection-shaped `q` can only ever fail to
-/// match, never alter the query. `limit` is pre-clamped by `clamp_prompt_limit`.
-#[derive(Debug, Clone, Default)]
-pub struct PromptFilters {
-    pub session_id: Option<String>,
-    pub mission_id: Option<String>,
-    pub surface: Option<String>,
-    pub project: Option<String>,
-    pub since_seq: Option<i64>,
-    pub substring: Option<String>,
-    pub limit: i64,
-    /// Memory-by-session filters over the non-hashed provenance columns.
-    pub thread_kind: Option<String>,
-    pub thread_id: Option<String>,
-    pub parent_session_id: Option<String>,
-    /// Exact-match filter on the recorded model (`prompts.model`).
-    pub model: Option<String>,
-    /// Exact corpus-role filter (`user` | `agent` | `system`).
-    pub role: Option<String>,
-    /// Include `agent` rows — Redline's own constructed prefaces. Off by
-    /// default: they are 87% of the corpus by weight and answer nobody's
-    /// question, so a caller has to ask for them on purpose. An explicit
-    /// `role=agent` overrides this, because then the caller HAS asked.
-    pub include_agent: bool,
-}
 
 /// Clamp + default `GET /v1/context/prompts`'s `?limit=`.
 pub fn clamp_prompt_limit(raw: Option<i64>) -> i64 {
@@ -1036,32 +1008,6 @@ pub fn build_answer_pack(
     };
     enforce_pack_budget(&mut pack);
     pack
-}
-
-/// One note-write act from the surface. Exactly ONE of `text` / `starred` per
-/// call — each act appends exactly one `note` ledger event, so the record
-/// stays one-act-one-event. `noteId` addresses a specific row (standalone
-/// edits); otherwise the row is resolved (or created) by target.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct NoteWrite {
-    pub note_id: Option<i64>,
-    /// Defaults to `none` (a standalone note) when absent.
-    pub target_kind: Option<String>,
-    pub target_id: Option<String>,
-    pub text: Option<String>,
-    pub starred: Option<bool>,
-}
-
-/// What a note-write did — the `SupersessionOutcome` shape: rejections are
-/// data, not errors, and a no-op is explicit (it must append NO event).
-#[derive(Debug)]
-pub enum NoteOutcome {
-    /// The act applied; one `note` ledger event was appended.
-    Written(UserNote),
-    /// Nothing changed (same text / same star) — no event appended.
-    Unchanged(UserNote),
-    Rejected(String),
 }
 
 /// One session-tree node with its parent and child digests — shared by

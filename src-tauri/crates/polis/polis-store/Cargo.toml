@@ -16,3 +16,11 @@ polis-core = { path = "../polis-core" }
 # trusting the build.
 rusqlite = { version = "0.31", features = ["bundled"] }
 tracing = "0.1"
+serde_json = "1"
+# The compaction archive (deflate) and the grep arm's regex verifier — the same
+# two crates Redline chose, for the same reasons (`regex-lite`, not `regex`:
+# +529 KB measured for a backtracking job over a few hundred candidates).
+flate2 = "1"
+regex-lite = "0.1"
+# Fresh catalog node ids.
+uuid = { version = "1", features = ["v4"] }
