@@ -48,12 +48,43 @@ fn db_conn_is_never_locked_with_unwrap() {
 
     // The accessor is only worth anything if it is what the file actually
     // uses. A floor, not an exact count, so ordinary new db methods don't trip
-    // it.
+    // it. (Was 300 before Session A3 of the Polis extraction moved ~110
+    // memory methods onto `PolisStore`; the same invariant now holds there,
+    // below.)
     let uses = DB_RS.matches("self.lock_conn()").count();
     assert!(
-        uses > 300,
+        uses > 200,
         "only {uses} call sites go through lock_conn() — the sweep regressed"
     );
+}
+
+/// The same lock is shared with `polis-store` (Session A2/A3), whose methods
+/// take it through `PolisStore::conn()` — an accessor built on the house
+/// pattern — and never with a bare unwrap. Same invariant, second crate.
+#[test]
+fn store_conn_is_never_locked_with_unwrap() {
+    const STORE: &[(&str, &str)] = &[
+        ("lib.rs", include_str!("../crates/polis/polis-store/src/lib.rs")),
+        ("catalog.rs", include_str!("../crates/polis/polis-store/src/catalog.rs")),
+        ("chain.rs", include_str!("../crates/polis/polis-store/src/chain.rs")),
+        ("compaction.rs", include_str!("../crates/polis/polis-store/src/compaction.rs")),
+        ("notes.rs", include_str!("../crates/polis/polis-store/src/notes.rs")),
+        ("observations.rs", include_str!("../crates/polis/polis-store/src/observations.rs")),
+        ("prompts.rs", include_str!("../crates/polis/polis-store/src/prompts.rs")),
+        ("search.rs", include_str!("../crates/polis/polis-store/src/search.rs")),
+        ("supersessions.rs", include_str!("../crates/polis/polis-store/src/supersessions.rs")),
+    ];
+    let mut uses = 0;
+    for (name, src) in STORE {
+        let bare = src.matches("self.conn.lock().unwrap()").count() + src.matches(".lock().unwrap()").count();
+        assert_eq!(bare, 0, "polis-store/{name} takes the connection with a bare unwrap");
+        uses += src.matches("self.conn()").count();
+    }
+    assert!(
+        STORE[0].1.contains("conn.lock().unwrap_or_else(|e| e.into_inner())"),
+        "PolisStore's lock must recover a poisoned guard with the house pattern"
+    );
+    assert!(uses > 80, "only {uses} store call sites go through PolisStore::conn() — the sweep regressed");
 }
 
 /// The behavioural half is easy to delete by accident from another file; pin

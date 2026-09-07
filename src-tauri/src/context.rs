@@ -1639,7 +1639,9 @@ mod tests {
     /// well rather than what happened.
     #[test]
     fn classifier_delta_takes_no_query() {
-        const SRC: &str = include_str!("db.rs");
+        // The delta reader is a `PolisStore` method since Session A3 of the
+        // Polis extraction; the guard reads the moved source.
+        const SRC: &str = include_str!("../crates/polis/polis-store/src/catalog.rs");
         let body = SRC
             .split_once("pub fn list_lake_items_since(")
             .expect("the classifier's delta reader exists")

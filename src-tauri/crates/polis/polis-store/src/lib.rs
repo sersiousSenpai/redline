@@ -19,6 +19,8 @@ pub mod ledger;
 pub mod lexical;
 pub mod meta;
 pub mod schema;
+pub mod observations;
+pub mod supersessions;
 pub mod catalog;
 pub mod notes;
 pub mod search;

@@ -53,6 +53,7 @@ pub use polis_core::proposal::{
 };
 #[allow(unused_imports)]
 pub use polis_store::catalog::new_node_id;
+#[allow(unused_imports)]
 pub use polis_core::types::{
     AppliedReorg, ClassLink, ClassNode, ClassObservation, ClassProposalRow, ClassRun, LakeItem,
     StageResult, StagedOutcome, SupersessionOutcome, DECISION_KINDS,
