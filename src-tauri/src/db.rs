@@ -96,34 +96,10 @@ pub struct ShareReturnRecord {
     pub comment_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BrowseHit {
-    pub id: i64,
-    /// The LEDGER seq for this page view — what `#seq` citations and the
-    /// Timeline's filter both speak. Carrying only `browse_events.id` (which
-    /// is a different id-space entirely) meant a page the Ask agent cited was
-    /// uncitable: the chip pointed at a seq that was some unrelated prompt.
-    /// `None` only if the ledger row is missing, which no live row is.
-    pub seq: Option<i64>,
-    pub ts: i64,
-    pub url: String,
-    pub title: Option<String>,
-    pub snippet: String,
-    pub score: f64,
-    /// Which stage of the query cascade found this — `and` (every term present)
-    /// or `or` (widened). Surfaced so "we found what you asked for" reads
-    /// differently from "we widened until something matched".
-    pub stage: String,
-    /// The picture of this page, when one was captured. Completes the seam the
-    /// visual layer is built on: a `#seq` chip → a Timeline row → a detail rail
-    /// → a picture. An agent can say "there's a screenshot of this" instead of
-    /// describing a page from its text alone.
-    pub shot_key: Option<String>,
-    /// A vision-tier description, for a page whose text didn't capture — the
-    /// 12% of the corpus that is otherwise dark.
-    pub caption: Option<String>,
-}
+// The read-side hit rows live in `polis-core` (Session A1 of the Polis
+// extraction); re-exported so every `crate::db::BrowseHit` / `GrepHit` site is
+// unchanged.
+pub use polis_core::types::{BrowseHit, GrepHit};
 
 /// Shortest literal the grep arm will accept. This is the trigram size, and it
 /// is a hard floor rather than a tuning knob: a two-character needle cannot be
@@ -134,45 +110,7 @@ pub const GREP_MIN_LITERAL: usize = 3;
 /// Characters of context returned around a grep match.
 const GREP_EXCERPT_CHARS: usize = 240;
 
-/// What the grep arm searches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum GrepScope {
-    #[default]
-    All,
-    Prompts,
-    Browse,
-}
-
-impl GrepScope {
-    pub fn parse(s: Option<&str>) -> GrepScope {
-        match s.map(str::trim) {
-            Some("prompts") => GrepScope::Prompts,
-            Some("browse") => GrepScope::Browse,
-            _ => GrepScope::All,
-        }
-    }
-    fn wants_prompts(self) -> bool {
-        matches!(self, GrepScope::All | GrepScope::Prompts)
-    }
-    fn wants_browse(self) -> bool {
-        matches!(self, GrepScope::All | GrepScope::Browse)
-    }
-}
-
-/// One grep hit. `seq` is the ledger seq, so a hit is citable as `#seq` and
-/// opens the Timeline exactly like every other citation.
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GrepHit {
-    /// `prompt` | `browse`.
-    pub kind: String,
-    pub seq: Option<i64>,
-    pub ts: i64,
-    /// The surface for a prompt; the page title (or URL) for a browse hit.
-    pub label: String,
-    /// Text around the match — centered on it, never the head.
-    pub excerpt: String,
-}
+pub use polis_core::types::GrepScope;
 
 /// Why a grep was refused. Both variants are named rather than degraded into an
 /// empty result: "nothing matched" and "we declined to look" are different
@@ -710,7 +648,75 @@ impl Database {
         Ok(db)
     }
 
-    #[cfg(test)]
+    /// The memory tables — the Polis lake, its lexical layer and the class
+    /// catalog — as `migrate_v1` and the later ALTER/lexical blocks create them.
+    /// `memory_schema_sql` dumps their DDL (tables, indexes, triggers and the
+    /// FTS shadow tables) from a fresh database in creation order; the golden at
+    /// `tests/golden/memory_schema.sql` is the referee while that DDL moves
+    /// byte-for-byte into `polis-store` (Session A2, docs/polis-extraction.md).
+    pub const MEMORY_TABLES: &'static [&'static str] = &[
+        "prompts",
+        "ledger_events",
+        "class_nodes",
+        "class_links",
+        "class_proposals",
+        "class_runs",
+        "supersessions",
+        "class_observations",
+        "user_notes",
+        "plan_exports",
+        "browse_events",
+        "session_tree",
+        "prompt_archive",
+        "embeddings",
+        "prompts_fts",
+        "browse_events_fts",
+        "class_nodes_fts",
+        "prompts_grep",
+        "browse_grep",
+    ];
+
+    /// Every `sqlite_master` row that belongs to a memory table (its own DDL,
+    /// its indexes and triggers, and an FTS table's `<name>_*` shadow tables),
+    /// in creation order, rendered as SQL. A fresh in-memory database, so the
+    /// result is a pure function of the migration code.
+    pub fn memory_schema_sql() -> rusqlite::Result<String> {
+        let db = Database::open_in_memory()?;
+        let conn = db.lock_conn();
+        let mut stmt =
+            conn.prepare("SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY rowid")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+            ))
+        })?;
+        let mut out = String::from(
+            "-- Memory schema golden: every sqlite_master row of the Polis lake + catalog\n\
+             -- tables from a fresh in-memory Database, in creation order.\n\
+             -- Regenerate: UPDATE_GOLDEN=1 cargo test --test schema_golden\n\n",
+        );
+        for row in rows {
+            let (ty, name, tbl, sql) = row?;
+            let owned = Self::MEMORY_TABLES
+                .iter()
+                .any(|t| tbl == *t || name.starts_with(&format!("{t}_")));
+            if !owned {
+                continue;
+            }
+            match sql {
+                Some(sql) => out.push_str(&format!("-- {ty} {name} ({tbl})\n{sql};\n\n")),
+                None => out.push_str(&format!("-- {ty} {name} ({tbl}) [auto]\n\n")),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Not `#[cfg(test)]` (it was, until Session A1): `memory_schema_sql` needs a
+    /// fresh database from the NON-test lib, because `tests/schema_golden.rs`
+    /// is an integration test and links the library as shipped.
     pub fn open_in_memory() -> rusqlite::Result<Self> {
         let conn = Connection::open_in_memory()?;
         let db = Self {

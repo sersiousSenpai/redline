@@ -26,12 +26,14 @@ members = [
     "crates/redline-mcp",
     "crates/redline-extension-abi",
     "crates/redline-extension-sdk",
+    "crates/polis/polis-core",
 ]
 default-members = [
     ".",
     "crates/redline-mcp",
     "crates/redline-extension-abi",
     "crates/redline-extension-sdk",
+    "crates/polis/polis-core",
 ]
 
 [lib]
@@ -109,6 +111,13 @@ redline-extension-abi = { path = "crates/redline-extension-abi" }
 # sits behind `extension_host::Runtime`; a feature-gated JIT (`ext-jit`)
 # stays purely additive if an extension ever proves compute-bound.
 wasmi = "1.1"
+# Polis Memory core (Program A of the Polis extraction, docs/polis-extraction.md):
+# the ledger vocabulary + hashing, the proposal grammar, the answer-pack types
+# and budget, bundle verification and the MemoryApi trait. Staged under
+# crates/polis/ until A7 extracts the `polis-memory` repo, when this flips to a
+# git rev and then a crates.io version. Pure (serde + sha2), so it adds nothing
+# to the binary that was not already linked.
+polis-core = { path = "crates/polis/polis-core" }
 # Deflate for the compaction archive (`prompt_archive`): a cold compaction
 # releases a body at ~59:1 and used to be irrecoverable. Already present in the
 # dependency tree (via `png` → `tauri-utils`), so naming it here is a visibility

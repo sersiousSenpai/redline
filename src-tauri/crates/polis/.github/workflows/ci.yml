@@ -1,0 +1,73 @@
+# polis-memory CI — INERT WHILE STAGED under src-tauri/crates/polis/ (GitHub
+# reads workflows only at the repo root). Becomes live when Session A7
+# extracts the repo. Three OSes because R1 (cross-platform core) is a stated
+# requirement, plus a KEYLESS job because R12 (no-model mode) is a stated
+# guarantee: capture, retrieval and centroid filing must work with no API key
+# and no `claude`/`codex` on PATH.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --locked
+      - run: cargo test --workspace --locked
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  keyless:
+    # R12: the no-model guarantee, proven by an environment that has nothing.
+    # Filled in by Session C1 (`polis init` → capture → search → file with no
+    # model configured); until then it asserts the precondition only.
+    name: keyless (no model, no CLI)
+    runs-on: ubuntu-latest
+    env:
+      ANTHROPIC_API_KEY: ""
+      OPENAI_API_KEY: ""
+      POLIS_NO_NETWORK: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: assert no model binaries on PATH
+        run: |
+          ! command -v claude
+          ! command -v codex
+          ! command -v ollama
+      - run: cargo test -p polis-core --locked
+
+  licenses:
+    name: licenses (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses
+
+  size:
+    # The lean-library promise: polis-core stays serde + sha2, and the
+    # `polis` binary ships under the ceiling docs/bench.md states. Filled in by
+    # Session G1 once cargo-dist produces the binaries to measure.
+    name: size
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo tree -p polis-core --edges normal --depth 1

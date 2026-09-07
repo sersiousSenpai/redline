@@ -22,6 +22,26 @@ use crate::db::Database;
 use crate::ledger::{now_millis, LedgerEventRow};
 use crate::state::SessionStatus;
 
+// The answer-pack vocabulary (types, byte budget, RRF fusion, the inline
+// evidence render) and the read-side row types live in `polis-core` (Session
+// A1 of the Polis extraction, docs/polis-extraction.md). Re-exported so every
+// `crate::context::…` call site is unchanged.
+// `#[allow(unused_imports)]`: a shim re-exports for PATH STABILITY, not for use
+// inside this module — what nothing here touches still has call sites elsewhere
+// (or in tests), and the lint cannot see across cfgs.
+#[allow(unused_imports)]
+pub use polis_core::pack::{
+    budgeted_item_count, clamp_answer_pack_limit, clip_line, enforce_pack_budget,
+    prefetch_status_label, render_answer_pack_block, rrf_fuse, AnswerPack, Arm, ArmCoverage,
+    ArmHit, PackLink, PackNode, PackPromptHit, ANSWER_PACK_LIMIT, ANSWER_PACK_LIMIT_MAX,
+    INLINE_BODY_CHARS, INLINE_PACK_LIMIT, INLINE_PACK_MAX_BYTES, MAX_CONTEXT_BYTES, RRF_K,
+};
+#[allow(unused_imports)]
+pub use polis_core::types::{
+    clamp_ledger_limit, ContextStats, LedgerFilters, MapEdge, MapNode, MemoryMapView,
+    TimelineItem, UserNote, LEDGER_PAGE_MAX, PREVIEW_CHARS,
+};
+
 /// Caps keep the digest bounded on a long history (mirrors `code.rs`'s bounds).
 pub const MAX_IN_REVIEW: usize = 20;
 pub const MAX_BULGING: usize = 8;
@@ -36,8 +56,6 @@ pub const LIMIT_MAX: i64 = 50;
 
 /// Clamp + default for `GET /v1/context/prompts`'s `?limit=`.
 pub const PROMPT_LIMIT_MAX: i64 = 200;
-/// Byte budget on the `/v1/context/prompts` response (mirrors `code.rs`'s 60KB).
-pub const MAX_CONTEXT_BYTES: usize = 60_000;
 
 fn days_since(now: i64, then: i64) -> i64 {
     ((now - then).max(0)) / 86_400_000
@@ -299,27 +317,6 @@ pub fn list_prompts(db: &Database, filters: &PromptFilters) -> Result<Vec<LakeIt
     Ok(items)
 }
 
-/// How many leading items fit in `MAX_CONTEXT_BYTES`, given each one's body.
-/// Always at least one (a single oversized item is truncated by the DB layer,
-/// not dropped — an empty response would read as "nothing recorded").
-///
-/// Shared by `/v1/context/prompts` and `/v1/memory/prompts`: an item cap alone
-/// is not a bound when one item can be a 40KB page snapshot.
-pub fn budgeted_item_count<'a>(bodies: impl Iterator<Item = Option<&'a str>>) -> usize {
-    let mut budget = MAX_CONTEXT_BYTES;
-    let mut keep = 0usize;
-    for body in bodies {
-        // ~120 bytes of metadata overhead per item + the (truncated) body.
-        let cost = 120 + body.map(str::len).unwrap_or(0);
-        if keep > 0 && cost > budget {
-            break;
-        }
-        budget = budget.saturating_sub(cost);
-        keep += 1;
-    }
-    keep
-}
-
 /// A revision reduced to a digest (no body) for the session-history route.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -429,26 +426,6 @@ pub fn build_session_history(db: &Database, session_id: &str) -> Option<SessionH
     })
 }
 
-/// `GET /v1/context/stats` and the `context_stats` command — shared counts for
-/// agents/MCP AND the Memory surface's facet rails and activity ribbon (the
-/// old "no dashboard UI" stance was overturned by the Memory-as-a-Second-Brain
-/// plan). Every axis is a `(label, count)` list plus the two grand totals.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ContextStats {
-    pub generated_ts: i64,
-    pub total_prompts: i64,
-    pub total_events: i64,
-    pub by_day: Vec<(String, i64)>,
-    pub by_surface: Vec<(String, i64)>,
-    pub by_kind: Vec<(String, i64)>,
-    pub by_class: Vec<(String, i64)>,
-    /// Ledger events per author — the Timeline's actor facet. Meaningful only
-    /// since P0 made agents author as their seat name; older rows are uniformly
-    /// the local human.
-    pub by_author: Vec<(String, i64)>,
-}
-
 /// `build_stats` memoized on the ledger head. Five GROUP BY aggregations over
 /// the whole lake, and the Memory surface's facet rails re-read them on every
 /// `memory-changed` — which a browse capture burst fires repeatedly.
@@ -512,111 +489,6 @@ pub fn build_stats(db: &Database) -> ContextStats {
 // Timeline query (the Memory surface's spine)
 // ---------------------------------------------------------------------------
 
-/// Clamp + default for the Timeline's page size. Pages are cursor-chained
-/// (`before_seq`), so the cap bounds one IPC payload, not the reachable
-/// history — unlike `ledger_list_events`' old hard 1,000-row ceiling.
-pub const LEDGER_PAGE_MAX: i64 = 500;
-
-/// List-row preview length (chars). The detail rail fetches the full body.
-pub const PREVIEW_CHARS: usize = 240;
-
-/// Filters for `db::query_ledger_events` / the `ledger_query` command. All
-/// clauses are ANDed; every value is bound, never spliced into SQL. `Default`
-/// + `serde(default)` so the frontend sends only the axes it is filtering on.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct LedgerFilters {
-    /// Exact event kind (`prompt`, `approval`, `browse_event`, …).
-    pub kind: Option<String>,
-    /// Exact author — the actor facet (`local_author()` or a seat name).
-    pub author: Option<String>,
-    pub session_id: Option<String>,
-    /// Prompt-provenance facets (via the `prompts` join; non-prompt events
-    /// never match when one of these is set).
-    pub surface: Option<String>,
-    pub project: Option<String>,
-    /// Substring over the prompt body (gist once compacted) — bound LIKE.
-    pub q: Option<String>,
-    /// Inclusive ts range, for the activity ribbon's date filter.
-    pub since_ts: Option<i64>,
-    pub until_ts: Option<i64>,
-    /// Cursor: only events with `seq` strictly below this. Pages walk
-    /// newest→oldest; the next cursor is the last returned row's `seq`.
-    pub before_seq: Option<i64>,
-    pub limit: Option<i64>,
-    /// Star/note facets (Second Brain P3). Only `true` filters — `false`/absent
-    /// means the axis is off, matching how the facet chips toggle.
-    pub starred: Option<bool>,
-    pub noted: Option<bool>,
-    /// Citation focus (Second Brain P4): exact ledger seqs — the Ask agent's
-    /// `#seq` chips drive the Timeline here. Empty behaves like absent.
-    pub seqs: Option<Vec<i64>>,
-    /// Citation focus: only events filed under this accepted class node.
-    pub class_node: Option<String>,
-    /// Map focus (Second Brain P5): prompts recorded on one agent thread
-    /// (`prompts.thread_id` — a linked/drafter/mission/memchat conversation).
-    pub thread_id: Option<String>,
-    /// Map focus: one browse tab's trail (`browse_events.browse_id`).
-    pub browse_id: Option<String>,
-    /// Corpus-role facet (`user` | `agent` | `system`). The UI defaults it to
-    /// `user`; flipping it is how the reclassified machine text stays visible
-    /// rather than merely hidden. Non-prompt events are never excluded by it.
-    pub role: Option<String>,
-}
-
-pub fn clamp_ledger_limit(raw: Option<i64>) -> i64 {
-    raw.unwrap_or(LEDGER_PAGE_MAX).clamp(1, LEDGER_PAGE_MAX)
-}
-
-/// One Timeline row: the ledger event plus the read-side provenance the rail
-/// renders — prompt columns when the event is a prompt, the browse columns
-/// when it is a browse event, and the accepted class filing. All joined at
-/// query time; nothing here is stored beyond the existing tables.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TimelineItem {
-    #[serde(flatten)]
-    pub event: LedgerEventRow,
-    pub surface: Option<String>,
-    pub project_path: Option<String>,
-    pub thread_kind: Option<String>,
-    pub model: Option<String>,
-    /// First `PREVIEW_CHARS` of the body (gist once compacted) — the list row.
-    /// Clipped in SQL, so a 500-row page no longer carries megabytes of body
-    /// text across the lock to render 240-character rows. The detail rail
-    /// fetches the full text via `ledger_prompt_body`.
-    pub preview: Option<String>,
-    /// Full length of the text `preview` was clipped from — what makes the
-    /// row's "…" honest without shipping the bytes it stands for.
-    pub body_chars: Option<i64>,
-    /// What kind of text this is (`user` | `agent` | `system`); `None` for a
-    /// non-prompt event.
-    pub role: Option<String>,
-    /// The body was compacted away; `preview` shows the released gist.
-    pub compacted: bool,
-    pub browse_id: Option<String>,
-    pub url: Option<String>,
-    pub title: Option<String>,
-    /// The browse verb (`navigate | select | submit | leave`).
-    pub action: Option<String>,
-    pub from_event_id: Option<i64>,
-    /// The picture of this page, when there is one. `None` covers three real
-    /// states — never captured, policy-denied, and the user forgot it — which
-    /// is why it is stored rather than derived from the content hash.
-    pub shot_key: Option<String>,
-    /// A vision-tier description, for a page whose text didn't capture.
-    pub caption: Option<String>,
-    /// Accepted class filing (first link), for the class grouping + detail rail.
-    pub class_node_id: Option<String>,
-    pub class_title: Option<String>,
-    /// Second Brain P3: this event is starred (annotated directly, or a `note`
-    /// event whose own row is starred).
-    pub starred: bool,
-    /// The current text of the note ON this event (`user_notes` probe) — the
-    /// detail rail's editor seed. `None` when empty/absent.
-    pub note: Option<String>,
-}
-
 /// Timeline page, newest-first. Thin over `db::query_ledger_events`.
 pub fn query_ledger(db: &Database, f: &LedgerFilters) -> Result<Vec<TimelineItem>, String> {
     db.query_ledger_events(f).map_err(|e| e.to_string())
@@ -625,56 +497,6 @@ pub fn query_ledger(db: &Database, f: &LedgerFilters) -> Result<Vec<TimelineItem
 // ---------------------------------------------------------------------------
 // Memory map (Second Brain P5)
 // ---------------------------------------------------------------------------
-
-/// One Map node. §3 rule 1: nodes are classes and sessions — never raw
-/// prompts; prompts appear only as `mass`. Exactly one of the four focus
-/// handles is set, and it is what a click filters the Timeline by (§3 rule 4):
-/// a class filing, a plan session, a browse tab's trail, or an agent thread.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MapNode {
-    /// Map keyspace: `class:<node_id>` | `thread:<kind>:<id>`.
-    pub id: String,
-    /// `class | digest | session | thread`.
-    pub kind: String,
-    pub label: String,
-    /// Classes: filed-link count. Threads: message count. Radius, never dots.
-    pub mass: i64,
-    /// Same-keyspace structural parent (`contains` for classes, `lineage` for
-    /// threads) — the layout prior.
-    pub parent_id: Option<String>,
-    pub pinned: bool,
-    pub project_path: Option<String>,
-    pub class_node_id: Option<String>,
-    pub session_id: Option<String>,
-    pub browse_id: Option<String>,
-    pub thread_id: Option<String>,
-}
-
-/// One Map edge with DECLARED semantics (§3 rule 3): `contains` (class tree) ·
-/// `lineage` (session → threads) · `supersedes` (decision chain, endpoints
-/// resolved to their class/session) · `co_occurs` (the only derived edge —
-/// classes sharing sessions or a project while filed apart).
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MapEdge {
-    pub kind: String,
-    pub from: String,
-    pub to: String,
-    pub weight: i64,
-    /// Human line for the derived/chain edges ("3 shared sessions", "#12 → #40").
-    pub basis: Option<String>,
-}
-
-/// The `memory_map` command's payload — data only; the deterministic layout is
-/// the frontend's pure `memoryMap.ts` (same input → same picture).
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MemoryMapView {
-    pub generated_ts: i64,
-    pub nodes: Vec<MapNode>,
-    pub edges: Vec<MapEdge>,
-}
 
 /// Assemble the Map: accepted classes + session-tree threads (plus sessions a
 /// supersession resolves to), with the four declared edge kinds. Everything is
@@ -878,109 +700,6 @@ pub fn build_memory_map(db: &Database) -> MemoryMapView {
 // ---------------------------------------------------------------------------
 // Answer pack — the batched retrieval read
 // ---------------------------------------------------------------------------
-
-/// Default `?limit=` on each list inside the answer pack.
-pub const ANSWER_PACK_LIMIT: i64 = 20;
-/// Clamp on that limit — a caller can widen a list, not unbound it.
-pub const ANSWER_PACK_LIMIT_MAX: i64 = 60;
-
-pub fn clamp_answer_pack_limit(raw: Option<i64>) -> i64 {
-    raw.unwrap_or(ANSWER_PACK_LIMIT)
-        .clamp(1, ANSWER_PACK_LIMIT_MAX)
-}
-
-/// One link out of the resolved node, with its label and supersession status
-/// resolved — the same `(label, supersededBy)` decoration
-/// `GET /v1/memory/node/:id` carries, so an agent reading the pack and an agent
-/// reading the node route see one shape.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PackLink {
-    #[serde(flatten)]
-    pub link: crate::classmem::ClassLink,
-    pub label: Option<String>,
-    /// The decision seq that superseded this link's target (`None` = current).
-    pub superseded_by: Option<i64>,
-}
-
-/// The resolved node and everything hanging off it.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PackNode {
-    pub node: crate::classmem::ClassNode,
-    /// Children to depth 2 — enough for the agent to see where to descend
-    /// next without a second call.
-    pub children: Vec<crate::classmem::ClassNode>,
-    pub grandchildren: Vec<crate::classmem::ClassNode>,
-    pub links: Vec<PackLink>,
-    pub observations: Vec<crate::classmem::ClassObservation>,
-}
-
-/// A matching prompt from the lake, carrying its supersession status so a
-/// stale decision can't be read back as current.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PackPromptHit {
-    #[serde(flatten)]
-    pub item: LakeItem,
-    pub superseded_by: Option<i64>,
-    /// Other hits that collapsed into this one — same body, or the same framing
-    /// around a different question. Reported rather than hidden: "four copies"
-    /// and "one copy, three duplicates suppressed" are different facts about
-    /// the record, and the second is the true one.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub duplicate_of: Vec<i64>,
-    /// Which stage of the query cascade found this: `and` (every term present)
-    /// or `or` (widened) or `like` (substring fallback).
-    pub stage: String,
-    /// Every arm that found this hit, with its rank and score there. A hit
-    /// found by two arms is stronger evidence than one found by either alone,
-    /// and a `semantic`-only hit is *associated* rather than asserted — see
-    /// [`Arm`] for the trust ordering.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub arms: Vec<ArmHit>,
-}
-
-/// One batched read that answers most memory questions: the resolved class
-/// node with its subtree, links and observations, plus the user's own matching
-/// notes, matching prompts from the lake and matching pages from the browse
-/// stream.
-///
-/// It exists to collapse a 5–7 turn retrieval walk into ONE tool call. Which
-/// is why the miss path is a design requirement, not a nicety: `promptHits`,
-/// `browseHits` and `matchedNodes` are always populated from the query text,
-/// even when node resolution fails outright or a caller passes a stale
-/// `?node=`. A resolution miss must still hand back lexical evidence — never
-/// an empty pack that pushes the agent back into the walk it was built to
-/// replace.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AnswerPack {
-    /// The ledger head this pack was assembled at — the agent cites against it.
-    pub head_seq: i64,
-    pub query: Option<String>,
-    /// `None` when nothing resolved; the lexical hits below still stand.
-    pub node: Option<PackNode>,
-    /// Runners-up from node resolution, so the agent can redirect in one step.
-    pub matched_nodes: Vec<crate::classmem::ClassNode>,
-    /// The user's own words — FIRST, and the last thing the budget trims.
-    pub notes: Vec<UserNote>,
-    pub prompt_hits: Vec<PackPromptHit>,
-    pub browse_hits: Vec<crate::db::BrowseHit>,
-    /// Literal/regex hits. Present only when the question LOOKS like it is
-    /// reaching for a literal (a flag, a path, an identifier, a quoted phrase)
-    /// — a trigram probe on every natural-language question would cost an index
-    /// scan to return noise.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub grep_hits: Vec<crate::db::GrepHit>,
-    /// Which arms ran, and what each returned. Read this before concluding
-    /// anything from an empty list: an arm that did not run is ABSENT, which is
-    /// a fact about the index rather than about the user's history.
-    pub arm_coverage: Vec<ArmCoverage>,
-    /// Which lists the byte budget cut, so the agent knows to narrow rather
-    /// than conclude the record is empty.
-    pub truncated: Vec<String>,
-}
 
 /// Assemble the pack. Every list is bounded by `limit`, and the whole response
 /// is bounded by `MAX_CONTEXT_BYTES` — trimming links, then prompt hits, then
@@ -1317,426 +1036,6 @@ pub fn build_answer_pack(
     };
     enforce_pack_budget(&mut pack);
     pack
-}
-
-/// Trim the pack to `MAX_CONTEXT_BYTES` without ever letting one arm's results
-/// erase another's.
-///
-/// The old rule was "drop whole lists in a fixed order, cheapest first", and it
-/// had a failure mode the live probe hit exactly: browse hits were first in the
-/// order, so a pack bloated by four copies of one preface dropped **every
-/// page** before touching a single prompt. The user's question was answered
-/// from one kind of evidence because the other kind was cheaper to delete.
-///
-/// The rule now: **every arm that produced anything keeps at least one hit.**
-/// Above that floor, arms are trimmed in the same priority order (the user's
-/// own notes dead last — they are the one human-authored signal), still in
-/// proportional chunks, because each `size()` call re-serializes the pack and a
-/// pop-one loop over a long list would be quadratic on exactly the biggest
-/// packs. That chunking reasoning was sound and is kept verbatim.
-///
-/// An arm reduced to its floor is still reported in `truncated`: "one of many"
-/// and "one, that's all there was" are different answers.
-fn enforce_pack_budget(pack: &mut AnswerPack) {
-    fn size(p: &AnswerPack) -> usize {
-        serde_json::to_vec(p).map(|v| v.len()).unwrap_or(0)
-    }
-    if size(pack) <= MAX_CONTEXT_BYTES {
-        return;
-    }
-    type Len = fn(&AnswerPack) -> usize;
-    type Drop = fn(&mut AnswerPack, usize);
-    /// Every arm that produced at least one hit keeps at least this many.
-    const ARM_FLOOR: usize = 1;
-
-    let steps: [(&str, Len, Drop); 5] = [
-        ("browseHits", |p| p.browse_hits.len(), |p, n| {
-            let keep = p.browse_hits.len().saturating_sub(n);
-            p.browse_hits.truncate(keep);
-        }),
-        ("promptHits", |p| p.prompt_hits.len(), |p, n| {
-            let keep = p.prompt_hits.len().saturating_sub(n);
-            p.prompt_hits.truncate(keep);
-        }),
-        ("links", |p| p.node.as_ref().map(|n| n.links.len()).unwrap_or(0), |p, n| {
-            if let Some(node) = p.node.as_mut() {
-                let keep = node.links.len().saturating_sub(n);
-                node.links.truncate(keep);
-            }
-        }),
-        ("grepHits", |p| p.grep_hits.len(), |p, n| {
-            let keep = p.grep_hits.len().saturating_sub(n);
-            p.grep_hits.truncate(keep);
-        }),
-        ("notes", |p| p.notes.len(), |p, n| {
-            let keep = p.notes.len().saturating_sub(n);
-            p.notes.truncate(keep);
-        }),
-    ];
-
-    // Pass one: trim every arm down towards its floor, in priority order.
-    for (name, len, drop) in steps {
-        let mut cut = false;
-        while size(pack) > MAX_CONTEXT_BYTES && len(pack) > ARM_FLOOR {
-            let over = len(pack) - ARM_FLOOR;
-            drop(pack, (over / 4).max(1).min(over));
-            cut = true;
-        }
-        if cut && !pack.truncated.iter().any(|t| t == name) {
-            pack.truncated.push(name.to_string());
-        }
-        if size(pack) <= MAX_CONTEXT_BYTES {
-            return;
-        }
-    }
-
-    // Pass two: still over budget with every arm at its floor. Now the floor
-    // itself has to give — but only after every arm has been reduced to it, so
-    // what is lost is spread across the evidence rather than taken entirely
-    // from whichever arm happened to sort first.
-    for (name, len, drop) in steps {
-        while size(pack) > MAX_CONTEXT_BYTES && len(pack) > 0 {
-            drop(pack, 1);
-            if !pack.truncated.iter().any(|t| t == name) {
-                pack.truncated.push(name.to_string());
-            }
-        }
-        if size(pack) <= MAX_CONTEXT_BYTES {
-            return;
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Arms and fusion
-// ---------------------------------------------------------------------------
-
-/// Which retrieval arm produced a hit. This is the auditability half of what
-/// replaced "no embedding model enters the product": a reader can always tell
-/// what KIND of evidence they are looking at.
-///
-/// The trust ordering is real and is stated in the retrieval contract:
-/// - `Node` — **curated**. A human accepted this class. It outranks everything.
-/// - `Note` — the user's own margin words. Human-authored, quoted verbatim.
-/// - `Lexical` — the terms are literally present.
-/// - `Grep` — an exact string match, with no relevance claim beyond "it's here".
-/// - `Semantic` — **associated**, not asserted. A vector said these are alike.
-///   A `Semantic`-only hit must be verified before being stated as fact.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Arm {
-    Node,
-    Note,
-    Lexical,
-    Grep,
-    Semantic,
-}
-
-impl Arm {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Arm::Node => "node",
-            Arm::Note => "note",
-            Arm::Lexical => "lexical",
-            Arm::Grep => "grep",
-            Arm::Semantic => "semantic",
-        }
-    }
-}
-
-/// One arm's contribution to a hit: which arm, where it ranked, what it scored.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ArmHit {
-    pub arm: Arm,
-    pub rank: usize,
-    pub score: f64,
-}
-
-/// Reciprocal Rank Fusion's smoothing constant. 60 is the value from the
-/// original paper and it is not a tuning dial here: it flattens the difference
-/// between rank 1 and rank 2 enough that one arm's confident-but-wrong top hit
-/// cannot dominate three other arms' agreement.
-pub const RRF_K: f64 = 60.0;
-
-/// Fuse ranked lists into one ordering by Reciprocal Rank Fusion.
-///
-/// RRF over score-normalization deliberately: the arms' scores are not
-/// commensurable — bm25 is unbounded and negative-is-better, cosine is [-1,1],
-/// and a grep hit has no score at all. Ranks are the only thing they share.
-///
-/// Returns each key with the arms that found it, ordered by fused score.
-pub fn rrf_fuse(lists: &[(Arm, Vec<(String, f64)>)]) -> Vec<(String, Vec<ArmHit>, f64)> {
-    let mut fused: std::collections::HashMap<String, (Vec<ArmHit>, f64)> =
-        std::collections::HashMap::new();
-    for (arm, hits) in lists {
-        for (rank, (key, score)) in hits.iter().enumerate() {
-            let contribution = 1.0 / (RRF_K + (rank + 1) as f64);
-            let e = fused.entry(key.clone()).or_insert_with(|| (Vec::new(), 0.0));
-            e.0.push(ArmHit { arm: *arm, rank: rank + 1, score: *score });
-            e.1 += contribution;
-        }
-    }
-    let mut out: Vec<(String, Vec<ArmHit>, f64)> =
-        fused.into_iter().map(|(k, (arms, s))| (k, arms, s)).collect();
-    // Deterministic: fused score desc, then key — never wall-clock or hash order.
-    out.sort_by(|a, b| {
-        b.2.partial_cmp(&a.2)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.0.cmp(&b.0))
-    });
-    out
-}
-
-/// Which arms ran and what each returned — so an empty result reads as "the
-/// semantic index isn't built yet" rather than "you never thought about this".
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ArmCoverage {
-    pub arm: Arm,
-    /// `true` when the arm ran at all. A `false` here is the honest third
-    /// state: absent, not empty.
-    pub ran: bool,
-    pub hits: usize,
-    /// Why it did not run, when it did not.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub absent_because: Option<String>,
-}
-
-// ---------------------------------------------------------------------------
-// Inline prefetch rendering (one-turn Ask)
-// ---------------------------------------------------------------------------
-
-/// Byte ceiling for the prefetched-evidence block baked into an Ask prompt.
-/// Sized against `classmem::CATALOG_SNAPSHOT_MAX_BYTES`, which rides in the
-/// same prompt: prototyped over the live pack (`q=browser&limit=8`, 400-char
-/// bodies, one line per link) the render came to ~6 KB, so 12 KB is headroom
-/// rather than a target.
-pub const INLINE_PACK_MAX_BYTES: usize = 12_000;
-/// Hits per arm in a prefetch — deliberately below `ANSWER_PACK_LIMIT`. The
-/// prefetch is a first look, not the whole record; the agent can still curl for
-/// more, and the block tells it when that is worth doing.
-pub const INLINE_PACK_LIMIT: i64 = 8;
-/// Per-hit body window in the inline render, against the DB layer's 4,000. Eight
-/// hits at 4,000 would be the whole budget spent on one arm.
-pub const INLINE_BODY_CHARS: usize = 400;
-
-/// Render an answer pack as the compact evidence block that rides inside an Ask
-/// prompt, or `None` when there is nothing honest to say.
-///
-/// **`None` is a real answer here.** An empty block is strictly worse than
-/// silence: it reads to the model as "the record was searched and is empty",
-/// which is a claim about the user's history rather than about the query. So a
-/// query with no terms ("what can you do?") and a pack where every arm came
-/// back empty both render nothing at all, and the agent falls through to its
-/// normal retrieval — which is exactly today's behaviour, i.e. the downside of
-/// a prefetch miss is bounded at the status quo.
-///
-/// The block is **honest about itself**, and that is what makes the escape
-/// hatch safe. It names the terms that were searched, the basis on which a node
-/// resolved, and any list that was trimmed — so the model can tell "the record
-/// is empty on this" from "the prefetch looked in the wrong place", and knows
-/// when curling is worth a turn. Without that distinction a prefetch is just a
-/// confident way to be wrong.
-pub fn render_answer_pack_block(
-    pack: &AnswerPack,
-    plan: Option<&crate::query::FtsPlan>,
-    max_bytes: usize,
-) -> Option<String> {
-    let terms: Vec<String> = plan.map(|p| p.terms.clone()).unwrap_or_default();
-    if terms.is_empty() && plan.map(|p| p.phrases.is_empty()).unwrap_or(true) {
-        return None;
-    }
-    let empty = pack.node.is_none()
-        && pack.notes.is_empty()
-        && pack.prompt_hits.is_empty()
-        && pack.browse_hits.is_empty()
-        && pack.grep_hits.is_empty();
-    if empty {
-        return None;
-    }
-
-    let mut out = String::with_capacity(2048);
-    out.push_str(&format!(
-        "PREFETCHED EVIDENCE — assembled server-side from your question at seq {}.\n",
-        pack.head_seq
-    ));
-    out.push_str(&format!("Searched: {}.\n", terms.join(", ")));
-    if let Some(node) = &pack.node {
-        // Say WHY it resolved. "Resolved: [[X]]" alone is an assertion; naming
-        // the term that matched lets the model notice a wrong turn.
-        let basis = terms
-            .iter()
-            .find(|t| node.node.title.to_lowercase().contains(t.as_str()))
-            .map(|t| format!(" (matched \"{t}\" in the title)"))
-            .unwrap_or_default();
-        out.push_str(&format!("Resolved: [[{}]]{basis}.\n", node.node.title));
-    } else {
-        out.push_str("Resolved: no class matched — the lexical evidence below still stands.\n");
-    }
-    if !pack.truncated.is_empty() {
-        out.push_str(&format!("TRIMMED: {}.\n", pack.truncated.join(", ")));
-    }
-    out.push_str(
-        "If this answers the question, ANSWER — do not curl.\n\
-         Curl the answer-pack ONLY when this block is empty on the subject you need, names \
-         a node you want to descend into, or says it was TRIMMED.\n\n",
-    );
-
-    // The user's own words lead, exactly as in the pack itself.
-    if !pack.notes.is_empty() {
-        out.push_str("YOUR NOTES (human-authored — quote verbatim):\n");
-        for n in &pack.notes {
-            let star = if n.starred { "★ " } else { "" };
-            out.push_str(&format!(
-                "- {star}#{} {}\n",
-                n.seq.unwrap_or(0),
-                clip_line(&n.text, INLINE_BODY_CHARS)
-            ));
-        }
-        out.push('\n');
-    }
-    if let Some(node) = &pack.node {
-        if !node.children.is_empty() {
-            let kids: Vec<&str> = node.children.iter().map(|c| c.title.as_str()).collect();
-            out.push_str(&format!("Children of [[{}]]: {}\n\n", node.node.title, kids.join(" · ")));
-        }
-        if !node.links.is_empty() {
-            out.push_str("FILED UNDER IT:\n");
-            for l in &node.links {
-                let sup = l
-                    .superseded_by
-                    .map(|s| format!(" [superseded by #{s}]"))
-                    .unwrap_or_default();
-                out.push_str(&format!(
-                    "- #{} {}{sup}\n",
-                    l.link.target_id,
-                    clip_line(l.label.as_deref().unwrap_or("(no preview)"), 160)
-                ));
-            }
-            out.push('\n');
-        }
-        if !node.observations.is_empty() {
-            out.push_str("OBSERVATIONS (patterns, not facts — label them as such):\n");
-            for o in &node.observations {
-                out.push_str(&format!("- {}\n", clip_line(&o.summary, 200)));
-            }
-            out.push('\n');
-        }
-    }
-    if !pack.prompt_hits.is_empty() {
-        out.push_str("PROMPTS:\n");
-        for h in &pack.prompt_hits {
-            let sup = h
-                .superseded_by
-                .map(|s| format!(" [superseded by #{s}]"))
-                .unwrap_or_default();
-            let dupes = if h.duplicate_of.is_empty() {
-                String::new()
-            } else {
-                format!(" [+{} near-identical]", h.duplicate_of.len())
-            };
-            // Name the arms. A hit two arms found is stronger evidence than one
-            // either found alone, and a `semantic`-only hit is *associated*
-            // rather than asserted — the reader can only weigh that if it says.
-            let arms = if h.arms.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    " ({})",
-                    h.arms.iter().map(|a| a.arm.as_str()).collect::<Vec<_>>().join("+")
-                )
-            };
-            out.push_str(&format!(
-                "- #{}{sup}{dupes}{arms} {}\n",
-                h.item.seq,
-                clip_line(h.item.body.as_deref().unwrap_or(""), INLINE_BODY_CHARS)
-            ));
-        }
-        out.push('\n');
-    }
-    if !pack.browse_hits.is_empty() {
-        out.push_str("PAGES:\n");
-        for b in &pack.browse_hits {
-            out.push_str(&format!(
-                "- #{} {} — {}\n",
-                b.seq.unwrap_or(0),
-                clip_line(b.title.as_deref().unwrap_or(""), 100),
-                b.url
-            ));
-        }
-        out.push('\n');
-    }
-    if !pack.grep_hits.is_empty() {
-        out.push_str("LITERAL MATCHES:\n");
-        for g in &pack.grep_hits {
-            out.push_str(&format!(
-                "- #{} {} {}\n",
-                g.seq.unwrap_or(0),
-                g.label,
-                clip_line(&g.excerpt, 160)
-            ));
-        }
-        out.push('\n');
-    }
-
-    // Clip at a line boundary, and SAY the block was clipped — a silently
-    // truncated evidence block is the same lie as a silently truncated pack.
-    if out.len() > max_bytes {
-        let cut = out
-            .char_indices()
-            .take_while(|(i, _)| *i < max_bytes.saturating_sub(80))
-            .map(|(i, _)| i)
-            .last()
-            .unwrap_or(0);
-        let cut = out[..cut].rfind('\n').unwrap_or(cut);
-        out.truncate(cut);
-        out.push_str("\n[prefetch clipped to fit — curl the answer-pack for the rest]\n");
-    }
-    Some(out)
-}
-
-/// One line, newlines flattened, clipped with an ellipsis.
-fn clip_line(s: &str, max: usize) -> String {
-    let one = s.replace('\n', " ");
-    if one.chars().count() <= max {
-        one
-    } else {
-        one.chars().take(max).collect::<String>() + "…"
-    }
-}
-
-/// The ticker line for a prefetched turn. `retrieval_status_label` narrates
-/// curls, and a prefetched turn makes none — so without this the surface would
-/// sit silent through the one part of the turn that used to show progress.
-///
-/// It reports a RESULT where the old ticker reported an ACTIVITY: "read
-/// Embedded browser + 16 items…" rather than "searching your memory…".
-pub fn prefetch_status_label(node: Option<&str>, hits: usize) -> String {
-    match (node, hits) {
-        (Some(title), 0) => format!("read {title}…"),
-        (Some(title), n) => format!("read {title} + {n} items…"),
-        (None, 0) => "nothing matched — asking anyway…".to_string(),
-        (None, n) => format!("read {n} items…"),
-    }
-}
-
-/// One user note/star row (`user_notes`) — the readable, current-state side of
-/// `note` ledger events (Second Brain P3). Serialized camelCase for the Memory
-/// surface.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UserNote {
-    pub id: i64,
-    /// Latest `note` ledger event seq that touched this row.
-    pub seq: Option<i64>,
-    /// `ledger_event | class_node | session | none` (standalone thought).
-    pub target_kind: String,
-    pub target_id: Option<String>,
-    pub text: String,
-    pub starred: bool,
-    pub created_at: i64,
-    pub updated_at: i64,
 }
 
 /// One note-write act from the surface. Exactly ONE of `text` / `starred` per
@@ -2221,19 +1520,6 @@ mod tests {
         assert!(block.contains("[prefetch clipped to fit"), "{block}");
     }
 
-    /// The ticker reports a RESULT where the old one reported an ACTIVITY.
-    #[test]
-    fn prefetch_status_reports_what_was_read() {
-        assert_eq!(
-            prefetch_status_label(Some("Embedded browser"), 16),
-            "read Embedded browser + 16 items…"
-        );
-        assert_eq!(prefetch_status_label(Some("Voice agent"), 0), "read Voice agent…");
-        assert_eq!(prefetch_status_label(None, 4), "read 4 items…");
-        // The honest empty case — never a silent ticker.
-        assert_eq!(prefetch_status_label(None, 0), "nothing matched — asking anyway…");
-    }
-
     /// GOLDEN QUESTIONS — retrieval is the thing that regresses silently, so it
     /// gets a fixture rather than a spot check. Each row is
     /// `question → the node it must resolve → a seq that must be in the pack`.
@@ -2375,8 +1661,11 @@ mod tests {
     #[test]
     fn retrieval_modules_never_write_the_catalog() {
         const RETRIEVAL: &[(&str, &str)] = &[
-            ("query.rs", include_str!("query.rs")),
-            ("dedup.rs", include_str!("dedup.rs")),
+            // The two pure modules now live in polis-core; the shims at
+            // `src/query.rs` / `src/dedup.rs` are one re-export each, so the
+            // guard reads the moved sources or it guards nothing.
+            ("query.rs", include_str!("../crates/polis/polis-core/src/query.rs")),
+            ("dedup.rs", include_str!("../crates/polis/polis-core/src/dedup.rs")),
             ("embed.rs", include_str!("embed.rs")),
         ];
         // Every catalog-mutating entry point on `Database`.
@@ -2429,39 +1718,6 @@ mod tests {
         let stmt = &body[..stmt_end];
         assert!(stmt.contains("ORDER BY le.seq ASC"), "chain order is the contract");
         assert!(!stmt.contains("bm25("), "no ranking may enter the classifier's input");
-    }
-
-    /// RRF fuses by RANK, not by score — the arms' scores are not
-    /// commensurable (bm25 is unbounded and negative-is-better, cosine is
-    /// [-1,1], grep has no score at all), so ranks are the only shared unit.
-    #[test]
-    fn rrf_rewards_agreement_between_arms() {
-        let lexical = vec![("a".to_string(), 9.0), ("b".to_string(), 8.0), ("c".to_string(), 7.0)];
-        let semantic = vec![("c".to_string(), 0.91), ("a".to_string(), 0.88)];
-        let fused = rrf_fuse(&[(Arm::Lexical, lexical), (Arm::Semantic, semantic)]);
-
-        // `a` is rank 1 and rank 2 — found by both, so it leads.
-        assert_eq!(fused[0].0, "a");
-        assert_eq!(fused[0].1.len(), 2, "both arms are recorded on the hit");
-        // `c` (ranks 3 and 1) beats `b` (rank 2 in one arm only): agreement
-        // across arms outweighs a better position in one of them.
-        let pos = |k: &str| fused.iter().position(|(x, _, _)| x == k).unwrap();
-        assert!(pos("c") < pos("b"), "two arms agreeing beats one arm ranking higher");
-
-        // Every hit names its arms with rank and score, so a `semantic`-only
-        // hit is visibly *associated* rather than asserted.
-        let b = &fused[pos("b")].1;
-        assert_eq!(b.len(), 1);
-        assert_eq!(b[0].arm, Arm::Lexical);
-        assert_eq!(b[0].rank, 2);
-
-        // Deterministic on ties — never hash order.
-        let tie = rrf_fuse(&[
-            (Arm::Lexical, vec![("z".into(), 1.0)]),
-            (Arm::Semantic, vec![("y".into(), 1.0)]),
-        ]);
-        assert_eq!(tie.iter().map(|(k, _, _)| k.as_str()).collect::<Vec<_>>(), ["y", "z"]);
-        assert!(rrf_fuse(&[]).is_empty());
     }
 
     /// An arm that did not run says so. This is what stops an empty result
@@ -2659,91 +1915,6 @@ mod tests {
             .prompt_hits
             .iter()
             .any(|h| h.item.body.as_deref().is_some_and(|b| b.contains("watch bus"))));
-    }
-
-    /// The budget may starve nothing. The old rule dropped whole lists in a
-    /// fixed order, so a bloated `promptHits` cost the user EVERY page before a
-    /// single prompt was touched — which is what the live probe showed
-    /// (`browseHits: 0`, `truncated: [browseHits, promptHits]`).
-    #[test]
-    fn budget_keeps_one_hit_per_arm() {
-        let filler = "x".repeat(6_000);
-        let mut pack = AnswerPack {
-            head_seq: 1,
-            query: Some("q".into()),
-            node: None,
-            matched_nodes: Vec::new(),
-            notes: (0..30)
-                .map(|i| UserNote {
-                    id: i,
-                    seq: Some(i),
-                    target_kind: "none".into(),
-                    target_id: None,
-                    text: filler.clone(),
-                    starred: false,
-                    created_at: 0,
-                    updated_at: 0,
-                })
-                .collect(),
-            prompt_hits: (0..30)
-                .map(|i| PackPromptHit {
-                    item: LakeItem {
-                        seq: i,
-                        ts: 0,
-                        kind: "prompt".into(),
-                        ref_kind: None,
-                        ref_id: None,
-                        session_id: None,
-                        surface: None,
-                        origin: None,
-                        role: None,
-                        mission_id: None,
-                        project_path: None,
-                        body: Some(filler.clone()),
-                        thread_kind: None,
-                        thread_id: None,
-                        parent_session_id: None,
-                        model: None,
-                    },
-                    superseded_by: None,
-                    duplicate_of: Vec::new(),
-                    stage: "and".into(),
-                    arms: Vec::new(),
-                })
-                .collect(),
-            browse_hits: (0..30)
-                .map(|i| crate::db::BrowseHit {
-                    id: i,
-                    seq: Some(i),
-                    ts: 0,
-                    url: format!("https://example.com/{i}"),
-                    title: Some(filler.clone()),
-                    snippet: filler.clone(),
-                    score: 0.0,
-                    stage: "and".into(),
-                    shot_key: None,
-                    caption: None,
-                })
-                .collect(),
-            grep_hits: Vec::new(),
-            arm_coverage: Vec::new(),
-            truncated: Vec::new(),
-        };
-        enforce_pack_budget(&mut pack);
-
-        let bytes = serde_json::to_vec(&pack).unwrap().len();
-        assert!(bytes <= MAX_CONTEXT_BYTES, "{bytes} over budget");
-        assert!(!pack.browse_hits.is_empty(), "pages must not be erased outright");
-        assert!(!pack.prompt_hits.is_empty(), "prompts must not be erased outright");
-        assert!(!pack.notes.is_empty(), "the user's own words least of all");
-        // …and every arm that lost something says so.
-        for arm in ["browseHits", "promptHits"] {
-            assert!(
-                pack.truncated.iter().any(|t| t == arm),
-                "{arm} was trimmed and must report it: {:?}",
-                pack.truncated
-            );
-        }
     }
 
     /// A bulging class must not be able to make the pack quadratic: the link

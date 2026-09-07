@@ -52,6 +52,12 @@ use crate::db::Database;
 use crate::ledger::{self, now_millis};
 use crate::state::{AttachState, SessionStatus, SessionStore};
 
+// The deterministic gist and the tolerant JSON extractor live in `polis-core`
+// (Session A1 of the Polis extraction, docs/polis-extraction.md).
+#[allow(unused_imports)]
+pub use polis_core::gist::deterministic_gist;
+pub(crate) use polis_core::json::extract_object_with_key;
+
 // --- Tunables (code-only; nothing is exposed to the user) ------------------
 
 /// How often the keeper wakes to consider a run.
@@ -76,13 +82,6 @@ const SIZE_FLOOR_BYTES: i64 = 2048;
 const MAX_BATCH: usize = 40;
 /// Byte bound on the summarizer's baked-in corpus.
 const MAX_CORPUS_BYTES: usize = 60_000;
-/// Deterministic-fallback gist keeps this many leading characters…
-const GIST_HEAD_CHARS: usize = 200;
-/// …and this many trailing ones. A prompt states its ask at the top and lands
-/// its decision at the bottom; a pure head window keeps the first and throws the
-/// second away, which is why 47% of surviving gists read as an opening sentence
-/// and nothing else. Head+tail costs 80 characters and keeps both ends.
-const GIST_TAIL_CHARS: usize = 120;
 /// How long a machine-authored row (`agent`/`system`) stays warm. Measured in
 /// lake time against the newest event, like every other coldness here — never
 /// wall clock. Machine text has no class link to go cold *through*, so age is
@@ -234,30 +233,6 @@ pub struct CompactionAction {
     pub reason: String,
 }
 
-/// Deterministic gist for when the agent summarizer is unavailable or its reply
-/// won't parse — compaction must never hard-depend on `claude` being installed.
-/// Keeps `GIST_HEAD_CHARS` from the front AND `GIST_TAIL_CHARS` from the back,
-/// and records what was released: the ask is at the top, the decision is at the
-/// bottom, and a head-only window silently kept one and destroyed the other.
-/// Short bodies collapse to a single window with no ellipsis in the middle.
-pub fn deterministic_gist(body: &str) -> String {
-    let bytes = body.len();
-    let flat: Vec<char> = body
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .collect();
-    let summary = if flat.len() <= GIST_HEAD_CHARS + GIST_TAIL_CHARS {
-        flat.iter().collect::<String>()
-    } else {
-        let head: String = flat[..GIST_HEAD_CHARS].iter().collect();
-        let tail: String = flat[flat.len() - GIST_TAIL_CHARS..].iter().collect();
-        format!("{head} … {tail}")
-    };
-    format!("{summary}… [compacted {bytes} bytes]")
-}
-
 /// Build the summarizer's first-turn prompt: the cold prompt bodies (byte-
 /// bounded) + a strict JSON output contract. Self-contained (no curl needed).
 pub fn build_keeper_prompt(prompts: &[(i64, String)]) -> String {
@@ -329,56 +304,6 @@ pub fn parse_compaction_actions(text: &str) -> Vec<CompactionAction> {
         }
     }
     out
-}
-
-/// First top-level `{…}` substring that parses as JSON and carries `key`.
-/// Shared with classmem's supersede-verifier parser.
-pub(crate) fn extract_object_with_key(text: &str, key: &str) -> Option<Value> {
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'{' {
-            if let Some(end) = matching_brace(bytes, i) {
-                if let Ok(v) = serde_json::from_str::<Value>(&text[i..=end]) {
-                    if v.get(key).is_some() {
-                        return Some(v);
-                    }
-                }
-            }
-        }
-        i += 1;
-    }
-    None
-}
-
-fn matching_brace(bytes: &[u8], start: usize) -> Option<usize> {
-    let mut depth = 0i32;
-    let mut in_str = false;
-    let mut escaped = false;
-    for (offset, &b) in bytes.iter().enumerate().skip(start) {
-        if in_str {
-            if escaped {
-                escaped = false;
-            } else if b == b'\\' {
-                escaped = true;
-            } else if b == b'"' {
-                in_str = false;
-            }
-            continue;
-        }
-        match b {
-            b'"' => in_str = true,
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(offset);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 /// Run the summarizer headless to completion, returning its final text. Same
@@ -1814,19 +1739,6 @@ mod tests {
         assert_eq!(picked, vec![3], "only machine text is an automatic target");
     }
 
-    /// The deterministic fallback keeps BOTH ends: a prompt states its ask at
-    /// the top and lands its decision at the bottom, and a head-only window
-    /// silently kept the first and destroyed the second.
-    #[test]
-    fn deterministic_gist_keeps_the_head_and_the_tail() {
-        let body = format!("THE-ASK {} THE-DECISION", "filler ".repeat(400));
-        let g = deterministic_gist(&body);
-        assert!(g.starts_with("THE-ASK"), "the opening ask survives: {g}");
-        assert!(g.contains("THE-DECISION"), "the closing decision survives: {g}");
-        assert!(g.contains(" … "), "the middle is elided, not the end");
-        assert!(g.chars().count() < body.chars().count());
-    }
-
     #[test]
     fn parse_actions_tolerates_prose_and_coerces_ids() {
         let text = r#"Here you go:
@@ -1918,14 +1830,6 @@ mod tests {
         assert!(p.contains("uncited observations are rejected"));
         assert!(p.contains("### node cn-a — Auth"));
         assert!(p.contains("seq 10"));
-    }
-
-    #[test]
-    fn deterministic_gist_marks_reclaimed_bytes() {
-        let body = "word ".repeat(200); // 1000 bytes
-        let g = deterministic_gist(&body);
-        assert!(g.contains("[compacted 1000 bytes]"));
-        assert!(g.chars().count() < body.chars().count());
     }
 
     // --- the watch bus ------------------------------------------------------

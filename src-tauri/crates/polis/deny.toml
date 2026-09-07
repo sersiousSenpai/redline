@@ -1,0 +1,48 @@
+# cargo-deny configuration for the polis-memory repo — the license gate.
+# Kept IDENTICAL to src-tauri/deny.toml while staged (the two allowlists must
+# not drift: Redline links these crates, so anything admitted here enters
+# Redline's graph too). At extraction (Session A7) this file moves to the new
+# repo root and its CI runs `cargo deny check licenses` on every push.
+#
+# ---- copied verbatim from src-tauri/deny.toml below this line ----
+
+# cargo-deny configuration — license compliance gate.
+# Run: cargo deny --manifest-path src-tauri/Cargo.toml check licenses
+#
+# Purpose: ensure no copyleft (GPL/AGPL/LGPL) or unknown-license crate enters
+# the dependency graph, keeping Redline's permissive Apache-2.0 distribution
+# and acquisition story clean.
+
+[licenses]
+# Only permissive licenses are allowed.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MITNFA",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    "MPL-2.0",
+    "BSL-1.0",
+    "OpenSSL",
+    # Public-domain dedication (OSI-approved) — whisper-rs / whisper-rs-sys,
+    # the bundled speech-to-text bindings.
+    "Unlicense",
+    # Community Data License Agreement Permissive 2.0 — webpki-root-certs'
+    # bundled Mozilla CA root certificate DATA (via reqwest's rustls
+    # platform verifier). Permissive, attribution-style, no copyleft.
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "allow"
+
+[advisories]
+# License audit only here; this file does not gate on vulnerabilities.
+yanked = "warn"

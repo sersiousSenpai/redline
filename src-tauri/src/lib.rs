@@ -55,6 +55,14 @@ mod seatassign;
 /// settings surface. The protocol core + proxy binary moved to the
 /// `crates/redline-mcp` workspace member (size lever — see that crate's docs).
 pub mod mcp;
+
+/// The memory schema's DDL from a fresh database — the referee
+/// `tests/schema_golden.rs` pins while the memory tables move into
+/// `polis-store` (Session A2 of the Polis extraction). Public because `db` is
+/// not; the integration test is the only caller.
+pub fn memory_schema_sql() -> String {
+    db::Database::memory_schema_sql().expect("fresh in-memory schema")
+}
 mod memchat;
 mod meter;
 mod mirror;
@@ -5528,13 +5536,9 @@ async fn handle_code_git(
 
 /// A tree node as returned to a retrieval agent / the pane: the node plus its
 /// total link count (leaf-count badge).
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TreeNodeView {
-    #[serde(flatten)]
-    node: crate::classmem::ClassNode,
-    link_count: i64,
-}
+// The tree/link view rows are `polis-core` API types (Session A1 of the Polis
+// extraction) — the same shape the MCP tools and the generated clients read.
+use polis_core::api::{LinkView, TreeNodeView};
 
 #[derive(Deserialize)]
 struct MemoryTreeQ {
@@ -5604,16 +5608,6 @@ fn subtree_ids(all: &[(crate::classmem::ClassNode, i64)], root: &str) -> std::co
 }
 
 /// A link with a resolved display label + supersession status.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LinkView {
-    #[serde(flatten)]
-    link: crate::classmem::ClassLink,
-    label: Option<String>,
-    /// The decision seq that superseded this link's target (`None` = current).
-    /// Distinct from `link.status`, which stays proposed|accepted.
-    superseded_by: Option<i64>,
-}
 
 /// Shared node-view assembly for the curl-bridge route AND the Tauri command —
 /// one shape (`{node, children, links, observations}`) so the retrieval agents

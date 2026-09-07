@@ -3287,6 +3287,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "polis-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "polling"
 version = "3.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3606,6 +3615,7 @@ dependencies = [
  "objc2-natural-language",
  "objc2-speech",
  "objc2-web-kit",
+ "polis-core",
  "portable-pty",
  "pulldown-cmark",
  "redline-extension-abi",

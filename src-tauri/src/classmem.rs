@@ -28,13 +28,32 @@
 use std::collections::HashMap;
 use std::process::Stdio;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::claude_proc::{classify_line, resolve_claude_bin, StreamLine};
 use crate::db::Database;
 use crate::ledger::{self, now_millis, DecisionInput, EventKind};
+
+// The pure vocabulary of ClassMemory — row types, the proposal grammar and the
+// coldness interlock — lives in `polis-core` (Session A1 of the Polis
+// extraction, docs/polis-extraction.md). Re-exported so every
+// `crate::classmem::…` call site is unchanged.
+// `#[allow(unused_imports)]`: a shim re-exports for PATH STABILITY, not for use
+// inside this module — what nothing here touches still has call sites elsewhere
+// (or in tests), and the lint cannot see across cfgs.
+#[allow(unused_imports)]
+pub use polis_core::coldness::{
+    auto_collapse_safe, subtree_stats, BranchStat, LakeEnvelope, COLLAPSE_FRESH_FRACTION,
+};
+#[allow(unused_imports)]
+pub use polis_core::proposal::{
+    parse_proposals, parse_supersede_verdicts, Proposal, SplitPart, SupersedeVerdict,
+    SUPERSEDE_CONFIDENCE_MIN,
+};
+#[allow(unused_imports)]
+pub use polis_core::types::{ClassLink, ClassNode, ClassObservation, LakeItem, StageResult};
 
 /// A general (repo-less) root always seeded alongside the repo roots.
 pub const GENERAL_ROOT_ID: &str = "root-general";
@@ -54,39 +73,6 @@ const MAX_CORPUS_BYTES: usize = 60_000;
 // Row types (mirrors of the class_* tables)
 // ---------------------------------------------------------------------------
 
-/// A class node. A *class* is just a root (`parent_id == None`); depth is
-/// emergent (no level enum). A `digest` node's `summary` is the agent-written
-/// gist of a collapsed cold branch.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ClassNode {
-    pub id: String,
-    pub parent_id: Option<String>,
-    pub kind: String, // "node" | "digest"
-    pub title: String,
-    pub summary: Option<String>,
-    pub project_path: Option<String>,
-    pub ip_name: Option<String>,
-    pub status: String, // "proposed" | "accepted"
-    pub pinned: bool,
-    pub curated_by: Option<String>,
-    pub created_at: i64,
-    pub updated_at: i64,
-}
-
-/// A pointer from a class node into the lake.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ClassLink {
-    pub id: i64,
-    pub node_id: String,
-    pub target_kind: String, // prompt|session|revision|mission|decision|browse_event
-    pub target_id: String,
-    pub note: Option<String>,
-    pub status: String,
-    pub created_at: i64,
-}
-
 /// The ledger event kinds that are claims (decisions) — the only kinds a
 /// supersession may connect. Prompts/revisions are history, never superseded.
 pub const DECISION_KINDS: [&str; 3] = ["resolution", "approval", "review_verdict"];
@@ -103,22 +89,6 @@ pub enum SupersessionOutcome {
         event_seq: i64,
     },
     Rejected(String),
-}
-
-/// An agent-written pattern statement over a node's lake items. Derived,
-/// never ground truth — retrieval surfaces these after facts/decisions,
-/// labeled as patterns. `cite_seqs` is always non-empty (uncited = rejected).
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ClassObservation {
-    pub id: i64,
-    pub node_id: String,
-    pub summary: String,
-    pub cite_seqs: Vec<i64>,
-    pub created_seq: Option<i64>,
-    pub pinned: bool,
-    pub dismissed: bool,
-    pub created_at: i64,
 }
 
 /// A queued structural reorg proposal (promote/split/merge/collapse/supersede).
@@ -152,38 +122,6 @@ pub struct ClassRun {
     pub summary: Option<String>,
 }
 
-/// A compact prompt/decision item fed to the classifier and returned by
-/// `GET /v1/memory/prompts`. Provenance (`project_path`/`surface`/dates) is
-/// carried as ground truth — the classifier never infers where a memory came
-/// from.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LakeItem {
-    pub seq: i64,
-    pub ts: i64,
-    pub kind: String,   // prompt | resolution | approval | pin | ...
-    pub surface: Option<String>,
-    pub origin: Option<String>,
-    pub role: Option<String>,
-    pub session_id: Option<String>,
-    pub mission_id: Option<String>,
-    pub project_path: Option<String>,
-    pub ref_kind: Option<String>,
-    pub ref_id: Option<String>,
-    /// The prompt body (truncated) for prompt items; `None` for decision events
-    /// (they reference a row, not a stored body).
-    pub body: Option<String>,
-    /// Memory-by-session provenance (non-hashed `prompts` columns): the thread
-    /// this prompt belongs to and the parent session it hangs under.
-    pub thread_kind: Option<String>,
-    pub thread_id: Option<String>,
-    pub parent_session_id: Option<String>,
-    /// The model that received the prompt, when recorded — carried as ground
-    /// truth (seat flag or transcript backfill), never inferred. `None` for
-    /// decision events and for prompts whose model was never established.
-    pub model: Option<String>,
-}
-
 // ---------------------------------------------------------------------------
 // Seeding
 // ---------------------------------------------------------------------------
@@ -211,259 +149,12 @@ pub fn seed_root_rows(project_paths: &[String]) -> Vec<(String, String, Option<S
 }
 
 // ---------------------------------------------------------------------------
-// Proposal parsing (the classifier's structured-JSON output)
-// ---------------------------------------------------------------------------
-
-/// One part of a `split` op: a new sub-class title and the link ids that move to
-/// it.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub struct SplitPart {
-    pub title: String,
-    #[serde(default)]
-    pub link_ids: Vec<i64>,
-}
-
-/// A parsed proposal. `file`/`create` are additive (staged as proposed rows);
-/// `promote`/`split`/`merge`/`collapse` are structural (queued for review).
-#[derive(Debug, Clone, PartialEq)]
-pub enum Proposal {
-    File {
-        parent_id: String,
-        sub_class: Option<String>,
-        target_kind: String,
-        target_id: String,
-        note: Option<String>,
-        rationale: Option<String>,
-    },
-    Create {
-        parent_id: String,
-        title: String,
-        rationale: Option<String>,
-    },
-    Promote {
-        node_id: String,
-        new_parent_id: Option<String>,
-        rationale: Option<String>,
-    },
-    Split {
-        node_id: String,
-        into: Vec<SplitPart>,
-        rationale: Option<String>,
-    },
-    Merge {
-        node_ids: Vec<String>,
-        title: Option<String>,
-        parent_id: Option<String>,
-        rationale: Option<String>,
-    },
-    Collapse {
-        node_id: String,
-        summary: String,
-        cite_seqs: Vec<i64>,
-        rationale: Option<String>,
-    },
-    /// A newer decision replaces an older one on the same subject. Staged for
-    /// the verifier agent (never blind-applied); apply-time guardrails live in
-    /// `Database::apply_supersession_locked`.
-    Supersede {
-        old_seq: i64,
-        new_seq: i64,
-        rationale: Option<String>,
-    },
-}
-
-/// Extract the proposals JSON from a classifier's final message. Tolerates the
-/// model wrapping it in a ```json fence or in surrounding prose: finds the first
-/// balanced `{...}` object that parses and contains a `proposals` array. Pure.
-pub fn parse_proposals(text: &str) -> Vec<Proposal> {
-    let Some(obj) = extract_json_object(text) else {
-        return Vec::new();
-    };
-    let Some(arr) = obj.get("proposals").and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    arr.iter().filter_map(parse_one).collect()
-}
-
-/// Find the first top-level `{...}` substring that parses as JSON. Scans for a
-/// `{`, then walks to the matching brace respecting string literals/escapes, and
-/// tries to parse each candidate. Bounded by the input length.
-fn extract_json_object(text: &str) -> Option<Value> {
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'{' {
-            if let Some(end) = matching_brace(bytes, i) {
-                if let Ok(v) = serde_json::from_str::<Value>(&text[i..=end]) {
-                    if v.get("proposals").is_some() {
-                        return Some(v);
-                    }
-                }
-            }
-        }
-        i += 1;
-    }
-    None
-}
-
-fn matching_brace(bytes: &[u8], start: usize) -> Option<usize> {
-    let mut depth = 0i32;
-    let mut in_str = false;
-    let mut escaped = false;
-    for (offset, &b) in bytes.iter().enumerate().skip(start) {
-        if in_str {
-            if escaped {
-                escaped = false;
-            } else if b == b'\\' {
-                escaped = true;
-            } else if b == b'"' {
-                in_str = false;
-            }
-            continue;
-        }
-        match b {
-            b'"' => in_str = true,
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(offset);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn str_field<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
-    v.get(k).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
-}
-
-fn parse_one(v: &Value) -> Option<Proposal> {
-    let op = str_field(v, "op")?;
-    let rationale = str_field(v, "rationale").map(str::to_string);
-    match op {
-        "file" => {
-            // A lake target id may be a number (prompt/ledger seq) or a string
-            // (session/mission id) — accept both.
-            let target_id = value_as_id(v.get("target_id"))?;
-            Some(Proposal::File {
-                parent_id: str_field(v, "parent_id")?.to_string(),
-                sub_class: str_field(v, "sub_class").map(str::to_string),
-                target_kind: str_field(v, "target_kind")?.to_string(),
-                target_id,
-                note: str_field(v, "note").map(str::to_string),
-                rationale,
-            })
-        }
-        "create" => Some(Proposal::Create {
-            parent_id: str_field(v, "parent_id")?.to_string(),
-            title: str_field(v, "title")?.to_string(),
-            rationale,
-        }),
-        "promote" => Some(Proposal::Promote {
-            node_id: str_field(v, "node_id")?.to_string(),
-            new_parent_id: str_field(v, "new_parent_id").map(str::to_string),
-            rationale,
-        }),
-        "split" => {
-            let into: Vec<SplitPart> = v
-                .get("into")
-                .and_then(|x| serde_json::from_value(x.clone()).ok())
-                .unwrap_or_default();
-            if into.is_empty() {
-                return None;
-            }
-            Some(Proposal::Split {
-                node_id: str_field(v, "node_id")?.to_string(),
-                into,
-                rationale,
-            })
-        }
-        "merge" => {
-            let node_ids: Vec<String> = v
-                .get("node_ids")
-                .and_then(Value::as_array)
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
-                .unwrap_or_default();
-            if node_ids.len() < 2 {
-                return None;
-            }
-            Some(Proposal::Merge {
-                node_ids,
-                title: str_field(v, "title").map(str::to_string),
-                parent_id: str_field(v, "parent_id").map(str::to_string),
-                rationale,
-            })
-        }
-        "collapse" => {
-            let cite_seqs: Vec<i64> = v
-                .get("cite_seqs")
-                .and_then(Value::as_array)
-                .map(|a| a.iter().filter_map(Value::as_i64).collect())
-                .unwrap_or_default();
-            Some(Proposal::Collapse {
-                node_id: str_field(v, "node_id")?.to_string(),
-                summary: str_field(v, "summary")?.to_string(),
-                cite_seqs,
-                rationale,
-            })
-        }
-        "supersede" => {
-            let old_seq = value_as_i64(v.get("old_seq"))?;
-            let new_seq = value_as_i64(v.get("new_seq"))?;
-            // Cheap screen only — old must precede new (which also makes
-            // cycles impossible); the full guardrails (decision-kind check,
-            // head-of-chain redirect) run at apply time.
-            if old_seq <= 0 || new_seq <= 0 || old_seq >= new_seq {
-                return None;
-            }
-            Some(Proposal::Supersede {
-                old_seq,
-                new_seq,
-                rationale,
-            })
-        }
-        _ => None, // unknown op — skipped (logged by the caller if it wants)
-    }
-}
-
-/// A lake target id may arrive as a JSON number or string.
-fn value_as_id(v: Option<&Value>) -> Option<String> {
-    match v {
-        Some(Value::String(s)) if !s.trim().is_empty() => Some(s.trim().to_string()),
-        Some(Value::Number(n)) => Some(n.to_string()),
-        _ => None,
-    }
-}
-
-/// A ledger seq may arrive as a JSON number or numeric string.
-fn value_as_i64(v: Option<&Value>) -> Option<i64> {
-    match v {
-        Some(Value::Number(n)) => n.as_i64(),
-        Some(Value::String(s)) => s.trim().parse().ok(),
-        _ => None,
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Staging (materialize parsed proposals as reviewable rows)
 // ---------------------------------------------------------------------------
 
 /// Fresh node id for a created/staged node.
 pub fn new_node_id() -> String {
     format!("cn-{}", uuid::Uuid::new_v4().simple())
-}
-
-/// Outcome counts from staging a batch of proposals.
-#[derive(Debug, Default, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StageResult {
-    pub created_nodes: usize,
-    pub staged_links: usize,
-    pub structural: usize,
-    pub skipped: usize,
 }
 
 /// Stage a batch of parsed proposals into reviewable rows. Additive proposals
@@ -511,119 +202,6 @@ pub struct AppliedReorg {
 // ---------------------------------------------------------------------------
 // Classifier spawn + drive
 // ---------------------------------------------------------------------------
-
-/// Subtree-rolled activity for one branch — the *temporal + storage* facts that
-/// give "cold" a scope. `last_ts` is the newest resolvable linked lake item in
-/// the whole subtree; `item_count` is how many links it holds; `pinned` is true
-/// if the node or any descendant is pinned (an absolute anti-decay veto).
-#[derive(Debug, Clone, Default)]
-pub struct BranchStat {
-    pub last_ts: Option<i64>,
-    pub item_count: i64,
-    pub pinned: bool,
-}
-
-/// The lake's temporal envelope: the oldest and newest ledger `ts`. Coldness is
-/// measured against *this* (the lake's own activity), never wall-clock — Redline
-/// may be closed for weeks, so the newest event is the true "now".
-#[derive(Debug, Clone, Copy)]
-pub struct LakeEnvelope {
-    pub oldest: i64,
-    pub newest: i64,
-}
-
-impl LakeEnvelope {
-    pub fn span(&self) -> i64 {
-        (self.newest - self.oldest).max(0)
-    }
-}
-
-/// Safety interlock on the one destructive, auto-applied op. A branch is safe to
-/// **auto**-collapse only when its most-recent activity sits outside the freshest
-/// slice of the lake's span. This is NOT a taxonomy threshold (the orchestrator
-/// still judges *what* is cold) — it's a floor that stops silent destruction of
-/// recently-touched data. Anything that fails this (pinned, too fresh, or no
-/// datable history to judge) is held as a pending proposal for manual review.
-/// Tunable: the fraction of the lake span that counts as "too fresh to auto-nuke".
-pub const COLLAPSE_FRESH_FRACTION: f64 = 0.34;
-
-/// Whether a branch may be auto-collapsed (see `COLLAPSE_FRESH_FRACTION`).
-pub fn auto_collapse_safe(stat: &BranchStat, env: LakeEnvelope) -> bool {
-    if stat.pinned {
-        return false; // pins are an absolute anti-decay veto
-    }
-    let Some(last) = stat.last_ts else {
-        return false; // no datable activity → can't judge coldness → hold for review
-    };
-    let span = env.span();
-    if span <= 0 {
-        return false; // not enough history to have a notion of cold
-    }
-    let age = (env.newest - last).max(0) as f64;
-    age >= COLLAPSE_FRESH_FRACTION * span as f64
-}
-
-/// Roll up per-node direct activity (`node_id → (item_count, last_ts)`) into
-/// subtree stats for every node, folding in the pin flags. Pure / testable.
-pub fn subtree_stats(
-    nodes: &[ClassNode],
-    direct: &HashMap<String, (i64, Option<i64>)>,
-) -> HashMap<String, BranchStat> {
-    // children index
-    let mut kids: HashMap<String, Vec<usize>> = HashMap::new();
-    for (i, n) in nodes.iter().enumerate() {
-        if let Some(p) = &n.parent_id {
-            kids.entry(p.clone()).or_default().push(i);
-        }
-    }
-    let pinned_of: HashMap<&str, bool> = nodes.iter().map(|n| (n.id.as_str(), n.pinned)).collect();
-
-    // Recursive rollup with a visited guard (defensive against cycles).
-    fn roll(
-        idx: usize,
-        nodes: &[ClassNode],
-        kids: &HashMap<String, Vec<usize>>,
-        pinned_of: &HashMap<&str, bool>,
-        direct: &HashMap<String, (i64, Option<i64>)>,
-        out: &mut HashMap<String, BranchStat>,
-        depth: usize,
-    ) -> BranchStat {
-        let id = &nodes[idx].id;
-        let (mut count, mut last) = direct.get(id).copied().unwrap_or((0, None));
-        let mut pinned = *pinned_of.get(id.as_str()).unwrap_or(&false);
-        if depth < 64 {
-            if let Some(children) = kids.get(id) {
-                for &c in children {
-                    let cs = roll(c, nodes, kids, pinned_of, direct, out, depth + 1);
-                    count += cs.item_count;
-                    last = match (last, cs.last_ts) {
-                        (Some(a), Some(b)) => Some(a.max(b)),
-                        (a, b) => a.or(b),
-                    };
-                    pinned = pinned || cs.pinned;
-                }
-            }
-        }
-        let stat = BranchStat { last_ts: last, item_count: count, pinned };
-        out.insert(id.clone(), stat.clone());
-        stat
-    }
-
-    let mut out = HashMap::new();
-    for (i, n) in nodes.iter().enumerate() {
-        if n.parent_id.is_none() {
-            roll(i, nodes, &kids, &pinned_of, direct, &mut out, 0);
-        }
-    }
-    // Any node not reached from a root (orphaned parent) still gets its direct stat.
-    for n in nodes {
-        out.entry(n.id.clone()).or_insert_with(|| {
-            let (count, last) = direct.get(&n.id).copied().unwrap_or((0, None));
-            BranchStat { last_ts: last, item_count: count, pinned: n.pinned }
-        });
-    }
-    out
-}
 
 /// Human "N days" between two ms timestamps (for the classifier prompt).
 fn days_between(newer: i64, older: i64) -> i64 {
@@ -1201,47 +779,6 @@ pub async fn organize_once(db: &Database) -> Result<OrganizeOutcome, String> {
 // Supersede verifier (the machine confidence gate)
 // ---------------------------------------------------------------------------
 
-/// A supersession only applies when the verifier affirms it at or above this
-/// confidence. Below it (or on an explicit refutation) the proposal is
-/// dropped; with no verdict at all it stays staged for the review strip.
-pub const SUPERSEDE_CONFIDENCE_MIN: f64 = 0.8;
-
-/// One adjudication from the verifier agent.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SupersedeVerdict {
-    pub proposal_id: i64,
-    pub apply: bool,
-    pub confidence: f64,
-    pub reason: String,
-}
-
-/// Parse the verifier's reply. Tolerant of prose/fences like the other agent
-/// parsers; entries with no usable proposalId are dropped, missing fields
-/// default to the safe side (apply=false, confidence=0).
-pub fn parse_supersede_verdicts(text: &str) -> Vec<SupersedeVerdict> {
-    let Some(obj) = crate::keeper::extract_object_with_key(text, "verdicts") else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    if let Some(arr) = obj.get("verdicts").and_then(Value::as_array) {
-        for v in arr {
-            let Some(proposal_id) = value_as_i64(v.get("proposalId")) else {
-                continue;
-            };
-            let apply = v.get("apply").and_then(Value::as_bool).unwrap_or(false);
-            let confidence = v.get("confidence").and_then(Value::as_f64).unwrap_or(0.0);
-            let reason = str_field(v, "reason").unwrap_or("").to_string();
-            out.push(SupersedeVerdict {
-                proposal_id,
-                apply,
-                confidence,
-                reason,
-            });
-        }
-    }
-    out
-}
-
 /// The adversarial adjudication prompt: evidence for both decisions per
 /// proposal, and an instruction to REFUTE unless the replacement is clear.
 fn build_supersede_verifier_prompt(db: &Database, pending: &[ClassProposalRow]) -> String {
@@ -1426,88 +963,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_all_ops_from_a_fenced_block() {
-        let text = r#"Here are my proposals:
-```json
-{"proposals":[
-  {"op":"create","parent_id":"root-redline","title":"Loop Engineering","rationale":"8 items"},
-  {"op":"file","parent_id":"root-redline","sub_class":"Loop Engineering","target_kind":"prompt","target_id":42,"note":"spawn","rationale":"coheres"},
-  {"op":"promote","node_id":"cn-1","new_parent_id":"root-redline","rationale":"grew"},
-  {"op":"split","node_id":"cn-2","into":[{"title":"Clerk","link_ids":[1,2]},{"title":"Sessions","link_ids":[3]}],"rationale":"two subjects"},
-  {"op":"merge","node_ids":["cn-3","cn-4"],"title":"Auth","rationale":"dupes"},
-  {"op":"collapse","node_id":"cn-5","summary":"old investing research","cite_seqs":[10,11,12],"rationale":"cold"},
-  {"op":"supersede","old_seq":"318","new_seq":402,"rationale":"the beta approval reversed the earlier resolution"}
-]}
-```
-That's it."#;
-        let props = parse_proposals(text);
-        assert_eq!(props.len(), 7);
-        assert!(matches!(props[0], Proposal::Create { .. }));
-        match &props[1] {
-            Proposal::File { target_id, sub_class, .. } => {
-                assert_eq!(target_id, "42"); // numeric id coerced to string
-                assert_eq!(sub_class.as_deref(), Some("Loop Engineering"));
-            }
-            _ => panic!("expected file"),
-        }
-        match &props[3] {
-            Proposal::Split { into, .. } => assert_eq!(into.len(), 2),
-            _ => panic!("expected split"),
-        }
-        match &props[5] {
-            Proposal::Collapse { cite_seqs, .. } => assert_eq!(cite_seqs, &vec![10, 11, 12]),
-            _ => panic!("expected collapse"),
-        }
-        match &props[6] {
-            Proposal::Supersede { old_seq, new_seq, .. } => {
-                // string-coerced old_seq + numeric new_seq both parse
-                assert_eq!((*old_seq, *new_seq), (318, 402));
-            }
-            _ => panic!("expected supersede"),
-        }
-    }
-
-    #[test]
-    fn parse_ignores_prose_and_bad_ops() {
-        assert!(parse_proposals("no json here").is_empty());
-        // merge with <2 ids and split with no parts are dropped.
-        let text = r#"{"proposals":[
-          {"op":"frobnicate","node_id":"x"},
-          {"op":"merge","node_ids":["only-one"]},
-          {"op":"split","node_id":"y","into":[]},
-          {"op":"supersede","old_seq":9},
-          {"op":"supersede","old_seq":9,"new_seq":9},
-          {"op":"supersede","old_seq":12,"new_seq":9},
-          {"op":"create","parent_id":"root","title":"Keep","rationale":"ok"}
-        ]}"#;
-        let props = parse_proposals(text);
-        assert_eq!(props.len(), 1);
-        assert!(matches!(props[0], Proposal::Create { .. }));
-    }
-
-    #[test]
-    fn parse_supersede_verdicts_gates_on_shape() {
-        let text = r#"Adjudicated.
-```json
-{"verdicts":[
-  {"proposalId":7,"apply":true,"confidence":0.95,"reason":"clear reversal"},
-  {"proposalId":"8","apply":false,"confidence":0.4,"reason":"different subjects"},
-  {"apply":true,"confidence":1.0,"reason":"no id — dropped"},
-  {"proposalId":9}
-]}
-```"#;
-        let v = parse_supersede_verdicts(text);
-        assert_eq!(v.len(), 3);
-        assert_eq!(v[0], SupersedeVerdict { proposal_id: 7, apply: true, confidence: 0.95, reason: "clear reversal".into() });
-        // numeric-string id coerces; refutation carries through
-        assert_eq!(v[1].proposal_id, 8);
-        assert!(!v[1].apply);
-        // missing fields default to the safe side
-        assert_eq!(v[2], SupersedeVerdict { proposal_id: 9, apply: false, confidence: 0.0, reason: String::new() });
-        assert!(parse_supersede_verdicts("prose only").is_empty());
-    }
-
-    #[test]
     fn build_prompt_marks_provenance_as_ground_truth() {
         let tree = vec![ClassNode {
             id: "root-redline".into(),
@@ -1648,58 +1103,4 @@ That's it."#;
         assert!(out.contains("seq 99"));
     }
 
-    #[test]
-    fn subtree_stats_rolls_up_counts_recency_and_pins() {
-        let n = |id: &str, parent: Option<&str>, pinned: bool| ClassNode {
-            id: id.into(),
-            parent_id: parent.map(str::to_string),
-            kind: "node".into(),
-            title: id.into(),
-            summary: None,
-            project_path: None,
-            ip_name: None,
-            status: "accepted".into(),
-            pinned,
-            curated_by: None,
-            created_at: 0,
-            updated_at: 0,
-        };
-        let nodes = vec![
-            n("root", None, false),
-            n("child", Some("root"), true), // a pinned descendant
-        ];
-        let mut direct = HashMap::new();
-        direct.insert("root".to_string(), (1i64, Some(100i64)));
-        direct.insert("child".to_string(), (2i64, Some(900i64)));
-        let stats = subtree_stats(&nodes, &direct);
-        let root = &stats["root"];
-        assert_eq!(root.item_count, 3); // 1 + 2 from child
-        assert_eq!(root.last_ts, Some(900)); // newest across subtree
-        assert!(root.pinned, "a pinned descendant makes the branch pinned");
-    }
-
-    #[test]
-    fn auto_collapse_interlock_holds_pinned_fresh_and_undatable() {
-        let env = LakeEnvelope { oldest: 0, newest: 1000 };
-        // Old, unpinned, datable → safe to auto-collapse.
-        assert!(auto_collapse_safe(
-            &BranchStat { last_ts: Some(100), item_count: 5, pinned: false },
-            env
-        ));
-        // Pinned → held regardless of age.
-        assert!(!auto_collapse_safe(
-            &BranchStat { last_ts: Some(100), item_count: 5, pinned: true },
-            env
-        ));
-        // Too fresh (within the freshest slice) → held.
-        assert!(!auto_collapse_safe(
-            &BranchStat { last_ts: Some(900), item_count: 5, pinned: false },
-            env
-        ));
-        // No datable activity → can't judge → held.
-        assert!(!auto_collapse_safe(
-            &BranchStat { last_ts: None, item_count: 5, pinned: false },
-            env
-        ));
-    }
 }
