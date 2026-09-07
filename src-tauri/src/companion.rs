@@ -29,7 +29,6 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{ChildStderr, ChildStdout};
 
-use crate::browse::{is_context_overflow, is_transient};
 use crate::claude_proc::{
     bridge_args_with_flags, classify_line, mission_context_block, resolve_claude_bin,
     StreamLine,
@@ -122,6 +121,17 @@ struct CompanionDelta {
     /// reports the seq already folded into `partial`, and the frontend drops
     /// any delta at or below that watermark.
     seq: u64,
+}
+
+/// What the turn is spending and what it is doing. Flattened so the id field
+/// the frontend hook matches on stays at the top level, like every other
+/// companion event.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompanionMeter {
+    companion_id: String,
+    #[serde(flatten)]
+    meter: turn::MeterPayload,
 }
 
 #[derive(Clone, Serialize)]
@@ -1179,12 +1189,29 @@ async fn read_companion(
     let mut final_text: Option<String> = None;
     let mut errored: Option<String> = None;
     let mut saw_json = false;
+    let mut pacer = turn::MeterPacer::default();
 
     while let Ok(Some(line)) = lines.next_line().await {
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
         saw_json = true;
+        // The raw wire, for the inspector. A no-op when it's off —
+        // one relaxed atomic load, nothing buffered.
+        crate::inspect::capture("companion", &companion_id, line.trim());
+        // Second pass over the same value — the meter reads what
+        // `classify_line` throws away. Mutate-then-emit, coalesced.
+        if let Some(payload) = turn::push_meta(&buf, &v) {
+            if pacer.due(&payload) {
+                let _ = app.emit(
+                    "companion-meter",
+                    CompanionMeter {
+                        companion_id: companion_id.clone(),
+                        meter: payload,
+                    },
+                );
+            }
+        }
         // Live retrieval status. Read before classification because a tool_use
         // rides an `assistant` line, which `classify_line` (rightly) ignores —
         // it carries no answer text.
@@ -1246,6 +1273,24 @@ async fn read_companion(
             .remove(&companion_id)
     };
 
+    // ABOVE the terminal branch, so success, error and cancelled all
+    // book. A cancelled turn spent its input tokens too.
+    let settled = crate::meter::settle(&db, "companion", &buf);
+    if !settled.is_empty() {
+        let _ = app.emit(
+            "companion-meter",
+            CompanionMeter {
+                    companion_id: companion_id.clone(),
+                meter: turn::MeterPayload {
+                    rev: settled.rev,
+                    meter: settled.clone(),
+                    activity: None,
+                    discrete: true,
+                },
+            },
+        );
+    }
+
     'terminal: {
         if cancelled {
             let _ = app.emit(
@@ -1258,7 +1303,8 @@ async fn read_companion(
         }
         if let Some(err) = errored {
             let why = describe_turn_error(&db, &companion_id, &err);
-            finish_error(&app, &db, &companion_id, &surface, &why);
+            let row = finish_error(&app, &db, &companion_id, &surface, &why);
+            crate::meter::attach(&db, "companion", &row, &settled);
             break 'terminal;
         }
         if let Some(text) = final_text {
@@ -1291,6 +1337,8 @@ async fn read_companion(
             if let Err(e) = db.insert_companion_message(&msg) {
                 tracing::warn!(error = %e, "failed to persist assistant message");
             }
+            // The badge and the footer outlive the turn.
+            crate::meter::attach(&db, "companion", &msg.id, &settled);
             // Deliberately NO agent_turn journal append here — the chat's own
             // turns must not echo back into its next "while you were away"
             // delta.
@@ -1383,30 +1431,27 @@ async fn read_companion(
     }
 }
 
-/// Same recovery policy as browse/draft-chat: explicit context overflow resets
-/// the resumable session; transient API errors keep it and ask for a retry.
-///
-/// The overflow branch is the REACTIVE twin of the proactive rotation in
-/// `start_companion_turn` — same helper, so the two can never differ in what
-/// they clear. With the turn budget in place this should now be the rare path:
-/// a conversation normally rotates long before the window runs out.
+/// Translate a failed Companion turn — branches and wording live once, in
+/// `claude_proc::describe_turn_error`. The overflow reset is the Companion's
+/// own: it re-seeds a fresh session from the completed turns rather than just
+/// forgetting an id.
 fn describe_turn_error(db: &Database, companion_id: &str, error: &str) -> String {
-    if is_context_overflow(error) {
-        let turns = completed_assistant_turns(
-            &db.load_companion_thread(companion_id).unwrap_or_default(),
-        );
-        reset_companion_session(db, companion_id, turns);
-        return "This conversation outgrew the model's context window, so the turn \
-                failed. I've reset its context — send your message again and I'll \
-                pick up fresh from here (the replies above are kept)."
-            .to_string();
-    }
-    if is_transient(error) {
-        return "The model hit a momentary error on that turn. The conversation is \
-                fine — send your message again in a moment."
-            .to_string();
-    }
-    error.to_string()
+    crate::claude_proc::describe_turn_error(
+        db,
+        crate::claude_proc::TurnErrorCopy {
+            surface: "companion",
+            subject: Some(companion_id),
+            noun: "conversation",
+            next: "I'll pick up fresh from here",
+        },
+        error,
+        || {
+            let turns = completed_assistant_turns(
+                &db.load_companion_thread(companion_id).unwrap_or_default(),
+            );
+            reset_companion_session(db, companion_id, turns);
+        },
+    )
 }
 
 fn finish_error(
@@ -1415,7 +1460,7 @@ fn finish_error(
     companion_id: &str,
     surface: &SurfaceInfo,
     why: &str,
-) {
+) -> String {
     let msg = CompanionMessage {
         id: uuid::Uuid::new_v4().to_string(),
         companion_id: companion_id.to_string(),
@@ -1437,6 +1482,8 @@ fn finish_error(
             error: why.to_string(),
         },
     );
+    // The id the caller attaches this turn's meter to.
+    msg.id
 }
 
 // --- Auto-titling -------------------------------------------------------------
@@ -1560,11 +1607,13 @@ async fn autotitle(
     ) else {
         return;
     };
+    let title_db = companion.db.clone();
     let outcome = tokio::time::timeout(TITLE_TIMEOUT, async move {
         use tokio::io::AsyncWriteExt;
         let _ = stdin.write_all(prompt.as_bytes()).await;
         drop(stdin);
-        let outcome = crate::claude_proc::collect_turn(stdout, stderr).await;
+        let outcome =
+            crate::claude_proc::collect_turn_seated(&title_db, "companion", stdout, stderr).await;
         let _ = child.wait().await;
         outcome
     })
@@ -1708,7 +1757,7 @@ impl CompanionState {
 
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(180),
-            crate::claude_proc::collect_turn(stdout, stderr),
+            crate::claude_proc::collect_turn_seated(&self.db, "companion", stdout, stderr),
         )
         .await;
         // Token-matched: a consult draining its stream must not steal a

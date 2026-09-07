@@ -429,6 +429,8 @@ mod tests {
             attach_state: crate::state::AttachState::Idle,
             updated_at: 1,
             run_state: None,
+            backend: None,
+            model: None,
         })
         .unwrap();
         for i in 0..n {
@@ -447,7 +449,7 @@ mod tests {
                     body: format!("prompt body {i}"),
                     thread: None,
                     author: None,
-                    model: None,
+                model: None,
                     model_source: None,
                 },
             )

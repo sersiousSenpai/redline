@@ -448,13 +448,39 @@ pub fn pty_write_bytes(state: &PtyState, id: &str, bytes: &[u8]) -> Result<(), S
     let Some(session) = session_of(state, id) else {
         return Ok(());
     };
-    let mut s = lock_ok(&session);
-    s.writer
-        .write_all(bytes)
-        .map_err(|e| format!("pty write failed: {e}"))?;
-    s.writer.flush().ok();
-    Ok(())
+    write_chunk(&session, bytes)
 }
+
+/// The tty input queue is **1024 bytes** on macOS (`TTYHOG` in the kernel's
+/// tty layer). A single write to the PTY master larger than what the shell has
+/// drained is not blocked and not short-counted — the kernel **discards the
+/// excess and reports success**. So a long typed command arrives at zsh cut
+/// off mid-word, sitting unexecuted in the line editor, with no error anywhere
+/// in Redline, in the shell, or in the return value.
+///
+/// Measured: a 6,476-byte plan launch reached the shell truncated at byte
+/// 1023. This was never Codex-specific — it is the ceiling on ANY programmatic
+/// injection, and a Drafter document longer than a paragraph has always been
+/// riding it. Chunking below the queue size and yielding between chunks lets
+/// the shell drain; `write_all` on each chunk still catches a real I/O error.
+const PTY_CHUNK: usize = 512;
+/// Long enough for zsh's line editor to drain a chunk, short enough that a
+/// 60 KB document still types in well under a second.
+///
+/// Both halves measured at this exact pacing, 2026-09-02, after a report of a
+/// corrupted 113 KB launch sent someone looking here:
+///
+/// * a raw-mode tty with a fast reader takes 100 KB with **zero loss** in
+///   1.10 s — the queue is not the ceiling once writes are paced;
+/// * zsh's line editor takes 22 KB with **zero loss** in 0.88 s.
+///
+/// So the pacing does what it claims and a long typed command arrives whole.
+/// Recorded because the second measurement is easy to get WRONG: zsh redraws
+/// the entire command line on every chunk, emitting far more than it consumes,
+/// so a test that does not drain the master fd continuously will back-pressure
+/// zsh into blocking on its own output and read that as "the line editor
+/// cannot keep up". It can.
+const PTY_CHUNK_PAUSE: Duration = Duration::from_millis(4);
 
 /// The verified twin of `pty_write`: an unregistered id is an ERROR, not a
 /// silent no-op. Every *programmatic* injection (the Orchestrate handoff,
@@ -462,26 +488,66 @@ pub fn pty_write_bytes(state: &PtyState, id: &str, bytes: &[u8]) -> Result<(), S
 /// does not exist must be distinguishable from one that landed. The soft
 /// `pty_write`/`pty_write_bytes` contract stays untouched for the best-effort
 /// auto-continue inject and user keystrokes.
-#[tauri::command]
-pub fn pty_write_checked(
+///
+/// `(async)` because it PACES: see `PTY_CHUNK`. A sync command runs on the main
+/// thread, where the pauses would freeze the UI for the length of the write.
+#[tauri::command(async)]
+pub async fn pty_write_checked(
     state: tauri::State<'_, PtyState>,
     id: String,
     data: String,
 ) -> Result<(), String> {
-    pty_write_bytes_checked(&state, &id, data.as_bytes())
+    let session = session_of(&state, &id).ok_or_else(|| format!("terminal {id} is not running"))?;
+    // The lock is taken PER CHUNK inside the sink and never held across the
+    // await — a guard is not `Send`, and holding one for the length of a paced
+    // write would block the reader's own use of the session.
+    paced(data.as_bytes(), |chunk| write_chunk(&session, chunk)).await
 }
 
-/// Internal helper behind `pty_write_checked`, callable from Rust and tests.
-pub fn pty_write_bytes_checked(state: &PtyState, id: &str, bytes: &[u8]) -> Result<(), String> {
-    let Some(session) = session_of(state, id) else {
-        return Err(format!("terminal {id} is not running"));
-    };
-    let mut s = lock_ok(&session);
+/// Feed `bytes` to `sink` in `PTY_CHUNK`-sized pieces, pausing between them.
+///
+/// The sink is a closure rather than a writer so the pacing law can be tested
+/// against a recorder (chunk boundaries) and against a real PTY (bytes arrive
+/// whole) without either test reimplementing the loop it is supposed to pin.
+async fn paced<F>(bytes: &[u8], mut sink: F) -> Result<(), String>
+where
+    F: FnMut(&[u8]) -> Result<(), String>,
+{
+    for (i, chunk) in bytes.chunks(PTY_CHUNK).enumerate() {
+        if i > 0 {
+            tokio::time::sleep(PTY_CHUNK_PAUSE).await;
+        }
+        sink(chunk)?;
+    }
+    Ok(())
+}
+
+/// One unpaced write into a session. Split out so the paced command and the
+/// synchronous callers share the same error mapping.
+fn write_chunk(session: &Arc<Mutex<PtySession>>, bytes: &[u8]) -> Result<(), String> {
+    let mut s = lock_ok(session);
     s.writer
         .write_all(bytes)
         .map_err(|e| format!("pty write failed: {e}"))?;
     s.writer.flush().ok();
     Ok(())
+}
+
+/// Internal helper behind `pty_write_checked`, callable from Rust and tests.
+///
+/// Synchronous, so it writes in one go — correct for the short injections Rust
+/// makes itself (a menu-skip keystroke). Anything that can exceed
+/// `PTY_CHUNK` must go through the paced command instead.
+pub fn pty_write_bytes_checked(state: &PtyState, id: &str, bytes: &[u8]) -> Result<(), String> {
+    debug_assert!(
+        bytes.len() <= PTY_CHUNK,
+        "unpaced write of {} bytes will be truncated by the tty input queue",
+        bytes.len()
+    );
+    let Some(session) = session_of(state, id) else {
+        return Err(format!("terminal {id} is not running"));
+    };
+    write_chunk(&session, bytes)
 }
 
 /// Registry membership — the handoff's spawn probe.
@@ -733,6 +799,68 @@ mod tests {
             .expect_err("missing id must be an error");
         assert!(err.contains("no-such-tab"), "got: {err}");
         assert!(err.contains("not running"), "got: {err}");
+    }
+
+    /// The macOS tty input queue (`TTYHOG`). A write larger than what the
+    /// shell has drained is not blocked and not short-counted — the kernel
+    /// discards the excess and reports success.
+    const TTY_INPUT_QUEUE: usize = 1024;
+
+    #[test]
+    fn the_chunk_fits_inside_the_tty_input_queue() {
+        assert!(
+            PTY_CHUNK < TTY_INPUT_QUEUE,
+            "a chunk at or above the queue size is the bug, not the fix",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_paced_write_is_split_and_loses_nothing() {
+        // The measured failure: a 6,476-byte plan launch reached zsh cut off
+        // at byte 1023, sitting unexecuted, with no error anywhere.
+        let payload: Vec<u8> = (0..6_476u32).map(|i| (i % 251) as u8).collect();
+        let mut chunks: Vec<Vec<u8>> = Vec::new();
+        paced(&payload, |c| {
+            chunks.push(c.to_vec());
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        assert!(chunks.len() > 1, "a 6 KB write must not go out in one piece");
+        assert!(chunks.iter().all(|c| c.len() <= PTY_CHUNK));
+        assert_eq!(
+            chunks.concat(),
+            payload,
+            "pacing must not drop, duplicate or reorder a byte",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_short_write_is_still_one_write() {
+        // Every keystroke-sized injection goes through here too; splitting a
+        // 2-byte menu answer would be pure latency.
+        let mut n = 0;
+        paced(b"3\r", |_| {
+            n += 1;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[tokio::test]
+    async fn a_sink_error_stops_the_write_rather_than_racing_on() {
+        let mut seen = 0;
+        let err = paced(&vec![b'x'; PTY_CHUNK * 3], |_| {
+            seen += 1;
+            Err("pty write failed: broken pipe".to_string())
+        })
+        .await
+        .expect_err("a failed chunk must surface");
+        assert_eq!(seen, 1, "no further chunks after a failure");
+        assert!(err.contains("broken pipe"));
     }
 
     #[test]

@@ -15,7 +15,6 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { ApproveToast } from "./components/ApproveToast";
-import { CommentCard } from "./components/CommentCard";
 import { CommentComposer } from "./components/CommentComposer";
 import { DiscussionZoomContext } from "./components/DiscussionViewContext";
 import { lazy, Suspense } from "react";
@@ -31,6 +30,7 @@ import type { PlanEditorActions } from "./components/PlanEditor";
 import type { PlanEditorCollab } from "./components/PlanEditor";
 import { EmptyState } from "./components/EmptyState";
 import { FrontDoor } from "./components/FrontDoor";
+import { ReadinessStrip } from "./components/ReadinessStrip";
 import {
   applySeed,
   isEditableTarget,
@@ -54,16 +54,32 @@ import {
   type ProjectChoice,
 } from "./lib/launch";
 import {
+  codexRestoreBlockers,
   deriveReadiness,
   type PreflightStatus,
+  type ReadinessInput,
   type ReadinessItem,
 } from "./lib/readiness";
-import { isLiveRunState } from "./lib/orchestration";
+import {
+  detachedBannerCopy,
+  resolveRestoreHarness,
+  restoreCopiedNote,
+  restoreStartedNote,
+  type RestoreHarness,
+  type RestorePrep,
+} from "./lib/restoreHarness";
+import {
+  canStartRestore,
+  reduceRestore,
+  restoreDeadlineIn,
+  restoreView,
+  type RestoreAttempt,
+  type RestoreEvent,
+} from "./lib/restoreAttempt";
+import { isLiveRunState, resolveRunProject } from "./lib/orchestration";
 import { Footer } from "./components/Footer";
 import { Header } from "./components/Header";
 import { Button } from "./components/ui/Button";
-import { InviteDialog } from "./components/InviteDialog";
-import { JoinDialog } from "./components/JoinDialog";
 // Carries the markdown→PM parser + block serializer (the heavy editor chain);
 // only mounts when the share dialog opens.
 const ShareSnapshotDialog = lazy(() =>
@@ -73,6 +89,26 @@ const ShareSnapshotDialog = lazy(() =>
 );
 import { importSharedPlanFromUrl } from "./collab/importSharedLink";
 import { deriveActiveSurface } from "./lib/activeSurface";
+import { documentPlateMode } from "./lib/documentPlate";
+import {
+  BROWSER_DOCK_KINDS,
+  CONVERSATION_PIN_KEY,
+  activeConversation,
+  conversationContexts,
+  conversationPose,
+  kindPill,
+  migrateChatSurfaceOnce,
+  pillKind,
+  takeDockSeed,
+  type ConversationKind,
+} from "./lib/conversationContext";
+import {
+  NO_BROWSER_DOCK,
+  type BrowserDockState,
+  type ChatPill,
+} from "./lib/browseChatState";
+import { DockContextStrip } from "./components/DockContextStrip";
+import { AwayFeed } from "./components/AwayFeed";
 import { PresenceBar } from "./components/PresenceBar";
 import {
   collabRevisionKey,
@@ -100,10 +136,6 @@ import {
   joinedSessionKey,
   useJoinedSession,
 } from "./collab/useJoinedSession";
-import { HookSetupModal } from "./components/HookSetupModal";
-import { HowItWorksCard } from "./components/HowItWorksCard";
-import { ReadmeModal } from "./components/ReadmeModal";
-import { FeedbackModal } from "./components/FeedbackModal";
 // Shown once, ever — the cleanest lazy win on the boot path (A0).
 const OnboardingTour = lazy(() =>
   import("./components/OnboardingTour").then((m) => ({
@@ -165,7 +197,6 @@ const PromptDrafter = lazy(() =>
   loadPromptDrafter().then((m) => ({ default: m.PromptDrafter })),
 );
 import type { DrafterSaveState } from "./components/PromptDrafter";
-import ReviewPanel from "./components/ReviewPanel";
 // Lazy: a settings pane. Its module also feeds MemorySurface (class tree +
 // portability sections), so the chunk is shared with that surface's family.
 const MemoryInspector = lazy(() =>
@@ -182,6 +213,26 @@ const MemorySurface = lazy(() =>
 );
 // Off the boot path like the drafter: the Runs surface only matters once an
 // orchestrated run exists, so its chunk loads on first open.
+// The run report — the container an orchestrated run's review pane sits in.
+// Behind the run chip, never on the way to the front door, and (like the
+// preflight modal above) pure surface that a user who has never orchestrated
+// should not carry at boot.
+const RunReport = lazy(() =>
+  import("./components/RunReport").then((m) => ({ default: m.RunReport })),
+);
+
+// The Orchestrate preflight modal. Lazy because it is behind a click that
+// already awaits three invokes (push_status, the workflows probe, the allow
+// candidates), so a chunk fetch is free there — and because it is pure prose
+// and controls that nobody who never orchestrates should pay for at boot. The
+// door is on the boot path with single-digit KB of headroom; this is exactly
+// the kind of weight that has no business sitting on it.
+const OrchestrateLaunchModal = lazy(() =>
+  import("./components/OrchestrateLaunchModal").then((m) => ({
+    default: m.OrchestrateLaunchModal,
+  })),
+);
+
 const loadOrchestrationSurface = () => import("./components/OrchestrationSurface");
 const OrchestrationSurface = lazy(() =>
   loadOrchestrationSurface().then((m) => ({
@@ -207,12 +258,13 @@ const SURFACE_CHUNK_LOADERS: Partial<
   browser: loadBrowserPane,
   memory: loadMemorySurface,
   runs: loadOrchestrationSurface,
+  // Not a surface any more — the room is the conversation dock's Companion
+  // body. Kept keyed here so the dock warms it through the same helper.
   chat: loadChatRoom,
 };
 function prefetchSurfaceChunk(surface: string): void {
   void SURFACE_CHUNK_LOADERS[surface]?.().catch(() => {});
 }
-import ReviewDiscussionPane from "./components/ReviewDiscussionPane";
 import { ServersPane } from "./components/ServersPane";
 import { useReview } from "./hooks/useReview";
 import { useTextClearance } from "./hooks/useTextClearance";
@@ -259,7 +311,14 @@ import { ChromeSlot } from "./components/HullRail";
 import { PaneDivider } from "./components/PaneDivider";
 import { BoundaryFallback, ErrorBoundary } from "./components/ErrorBoundary";
 import { DiscussPill } from "./components/DiscussPill";
-import { TerminalTabs } from "./components/TerminalTabs";
+// The dock's body is fetched with its mount, not with the shell — see
+// `terminalMounted` below. `import type` is erased, so the handle's type
+// costs nothing.
+const TerminalTabs = lazy(() =>
+  import("./components/TerminalTabs").then((m) => ({
+    default: m.TerminalTabs,
+  })),
+);
 import type { TerminalTabsHandle } from "./components/TerminalTabs";
 import { DecisionWindowBanner } from "./components/DecisionWindowBanner";
 import { FlashOverlay } from "./components/FlashOverlay";
@@ -267,7 +326,8 @@ import { CommandPalette } from "./components/CommandPalette";
 import { playInterceptBeep, DEFAULT_SOUND } from "./audio/beep";
 import { buildResumeCommand } from "./lib/resumeCommand";
 import { buildCommands } from "./lib/commands";
-import { isNewPlanKey, isPaletteKey, isSnapBackKey } from "./lib/keymap";
+import { isDockKey, isNewPlanKey, isPaletteKey, isSnapBackKey } from "./lib/keymap";
+import { isKnownTab, type NavTarget, type TabRequest } from "./lib/navTarget";
 import {
   TOC_RAIL_W,
   TOC_RAIL_W_WIDE,
@@ -344,6 +404,13 @@ import {
 } from "./lib/paneLayout";
 import { dockHeightForTiles } from "./lib/tileGrid";
 import { SNAPBACK_SETTLE_MS } from "./lib/boot";
+import { markOnce } from "./lib/bootMarks";
+import type { BootstrapState, DaemonState } from "./types";
+import {
+  integrationHealth,
+  type HealthQuery,
+  type IntegrationHealth,
+} from "./lib/integrationHealth";
 import {
   clearDrafterShadow,
   drafterModeKey,
@@ -357,6 +424,18 @@ import {
 import { useBootChoreography } from "./hooks/useBootChoreography";
 /** Toggle the curtain attribute only on a real flip — `setAttribute` with an
  *  unchanged value still invalidates style, and this runs every drag frame. */
+/** The parts of `ReadinessInput` that depend on WHICH launch is being judged.
+ *  Everything else is closed over by `buildReadinessInput`, so the strip and
+ *  the launch gate cannot drift apart. */
+type ReadinessInputFor = (o: {
+  preflight: PreflightStatus | null;
+  /** The daemon is not known to have failed its bind. */
+  daemonOk: boolean;
+  projectPath: string | null;
+  backend: Backend;
+  now: number;
+}) => ReadinessInput;
+
 function setCurtain(el: HTMLElement | null, on: boolean): void {
   if (!el) return;
   if (on === (el.dataset.rlCurtain === "1")) return;
@@ -396,6 +475,14 @@ import {
 } from "./lib/planLaunchCommand";
 import { guessProjectForPlan } from "./lib/guessProject";
 import {
+  defaultChoice as defaultBackendChoice,
+  normalizeChoice as normalizeBackendChoice,
+  parseChoice as parseBackendChoice,
+  type Backend,
+  type BackendChoice,
+  type CodexModel,
+} from "./lib/backendChoice";
+import {
   deleteSource,
   importSourceFile,
   listSources,
@@ -409,6 +496,62 @@ import {
   type DraftSource,
 } from "./lib/bookshelf";
 // Lazy: the shelf is a sheet over the drafter, opened on click.
+// ── Feature islands (A0 / boot budget) ──────────────────────────────────────
+//
+// Everything here was a STATIC import of App, and every one of them is behind
+// something the user does — not something they see. Together they were pulling
+// the whole markdown-rendering stack onto the boot path: App → CommentCard →
+// CommentThread → MarkdownView → markdown-it + highlight.js + entities +
+// linkify-it, ~670 kB of source that a launch which never opens a comment
+// never needed.
+//
+// The pattern is the same in each case: the TRIGGER stays static (a menu item,
+// a keystroke, a surface tab), the BODY is fetched on first use.
+
+/** The comment pane's card. Rendered only when a plan session is open and has
+ *  comments — and it is the root of the markdown chain. */
+const CommentCard = lazy(() =>
+  import("./components/CommentCard").then((m) => ({ default: m.CommentCard })),
+);
+/** The code-review surface's whole body, including DiffView and the push
+ *  dialog. Reached by opening a review, never on boot. */
+const ReviewPanel = lazy(() => import("./components/ReviewPanel"));
+/** The review's discussion sidecar — a second markdown consumer. */
+const ReviewDiscussionPane = lazy(
+  () => import("./components/ReviewDiscussionPane"),
+);
+/** Modal bodies that are CLOSED at startup, by construction: each render site
+ *  is `{flag && <Body/>}`, so a static import was pure boot cost. */
+const ReadmeModal = lazy(() =>
+  import("./components/ReadmeModal").then((m) => ({ default: m.ReadmeModal })),
+);
+const FeedbackModal = lazy(() =>
+  import("./components/FeedbackModal").then((m) => ({
+    default: m.FeedbackModal,
+  })),
+);
+const HowItWorksCard = lazy(() =>
+  import("./components/HowItWorksCard").then((m) => ({
+    default: m.HowItWorksCard,
+  })),
+);
+const InviteDialog = lazy(() =>
+  import("./components/InviteDialog").then((m) => ({
+    default: m.InviteDialog,
+  })),
+);
+const JoinDialog = lazy(() =>
+  import("./components/JoinDialog").then((m) => ({ default: m.JoinDialog })),
+);
+/** The unskippable first-run setup modal. Lazy is safe *because* the modal is
+ *  now gated on `integrationReady` — it cannot render before the post-reveal
+ *  probe answers, by which time this chunk is long since fetched. */
+const HookSetupModal = lazy(() =>
+  import("./components/HookSetupModal").then((m) => ({
+    default: m.HookSetupModal,
+  })),
+);
+
 const BookshelfView = lazy(() =>
   import("./components/BookshelfView").then((m) => ({
     default: m.BookshelfView,
@@ -440,14 +583,19 @@ import type {
   Section,
   SessionSummary,
   SkillStatus,
+  AllowCandidate,
+  CombineBrief,
+  CombinePreview,
+  CombineSource,
   WorkflowAvailability,
 } from "./types";
-import { OrchestrateLaunchModal } from "./components/OrchestrateLaunchModal";
-import { RunReport } from "./components/RunReport";
 
 // Upgrade pre-quick-switch persisted pane state (four booleans → one surface
 // value + a doc pin) exactly once, before the first usePersistedState read.
 migrateMainSurfaceOnce(localStorage);
+// …and the chat room's fold into the conversation dock (A3): a persisted
+// `mainSurface === "chat"` names a surface this build no longer renders.
+migrateChatSurfaceOnce(localStorage);
 
 interface ComposingState {
   type: CommentType;
@@ -570,7 +718,24 @@ function App() {
     [],
   );
   const [session, setSession] = useState<ReviewSession | null>(null);
+  // ── The four readiness axes ───────────────────────────────────────────────
+  //
+  // There used to be one global `loading` boolean covering everything boot
+  // did, which is why a hook-file diff and a `codex --help` could hold the
+  // front door shut. Four independent questions, four answers, and a surface
+  // waits on exactly the one it needs:
+  //
+  //   shellReady        the core bootstrap resolved — a surface can render and
+  //                     take a keystroke.                (`!loading`, below)
+  //   sessionReady      the held plan is loaded.         (declared with it)
+  //   integrationReady  hooks/skills/binaries answered.  (`preflight !== null`)
+  //   terminalReady     the dock has a live PTY.         (the dock reports it)
+  //
+  // Nothing here is the boot ANIMATION, which gates none of them.
   const [loading, setLoading] = useState(true);
+  /** The core bootstrap resolved. The front door renders and focuses on this
+   *  and nothing else. */
+  const shellReady = !loading;
   const [composing, setComposing] = useState<ComposingState | null>(null);
   const [busy, setBusy] = useState(false);
   // Session ids with a submit in flight: added on a successful submit, removed
@@ -592,9 +757,14 @@ function App() {
   );
   const [warning, setWarning] = useState<ResolutionWarning | null>(null);
   const [askModeViolation, setAskModeViolation] = useState<boolean>(false);
-  // Set false when this window's daemon could not bind :7676 (another process
-  // holds it): this window captures no plans, so we block it with a banner.
-  const [daemonBound, setDaemonBound] = useState<boolean>(true);
+  // How far this window's daemon got binding :7676. Three states, not a
+  // boolean: a bind in flight is not a failure, and the old boolean had to
+  // default to `true` to avoid flashing a scary banner — which made the
+  // optimistic guess indistinguishable from the real answer, so nothing could
+  // legitimately WAIT for readiness. Rendering ignores this entirely; a
+  // launch awaits `"ready"`, and only `"failed"` raises the banner.
+  const [daemonState, setDaemonState] = useState<DaemonState>("starting");
+  const daemonBound = daemonState !== "failed";
   // The detached banner's manual dismiss. The detached state itself is
   // derived from the active session's persisted `attachState` (see below) so
   // it survives app restarts and background-session detaches; this flag only
@@ -759,6 +929,10 @@ function App() {
       // not state-driven, exactly like useAutoExitFullscreen: the rule fires
       // on the move and never fights the user afterwards.
       setImmersiveBroken(false);
+      // Leaving the plate the conversation had taken. It does NOT close — it
+      // collapses into the dock and comes with you, which is the whole point
+      // of there being one column: you walk out of the room still talking.
+      setExpandedKind(null);
       if (next === "review" && mainSurface !== "review") {
         setDiscussionPinned("review");
       } else if (next !== "review" && mainSurface === "review") {
@@ -888,6 +1062,7 @@ function App() {
     [nudgeState, workspace],
   );
   const voiceEnabled = surfaceEnabled(effectiveWorkspace, "voice");
+  const chatEnabled = surfaceEnabled(effectiveWorkspace, "chat");
   // Fresh view of mainSurface for the boot-time landing decision.
   const mainSurfaceRef = useRef(mainSurface);
   mainSurfaceRef.current = mainSurface;
@@ -941,7 +1116,7 @@ function App() {
   // stock, with the eviction effect below rehoming a stranded surface).
   const harnessFlavorRef = useRef<string | null>(null);
   const harnessListJsonRef = useRef("");
-  const bootSettledRef = useRef(false);
+  const bootstrapDoneRef = useRef(false);
   const applyHarnessResolution = useCallback(
     (installed: { id: string; json: string }[]): ActiveHarness | null => {
       const harnesses = resolveHarnesses(installed);
@@ -983,7 +1158,7 @@ function App() {
     [],
   );
   const refreshHarnesses = useCallback(() => {
-    if (!bootSettledRef.current) return;
+    if (!bootstrapDoneRef.current) return;
     void invoke<{ id: string; json: string }[]>("list_harnesses")
       .then(applyHarnessResolution)
       .catch(() => {});
@@ -1018,18 +1193,49 @@ function App() {
   // The Prompt Drafter — a Word-style authoring surface selected into the
   // center pane. Its draft (Tiptap JSON) and the project it launches into
   // persist across reloads.
-  // The voice agent — a drawer docked to the plan pane that reads the plan
-  // aloud or discusses it (spoken) via the warm Claude session. Kept on the
-  // plan surface (not the Header) so it reads as a plan feature.
-  const [voiceOpen, setVoiceOpen] = useState(false);
+  // The conversation dock — ONE AI column beside whichever surface is
+  // selected. It began as the plan's voice drawer and then grew a second copy
+  // for the drafter; the two open bits could disagree, so crossing between the
+  // surfaces closed a conversation the user had deliberately left up. There is
+  // one bit now, and `conversationContext.ts` decides WHICH conversation the
+  // column is holding — the same shape `mainSurface` gave the center plate.
+  const [dockOpen, setDockOpen] = useState(() => takeDockSeed(localStorage));
+  // The conversation the user asked to see as a ROOM rather than as the column
+  // beside a surface — the kind, not a boolean, so the pose can be decided
+  // before the context list exists (the mask is computed high up, and a read
+  // above its block is a type error rather than a silently wrong value).
+  // Never persisted, and cleared by `selectSurface`: coming back to the
+  // document later must not find a room you did not ask to re-enter.
+  const [expandedKind, setExpandedKind] = useState<ConversationKind | null>(
+    null,
+  );
+  // Which conversation the user pinned when a surface offers several. A
+  // TIE-BREAK only (`activeConversation`), never an override: a pin naming a
+  // kind this surface hasn't got is ignored rather than obeyed into an empty
+  // dock.
+  const [conversationPin, setConversationPin] = usePersistedState<
+    ConversationKind | null
+  >(CONVERSATION_PIN_KEY, null);
+  // What the browser pane says is beside it: the discussion tab, the linked
+  // thread, the mission. Ids only — the panels themselves stay in the pane and
+  // are portalled into the dock's slot. Reset when the pane unmounts, so a
+  // stale tab title can't label a context that is no longer on screen.
+  const [browserDock, setBrowserDock] =
+    useState<BrowserDockState>(NO_BROWSER_DOCK);
+  // The dock's DOM node for those panels. State, not a ref: the pane needs to
+  // re-render once the node exists, and a ref would never tell it.
+  const [dockSlotEl, setDockSlotEl] = useState<HTMLDivElement | null>(null);
   // A discussion is actually going on in the open voice panel (reported by it).
   // Refs, because the `plan-received` listener is mount-scoped on `activeId` and
   // must read both without re-subscribing on every keystroke of a conversation.
   const [discussionLive, setDiscussionLive] = useState(false);
   const discussionLiveRef = useRef(false);
   discussionLiveRef.current = discussionLive;
-  const voiceOpenRef = useRef(false);
-  voiceOpenRef.current = voiceOpen;
+  // "The reviewer is mid-conversation about THIS plan" — the one case where an
+  // intercepted plan for another session must not steal focus. Assigned from
+  // the dock derivation far below, so it tracks the live context rather than
+  // the raw open bit (the dock being up over a DRAFT is not that case).
+  const planVoiceOpenRef = useRef(false);
   // Sessions whose intercepted plan we did NOT switch to (a live discussion was
   // in the way). Drives the sidebar's pulsing dot until the row is selected.
   const [unseenPlanIds, setUnseenPlanIds] = useState<Set<string>>(
@@ -1108,13 +1314,26 @@ function App() {
   const [frontDoorAttachments, setFrontDoorAttachments] = usePersistedState<
     string[]
   >("redline.frontDoor.attachments", []);
-  // Read by `releasePending`, which runs long after the render that armed the
+  // Plans handed over by the sidebar's Combine picker. Persisted for the same
+  // reason the sentence and the attachments are — a restart that eats what you
+  // set up is the small betrayal this surface exists to remove — but FILTERED
+  // against the live session list wherever it is read, so a pill for a deleted
+  // plan cannot survive a restart and then fail at launch.
+  const [frontDoorCombineRaw, setFrontDoorCombine] = usePersistedState<
+    CombineSource[]
+  >("redline.frontDoor.combine", []);
+  const [combinePreview, setCombinePreview] = useState<CombinePreview | null>(
+    null,
+  );
+  // Read by `repayPending`, which runs long after the render that armed the
   // launch — it must see what the composer holds NOW, not at launch time, or
   // giving a sentence back would clobber whatever was typed since.
   const frontDoorTextRef = useRef(frontDoorText);
   frontDoorTextRef.current = frontDoorText;
   const frontDoorAttachmentsRef = useRef(frontDoorAttachments);
   frontDoorAttachmentsRef.current = frontDoorAttachments;
+  const frontDoorCombineRef = useRef(frontDoorCombineRaw);
+  frontDoorCombineRef.current = frontDoorCombineRaw;
   // A ⏎ the LAUNCH path refused, for the door to render. Deliberately NOT
   // persisted and deliberately nonce-keyed: it is a reaction to one keystroke,
   // and pressing ⏎ twice against the same blocker has to nudge twice or the
@@ -1130,6 +1349,43 @@ function App() {
     "redline.frontDoor.destination",
     "plan",
   );
+  // WHICH harness ⏎ launches on. Sticky for the same reason the destination
+  // is, and read by every door — the Drafter and the browser's "Send to
+  // Redline" launch through the same `launchPlan`, so all three agree without
+  // each carrying its own picker.
+  const [frontDoorBackendRaw, setFrontDoorBackend] =
+    usePersistedState<BackendChoice>(
+      "redline.frontDoor.backend",
+      defaultBackendChoice(),
+    );
+  /** `codex debug models`, fetched on first use of the picker. Never at boot:
+   *  a Claude-only user must not spawn a codex child process to open the app.
+   *  Cached for the session — the catalog only moves when the ChatGPT app
+   *  updates. */
+  const [codexModels, setCodexModels] = useState<CodexModel[]>([]);
+  const codexModelsAskedRef = useRef(false);
+  const requestCodexModels = useCallback(() => {
+    if (codexModelsAskedRef.current) return;
+    codexModelsAskedRef.current = true;
+    void invoke<CodexModel[]>("codex_model_catalog")
+      .then(setCodexModels)
+      // A failed probe is not an error the user has to act on: the picker
+      // simply offers "Default", and codex runs on its own default model.
+      .catch((e: unknown) => console.warn("codex_model_catalog failed", e));
+  }, []);
+  // Tolerant on the way in (a hand-edited or stale blob can't launch on a
+  // backend nobody chose) and folded onto what the backend can actually run.
+  const frontDoorBackend = useMemo(
+    () => normalizeBackendChoice(parseBackendChoice(frontDoorBackendRaw), codexModels),
+    [frontDoorBackendRaw, codexModels],
+  );
+  // A returning Codex user never has to open the picker for their stored pick
+  // to work (`normalizeChoice` passes it through while the catalog is
+  // unknown) — but the chip would read the raw slug and the effort list would
+  // be empty until they did. One fetch, only for someone already on Codex.
+  useEffect(() => {
+    if (frontDoorBackend.backend === "codex") requestCodexModels();
+  }, [frontDoorBackend.backend, requestCodexModels]);
   // ── The chat room ───────────────────────────────────────────────────────
   // Which conversation the room shows. PERSISTED for the same reason the
   // door's sentence is: a chat is a place you come back to, and landing on a
@@ -1143,6 +1399,10 @@ function App() {
   // which is precisely where the room is not mounted.
   const [chats, setChats] = useState<Companion[]>([]);
   const [chatsLoaded, setChatsLoaded] = useState(false);
+  // The open conversation's name — the dock's tab label and the active-surface
+  // cell's label, from one lookup.
+  const chatTitle =
+    chats.find((c) => c.companionId === chatId)?.title ?? null;
   // The door's sentence, handed to the room to send as message 1. Ephemeral by
   // design — a seed that outlived a restart would re-send an old sentence into
   // a conversation that already has it.
@@ -1174,19 +1434,30 @@ function App() {
     };
   }, [refreshChats]);
 
-  // A chat surface with no chat. `mainSurface` is persisted and `chatId` can be
-  // cleared independently (the last chat deleted, storage wiped), so the pair
-  // can come back disagreeing — which would strand the room on its "starting a
-  // conversation…" placeholder forever. Land on the most recent conversation
-  // if there is one; otherwise go home. Waits for the list to load, so an
-  // in-flight fetch is never mistaken for an empty one.
+  // The dock opened on the Companion with no conversation chosen. `chatId` is
+  // persisted and can be cleared independently (the last chat deleted, storage
+  // wiped), so land on the most recent conversation — coming back to a chat is
+  // the whole reason that id is persisted. Waits for the list to load, so an
+  // in-flight fetch is never mistaken for an empty one; with a genuinely empty
+  // list the dock offers to start the first one rather than minting one nobody
+  // asked for.
   useEffect(() => {
-    if (!chatOpen || chatId || chatOpening || !chatsLoaded) return;
+    if (!dockOpen || chatId || chatOpening || !chatsLoaded) return;
     const recent = chats[0];
     if (recent) setChatId(recent.companionId);
-    else selectSurfaceRef.current("document");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chatOpen, chatId, chatOpening, chatsLoaded, chats]);
+  }, [dockOpen, chatId, chatOpening, chatsLoaded, chats]);
+  // Belt and braces for the surface that moved into the dock: nothing in this
+  // build selects `"chat"` any more and the boot migration rewrites the
+  // persisted value, but a workspace manifest can still NAME a surface (its
+  // `landing`), and landing on one with no body would show an empty plate.
+  useEffect(() => {
+    if (mainSurface !== "chat") return;
+    selectSurfaceRef.current("document");
+    setConversationPin("companion");
+    setDockOpen(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mainSurface]);
 
   // ONE pending launch, keyed by the door it came through. Not one per
   // surface: `deriveReadiness` takes a single `pendingSince`, so two states
@@ -1201,6 +1472,18 @@ function App() {
   // "Can this machine actually deliver a plan" — null until the first probe
   // resolves, which readiness reads as *unknown*, never as broken.
   const [preflight, setPreflight] = useState<PreflightStatus | null>(null);
+  /** Post-reveal integration health has answered at least once. Null means
+   *  "not asked yet", never "healthy" — every derivation from it is withheld
+   *  rather than guessed at. */
+  const integrationReady = preflight !== null;
+  // Both read at LAUNCH time, from inside `launchPlan` — the same discipline
+  // `readinessRef` uses. The resolved codex path is what makes the codex arm
+  // absolute rather than trusting `$PATH`, which on this machine still points
+  // at a build with no `resume`.
+  const preflightRef = useRef(preflight);
+  preflightRef.current = preflight;
+  const backendChoiceRef = useRef(frontDoorBackend);
+  backendChoiceRef.current = frontDoorBackend;
   // Gates the 90s `/hooks` nudge: a plan that has ever landed proves the hook
   // works, so a later wait has some other cause and blaming it would be a lie.
   const [planEverArrived, setPlanEverArrived] = usePersistedState(
@@ -1509,7 +1792,6 @@ function App() {
   );
   // The drafter's 🎙️ voice drawer + what it's primed with: the latest mirrored
   // markdown and its parsed Section tree (for the Guided Walkthrough).
-  const [drafterVoiceOpen, setDrafterVoiceOpen] = useState(false);
   const [drafterMarkdown, setDrafterMarkdown] = useState("");
   const [drafterSections, setDrafterSections] = useState<Section[]>([]);
   // The open drafter's LIVE markdown getter — serialized on demand, so the
@@ -1637,7 +1919,7 @@ function App() {
   // Sections for the drafter voice walkthrough — parsed backend-side from the
   // mirrored markdown, only while the voice drawer is open.
   useEffect(() => {
-    if (!drafterVoiceOpen) return;
+    if (!(dockOpen && mainSurface === "drafter" && drafterDraftId)) return;
     let alive = true;
     void invoke<Section[]>("parse_markdown_sections", {
       markdown: drafterMarkdown,
@@ -1647,7 +1929,7 @@ function App() {
     return () => {
       alive = false;
     };
-  }, [drafterVoiceOpen, drafterMarkdown]);
+  }, [dockOpen, mainSurface, drafterDraftId, drafterMarkdown]);
   // A plan sent from the browser page-discussion agent, held for a repo-confirm
   // step (SendToRedlineDialog) before it launches into a terminal — so it never
   // silently lands in $HOME.
@@ -1663,27 +1945,17 @@ function App() {
   // the Companion's separate drawer UI is gone — its scope folded into the
   // voice agent (voice.rs embeds the cross-surface map + write routes).
   useEffect(() => {
-    if (!voiceEnabled) return;
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && (e.key === "j" || e.key === "J")) {
-        e.preventDefault();
-        if (mainSurfaceRef.current === "drafter") {
-          setDrafterVoiceOpen((v) => !v);
-        } else if (mainSurfaceRef.current === "document") {
-          setVoiceOpen((v) => !v);
-        }
-      }
+      if (!isDockKey(e)) return;
+      e.preventDefault();
+      // Surface-agnostic: one dock, one toggle. On a surface with no
+      // conversation of its own it is simply inert — `voiceDocked` below needs
+      // a context, not just the bit.
+      setDockOpen((v) => !v);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [voiceEnabled]);
-  // Same rule for the voice drawers when the voice surface is manifest-off.
-  useEffect(() => {
-    if (!voiceEnabled) {
-      setVoiceOpen(false);
-      setDrafterVoiceOpen(false);
-    }
-  }, [voiceEnabled]);
+  }, []);
   const codeReview = useReview();
   // The Localhost dashboard. Gated on the surface being selected: the scan
   // forks three subprocesses per tick, so it must not run behind another pane.
@@ -1764,19 +2036,28 @@ function App() {
   // matched by lib/keymap so the combos live in one place.
   const [paletteOpen, setPaletteOpen] = useState(false);
   // Doors-open boot (A2): main.tsx armed the closed frame before React
-  // mounted; this parts the plates after the reveal and reports when the
-  // shell has settled. A first-ever launch (tour not yet run) holds the
-  // closed frame one breath longer before opening.
-  const { bootAnimating, bootSettled } = useBootChoreography(!onboardingDone);
+  // mounted; this parts the plates after the reveal. Purely decorative — it
+  // reports only whether the plates are mid-flight (the native browser
+  // webview has to hide for that composition transition), and nothing
+  // actionable is allowed to wait on it.
+  const { bootAnimating } = useBootChoreography();
 
-  // Warm the Drafter's chunk once the shell has settled and the main thread is
-  // free. Nothing on the boot path changes — this is a dynamic import at idle,
-  // so the size budget is untouched — but it removes the one difference
+  // The first surface the user can actually act on. `loading` clears when the
+  // core bootstrap has resolved — session summaries in, held session (if any)
+  // loaded — which is the same moment the front door takes focus. Nothing in
+  // this condition is a probe, a repair, or an animation.
+  useEffect(() => {
+    if (shellReady) markOnce("rl:actionable");
+  }, [shellReady]);
+
+  // Warm the Drafter's chunk once the shell is actionable and the main thread
+  // is free. Nothing on the boot path changes — this is a dynamic import at
+  // idle, so the size budget is untouched — but it removes the one difference
   // between the first trip from the Front Door and every later one: on a cold
   // chunk the spring animates a Suspense fallback and then the real editor
   // arrives mid-flight, which is precisely the first-run jank.
   useEffect(() => {
-    if (!bootSettled) return;
+    if (!shellReady) return;
     const idle = (
       window as Window & {
         requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number;
@@ -1792,7 +2073,7 @@ function App() {
     }
     const t = window.setTimeout(run, 1200);
     return () => window.clearTimeout(t);
-  }, [bootSettled]);
+  }, [shellReady]);
   const clampZoom = (z: number) =>
     Math.min(1.6, Math.max(0.8, Math.round(z * 100) / 100));
   const zoomIn = () => setDocZoom((z) => clampZoom(z + 0.1));
@@ -1887,6 +2168,10 @@ function App() {
     };
   }, [browserOpen]);
 
+  // The first React commit — a themed shell now exists in the DOM. A layout
+  // effect, so it lands on the commit itself rather than a frame later.
+  useLayoutEffect(() => markOnce("rl:first-commit"), []);
+
   // Reveal the native window once the first themed frame has painted (the
   // window starts hidden), so launch never shows a flash of white. Two rAFs:
   // the first schedules after layout, the second after that frame commits.
@@ -1894,7 +2179,10 @@ function App() {
     let raf2 = 0;
     const raf1 = requestAnimationFrame(() => {
       raf2 = requestAnimationFrame(() => {
-        void invoke("show_main_window").catch(() => {});
+        markOnce("rl:reveal-call");
+        void invoke("show_main_window")
+          .then(() => markOnce("rl:reveal-done"))
+          .catch(() => {});
       });
     });
     return () => {
@@ -1915,6 +2203,38 @@ function App() {
     "redline.terminalPane.fullscreen",
     false,
   );
+
+  // Project-folder explorer: open folders (sidebar tabs), the active tab, the
+  // file shown in the center pane, and the linked-nav toggle.
+  const {
+    openFolders,
+    sidebarTab,
+    linkNav,
+    activeFile,
+    openFolder,
+    closeFolder,
+    selectSessions,
+    selectFolder,
+    setActiveFile,
+    setLinkNav,
+  } = useFolderWorkspaces();
+  // The document plate wears three faces — the Front Door, a plan, and the
+  // folder explorer's file viewer — and every site below used to re-derive
+  // which one from `sidebarTab.kind === "folder" && activeFile`. Naming it
+  // once is what lets the conversation dock tell a plan (which has a
+  // discussion) from a file (which has none).
+  const plateMode = documentPlateMode(sidebarTab, activeId, activeFile);
+  // Whether a conversation may take the plate at all. The Front Door is the
+  // plate at REST — no document, no draft, nothing of its own to cover — and
+  // that is precisely what lets the door open INTO a conversation instead of
+  // navigating away to one.
+  const plateAtRest = mainSurface === "document" && plateMode === "door";
+  const conversationExpanded =
+    conversationPose({
+      open: dockOpen,
+      expandedKind,
+      plateAtRest,
+    }) === "expanded";
 
   // ---- Immersive surfaces ---------------------------------------------------
   //
@@ -1950,6 +2270,7 @@ function App() {
   // `docPinned` is read from the UNMASKED shape (this never touches it), so
   // there is no cycle.
   const pMask = panelMask({
+    conversationExpanded,
     surface: mainSurface,
     broken: immersiveBroken,
     enabled: workspaceImmersive(workspace),
@@ -1981,6 +2302,9 @@ function App() {
   }, [setPaneCollapsed]);
   const revealTerm = useCallback(() => {
     setImmersiveBroken(true);
+    // Opening the dock IS the intent to use it — mount now rather than at the
+    // next idle callback.
+    setTerminalMounted(true);
     setTermCollapsed(false);
   }, [setTermCollapsed]);
   // The user-driven toggles read the EFFECTIVE value to pick their direction:
@@ -1996,6 +2320,7 @@ function App() {
   }, [paneCollapsed, setPaneCollapsed]);
   const toggleTerm = useCallback(() => {
     setImmersiveBroken(true);
+    setTerminalMounted(true);
     setTermCollapsed(!termCollapsed);
   }, [termCollapsed, setTermCollapsed]);
   // Entering dock fullscreen. Extracted from the inline handler that used to
@@ -2005,6 +2330,7 @@ function App() {
   // needs to, which is why the two exit paths below just set the flag.
   const enterTermFullscreen = useCallback(() => {
     setImmersiveBroken(true);
+    setTerminalMounted(true);
     setTermFullscreen(true);
   }, [setTermFullscreen]);
 
@@ -2219,20 +2545,6 @@ function App() {
       revealTerm,
     ],
   );
-  // Project-folder explorer: open folders (sidebar tabs), the active tab, the
-  // file shown in the center pane, and the linked-nav toggle.
-  const {
-    openFolders,
-    sidebarTab,
-    linkNav,
-    activeFile,
-    openFolder,
-    closeFolder,
-    selectSessions,
-    selectFolder,
-    setActiveFile,
-    setLinkNav,
-  } = useFolderWorkspaces();
 
   // Follow the active terminal's live working directory: when it `cd`s into a
   // new folder, auto-open that folder as a sidebar tab, and — when linked nav
@@ -2259,7 +2571,88 @@ function App() {
   const termCtxRef = useRef<
     Map<string, { folder: string | null; file: string | null }>
   >(new Map());
-  const terminalsRef = useRef<TerminalTabsHandle>(null);
+  // ── Deferred terminal dock (boot budget) ───────────────────────────────
+  //
+  // `TerminalTabs` used to mount with the shell: it loads xterm, spawns a PTY,
+  // and starts polling cwds — all while the front door is still coming up, for
+  // a dock most launches don't touch until after they've typed a sentence.
+  //
+  // Now the dock renders as a fixed-geometry SHELL (the plate, the divider,
+  // the height the layout owns) and the tabs mount once, on the first of:
+  //   * an idle callback after the first actionable frame,
+  //   * the user opening/focusing the dock,
+  //   * a launch that needs a terminal — which awaits the mount rather than
+  //     racing it (`ensureTerminalReady`).
+  // Once mounted it is never unmounted: a surface change that took the dock
+  // away would kill every PTY in it and lose the scrollback.
+  const [terminalMounted, setTerminalMounted] = useState(false);
+  const terminalsRef = useRef<TerminalTabsHandle | null>(null);
+  /** Resolvers waiting for the dock's imperative handle to exist. */
+  const terminalWaitersRef = useRef<((h: TerminalTabsHandle | null) => void)[]>(
+    [],
+  );
+  /** Callback ref: the handle's arrival is the signal a queued launch needs,
+   *  and a ref object cannot announce itself. */
+  const attachTerminals = useCallback((handle: TerminalTabsHandle | null) => {
+    terminalsRef.current = handle;
+    if (!handle) return;
+    const waiting = terminalWaitersRef.current;
+    terminalWaitersRef.current = [];
+    for (const resolve of waiting) resolve(handle);
+  }, []);
+  /** Mount the dock if it isn't, and resolve once a PTY can be opened in it.
+   *
+   *  This is the queue the plan calls for: launch intent that arrives before
+   *  xterm exists waits for it instead of being dropped. Bounded — a dock that
+   *  never mounts must surface as "couldn't open a terminal", the failure the
+   *  launch path already handles, not as a launch that hangs forever. */
+  const ensureTerminalReady = useCallback(
+    (timeoutMs = 5000): Promise<TerminalTabsHandle | null> => {
+      if (terminalsRef.current) return Promise.resolve(terminalsRef.current);
+      setTerminalMounted(true);
+      return new Promise((resolve) => {
+        let settled = false;
+        const once = (h: TerminalTabsHandle | null) => {
+          if (settled) return;
+          settled = true;
+          resolve(h);
+        };
+        terminalWaitersRef.current.push(once);
+        window.setTimeout(() => once(terminalsRef.current), timeoutMs);
+      });
+    },
+    [],
+  );
+
+  // Mount the terminal dock once the shell is actionable and the main thread
+  // is free. Idle, not immediate: xterm's chunk plus a PTY spawn plus the cwd
+  // poll is real work, and the point of deferring it was to keep it off the
+  // frame the user is waiting for. Any explicit intent (opening the dock, a
+  // launch) beats this timer — see `ensureTerminalReady`.
+  useEffect(() => {
+    if (!shellReady || terminalMounted) return;
+    const idle = (
+      window as Window & {
+        requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number;
+      }
+    ).requestIdleCallback;
+    const run = () => setTerminalMounted(true);
+    if (!idle) {
+      const t = window.setTimeout(run, 400);
+      return () => window.clearTimeout(t);
+    }
+    const id = idle(run, { timeout: 2000 });
+    return () =>
+      (
+        window as Window & { cancelIdleCallback?: (h: number) => void }
+      ).cancelIdleCallback?.(id);
+  }, [shellReady, terminalMounted]);
+
+  // The dock is live: xterm is loaded and a PTY can be opened in it.
+  useEffect(() => {
+    if (terminalMounted) markOnce("rl:terminal-ready");
+  }, [terminalMounted]);
+
 
   // Switch the sidebar to a folder and reopen the file last viewed there. The
   // single path for "this folder is now active", whatever triggered it. Does
@@ -3218,85 +3611,51 @@ function App() {
     }
   }
 
-  // Initial load: hook status + sessions
+  // ── Core bootstrap ────────────────────────────────────────────────────────
+  //
+  // ONE call, and it answers exactly one question: what should the first
+  // actionable frame show? Session summaries, the held session (if any), the
+  // interception mode, the daemon's bind state, the workspace manifest and the
+  // installed harnesses — everything that decides *which surface renders and
+  // what is on it*.
+  //
+  // What is deliberately NOT here: whether the hook is installed, whether the
+  // skill is stale, whether `claude`/`codex`/curl are present and new enough.
+  // Those decide whether a *launch* will work, which is a question with a much
+  // later deadline — and answering them spawns child processes, one of which
+  // (`codex --help`, behind an interactive login shell on an exotic install)
+  // could be the single slowest thing on the machine. They ran inside this
+  // effect's `Promise.all`, so the front door was gated on the slowest probe.
+  // They now run after the reveal, in `integrationHealth`.
   useEffect(() => {
     (async () => {
-      // The boot lookups are independent of one another AND of the session
-      // list, so they all fly concurrently — the doors animate over this
-      // stretch, and every serial IPC here used to delay first content.
-      const statuses = Promise.all([
-        invoke<HookStatus>("get_hook_status").then(setHookStatus, (err) =>
-          console.error("get_hook_status failed", err),
-        ),
-        invoke<CodexHookStatus>("get_codex_hook_status").then(
-          setCodexHookStatus,
-          (err) => console.error("get_codex_hook_status failed", err),
-        ),
-        invoke<SkillStatus>("get_codex_skill_status").then(
-          setCodexSkillStatus,
-          (err) => console.error("get_codex_skill_status failed", err),
-        ),
-        invoke<SkillStatus>("get_skill_status").then(
-          (status) => {
-            // `outdated` means present-but-stale (content drift after an app
-            // update, or a retired orphan dir) — the user already consented
-            // to the install once via the setup modal, so refresh silently
-            // instead of re-raising it. First-run (not installed, not
-            // outdated) still gets the unskippable modal. No modal flash:
-            // `setupModalActive` requires a non-null status, which stays
-            // null until this whole chain resolves. On install failure fall
-            // back to the fetched status so the modal still catches it.
-            if (!status.outdated) {
-              setSkillStatus(status);
-              return;
-            }
-            return invoke<SkillStatus>("install_skill").then(
-              setSkillStatus,
-              (err) => {
-                console.error("install_skill failed", err);
-                setSkillStatus(status);
-              },
-            );
-          },
-          (err) => console.error("get_skill_status failed", err),
-        ),
-        invoke<InterceptionMode>("get_interception_mode").then(
-          setMode,
-          (err) => console.error("get_interception_mode failed", err),
-        ),
-        // Authoritative mount-time check — beats racing the
-        // daemon-bind-failed event, which may fire before this listener is
-        // wired up.
-        invoke<boolean>("get_daemon_status").then(setDaemonBound, (err) =>
-          console.error("get_daemon_status failed", err),
-        ),
-      ]);
-      // The workspace manifest gates what mounts, so it loads with the other
-      // boot lookups. Missing/malformed file = defaults = today's stock UI
-      // (and so does an unavailable command — tests / web). The harness
-      // lookups ride the same batch: the build's flavor (A7's boot entry —
-      // None in every normal build) and the installed manifests.
-      const [wsText, flavor, installed, list] = await Promise.all([
-        invoke<string | null>("get_workspace").catch(() => null),
-        invoke<string | null>("harness_flavor").catch(() => null),
-        invoke<{ id: string; json: string }[]>("list_harnesses").catch(
-          () => [] as { id: string; json: string }[],
-        ),
-        refreshSummaries(),
-        statuses,
-      ]);
-      const ws = parseWorkspace(wsText);
+      const boot = await invoke<BootstrapState>("bootstrap_state").catch(
+        (err) => {
+          // The shell still has to come up. Cached preferences already
+          // composed the first frame; empty defaults here mean the front door
+          // with no projects rather than a window that never resolves.
+          console.error("bootstrap_state failed", err);
+          return null;
+        },
+      );
+      const list = boot?.sessions ?? [];
+      setSummaries(list);
+      if (boot) {
+        setMode(boot.mode as InterceptionMode);
+        setDaemonState(boot.daemon);
+      }
+      const ws = parseWorkspace(boot?.workspace ?? null);
       setWorkspace(ws);
       // Refresh the paint cache from the authoritative read — the file is
       // the store, the cache is next launch's first frame.
-      storeWorkspaceCache(localStorage, wsText ?? null);
+      storeWorkspaceCache(localStorage, boot?.workspace ?? null);
       // Harness resolution. The boot pass and every later refresh (window
       // focus, an install landing) share applyHarnessResolution: a
       // user-entered harness from last session is RE-RESOLVED from its
       // source, so an edited manifest shows fresh and a deleted one exits
       // cleanly to stock Redline.
-      harnessFlavorRef.current = flavor;
-      const resolved = applyHarnessResolution(installed);
+      harnessFlavorRef.current = boot?.harnessFlavor ?? null;
+      const resolved = applyHarnessResolution(boot?.harnesses ?? []);
       const harnessDeltaNow = resolved
         ? readHarnessArrangement(localStorage, resolved.manifest.id)
         : {};
@@ -3307,10 +3666,13 @@ function App() {
       // One carve-out: a session still HELD is Claude literally paused mid-
       // run waiting on your verdict. Burying that behind a prompt box would
       // leave an agent blocked with nothing on screen saying so, so a held
-      // plan still claims the plate.
-      const held = list.find((s) => s.attachState === "held") ?? null;
-      setActiveId(held?.sessionId ?? null);
-      await loadSession(held?.sessionId ?? null);
+      // plan still claims the plate. The backend picks it from the same list
+      // it returned, so the routing target is always in the list it routes
+      // within.
+      const held = boot?.heldSessionId ?? null;
+      setActiveId(held);
+      await loadSession(held);
+      if (held) markOnce("rl:session-ready");
       // Landing: "last" (default) keeps the persisted surface — today's
       // behavior. A fixed or per-project landing overrides it; a landing on
       // a disabled surface falls back to the document. Inside a harness the
@@ -3341,7 +3703,8 @@ function App() {
         startedAt: Date.now(),
         done: false,
       };
-      bootSettledRef.current = true;
+      bootstrapDoneRef.current = true;
+      markOnce("rl:core-bootstrap");
       setLoading(false);
     })();
   }, []);
@@ -3380,6 +3743,14 @@ function App() {
       // it was one, is over.
       setPlanEverArrived(true);
       setPendingLaunch(null);
+      // A restore landed. Completed off the EVENT, not off a session-id match:
+      // `restored` is set only for a re-presentation the daemon rebound to a
+      // plan it was holding, and there is at most one restore in flight
+      // app-wide — so the attempt closes even when claude came back under a
+      // rekeyed live session id and the sentinel is what tied the two together.
+      setRestoreAttempt((a) =>
+        reduceRestore(a, { type: "plan-received", restored: payload.restored }),
+      );
       // Attention cue: a plan was just intercepted. Fire on *every* intercept,
       // regardless of which session it targets or whether we're focused.
       if (flashEnabledRef.current) {
@@ -3408,7 +3779,12 @@ function App() {
               ?.pendingCount ?? 0;
           if (pending > 0) {
             setToast(
-              `${pending} pending comment${pending === 1 ? "" : "s"} carried over — Send to Claude Code when ready`,
+              `${pending} pending comment${pending === 1 ? "" : "s"} carried over — Send to ${
+                resolveRestoreHarness({
+                  backend: list.find((s) => s.sessionId === payload.sessionId)
+                    ?.backend,
+                }).label
+              } when ready`,
             );
             setTimeout(() => setToast(null), 4000);
           }
@@ -3441,7 +3817,7 @@ function App() {
         const stealsFocus =
           payload.sessionId !== activeId &&
           discussionLiveRef.current &&
-          voiceOpenRef.current;
+          planVoiceOpenRef.current;
         if (!stealsFocus) {
           focusIntercepted();
           return;
@@ -3504,7 +3880,7 @@ function App() {
     );
     // This window's daemon could not bind :7676 — it captures no plans.
     const bindFailedUnlisten = listen("daemon-bind-failed", () => {
-      setDaemonBound(false);
+      setDaemonState("failed");
     });
     const commentsUnlisten = listen<{ sessionId: string }>(
       "comments-changed",
@@ -3846,7 +4222,7 @@ function App() {
     runsOpen,
     chatOpen,
     chatId,
-    chatTitle: chats.find((c) => c.companionId === chatId)?.title ?? null,
+    chatTitle,
     activeId,
     planTitle: activeSummary?.planTitle ?? null,
     planProject: activeSummary?.projectPath ?? null,
@@ -3856,6 +4232,7 @@ function App() {
     drafterDraftId,
     drafterProject: drafterProjectPath,
     activeFile,
+    plateMode,
     hasTerminal: termTabCount > 0,
   });
   const activeSurfaceKey = `${activeSurface.kind}\u0000${activeSurface.id ?? ""}\u0000${
@@ -4157,28 +4534,120 @@ function App() {
     deps: [tocDocked, tocEligible, mainSurface, activeId, activeFile, docWide],
   });
 
-  // The voice panel docks on the OTHER side of the same document column, over
-  // whichever of its two surfaces is live. One source of truth for the JSX and
-  // for the surrounding layout, so the dock, the divider and the pill can never
-  // disagree about whether the panel is up.
-  const planVoiceOpen =
-    voiceEnabled &&
-    sessionReady &&
-    !!latest &&
-    mainSurface === "document" &&
-    !(sidebarTab.kind === "folder" && activeFile) &&
-    voiceOpen;
-  const drafterVoicePanelOpen =
-    voiceEnabled &&
-    mainSurface === "drafter" &&
-    !!drafterDraftId &&
-    drafterVoiceOpen;
-  const voiceDocked = planVoiceOpen || drafterVoicePanelOpen;
-  // Which "close" the divider's chevron means depends on which surface is up.
-  const closeVoicePanel = useCallback(() => {
-    setVoiceOpen(false);
-    setDrafterVoiceOpen(false);
+  // The conversation dock's contexts. It sits at PLATE level — a sibling of
+  // the whole surface pane, not of the document body — so the same column
+  // serves whichever surface is selected; all that changes per surface is
+  // which conversations exist beside it.
+  //
+  // App decides what is DISCUSSABLE (a plan needs its markdown to have
+  // arrived); the lib decides which conversations belong to a surface and
+  // which one leads. That split is the point: the precedence is unit-tested
+  // and App only wires.
+  const planDiscussable = sessionReady && !!latest;
+  const dockContexts = useMemo(
+    () =>
+      conversationContexts({
+        voiceEnabled,
+        chatEnabled,
+        surface: mainSurface,
+        plateMode,
+        activeId: planDiscussable ? activeId : null,
+        planTitle: activeSummary?.planTitle ?? null,
+        drafterDraftId,
+        drafterTitle: null,
+        browseId: browserDock.browseId,
+        browseTitle: browserDock.title,
+        browsePill: browserDock.pill,
+        linkedId: browserDock.linkedId,
+        missionId: browserDock.missionId,
+        missionTitle: browserDock.missionTitle,
+        companionId: chatId,
+        companionTitle: chatTitle,
+      }),
+    [
+      voiceEnabled,
+      chatEnabled,
+      mainSurface,
+      plateMode,
+      planDiscussable,
+      activeId,
+      activeSummary?.planTitle,
+      drafterDraftId,
+      browserDock,
+      chatId,
+      chatTitle,
+    ],
+  );
+  const dockContext = activeConversation(dockContexts, conversationPin);
+  // Two poses, one thread. The plate is "at rest" only on the Front Door —
+  // nothing of its own to cover — which is exactly what makes the door a way
+  // IN to a conversation rather than a place you navigate away from.
+  // The room's occupant must be the conversation the room was opened for. If
+  // the user switches contexts from inside it — to one that cannot be a room,
+  // or simply to another — the room folds back into the column rather than
+  // quietly showing something else at plate scale.
+  useEffect(() => {
+    if (expandedKind && dockContext && dockContext.kind !== expandedKind)
+      setExpandedKind(null);
+  }, [expandedKind, dockContext]);
+  // One source of truth for the JSX and for the surrounding layout, so the
+  // dock, the divider and the pill can never disagree about whether the
+  // column is up.
+  const voiceDocked = !conversationExpanded && dockOpen && dockContext != null;
+  const planVoiceOpen = voiceDocked && dockContext?.kind === "voice";
+  planVoiceOpenRef.current = planVoiceOpen;
+  // One native capture at a time. The mic belongs to the dock only while the
+  // dock is holding a conversation `voice.rs` will actually take.
+  const dockOwnsMic = voiceDocked && dockContext?.voiceCapable === true;
+  // Putting the conversation away — from the column or from the room. One
+  // action, because "close" must not mean two different things depending on
+  // the pose: whichever you were in, you end up back where you were without it.
+  const closeDock = useCallback(() => {
+    setDockOpen(false);
+    setExpandedKind(null);
   }, []);
+  const openDock = useCallback(() => setDockOpen(true), []);
+  // Which of the browser pane's four panels the dock is showing, in the pane's
+  // own vocabulary. Null whenever the column is closed or holding another
+  // surface's conversation — which is exactly when the pane must not portal.
+  const dockPill = voiceDocked ? kindPill(dockContext?.kind ?? null) : null;
+  const openDockPill = useCallback(
+    (pill: ChatPill) => {
+      const kind = pillKind(pill);
+      if (!kind) return;
+      setConversationPin(kind);
+      setDockOpen(true);
+    },
+    [setConversationPin],
+  );
+  // The browser pane is mounted only while its surface is selected, so its
+  // description of itself has to be dropped when it leaves — otherwise a tab
+  // title outlives the tab it named.
+  useEffect(() => {
+    if (mainSurface !== "browser") setBrowserDock(NO_BROWSER_DOCK);
+  }, [mainSurface]);
+  // The dock's bodies are lazy chunks. Warm the room's when the COLUMN opens
+  // rather than at the instant the Companion tab is picked, so stepping
+  // sideways into it doesn't blank for a beat.
+  useEffect(() => {
+    if (dockOpen && chatEnabled) prefetchSurfaceChunk("chat");
+  }, [dockOpen, chatEnabled]);
+  // Go to a surface AND a tab inside it. `selectSurface` keeps its signature —
+  // it is the one surface mutator and taking a second argument would make
+  // every one of its ~30 call sites answer a question it doesn't have — so the
+  // tab travels as a separate nonce'd REQUEST that the surface honours once.
+  // A tab the surface doesn't have is dropped here rather than sent and
+  // ignored, so a stale palette entry can't strand anyone.
+  const [tabRequest, setTabRequest] = useState<TabRequest | null>(null);
+  const navigateTo = useCallback(
+    (t: NavTarget) => {
+      selectSurfaceRef.current(t.surface as MainSurface);
+      if (isKnownTab(t.surface, t.tab))
+        setTabRequest({ tab: t.tab!, nonce: Date.now() });
+    },
+    [],
+  );
+  const dockReachable = dockContexts.length > 0;
 
   const joinRoom = useCallback((config: CollabConfig, name: string) => {
     setJoinedRoom({ config, name });
@@ -4406,32 +4875,108 @@ function App() {
     summaries.find((s) => s.sessionId === activeId)?.attachState ===
     "detached";
   const detached = activeDetached && !detachDismissed;
-  // A restore in flight, by session id. Restoring costs a resumed model turn
-  // and takes several seconds; without this the button looks inert and gets
-  // clicked again — which is not harmless. Every click resumes the SAME
-  // conversation in ANOTHER terminal, and each of those lands its own
-  // ExitPlanMode: on 08/26 three clicks 40 seconds apart put two duplicate
-  // revisions on one plan and left three claudes racing to hold it.
-  //
-  // Cleared by the plan coming back (the session leaves `detached`) or by the
-  // watchdog below, never by the click that set it.
-  const [restoringId, setRestoringId] = useState<string | null>(null);
-  const restoring = !!restoringId && restoringId === activeId;
+  // A restore in flight — a RECORD, not a flag, and a state machine rather
+  // than a pile of setState calls. Every rule that matters about it is a rule
+  // about ORDER (a stale handoff failure landing after a retry; a summary
+  // refresh beating the event that already closed it), so the whole lifecycle
+  // lives in `lib/restoreAttempt` where order can be pinned by a test.
+  const [restoreAttempt, setRestoreAttempt] = useState<RestoreAttempt | null>(
+    null,
+  );
+  const onRestore = (ev: RestoreEvent) =>
+    setRestoreAttempt((a) => reduceRestore(a, ev));
+  const {
+    attempt: attemptHere,
+    restoring,
+    failure: restoreFailure,
+  } = restoreView(restoreAttempt, activeId);
+  // A stuck attempt would leave the reviewer watching a status line forever, so
+  // it expires — into a VISIBLE failure rather than back into the original
+  // banner. Silently reverting is indistinguishable from never having clicked,
+  // which is how one quietly-dead restore became three live claudes.
   useEffect(() => {
-    if (!restoringId) return;
-    // Reattached: the restore landed and the banner is already gone.
-    const state = summaries.find((s) => s.sessionId === restoringId)?.attachState;
-    if (state && state !== "detached") {
-      setRestoringId(null);
+    if (!restoreAttempt || restoreAttempt.phase === "failed") return;
+    // Reattached: the restore landed. (`plan-received` closes it too, and
+    // usually first — this is the backstop for a summary refresh that wins.)
+    const state =
+      summaries.find((sx) => sx.sessionId === restoreAttempt.sessionId)
+        ?.attachState ?? null;
+    const settled = reduceRestore(restoreAttempt, {
+      type: "attach-state",
+      sessionId: restoreAttempt.sessionId,
+      state,
+    });
+    if (settled !== restoreAttempt) {
+      setRestoreAttempt(settled);
       return;
     }
-    // …or it didn't. A stuck flag would disable the only way back, so it
-    // expires on its own — generously, since the wait is a model turn against
-    // a full transcript and the reviewer can always wait longer than we can
-    // predict.
-    const timer = window.setTimeout(() => setRestoringId(null), 120_000);
+    const timer = window.setTimeout(
+      () =>
+        onRestore({
+          type: "timeout",
+          error:
+            "The reopened session hasn't answered in two minutes. It may " +
+            "still be thinking — or it may have stopped at a prompt.",
+        }),
+      restoreDeadlineIn(restoreAttempt, Date.now()),
+    );
     return () => window.clearTimeout(timer);
-  }, [restoringId, summaries]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [restoreAttempt, summaries]);
+
+  // A legacy row — no `sessions.backend`, because it predates the column or its
+  // hook never sent a provider — cannot be restored until someone says which
+  // harness holds the conversation. The id proves nothing: current Codex issues
+  // UUID session ids indistinguishable from Claude's, so sniffing the shape
+  // would be a coin flip dressed as a decision. So the banner asks. Keyed by
+  // session, because two legacy reviews must not inherit each other's pick.
+  const [harnessChoices, setHarnessChoices] = useState<
+    Record<string, RestoreHarness>
+  >({});
+
+  // The harness this detached review restores on. ONE derivation, read by the
+  // banner, the embedded-terminal restore and the clipboard fallback alike —
+  // the three cannot disagree about which binary resumes the conversation.
+  const restoreDecision = useMemo(
+    () =>
+      resolveRestoreHarness({
+        backend: session?.backend,
+        choice: activeId ? harnessChoices[activeId] : null,
+      }),
+    [session?.backend, activeId, harnessChoices],
+  );
+
+  // What stands between this review and its plan coming back. Derived, never
+  // stored: `applyReadinessFix` re-probes, the answer lands in `preflight`, and
+  // the row clears itself without the reviewer re-clicking anything. Shown in
+  // the banner BEFORE the click, because a restore that can't return the plan
+  // spends a terminal, dismisses the banner, and leaves nothing to show for it.
+  const detachedCopy = useMemo(
+    () => detachedBannerCopy(restoreDecision),
+    [restoreDecision],
+  );
+
+  // What the banner says while a restore is in flight. Same copy the toast used
+  // to carry, from the same place — `restoreHarness` owns every reviewer-facing
+  // sentence about a restore so the two paths cannot drift. `history` is only
+  // known once `prepare_restore` has answered, and `unchecked` is the honest
+  // reading before then: nobody has looked yet.
+  const restoreStatus = restoring
+    ? restoreStartedNote(restoreDecision, {
+        cwd: null,
+        relocated: false,
+        primed: false,
+        history: attemptHere?.history ?? "unchecked",
+      }).message
+    : null;
+
+  const restoreBlockers = useMemo(
+    () =>
+      restoreDecision.harness === "codex"
+        ? codexRestoreBlockers(preflight, codexHookStatus?.installed)
+        : [],
+    [restoreDecision.harness, preflight, codexHookStatus?.installed],
+  );
   // `waiting` shows the "Claude is working" indicators and gates the
   // submit/approve buttons — true from "Send to Claude Code" until that
   // session's next plan arrives. See isClaudeWorking for the exact rules
@@ -4659,8 +5204,8 @@ function App() {
   // — skip the git duty, keep the rest.
   const [orchestrateModal, setOrchestrateModal] = useState<{
     gitStatus: GitStatus | null;
-    workflowsDisabled: boolean;
-    allowRules: string[];
+    availability: WorkflowAvailability | null;
+    allowRules: AllowCandidate[];
   } | null>(null);
   const openOrchestrateModal = async () => {
     if (!session || busy) return;
@@ -4669,19 +5214,21 @@ function App() {
       repo
         ? invoke<GitStatus>("push_status", { repo }).catch(() => null)
         : Promise.resolve(null),
-      invoke<WorkflowAvailability>("workflow_availability").catch(() => null),
+      // The project goes with the probe: a `disableWorkflows` in the repo's
+      // own `.claude/settings*.json` binds this run exactly as hard as the
+      // user-level file, and used to be unread.
+      invoke<WorkflowAvailability>("workflow_availability", {
+        projectPath: repo,
+      }).catch(() => null),
       repo
-        ? invoke<string[]>("orchestrate_allow_candidates", {
+        ? invoke<AllowCandidate[]>("orchestrate_allow_candidates", {
             projectPath: repo,
           }).catch(() => [])
         : Promise.resolve([]),
     ]);
     setOrchestrateModal({
       gitStatus: git,
-      workflowsDisabled: !!(
-        avail &&
-        (avail.disabledInSettings || avail.disabledInEnv)
-      ),
+      availability: avail,
       allowRules: rules ?? [],
     });
   };
@@ -4697,6 +5244,27 @@ function App() {
     projectPath: string | null,
   ) => {
     const prompt = buildOrchestratePrompt(sessionId);
+    // B3: a `cd`-less orchestrate command spawns in `$HOME`, and the
+    // orchestrator runs `--permission-mode acceptEdits` — a write-capable
+    // session pointed at the wrong tree. The severity is not "it fails", it
+    // is "it succeeds somewhere else", so an unresolved project refuses here
+    // rather than launching against the default directory.
+    if (!projectPath || !projectPath.trim()) {
+      await invoke("reset_run", { sessionId }).catch(() => {});
+      setHandoffFailure({
+        sessionId,
+        stage: "launch",
+        reason:
+          "no project directory could be resolved for this session — " +
+          "refusing to launch a write-capable orchestrator in your home " +
+          "directory",
+        launchCmd: "",
+        prompt,
+        projectPath: null,
+      });
+      void refreshSummaries();
+      return;
+    }
     const seats = await invoke<{
       seats: Record<string, { model?: string }>;
     }>("get_agent_seats").catch(() => null);
@@ -4708,7 +5276,11 @@ function App() {
     suppressTerminalRevealFocus();
     setTermFullscreen(false);
     revealTerm();
-    const id = terminalsRef.current?.openSessionTerminal(projectPath) ?? null;
+    // Waits for the dock rather than racing it: the terminal now mounts after
+    // the first actionable frame, so a launch fired seconds into a session
+    // could otherwise find no handle and report "couldn't open a terminal".
+    const id =
+      (await ensureTerminalReady())?.openSessionTerminal(projectPath) ?? null;
     const fail = async (stage: string, reason: string) => {
       await invoke("reset_run", { sessionId }).catch(() => {});
       setHandoffFailure({
@@ -4811,7 +5383,18 @@ function App() {
   // delivery — reset + orchestrating happen backend-side; the delivery half
   // is the same verified handoff as a first launch.
   const relaunchOrchestrator = async (sessionId: string) => {
-    const summary = summaries.find((x) => x.sessionId === sessionId);
+    // Resolve the tree BEFORE touching the run state: the loaded session
+    // first (same source the first launch uses), the summary as the fallback,
+    // and a refusal when neither answers — never a `cd`-less command.
+    const projectPath = resolveRunProject(sessionId, session, summaries);
+    if (!projectPath) {
+      setToast(
+        "Re-launch refused: this session's project directory could not be " +
+          "resolved, and an orchestrator must never run in your home folder.",
+      );
+      setTimeout(() => setToast(null), 8000);
+      return;
+    }
     setHandoffFailure((cur) => (cur?.sessionId === sessionId ? null : cur));
     try {
       await invoke("relaunch_run", { sessionId });
@@ -4820,7 +5403,7 @@ function App() {
       setTimeout(() => setToast(null), 6000);
       return;
     }
-    void deliverOrchestrator(sessionId, summary?.projectPath || null);
+    void deliverOrchestrator(sessionId, projectPath);
   };
 
   // B1: clear a wedged run without touching the approval.
@@ -4878,7 +5461,9 @@ function App() {
             onAction: () => {
               setToast(null);
               revealTerm();
-              terminalsRef.current?.selectTab(terminal);
+              void ensureTerminalReady().then((dock) =>
+                dock?.selectTab(terminal),
+              );
             },
           },
         });
@@ -4913,6 +5498,11 @@ function App() {
      *  `SHELL_PROMPT`. Costs no wall-clock — a shell mid-rc could not have run
      *  the command yet either way. */
     freshShell?: boolean,
+    /** Take the failure instead of the toast. Set by callers that already own
+     *  a place to say it — the restore banner, which has to move to its
+     *  `failed` phase rather than leave a status line spinning behind a toast
+     *  the reviewer dismissed. */
+    onFailure?: (stage: string, reason: string) => void,
   ) => {
     const journal = (stage: string, detail?: string) => {
       if (!sessionId) return;
@@ -4937,6 +5527,10 @@ function App() {
     void deliverToTerminal(deps, id, [step]).then((r) => {
       if (!r.ok) {
         journal("handoff_failed", `${r.stage}: ${r.reason}`);
+        if (onFailure) {
+          onFailure(r.stage, r.reason);
+          return;
+        }
         setToast({
           message: `${failNote} (${r.stage}): ${r.reason}`,
           action: { label: "Dismiss", onAction: () => setToast(null) },
@@ -4945,41 +5539,24 @@ function App() {
     });
   };
 
-  /** What `prepare_restore` resolved against the transcripts on disk. */
-  interface RestorePrep {
-    /** The cwd the resume must run from — the session's STARTUP cwd. */
-    cwd: string | null;
-    /** A transcript for this id exists; without one there is nothing to resume. */
-    found: boolean;
-    /** It lives somewhere other than the plan's project path. */
-    relocated: boolean;
-    /** Its plan file already holds the restore marker, so the resumed session
-     *  has one tool call to make instead of three. */
-    primed: boolean;
-  }
-
-  // A session with no transcript on disk can't be resumed at all — `claude
-  // --resume` will report "No conversation found" from every cwd, then start a
-  // FRESH conversation. The restore still lands (the sentinel carries the held
-  // plan's id, so the daemon rebinds it), but the plan's own history is gone
-  // from that session's context, and the reviewer deserves to know which of the
-  // two just happened. The usual cause is transcript saving being off — a
-  // `claude` launched with an inherited CLAUDE_CODE_CHILD_SESSION marker.
-  const NO_TRANSCRIPT_NOTE =
-    "Copied — but Claude has no saved transcript for this session, so it will " +
-    "resume as a fresh conversation without the plan's history.";
-
-  // Ask the backend where this conversation actually lives. Never throws the
-  // restore away on failure: the plan's project path is the guess this used to
-  // make unconditionally, so falling back to it is a return to the old
-  // behaviour rather than a dead end.
+  // Ask the backend where this conversation actually lives — and, for Claude,
+  // whether it lives anywhere at all. Never throws the restore away on failure:
+  // the plan's project path is the guess this used to make unconditionally, so
+  // falling back to it is a return to the old behaviour rather than a dead end.
+  //
+  // The fallback claims `unchecked`, not `available`. Preparation failing is
+  // precisely the case where we have no answer about the transcript, and the
+  // one thing `history` must never do is manufacture one — `missing` is spent
+  // on a real warning ("resuming as a fresh conversation") that would be a lie
+  // here, and `available` would suppress that warning when it was deserved.
   const resolveResumeCwd = async (
     sessionId: string,
     projectPath: string | null | undefined,
+    backend: string | null | undefined,
   ): Promise<RestorePrep> => {
     const fallback: RestorePrep = {
       cwd: projectPath || null,
-      found: true,
+      history: "unchecked",
       relocated: false,
       primed: false,
     };
@@ -4987,6 +5564,11 @@ function App() {
       const r = await invoke<RestorePrep>("prepare_restore", {
         sessionId,
         projectPath: projectPath || null,
+        // Load-bearing: the Claude arm reads `~/.claude` for a transcript, a
+        // startup cwd and a plan file to prime. A Codex thread has none of the
+        // three, so running it would spend the lookups to arrive at "missing"
+        // — and then tell a Codex reviewer their session has no transcript.
+        backend: backend || null,
       });
       return r ?? fallback;
     } catch {
@@ -4994,59 +5576,128 @@ function App() {
     }
   };
 
-  // One-click recovery for a detached plan: open a terminal in the session's
-  // project dir and resume the exact Claude Code conversation with an initial,
-  // user-attested prompt that re-presents the plan. Because the resumed session
-  // keeps the same session_id, its ExitPlanMode POST reattaches to this review —
-  // comments, revisions and reopen history intact (no phantom new review).
-  const restorePlanSession = async () => {
-    if (!session) return;
-    // One at a time. See `restoringId`.
-    if (restoringId) return;
-    setRestoringId(session.sessionId);
-    // Where the conversation can actually be resumed from — the cwd it STARTED
-    // in, which is not always the plan's project path (a session launched from
-    // `~` and `cd`'d into the repo files its transcript under `~`). Resolved
-    // against the transcripts on disk; falls back to the project path.
-    const target = await resolveResumeCwd(session.sessionId, session.projectPath);
-    const cwd = target.cwd;
-    const cmd = `${buildResumeCommand(
-      session.sessionId,
-      new Date(),
-      cwd,
-      rescindedIds.has(session.sessionId),
-      target.primed,
-    )}\r`;
-    // Arm a one-shot restore so the resumed session's re-presented plan is
-    // labeled "vN restored" rather than counted as a fresh version/thread.
-    void invoke("arm_restore", { sessionId: session.sessionId });
-    suppressTerminalRevealFocus();
+  // Refuse a restore that cannot return the plan, and say what's in the way.
+  // The banner already renders these rows with their fix buttons; this is the
+  // click-time backstop for the gap between a stale probe and the button state.
+  const refuseBlockedRestore = (): boolean => {
+    const [first] = restoreBlockers;
+    if (!first) return false;
+    setToast(`${first.label} — restore can't bring the plan back until that's fixed.`);
+    setTimeout(() => setToast(null), 6000);
+    return true;
+  };
+
+  /** Bring a restore's terminal on screen, on request.
+   *
+   *  Promotes the EXISTING background terminal into the focused tile — never a
+   *  second terminal and never a second resume, which is the whole reason the
+   *  attempt record carries its id. Focus is deliberately not suppressed here
+   *  (unlike an automatic reveal): the reviewer asked to go there. */
+  const showRawTerminal = async (terminalId: string | null) => {
     setTermFullscreen(false);
     revealTerm();
+    if (!terminalId) return;
+    const dock = await ensureTerminalReady();
+    dock?.selectTab(terminalId);
+    dock?.hailTerminal(terminalId);
+  };
+
+  // One-click recovery for a detached plan: resume the exact conversation that
+  // wrote it, with a compact control event that re-establishes the held
+  // ExitPlanMode. Because the resumed session keeps the same session_id, its
+  // POST reattaches to this review — comments, revisions and reopen history
+  // intact (no phantom new review).
+  //
+  // The terminal it runs in is BACKGROUND. Restoring is machinery, not a place
+  // to work: the old path yanked the dock open and put the reviewer in front of
+  // a resumed session replaying its own control messages, which is exactly the
+  // raw replay this rework exists to stop presenting as conversation. The
+  // banner they are already reading becomes the progress surface, and
+  // "Show raw terminal" is there for when they want the machinery.
+  const restorePlanSession = async () => {
+    if (!session) return;
+    // One at a time. See `RestoreAttempt`. A failed attempt is not in flight —
+    // its Retry comes back through here.
+    if (!canStartRestore(restoreAttempt)) return;
+    // Nothing spent until the round trip can actually complete: a Codex restore
+    // missing its binary, sign-in, plan profile or Stop hook opens a terminal
+    // that runs, looks healthy, and never gives the plan back. The blocker's
+    // own fix is already on screen.
+    if (refuseBlockedRestore()) return;
+    const sessionId = session.sessionId;
+    const projectPath = session.projectPath || null;
+    onRestore({ type: "start", sessionId, at: Date.now() });
+    // The banner is the status surface now, so it must NOT be dismissed — the
+    // old path hid it and left the reviewer with a terminal and no narrator.
+    setDetachDismissed(false);
+    const fail = (error: string) =>
+      onRestore({ type: "fail", sessionId, error });
+
+    // Where the conversation can actually be resumed from — for Claude, the cwd
+    // it STARTED in, which is not always the plan's project path (a session
+    // launched from `~` and `cd`'d into the repo files its transcript under
+    // `~`). Resolved against the transcripts on disk; falls back to the project
+    // path, which is also where the Codex arm starts and ends.
+    const target = await resolveResumeCwd(
+      sessionId,
+      projectPath,
+      restoreDecision.harness,
+    );
+    const cmd = `${buildResumeCommand(
+      sessionId,
+      new Date(),
+      target.cwd,
+      rescindedIds.has(sessionId),
+      target.primed,
+      // A Codex thread id handed to `claude --resume` does not error — it
+      // silently starts a FRESH session, which then writes the sentinel under
+      // an id Redline never held. For a legacy row with no stored provenance
+      // this is the reviewer's own pick, defaulting to Claude.
+      {
+        backend: restoreDecision.harness,
+        codexBin: preflight?.codex?.path ?? null,
+      },
+    )}\r`;
+
+    // AWAITED, not fired: this arms two one-shots the restore depends on — the
+    // plan side (so the re-presentation is labeled "vN restored" instead of
+    // counted as a fresh version) and the prompt side (so the resumed session's
+    // first submission is answered with the hidden protocol and kept out of the
+    // lake). Both are consumed by events the command itself triggers, so
+    // dispatching first is a race with the arming that is supposed to precede
+    // it. It used to be a bare `void invoke(...)`.
+    try {
+      await invoke("arm_restore", { sessionId });
+    } catch (e) {
+      fail(`Couldn't arm the restore: ${String(e)}`);
+      return;
+    }
+
     // The terminal opens in the PLAN's directory — the one the reviewer thinks
     // in — and the command's own `cd` takes it wherever the transcript lives.
     const id =
-      terminalsRef.current?.openSessionTerminal(session.projectPath || null) ??
-      null;
-    if (id) {
-      typeIntoTerminal(
-        id,
-        cmd,
-        "Couldn't type the resume command",
-        session.sessionId,
-        true,
-      );
+      (await ensureTerminalReady())?.openSessionTerminal(projectPath, {
+        background: true,
+      }) ?? null;
+    if (!id) {
+      fail("Couldn't open a terminal to resume in.");
+      return;
     }
-    // Hide the banner while the resume runs; the re-presented plan flips
-    // attachState back to held, which clears the derived state for real.
-    setDetachDismissed(true);
-    setToast(
-      target.found
-        ? "Resuming the session below ↓ — the plan comes back when it answers"
-        : "No saved transcript for this session — resuming as a fresh " +
-          "conversation below ↓",
+    onRestore({
+      type: "dispatched",
+      sessionId,
+      terminalId: id,
+      history: target.history,
+    });
+    typeIntoTerminal(
+      id,
+      cmd,
+      "Couldn't type the resume command",
+      sessionId,
+      true,
+      (stage, reason) =>
+        fail(`Couldn't type the resume command (${stage}): ${reason}`),
     );
-    setTimeout(() => setToast(null), target.found ? 6000 : 8000);
   };
 
   // Candidate project directories for the drafter's launch picker: every review
@@ -5076,25 +5727,73 @@ function App() {
   // --add-dir grants exactly once, on the launch the folder was made for.
   const createdKindsRef = useRef<Record<string, "extension" | "harness">>({});
 
-  // A pending launch is being displaced (or has died). Pay back whatever the
-  // surface handed over before overwriting it — the Front Door gave up its
-  // sentence to the card and is owed it; the Drafter never took the document
-  // away and is owed nothing.
-  const releasePending = (p: PendingLaunch | null, note?: string) => {
+  // A pending launch DIED — the terminal it was running in went away before a
+  // plan ever arrived. Pay back whatever the surface handed over, because
+  // retyping a sentence you already wrote is the small betrayal this door
+  // exists to remove: the Front Door gave its sentence up and is owed it; the
+  // Drafter never took the document away and is owed nothing.
+  //
+  // Exactly ONE caller, and the name says why. Deliberate dismissal is not a
+  // death: "start something else" and displacing an older launch both leave
+  // the plan running in its own tile, and refilling the composer there is the
+  // unwanted refill — the sentence coming back after you sent it on purpose.
+  const repayPending = (p: PendingLaunch | null, note?: string) => {
     if (!p) return;
     if (p.restore.kind === "composer") {
       const next = restoreInto(
-        { text: frontDoorTextRef.current, attachments: frontDoorAttachmentsRef.current },
+        {
+          text: frontDoorTextRef.current,
+          attachments: frontDoorAttachmentsRef.current,
+          combine: frontDoorCombineRef.current,
+        },
         p.restore,
       );
       setFrontDoorText(next.text);
       setFrontDoorAttachments(next.attachments);
+      // A dead combine that handed back only the sentence would silently
+      // drop the plans it was about.
+      setFrontDoorCombine(next.combine ?? []);
     }
     if (note) {
       setToast(note);
       setTimeout(() => setToast(null), 4000);
     }
   };
+
+  // Read at LAUNCH time, from definitions that sit below `launchPlan` in the
+  // body — the same ref discipline `readinessRef` already uses so the gate is
+  // one law with one construction site.
+  const readinessInputRef = useRef<ReadinessInputFor>(() => {
+    throw new Error("readiness input builder read before it was defined");
+  });
+  const applyHealthRef = useRef<(h: IntegrationHealth) => void>(() => {});
+
+  /** Wait for the daemon's bind to actually resolve, bounded.
+   *
+   *  Shell rendering treats a bind in flight as fine — it is. A launch cannot:
+   *  starting a session in a window that owns no port sends the resulting plan
+   *  to whichever instance does, and the user watches a card spin over
+   *  nothing. Bounded because the opposite failure (a launch stranded behind a
+   *  bind that never resolves) is just as bad; on timeout we proceed on
+   *  "starting", which is not a blocker. */
+  const ensureDaemonReady = useCallback(
+    async (timeoutMs = 4000): Promise<DaemonState> => {
+      const started = Date.now();
+      for (;;) {
+        const state = await invoke<DaemonState>("daemon_state").catch(
+          // No command (tests, a browser preview) is not a failed bind.
+          () => "ready" as DaemonState,
+        );
+        if (state !== "starting") {
+          setDaemonState(state);
+          return state;
+        }
+        if (Date.now() - started > timeoutMs) return "starting";
+        await new Promise((resolve) => setTimeout(resolve, 40));
+      }
+    },
+    [],
+  );
 
   // THE launch. One impure function behind every door: it spawns the terminal,
   // types `claude --permission-mode plan` with the prompt (the spawn-verified
@@ -5105,7 +5804,7 @@ function App() {
   // themselves so they can order their own steps (render the blocker inside
   // their own island, hold the ⏎ to carry through). This catches the door that
   // forgets — which is exactly how the Drafter shipped with zero preflight.
-  const launchPlan = (req: {
+  const launchPlan = async (req: {
     origin: LaunchOrigin;
     prompt: string;
     projectPath: string | null;
@@ -5115,34 +5814,113 @@ function App() {
      *  months later, "why did we build this" walks back from the plan to the
      *  talk that produced it. */
     chatId?: string | null;
+    /** What the prompt LAKE should hold, when that is not what gets typed.
+     *  Only Combine passes it — see the invoke below. */
+    recordBody?: string | null;
+    /** The human's own words inside `recordBody`, for the lexical index. */
+    userText?: string | null;
     restore: LaunchRestore;
-  }):
+  }): Promise<
     | { ok: true; terminalId: string }
     // `blocked` carries the readiness item itself, not just its label: a door
     // that can render the fix where the user is looking should not have to
     // re-derive which fault it was from a sentence.
-    | { ok: false; reason: string; blocked?: ReadinessItem } => {
+    | { ok: false; reason: string; blocked?: ReadinessItem }
+  > => {
     const trimmed = req.prompt.trim();
     if (!trimmed) return { ok: false, reason: "nothing to launch" };
-    const gate = attemptLaunch(readinessRef.current);
+
+    // What kind of launch is this? Answered from the workspace registry alone
+    // — no probe needed — and it decides both the backend and what has to be
+    // probed for, so it comes first.
+    const kind =
+      projectKind(workspace, req.projectPath) ??
+      (req.projectPath
+        ? (createdKindsRef.current[req.projectPath] ?? null)
+        : null);
+    // ONE stored choice for all three doors. The front door owns the picker;
+    // the Drafter and the browser's "Send to Redline" launch through this same
+    // function, so they agree without each growing a control of their own.
+    //
+    // An extension launch stays on Claude no matter what is stored: its
+    // `--add-dir` grants are read grants under plan mode, and Codex's
+    // `--add-dir` is a WRITE grant that contradicts `-s read-only`.
+    const choice =
+      kind === "extension"
+        ? { backend: "claude-code" as const, model: null, effort: null }
+        : backendChoiceRef.current;
+
+    // ── The launch boundary ─────────────────────────────────────────────────
+    //
+    // Shell rendering never waits for integration health or for the daemon.
+    // A launch must. This is the seam where "the shell came up fast" stops
+    // being a licence to start a session on unverified ground:
+    //
+    //   * the probe is scoped to THIS launch (its backend, its target kind),
+    //     not to whatever the front door's picker happens to show — the
+    //     browser's "Send to Redline" can launch into a different project
+    //     than the one on screen;
+    //   * it goes through the same shared service, so a launch moments after
+    //     boot reuses the post-reveal probe instead of starting a second one;
+    //   * the gate is derived from the FRESH payload, not from React state,
+    //     which would still hold the pre-await value on this tick.
+    //
+    // If the probe fails outright, `health` is null and the gate falls back to
+    // the last derived readiness — a launch is not refused because a probe
+    // errored, only because it answered with a blocker.
+    const health = await integrationHealth
+      .ensure({ backend: choice.backend, extension: kind === "extension" })
+      .catch((err) => {
+        console.error("integration health failed at launch", err);
+        return null;
+      });
+    if (health) applyHealthRef.current(health);
+    // A window that owns no port captures no plans: the session would run and
+    // its plan would land in a different instance. Bounded — a bind that never
+    // resolves must not strand the launch either.
+    const daemon = await ensureDaemonReady();
+    const gate = attemptLaunch(
+      health
+        ? deriveReadiness(
+            readinessInputRef.current({
+              preflight: health.preflight,
+              daemonOk: daemon !== "failed",
+              projectPath: req.projectPath,
+              backend: choice.backend,
+              now: Date.now(),
+            }),
+          )
+        : readinessRef.current,
+    );
     if (gate.kind === "blocked")
       return { ok: false, reason: gate.item.label, blocked: gate.item };
 
     // An extension-pack target gets the staged ABI/SDK/template dirs granted
     // via --add-dir: the contract it builds against lives outside its cwd.
+    // Read from the payload just awaited, so an extension launch can no longer
+    // grant nothing because the door's cached probe never asked.
     const addDirs = extensionAddDirs(
-      projectKind(workspace, req.projectPath) ??
-        (req.projectPath
-          ? (createdKindsRef.current[req.projectPath] ?? null)
-          : null),
-      preflight?.extension ?? null,
+      kind,
+      health?.preflight.extension ?? preflightRef.current?.extension ?? null,
     );
-    const cmd = `${buildPlanLaunchCommand(trimmed, req.projectPath, addDirs)}\r`;
+    const cmd = `${buildPlanLaunchCommand(
+      trimmed,
+      req.projectPath,
+      addDirs,
+      choice,
+      {
+        codex:
+          health?.preflight.codex?.path ??
+          preflightRef.current?.codex?.path ??
+          null,
+      },
+    )}\r`;
     suppressTerminalRevealFocus();
     setTermFullscreen(false);
     revealTerm();
     const terminalId =
-      terminalsRef.current?.openSessionTerminal(req.projectPath) ?? null;
+      (await ensureTerminalReady())?.openSessionTerminal(req.projectPath) ??
+      null;
     // No terminal means the command was never typed and nothing will ever
     // arrive. Report it — `PendingLaunch.terminalId` is non-nullable precisely
     // so "spinning on a launch that never happened" cannot be constructed.
@@ -5162,6 +5940,17 @@ function App() {
       draftId: req.draftId,
       chatId: req.chatId ?? null,
       origin: req.origin,
+      // Combine alone records something other than what it typed: the brief
+      // is up to 120 KB of concatenated machine-written plans, and a
+      // `CorpusRole::User` row is permanently uncompactable. What reaches the
+      // lake is the human's typed context plus the source hashes.
+      recordBody: req.recordBody ?? null,
+      userText: req.userText ?? null,
+      // The door's own pick — known here and nowhere else. A launch left on
+      // the backend default sends nulls, and the transcript backfill answers
+      // instead.
+      backend: choice.backend,
+      model: choice.model,
     }).catch((err: unknown) => {
       const reason = String(err);
       console.error("record_plan_launch failed", err);
@@ -5170,7 +5959,11 @@ function App() {
       );
     });
 
-    releasePending(pendingLaunchRef.current);
+    // The displaced launch is NOT repaid. It is still running in its own
+    // terminal tile with its own plan on the way; handing its sentence back
+    // into the composer would drop a stale prompt on top of the one that just
+    // shipped. `pendingLaunch` is a single slot — the older launch's status
+    // lives in its tile, one click away.
     setReadinessNow(startedAt);
     setPendingLaunch({
       origin: req.origin,
@@ -5190,13 +5983,14 @@ function App() {
   // command. Same spawn-verified handoff as launchPlan.
   // No `cd` prefix — openSessionTerminal spawns the PTY *in* that directory,
   // and prefixing one would break on a path the shell would need quoted.
-  const runDevServer = (projectPath: string, runCommand: string) => {
+  const runDevServer = async (projectPath: string, runCommand: string) => {
     const cmd = runCommand.trim();
     if (!cmd) return;
     suppressTerminalRevealFocus();
     setTermFullscreen(false);
     revealTerm();
-    const id = terminalsRef.current?.openSessionTerminal(projectPath) ?? null;
+    const id =
+      (await ensureTerminalReady())?.openSessionTerminal(projectPath) ?? null;
     if (id) {
       typeIntoTerminal(id, `${cmd}\r`, "Couldn't start the dev server");
     }
@@ -5252,7 +6046,7 @@ function App() {
 
   // Repo confirmed in SendToRedlineDialog: bring the document pane forward and
   // launch the held plan in a terminal scoped to the chosen repo.
-  const confirmSendToRedline = (project: string | null) => {
+  const confirmSendToRedline = async (project: string | null) => {
     const markdown = sendConfirm?.markdown;
     setSendConfirm(null);
     if (!markdown) return;
@@ -5262,7 +6056,7 @@ function App() {
     // file it under an unrelated draft. (The "Open in Drafter" route mints a
     // real document and keeps its own lineage.) It owes nothing back: the reply
     // it came from is still in the browser's thread.
-    const r = launchPlan({
+    const r = await launchPlan({
       origin: "browser",
       prompt: markdown,
       projectPath: project,
@@ -5384,10 +6178,25 @@ function App() {
   // resume command so the user can paste it into their own terminal.
   const copyRestoreCommand = async () => {
     if (!session) return;
-    // Same one-shot restore arming as restorePlanSession — the resumed plan,
-    // whichever terminal runs it, should land as "vN restored".
-    void invoke("arm_restore", { sessionId: session.sessionId });
-    const target = await resolveResumeCwd(session.sessionId, session.projectPath);
+    // The same gate as the embedded path. A command that can't return the plan
+    // is no better on the clipboard than in Redline's own terminal — worse, in
+    // fact: it fails in a shell where nothing is watching for the answer.
+    if (refuseBlockedRestore()) return;
+    // Same one-shot arming as restorePlanSession, and awaited for the same
+    // reason: the reviewer can paste the moment the clipboard is written, and
+    // both one-shots (the "vN restored" label, and the resumed session's first
+    // prompt getting the hidden protocol) have to be in place before the
+    // command can run.
+    try {
+      await invoke("arm_restore", { sessionId: session.sessionId });
+    } catch (e) {
+      console.error("arm_restore failed", e);
+    }
+    const target = await resolveResumeCwd(
+      session.sessionId,
+      session.projectPath,
+      restoreDecision.harness,
+    );
     void navigator.clipboard?.writeText(
       buildResumeCommand(
         session.sessionId,
@@ -5395,14 +6204,15 @@ function App() {
         target.cwd,
         rescindedIds.has(session.sessionId),
         target.primed,
+        {
+          backend: restoreDecision.harness,
+          codexBin: preflight?.codex?.path ?? null,
+        },
       ),
     );
-    setToast(
-      target.found
-        ? "Resume command copied — paste it into a shell prompt"
-        : NO_TRANSCRIPT_NOTE,
-    );
-    setTimeout(() => setToast(null), 8000);
+    const note = restoreCopiedNote(restoreDecision, target);
+    setToast(note.message);
+    setTimeout(() => setToast(null), note.ms);
   };
 
   // Local date/time stamp embedded in export file names.
@@ -5676,6 +6486,16 @@ function App() {
       errors.push(`Codex hook install failed: ${err}`);
     }
     try {
+      // The Codex plan contract, as a config profile. Installed here rather
+      // than written at launch because `codex -p <name>` with no such file is
+      // silently ignored — a plan session with no contract looks fine until
+      // its first revision loses every block-identity sidecar.
+      await invoke("install_codex_profile");
+    } catch (err) {
+      console.error("install_codex_profile failed", err);
+      errors.push(`Codex plan contract install failed: ${err}`);
+    }
+    try {
       const skill = await invoke<SkillStatus>("install_codex_skill");
       setCodexSkillStatus(skill);
       codexSkillOk = skill.installed;
@@ -5691,6 +6511,11 @@ function App() {
       console.error("install_skill failed", err);
       errors.push(`Skill install failed: ${err}`);
     }
+    // Every status above was set directly from its install's return value, so
+    // the state is already current — but the SHARED cache still holds the
+    // pre-install answer, and the next asker (a focus refresh, the launch
+    // gate) would read it. Drop it.
+    integrationHealth.invalidate();
     const ok =
       errors.length === 0 && hookOk && skillOk && codexHookOk && codexSkillOk;
     if (showExplainer) {
@@ -5706,7 +6531,14 @@ function App() {
   // A native child webview paints on top of all React DOM, so when a
   // full-pane overlay is up the browser must be hidden underneath it. Mirrors
   // the setup-modal / tour gating used in the JSX below.
+  // The unskippable first-run modal. `integrationReady` leads deliberately:
+  // the two null checks after it are TypeScript narrowing, but the reason the
+  // modal is withheld is that the probe has not answered yet — not that two
+  // variables happen to be null. Withholding is the whole point: integration
+  // health now resolves AFTER the reveal, so without this the modal would
+  // flash on every launch in the beat before the answer arrives.
   const setupModalActive =
+    integrationReady &&
     !!hookStatus &&
     !!skillStatus &&
     (!hookStatus.installed ||
@@ -5714,10 +6546,13 @@ function App() {
       (codexHookStatus?.available &&
         (!codexHookStatus.installed || !codexSkillStatus?.installed)) ||
       setupPhase === "done");
-  // First-run auto-start waits for the doors to settle — the tour's spotlight
-  // must never overlay plates that are still mid-flight.
+  // First-run auto-start waits for the doors to finish — the tour's spotlight
+  // is measured against plate geometry, and a coachmark pinned to a plate
+  // that is still travelling points at nothing. This is the one legitimate
+  // reason to read the choreography: it is about where things ARE, not about
+  // when the user may act.
   const tourActive =
-    tourOpen || (!onboardingDone && !setupModalActive && bootSettled);
+    tourOpen || (!onboardingDone && !setupModalActive && !bootAnimating);
   const browserOverlayActive =
     showReadme ||
     showFeedback ||
@@ -5745,41 +6580,13 @@ function App() {
     !isDragging &&
     !termDragging &&
     !splitDragging &&
+    // The conversation dock reflows the browser as it is dragged; the native
+    // webview paints above React DOM and would otherwise smear across the
+    // frames it is being resized through.
+    !voiceDragging &&
     !termFullscreen &&
     !liveFlags.curtain &&
     openMenuCount === 0;
-
-  // ── Front door: preflight, readiness, launch ─────────────────────────────
-  // One call answers "can this machine actually deliver a plan". Re-probed on
-  // a mode change (the mode is part of the answer) and on window focus, since
-  // the things it measures — the hook file, the `claude` binary, curl — are
-  // all edited OUTSIDE Redline while it sits in the background.
-  const preflightModeRef = useRef<string | null>(null);
-  const preflightAtRef = useRef(0);
-  const refreshPreflight = useCallback(() => {
-    preflightAtRef.current = Date.now();
-    void invoke<PreflightStatus>("preflight_status").then(setPreflight, (err) =>
-      console.error("preflight_status failed", err),
-    );
-  }, []);
-  useEffect(() => {
-    // Fires at mount and on every real mode change. The ref dedupe matters:
-    // `mode` starts at its default and is then overwritten by the boot
-    // lookup, and a second probe would re-run `resolve_claude_bin`'s
-    // login-shell fallback (a TCC-visible child) for nothing.
-    if (preflightModeRef.current === mode) return;
-    preflightModeRef.current = mode;
-    refreshPreflight();
-  }, [mode, refreshPreflight]);
-  useEffect(() => {
-    const onFocus = () => {
-      // Throttled for the same reason: focus fires on every ⌘-tab back.
-      if (Date.now() - preflightAtRef.current < 30_000) return;
-      refreshPreflight();
-    };
-    window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
-  }, [refreshPreflight]);
 
   // Close the terminal a launch is running in and the launch is over: the PTY
   // dies with the tile, so no plan is ever coming. Without this the Planning
@@ -5813,11 +6620,11 @@ function App() {
     seen.confirmed = live.confirmed;
     if (live.alive) return;
     setPendingLaunch(null);
-    // Give the sentence back, for the door that took one. Asking someone to
-    // retype what they already wrote — because they changed their mind about a
-    // terminal — is the small betrayal this surface exists to remove. The
+    // Give the sentence back, for the door that took one — the ONE place the
+    // pay-back fires. This is the involuntary case: the launch did not survive
+    // and nobody chose that, so the composer is refilled ready to re-send. The
     // Drafter's document never left the screen, so its restore is `none`.
-    releasePending(p, "Launch cancelled — that terminal was closed");
+    repayPending(p, "Launch cancelled — that terminal was closed");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [liveTermIds, pendingLaunch]);
 
@@ -5846,35 +6653,175 @@ function App() {
     ],
   );
 
-  const readiness = useMemo(
-    () =>
-      deriveReadiness({
+  // ── Integration health ────────────────────────────────────────────────────
+  //
+  // "Will a launch actually work on this machine" — hooks, skills, binaries,
+  // curl. Everything here can spawn a child process, and none of it decides
+  // what renders, so it runs AFTER the first actionable frame. It used to sit
+  // in the boot `Promise.all`, which made the front door wait on the slowest
+  // probe on the machine before it would take a keystroke.
+  //
+  // The question is scoped to the launch that ⏎ would actually make: a Claude
+  // user's machine is never asked about codex, and only an extension target
+  // pays for `rustup target list`. `lib/integrationHealth` shares one
+  // in-flight probe across boot, this effect, the focus refresh and the launch
+  // gate, so four askers still produce one round trip.
+  const healthQuery = useMemo<HealthQuery>(
+    () => ({
+      backend:
+        projectKind(workspace, frontDoorResolvedProject) === "extension"
+          ? // An extension launch is forced back onto Claude at the door (its
+            // `--add-dir` grants have no read-only Codex analogue), so asking
+            // about codex here would probe for a launch that cannot happen.
+            "claude-code"
+          : frontDoorBackend.backend,
+      extension:
+        projectKind(workspace, frontDoorResolvedProject) === "extension",
+    }),
+    [workspace, frontDoorResolvedProject, frontDoorBackend.backend],
+  );
+  const applyHealth = useCallback((health: IntegrationHealth) => {
+    setPreflight(health.preflight);
+    setHookStatus(health.hook);
+    setSkillStatus(health.skill);
+    setCodexHookStatus(health.codexHook);
+    setCodexSkillStatus(health.codexSkill);
+    markOnce("rl:integration-ready");
+  }, []);
+
+  // The probe itself: after the shell is actionable, at idle. `mode` is part
+  // of the answer, so a mode change re-probes; so does a change of launch
+  // target, because that changes the QUESTION (a different backend, or an
+  // extension's toolchain).
+  useEffect(() => {
+    if (!shellReady) return;
+    let cancelled = false;
+    const run = () => {
+      void integrationHealth
+        .ensure(healthQuery)
+        .then((health) => {
+          if (cancelled) return;
+          applyHealth(health);
+          // Silent repair: `outdated` means present-but-stale (content drift
+          // after an app update, or a retired orphan dir). The user already
+          // consented to the install once via the setup modal, so refresh
+          // rather than re-raising it. First-run (not installed, not
+          // outdated) still gets the unskippable modal — which is why this
+          // runs after the reveal without gating anything: a modal that
+          // appears a beat later is fine, a shell that waits for a file diff
+          // is not.
+          if (health.skill.outdated) {
+            void invoke<SkillStatus>("install_skill").then(
+              (fresh) => {
+                if (cancelled) return;
+                setSkillStatus(fresh);
+                integrationHealth.invalidate();
+              },
+              (err) => console.error("install_skill failed", err),
+            );
+          }
+        })
+        .catch((err) => console.error("integration health failed", err));
+    };
+    const idle = (
+      window as Window & {
+        requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number;
+      }
+    ).requestIdleCallback;
+    if (!idle) {
+      const t = window.setTimeout(run, 0);
+      return () => {
+        cancelled = true;
+        window.clearTimeout(t);
+      };
+    }
+    const id = idle(run, { timeout: 1500 });
+    return () => {
+      cancelled = true;
+      (
+        window as Window & { cancelIdleCallback?: (h: number) => void }
+      ).cancelIdleCallback?.(id);
+    };
+  }, [shellReady, mode, healthQuery, applyHealth]);
+
+  // The things measured here — a hook file, a binary, curl — are edited
+  // OUTSIDE Redline while it sits in the background, so coming back is the
+  // moment to look again. The service's freshness window does the throttling
+  // that an ad-hoc timestamp ref used to.
+  useEffect(() => {
+    const onFocus = () => {
+      void integrationHealth
+        .ensure(healthQuery)
+        .then(applyHealth)
+        .catch(() => {});
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [healthQuery, applyHealth]);
+
+  // ONE construction site for the readiness derivation's input.
+  //
+  // It has two callers with different arguments: the strip (the front door's
+  // current target, from React state) and the launch gate (THIS launch's
+  // target, from a payload just awaited — React state still holds the
+  // pre-await value on that tick). They must not drift, so the parts that
+  // depend on the launch are parameters and everything else is closed over.
+  const buildReadinessInput = useCallback<ReadinessInputFor>(
+    ({ preflight: pf, daemonOk, projectPath, backend, now }) => {
+      const isExtension = projectKind(workspace, projectPath) === "extension";
+      return {
         // The live `mode` beats the probe's snapshot: `mode-changed` lands
         // long before the re-probe it triggers resolves.
-        preflight: preflight ? { ...preflight, mode } : null,
-        daemonBound,
+        preflight: pf ? { ...pf, mode } : null,
+        daemonBound: daemonOk,
         hookModalActive: setupModalActive,
         planEverArrived: planEverArrived || summaries.length > 0,
         pendingSince: pendingLaunch?.startedAt ?? null,
-        now: readinessNow,
+        now,
         projectCount: projectOptions.length,
-        // ⏎'s resolved target: the toolchain item fires only when the launch
-        // would actually land in an extension-pack project.
-        targetIsExtension:
-          projectKind(workspace, frontDoorResolvedProject) === "extension",
-      }),
+        // The toolchain item fires only when the launch would actually land
+        // in an extension-pack project.
+        targetIsExtension: isExtension,
+        // …and the codex items only when it would actually launch on Codex.
+        // An extension target is forced back onto Claude at the door (its
+        // `--add-dir` grants have no read-only Codex analogue), so it is NOT
+        // a codex launch however the picker is set.
+        targetIsCodex: backend === "codex" && !isExtension,
+        codexHookInstalled: codexHookStatus?.installed,
+      };
+    },
     [
-      preflight,
       mode,
-      daemonBound,
       setupModalActive,
       planEverArrived,
       summaries.length,
       pendingLaunch,
-      readinessNow,
       projectOptions.length,
       workspace,
+      codexHookStatus?.installed,
+    ],
+  );
+  readinessInputRef.current = buildReadinessInput;
+  applyHealthRef.current = applyHealth;
+
+  const readiness = useMemo(
+    () =>
+      deriveReadiness(
+        buildReadinessInput({
+          preflight,
+          daemonOk: daemonBound,
+          projectPath: frontDoorResolvedProject,
+          backend: frontDoorBackend.backend,
+          now: readinessNow,
+        }),
+      ),
+    [
+      buildReadinessInput,
+      preflight,
+      daemonBound,
       frontDoorResolvedProject,
+      frontDoorBackend.backend,
+      readinessNow,
     ],
   );
   // `launchPlan`'s backstop gate reads this at call time, from a definition
@@ -5882,11 +6829,136 @@ function App() {
   const readinessRef = useRef(readiness);
   readinessRef.current = readiness;
 
-  const launchFromFrontDoor = (projectOverride?: string) => {
+  // Pills, filtered against the session list as it is NOW. Persistence keeps a
+  // combination across a restart; this keeps it honest — a plan deleted in the
+  // meantime is not something the launch can still merge.
+  const frontDoorCombine = useMemo(
+    () =>
+      frontDoorCombineRaw.filter((c) =>
+        summaries.some((s) => s.sessionId === c.sessionId),
+      ),
+    [frontDoorCombineRaw, summaries],
+  );
+
+  // Re-preview whenever the set changes — seeded from the sidebar, and again
+  // after every removal, since the warnings and the size refusal are both
+  // properties of the SET, not of any one pill.
+  useEffect(() => {
+    if (frontDoorCombine.length === 0) {
+      setCombinePreview(null);
+      return;
+    }
+    let alive = true;
+    void invoke<CombinePreview>("combine_preview", {
+      sessionIds: frontDoorCombine.map((c) => c.sessionId),
+    })
+      .then((p) => {
+        if (alive) setCombinePreview(p);
+      })
+      .catch((err) => {
+        console.error("combine_preview failed", err);
+        if (alive) setCombinePreview(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [frontDoorCombine]);
+
+  // The sidebar's Combine picker landing at the front door. Does exactly what
+  // "＋ Plan a build" does — clears the selection so the door is on screen —
+  // and seeds the pills; the composer there becomes the place to add context.
+  const beginCombine = async (sessionIds: string[]) => {
+    let preview: CombinePreview;
+    try {
+      preview = await invoke<CombinePreview>("combine_preview", { sessionIds });
+    } catch (err) {
+      setToast(`Couldn't read those plans — ${String(err)}`);
+      setTimeout(() => setToast(null), 6000);
+      return;
+    }
+    // The same door "＋ Plan a build" opens — surface, tab and viewed version
+    // included, not just a cleared selection.
+    openFrontDoorRef.current();
+    setFrontDoorCombine(preview.sources);
+    setCombinePreview(preview);
+    // Seed the project as an EXPLICIT pick, never null: `ProjectChoice`'s
+    // wrapper exists precisely because null means "re-guess from the prompt
+    // text on every keystroke", and left null `guessProjectForPlan` would
+    // drift the target away as the user types their instruction.
+    if (preview.defaultProjectPath) {
+      setFrontDoorProject({ path: preview.defaultProjectPath });
+    }
+  };
+
+  // ⏎ with plans pilled. The brief is composed at THIS moment, not at preview
+  // time, so it reflects any revision that landed in between.
+  const launchCombine = async (projectOverride?: string) => {
+    const pills = frontDoorCombine;
+    if (pills.length === 0) return;
+    const instruction = frontDoorText.trim();
+    const sessionIds = pills.map((c) => c.sessionId);
+    let composed: CombineBrief;
+    try {
+      composed = await invoke<CombineBrief>("combine_brief", {
+        sessionIds,
+        instruction,
+      });
+    } catch (err) {
+      // The oversize refusal arrives here too — it is an Err, deliberately,
+      // because a brief that cannot be carried whole must never be carried at
+      // all, and a confident merge of half a plan is the worst outcome here.
+      setFrontDoorRefusal((prev) => ({
+        item: null,
+        reason: String(err).replace(/^Error:\s*/, ""),
+        nonce: (prev?.nonce ?? 0) + 1,
+      }));
+      return;
+    }
+    const project = projectOverride ?? frontDoorResolvedProject;
+    const r = await launchPlan({
+      origin: "combine",
+      prompt: composed.brief,
+      recordBody: composed.record,
+      userText: instruction || null,
+      projectPath: project,
+      draftId: null,
+      chatId: null,
+      restore: {
+        kind: "composer",
+        text: frontDoorText,
+        attachments: frontDoorAttachments,
+        combine: pills,
+      },
+    });
+    if (!r.ok) {
+      setToast(`Couldn't launch the combination — ${r.reason}`);
+      setTimeout(() => setToast(null), 6000);
+      setFrontDoorRefusal((prev) => ({
+        item: r.blocked ?? null,
+        reason: r.blocked ? null : r.reason,
+        nonce: (prev?.nonce ?? 0) + 1,
+      }));
+      return;
+    }
+    // (The `plan_combine` journal breadcrumb is written Rust-side by
+    // `combine_brief`, where the composition actually happens.)
+    setFrontDoorText("");
+    setFrontDoorAttachments([]);
+    setFrontDoorCombine([]);
+    setCombinePreview(null);
+  };
+
+  const launchFromFrontDoor = async (projectOverride?: string) => {
+    // Plans pilled → this is a combination, and the composer's text is context
+    // on top of them rather than the thing being launched.
+    if (frontDoorCombine.length > 0) {
+      await launchCombine(projectOverride);
+      return;
+    }
     const prompt = composePrompt(frontDoorText, frontDoorAttachments);
     if (!prompt) return;
     const project = projectOverride ?? frontDoorResolvedProject;
-    const r = launchPlan({
+    const r = await launchPlan({
       origin: "front-door",
       prompt,
       projectPath: project,
@@ -5972,7 +7044,14 @@ function App() {
     );
     setQuietOpen(true);
     setChatOpening(true);
-    selectSurface("chat");
+    // The island EXPANDS into the room. It is the same conversation the dock
+    // holds — one thread — but entering it deliberately is not a glance at a
+    // column, it is going somewhere: the measured island rect above is the box
+    // it grows out of, and `selectSurface` is deliberately not called, because
+    // nothing is being navigated away from.
+    setConversationPin("companion");
+    setDockOpen(true);
+    setExpandedKind("companion");
     try {
       // The provisional title is the opening sentence, trimmed to 80 by
       // `companion_create`. It is a placeholder, not a name: the backend
@@ -5992,20 +7071,44 @@ function App() {
       // The sentence is still in the composer — nothing was taken away.
       setToast(`Couldn't start the chat — ${e}`);
       setTimeout(() => setToast(null), 6000);
-      selectSurface("document");
+      setDockOpen(false);
+      setExpandedKind(null);
     } finally {
       setChatOpening(false);
     }
   };
 
-  // Open an existing conversation (a recent-chat pill). No spring: this is
-  // navigation, not the island becoming something.
+  // Open an existing conversation (a recent-chat pill, or the room's own
+  // `Chats ▾`). The dock comes forward wherever the user happens to be — a
+  // conversation is not a place you navigate to any more.
   const openChat = (id: string) => {
     setChatId(id);
     setChatSeed(null);
     setSwapFrom(null);
-    selectSurface("chat");
+    setConversationPin("companion");
+    setDockOpen(true);
+    // Opening a conversation FROM the door means going into it; opening one
+    // from anywhere else means bringing it alongside what you are doing. Same
+    // thread either way — the difference is only whether you are arriving or
+    // glancing.
+    if (plateAtRest) setExpandedKind("companion");
   };
+  // The first conversation, from the dock's empty state. No seed and no
+  // spring: the sentence-shaped way in is the Front Door's.
+  const startChat = useCallback(() => {
+    setChatOpening(true);
+    void invoke<Companion>("companion_create", { title: null })
+      .then((chat) => {
+        setChatId(chat.companionId);
+        refreshChats();
+      })
+      .catch((e) => {
+        setToast(`Couldn't start the chat — ${e}`);
+        setTimeout(() => setToast(null), 6000);
+      })
+      .finally(() => setChatOpening(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshChats]);
 
   // A chat graduating. The reply to the handoff turn IS the brief, and this
   // listens at APP level rather than in the room for the same reason the
@@ -6031,7 +7134,7 @@ function App() {
       lastLaunchProject,
     });
     selectSurface("document");
-    const r = launchPlan({
+    const r = await launchPlan({
       origin: "chat",
       prompt: markdown,
       projectPath: project,
@@ -6067,8 +7170,8 @@ function App() {
   // it behind a spinner) would be the worst possible translation of that idea.
   // The bar morphs into the launch card above it instead, so what changes is
   // the receipt, not the work.
-  const launchFromDrafter = (markdown: string, project: string | null) => {
-    const r = launchPlan({
+  const launchFromDrafter = async (markdown: string, project: string | null) => {
+    const r = await launchPlan({
       origin: "drafter",
       prompt: markdown,
       projectPath: project,
@@ -6086,25 +7189,41 @@ function App() {
   // means the fault is cleared, which is what lets a refused ⏎ carry through
   // instead of making the user press it again.
   const applyReadinessFix = async (item: ReadinessItem): Promise<boolean> => {
+    // A fix's whole point is that the answer just changed, so the cache is
+    // dropped and the probe re-run — never the freshness window's cached
+    // "still broken", which would tell the user their fix did nothing.
+    const reprobe = () => {
+      integrationHealth.invalidate();
+      void integrationHealth
+        .refresh(healthQuery)
+        .then(applyHealth)
+        .catch((err) => console.error("integration health failed", err));
+    };
     try {
       switch (item.fix?.kind) {
         case "resume-mode":
           await changeMode("active");
-          refreshPreflight();
+          reprobe();
           return true;
         case "install-integration": {
           const ok = await installIntegration(false);
-          refreshPreflight();
+          reprobe();
           return ok;
         }
-        case "locate-claude": {
+        case "locate-claude":
+        case "locate-codex": {
           // The dialog plugin is already in the boot chunk (ProjectPicker),
           // so this import costs nothing beyond the await.
           const { open } = await import("@tauri-apps/plugin-dialog");
           const picked = await open({ directory: false, multiple: false });
           if (typeof picked !== "string") return false;
-          await invoke("set_claude_bin_override", { path: picked });
-          refreshPreflight();
+          await invoke(
+            item.fix.kind === "locate-codex"
+              ? "set_codex_bin_override"
+              : "set_claude_bin_override",
+            { path: picked },
+          );
+          reprobe();
           return true;
         }
         default:
@@ -6255,6 +7374,15 @@ function App() {
               exitHidden: activeHarness.entry === "boot",
             }
           : null,
+        // The dock's contents from where the user is standing. Not a global
+        // index — which conversations exist is a property of the surface, and
+        // offering one this surface hasn't got would land in an empty column.
+        conversations: dockContexts.map((c) => ({
+          kind: c.kind,
+          label: c.label,
+        })),
+        currentConversation: voiceDocked ? (dockContext?.kind ?? null) : null,
+        chats: chats.slice(0, 8).map((c) => ({ id: c.companionId, title: c.title })),
         actions: {
           // ⌘K "Plan a build" lands on the front door, which is now the
           // primary way to start one. The Drafter is still one hop away
@@ -6271,6 +7399,18 @@ function App() {
             const d = headerSurfaceList.find((s) => s.id === id);
             if (d) selectSurfaceRef.current(d.id);
           },
+          navigateTo: (t) => {
+            const d = headerSurfaceList.find((s) => s.id === t.surface);
+            if (d) navigateTo({ surface: d.id, tab: t.tab });
+          },
+          toggleDock: () => setDockOpen((v) => !v),
+          openConversation: (kind) => {
+            const hit = dockContexts.find((c) => c.kind === kind);
+            if (!hit) return;
+            setConversationPin(hit.kind);
+            setDockOpen(true);
+          },
+          openChat,
           snapBack,
           toggleSidebar,
           toggleDiscussion: togglePane,
@@ -6314,6 +7454,125 @@ function App() {
       setDocZoom,
     ],
   );
+
+  // The conversation's BODY, built once and hosted in either pose: the dock's
+  // column, or the plate itself. One definition, because they are the same
+  // conversation — the Companion you glance at from the browser and the room
+  // you sink into from the Front Door are one thread at two scales, and
+  // building them separately is how they would drift apart.
+  // Lazy chunk: the host renders empty for the load beat, then the panel
+  // mounts — the column's width is ref-owned, so nothing shifts.
+  const dockBody = dockContext ? (
+    <Suspense fallback={null}>
+      {BROWSER_DOCK_KINDS.includes(dockContext.kind) ? (
+        // The browser pane portals its own panel in here. An empty
+        // node is the right thing to render while it is loading or
+        // between tabs — the column is the pane's, and only the
+        // pane knows what belongs in it.
+        <div ref={setDockSlotEl} className="flex-1 min-h-0" />
+      ) : dockContext.kind === "companion" ? (
+        chatOpening ? (
+          <EmptyState title="Chat" body="Starting a conversation…" />
+        ) : !chatId ? (
+          <EmptyState
+            title="Companion"
+            body={
+              "One conversation that follows you across every " +
+              "surface — the plan, the browser, a review, your " +
+              "memory. Start it here, or say something at the " +
+              "front door."
+            }
+            action={{
+              label: "Start a conversation",
+              onAction: startChat,
+            }}
+          />
+        ) : (
+          // The news rides ABOVE the conversation, in the same
+          // column: the Companion is the one thing the user can
+          // reach from every surface, so it is where "here is what
+          // happened while you were elsewhere" finds them. It
+          // renders nothing when nothing happened.
+          <div className="flex h-full min-h-0 flex-col">
+          <AwayFeed
+            active={dockContext.kind === "companion"}
+            onOpenWork={() =>
+              navigateTo({ surface: "runs", tab: "work" })
+            }
+          />
+          <ErrorBoundary region="chat" fallback={surfaceFallback("chat")}>
+            <ChatRoom
+              // Keyed by the thread: the composer draft is stored
+              // per chat and `usePersistedState` reads its key
+              // once, so switching conversations is a REMOUNT by
+              // design rather than one chat's half-typed thought
+              // carried into another.
+              key={chatId}
+              companionId={chatId}
+              onSelectChat={openChat}
+              onEmpty={() => setChatId(null)}
+              // The agent's read-only file tools are scoped to
+              // whatever folder the user is browsing; HOME when
+              // there is none.
+              cwd={
+                sidebarTab.kind === "folder" ? sidebarTab.id : null
+              }
+              dictationEnabled={!dockOwnsMic}
+              // Only in the room: shrink it to the column beside the door,
+              // keeping the conversation up. The other way out is simply
+              // going somewhere — `selectSurface` collapses the room and the
+              // conversation comes with you.
+              onCollapse={
+                conversationExpanded ? () => setExpandedKind(null) : undefined
+              }
+              onClose={closeDock}
+              seed={
+                chatSeed?.companionId === chatId
+                  ? chatSeed.text
+                  : null
+              }
+              onSeedConsumed={() => setChatSeed(null)}
+            />
+          </ErrorBoundary>
+          </div>
+        )
+      ) : (
+      <VoicePanel
+        // Remount cleanly when the conversation changes (a revision
+        // arriving calls setActiveId; switching contexts changes the
+        // kind) instead of mutating sessionId under a live warm
+        // session.
+        key={dockContext.key}
+        sessionId={dockContext.key}
+        markdown={
+          dockContext.kind === "drafter"
+            ? drafterMarkdown
+            : (latest?.rawPlanMarkdown ?? "")
+        }
+        sections={
+          dockContext.kind === "drafter" ? drafterSections : sections
+        }
+        // The drafter's mirror is debounce-lagged, so its panel gets
+        // a live getter; a plan revision is already whole when it
+        // arrives and has none.
+        cwd={
+          dockContext.kind === "drafter" ? drafterProjectPath : null
+        }
+        liveMarkdown={
+          dockContext.kind === "drafter"
+            ? getDrafterLiveMarkdown
+            : null
+        }
+        // Only the plan's conversation can be the one an incoming
+        // revision must not interrupt.
+        onActivityChange={
+          dockContext.kind === "voice" ? setDiscussionLive : undefined
+        }
+        onClose={closeDock}
+      />
+      )}
+    </Suspense>
+  ) : null;
 
   return (
     <MenuOverlayProvider value={adjustMenuOverlay}>
@@ -6545,6 +7804,7 @@ function App() {
               onLeaveJoined={leaveJoined}
               onSelect={(id) => setActiveId(id)}
               onNewPlan={openFrontDoor}
+              onCombine={(ids) => void beginCombine(ids)}
               onDelete={deleteSession}
               onExport={exportRevision}
               onSelectRevision={(sessionId, versionNumber) => {
@@ -7058,9 +8318,7 @@ function App() {
                     // draft's voice panel — the one discussion surface (talk or
                     // type). Hidden while the panel is up.
                     onDiscuss={
-                      voiceEnabled && drafterDraftId && !drafterVoiceOpen
-                        ? () => setDrafterVoiceOpen(true)
-                        : null
+                      dockReachable && !dockOpen ? openDock : null
                     }
                     onOpenShelf={() => setDrafterShelfOpen(true)}
                     onOpenAgents={() => setAgentShelfOpen(true)}
@@ -7094,6 +8352,7 @@ function App() {
               ? summaries.find((s) => s.sessionId === runReportFor) ?? null
               : null;
             const reviewBody = runReportFor ? (
+              <Suspense fallback={null}>
               <RunReport
                 planSessionId={runReportFor}
                 planTitle={runReportSummary?.planTitle ?? null}
@@ -7106,13 +8365,16 @@ function App() {
                 onRelaunch={(sid) => void relaunchOrchestrator(sid)}
                 onStandDown={(sid) => void standDownRun(sid)}
               />
+              </Suspense>
             ) : (
               <ErrorBoundary region="review pane" fallback={surfaceFallback("review pane")}>
-                <ReviewPanel
-                  review={codeReview}
-                  projectOptions={projectOptions}
-                  onClose={() => selectSurface("document")}
-                />
+                <Suspense fallback={null}>
+                  <ReviewPanel
+                    review={codeReview}
+                    projectOptions={projectOptions}
+                    onClose={() => selectSurface("document")}
+                  />
+                </Suspense>
               </ErrorBoundary>
             );
             const serversBody = (
@@ -7137,6 +8399,7 @@ function App() {
                   <MemorySurface
                     activeSessionId={session?.sessionId ?? null}
                     activeSessionName={session?.projectName ?? null}
+                    tabRequest={mainSurface === "memory" ? tabRequest : null}
                   />
                 </ErrorBoundary>
               </Suspense>
@@ -7156,6 +8419,7 @@ function App() {
                     onResetRun={(sid) => void resetRunFor(sid)}
                     onUnapprove={(sid) => void unapproveSession(sid)}
                     onStandDown={(sid) => void standDownRun(sid)}
+                    tabRequest={runsOpen ? tabRequest : null}
                   />
                 </ErrorBoundary>
               </Suspense>
@@ -7174,10 +8438,11 @@ function App() {
             const frontDoorShowing =
               !joinedActive &&
               sidebarTab.kind !== "folder" &&
-              !(loading || (activeId && !sessionReady)) &&
+              shellReady &&
+              !(activeId && !sessionReady) &&
               !sessionReady;
             const documentBody =
-              sidebarTab.kind === "folder" && activeFile ? (
+              plateMode === "file" && activeFile ? (
             <Suspense fallback={null}>
               <FileViewer
                 path={activeFile}
@@ -7278,7 +8543,7 @@ function App() {
                 title="Browsing files"
                 body="Select a file from the tree to view it here."
               />
-            ) : loading || (activeId && !sessionReady) ? (
+            ) : !shellReady || (activeId && !sessionReady) ? (
               // Mid-choreography the plate stays quietly blank — a "Loading…"
               // flash inside the parting doors reads as a glitch, and the
               // plate's own fade already covers the wait.
@@ -7347,7 +8612,7 @@ function App() {
               // janky navigation in every earlier attempt.
               frontDoorShowing ? (
               <FrontDoor
-                visible={bootSettled && !loading}
+                visible={shellReady}
                 text={frontDoorText}
                 onTextChange={setFrontDoorText}
                 choice={frontDoorProject}
@@ -7356,6 +8621,9 @@ function App() {
                 resolvedProject={frontDoorResolvedProject}
                 attachments={frontDoorAttachments}
                 onAttachmentsChange={setFrontDoorAttachments}
+                combine={frontDoorCombine}
+                onCombineChange={setFrontDoorCombine}
+                combinePreview={combinePreview}
                 readiness={readiness}
                 onFix={applyReadinessFix}
                 // Only ITS launch: one pending state serves every door, so the
@@ -7372,9 +8640,23 @@ function App() {
                 chatEnabled={surfaceEnabled(effectiveWorkspace, "chat")}
                 destination={frontDoorDest}
                 onDestinationChange={setFrontDoorDest}
-                onCancelPending={() => {
-                  releasePending(pendingLaunchRef.current);
-                  setPendingLaunch(null);
+                backend={frontDoorBackend}
+                onBackendChange={setFrontDoorBackend}
+                codexModels={codexModels}
+                onNeedCodexModels={requestCodexModels}
+                // Dismissing the flight pill retires the INDICATOR, nothing
+                // else: the plan keeps running in its tile and the composer —
+                // already blank, already usable — stays blank. No pay-back.
+                onCancelPending={() => setPendingLaunch(null)}
+                // The pill's other half: go watch it. Reveal the dock, focus
+                // the tile the plan is running in, and glow it once so the
+                // eye lands on the right one of fourteen.
+                onRevealPending={() => {
+                  const p = pendingLaunchRef.current;
+                  if (!p) return;
+                  revealTerm();
+                  terminalsRef.current?.selectTab(p.terminalId);
+                  terminalsRef.current?.hailTerminal(p.terminalId);
                 }}
                 onHowItWorks={() => setHowItWorksOpen(true)}
                 onCreateProject={createFrontDoorProject}
@@ -7403,7 +8685,7 @@ function App() {
                 onOpenChat={openChat}
                 // One native capture at a time, no session id — the voice
                 // panel owns the mic whenever it is open.
-                dictationEnabled={!voiceOpen}
+                dictationEnabled={!dockOwnsMic}
               />
               ) : null
             )}
@@ -7447,7 +8729,16 @@ function App() {
                   // Immersive entry and every chrome reveal move the slot as
                   // surely as a pane toggle does, and the native webview only
                   // re-reads its rect when this key changes.
-                  layoutKey={`${paneCollapsed}|${sidebarCollapsed}|${docVisible}|${splitVertical}|${liveFlags.curtain}|${voiceDocked}|${termCollapsed}|${termHeight}|${termFullscreen}|${termTiles.count}x${termTiles.rows}|${immersive}|${chromeRevealed}`}
+                  layoutKey={`${paneCollapsed}|${sidebarCollapsed}|${docVisible}|${splitVertical}|${liveFlags.curtain}|${voiceDocked}|${dockPill ?? ""}|${termCollapsed}|${termHeight}|${termFullscreen}|${termTiles.count}x${termTiles.rows}|${immersive}|${chromeRevealed}`}
+                  // The pane's four panels render into the app's one
+                  // conversation column, through a portal — everything they
+                  // need (tabs, missions, the linked thread) is the pane's own
+                  // state, so the column borrows the DOM node, not the state.
+                  dockSlot={dockSlotEl}
+                  dockPill={dockPill}
+                  onOpenDockPill={openDockPill}
+                  onCloseDock={closeDock}
+                  onDockState={setBrowserDock}
                 />
               </ErrorBoundary>
               </Suspense>
@@ -7465,53 +8756,6 @@ function App() {
             // `from` is null for the header and command-palette routes: they
             // have no island to spring from, so SpringSwap renders the body
             // untouched.
-            const chatRoomBody =
-              chatOpening || !chatId ? (
-                <EmptyState title="Chat" body="Starting a conversation…" />
-              ) : (
-                <Suspense
-                  fallback={<EmptyState title="Chat" body="Opening the room…" />}
-                >
-                  <ErrorBoundary region="chat" fallback={surfaceFallback("chat")}>
-                    <ChatRoom
-                      // Keyed by the thread: the composer draft is stored per
-                      // chat and `usePersistedState` reads its key once, so
-                      // switching conversations is a REMOUNT by design rather
-                      // than one chat's half-typed thought carried into another.
-                      key={chatId}
-                      companionId={chatId}
-                      onSelectChat={openChat}
-                      onEmpty={() => {
-                        setChatId(null);
-                        selectSurface("document");
-                      }}
-                      // The agent's read-only file tools are scoped to whatever
-                      // folder the user is browsing; HOME when there is none.
-                      cwd={sidebarTab.kind === "folder" ? sidebarTab.id : null}
-                      dictationEnabled={!voiceOpen}
-                      onClose={() => selectSurface("document")}
-                      seed={
-                        chatSeed?.companionId === chatId ? chatSeed.text : null
-                      }
-                      onSeedConsumed={() => setChatSeed(null)}
-                    />
-                  </ErrorBoundary>
-                </Suspense>
-              );
-            // The chat springs out of the island exactly as the Drafter does —
-            // same slot, same `SpringSwap`, same `from` measured on the
-            // gesture. `from` is null for the recent-chat pills: navigation
-            // has no island to grow from, and SpringSwap then renders the body
-            // untouched.
-            const chatSurface = (
-              <SpringSwap
-                from={swapFrom}
-                onArrived={() => setSwapFrom(null)}
-                leaving={swapFrom ? documentBody : null}
-              >
-                {chatRoomBody}
-              </SpringSwap>
-            );
             const drafterSurface = (
               <SpringSwap
                 from={swapFrom}
@@ -7538,8 +8782,27 @@ function App() {
               servers: serversBody,
               memory: memoryBody,
               runs: runsBody,
-              chat: chatSurface,
+              // No `chat` entry: the room is a conversation, and conversations
+              // live in the dock now. `"chat"` stays in the `MainSurface` union
+              // for one release (a downgrade must still read its own persisted
+              // key) and resolves here to no body — the document — which is
+              // exactly what the lenient record is for.
             };
+            // The room. A conversation that has taken the plate springs out
+            // of the box the gesture started in — the Front Door's island —
+            // with the door still mounted behind it and fading, exactly as
+            // the Drafter does. One spring, one surface becoming another:
+            // the door is a way THROUGH, not a place you leave.
+            if (conversationExpanded && dockBody)
+              return (
+                <SpringSwap
+                  from={swapFrom}
+                  onArrived={() => setSwapFrom(null)}
+                  leaving={swapFrom ? documentBody : null}
+                >
+                  <div className="flex h-full min-h-0 flex-col">{dockBody}</div>
+                </SpringSwap>
+              );
             const secondaryBody =
               mainSurface === "document"
                 ? null
@@ -7565,14 +8828,24 @@ function App() {
               is up. Stands up out of the article's way when the pane gets too
               narrow to hold both; 64 is the article's pl-16. */}
           {mainSurface === "document" &&
-            !(sidebarTab.kind === "folder" && activeFile) &&
-            !voiceOpen &&
-            voiceEnabled &&
-            sessionReady &&
-            latest && (
+            // Not on the Front Door. The door is one composed gesture — a
+            // sentence and three destinations, one of which IS a conversation
+            // — and a floating pill offering a fourth way to the same place
+            // would be the header-button sprawl this app refuses, one level
+            // down. Everywhere else on this surface the pill is the way in.
+            plateMode !== "door" &&
+            !dockOpen &&
+            dockReachable && (
               <DiscussPill
-                onClick={() => setVoiceOpen(true)}
-                textRef={documentRef}
+                onClick={openDock}
+                // Only a plan has an article to stand clear of; the file
+                // viewer has none, and a stale ref would stow the pill against
+                // a column that isn't on screen.
+                textRef={
+                  plateMode === "plan" && planDiscussable
+                    ? documentRef
+                    : undefined
+                }
                 textInset={64}
                 measureKey={docWide}
               />
@@ -7591,7 +8864,7 @@ function App() {
               `column-reverse` so the order still reads + above − with the mode
               toggle on top. */}
           {(mainSurface === "document" ? docSurfaceActive : drafterOpen) &&
-            !(sidebarTab.kind === "folder" && activeFile) && (
+            plateMode !== "file" && (
             <div
               ref={zoomCtrlRef}
               className={`absolute flex items-center gap-1 rounded-full${zoomColumn ? " flex-col-reverse" : ""}`}
@@ -7648,13 +8921,18 @@ function App() {
             </div>
           )}
           </div>
-          {/* Voice panel — the app's one discussion surface, opened by the
-              Discuss pill or ⌘J over a plan, or by the drafter's own pill over
-              a draft. A docked, resizable column rather than a drawer painted
-              over the document: the two surfaces are mutually exclusive, so
-              one dock hosts whichever is live and the differing `key`s keep
-              the remount-per-session behaviour. */}
-          {voiceDocked && (
+          {/* The conversation dock — the app's one AI column, opened by the
+              Discuss pill or ⌘J. A sibling of the whole surface pane rather
+              than a drawer painted over the document, so it SHRINKS whatever
+              is selected instead of covering it — which is also what keeps it
+              honest over the browser, whose native webview would ignore an
+              overlay and paint straight through it.
+
+              `dockContext.key` is the identity: switching conversations
+              remounts the body rather than mutating a warm session under it,
+              and for the voice-capable kinds that same key is what `voice.rs`
+              dispatches on. */}
+          {voiceDocked && dockContext && (
             <>
               <PaneDivider
                 label="voice"
@@ -7662,7 +8940,7 @@ function App() {
                 dragging={voiceDragging}
                 // The chevron closes the panel; the pill and ⌘J reopen it (a
                 // collapsed voice column has no divider left to drag from).
-                onToggle={closeVoicePanel}
+                onToggle={closeDock}
                 onPointerDown={startVoiceDrag}
                 hideChevron={latchActive}
                 // Runs inside the document plate — no hull to show through.
@@ -7674,38 +8952,20 @@ function App() {
               <div
                 ref={voiceDockRef}
                 data-rl-pane
-                className="shrink-0 flex overflow-hidden"
+                className="shrink-0 flex flex-col overflow-hidden"
               >
-                {/* Lazy chunk: the dock renders empty for the load beat, then
-                    the panel mounts — width is ref-owned, so nothing shifts. */}
-                <Suspense fallback={null}>
-                  {planVoiceOpen ? (
-                    <VoicePanel
-                      // Remount cleanly if the active session changes (a revision
-                      // arriving calls setActiveId) instead of mutating sessionId
-                      // under a live warm session.
-                      key={activeId ?? ""}
-                      sessionId={activeId ?? ""}
-                      markdown={latest?.rawPlanMarkdown ?? ""}
-                      sections={sections}
-                      onActivityChange={setDiscussionLive}
-                      onClose={() => setVoiceOpen(false)}
-                    />
-                  ) : (
-                    <VoicePanel
-                      // Keyed `drafter:<draft_id>` — the backend derives the kind
-                      // from the key shape — and primed with the draft's markdown
-                      // mirror.
-                      key={`drafter:${drafterDraftId ?? ""}`}
-                      sessionId={`drafter:${drafterDraftId ?? ""}`}
-                      markdown={drafterMarkdown}
-                      sections={drafterSections}
-                      cwd={drafterProjectPath}
-                      liveMarkdown={getDrafterLiveMarkdown}
-                      onClose={() => setDrafterVoiceOpen(false)}
-                    />
-                  )}
-                </Suspense>
+                {/* Only when the surface offers a genuine choice — see the
+                    strip. Selecting sets the PIN, which is a tie-break: it
+                    follows you to the next surface that has the same kind and
+                    is ignored by every surface that hasn't. */}
+                <DockContextStrip
+                  contexts={dockContexts}
+                  activeKey={dockContext.key}
+                  onSelect={(d) => setConversationPin(d.kind)}
+                />
+                <div className="flex-1 min-h-0 flex overflow-hidden">
+                {dockBody}
+                </div>
               </div>
             </>
           )}
@@ -7976,7 +9236,9 @@ function App() {
                 the plan session's comments. Same pane, same fullscreen/zoom
                 machinery — different grounding. */}
             {discussionContext === "review" ? (
-              <ReviewDiscussionPane review={codeReview} />
+              <Suspense fallback={null}>
+                <ReviewDiscussionPane review={codeReview} />
+              </Suspense>
             ) : sidebarTab.kind !== "sessions" ? (
               <div
                 className="italic"
@@ -8014,22 +9276,209 @@ function App() {
                 }}
               >
                 <span style={{ flex: 1 }}>
-                  <strong>Claude is no longer waiting for this plan.</strong> The
-                  Claude Code session ended (or the hold timed out). Your comments
-                  are preserved — <strong>Restore plan session</strong> reopens the
-                  same conversation in a terminal and re-presents the plan for
-                  review.
+                  {restoring ? (
+                    /* The restore's own status, app-native. The terminal
+                       running it is deliberately off-screen: a resumed session
+                       replays its earlier user turns, so what is on that screen
+                       is Redline's own control traffic quoted back — valid
+                       history that reads as an accidental double-send. This
+                       banner is where the reviewer learns what is happening,
+                       and the button below is the way to the machinery. */
+                    <>
+                      <strong>Reopening this plan…</strong> {restoreStatus}
+                      <span
+                        className="block"
+                        style={{
+                          marginTop: "4px",
+                          color: "var(--color-ink-muted)",
+                          fontSize: "12px",
+                        }}
+                      >
+                        The original {restoreDecision.label} conversation and
+                        your Redline comments are kept — this re-presents the
+                        plan it was holding, it doesn&rsquo;t revise it.
+                      </span>
+                      <span
+                        className="flex flex-wrap gap-2"
+                        style={{ marginTop: "8px" }}
+                      >
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void showRawTerminal(attemptHere?.terminalId ?? null)
+                          }
+                          disabled={!attemptHere?.terminalId}
+                          title="Open the terminal this restore is running in."
+                          className="rounded px-2 py-1"
+                          style={{
+                            background: "transparent",
+                            color: "var(--color-ink-muted)",
+                            border: "1px solid var(--color-rule)",
+                            cursor: attemptHere?.terminalId
+                              ? "pointer"
+                              : "default",
+                            fontSize: "12px",
+                            opacity: attemptHere?.terminalId ? 1 : 0.6,
+                          }}
+                        >
+                          Show raw terminal
+                        </button>
+                      </span>
+                    </>
+                  ) : restoreFailure ? (
+                    /* A restore that died stays on screen and stays
+                       actionable. Reverting to the plain detached banner is
+                       indistinguishable from never having clicked, which is how
+                       one silently-dead restore became three live claudes. */
+                    <>
+                      <strong>Couldn&rsquo;t reopen this plan.</strong>{" "}
+                      {restoreFailure.error}
+                      <span
+                        className="flex flex-wrap gap-2"
+                        style={{ marginTop: "8px" }}
+                      >
+                        <button
+                          type="button"
+                          onClick={restorePlanSession}
+                          className="rounded px-2 py-1"
+                          style={{
+                            background: "var(--color-anchor-bg)",
+                            color: "var(--color-anchor-text)",
+                            border: "1px solid var(--color-rule)",
+                            cursor: "pointer",
+                            fontSize: "12px",
+                            fontWeight: 600,
+                          }}
+                        >
+                          Retry
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void showRawTerminal(restoreFailure.terminalId)
+                          }
+                          disabled={!restoreFailure.terminalId}
+                          title="Open the terminal this restore was running in."
+                          className="rounded px-2 py-1"
+                          style={{
+                            background: "transparent",
+                            color: "var(--color-ink-muted)",
+                            border: "1px solid var(--color-rule)",
+                            cursor: restoreFailure.terminalId
+                              ? "pointer"
+                              : "default",
+                            fontSize: "12px",
+                            opacity: restoreFailure.terminalId ? 1 : 0.6,
+                          }}
+                        >
+                          Show raw terminal
+                        </button>
+                        <button
+                          type="button"
+                          onClick={copyRestoreCommand}
+                          className="rounded px-2 py-1"
+                          style={{
+                            background: "transparent",
+                            color: "var(--color-ink-muted)",
+                            border: "1px solid var(--color-rule)",
+                            cursor: "pointer",
+                            fontSize: "12px",
+                          }}
+                        >
+                          Copy resume command
+                        </button>
+                      </span>
+                    </>
+                  ) : (
+                  <>
+                  {/* Named for the harness that actually left. A Codex reviewer
+                      told "the Claude Code session ended" is being pointed at a
+                      process they never started — the sentence stops describing
+                      a recoverable state and starts reading as a bug. A legacy
+                      row claims neither name; see `detachedBannerCopy`. */}
+                  <strong>{detachedCopy.lede}</strong> {detachedCopy.body}
+                  <strong>Restore plan session</strong> reopens the same
+                  conversation and re-presents the plan for review. It runs in
+                  the background — nothing is retyped and nothing is lost.
+                  {/* The harness choice, for a row with no stored provenance.
+                      Shown ONLY then: asking a known-Codex reviewer which
+                      harness wrote their plan is asking them to confirm
+                      something Redline already knows, and getting it wrong
+                      sends `claude --resume` a thread id — which does not
+                      error, it silently starts a FRESH session. */}
+                  {restoreDecision.legacy && activeId && (
+                    <span
+                      className="flex items-center gap-2 flex-wrap"
+                      style={{ marginTop: "8px", fontSize: "12px" }}
+                    >
+                      <span style={{ color: "var(--color-ink-muted)" }}>
+                        Written in:
+                      </span>
+                      {(
+                        [
+                          ["claude-code", "Claude Code"],
+                          ["codex", "Codex"],
+                        ] as [RestoreHarness, string][]
+                      ).map(([value, label]) => {
+                        const on = restoreDecision.harness === value;
+                        return (
+                          <button
+                            key={value}
+                            type="button"
+                            aria-pressed={on && restoreDecision.chosen}
+                            onClick={() =>
+                              setHarnessChoices((prev) => ({
+                                ...prev,
+                                [activeId]: value,
+                              }))
+                            }
+                            className="rounded px-2 py-0.5"
+                            style={{
+                              background: on
+                                ? "var(--color-anchor-bg)"
+                                : "transparent",
+                              color: on
+                                ? "var(--color-anchor-text)"
+                                : "var(--color-ink-muted)",
+                              border: "1px solid var(--color-rule)",
+                              cursor: "pointer",
+                              fontSize: "11px",
+                              fontWeight: on ? 600 : 400,
+                            }}
+                          >
+                            {label}
+                          </button>
+                        );
+                      })}
+                    </span>
+                  )}
+                  {/* What would stop the plan coming back, with the same fix
+                      the front door offers. Rendered before the click, not
+                      after: a restore that cannot complete spends a terminal,
+                      dismisses this banner, and leaves nothing to show for it. */}
+                  {restoreBlockers.length > 0 && (
+                    <span className="block">
+                      <ReadinessStrip
+                        items={restoreBlockers}
+                        onFix={applyReadinessFix}
+                      />
+                    </span>
+                  )}
                   <span
                     className="flex flex-wrap gap-2"
                     style={{ marginTop: "8px" }}
                   >
+                    {/* No "Restoring…" state here any more: an in-flight
+                        restore replaces this whole branch with its own status,
+                        so this button only ever renders when there is nothing
+                        running to double-click. */}
                     <button
                       type="button"
                       onClick={restorePlanSession}
-                      disabled={restoring}
+                      disabled={restoreBlockers.length > 0}
                       title={
-                        restoring
-                          ? "Resuming the conversation and re-presenting the plan — this takes a few seconds."
+                        restoreBlockers.length > 0
+                          ? `${restoreBlockers[0].label} — restore can't bring the plan back until that's fixed.`
                           : undefined
                       }
                       className="rounded px-2 py-1"
@@ -8037,31 +9486,41 @@ function App() {
                         background: "var(--color-anchor-bg)",
                         color: "var(--color-anchor-text)",
                         border: "1px solid var(--color-rule)",
-                        cursor: restoring ? "default" : "pointer",
+                        cursor:
+                          restoreBlockers.length > 0 ? "default" : "pointer",
                         fontSize: "12px",
                         fontWeight: 600,
-                        opacity: restoring ? 0.6 : 1,
+                        opacity: restoreBlockers.length > 0 ? 0.6 : 1,
                       }}
                     >
-                      {restoring ? "Restoring…" : "Restore plan session"}
+                      Restore plan session
                     </button>
                     <button
                       type="button"
                       onClick={copyRestoreCommand}
-                      title="For a Claude running in a terminal Redline doesn't own — copy the resume command to paste yourself."
+                      disabled={restoreBlockers.length > 0}
+                      title={`For a ${restoreDecision.label} running in a terminal Redline doesn't own — copy the resume command to paste yourself.`}
                       className="rounded px-2 py-1"
                       style={{
                         background: "transparent",
                         color: "var(--color-ink-muted)",
                         border: "1px solid var(--color-rule)",
-                        cursor: "pointer",
+                        cursor:
+                          restoreBlockers.length > 0 ? "default" : "pointer",
                         fontSize: "12px",
+                        opacity: restoreBlockers.length > 0 ? 0.6 : 1,
                       }}
                     >
                       Copy resume command
                     </button>
                   </span>
+                  </>
+                  )}
                 </span>
+                {/* No dismiss while a restore is running: the banner IS the
+                    progress, and hiding it leaves the reviewer with a
+                    background terminal and no narrator. */}
+                {!restoring && (
                 <button
                   type="button"
                   onClick={() => setDetachDismissed(true)}
@@ -8075,6 +9534,7 @@ function App() {
                 >
                   ✕
                 </button>
+                )}
               </div>
             )}
             {composing && (
@@ -8239,10 +9699,16 @@ function App() {
               );
             })()}
             <DiscussionZoomContext.Provider value={adjustDiscussionZoom}>
+            {/* One boundary around the LIST, not one per card: a per-card
+                Suspense would let the pane pop in a card at a time. Quiet
+                fallback — a spinner where comments are about to appear reads
+                as a glitch, and the chunk is local. */}
+            <Suspense fallback={null}>
             {paneComments.map((c) => (
               <CommentCard
                 key={`${session?.sessionId ?? ""}-${c.id}`}
                 sessionId={session?.sessionId ?? ""}
+                backend={session?.backend ?? null}
                 comment={c}
                 focused={focusedCommentId === c.id}
                 autoOpen={autoOpenCommentId === c.id}
@@ -8257,6 +9723,7 @@ function App() {
                 submitInFlight={busy}
               />
             ))}
+            </Suspense>
             </DiscussionZoomContext.Provider>
               </>
             )}
@@ -8333,8 +9800,15 @@ function App() {
               />
             </div>
           )}
+          {/* Mounted once and never unmounted: the dock's PTYs and their
+              scrollback die with it, so a surface change must never take it
+              away. Until then the enclosing div IS the dock — same plate, same
+              geometry, owned by `applyLiveLayout` — so nothing moves when the
+              tabs arrive. */}
+          {terminalMounted && (
+          <Suspense fallback={null}>
           <TerminalTabs
-            ref={terminalsRef}
+            ref={attachTerminals}
             theme={theme}
             onTabsChange={setTermTabCount}
             onTabIdsChange={setLiveTermIds}
@@ -8346,6 +9820,8 @@ function App() {
             heldPlanTitles={heldPlanTitles}
             projectOptions={projectOptions}
           />
+          </Suspense>
+          )}
         </div>
       </main>
       <ErrorBoundary
@@ -8388,6 +9864,7 @@ function App() {
         termTabCount={termTabCount}
         termHasUnseen={termHasUnseen}
         onExpandTerminal={revealTerm}
+        backend={session?.backend ?? null}
       />
       </ChromeSlot>
       </ErrorBoundary>
@@ -8433,14 +9910,16 @@ function App() {
         />
       )}
       {orchestrateModal && (
+        <Suspense fallback={null}>
         <OrchestrateLaunchModal
           projectPath={session?.projectPath || null}
           gitStatus={orchestrateModal.gitStatus}
-          workflowsDisabled={orchestrateModal.workflowsDisabled}
+          availability={orchestrateModal.availability}
           allowRules={orchestrateModal.allowRules}
           onLaunch={(rules) => void launchOrchestrator(rules)}
           onCancel={() => setOrchestrateModal(null)}
         />
+        </Suspense>
       )}
       {toast &&
         (typeof toast === "string" ? (
@@ -8512,8 +9991,8 @@ function App() {
               type="button"
               onClick={() => {
                 revealTerm();
-                terminalsRef.current?.openSessionTerminal(
-                  handoffFailure.projectPath,
+                void ensureTerminalReady().then((dock) =>
+                  dock?.openSessionTerminal(handoffFailure.projectPath),
                 );
               }}
               className="rounded px-2 py-1"
@@ -8539,6 +10018,7 @@ function App() {
         </div>
       )}
       {inviteOpen && (
+        <Suspense fallback={null}>
         <InviteDialog
           sharing={collabShare}
           peerCount={collabPeers}
@@ -8554,13 +10034,16 @@ function App() {
           onStop={stopShare}
           onClose={() => setInviteOpen(false)}
         />
+        </Suspense>
       )}
       {joinOpen && (
-        <JoinDialog
-          defaultDisplayName={relayDefaults.displayName}
-          onJoin={joinRoom}
-          onClose={() => setJoinOpen(false)}
-        />
+        <Suspense fallback={null}>
+          <JoinDialog
+            defaultDisplayName={relayDefaults.displayName}
+            onJoin={joinRoom}
+            onClose={() => setJoinOpen(false)}
+          />
+        </Suspense>
       )}
       {shareOpen && session && latest && (
         <Suspense fallback={null}>
@@ -8596,9 +10079,15 @@ function App() {
           />
         </Suspense>
       )}
-      {showReadme && <ReadmeModal onClose={() => setShowReadme(false)} />}
+      {showReadme && (
+        <Suspense fallback={null}>
+          <ReadmeModal onClose={() => setShowReadme(false)} />
+        </Suspense>
+      )}
       {showFeedback && (
-        <FeedbackModal onClose={() => setShowFeedback(false)} />
+        <Suspense fallback={null}>
+          <FeedbackModal onClose={() => setShowFeedback(false)} />
+        </Suspense>
       )}
       {hookStatus &&
         skillStatus &&
@@ -8607,6 +10096,7 @@ function App() {
           (codexHookStatus?.available &&
             (!codexHookStatus.installed || !codexSkillStatus?.installed)) ||
           setupPhase === "done") && (
+          <Suspense fallback={null}>
           <HookSetupModal
             phase={
               !hookStatus.installed ||
@@ -8625,9 +10115,12 @@ function App() {
             onShowHowItWorks={() => setHowItWorksOpen(true)}
             error={installError}
           />
+          </Suspense>
         )}
       {howItWorksOpen && (
-        <HowItWorksCard onClose={() => setHowItWorksOpen(false)} />
+        <Suspense fallback={null}>
+          <HowItWorksCard onClose={() => setHowItWorksOpen(false)} />
+        </Suspense>
       )}
       {/* ⌘K palette. Registers with the menu-overlay contract while open, so
           the native browser webview hides beneath it. */}
@@ -8641,6 +10134,7 @@ function App() {
           so the two never overlap. */}
       {(() => {
         const setupActive =
+          integrationReady &&
           !!hookStatus &&
           !!skillStatus &&
           (!hookStatus.installed ||
@@ -8649,7 +10143,7 @@ function App() {
               (!codexHookStatus.installed || !codexSkillStatus?.installed)) ||
             setupPhase === "done");
         const show =
-          tourOpen || (!onboardingDone && !setupActive && bootSettled);
+          tourOpen || (!onboardingDone && !setupActive && !bootAnimating);
         if (!show) return null;
         return (
           <Suspense fallback={null}>

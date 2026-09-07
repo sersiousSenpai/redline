@@ -24,26 +24,62 @@ export interface ExtensionToolchain {
   templateDir: string | null;
 }
 
+/** The codex half of the probe. Read ONLY when the stored backend choice is
+ *  Codex — `found` and `usable` are different answers, and the gap between
+ *  them is the live bug this shipped to close: `$PATH` on a machine with the
+ *  ChatGPT desktop app usually resolves an older standalone build that has no
+ *  `app-server` and no `resume`. */
+export interface CodexProbe {
+  found: boolean;
+  path: string | null;
+  source: string;
+  usable: boolean;
+  signedIn: boolean;
+  /** The config profile carrying the plan contract (`codex_profile.rs`).
+   *  Optional so a probe predating the field is withheld, not guessed at. */
+  profile?: { installed: boolean; outdated: boolean; path: string };
+}
+
 /** Runtime probe from `preflight_status` (src-tauri/src/preflight.rs). */
 export interface PreflightStatus {
   claude: { found: boolean; path: string | null; source: string };
+  /** Optional so a probe predating the field reads as "no answer" — every
+   *  derivation from it is withheld rather than guessed at. */
+  codex?: CodexProbe | null;
   curl: { ok: boolean; version: string | null };
   /** "active" | "ambient" | "paused" */
   mode: string;
   hook: { installed: boolean; conflictingUrl: string | null };
   skill: { installed: boolean; outdated: boolean };
+  /** The Codex hook + skill installs. Withheld on the same condition as
+   *  `codex`: reading either runs the codex capability probe, so a Claude
+   *  user's payload carries neither. */
+  codexHook?: {
+    available: boolean;
+    installed: boolean;
+    hooksPath: string;
+    stopFound: boolean;
+    promptCaptureFound: boolean;
+  } | null;
+  codexSkill?: { installed: boolean; outdated: boolean } | null;
   /** Optional so a probe predating the field reads as "no answer" — every
-   *  derivation from it is withheld rather than guessed at. */
-  extension?: ExtensionToolchain;
+   *  derivation from it is withheld rather than guessed at. Also null when
+   *  the launch target isn't an extension pack: `rustup target list` is a
+   *  child process and a plain build never needs the answer. */
+  extension?: ExtensionToolchain | null;
 }
 
 export type ReadinessId =
   | "mode-paused"
   | "claude-missing"
+  | "codex-missing"
+  | "codex-logged-out"
+  | "codex-contract-missing"
   | "daemon-unbound"
   | "hook-unapproved"
   | "no-project"
   | "hook-missing"
+  | "codex-hook-missing"
   | "skill-stale"
   | "curl-old"
   | "ext-toolchain";
@@ -53,6 +89,7 @@ export type ReadinessId =
 export type ReadinessFixKind =
   | "resume-mode"
   | "locate-claude"
+  | "locate-codex"
   | "install-integration"
   | "new-project"
   | "copy-hooks";
@@ -92,6 +129,13 @@ export interface ReadinessInput {
   /** ⏎'s resolved target is an extension-pack project (workspace registry
    *  kind). Gates the toolchain item so it never nags a plain build. */
   targetIsExtension?: boolean;
+  /** ⏎ would launch on Codex. Every codex item is gated on this: a Claude
+   *  user must never be shown a Codex blocker, and an extension launch is
+   *  forced back onto Claude regardless of what is stored. */
+  targetIsCodex?: boolean;
+  /** Redline's Stop hook is installed in `~/.codex/hooks.json`
+   *  (`get_codex_hook_status`). `undefined` while unprobed. */
+  codexHookInstalled?: boolean;
 }
 
 /** How long a launch may sit with nothing arriving before we name the most
@@ -105,10 +149,14 @@ export const HOOK_SILENCE_MS = 90_000;
 const ID_ORDER: ReadinessId[] = [
   "mode-paused",
   "claude-missing",
+  "codex-missing",
+  "codex-logged-out",
+  "codex-contract-missing",
   "daemon-unbound",
   "hook-unapproved",
   "no-project",
   "hook-missing",
+  "codex-hook-missing",
   "skill-stale",
   "curl-old",
   "ext-toolchain",
@@ -146,6 +194,63 @@ export function deriveReadiness(input: ReadinessInput): ReadinessItem[] {
         "point Redline at the binary.",
       fix: { label: "Locate it…", kind: "locate-claude" },
     });
+  }
+
+  // ── The Codex routes ───────────────────────────────────────────────────
+  // All three gated on the stored choice: a Claude user must never see a
+  // Codex blocker, and neither must a Claude launch out of an extension
+  // project (those are forced back onto Claude at the door).
+  if (input.targetIsCodex && pf) {
+    const cx = pf.codex;
+    if (!cx?.found || !cx.usable) {
+      items.push({
+        id: "codex-missing",
+        state: "blocked",
+        label: cx?.found
+          ? "This `codex` is too old for Redline"
+          : "Can't find the `codex` command",
+        detail: cx?.found
+          ? `${cx.path ?? "It"} has no \`resume\` — it could plan once and then ` +
+            "fail every restore. The ChatGPT desktop app ships a current " +
+            "build; point Redline at that one."
+          : "Redline spawns Codex to do the planning. Install the ChatGPT " +
+            "desktop app, or point Redline at the binary.",
+        fix: { label: "Locate it…", kind: "locate-codex" },
+      });
+    } else if (cx.profile && (!cx.profile.installed || cx.profile.outdated)) {
+      // The silent one. `codex -p redline-plan` with no such file is NOT an
+      // error — codex ignores it — so the session would plan with no contract
+      // at all: it looks perfect on v1 and destroys the track-changes diff on
+      // v2, because nothing told it to preserve the block-identity sidecars.
+      // Blocking, and blocking on `outdated` too: a stale contract fails the
+      // same way, and the fix is the same one click.
+      items.push({
+        id: "codex-contract-missing",
+        state: "blocked",
+        label: cx.profile.outdated
+          ? "The Codex plan contract is out of date"
+          : "The Codex plan contract isn't installed",
+        detail:
+          "It teaches Codex how to submit a plan and how to fold your " +
+          "revisions back in without losing the track-changes markers. " +
+          "Codex ignores a missing profile silently, so a plan would come " +
+          "back looking fine and then break on the first revision.",
+        fix: { label: "Install integration", kind: "install-integration" },
+      });
+    } else if (!cx.signedIn) {
+      // The third silent-failure route, and the one this strip exists for: a
+      // present, hooked, logged-OUT codex spins forever over nothing.
+      items.push({
+        id: "codex-logged-out",
+        state: "blocked",
+        label: "Codex isn't signed in",
+        detail:
+          "A logged-out Codex starts, accepts the prompt, and then fails at " +
+          "the first token — nothing would ever come back for review. Run " +
+          "`codex login` in a terminal.",
+        fix: { label: "codex login", kind: "copy-hooks", copyText: "codex login" },
+      });
+    }
   }
 
   if (!input.daemonBound) {
@@ -202,6 +307,26 @@ export function deriveReadiness(input: ReadinessInput): ReadinessItem[] {
       detail: pf.hook.conflictingUrl
         ? `~/.claude/settings.json points ExitPlanMode at ${pf.hook.conflictingUrl}. Reinstalling merges Redline's entry back in.`
         : "Without it Claude Code never sends plans here. Reinstalling merges it back into ~/.claude/settings.json.",
+      fix: { label: "Install integration", kind: "install-integration" },
+    });
+  }
+
+  // Same shape as `hook-missing`, and only for a Codex launch. A warning
+  // rather than a blocker because the plan still reaches the model — what is
+  // lost is the return trip, which is exactly what the detail says.
+  if (
+    input.targetIsCodex &&
+    !input.hookModalActive &&
+    input.codexHookInstalled === false
+  ) {
+    items.push({
+      id: "codex-hook-missing",
+      state: "warn",
+      label: "The Codex plan hook isn't installed",
+      detail:
+        "Without it Codex never sends plans here. Installing it writes the " +
+        "Stop hook into ~/.codex/hooks.json — Codex then asks you once to " +
+        "trust the new hook, from inside Codex itself.",
       fix: { label: "Install integration", kind: "install-integration" },
     });
   }
@@ -278,6 +403,65 @@ export function sortReadiness(items: ReadinessItem[]): ReadinessItem[] {
 /** The items that refuse ⏎, in the order the composer should surface them. */
 export function blockingItems(items: ReadinessItem[]): ReadinessItem[] {
   return items.filter((i) => i.state === "blocked");
+}
+
+/** The Codex faults that make a RESTORE impossible.
+ *
+ *  A restore is a narrower thing than a launch, and it fails differently. The
+ *  door's gate asks "can this machine start a plan session"; this one asks "can
+ *  this machine resume THIS conversation and get the held plan back" — and the
+ *  answer needs all four of these, because the restore is a round trip:
+ *
+ *  - the binary, and a current one: `codex resume` is the whole mechanism, and
+ *    the `$PATH` build on a machine with the ChatGPT desktop app usually lacks
+ *    it (that gap is why `usable` exists apart from `found`);
+ *  - the sign-in, or the resumed session dies at the first token;
+ *  - the plan profile, or the resumed session is never told the contract;
+ *  - the Stop hook, or the sentinel it writes reaches nothing.
+ *
+ *  Lose any one and the reviewer gets a terminal that runs, looks fine, and
+ *  never gives the plan back — with the detached banner dismissed behind it.
+ *  So the restore refuses instead, and shows the same fix it would have shown
+ *  at the door. */
+const CODEX_RESTORE_IDS: readonly ReadinessId[] = [
+  "codex-missing",
+  "codex-contract-missing",
+  "codex-logged-out",
+  "codex-hook-missing",
+];
+
+/** What stands between a detached Codex review and its plan coming back.
+ *
+ *  Deliberately built by running `deriveReadiness` rather than re-deriving the
+ *  four items: the labels, details and fix actions are the ones the front door
+ *  already ships, so a Codex probe that grows a new failure mode is answered in
+ *  one place. The synthetic surroundings are the honest ones for a restore —
+ *  it needs no project, no pending launch, and no plan to have ever arrived.
+ *
+ *  Empty while `preflight` is null. An unprobed machine has told us nothing,
+ *  and refusing a restore on no answer would be worse than the fault it guards
+ *  against: the reviewer's own terminal was always the fallback. */
+export function codexRestoreBlockers(
+  preflight: PreflightStatus | null,
+  codexHookInstalled?: boolean,
+): ReadinessItem[] {
+  if (!preflight) return [];
+  return deriveReadiness({
+    preflight,
+    daemonBound: true,
+    hookModalActive: false,
+    planEverArrived: true,
+    pendingSince: null,
+    now: 0,
+    projectCount: 1,
+    targetIsCodex: true,
+    codexHookInstalled,
+  })
+    .filter((i) => CODEX_RESTORE_IDS.includes(i.id))
+    // `codex-hook-missing` is a WARNING at the door, and correctly so: the
+    // plan still reaches the model, only the return trip is lost. A restore is
+    // nothing BUT the return trip, so here the same fault is fatal.
+    .map((i) => (i.state === "blocked" ? i : { ...i, state: "blocked" as const }));
 }
 
 /** The blockers that apply to opening a CHAT.

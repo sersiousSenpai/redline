@@ -19,6 +19,12 @@ import {
   BOOT_PLAYED_KEY,
   shouldArm,
 } from "./lib/boot";
+import { mark } from "./lib/bootMarks";
+
+// The zero point for every frontend boot milestone (docs/perf-budget.md "Boot
+// budget"). First statement in the entry module, so the measurements start
+// where the JS does.
+mark("rl:entry");
 
 // Apply the persisted theme + font + lint before first paint to avoid a flash
 // of the default theme/typeface on launch.

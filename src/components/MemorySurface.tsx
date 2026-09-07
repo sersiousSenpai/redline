@@ -31,6 +31,7 @@ import {
   type TimelineItem,
   type TimelineRow,
 } from "../lib/timeline";
+import type { TabRequest } from "../lib/navTarget";
 import { useShotCache } from "../hooks/useShotCache";
 import { MemoryAsk } from "./MemoryAsk";
 import { MemoryMapTab } from "./MemoryMap";
@@ -87,6 +88,10 @@ const OVERSCAN = 12;
 interface MemorySurfaceProps {
   activeSessionId?: string | null;
   activeSessionName?: string | null;
+  /** "Go to Memory: Catalog" from the command palette. Nonce'd rather than
+   *  controlled: a prop that stayed set would drag the surface back to that
+   *  tab on every render and the user could never leave it. */
+  tabRequest?: TabRequest | null;
 }
 
 /** The viewer's glow-dot (Agent Seats' primitive, copied). */
@@ -2675,11 +2680,32 @@ function HealthTab({
 
 type SurfaceTab = "ask" | "timeline" | "catalog" | "map" | "health";
 
-export function MemorySurface({ activeSessionId, activeSessionName }: MemorySurfaceProps) {
-  const [tab, setTab] = usePersistedState<SurfaceTab>(
+// Five, and Ask is first: it is a conversation over *this* surface's lake whose
+// every reply cites into the Timeline behind it, so it wants the whole plate —
+// `MemoryAsk`'s bubbles are sized for that width, not for a ~360px column. Its
+// thread is a singleton (`memchat`, no thread column in the schema), so it must
+// have exactly one live mount; that is why the app's conversation dock does not
+// carry a `memchat` entry, and why it must not be given one again.
+const SURFACE_TABS: readonly SurfaceTab[] = [
+  "ask",
+  "timeline",
+  "catalog",
+  "map",
+  "health",
+];
+
+export function MemorySurface({
+  activeSessionId,
+  activeSessionName,
+  tabRequest = null,
+}: MemorySurfaceProps) {
+  const [storedTab, setTab] = usePersistedState<SurfaceTab>(
     "redline.memory.surfaceTab",
     "timeline",
   );
+  // Repair on read, never a migration write: a stored value this surface no
+  // longer has a tab for lands on the Timeline instead of on nothing.
+  const tab = SURFACE_TABS.includes(storedTab) ? storedTab : "timeline";
   const [status, setStatus] = useState<MemoryStatus | null>(null);
   // The Ask tab's citation-chip jump: set the focus, land on the Timeline.
   const [focus, setFocus] = useState<TimelineFocus | null>(null);
@@ -2690,6 +2716,16 @@ export function MemorySurface({ activeSessionId, activeSessionName }: MemorySurf
     },
     [setTab],
   );
+  // …and the palette's "Go to Memory: <tab>". App drops a tab this surface
+  // hasn't got before it ever gets here (`isKnownTab`), so the cast is a
+  // re-typing of a value from this surface's own list.
+  const tabNonce = tabRequest?.nonce;
+  useEffect(() => {
+    if (!tabRequest) return;
+    if (SURFACE_TABS.includes(tabRequest.tab as SurfaceTab))
+      setTab(tabRequest.tab as SurfaceTab);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabNonce]);
 
   const loadStatus = useCallback(async () => {
     try {
@@ -2785,7 +2821,7 @@ export function MemorySurface({ activeSessionId, activeSessionName }: MemorySurf
         >
           <span style={{ flex: 1 }}>{sentence}</span>
           <div style={{ display: "flex", gap: 4 }}>
-            {(["ask", "timeline", "catalog", "map", "health"] as SurfaceTab[]).map((t) => (
+            {SURFACE_TABS.map((t) => (
               <button
                 key={t}
                 type="button"

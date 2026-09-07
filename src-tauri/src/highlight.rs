@@ -156,24 +156,50 @@ impl CachedDoc {
 /// (it's expensive) and shared; the file cache is keyed by absolute path, the
 /// diff-segment cache by content hash (diff text has no path or mtime).
 pub struct Highlighter {
-    syntaxes: SyntaxSet,
     cache: Mutex<HashMap<String, Arc<CachedDoc>>>,
     diff_cache: Mutex<HashMap<u64, Arc<Vec<Vec<Token>>>>>,
 }
 
+/// The grammar set, built at most once per process, on whichever thread asks
+/// first.
+///
+/// It used to be a field, built inside `Highlighter::new()` — which ran
+/// **synchronously inside Tauri's `setup`**, in front of the window, on every
+/// launch. Deserializing `two_face`'s extended dump is the single most
+/// expensive constructor in that closure, and the overwhelming majority of
+/// launches never open a file at all.
+///
+/// `OnceLock::get_or_init` is the single-flight: the post-boot warmup and a
+/// user who opens a file before it finishes are the same initialization, and
+/// the loser blocks on the winner rather than building a second copy. Which
+/// also means "warm it in the background" and "the managed state the commands
+/// use" are necessarily the same instance — the old code warmed a clone's
+/// regex cache and hoped.
+fn syntaxes() -> &'static SyntaxSet {
+    static SET: OnceLock<SyntaxSet> = OnceLock::new();
+    // `two_face`'s extended set (bat's curated, permissive-only grammars)
+    // rather than `SyntaxSet::load_defaults_newlines()`: the bundled syntect
+    // defaults omit TypeScript/TSX/JSX, so .ts/.tsx files matched no grammar
+    // and rendered as plain text (a uniform wall of the theme's foreground
+    // color). The extended set carries those grammars, and is also
+    // `_newlines` so `ParseState` still gets its trailing '\n'.
+    SET.get_or_init(two_face::syntax::extra_newlines)
+}
+
 impl Highlighter {
+    /// Cheap by construction: two empty maps. Everything expensive is behind
+    /// `syntaxes()`, which nothing on the boot path calls.
     pub fn new() -> Self {
         Self {
-            // `two_face`'s extended set (bat's curated, permissive-only grammars)
-            // rather than `SyntaxSet::load_defaults_newlines()`: the bundled
-            // syntect defaults omit TypeScript/TSX/JSX, so .ts/.tsx files matched
-            // no grammar and rendered as plain text (a uniform wall of the theme's
-            // foreground color). The extended set carries those grammars, and is
-            // also `_newlines` so `ParseState` still gets its trailing '\n'.
-            syntaxes: two_face::syntax::extra_newlines(),
             cache: Mutex::new(HashMap::new()),
             diff_cache: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Build the shared grammar set now, off the critical path. Idempotent,
+    /// and the same instance every command later uses.
+    pub fn warm_syntaxes() {
+        let _ = syntaxes();
     }
 
     /// Fetch the cached doc if its mtime still matches, else `None`.
@@ -301,15 +327,14 @@ impl Highlighter {
     /// `None` if no syntax matches (caller falls back to plain text). The result
     /// is parallel to `split_display_lines(content)`.
     fn tokenize(&self, path: &str, content: &str) -> Option<Vec<Vec<Token>>> {
-        let syntax = self
-            .syntaxes
+        let syntax = syntaxes()
             .find_syntax_for_file(path)
             .ok()
             .flatten()
             .or_else(|| self.syntax_for_alias(path))
-            .or_else(|| self.syntaxes.find_syntax_by_first_line(content))?;
+            .or_else(|| syntaxes().find_syntax_by_first_line(content))?;
         // The plain-text syntax produces no useful classes — treat as unhighlighted.
-        if syntax.name == self.syntaxes.find_syntax_plain_text().name {
+        if syntax.name == syntaxes().find_syntax_plain_text().name {
             return None;
         }
         Some(self.tokenize_content(syntax, content))
@@ -324,14 +349,14 @@ impl Highlighter {
         let syntax = p
             .extension()
             .and_then(|e| e.to_str())
-            .and_then(|e| self.syntaxes.find_syntax_by_extension(e))
+            .and_then(|e| syntaxes().find_syntax_by_extension(e))
             .or_else(|| {
                 p.file_name()
                     .and_then(|n| n.to_str())
-                    .and_then(|n| self.syntaxes.find_syntax_by_extension(n))
+                    .and_then(|n| syntaxes().find_syntax_by_extension(n))
             })
             .or_else(|| self.syntax_for_alias(path))?;
-        if syntax.name == self.syntaxes.find_syntax_plain_text().name {
+        if syntax.name == syntaxes().find_syntax_plain_text().name {
             return None;
         }
         Some(syntax)
@@ -373,7 +398,7 @@ impl Highlighter {
         // `_newlines` syntaxes expect a trailing '\n'; feed it but strip it from
         // emitted text so the renderer controls line breaks.
         for line in content.split_inclusive('\n') {
-            let ops = match state.parse_line(line, &self.syntaxes) {
+            let ops = match state.parse_line(line, syntaxes()) {
                 Ok(ops) => ops,
                 // A grammar error shouldn't blank the file — emit the line plain.
                 Err(_) => {
@@ -420,7 +445,7 @@ impl Highlighter {
             "mjs" | "cjs" => "JavaScript",
             _ => return None,
         };
-        self.syntaxes.find_syntax_by_name(name)
+        syntaxes().find_syntax_by_name(name)
     }
 
     /// Pre-compile the per-grammar regexes off the hot path so the first real

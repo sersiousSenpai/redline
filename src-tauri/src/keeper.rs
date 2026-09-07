@@ -386,7 +386,11 @@ fn matching_brace(bytes: &[u8], start: usize) -> Option<usize> {
 /// baked into `prompt` so it never depends on the agent curling. Registers the
 /// prompt with the dedup guard first so the headless `-p` doesn't leak into the
 /// lake via the global hook.
-pub async fn run_keeper_summarizer(cwd: &str, prompt: String) -> Result<String, String> {
+pub async fn run_keeper_summarizer(
+    db: &Database,
+    cwd: &str,
+    prompt: String,
+) -> Result<String, String> {
     let claude_bin = tokio::task::spawn_blocking(resolve_claude_bin)
         .await
         .map_err(|e| e.to_string())?;
@@ -406,10 +410,14 @@ pub async fn run_keeper_summarizer(cwd: &str, prompt: String) -> Result<String, 
     let mut reader = BufReader::new(stdout).lines();
     let mut final_text: Option<String> = None;
     let mut errored: Option<String> = None;
+    let mut meter = crate::meter::TurnMeter::new();
     while let Ok(Some(line)) = reader.next_line().await {
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
+        // Second pass over the same value — the ONE accounting rule. A
+        // daemon seat has no pane to stream to, but it burns real tokens.
+        meter.observe(&v);
         match classify_line(&v) {
             StreamLine::Final { text, .. } => final_text = Some(text),
             StreamLine::Failed(msg) => errored = Some(msg),
@@ -417,6 +425,9 @@ pub async fn run_keeper_summarizer(cwd: &str, prompt: String) -> Result<String, 
         }
     }
     let _ = child.wait().await;
+    // Booked before the error return below: a failed summarizer spent its
+    // input tokens exactly like a successful one.
+    crate::meter::book(db, "keeper", &meter);
     if let Some(msg) = errored {
         return Err(msg);
     }
@@ -465,7 +476,7 @@ pub async fn compaction_pass(db: &Database) -> Result<usize, String> {
     // for any prompt the agent didn't cover (or if it failed entirely).
     let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
     let mut gists: HashMap<i64, (String, String, &'static str)> = HashMap::new();
-    match run_keeper_summarizer(&cwd, build_keeper_prompt(&bodies)).await {
+    match run_keeper_summarizer(db, &cwd, build_keeper_prompt(&bodies)).await {
         Ok(text) => {
             for a in parse_compaction_actions(&text) {
                 if body_map.contains_key(&a.prompt_id) {
@@ -683,7 +694,7 @@ pub async fn observations_pass(db: &Database) -> Result<usize, String> {
         return Ok(0);
     }
     let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-    let text = match run_keeper_summarizer(&cwd, build_observations_prompt(&corpus)).await {
+    let text = match run_keeper_summarizer(db, &cwd, build_observations_prompt(&corpus)).await {
         Ok(text) => text,
         Err(e) => {
             tracing::info!(error = %e, "observation agent unavailable — skipping the pass");
@@ -867,11 +878,22 @@ fn orchestrating_sessions(ctx: &WatchCtx) -> Vec<String> {
         .collect()
 }
 
+fn running_sessions(ctx: &WatchCtx) -> Vec<String> {
+    ctx.store
+        .list()
+        .into_iter()
+        .filter(|s| s.run_state.as_deref() == Some("running"))
+        .map(|s| s.session_id)
+        .collect()
+}
+
 /// Something is (or was just) on the clock — the sweep must also run when the
 /// tracked set needs clearing, so a session that left `orchestrating` between
 /// sweeps drops its stale clock instead of firing instantly on a later return.
 fn stall_watch_predicate(ctx: &WatchCtx, _now: i64) -> bool {
-    !orchestrating_sessions(ctx).is_empty() || !stall_first_seen().lock().unwrap().is_empty()
+    !orchestrating_sessions(ctx).is_empty()
+        || !stall_first_seen().lock().unwrap().is_empty()
+        || !running_sessions(ctx).is_empty()
 }
 
 /// Walk every over-window `orchestrating` session to `stalled` — the periodic,
@@ -901,6 +923,77 @@ fn stall_watch_act(ctx: &WatchCtx, now: i64) {
                 tracing::info!(session_id = %sid, "orchestrate stall sweep fired");
                 crate::advance_run_state(&app, &store, &sid, "stalled");
             }
+        }
+    });
+}
+
+/// The whole orchestrate-stall sweep: the launch window (`orchestrating` that
+/// never got a beacon) and the silence window (`running` that stopped
+/// producing artifacts). One watch, two clocks — the plan for this was
+/// explicitly "extend that sweep rather than add a fourth timer".
+fn stall_sweep_act(ctx: &WatchCtx, now: i64) {
+    stall_watch_act(ctx, now);
+    running_silence_act(ctx, now);
+}
+
+/// The second half of the same sweep: a run that reached `running` and then
+/// wrote nothing anywhere in its artifact set for the window.
+///
+/// Deliberately folded into this watch rather than given a fourth timer. The
+/// clock is the artifacts' own mtimes (`runwatch::run_last_activity_ms`), not
+/// an in-memory first-seen map, so it survives a restart with no warm-up: the
+/// evidence is on disk either way.
+fn running_silence_act(ctx: &WatchCtx, now: i64) {
+    let candidates = running_sessions(ctx);
+    if candidates.is_empty() {
+        return;
+    }
+    let window_ms = crate::RUNNING_SILENCE_WINDOW.as_millis() as i64;
+    // Same two vetoes the abandoned-run sweep takes: a run held by a human is
+    // not a silent one.
+    let live_links: HashSet<String> = ctx
+        .app
+        .try_state::<crate::PendingReviews>()
+        .map(|pr| pr.held_ids())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|rid| crate::orchestration_review_link(&ctx.db, &rid))
+        .collect();
+    let app = ctx.app.clone();
+    let store = ctx.store.clone();
+    let pending = ctx.pending.clone();
+    tokio::task::spawn_blocking(move || {
+        for sid in candidates {
+            let db = store.database();
+            let Some(row) = db.get_orchestration(&sid) else { continue };
+            // No artifacts to read = no evidence of silence. The phantom-run
+            // case (a claim that never anchored) is the launch watchdog's.
+            let Some(last) = crate::runwatch::run_last_activity_ms(&row) else {
+                continue;
+            };
+            let state = db.get_run_state(&sid);
+            if !crate::running_silence_should_stall(
+                state.as_deref(),
+                now - last,
+                window_ms,
+                pending.has(&sid),
+                live_links.contains(&sid),
+            ) {
+                continue;
+            }
+            let quiet_m = (now - last) / 60_000;
+            tracing::info!(
+                session_id = %sid,
+                quiet_minutes = quiet_m,
+                "running-silence sweep: walking a quiet run to stalled"
+            );
+            crate::db::note_friction(
+                "run_stalled",
+                Some("orchestration"),
+                Some(&sid),
+                Some(&format!("running with no artifact writes for {quiet_m}m")),
+            );
+            crate::advance_run_state(&app, &store, &sid, "stalled");
         }
     });
 }
@@ -1310,7 +1403,7 @@ pub(crate) static WATCHES: &[Watch] = &[
         cadence: STALL_SWEEP_EVERY,
         gate: always,
         predicate: stall_watch_predicate,
-        act: stall_watch_act,
+        act: stall_sweep_act,
     },
     Watch {
         name: "abandoned-run-sweep",

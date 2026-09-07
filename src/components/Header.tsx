@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import type { InterceptionMode, ReviewSession } from "../types";
 import type { MainSurface } from "../lib/mainSurface";
@@ -11,7 +11,6 @@ import type { FontName } from "../theme/fonts";
 import type { LintName } from "../theme/lint";
 import { ThemePicker } from "./ThemePicker";
 import { FontPicker } from "./FontPicker";
-import { AgentSeats } from "./AgentSeats";
 import { LintPicker } from "./LintPicker";
 import { DownloadMenu } from "./DownloadMenu";
 import { ModeToggle } from "./ModeToggle";
@@ -19,13 +18,25 @@ import { AlertSettings } from "./AlertSettings";
 import { MemoryStatusPill } from "./MemoryStatusPill";
 import { LiveSessionMenu } from "./LiveSessionMenu";
 import { SettingsMenu } from "./SettingsMenu";
-import { ExtensionsPanel } from "./ExtensionsPanel";
 import { Button } from "./ui/Button";
 import { MenuSurface } from "./ui/MenuSurface";
 import { Pill } from "./ui/Pill";
 import type { SoundConfig } from "../audio/beep";
 import { latestDisplayVersion } from "../lib/revisionVersions";
 import { beginWindowDrag, toggleWindowMaximize } from "../lib/windowDrag";
+
+// Settings BODIES, not the settings trigger. The gear stays in the static
+// header — it has to, it is chrome — but the panels behind it are two of the
+// heaviest components in the app (the seat chart's model/effort matrix, the
+// extension marketplace) and they are behind a click that most launches never
+// make. `SettingsMenu` only mounts its rows while the menu is open, so `lazy`
+// here means the chunk is fetched on the first open and never on boot.
+const AgentSeats = lazy(() =>
+  import("./AgentSeats").then((m) => ({ default: m.AgentSeats })),
+);
+const ExtensionsPanel = lazy(() =>
+  import("./ExtensionsPanel").then((m) => ({ default: m.ExtensionsPanel })),
+);
 
 // Programmatic window-drag (there is no native title bar — see windowDrag.ts).
 // Lives in lib/ because the immersive hull rail stands in for this header and
@@ -401,9 +412,17 @@ export function Header({
           theme={<ThemePicker theme={theme} onThemeChange={onThemeChange} />}
           font={<FontPicker font={font} onFontChange={onFontChange} />}
           lint={<LintPicker lint={lint} onLintChange={onLintChange} />}
-          agents={<AgentSeats />}
+          agents={
+            <Suspense fallback={null}>
+              <AgentSeats />
+            </Suspense>
+          }
           surfaces={surfacesPanel}
-          extensions={<ExtensionsPanel />}
+          extensions={
+            <Suspense fallback={null}>
+              <ExtensionsPanel />
+            </Suspense>
+          }
           notifications={
             <AlertSettings
               enabled={flashEnabled}

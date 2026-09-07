@@ -414,6 +414,7 @@ pub fn shipwright_argv(repo: &str, prompt: String, prior: Option<&str>) -> Vec<S
 /// persisted on success; a failed resume falls back to one fresh attempt and
 /// overwrites the stored id.
 pub async fn run_shipwright(
+    db: &Database,
     repo: &str,
     prompt: String,
     prior_session: Option<&str>,
@@ -421,7 +422,7 @@ pub async fn run_shipwright(
     crate::seat::run_with_thread(
         "shipwright",
         prior_session.map(str::to_string),
-        |prior| run_shipwright_once(repo, prompt.clone(), prior),
+        |prior| run_shipwright_once(db, repo, prompt.clone(), prior),
     )
     .await
 }
@@ -431,6 +432,7 @@ pub async fn run_shipwright(
 /// prompt with the agent-prompt guard first so the headless `-p` doesn't leak
 /// into the lake via the global hook.
 async fn run_shipwright_once(
+    db: &Database,
     repo: &str,
     prompt: String,
     prior: Option<String>,
@@ -466,10 +468,14 @@ async fn run_shipwright_once(
     let mut session: Option<String> = None;
     let mut final_text: Option<String> = None;
     let mut errored: Option<String> = None;
+    let mut meter = crate::meter::TurnMeter::new();
     while let Ok(Some(line)) = reader.next_line().await {
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
+        // Second pass over the same value — the ONE accounting rule. A
+        // daemon seat has no pane to stream to, but it burns real tokens.
+        meter.observe(&v);
         match classify_line(&v) {
             StreamLine::Init(sid) => session = Some(sid),
             StreamLine::Final { text, session_id } => {
@@ -482,6 +488,8 @@ async fn run_shipwright_once(
             _ => {}
         }
     }
+    // Booked before any error return: a failed pass spent its input tokens.
+    crate::meter::book(db, "shipwright", &meter);
     let mut errbuf = String::new();
     {
         let mut elines = BufReader::new(stderr).lines();

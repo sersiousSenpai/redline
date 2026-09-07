@@ -25,8 +25,10 @@ interface FakeOptions {
   spawn?: () => Promise<void>;
   live?: boolean;
   ready?: boolean;
-  /** Sequence of run states the poller sees (last value repeats). */
-  runStates?: (string | null)[];
+  /** Sequence of run states the poller sees (last value repeats). An
+   *  `Error` entry makes that probe REJECT — the "we couldn't ask" case,
+   *  which must never be read as an answer. */
+  runStates?: (string | null | Error)[];
   failWriteMatching?: RegExp;
 }
 
@@ -35,6 +37,7 @@ function makeFake(opts: FakeOptions = {}) {
   const journal: string[] = [];
   let rearms = 0;
   let stateCursor = 0;
+  let probes = 0;
   const deps: OrchestrateDeps = {
     whenSpawned: () => (opts.spawn ? opts.spawn() : Promise.resolve()),
     isLive: () => Promise.resolve(opts.live ?? false),
@@ -52,14 +55,15 @@ function makeFake(opts: FakeOptions = {}) {
       const states = opts.runStates ?? ["running"];
       const s = states[Math.min(stateCursor, states.length - 1)];
       stateCursor += 1;
-      return Promise.resolve(s);
+      probes += 1;
+      return s instanceof Error ? Promise.reject(s) : Promise.resolve(s);
     },
     rearm: () => {
       rearms += 1;
       return Promise.resolve();
     },
   };
-  return { deps, writes, journal, rearms: () => rearms };
+  return { deps, writes, journal, rearms: () => rearms, probes: () => probes };
 }
 
 function run(deps: OrchestrateDeps): Promise<HandoffResult> {
@@ -196,6 +200,53 @@ describe("orchestrateHandoff", () => {
     const r = await run(fake.deps);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.stage).toBe("launch");
+  });
+
+  it("a probe that throws is not evidence of delivery", async () => {
+    // The regression: the poll used to be `getRunState(...).catch(() => null)`
+    // followed by `state !== "orchestrating"`, so ONE flaky IPC call on the
+    // first poll reported the whole run delivered. Not knowing is not an
+    // observation — it has to keep asking and fail at the timeout.
+    const fake = makeFake({ runStates: [new Error("ipc channel closed")] });
+    const r = await run(fake.deps);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.stage).toBe("prompt");
+      expect(r.reason).toContain("never left 'orchestrating'");
+    }
+    // It really did keep asking, across every retry.
+    expect(fake.probes()).toBeGreaterThan(1);
+    expect(fake.writes.filter((w) => w.startsWith("ultracode"))).toHaveLength(3);
+  });
+
+  it("recovers when a flaky probe is followed by a real claim", async () => {
+    const fake = makeFake({ runStates: [new Error("transient"), "running"] });
+    expect(await run(fake.deps)).toEqual({ ok: true });
+    expect(fake.rearms()).toBe(0);
+  });
+
+  it("fails immediately, with its own reason, when the run is reset mid-launch", async () => {
+    // `null` is a real run_state — the one `reset_run` writes. Observing it
+    // means something took the run away, which no prompt retry can undo.
+    const fake = makeFake({ runStates: ["orchestrating", null] });
+    const r = await run(fake.deps);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.stage).toBe("prompt");
+      expect(r.reason).toContain("reset");
+      expect(r.reason).not.toContain("never left");
+    }
+    // No retry storm: one prompt write, then it stops.
+    expect(fake.writes.filter((w) => w.startsWith("ultracode"))).toHaveLength(1);
+    expect(fake.rearms()).toBe(0);
+  });
+
+  it("does not read a terminal run state as a claim landing", async () => {
+    // `landed` is not live, so it is not the ingest claim advancing the chip.
+    const fake = makeFake({ runStates: ["landed"] });
+    const r = await run(fake.deps);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain("never left 'orchestrating'");
   });
 });
 

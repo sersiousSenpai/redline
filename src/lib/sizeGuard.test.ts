@@ -79,6 +79,55 @@ describe("size guard", () => {
     });
   }
 
+  // The markdown-rendering stack. `MarkdownView` value-imports markdown-it,
+  // markdown-it-task-lists and highlight.js/lib/common — ~670 kB of source
+  // that reached the boot path through ONE chain: App → CommentCard →
+  // CommentThread → MarkdownView. These pin the chain's root.
+  for (const name of [
+    "CommentCard",
+    "ReviewPanel",
+    "ReviewDiscussionPane",
+    "ReadmeModal",
+  ]) {
+    it(`App.tsx keeps ${name} lazy — it is the markdown stack's boot path`, () => {
+      const app = files.find(({ rel }) => rel === "App.tsx");
+      expect(app).toBeDefined();
+      expect(
+        new RegExp(`const ${name} = lazy\\(`).test(app!.text),
+        `${name} statically imported drags markdown-it + highlight.js onto the boot path`,
+      ).toBe(true);
+    });
+  }
+
+  it("MarkdownView is never a static import of App", () => {
+    // Directly, or through any component App still imports statically. The
+    // per-component pins above are the readable failure; this is the backstop
+    // for a NEW static import that reaches it by some other route.
+    const app = files.find(({ rel }) => rel === "App.tsx");
+    expect(app!.text).not.toMatch(
+      /^import\s(?!type\b)[^;]*from\s+["']\.\/components\/MarkdownView["']/m,
+    );
+  });
+
+  it("the settings BODIES are lazy; the settings trigger is not", () => {
+    // The gear is chrome and has to be in the static header. The seat chart
+    // and the extension marketplace behind it are two of the heaviest
+    // components in the app, behind a click most launches never make.
+    const header = files.find(({ rel }) => rel === "components/Header.tsx");
+    expect(header).toBeDefined();
+    for (const name of ["AgentSeats", "ExtensionsPanel"]) {
+      expect(
+        new RegExp(`const ${name} = lazy\\(`).test(header!.text),
+        `${name} is a static import of the header`,
+      ).toBe(true);
+      expect(header!.text).not.toMatch(
+        new RegExp(`^import \\{ ${name} \\} from`, "m"),
+      );
+    }
+    // …and the trigger itself stays static, or the gear would suspend.
+    expect(header!.text).toMatch(/^import \{ SettingsMenu \} from/m);
+  });
+
   it("xterm is value-imported only inside lib/xtermLoader.ts (types are fine)", () => {
     const offenders = files
       .filter(({ rel }) => rel !== "lib/xtermLoader.ts")
@@ -100,6 +149,19 @@ describe("size guard", () => {
       offenders,
       'use `import hljs from "highlight.js/lib/common"` — the barrel is ~1.9 MB of grammars',
     ).toEqual([]);
+  });
+
+  it("build analysis is never written into dist", () => {
+    // `dist/` is embedded into the binary by Tauri and measured by
+    // `distTotalBytes`. A treemap written there inflates the number it exists
+    // to explain, and ships a developer artifact to users on any build that
+    // ran with ANALYZE set. `scripts/check-size.mjs` fails the built output;
+    // this catches the config change that would cause it.
+    const config = readFileSync(join(process.cwd(), "vite.config.ts"), "utf8");
+    const call = config.match(/visualizer\(\{[^}]*\}\)/);
+    expect(call, "the visualizer plugin call moved or vanished").not.toBe(null);
+    expect(call![0]).not.toMatch(/filename:\s*["'`]dist\//);
+    expect(call![0]).toContain("build-analysis/");
   });
 
   it("App.tsx reaches the section projections via sectionMaps, not docModel", () => {

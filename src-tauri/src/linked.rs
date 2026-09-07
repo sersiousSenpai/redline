@@ -168,7 +168,7 @@ impl LinkedState {
 
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(180),
-            crate::claude_proc::collect_turn(stdout, stderr),
+            crate::claude_proc::collect_turn_seated(&self.db, "linked", stdout, stderr),
         )
         .await;
         // Token-matched: a consult draining its stream after a cancel must
@@ -231,6 +231,17 @@ struct LinkedDelta {
     /// reports the seq already folded into `partial`, and the frontend drops
     /// any delta at or below that watermark.
     seq: u64,
+}
+
+/// What the turn is spending and what it is doing. Flattened so the id field
+/// the frontend hook matches on stays at the top level, like every other
+/// linked event.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LinkedMeter {
+    linked_id: String,
+    #[serde(flatten)]
+    meter: turn::MeterPayload,
 }
 
 #[derive(Clone, Serialize)]
@@ -1015,6 +1026,7 @@ async fn read_linked(
         let mut final_text: Option<String> = None;
         let mut errored: Option<String> = None;
         let mut saw_json = false;
+        let mut pacer = turn::MeterPacer::default();
         while let Ok(Some(line)) = reader.next_line().await {
             let trimmed = line.trim();
             if trimmed.is_empty() {
@@ -1024,6 +1036,22 @@ async fn read_linked(
                 continue;
             };
             saw_json = true;
+            // The raw wire, for the inspector. A no-op when it's off —
+            // one relaxed atomic load, nothing buffered.
+            crate::inspect::capture("linked", &linked_id, trimmed);
+            // Second pass over the same value — the meter reads what
+            // `classify_line` throws away. Mutate-then-emit, coalesced.
+            if let Some(payload) = turn::push_meta(&buf, &v) {
+                if pacer.due(&payload) {
+                    let _ = app.emit(
+                        "linked-meter",
+                        LinkedMeter {
+                            linked_id: linked_id.clone(),
+                            meter: payload,
+                        },
+                    );
+                }
+            }
             match classify_line(&v) {
                 StreamLine::Init(sid) => session = Some(sid),
                 StreamLine::Delta(text) => {
@@ -1072,6 +1100,24 @@ async fn read_linked(
         None => false,
     };
 
+    // ABOVE the terminal branch, so success, error and cancelled all
+    // book. A cancelled turn spent its input tokens too.
+    let settled = crate::meter::settle(&db, "linked", &buf);
+    if !settled.is_empty() {
+        let _ = app.emit(
+            "linked-meter",
+            LinkedMeter {
+                    linked_id: linked_id.clone(),
+                meter: turn::MeterPayload {
+                    rev: settled.rev,
+                    meter: settled.clone(),
+                    activity: None,
+                    discrete: true,
+                },
+            },
+        );
+    }
+
     'terminal: {
         if cancelled {
             let _ = app.emit(
@@ -1084,7 +1130,8 @@ async fn read_linked(
         }
         if let Some(err) = errored {
             let why = describe_turn_error(&db, &linked_id, &err);
-            finish_error(&app, &db, &linked_id, &tab, &tab_browse_id, &why);
+            let row = finish_error(&app, &db, &linked_id, &tab, &tab_browse_id, &why);
+            crate::meter::attach(&db, "linked", &row, &settled);
             break 'terminal;
         }
         if let Some(text) = final_text {
@@ -1119,6 +1166,8 @@ async fn read_linked(
             if let Err(e) = db.insert_linked_message(&msg) {
                 tracing::warn!(error = %e, "failed to persist assistant message");
             }
+            // The badge and the footer outlive the turn.
+            crate::meter::attach(&db, "linked", &msg.id, &settled);
             // Companion journal: the linked discussion completed a turn.
             let _ = db.append_journal("agent_turn", Some("linked"), Some(&linked_id), None, None);
             let _ = app.emit(
@@ -1188,41 +1237,25 @@ fn some_nonempty(s: &str) -> Option<String> {
     }
 }
 
-/// Translate a failed turn's raw error into the message to surface, and
-/// recover the discussion where that's the right move. Twin of
-/// `browse::describe_turn_error` — a spanning conversation accumulates context
-/// fast, and an overflowed session that is never cleared makes every later
-/// turn `--resume` the same over-limit context and fail forever.
+/// Translate a failed linked-discussion turn — branches and wording live once,
+/// in `claude_proc::describe_turn_error`. A spanning conversation accumulates
+/// context faster than any single tab, so the overflow reset earns its keep.
 fn describe_turn_error(db: &Database, linked_id: &str, error: &str) -> String {
-    if crate::browse::is_context_overflow(error) {
-        if let Err(e) = db.clear_linked_session(linked_id) {
-            tracing::warn!(error = %e, "failed to clear over-limit linked session");
-        }
-        let _ = db.record_friction(
-            "context_overflow",
-            Some("linked"),
-            Some(linked_id),
-            Some(error),
-        );
-        return "This discussion outgrew the model's context window, so the \
-                turn failed. I've reset its context — send your message again \
-                and I'll re-orient from the open tabs (the replies above are \
-                kept)."
-            .to_string();
-    }
-    if crate::browse::is_transient(error) {
-        let _ = db.record_friction(
-            "transient_fail",
-            Some("linked"),
-            Some(linked_id),
-            Some(error),
-        );
-        return "The model hit a temporary error on this turn (not something \
-                you did) — send your message again in a moment. Your \
-                conversation is intact."
-            .to_string();
-    }
-    error.to_string()
+    crate::claude_proc::describe_turn_error(
+        db,
+        crate::claude_proc::TurnErrorCopy {
+            surface: "linked",
+            subject: Some(linked_id),
+            noun: "discussion",
+            next: "I'll re-orient from the open tabs",
+        },
+        error,
+        || {
+            if let Err(e) = db.clear_linked_session(linked_id) {
+                tracing::warn!(error = %e, "failed to clear over-limit linked session");
+            }
+        },
+    )
 }
 
 /// Persist a failed turn as a terminal `error` row and emit `linked-error`.
@@ -1233,7 +1266,7 @@ fn finish_error(
     tab: &TabContext,
     tab_browse_id: &Option<String>,
     error: &str,
-) {
+) -> String {
     let msg = LinkedMessage {
         id: uuid::Uuid::new_v4().to_string(),
         linked_id: linked_id.to_string(),
@@ -1256,6 +1289,8 @@ fn finish_error(
             error: error.to_string(),
         },
     );
+    // The id the caller attaches this turn's meter to.
+    msg.id
 }
 
 #[cfg(test)]

@@ -45,6 +45,20 @@ pub struct Revision {
     pub version_number: u32,
     pub received_at: i64,
     pub raw_plan_markdown: String,
+    /// The parsed block tree.
+    ///
+    /// **Lazily materialized.** Inside `SessionStore`'s own map this is always
+    /// EMPTY — `raw_plan_markdown` is the record, and the parse is a
+    /// derivation of it. It is filled on the way out, by `SessionStore::get`
+    /// and by the store's internal `sections_for`, from a cache keyed by
+    /// (session, version).
+    ///
+    /// Startup used to parse every revision of every session in the history:
+    /// `Database::load_sessions` called `reparse_sections` per row, so opening
+    /// Redline meant a full markdown parse of every plan you had ever
+    /// reviewed, before the window appeared, to render a sidebar that shows
+    /// titles and dates. A `ReviewSession` handed OUT by the store always has
+    /// this populated; the emptiness is an implementation detail of the map.
     pub sections: Vec<Section>,
     pub comments: Vec<Comment>,
     /// True when this revision begins a new review *thread* — a fresh,
@@ -159,6 +173,15 @@ pub struct ReviewSession {
     /// from the frozen three-value `status` so reconciliation and the
     /// liveness watchdog stay untouched.
     pub run_state: Option<String>,
+    /// Which harness authored this plan: `claude-code` | `codex`. `None` on
+    /// every pre-backend row, which reads as claude-code everywhere it
+    /// matters. Not cosmetic: RESTORE branches on it, because
+    /// `claude --resume` handed a Codex thread id fails into a *fresh*
+    /// session rather than an error.
+    pub backend: Option<String>,
+    /// The model that produced the latest revision. Codex sends it on the
+    /// Stop payload; a Claude launch fills it from the door's pick.
+    pub model: Option<String>,
 }
 
 /// A lightweight per-revision projection for the sidebar's revisions tree —
@@ -205,6 +228,16 @@ pub struct SessionSummary {
     pub updated_at: i64,
     /// Orchestrated-run lifecycle chip state; `None` for plain Approves.
     pub run_state: Option<String>,
+    /// How the run actually executed — `workflow` or `sequential` — joined
+    /// from the `orchestrations` row. `None` until the watcher settles it.
+    /// Carried onto the summary (rather than left to the Runs surface) so the
+    /// sidebar chip, the only run affordance visible without navigating away,
+    /// can show that a run silently degraded to the sequential fallback.
+    pub run_mode: Option<String>,
+    /// Which harness authored the plan, and at what model — the session
+    /// header's badge. `None` reads as claude-code.
+    pub backend: Option<String>,
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1106,6 +1139,18 @@ pub struct SessionStore {
     /// it across an app restart just means a restore labels as a normal new
     /// thread, which is acceptable and rare.
     pending_restores: Arc<Mutex<HashSet<SessionId>>>,
+    /// Materialized `Revision::sections`, keyed by (session id, version).
+    ///
+    /// The store's own revisions carry empty `sections`; this is where a
+    /// parsed one actually lives. Populated two ways: a revision that arrives
+    /// already parsed (`upsert_plan` — the interception path has the sections
+    /// in hand and must not throw them away only to re-parse on the next
+    /// read), and a first read of a historical revision, which parses once.
+    ///
+    /// `Arc<Vec<Section>>` so handing the same parse to several readers is a
+    /// refcount bump. Evicted when a session is deleted or re-keyed — the only
+    /// two ways a (session, version) pair stops meaning what it meant.
+    sections: Arc<Mutex<HashMap<(SessionId, u32), Arc<Vec<Section>>>>>,
 }
 
 pub struct UpsertResult {
@@ -1138,6 +1183,65 @@ impl SessionStore {
             inner: Arc::new(Mutex::new(map)),
             db,
             pending_restores: Arc::new(Mutex::new(HashSet::new())),
+            sections: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    // ── Lazy sections ────────────────────────────────────────────────────
+    //
+    // `reparse_sections` is a full markdown parse. Startup used to run one per
+    // revision of every session ever reviewed, to build a list of titles and
+    // dates — so the cost of opening Redline scaled with how much you had used
+    // it. These three methods are the whole replacement: parse on the first
+    // read that genuinely needs a block tree, keep it, and never parse for a
+    // listing.
+
+    /// Sections for one revision: cached, or parsed now and cached.
+    ///
+    /// Every read of a block tree goes through here. `raw_plan_markdown` is
+    /// the record; this is the one place it becomes a parse.
+    fn sections_for(&self, session_id: &str, revision: &Revision) -> Arc<Vec<Section>> {
+        let key = (session_id.to_string(), revision.version_number);
+        if let Some(hit) = self.sections.lock().unwrap().get(&key) {
+            return hit.clone();
+        }
+        // Parsed OUTSIDE the cache lock: a large plan's parse must not
+        // serialize every other session's reads behind it.
+        let parsed = Arc::new(reparse_sections(&revision.raw_plan_markdown));
+        self.sections
+            .lock()
+            .unwrap()
+            .insert(key, parsed.clone());
+        parsed
+    }
+
+    /// Remember sections that arrived already parsed. The interception path
+    /// has just parsed the incoming plan to stamp block ids; re-parsing it on
+    /// the next read would be pure waste.
+    fn seed_sections(&self, session_id: &str, version: u32, sections: Vec<Section>) {
+        self.sections
+            .lock()
+            .unwrap()
+            .insert((session_id.to_string(), version), Arc::new(sections));
+    }
+
+    /// Drop every cached parse for a session. Called where a (session,
+    /// version) pair stops meaning what it meant: deletion, and re-keying.
+    fn forget_sections(&self, session_id: &str) {
+        self.sections
+            .lock()
+            .unwrap()
+            .retain(|(sid, _), _| sid != session_id);
+    }
+
+    /// Fill in a session's sections on the way out of the store. Callers
+    /// outside `state.rs` only ever see fully-materialized sessions.
+    fn materialize(&self, session: &mut ReviewSession) {
+        let id = session.session_id.clone();
+        for revision in session.revisions.iter_mut() {
+            if revision.sections.is_empty() {
+                revision.sections = (*self.sections_for(&id, revision)).clone();
+            }
         }
     }
 
@@ -1258,6 +1362,8 @@ impl SessionStore {
                 attach_state: AttachState::Idle,
                 updated_at: now,
                 run_state: None,
+                backend: None,
+                model: None,
             };
             if let Err(e) = self.db.upsert_session(&s) {
                 tracing::error!(error = %e, "failed to persist session");
@@ -1266,11 +1372,16 @@ impl SessionStore {
         });
         let is_new_session = session.revisions.is_empty();
         let version_number = (session.revisions.len() as u32) + 1;
+        // The incoming plan was already parsed (to stamp block ids), so the
+        // parse goes straight into the cache rather than being thrown away and
+        // redone on the first read. The map's copy carries an empty tree, like
+        // every other revision in it.
+        self.seed_sections(session_id, version_number, sections);
         let revision = Revision {
             version_number,
             received_at: now,
             raw_plan_markdown: raw_plan,
-            sections,
+            sections: Vec::new(),
             comments: Vec::new(),
             thread_start,
             restored,
@@ -1320,11 +1431,16 @@ impl SessionStore {
         let session = map.get_mut(session_id)?;
         let latest = session.revisions.last()?;
         let version_number = (session.revisions.len() as u32) + 1;
+        // A byte-exact clone of the body means a byte-exact clone of the
+        // parse: seed the new version from the old one's cached tree rather
+        // than parsing the same markdown a second time.
+        let restored_sections = self.sections_for(session_id, latest);
+        self.seed_sections(session_id, version_number, (*restored_sections).clone());
         let revision = Revision {
             version_number,
             received_at: now_millis(),
             raw_plan_markdown: latest.raw_plan_markdown.clone(),
-            sections: latest.sections.clone(),
+            sections: Vec::new(),
             comments: Vec::new(),
             thread_start: false,
             restored: true,
@@ -1375,6 +1491,9 @@ impl SessionStore {
     }
 
     pub fn list(&self) -> Vec<SessionSummary> {
+        // One small keyed read per refresh — the run chip needs a mode string
+        // and nothing else from the runs table.
+        let run_modes = self.db.run_modes();
         let map = self.inner.lock().unwrap();
         let mut sessions: Vec<SessionSummary> = map
             .values()
@@ -1421,6 +1540,9 @@ impl SessionStore {
                     attach_state: s.attach_state,
                     updated_at: s.updated_at,
                     run_state: s.run_state.clone(),
+                    run_mode: run_modes.get(s.session_id.as_str()).cloned(),
+                    backend: s.backend.clone(),
+                    model: s.model.clone(),
                 }
             })
             .collect();
@@ -1433,9 +1555,72 @@ impl SessionStore {
         sessions
     }
 
+    /// Record which harness (and model) produced this session's plan.
+    ///
+    /// Separate from `upsert_plan` on purpose: provenance arrives on the hook
+    /// payload, not from the parser, and threading it through the upsert
+    /// signature would touch every caller and every test for a value only the
+    /// plan route knows. Sticky by COALESCE at the DB layer, so a later
+    /// status-only upsert can't blank it.
+    pub fn set_backend(
+        &self,
+        session_id: &str,
+        backend: Option<&str>,
+        model: Option<&str>,
+    ) {
+        let clean = |v: Option<&str>| {
+            v.map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+        };
+        let (backend, model) = (clean(backend), clean(model));
+        if backend.is_none() && model.is_none() {
+            return;
+        }
+        let mut map = self.inner.lock().unwrap();
+        let Some(session) = map.get_mut(session_id) else {
+            return;
+        };
+        if backend.is_some() {
+            session.backend = backend;
+        }
+        if model.is_some() {
+            session.model = model;
+        }
+        let snapshot = session.clone();
+        drop(map);
+        if let Err(e) = self.db.upsert_session(&snapshot) {
+            tracing::error!(error = %e, "failed to persist session backend");
+        }
+    }
+
+    /// Which harness this session runs on, defaulting to claude-code — every
+    /// pre-backend row and every Claude session leaves the column NULL.
+    pub fn backend_of(&self, session_id: &str) -> String {
+        self.inner
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .and_then(|s| s.backend.clone())
+            .filter(|b| !b.trim().is_empty())
+            .unwrap_or_else(|| "claude-code".to_string())
+    }
+
+    /// A session, with its sections materialized.
+    ///
+    /// THE read path: `get_session`, every agent route, the snapshot builder
+    /// and the share exporter all come through here, which is why the lazy
+    /// parse is invisible to them — a `ReviewSession` that has left the store
+    /// always has its block trees.
     pub fn get(&self, session_id: &str) -> Option<ReviewSession> {
-        let map = self.inner.lock().unwrap();
-        map.get(session_id).cloned()
+        let mut session = {
+            let map = self.inner.lock().unwrap();
+            map.get(session_id).cloned()?
+        };
+        // Materialized OUTSIDE the map lock: a first read of a large history
+        // must not block a plan arriving on the daemon.
+        self.materialize(&mut session);
+        Some(session)
     }
 
     pub fn add_comment(
@@ -1679,6 +1864,10 @@ impl SessionStore {
             }
         }
         map.insert(new_id.to_string(), session);
+        // Cached parses are keyed by (session id, version); the id just
+        // changed, so the old keys name a session that no longer exists. The
+        // new id simply re-parses on its first read.
+        self.forget_sections(old_id);
         true
     }
 
@@ -1690,6 +1879,10 @@ impl SessionStore {
         if let Err(e) = self.db.delete_session(session_id) {
             tracing::error!(error = %e, "failed to delete session from db");
         }
+        // A new session could later be created under the same id (Claude Code
+        // reuses terminal session ids); a stale parse under that key would
+        // then be served for a different plan entirely.
+        self.forget_sections(session_id);
         true
     }
 
@@ -1790,22 +1983,31 @@ impl SessionStore {
         &self,
         session_id: &str,
     ) -> Option<(Vec<Section>, Vec<Comment>, String)> {
-        let map = self.inner.lock().unwrap();
-        let session = map.get(session_id)?;
-        let latest = session.revisions.last()?;
-        let comments: Vec<Comment> = session
-            .revisions
-            .iter()
-            .flat_map(|r| r.comments.iter())
-            .filter(|c| {
-                matches!(c.status, CommentStatus::Draft | CommentStatus::Reopened)
-            })
-            .cloned()
-            .collect();
+        // The map's revisions carry EMPTY sections by construction (see
+        // `Revision::sections`), so the tree comes from `sections_for` —
+        // parse-once, cached. The map lock is released before that call: a
+        // first parse of a large plan must not hold up a plan arriving on the
+        // daemon.
+        let (latest, comments) = {
+            let map = self.inner.lock().unwrap();
+            let session = map.get(session_id)?;
+            let latest = session.revisions.last()?.clone();
+            let comments: Vec<Comment> = session
+                .revisions
+                .iter()
+                .flat_map(|r| r.comments.iter())
+                .filter(|c| {
+                    matches!(c.status, CommentStatus::Draft | CommentStatus::Reopened)
+                })
+                .cloned()
+                .collect();
+            (latest, comments)
+        };
+        let sections = self.sections_for(session_id, &latest);
         Some((
-            latest.sections.clone(),
+            (*sections).clone(),
             comments,
-            latest.raw_plan_markdown.clone(),
+            latest.raw_plan_markdown,
         ))
     }
 
@@ -1917,14 +2119,22 @@ impl SessionStore {
         /// no seat's `items_filed` is incremented here.
         const APPROVAL_ACTOR: &str = "plan-approval";
         let sid = session.session_id.as_str();
+        // Through `sections_for`: this is called with a `&ReviewSession`
+        // borrowed from the store's own map, whose revisions carry empty
+        // section trees. Reading `r.sections` directly here would file an
+        // approved plan as ONE fallback item instead of one per section.
+        let latest = session.revisions.last().cloned();
+        let materialized = latest
+            .as_ref()
+            .map(|r| self.sections_for(sid, r));
         let (version, plan_md, sections): (u32, Option<&str>, &[Section]) =
-            match session.revisions.last() {
-                Some(r) => (
+            match (latest.as_ref(), materialized.as_deref()) {
+                (Some(r), Some(parsed)) => (
                     r.version_number,
                     Some(r.raw_plan_markdown.as_str()),
-                    &r.sections,
+                    parsed.as_slice(),
                 ),
-                None => (0, None, &[]),
+                _ => (0, None, &[]),
             };
         // The house plan shape is a single `#` title over `##` work sections
         // — when the parse yields exactly that, the `##` units are the plan's
@@ -2297,12 +2507,235 @@ fn derive_project_name(path: &str) -> String {
 }
 
 pub fn reparse_sections(raw: &str) -> Vec<Section> {
+    // The whole point of the lazy-section work is that this stops running per
+    // revision at startup, and "it felt faster" is not a test. Counted per
+    // thread, not process-wide: the suite runs in parallel and every other
+    // fixture parses plans, so a global counter would measure the suite.
+    #[cfg(test)]
+    SECTION_PARSES.with(|c| c.set(c.get() + 1));
     parser::parse_plan(raw)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many full plan parses have happened on this thread.
+    pub(crate) static SECTION_PARSES: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Lazy sections ────────────────────────────────────────────────────
+    //
+    // The law: a listing parses nothing, a first detailed read parses once,
+    // and what it produces is what eager parsing produced. Startup used to
+    // parse every revision of every session in the history — work thrown away
+    // for every plan the user never opened, paid in front of the window.
+
+    fn parses() -> usize {
+        SECTION_PARSES.with(|c| c.get())
+    }
+    fn reset_parses() {
+        SECTION_PARSES.with(|c| c.set(0));
+    }
+
+    /// A store rebuilt from disk, exactly as boot does it — the only way to
+    /// observe hydration, since a store you just wrote to has its parses
+    /// seeded by the write.
+    fn reloaded(db: &Arc<crate::db::Database>) -> SessionStore {
+        SessionStore::new(db.clone())
+    }
+
+    fn seed_history(db: &Arc<crate::db::Database>, sessions: usize, revisions: u32) {
+        let store = SessionStore::new(db.clone());
+        for i in 0..sessions {
+            let sid = format!("hist-{i}");
+            for v in 1..=revisions {
+                let md = format!("# Plan {i} v{v}\n\n## Alpha\n\nBody.\n\n## Beta\n\nMore.\n");
+                store.upsert_plan(
+                    &sid,
+                    "/tmp/hist",
+                    md.clone(),
+                    reparse_sections(&md),
+                    v == 1,
+                    false,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hydrating_and_listing_sessions_parses_nothing() {
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        seed_history(&db, 12, 3);
+
+        reset_parses();
+        let store = reloaded(&db);
+        assert_eq!(
+            parses(),
+            0,
+            "startup parsed the history — 36 revisions, none of them opened"
+        );
+
+        let summaries = store.list();
+        assert_eq!(summaries.len(), 12);
+        // Titles come from the raw markdown, never from a parse.
+        assert!(summaries.iter().all(|s| s.plan_title.is_some()));
+        assert_eq!(parses(), 0, "listing sessions parsed a plan");
+    }
+
+    #[test]
+    fn the_first_detailed_access_parses_exactly_once() {
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        seed_history(&db, 3, 2);
+        let store = reloaded(&db);
+
+        reset_parses();
+        let first = store.get("hist-1").expect("session");
+        assert_eq!(
+            parses(),
+            2,
+            "one parse per revision of the session actually opened, and no others"
+        );
+        assert!(!first.revisions[0].sections.is_empty(), "sections must be materialized on the way out");
+
+        let again = store.get("hist-1").expect("session");
+        assert_eq!(parses(), 2, "the second read re-parsed");
+        assert_eq!(
+            format!("{:?}", first.revisions[1].sections),
+            format!("{:?}", again.revisions[1].sections),
+            "the cached tree must be the same tree"
+        );
+
+        // A different session is a different key: it parses, the first does not.
+        store.get("hist-2").expect("session");
+        assert_eq!(parses(), 4);
+    }
+
+    #[test]
+    fn on_demand_parsing_is_identical_to_eager_parsing() {
+        // The body that is actually PERSISTED carries `rl:blk-` sidecars —
+        // `parse_plan_with_sidecars` stamps them, and `upsert_plan` stores the
+        // augmented text. That is what makes a later parse reproduce the same
+        // block ids, which is what the whole lazy scheme rests on: a block id
+        // is an anchor for comments, and a plan whose ids moved on reload
+        // would orphan every one of them.
+        let source = "# Title\n\nIntro.\n\n## One\n\n- a\n- b\n\n### Deep\n\n```rust\nfn x() {}\n```\n\n## Two\n\nEnd.\n";
+        let (eager, augmented) = crate::parser::parse_plan_with_sidecars(source);
+
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        {
+            let store = SessionStore::new(db.clone());
+            store.upsert_plan("s", "/tmp/s", augmented, eager.clone(), true, false);
+        }
+        let lazy = reloaded(&db)
+            .get("s")
+            .expect("session")
+            .revisions
+            .pop()
+            .expect("revision")
+            .sections;
+        assert_eq!(
+            format!("{eager:?}"),
+            format!("{lazy:?}"),
+            "a lazily-parsed revision must be byte-identical to the eager parse, \
+             block ids included"
+        );
+    }
+
+    #[test]
+    fn block_ids_are_stable_across_repeated_lazy_reads() {
+        // Even for a body with NO sidecars (a hand-inserted row, a legacy
+        // revision), the cache has to make ids stable: `parse_plan` mints
+        // fresh ones when it finds no markers, so an uncached re-parse would
+        // hand two readers two different sets of anchors for the same plan.
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let md = "# Bare\n\n## Alpha\n\nNo sidecars here.\n";
+        {
+            let store = SessionStore::new(db.clone());
+            store.upsert_plan("bare", "/tmp/b", md.to_string(), reparse_sections(md), true, false);
+        }
+        let store = reloaded(&db);
+        let first = store.get("bare").expect("session").revisions.pop().unwrap();
+        let second = store.get("bare").expect("session").revisions.pop().unwrap();
+        assert_eq!(
+            first.sections[0].block_id, second.sections[0].block_id,
+            "two reads of the same revision produced different block ids"
+        );
+    }
+
+    #[test]
+    fn an_intercepted_revision_is_never_reparsed() {
+        // The interception path already parsed the plan to stamp block ids.
+        // Throwing that away and re-parsing on the first read would be pure
+        // waste, and it is the obvious way to get this wrong.
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let store = SessionStore::new(db);
+        let md = "# Fresh\n\n## A\n\nBody.\n";
+        let sections = reparse_sections(md);
+
+        reset_parses();
+        store.upsert_plan("s", "/tmp/s", md.to_string(), sections, true, false);
+        let session = store.get("s").expect("session");
+        assert_eq!(parses(), 0, "the incoming parse was thrown away and redone");
+        assert!(!session.revisions[0].sections.is_empty());
+    }
+
+    #[test]
+    fn a_restore_reuses_the_parse_of_the_body_it_clones() {
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        seed_history(&db, 1, 1);
+        let store = reloaded(&db);
+        store.get("hist-0").expect("session"); // materialize v1
+
+        reset_parses();
+        store.restore_latest("hist-0").expect("restored");
+        let session = store.get("hist-0").expect("session");
+        assert_eq!(
+            parses(),
+            0,
+            "a byte-exact clone of the body re-parsed the same markdown"
+        );
+        assert_eq!(session.revisions.len(), 2);
+        assert_eq!(
+            format!("{:?}", session.revisions[0].sections),
+            format!("{:?}", session.revisions[1].sections),
+        );
+    }
+
+    #[test]
+    fn deleting_a_session_forgets_its_parses() {
+        // Claude Code reuses terminal session ids, so a later session can
+        // arrive under a deleted one's id. Serving the old plan's block tree
+        // for it would be a silent, very confusing wrong answer.
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let store = SessionStore::new(db);
+        let first = "# First\n\n## Alpha\n\nOne.\n";
+        store.upsert_plan("reused", "/tmp/r", first.to_string(), reparse_sections(first), true, false);
+        assert!(store.delete_session("reused"));
+
+        let second = "# Second\n\n## Beta\n\nTwo.\n";
+        store.upsert_plan("reused", "/tmp/r", second.to_string(), reparse_sections(second), true, false);
+        let session = store.get("reused").expect("session");
+        let rendered = format!("{:?}", session.revisions[0].sections);
+        assert!(rendered.contains("Beta"), "stale parse served: {rendered}");
+        assert!(!rendered.contains("Alpha"));
+    }
+
+    #[test]
+    fn rekeying_a_session_forgets_its_parses() {
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let store = SessionStore::new(db);
+        let md = "# Plan\n\n## Gamma\n\nBody.\n";
+        store.upsert_plan("old-id", "/tmp/r", md.to_string(), reparse_sections(md), true, false);
+        store.get("old-id").expect("materialize");
+        assert!(store.rekey_session("old-id", "new-id"));
+
+        let moved = store.get("new-id").expect("session under the new id");
+        assert!(format!("{:?}", moved.revisions[0].sections).contains("Gamma"));
+    }
 
     #[test]
     fn attach_state_round_trips_through_str() {

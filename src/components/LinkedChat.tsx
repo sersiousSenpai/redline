@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useEffect, useRef, useState } from "react";
+import { useMemo, useEffect, useRef, useState } from "react";
 import { Copy, Link2, PenLine, X } from "lucide-react";
 import type { Linked, LinkedMessage } from "../types";
 import { captureSnapshotOrCached } from "../lib/domSnapshot";
 import { useAgentTurn } from "../hooks/useAgentTurn";
+import { useStickToBottom } from "../hooks/useStickToBottom";
 import { usePersistedState } from "../theme/usePersistedState";
 import { MarkdownView } from "./MarkdownView";
+import StreamingBubble from "./StreamingBubble";
+import TurnFooter from "./TurnFooter";
+import { contextResets, type TurnMeter } from "../lib/turnMeter";
 import { QueuedChip, UnsentNote } from "./QueuedChip";
 import { WorkingIndicator } from "./WorkingIndicator";
 
@@ -60,8 +64,6 @@ export function LinkedChat({
   // Composer draft survives surface switches and app restarts (the component
   // is keyed by linkedId, so each discussion keeps its own).
   const [draft, setDraft] = usePersistedState<string>(`rl.chatDraft.linked.${linkedId}`, "");
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const stickRef = useRef(true);
   // The current tab, held in a ref so the streaming reply's assistant bubble can
   // be tagged with the tab the turn was sent on even if the user switches mid-
   // stream. Seeded fresh each render.
@@ -71,10 +73,11 @@ export function LinkedChat({
   // The turn lifecycle — persisted thread, live stream, mid-turn remount
   // restore (partial text + spinner), self-heal — lives in the shared hook.
   // Keyed on `linkedId` ONLY — switching tabs must NOT tear down the stream.
-  const { messages, liveText, status, startedAt, loaded, send, cancel, unqueue } =
+  const { messages, liveText, status, startedAt, loaded, send, cancel, unqueue, meter, activity, meters } =
     useAgentTurn<LinkedMessage>({
       surface: "linked",
       key: linkedId,
+      meterKind: "linked",
       idField: "linkedId",
       historyCmd: "linked_get_thread",
       historyArgs: { linkedId },
@@ -119,20 +122,26 @@ export function LinkedChat({
       },
     });
 
+  // A pressure drop is not a bug — it is auto-compaction or a fresh CLI
+  // session. Unlabelled, a fall from 78% to 12% reads as a broken meter.
+  const resets = useMemo(
+    () => contextResets(messages.map((m) => m.id), meters),
+    [messages, meters],
+  );
+
+  // Follow a streaming thread only while the reader is parked at the bottom.
+  // The rule lives in `useStickToBottom` — the turn footer changes every
+  // settled bubble's height, so five copies of it would need the same fix.
+  const {
+    ref: scrollRef,
+    onScroll,
+    stick,
+  } = useStickToBottom<HTMLDivElement>([messages, liveText]);
+
   useEffect(() => {
-    stickRef.current = true;
+    stick();
   }, [linkedId]);
 
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (el && stickRef.current) el.scrollTop = el.scrollHeight;
-  }, [messages, liveText]);
-
-  function onScroll() {
-    const el = scrollRef.current;
-    if (!el) return;
-    stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-  }
 
   return (
     <div
@@ -182,6 +191,8 @@ export function LinkedChat({
               <MessageBubble
                 key={m.id}
                 msg={m}
+                meter={meters[m.id]}
+                contextReset={resets.has(m.id)}
                 onOpenLink={onOpenLink}
                 onSendToRedline={onSendToRedline}
                 onSendToDrafter={onSendToDrafter}
@@ -191,19 +202,29 @@ export function LinkedChat({
                   });
                 }}
                 onResend={() => {
-                  stickRef.current = true;
+                  stick();
                   send(m.body);
                 }}
               />
             ),
           )
         )}
-        {status === "streaming" &&
-          (liveText ? (
-            <StreamingBubble text={liveText} onOpenLink={onOpenLink} />
-          ) : (
-            <WorkingIndicator startedAt={startedAt ?? undefined} />
-          ))}
+        {status === "streaming" && (
+          <>
+            {/* The badge and the activity line fill the wait the blank
+                ticker used to — so the bubble renders from the first line of
+                the stream, not the first token. */}
+            <StreamingBubble
+              text={liveText}
+              agent="Linked"
+              inspect={{ surface: "linked", key: linkedId }}
+              meter={meter}
+              activity={activity}
+              onOpenLink={onOpenLink}
+            />
+            {!liveText && <WorkingIndicator startedAt={startedAt ?? undefined} />}
+          </>
+        )}
       </div>
 
       <div className="px-3 py-2 shrink-0" style={{ borderTop: "1px solid var(--color-rule)" }}>
@@ -212,7 +233,7 @@ export function LinkedChat({
           setDraft={setDraft}
           streaming={status === "streaming"}
           onSend={() => {
-            stickRef.current = true;
+            stick();
             send(draft);
             setDraft("");
           }}
@@ -276,6 +297,8 @@ function MessageBubble({
   onSendToDrafter,
   onUnqueue,
   onResend,
+  meter,
+  contextReset,
 }: {
   msg: LinkedMessage;
   onOpenLink?: (url: string) => void;
@@ -283,6 +306,10 @@ function MessageBubble({
   onSendToDrafter?: (markdown: string) => void;
   onUnqueue?: () => void;
   onResend?: () => void;
+  /** This row's settled meter — the badge and footer that outlive the turn. */
+  meter?: TurnMeter | null;
+  /** This turn's context restarted (compaction or a fresh CLI session). */
+  contextReset?: boolean;
 }) {
   const isUser = msg.role === "user";
   const isError = msg.status === "error";
@@ -325,6 +352,7 @@ function MessageBubble({
           onSendToDrafter={onSendToDrafter}
         />
       )}
+      {!isUser && <TurnFooter meter={meter} contextReset={contextReset} />}
     </div>
   );
 }
@@ -387,26 +415,6 @@ function MessageActions({
         >
           Send to Claude Code ▶
         </button>
-      )}
-    </div>
-  );
-}
-
-function StreamingBubble({ text, onOpenLink }: { text: string; onOpenLink?: (url: string) => void }) {
-  return (
-    <div className="flex flex-col gap-0.5">
-      <span
-        style={{ fontSize: "9px", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-info)" }}
-      >
-        Linked
-      </span>
-      {text ? (
-        <div>
-          <MarkdownView body={text} compact onLinkClick={onOpenLink} />
-          <span style={{ color: "var(--color-ink-muted)" }}>▌</span>
-        </div>
-      ) : (
-        <div style={{ fontSize: "12.5px", lineHeight: 1.5, color: "var(--color-ink-muted)" }}>working…</div>
       )}
     </div>
   );

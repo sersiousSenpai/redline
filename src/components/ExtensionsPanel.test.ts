@@ -141,6 +141,12 @@ describe("ExtensionsPanel source invariants", () => {
       join(process.cwd(), "src/components/Header.tsx"),
       "utf8",
     );
-    expect(header).toContain("extensions={<ExtensionsPanel />}");
+    // Rendered into the same row, but LAZILY: the panel is one of the
+    // heaviest components in the app and it sits behind a click most launches
+    // never make, so a static import of it was pure boot cost (see
+    // lib/sizeGuard.test.ts). The row and its trigger are unchanged.
+    expect(header).toContain("<ExtensionsPanel />");
+    expect(header).toContain('const ExtensionsPanel = lazy(');
+    expect(header).not.toMatch(/^import \{ ExtensionsPanel \} from/m);
   });
 });

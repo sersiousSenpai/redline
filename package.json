@@ -11,7 +11,9 @@
   "scripts": {
     "predev": "node scripts/preflight-dev.mjs",
     "dev": "vite",
+    "prebuild": "node scripts/gen-codex-contract.mjs",
     "build": "tsc && vite build",
+    "gen:codex-contract": "node scripts/gen-codex-contract.mjs",
     "preview": "vite preview",
     "redline": "bash scripts/redline.sh",
     "test": "vitest run",

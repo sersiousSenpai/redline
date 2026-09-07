@@ -1,14 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   advance,
   BOOT_FAILSAFE_MS,
-  BOOT_FIRST_BREATH_MS,
   BOOT_OPEN_MS,
-  holdMs,
   shouldArm,
   SNAPBACK_SETTLE_MS,
 } from "./boot";
@@ -51,19 +49,84 @@ describe("advance", () => {
 });
 
 describe("timings", () => {
-  it("first launches breathe, replays don't", () => {
-    expect(holdMs(true)).toBe(BOOT_FIRST_BREATH_MS);
-    expect(holdMs(false)).toBe(0);
-  });
   it("the dead-man switch outlasts the longest legitimate run", () => {
-    // Breath + opening + generous frame slack must land BEFORE the module
-    // failsafe force-removes the attribute, or a healthy boot gets cut off.
-    expect(BOOT_FIRST_BREATH_MS + BOOT_OPEN_MS + 300).toBeLessThanOrEqual(
-      BOOT_FAILSAFE_MS,
-    );
+    // Opening + generous frame slack must land BEFORE the module failsafe
+    // force-removes the attribute, or a healthy boot gets cut off.
+    expect(BOOT_OPEN_MS + 300).toBeLessThanOrEqual(BOOT_FAILSAFE_MS);
   });
-  it("the snap-back fold is brisker than the boot", () => {
-    expect(SNAPBACK_SETTLE_MS).toBeLessThan(BOOT_OPEN_MS);
+
+  it("the whole decorative run fits the brisk band", () => {
+    // The run used to be 750ms because the shell WAITED for it. Now that
+    // nothing actionable does, it is a plate resolve: long enough to read as
+    // motion, over before a hand reaches the keyboard. The upper bound is the
+    // ratchet — raising it is a deliberate, reviewed diff of this number.
+    expect(BOOT_OPEN_MS).toBeGreaterThanOrEqual(200);
+    expect(BOOT_OPEN_MS).toBeLessThanOrEqual(320);
+  });
+
+  it("the boot and the snap-back fold are the same brisk band", () => {
+    // Both are short decorative folds now; neither may become a wait.
+    expect(SNAPBACK_SETTLE_MS).toBeLessThanOrEqual(BOOT_OPEN_MS + 40);
+    expect(BOOT_OPEN_MS).toBeLessThanOrEqual(SNAPBACK_SETTLE_MS + 40);
+  });
+});
+
+// The A2 animation is DECORATIVE. These are the source invariants that keep it
+// that way — the regression they exist to catch is the one that shipped: a
+// 750ms plate choreography that the front door gated its autofocus on, so
+// every launch carried a fixed interaction floor nobody had chosen.
+describe("the animation never gates actionability", () => {
+  const hook = readFileSync(
+    join(process.cwd(), "src/hooks/useBootChoreography.ts"),
+    "utf8",
+  );
+  const app = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
+  const door = readFileSync(
+    join(process.cwd(), "src/components/FrontDoor.tsx"),
+    "utf8",
+  );
+
+  it("the hook reports only whether the plates are mid-flight", () => {
+    // The interface carries one field and the hook returns one field. There
+    // is no settled/ready boolean to gate on, which is the guard: the old
+    // `bootSettled` could not be misused if it does not exist.
+    const iface = hook.match(
+      /export interface BootChoreography \{([\s\S]*?)\n\}/,
+    );
+    expect(iface, "BootChoreography interface missing").not.toBe(null);
+    const fields = [...iface![1].matchAll(/^\s{2}(\w+):/gm)].map((m) => m[1]);
+    expect(fields).toEqual(["bootAnimating"]);
+    expect(hook).toContain("return { bootAnimating: !settled };");
+  });
+
+  it("App reads the phase only where plate geometry is the question", () => {
+    // Four consumers, each because something paints over or measures against
+    // a plate that is still travelling:
+    //   1. `browserVisible`  — the native child webview ignores DOM transforms
+    //   2. `tourActive`      — a coachmark pinned to a moving plate misses
+    //   3. the tour's render — same, at the mount site
+    //   4. the document plate's "Loading…" — a flash inside parting doors
+    // Plus the destructuring in App's body. A fifth consumer needs its own
+    // geometry reason; an actionability reason is exactly what is banned.
+    const uses = [...app.matchAll(/bootAnimating/g)].length;
+    expect(uses, "a new bootAnimating consumer needs a geometry reason").toBe(
+      5,
+    );
+    expect(app).not.toContain("bootSettled");
+  });
+
+  it("the front door's visibility never conjoins a boot phase", () => {
+    const visible = app.match(/<FrontDoor\s+visible=\{([^}]*)\}/);
+    expect(visible, "FrontDoor lost its visible prop").not.toBe(null);
+    expect(visible![1]).not.toMatch(/boot/i);
+    expect(door).toContain("Deliberately NOT the boot choreography");
+  });
+
+  it("there is no first-run hold left to reinstate", () => {
+    const boot = readFileSync(join(process.cwd(), "src/lib/boot.ts"), "utf8");
+    expect(boot).not.toContain("BOOT_FIRST_BREATH_MS");
+    expect(boot).not.toContain("export function holdMs");
+    expect(hook).not.toContain("holdMs");
   });
 });
 
@@ -117,12 +180,15 @@ describe("boot CSS contract", () => {
   });
 });
 
-// Source invariants on App.tsx — the boot-path JS contract (A0). The doors
-// give ~700ms of cover; the deal that keeps boot JS under budget WITHOUT a
-// blank frame behind the parting plates is: heavy surfaces load lazily, and
-// the one surface boot will actually land on is prefetched the moment
-// `initialSurface` resolves. These pins keep both halves of that deal from
-// silently regressing.
+// Source invariants on App.tsx — the boot-path JS contract (A0). The deal that
+// keeps boot JS under budget WITHOUT a blank frame behind the parting plates
+// is: heavy surfaces load lazily, and the one surface boot will actually land
+// on is prefetched the moment `initialSurface` resolves. These pins keep both
+// halves of that deal from silently regressing.
+//
+// The prefetch half matters MORE now, not less. It used to have ~700ms of door
+// animation to hide behind; the doors are 300ms and no longer gate anything,
+// so a lazy surface missing from the loader map shows its own emptiness.
 describe("boot-path JS contract", () => {
   const app = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
 
@@ -164,10 +230,58 @@ describe("boot-path JS contract", () => {
     }
   });
 
-  it("the terminal dock stays static — it is first paint", () => {
-    expect(app).toMatch(
+  // The raw-wire inspector is devtools: most turns never open it, and it is
+  // reached from a chip on the turn badge rather than from App. So the guard
+  // is not "App doesn't import it" — it is "NOTHING imports it statically",
+  // which is the property that actually keeps it out of every chunk but its
+  // own.
+  it("the stream inspector is only ever reached through import()", () => {
+    const dir = join(process.cwd(), "src/components");
+    const files = readdirSync(dir).filter((f) => f.endsWith(".tsx"));
+    // Non-vacuous: an empty list would pass the loop below silently.
+    expect(files.length).toBeGreaterThan(20);
+    for (const file of files) {
+      if (file === "StreamInspector.tsx") continue;
+      const src = readFileSync(join(dir, file), "utf8");
+      expect(
+        src.match(/^import (?!type\b)[^;]*from "\.\/StreamInspector"/m),
+        `${file} statically imports StreamInspector`,
+      ).toBe(null);
+    }
+    const bubble = readFileSync(join(dir, "StreamingBubble.tsx"), "utf8");
+    expect(bubble).toContain('import("./StreamInspector")');
+  });
+
+  it("the terminal dock is deferred, and its mount is queued not raced", () => {
+    // This used to assert the OPPOSITE — that TerminalTabs was a static import
+    // because "it is first paint". It isn't: mounting it loads xterm, spawns a
+    // PTY and starts the cwd poll, all while the front door is still coming
+    // up, for a dock most launches don't touch until after they have typed a
+    // sentence. The dock's SHELL (plate, divider, geometry) is still first
+    // paint; the tabs arrive on the first of an idle callback, the user
+    // opening the dock, or a launch that needs one.
+    expect(app).not.toMatch(
       /^import { TerminalTabs } from "\.\/components\/TerminalTabs";/m,
     );
+    expect(app).toContain('import("./components/TerminalTabs")');
+    // The whole reason deferral is safe: launch intent WAITS for the dock
+    // instead of finding no handle and reporting "couldn't open a terminal".
+    expect(app).toContain("const ensureTerminalReady = useCallback(");
+    const openers = [...app.matchAll(/openSessionTerminal\(/g)].length;
+    const awaited = [
+      ...app.matchAll(/ensureTerminalReady\(\)\)?[\s\S]{0,60}?openSessionTerminal/g),
+    ].length;
+    expect(
+      awaited,
+      `${openers - awaited} openSessionTerminal call(s) bypass ensureTerminalReady`,
+    ).toBe(openers);
+  });
+
+  it("the dock is never unmounted by surface navigation", () => {
+    // The PTYs and their scrollback die with it. `terminalMounted` is
+    // one-way — nothing may set it false.
+    expect(app).toContain("setTerminalMounted(true)");
+    expect(app).not.toContain("setTerminalMounted(false)");
   });
 
   it("harness edits land on refocus — the A5a dev loop", () => {
@@ -181,7 +295,12 @@ describe("boot-path JS contract", () => {
     expect(app).toContain(
       'window.addEventListener("redline:harnesses-changed", refreshHarnesses)',
     );
-    expect(app).toContain("const resolved = applyHarnessResolution(installed)");
+    // The boot pass and the refocus pass must go through the SAME resolver —
+    // that shared call is what makes "edit harness.json, refocus, it's live"
+    // work without two divergent read paths. Two call sites, one function:
+    // the refocus `list_harnesses` and boot's `bootstrap_state` payload.
+    expect(app).toContain(".then(applyHarnessResolution)");
+    expect(app).toContain("applyHarnessResolution(boot?.harnesses ?? [])");
   });
 
   it("boot prefetches the landing surface's chunk under the doors", () => {

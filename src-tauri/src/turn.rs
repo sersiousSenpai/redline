@@ -49,6 +49,17 @@ pub const PARTIAL_CAP_BYTES: usize = 4 * 1024 * 1024;
 /// convenience, not a work scheduler — past this the sender gets a hard error.
 pub const QUEUE_CAP: usize = 5;
 
+/// Activity entries kept per turn. Bounded because `docs/perf-budget.md`
+/// Rule 2 forbids unbounded buffered content; a turn that made 500 tool calls
+/// is interesting in its tail, not its head.
+pub const ACTIVITY_CAP: usize = 200;
+
+/// Floor between coalesced `{surface}-meter` events (perf-budget Rule 3).
+/// Text deltas already fire per token; the meter must never ride them.
+/// A DISCRETE change (first model, new tool, rate-limit onset, the terminal)
+/// jumps this queue — see [`MeterPacer`].
+pub const METER_COALESCE_MS: i64 = 250;
+
 /// What a remounting panel learns about a key's turn: whether one is
 /// streaming, since when, the reply text streamed so far, and how many deltas
 /// that text folds in (`seq`). The frontend drops any delta event carrying
@@ -64,6 +75,13 @@ pub struct TurnStatus {
     pub seq: u64,
     /// Sends waiting behind the in-flight turn (Phase 3; empty until then).
     pub queued: Vec<QueuedTurn>,
+    /// What the turn has spent and which model is spending it; `None` when
+    /// idle or when nothing has been observed yet. A remounting panel adopts
+    /// this the same way it adopts `partial`/`seq` — otherwise the badge and
+    /// the footer blank out on every surface switch.
+    pub meter: Option<crate::meter::TurnMeter>,
+    /// What the turn was doing while you waited (bounded ring).
+    pub activity: Vec<crate::meter::Activity>,
 }
 
 /// One queued send, as surfaced to the frontend.
@@ -108,6 +126,28 @@ pub type BoxStartFuture = std::pin::Pin<
 pub struct PartialBuf {
     pub text: String,
     pub seq: u64,
+    /// The turn's meter — one per turn, because the dedupe state
+    /// (`message.id` -> usage) has to persist across the turn's lines.
+    pub meter: crate::meter::TurnMeter,
+    /// Bounded ring of activity entries, oldest dropped first.
+    pub activity: VecDeque<crate::meter::Activity>,
+}
+
+impl PartialBuf {
+    pub fn new() -> Self {
+        PartialBuf {
+            text: String::new(),
+            seq: 0,
+            meter: crate::meter::TurnMeter::new(),
+            activity: VecDeque::new(),
+        }
+    }
+}
+
+impl Default for PartialBuf {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// One in-flight turn. `child` is `None` during the spawn window — the slot
@@ -160,10 +200,7 @@ impl<Q> Turns<Q> {
     /// holds the lock and has already checked the slot is free.
     fn reserve_locked(self: &Arc<Self>, inner: &mut TurnsInner<Q>, key: &str) -> SlotGuard<Q> {
         let token = self.next_token.fetch_add(1, Ordering::Relaxed);
-        let partial = Arc::new(Mutex::new(PartialBuf {
-            text: String::new(),
-            seq: 0,
-        }));
+        let partial = Arc::new(Mutex::new(PartialBuf::new()));
         inner.procs.insert(
             key.to_string(),
             TurnProc {
@@ -319,6 +356,8 @@ impl<Q> Turns<Q> {
                     partial: Some(buf.text.clone()),
                     seq: buf.seq,
                     queued,
+                    meter: (!buf.meter.is_empty()).then(|| buf.meter.clone()),
+                    activity: buf.activity.iter().cloned().collect(),
                 }
             }
             None => TurnStatus {
@@ -327,6 +366,8 @@ impl<Q> Turns<Q> {
                 partial: None,
                 seq: 0,
                 queued,
+                meter: None,
+                activity: Vec::new(),
             },
         }
     }
@@ -356,6 +397,28 @@ impl<Q> Turns<Q> {
                 p.child = Some(child);
                 Ok(())
             }
+            _ => Err(child),
+        }
+    }
+
+    /// Swap a still-reserved turn's child for a freshly spawned one, keeping
+    /// the SAME reservation. Backs `fork.rs`'s one-shot auto-retry of a
+    /// transient failure: the slot has to stay held across the respawn, or
+    /// **Stop** would kill the exhausted child and leave the live one running,
+    /// and a queued send would start on top of a turn the user still sees
+    /// streaming.
+    ///
+    /// Token-matched. `Err(fresh)` means the reservation is gone (cancelled
+    /// mid-retry) or was superseded — the caller kills the child it just
+    /// spawned and settles the turn as cancelled. `Ok(previous)` hands back
+    /// the exhausted child so the caller can reap it.
+    ///
+    /// `started_at` deliberately survives: the elapsed counter measures how
+    /// long the reviewer has been waiting, which the retry does not reset.
+    pub fn reattach(&self, key: &str, token: u64, child: Child) -> Result<Option<Child>, Child> {
+        let mut inner = self.inner.lock().unwrap();
+        match inner.procs.get_mut(key) {
+            Some(p) if p.token == token => Ok(p.child.replace(child)),
             _ => Err(child),
         }
     }
@@ -434,6 +497,95 @@ pub fn push_delta(buf: &Mutex<PartialBuf>, text: &str) -> u64 {
     b.seq
 }
 
+/// What one folded line changed about the turn's meter — the payload of a
+/// `{surface}-meter` event, once the pacer says it's due.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeterPayload {
+    pub rev: u64,
+    pub meter: crate::meter::TurnMeter,
+    /// The entry this line earned, if any. Surfaces render the newest one as
+    /// the activity line; the full ring comes back from `status`.
+    pub activity: Option<crate::meter::Activity>,
+    /// Worth interrupting the coalescing tick for. Reader-side only — the
+    /// frontend has no use for it.
+    #[serde(skip)]
+    pub discrete: bool,
+}
+
+/// Fold one parsed line into the turn's meter and activity ring.
+///
+/// INVARIANT (identical to [`push_delta`], and for the same reason): mutate
+/// under the buffer lock FIRST, emit the event second. A concurrent `status`
+/// probe then observes either the meter without this line (and a smaller
+/// `rev`) or the meter with it (and `rev >=` the event's), which is what makes
+/// the frontend rule "drop meter events with `rev <=` the probed rev"
+/// lossless. Monotone rather than additive, so a dropped event costs nothing.
+///
+/// Returns `None` when the line said nothing new — which is the common case,
+/// including every text delta.
+pub fn push_meta(buf: &Mutex<PartialBuf>, v: &serde_json::Value) -> Option<MeterPayload> {
+    let at = now_millis();
+    let mut b = buf.lock().unwrap();
+    let before = b.meter.clone();
+    let changed = b.meter.observe(v);
+    let activity = crate::meter::activity_from(v, &before, &b.meter, at).filter(|a| {
+        // A turn thinks in a hundred deltas and requests three times; one row
+        // per repeat would bury the ring's tail in noise.
+        b.activity
+            .back()
+            .map(|last| last.kind != a.kind || last.label != a.label)
+            .unwrap_or(true)
+    });
+    if let Some(a) = &activity {
+        if b.activity.len() >= ACTIVITY_CAP {
+            b.activity.pop_front();
+        }
+        b.activity.push_back(a.clone());
+        // `system`/`status` carries no usage fact, so `observe` left `rev`
+        // alone — bump it here or the frontend's guard drops the event.
+        if !changed {
+            b.meter.bump_rev();
+        }
+    } else if !changed {
+        return None;
+    }
+    Some(MeterPayload {
+        rev: b.meter.rev,
+        discrete: b.meter.is_discrete_change(&before) || activity.is_some(),
+        meter: b.meter.clone(),
+        activity,
+    })
+}
+
+/// The coalescer that keeps the meter off the per-token path (perf-budget
+/// Rule 3). One per reader loop.
+#[derive(Default)]
+pub struct MeterPacer {
+    last_ms: i64,
+}
+
+impl MeterPacer {
+    /// Whether this update is due to be emitted now. Discrete changes — the
+    /// first model observation, a new tool call, a rate-limit onset, the
+    /// terminal adoption — jump the queue, because they are exactly the ones
+    /// a waiting user is looking at the pane for.
+    pub fn due(&mut self, payload: &MeterPayload) -> bool {
+        let now = now_millis();
+        if payload.discrete || now - self.last_ms >= METER_COALESCE_MS {
+            self.last_ms = now;
+            return true;
+        }
+        false
+    }
+
+    /// Force the next `due` to pass — the terminal emission, which must land
+    /// whatever the clock says.
+    pub fn force(&mut self) {
+        self.last_ms = 0;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,10 +636,7 @@ mod tests {
 
     #[test]
     fn push_delta_caps_text_but_seq_keeps_counting() {
-        let buf = Mutex::new(PartialBuf {
-            text: String::new(),
-            seq: 0,
-        });
+        let buf = Mutex::new(PartialBuf::new());
         // One oversized append reaches the cap (soft: a single append may
         // overshoot; growth stops from then on).
         let big = "x".repeat(PARTIAL_CAP_BYTES);

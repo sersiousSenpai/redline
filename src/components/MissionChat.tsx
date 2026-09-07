@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useEffect, useRef, useState } from "react";
+import { useMemo, useEffect, useRef, useState } from "react";
 import { Copy, Pin, Target, X } from "lucide-react";
 import type { Mission, MissionFinding, MissionMessage } from "../types";
 import { useAgentTurn } from "../hooks/useAgentTurn";
+import { useStickToBottom } from "../hooks/useStickToBottom";
 import { usePersistedState } from "../theme/usePersistedState";
 import { MarkdownView } from "./MarkdownView";
+import StreamingBubble from "./StreamingBubble";
+import TurnFooter from "./TurnFooter";
+import { contextResets, type TurnMeter } from "../lib/turnMeter";
 import { QueuedChip, UnsentNote } from "./QueuedChip";
 import { WorkingIndicator } from "./WorkingIndicator";
 
@@ -51,18 +55,17 @@ export function MissionChat({
   const [draft, setDraft] = usePersistedState<string>(`rl.chatDraft.mission.${missionId}`, "");
   const [showFindings, setShowFindings] = useState(true);
   const [editingGoal, setEditingGoal] = useState(false);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const stickRef = useRef(true);
   // The synthesize handoff itself lives at App level (`mission-synthesize-done`
   // → Drafter) — the backend owns the pending flag, so it survives this panel
   // unmounting mid-turn. Nothing to track here.
 
   // The turn lifecycle — persisted thread, live stream, mid-turn remount
   // restore (partial text + spinner), self-heal — lives in the shared hook.
-  const { messages, liveText, status, startedAt, loaded, send, cancel, unqueue } =
+  const { messages, liveText, status, startedAt, loaded, send, cancel, unqueue, meter, activity, meters } =
     useAgentTurn<MissionMessage>({
       surface: "mission",
       key: missionId,
+      meterKind: "mission",
       idField: "missionId",
       historyCmd: "get_mission_thread",
       historyArgs: { missionId },
@@ -86,20 +89,26 @@ export function MissionChat({
       }),
     });
 
+  // A pressure drop is not a bug — it is auto-compaction or a fresh CLI
+  // session. Unlabelled, a fall from 78% to 12% reads as a broken meter.
+  const resets = useMemo(
+    () => contextResets(messages.map((m) => m.id), meters),
+    [messages, meters],
+  );
+
+  // Follow a streaming thread only while the reader is parked at the bottom.
+  // The rule lives in `useStickToBottom` — the turn footer changes every
+  // settled bubble's height, so five copies of it would need the same fix.
+  const {
+    ref: scrollRef,
+    onScroll,
+    stick,
+  } = useStickToBottom<HTMLDivElement>([messages, liveText]);
+
   useEffect(() => {
-    stickRef.current = true;
+    stick();
   }, [missionId]);
 
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (el && stickRef.current) el.scrollTop = el.scrollHeight;
-  }, [messages, liveText]);
-
-  function onScroll() {
-    const el = scrollRef.current;
-    if (!el) return;
-    stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-  }
 
   return (
     <div
@@ -140,6 +149,8 @@ export function MissionChat({
             <MessageBubble
               key={m.id}
               msg={m}
+              meter={meters[m.id]}
+              contextReset={resets.has(m.id)}
               onOpenLink={onOpenLink}
               onSynthesize={onSynthesize}
               onUnqueue={() => {
@@ -148,25 +159,35 @@ export function MissionChat({
                 });
               }}
               onResend={() => {
-                stickRef.current = true;
+                stick();
                 send(m.body);
               }}
             />
           ))
         )}
-        {status === "streaming" &&
-          (liveText ? (
-            <StreamingBubble text={liveText} onOpenLink={onOpenLink} />
-          ) : (
-            <WorkingIndicator startedAt={startedAt ?? undefined} />
-          ))}
+        {status === "streaming" && (
+          <>
+            {/* The badge and the activity line fill the wait the blank
+                ticker used to — so the bubble renders from the first line of
+                the stream, not the first token. */}
+            <StreamingBubble
+              text={liveText}
+              agent="Orchestrator"
+              inspect={{ surface: "mission", key: missionId }}
+              meter={meter}
+              activity={activity}
+              onOpenLink={onOpenLink}
+            />
+            {!liveText && <WorkingIndicator startedAt={startedAt ?? undefined} />}
+          </>
+        )}
       </div>
 
       <div className="px-3 py-2 shrink-0" style={{ borderTop: "1px solid var(--color-rule)" }}>
         <button
           type="button"
           onClick={() => {
-            stickRef.current = true;
+            stick();
             send(SYNTHESIZE_PROMPT, {
               localBody: "✦ Synthesize the mission",
               extra: "synthesize",
@@ -190,7 +211,7 @@ export function MissionChat({
           setDraft={setDraft}
           streaming={status === "streaming"}
           onSend={() => {
-            stickRef.current = true;
+            stick();
             send(draft);
             setDraft("");
           }}
@@ -415,12 +436,18 @@ function MessageBubble({
   onSynthesize,
   onUnqueue,
   onResend,
+  meter,
+  contextReset,
 }: {
   msg: MissionMessage;
   onOpenLink?: (url: string) => void;
   onSynthesize?: (markdown: string) => void;
   onUnqueue?: () => void;
   onResend?: () => void;
+  /** This row's settled meter — the badge and footer that outlive the turn. */
+  meter?: TurnMeter | null;
+  /** This turn's context restarted (compaction or a fresh CLI session). */
+  contextReset?: boolean;
 }) {
   const isUser = msg.role === "user";
   const isError = msg.status === "error";
@@ -453,6 +480,7 @@ function MessageBubble({
       {isQueued && <QueuedChip onUnqueue={onUnqueue} />}
       {isUnsent && <UnsentNote onResend={onResend} />}
       {showActions && <MessageActions body={msg.body} onSynthesize={onSynthesize} />}
+      {!isUser && <TurnFooter meter={meter} contextReset={contextReset} />}
     </div>
   );
 }
@@ -501,26 +529,6 @@ function MessageActions({
         >
           Open in Drafter ▶
         </button>
-      )}
-    </div>
-  );
-}
-
-function StreamingBubble({ text, onOpenLink }: { text: string; onOpenLink?: (url: string) => void }) {
-  return (
-    <div className="flex flex-col gap-0.5">
-      <span
-        style={{ fontSize: "9px", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-info)" }}
-      >
-        Orchestrator
-      </span>
-      {text ? (
-        <div>
-          <MarkdownView body={text} compact onLinkClick={onOpenLink} />
-          <span style={{ color: "var(--color-ink-muted)" }}>▌</span>
-        </div>
-      ) : (
-        <div style={{ fontSize: "12.5px", lineHeight: 1.5, color: "var(--color-ink-muted)" }}>working…</div>
       )}
     </div>
   );

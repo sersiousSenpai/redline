@@ -209,6 +209,10 @@ impl BrowseState {
         )
         .await;
 
+        // Above every exit below — including the timeout, whose colleague
+        // spent real tokens before it stalled.
+        let _ = crate::meter::settle(&self.db, "browse", &buf);
+
         let (session, final_text, errored, saw_json, stderr_text) = match outcome {
             Ok(v) => v,
             Err(_) => {
@@ -332,6 +336,17 @@ struct BrowseError {
 #[serde(rename_all = "camelCase")]
 struct BrowseCancelled {
     browse_id: String,
+}
+
+/// What the turn is spending and what it is doing. Flattened so the payload
+/// reads `{browseId, rev, meter, activity}` — the id field the frontend hook
+/// matches on sits at the top level, exactly like every other browse event.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowseMeter {
+    browse_id: String,
+    #[serde(flatten)]
+    meter: turn::MeterPayload,
 }
 
 /// A queued send left the queue and became the streaming turn — the frontend
@@ -927,6 +942,7 @@ async fn drive_browse_stream(
         let mut final_text: Option<String> = None;
         let mut errored: Option<String> = None;
         let mut saw_json = false;
+        let mut pacer = turn::MeterPacer::default();
         while let Ok(Some(line)) = reader.next_line().await {
             let trimmed = line.trim();
             if trimmed.is_empty() {
@@ -936,6 +952,22 @@ async fn drive_browse_stream(
                 continue;
             };
             saw_json = true;
+            // The raw wire, for the inspector. A no-op when it's off —
+            // one relaxed atomic load, nothing buffered.
+            crate::inspect::capture("browse", browse_id, trimmed);
+            // Second pass over the same value — the meter reads what
+            // `classify_line` throws away. Mutate-then-emit, coalesced.
+            if let Some(payload) = turn::push_meta(buf, &v) {
+                if pacer.due(&payload) {
+                    let _ = app.emit(
+                        "browse-meter",
+                        BrowseMeter {
+                            browse_id: browse_id.to_string(),
+                            meter: payload,
+                        },
+                    );
+                }
+            }
             match classify_line(&v) {
                 StreamLine::Init(sid) => session = Some(sid),
                 StreamLine::Delta(text) => {
@@ -992,6 +1024,24 @@ async fn read_browse(
     let (session, final_text, errored, saw_json, stderr_text) =
         drive_browse_stream(&app, &browse_id, &buf, stdout, stderr).await;
 
+    // ABOVE the terminal branch, so success, error and cancelled all book.
+    // A cancelled turn spent its input tokens too.
+    let settled = crate::meter::settle(&db, "browse", &buf);
+    if !settled.is_empty() {
+        let _ = app.emit(
+            "browse-meter",
+            BrowseMeter {
+                browse_id: browse_id.clone(),
+                meter: turn::MeterPayload {
+                    rev: settled.rev,
+                    meter: settled.clone(),
+                    activity: None,
+                    discrete: true,
+                },
+            },
+        );
+    }
+
     // Reap the proc + pop the queue in ONE critical section, BEFORE emitting
     // the terminal event. Token-matched: a reader outliving a cancel must
     // neither steal a successor turn's proc nor drain its queue.
@@ -1016,12 +1066,15 @@ async fn read_browse(
             // Transient API errors keep the session and ask for a retry; only an
             // explicit context overflow resets the session to start fresh.
             let why = describe_turn_error(&db, &browse_id, &err);
-            finish_error(&app, &db, &browse_id, &why);
+            let row = finish_error(&app, &db, &browse_id, &why);
+            crate::meter::attach(&db, "browse", &row, &settled);
             break 'terminal;
         }
         if let Some(text) = final_text {
             if text.trim().is_empty() {
-                finish_error(&app, &db, &browse_id, "claude produced an empty reply");
+                let row =
+                    finish_error(&app, &db, &browse_id, "claude produced an empty reply");
+                crate::meter::attach(&db, "browse", &row, &settled);
                 break 'terminal;
             }
             // Persist the session id so the next turn resumes (not re-spawns).
@@ -1041,6 +1094,8 @@ async fn read_browse(
             if let Err(e) = db.insert_browse_message(&msg) {
                 tracing::warn!(error = %e, "failed to persist assistant message");
             }
+            // The badge and the footer outlive the turn.
+            crate::meter::attach(&db, "browse", &msg.id, &settled);
             // Companion journal: this tab's agent completed a turn.
             let _ = db.append_journal("agent_turn", Some("browse"), Some(&browse_id), None, None);
             let _ = app.emit(
@@ -1062,7 +1117,8 @@ async fn read_browse(
         } else {
             "claude ended without producing a reply".to_string()
         };
-        finish_error(&app, &db, &browse_id, &why);
+        let row = finish_error(&app, &db, &browse_id, &why);
+        crate::meter::attach(&db, "browse", &row, &settled);
     }
 
     // Drain: `finish_and_pop` already re-reserved the slot for the queue
@@ -1096,87 +1152,30 @@ async fn read_browse(
     }
 }
 
-/// Whether a failed turn's error is an EXPLICIT context-length signature — the
-/// resumable session genuinely outgrew the model's window, so every `--resume`
-/// of it will keep throwing until we start fresh. This is deliberately narrow:
-/// only claude's own "prompt is too long" / context-length phrasings, NOT the
-/// generic `error_during_execution` bucket. That bucket is dominated by
-/// *transient* API errors (overload / capacity) whose session is perfectly fine
-/// on the next attempt — clearing it there would throw away a healthy
-/// conversation over a momentary blip. (Empirically: the sessions that produced
-/// `error_during_execution` here were only ~60–70K tokens and resume cleanly.)
-pub(crate) fn is_context_overflow(error: &str) -> bool {
-    let e = error.to_lowercase();
-    e.contains("prompt is too long")
-        || e.contains("context length")
-        || e.contains("context window")
-        || e.contains("too many tokens")
-        || e.contains("maximum context")
-}
-
-/// Whether an error looks TRANSIENT — a momentary model/API failure (the generic
-/// `error_during_execution` subtype claude emits for an empty-message errored
-/// `result`, plus overload/capacity/timeout wording). The session is healthy;
-/// retrying in a moment usually works. Account-level limits are transient-ish
-/// too (they reset), so they also land here rather than triggering a reset.
-pub(crate) fn is_transient(error: &str) -> bool {
-    let e = error.to_lowercase();
-    e.contains("error_during_execution")
-        || e.contains("overloaded")
-        || e.contains("capacity")
-        || e.contains("timeout")
-        || e.contains("timed out")
-        || e.contains("temporarily")
-        || e.contains("rate limit")
-        || e.contains("usage limit")
-        || e.contains("session limit")
-}
-
-/// Translate a failed turn's raw error into the message to surface, and recover
-/// the tab where that's the right move:
-///
-/// - EXPLICIT context overflow → forget the stored session id so the next turn
-///   starts fresh (re-embedding a snapshot) instead of re-`--resume`-ing an
-///   over-limit context forever, and say so.
-/// - TRANSIENT model/API error → keep the session (it's fine) and tell the user
-///   plainly to retry. This is the common "kept failing" case: a momentary API
-///   blip the user hit by retrying inside the incident window.
-/// - Anything else → surface unchanged.
+/// Translate a failed browse turn into the sentence to show, and reset the
+/// tab's stored session when the error says the context overflowed. The
+/// branches (and the wording) live once, in `claude_proc::describe_turn_error`;
+/// this binds the two things that are browse's own.
 fn describe_turn_error(db: &Database, browse_id: &str, error: &str) -> String {
-    if is_context_overflow(error) {
-        if let Err(e) = db.clear_browse_session(browse_id) {
-            tracing::warn!(error = %e, "failed to clear over-limit browse session");
-        }
-        // The doc comment above has always named "the common 'kept failing'
-        // case"; now there is a counter behind it.
-        let _ = db.record_friction(
-            "context_overflow",
-            Some("browse"),
-            Some(browse_id),
-            Some(error),
-        );
-        return "This discussion outgrew the model's context window, so the turn \
-                failed. I've reset its context — send your message again and I'll \
-                start fresh on this page (the replies above are kept)."
-            .to_string();
-    }
-    if is_transient(error) {
-        let _ = db.record_friction(
-            "transient_fail",
-            Some("browse"),
-            Some(browse_id),
-            Some(error),
-        );
-        return "The model hit a temporary error on this turn (not something you \
-                did) — send your message again in a moment. Your conversation is \
-                intact."
-            .to_string();
-    }
-    error.to_string()
+    crate::claude_proc::describe_turn_error(
+        db,
+        crate::claude_proc::TurnErrorCopy {
+            surface: "browse",
+            subject: Some(browse_id),
+            noun: "discussion",
+            next: "I'll start fresh on this page",
+        },
+        error,
+        || {
+            if let Err(e) = db.clear_browse_session(browse_id) {
+                tracing::warn!(error = %e, "failed to clear over-limit browse session");
+            }
+        },
+    )
 }
 
 /// Persist a failed turn as a terminal `error` row and emit `browse-error`.
-fn finish_error(app: &AppHandle, db: &Database, browse_id: &str, error: &str) {
+fn finish_error(app: &AppHandle, db: &Database, browse_id: &str, error: &str) -> String {
     let msg = BrowseMessage {
         id: uuid::Uuid::new_v4().to_string(),
         browse_id: browse_id.to_string(),
@@ -1195,6 +1194,8 @@ fn finish_error(app: &AppHandle, db: &Database, browse_id: &str, error: &str) {
             error: error.to_string(),
         },
     );
+    // The id the caller attaches this turn's meter to.
+    msg.id
 }
 
 #[cfg(test)]
@@ -1264,20 +1265,6 @@ mod tests {
         // And the re-read routes are documented for a mid-conversation change.
         assert!(p.contains("/v1/mission/active"));
         assert!(p.contains("/v1/mission/findings"));
-    }
-
-    #[test]
-    fn only_explicit_overflow_counts_as_context_overflow() {
-        // Explicit context-length phrasings, however claude words them.
-        assert!(is_context_overflow("prompt is too long: 250000 tokens"));
-        assert!(is_context_overflow("maximum context length exceeded"));
-        assert!(is_context_overflow("input exceeds the context window"));
-        // The generic subtype is NOT overflow — it's transient (empirically the
-        // sessions that produced it were ~60–70K tokens and resume fine).
-        assert!(!is_context_overflow("error_during_execution"));
-        assert!(is_transient("error_during_execution"));
-        assert!(is_transient("model overloaded, please retry"));
-        assert!(is_transient("You've hit your session limit · resets 12:30pm"));
     }
 
     #[test]

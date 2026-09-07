@@ -15,6 +15,7 @@
 // and become untestable without a DOM, which is the house rule stated at
 // frontDoor.ts:6-8.
 
+import type { CombineSource } from "../types";
 import type { ProjectOption } from "../components/ProjectPicker";
 import { guessProjectForPlan } from "./guessProject";
 import type { ExtensionToolchain, ReadinessItem } from "./readiness";
@@ -164,7 +165,22 @@ export function staleBlocker(
  *  every front-door and browser launch as a drafter launch. `"chat"` is not
  *  cosmetic for the same reason: `record_plan_launch` stores this verbatim, so
  *  a graduation mislabelled as a front-door launch poisons the lake. */
-export type LaunchOrigin = "front-door" | "drafter" | "browser" | "chat";
+/** Fewer than two plans is not a combination. Mirrors Rust's
+ *  `combine::MIN_COMBINE`, which is the enforcing copy — this one exists so
+ *  the sidebar can hide a button and the Front Door can widen `canSubmit`
+ *  without a round trip. */
+export const MIN_COMBINE = 2;
+
+export type LaunchOrigin =
+  | "front-door"
+  | "drafter"
+  | "browser"
+  | "chat"
+  // A Combine stays its own origin even though the launch physically leaves
+  // through the Front Door: `surface` feeds `resolve_parent` and the
+  // Companion's account of what you did, and "synthesised three plans" must
+  // not collapse into "typed a sentence".
+  | "combine";
 
 /** What a surface gets back if its launch dies before a plan arrives.
  *
@@ -172,7 +188,14 @@ export type LaunchOrigin = "front-door" | "drafter" | "browser" | "chat";
  *  owed one. The Drafter owes nothing back — it never took the document away,
  *  which is the whole point of morphing in place. */
 export type LaunchRestore =
-  | { kind: "composer"; text: string; attachments: string[] }
+  | {
+      kind: "composer";
+      text: string;
+      attachments: string[];
+      /** Plan pills, for a Combine. A launch that dies would otherwise hand
+       *  back the sentence and silently drop the plans it was about. */
+      combine?: CombineSource[];
+    }
   | { kind: "none" };
 
 export interface PendingLaunch {
@@ -197,13 +220,18 @@ export interface PendingLaunch {
  *  composer is empty: giving someone their sentence back is a kindness,
  *  clobbering newer typing with it is not. */
 export function restoreInto(
-  prev: { text: string; attachments: string[] },
+  prev: { text: string; attachments: string[]; combine?: CombineSource[] },
   restore: LaunchRestore,
-): { text: string; attachments: string[] } {
+): { text: string; attachments: string[]; combine?: CombineSource[] } {
+  // Identity preserved on purpose: a surface that never took anything away
+  // (the Drafter) is owed nothing, and handing it a fresh object would make
+  // "nothing changed" indistinguishable from "restored the same values".
   if (restore.kind !== "composer") return prev;
   return {
     text: prev.text.trim() ? prev.text : restore.text,
     attachments: prev.attachments.length ? prev.attachments : restore.attachments,
+    // Same "only when empty" rule the other two take.
+    combine: prev.combine?.length ? prev.combine : (restore.combine ?? []),
   };
 }
 

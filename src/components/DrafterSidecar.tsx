@@ -4,7 +4,11 @@ import { useEffect, useRef, useState } from "react";
 
 import type { DraftComment, ThreadMessage } from "../types";
 import { useAgentTurn } from "../hooks/useAgentTurn";
+import { priorUserBody } from "../lib/agentTurn";
+import { RetryNote } from "./QueuedChip";
 import { MarkdownView } from "./MarkdownView";
+import StreamingBubble from "./StreamingBubble";
+import TurnFooter from "./TurnFooter";
 import { WorkingIndicator } from "./WorkingIndicator";
 
 interface DrafterSidecarProps {
@@ -201,6 +205,8 @@ function DraftThread({ draftId, commentId }: { draftId: string; commentId: strin
     // The fork events spell the scope `sessionId` for every family; for a
     // drafter thread that scope IS the draft id.
     idFields: { sessionId: draftId, commentId },
+    meterKind: "fork",
+    meterThreadId: draftId,
     historyCmd: "get_thread",
     historyArgs: { sessionId: draftId, commentId },
     commands: {
@@ -234,13 +240,20 @@ function DraftThread({ draftId, commentId }: { draftId: string; commentId: strin
     turn.send(trimmed);
   };
 
+  /** Re-send the question an error row is the failed answer to. Last row only
+   *  — an error further up has already been answered by what followed it. */
+  const retryAt = (i: number): (() => void) | undefined => {
+    const body = priorUserBody(messages, i);
+    return body ? () => send(body) : undefined;
+  };
+
   return (
     <div
       className="flex flex-col gap-1.5 pt-1"
       style={{ borderTop: "1px solid var(--color-rule)" }}
       onClick={(e) => e.stopPropagation()}
     >
-      {messages.map((m) => (
+      {messages.map((m, i) => (
         <div key={m.id} className="flex flex-col gap-0.5">
           <span
             style={{
@@ -249,10 +262,15 @@ function DraftThread({ draftId, commentId }: { draftId: string; commentId: strin
               textTransform: "uppercase",
               letterSpacing: "0.07em",
               color:
-                m.role === "user" ? "var(--color-ink-muted)" : "var(--color-info)",
+                m.status === "error"
+                  ? "var(--color-warning)"
+                  : m.role === "user"
+                    ? "var(--color-ink-muted)"
+                    : "var(--color-info)",
             }}
           >
-            {m.role === "user" ? "You" : "Agent"}
+            {/* Redline wrote the error sentence, not the model. */}
+            {m.role === "user" ? "You" : m.status === "error" ? "Redline" : "Agent"}
           </span>
           {m.status === "error" ? (
             <div
@@ -267,13 +285,26 @@ function DraftThread({ draftId, commentId }: { draftId: string; commentId: strin
           ) : (
             <MarkdownView body={m.body} compact rich />
           )}
+          {m.role !== "user" && <TurnFooter meter={turn.meters[m.id]} />}
+          {m.status === "error" &&
+            i === messages.length - 1 &&
+            (() => {
+              const onRetry = retryAt(i);
+              return onRetry ? <RetryNote onRetry={onRetry} /> : null;
+            })()}
         </div>
       ))}
       {streaming && (
         <div style={{ fontSize: "11.5px", color: "var(--color-ink-muted)" }}>
-          {liveText ? (
-            <MarkdownView body={liveText} compact />
-          ) : (
+          <StreamingBubble
+            text={liveText}
+            agent="Drafter"
+            inspect={{ surface: "drafter", key: draftId }}
+            retrying={turn.retrying}
+            meter={turn.meter}
+            activity={turn.activity}
+          />
+          {!liveText && !turn.retrying && (
             <WorkingIndicator compact startedAt={turn.startedAt ?? undefined} />
           )}
         </div>

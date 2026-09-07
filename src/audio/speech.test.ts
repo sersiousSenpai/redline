@@ -2,10 +2,12 @@
 // Copyright 2026 Yusuf Al-Bazian
 import { describe, expect, it, vi } from "vitest";
 import {
-  SpeechQueue,
-  takeSentences,
-  takeFirstChunk,
   clampRate,
+  READ_ALOUD_START,
+  readAloudStep,
+  SpeechQueue,
+  takeFirstChunk,
+  takeSentences,
   type SpeechDriver,
 } from "./speech";
 
@@ -139,5 +141,126 @@ describe("SpeechQueue", () => {
     });
     q.enqueue("Done. "); // trailing space completes the sentence
     expect(states).toEqual(["speaking", "idle"]);
+  });
+});
+
+describe("readAloudStep", () => {
+  const on = { enabled: true };
+
+  /** Run a whole stream through the step and collect what was spoken. */
+  function run(
+    frames: { liveText: string; streaming: boolean; enabled?: boolean }[],
+    enabled = true,
+  ) {
+    let state = READ_ALOUD_START;
+    const spoken: string[] = [];
+    let primes = 0;
+    let flushes = 0;
+    for (const f of frames) {
+      const s = readAloudStep(state, {
+        liveText: f.liveText,
+        streaming: f.streaming,
+        enabled: f.enabled ?? enabled,
+      });
+      state = { spokenLen: s.spokenLen, wasStreaming: s.wasStreaming };
+      if (s.prime) primes++;
+      if (s.delta) spoken.push(s.delta);
+      if (s.flush) flushes++;
+    }
+    return { spoken, primes, flushes, state };
+  }
+
+  it("speaks each streamed suffix exactly once, never the whole buffer", () => {
+    const { spoken } = run([
+      { liveText: "Hello", streaming: true },
+      { liveText: "Hello there", streaming: true },
+      { liveText: "Hello there. Ready?", streaming: true },
+    ]);
+    expect(spoken).toEqual(["Hello", " there", ". Ready?"]);
+    expect(spoken.join("")).toBe("Hello there. Ready?");
+  });
+
+  it("primes once per turn and flushes once at its end", () => {
+    const r = run([
+      { liveText: "", streaming: false },
+      { liveText: "", streaming: true },
+      { liveText: "Done", streaming: true },
+      { liveText: "Done", streaming: false },
+      { liveText: "Done", streaming: false },
+    ]);
+    expect(r.primes).toBe(1);
+    expect(r.flushes).toBe(1);
+  });
+
+  it("unmuting mid-reply starts from here, not from the top", () => {
+    // The user has already READ the first two sentences; hearing them read
+    // back is not what switching the voice on means.
+    const r = run([
+      { liveText: "One. ", streaming: true, enabled: false },
+      { liveText: "One. Two. ", streaming: true, enabled: false },
+      { liveText: "One. Two. Three.", streaming: true, enabled: true },
+    ]);
+    expect(r.spoken).toEqual(["Three."]);
+  });
+
+  it("stays silent while muted, watermark and all", () => {
+    const r = run(
+      [
+        { liveText: "a", streaming: true },
+        { liveText: "ab", streaming: true },
+        { liveText: "ab", streaming: false },
+      ],
+      false,
+    );
+    expect(r.spoken).toEqual([]);
+    expect(r.primes).toBe(0);
+    expect(r.flushes).toBe(0);
+    expect(r.state.spokenLen).toBe(2); // …but it kept up
+  });
+
+  it("a second turn resets rather than replaying the first", () => {
+    const r = run([
+      { liveText: "First reply.", streaming: true },
+      { liveText: "First reply.", streaming: false },
+      // The next turn starts with a fresh, SHORTER buffer.
+      { liveText: "Sec", streaming: true },
+      { liveText: "Second reply.", streaming: true },
+    ]);
+    expect(r.spoken).toEqual(["First reply.", "Sec", "ond reply."]);
+    expect(r.primes).toBe(2);
+  });
+
+  it("a shrinking buffer outside a turn rewinds the watermark, silently", () => {
+    // A history load replacing the live buffer must not be spoken, and must
+    // not leave the watermark past the end of the new text.
+    const r = run([
+      { liveText: "A long streamed reply.", streaming: true },
+      { liveText: "A long streamed reply.", streaming: false },
+      { liveText: "", streaming: false },
+    ]);
+    expect(r.state.spokenLen).toBe(0);
+    expect(r.spoken).toEqual(["A long streamed reply."]);
+  });
+
+  it("text arriving outside a turn is read, not heard", () => {
+    // A restored partial or a history fetch is something to look at.
+    const r = run([{ liveText: "Restored partial", streaming: false }]);
+    expect(r.spoken).toEqual([]);
+    expect(r.state.spokenLen).toBe(16);
+  });
+
+  it("an idle frame asks for nothing", () => {
+    const s = readAloudStep(READ_ALOUD_START, {
+      liveText: "",
+      streaming: false,
+      ...on,
+    });
+    expect(s).toEqual({
+      prime: false,
+      delta: "",
+      flush: false,
+      spokenLen: 0,
+      wasStreaming: false,
+    });
   });
 });

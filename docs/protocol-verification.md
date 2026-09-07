@@ -520,3 +520,103 @@ then ran `claude -p "say hi in one word"` from that directory.
 - [x] Command-type hook, stdin JSON, `exit 0` passes through unchanged. Redline
   installs it as a `curl … --max-time 1 … ; exit 0` one-liner (fail-open: a
   closed/slow daemon never delays or blocks prompt submission).
+
+---
+
+## Experiment (j) — usage, provenance and activity on the stream (2026-09-04, claude 2.1.222)
+
+| | |
+|---|---|
+| Status | **complete** |
+| Result | **Confirmed, with three corrections that changed the design.** Locks `meter.rs`. |
+
+**Question:** the token/provenance meter needs six facts off the wire that
+`classify_line` throws away — observed model, per-turn usage, context
+occupancy, tool activity, truncation, and rate-limit stalls. The repo had **no
+captured real `result` line**: every fixture (`claude_proc.rs`, `voice.rs`) was
+hand-written. So each of the six was an assumption.
+
+**Method.** Three real captures in a throwaway scratch dir (small `NOTES.md`,
+`CLAUDE*` env stripped, `--strict-mcp-config`), committed redacted to
+`src-tauri/tests/golden/stream/` — see that directory's README for the exact
+redaction. (1) `--model sonnet --effort high --tools "Read,Grep,Glob"`, a
+prompt forcing two tool calls; (2) `--tools ""`, a one-word reply; (3)
+`--resume` against a nonexistent session id.
+
+### Findings
+
+- [x] **`thinking_delta` exists — but carries no text.** `content_block_delta`
+  does emit `delta.type == "thinking_delta"`, contradicting §(i)'s
+  `signature_delta`-only table. However `delta.thinking` is the **empty
+  string**; the only payload is `delta.estimated_tokens`. A parallel
+  `system` / `thinking_tokens` line carries `estimated_tokens` +
+  `estimated_tokens_delta` cumulatively. **Consequence:** the activity line
+  shows *"Thinking… (~75 tokens)"* / *"Thought for 12s"*. There is no
+  reasoning text to show, on any Redline surface, at any effort.
+- [x] **`stop_reason` DOES reach stdout — but not where you'd look.** The
+  `assistant` lines carry `stop_reason: null` **always** (they are
+  message-*start* snapshots). It arrives on
+  `stream_event` → `message_delta` → `delta.stop_reason`, and again at
+  top level on the terminal `result`. Both are read.
+- [x] **stdout `assistant` usage is a snapshot, not the message's total.** In
+  capture (1) every `assistant` line reported `output_tokens: 2` while the
+  message's real finals were 134 / 167 / 18 — those arrive on
+  `message_delta.usage` (with `output_tokens_details.thinking_tokens`).
+  The **transcript's** `assistant` lines, by contrast, do carry final usage.
+  **Consequence:** the meter tracks the current `message.id` from
+  `message_start` and folds `message_delta.usage` onto it; the transcript arm
+  folds the `assistant` line directly. Same dedupe rule, two feeds.
+- [x] **`result` carries everything.** `usage`, `total_cost_usd`, `num_turns`,
+  `duration_ms`, `duration_api_ms`, `ttft_ms`, `stop_reason`,
+  `terminal_reason`, `permission_denials`, `api_error_status`, **and
+  `modelUsage`** — a per-model map with `inputTokens`/`outputTokens`/
+  `cacheReadInputTokens`/`cacheCreationInputTokens`, `costUSD`,
+  **`contextWindow`**, `maxOutputTokens`, `canonicalModel` and `provider`.
+  The CLI states the context window as fact (1,000,000 for `claude-sonnet-5`
+  on this account), so the static model table is the *pre-`result` fallback*,
+  not the only source of truth.
+- [x] **`result.usage` == the sum of the per-message finals**, exactly (6 /
+  319 / 5,983 / 30,186 in capture (1)). It is adopted as authoritative at the
+  terminal — **except when it is all zeros** (see below).
+- [x] **An errored `result` reports zeroed usage.** Capture (3) returned a
+  single `result` line: `is_error: true`, `subtype: error_during_execution`,
+  an `errors[]` array, `usage` all zeros, `modelUsage: {}`. A turn that failed
+  *mid-flight* really did spend what the live fold counted, so the meter
+  adopts `result.usage` only when non-zero. Overwriting with zeros would
+  under-report — the failure mode the burn work exists to avoid.
+- [x] **`rate_limit_event` is a routine heartbeat, not a stall.** It fired on
+  **every** capture, including the 1.4-second one, always with
+  `rate_limit_info.status: "allowed"`. Shape:
+  `{status, resetsAt, rateLimitType, overageStatus, overageResetsAt,
+  isUsingOverage}`; `resetsAt` is unix **seconds**. **Consequence:** treating
+  its arrival as dead air would have flagged every single turn as rate
+  limited. Only `status != "allowed"` sets the meter's `rate_limited`.
+- [x] **`system`/`init` carries `model`** (the *configured* model) plus `cwd`,
+  `tools`, `permissionMode`, `skills`, `slash_commands`. The **observed**
+  model is on `message_start.message.model` and every `assistant` line — that
+  is the one the badge shows, and the only one that reveals a
+  `--fallback-model` swap.
+- [x] **The tool name is available before the arguments.** `content_block_start`
+  with `content_block.type == "tool_use"` carries `name` and an **empty**
+  `input` (the args stream in as `input_json_delta`); the complete call lands
+  on the `assistant` line. So the activity line can name the tool at once and
+  fill in its argument a beat later. `system`/`status` (`status: "requesting"`)
+  marks each API request — the earliest activity signal of all.
+- [x] **The interactive PTY transcript has the same `assistant` shape** as an
+  orchestrated agent transcript: `message.{id, model, stop_reason, usage}`
+  with final per-message usage, plus a top-level `effort`. It additionally
+  carries line types a headless transcript never has (`mode`,
+  `permission-mode`, `bridge-session`, `ai-title`, `attachment`,
+  `last-prompt`, `file-history-snapshot`, `queue-operation`) — all ignored.
+  This is what makes the PTY arm a second feed into the same meter rather than
+  a second meter.
+- [ ] **`max_tokens` truncation was NOT captured.** The CLI exposes no
+  `--max-tokens` flag, so the case cannot be provoked from the command line.
+  `synthetic_max_tokens.jsonl` is hand-authored from the verified
+  `message_delta` / `result` shapes and named to say so.
+
+**Verdict:** the meter reads five line kinds — `message_start`,
+`message_delta`, `assistant`, `rate_limit_event`, `result` — plus
+`content_block_start` and `system`/`thinking_tokens` for the activity line.
+`classify_line` is untouched; `observe` is a second pass over the same
+`Value`, the way `tool_uses()` already sits beside it.

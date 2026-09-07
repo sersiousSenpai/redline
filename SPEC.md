@@ -362,36 +362,77 @@ on revise submissions, which require a resolution block).
 
 ### 6.5 Fork-agent discussion threads
 
-Every comment can host a multi-turn **discussion thread** with a Claude Code
-session *fork* — a context-aware sub-agent that answers inline without disturbing
+Every comment can host a multi-turn **discussion thread** with a *fork* of the
+plan session — a context-aware sub-agent that answers inline without disturbing
 the held plan-mode session. This is the "discuss" verb, distinct from "revise"
 (§6.1): a thread never round-trips into the plan.
 
-**Mechanism.** A turn runs a headless `claude` process (`fork.rs`):
+**Provider-aware.** A plan-comment fork is a fork *of that conversation*, so it
+runs on the harness that authored the plan (`sessions.backend`, §5). Two command
+protocols, one lifecycle (`fork.rs`):
 
-- First turn — `claude -p "<prompt>" --resume <main_session_id> --fork-session
-  --output-format stream-json --include-partial-messages --verbose
-  --permission-mode default --tools "Read,Grep,Glob" --strict-mcp-config`.
-  `--fork-session` writes the turn to a *new* session id, leaving the main
-  transcript untouched.
-- Follow-up turns — the same, resuming `<fork_session_id>` with no
-  `--fork-session`.
+- **claude-code** — first turn `claude -p "<prompt>" --resume <plan_session_id>
+  --fork-session --output-format stream-json --include-partial-messages
+  --verbose --permission-mode default --tools "<HEADLESS_TOOLS>"
+  --allowedTools … --strict-mcp-config`. `--fork-session` writes the turn to a
+  *new* session id, leaving the plan transcript untouched. Follow-ups resume
+  `<fork_session_id>` with no `--fork-session`. Classified by
+  `claude_proc::classify_line`: `text_delta` chunks → `fork-delta`, the `result`
+  line → the authoritative final text.
+- **codex** — first turn `codex -s read-only -a never --search -c
+  developer_instructions="<sidecar contract>" exec fork --json
+  --skip-git-repo-check <plan_thread_id> "<prompt>"`; follow-ups the same with
+  `exec resume <fork_thread_id>`. The top-level flags must precede `exec`, and
+  `--json`/`--skip-git-repo-check` belong to the subcommand. Classified by
+  `fork::classify_codex_line`: `thread.started` → the new fork id, a completed
+  `agent_message` item → reply text, `turn.failed`/`error` → a surfaced failure,
+  everything else (reasoning, command executions, web searches, todo lists,
+  usage) ignored. `codex exec --json` has no delta flag, so a reply arrives as
+  one chunk rather than token-by-token; it is still routed through `fork-delta`
+  so the frontend contract is identical on both backends.
 
-The fork is **read-only**: built-in tools are limited to `Read`/`Grep`/`Glob`,
-MCP servers are stripped, and it never runs in plan mode. `fork.rs` parses the
-`stream-json` stdout (`text_delta` chunks → `fork-delta` events; the `result`
-line → the authoritative final text) and keys a process registry by
-`(session_id, comment_id)`.
+Both are **read-only**: Claude by withholding `Edit`/`Write`/`ExitPlanMode` from
+`--tools` (with MCP stripped and never plan mode), Codex by `-s read-only -a
+never`. The Codex fork deliberately does **not** layer the `redline-plan`
+profile: that contract would have the thread emit a `<proposed_plan>` block,
+which the Stop hook would capture as a revision of the very plan under review.
+Its sidecar contract rides as `developer_instructions` instead, demoting the
+inherited planning history to context.
 
-**Persistence.** `thread_messages` holds *terminal* turns only (a row per finished
-turn); live streaming text is frontend-only. `comments.fork_session_id` records
-the comment's fork so later turns resume rather than re-fork.
+Downstream of the classifier everything is shared: the `fork-delta` /
+`fork-done` / `fork-error` / `fork-cancelled` events, cancellation, the partial
+buffer a mid-turn remount recovers from, persistence, and the process registry
+keyed by `(session_id, comment_id)`. Failure text names the harness that
+actually ran.
 
-**Coexistence.** A fork inherits the user's hooks, so one that called
-`ExitPlanMode` would POST to `:7676`. Three guards prevent a phantom revision:
-the tool restriction makes `ExitPlanMode` unavailable; the turn prompt forbids
-it; and `handle_plan` ignores any POST whose `session_id` is a known fork id
-(`is_known_fork_session`).
+**Persistence.** `thread_messages` holds *terminal* turns only (a row per
+finished turn); live streaming text is frontend-only. `comments.fork_session_id`
+records the comment's fork so later turns resume rather than re-fork, and
+`comments.fork_backend` records which harness can resume it — NULL on legacy
+rows, which reads as `claude-code`. The pair is read, written and cleared
+together: both id spaces are UUIDs and neither CLI errors on the other's id
+(`claude --resume <codex thread>` silently starts a *fresh* session), so the id
+alone cannot say which binary owns it. When a stored fork backend disagrees with
+the plan backend the id is **not** resumed — the plan session is re-forked on
+the correct harness and a bounded set of recent completed turns rides into the
+new fork's first turn as context, so the visible transcript survives the repair.
+
+**Coexistence.** A fork inherits the user's hooks, so one that submitted a plan
+would POST to `:7676`. Three guards prevent a phantom revision: the withheld
+tools / sandbox make it unavailable; the turn prompt and the Codex
+`developer_instructions` forbid it; and `handle_plan_core` ignores any POST whose
+`session_id` is a known fork id (`is_known_fork_session`), which covers both
+protocols because both persist their fork id in the same column.
+
+**Other thread families.** Review-annotation, Ask-AI and Drafter threads stay on
+the standalone Claude path: they start a fresh session in a repo rather than
+forking a conversation, so there is no plan provenance to obey.
+
+**Readiness.** Because a Codex plan's discussions need `codex exec fork`, the
+Codex capability probe checks two banners: `codex --help` for
+`app-server`/`resume`/`exec`, and `codex exec --help` for `fork`/`resume`. A
+build with the outer command but not the inner one would pass the old probe and
+fail at the first Discuss click.
 
 Commands: `fork_thread_send`, `get_thread`, `fork_thread_cancel`,
 `fork_thread_discard`, `fork_kill_all`. Events: `fork-delta`, `fork-done`,

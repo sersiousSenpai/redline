@@ -24,7 +24,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{ChildStderr, ChildStdout};
 
-use crate::browse::{is_context_overflow, is_transient};
+use crate::claude_proc::is_context_overflow;
 use crate::claude_proc::{
     bridge_args, classify_line, mission_context_block, resolve_claude_bin,
     StreamLine,
@@ -154,7 +154,7 @@ impl DraftChatState {
 
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(180),
-            crate::claude_proc::collect_turn(stdout, stderr),
+            crate::claude_proc::collect_turn_seated(&self.db, "drafter", stdout, stderr),
         )
         .await;
         let proc = self.turns.take(&draft_id).and_then(|p| p.child);
@@ -561,6 +561,17 @@ struct DraftChatDelta {
     /// reports the seq already folded into `partial`, and the frontend drops
     /// any delta at or below that watermark.
     seq: u64,
+}
+
+/// What the turn is spending and what it is doing. Flattened so the id field
+/// the frontend hook matches on stays at the top level, like every other
+/// draft-chat event.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DraftChatMeter {
+    draft_id: String,
+    #[serde(flatten)]
+    meter: turn::MeterPayload,
 }
 
 #[derive(Clone, Serialize)]
@@ -985,12 +996,29 @@ async fn read_draft_chat(
     let mut final_text: Option<String> = None;
     let mut errored: Option<String> = None;
     let mut saw_json = false;
+    let mut pacer = turn::MeterPacer::default();
 
     while let Ok(Some(line)) = lines.next_line().await {
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
         saw_json = true;
+        // The raw wire, for the inspector. A no-op when it's off —
+        // one relaxed atomic load, nothing buffered.
+        crate::inspect::capture("drafter", &draft_id, line.trim());
+        // Second pass over the same value — the meter reads what
+        // `classify_line` throws away. Mutate-then-emit, coalesced.
+        if let Some(payload) = turn::push_meta(&buf, &v) {
+            if pacer.due(&payload) {
+                let _ = app.emit(
+                    "draft-chat-meter",
+                    DraftChatMeter {
+                        draft_id: draft_id.clone(),
+                        meter: payload,
+                    },
+                );
+            }
+        }
         match classify_line(&v) {
             StreamLine::Init(sid) => session = Some(sid),
             StreamLine::Delta(text) => {
@@ -1036,19 +1064,40 @@ async fn read_draft_chat(
         None => false,
     };
 
+    // ABOVE the terminal branch, so success, error and cancelled all book.
+    // A cancelled turn spent its input tokens too.
+    let settled = crate::meter::settle(&db, "drafter", &buf);
+    if !settled.is_empty() {
+        let _ = app.emit(
+            "draft-chat-meter",
+            DraftChatMeter {
+                draft_id: draft_id.clone(),
+                meter: turn::MeterPayload {
+                    rev: settled.rev,
+                    meter: settled.clone(),
+                    activity: None,
+                    discrete: true,
+                },
+            },
+        );
+    }
+
+    'terminal: {
     if cancelled {
         let _ = app.emit("draft-chat-cancelled", DraftChatCancelled { draft_id });
-        return;
+        break 'terminal;
     }
     if let Some(err) = errored {
         let why = describe_turn_error(&db, &draft_id, &err, owns_thread);
-        finish_error(&app, &db, &draft_id, &why);
-        return;
+        let row = finish_error(&app, &db, &draft_id, &why);
+        crate::meter::attach(&db, "drafter", &row, &settled);
+        break 'terminal;
     }
     if let Some(text) = final_text {
         if text.trim().is_empty() {
-            finish_error(&app, &db, &draft_id, "claude produced an empty reply");
-            return;
+            let row = finish_error(&app, &db, &draft_id, "claude produced an empty reply");
+            crate::meter::attach(&db, "drafter", &row, &settled);
+            break 'terminal;
         }
         // A guest turn (shelf agent) is a fresh one-shot session: persisting
         // its id would make the NEXT discussion turn resume the wrong
@@ -1071,6 +1120,8 @@ async fn read_draft_chat(
         if let Err(e) = db.insert_draft_chat_message(&msg) {
             tracing::warn!(error = %e, "failed to persist assistant message");
         }
+        // The badge and the footer outlive the turn.
+        crate::meter::attach(&db, "drafter", &msg.id, &settled);
         // Companion journal: the draft agent completed a turn.
         let _ = db.append_journal("agent_turn", Some("drafter"), Some(&draft_id), None, None);
         let _ = app.emit(
@@ -1081,7 +1132,7 @@ async fn read_draft_chat(
                 body: text,
             },
         );
-        return;
+        break 'terminal;
     }
 
     let why = if !exit_ok && !stderr_text.trim().is_empty() {
@@ -1092,38 +1143,40 @@ async fn read_draft_chat(
     } else {
         "claude ended without producing a reply".to_string()
     };
-    finish_error(&app, &db, &draft_id, &why);
+    let row = finish_error(&app, &db, &draft_id, &why);
+    crate::meter::attach(&db, "drafter", &row, &settled);
+    }
 }
 
-/// Same recovery policy as the browse agent: explicit context overflow resets
-/// the resumable session (the next turn re-embeds the draft); transient API
-/// errors keep it and ask for a retry. A guest turn (`owns_thread` false)
-/// has no resumable session — overflow means the document itself outgrew one
-/// fresh pass, and the discussion thread's own session must stay untouched.
+/// Translate a failed drafter turn — branches and wording live once, in
+/// `claude_proc::describe_turn_error`. The one thing that is drafter's alone:
+/// a run that does NOT own the thread (a one-shot pass over the whole
+/// document) has no session to reset, so an overflow there is a fact about the
+/// document, not something the next send fixes.
 fn describe_turn_error(db: &Database, draft_id: &str, error: &str, owns_thread: bool) -> String {
-    if is_context_overflow(error) {
-        if !owns_thread {
-            return "This run outgrew the model's context window — the document \
-                    is too large for a single pass by this agent."
-                .to_string();
-        }
-        if let Err(e) = db.clear_draft_chat_session(draft_id) {
-            tracing::warn!(error = %e, "failed to clear over-limit draft chat session");
-        }
-        return "This discussion outgrew the model's context window, so the turn \
-                failed. I've reset its context — send your message again and I'll \
-                start fresh on this draft (the replies above are kept)."
+    if !owns_thread && is_context_overflow(error) {
+        return "This run outgrew the model's context window — the document \
+                is too large for a single pass by this agent."
             .to_string();
     }
-    if is_transient(error) {
-        return "The model hit a momentary error on that turn. The discussion is \
-                fine — send your message again in a moment."
-            .to_string();
-    }
-    error.to_string()
+    crate::claude_proc::describe_turn_error(
+        db,
+        crate::claude_proc::TurnErrorCopy {
+            surface: "drafter",
+            subject: Some(draft_id),
+            noun: "discussion",
+            next: "I'll start fresh on this draft",
+        },
+        error,
+        || {
+            if let Err(e) = db.clear_draft_chat_session(draft_id) {
+                tracing::warn!(error = %e, "failed to clear over-limit draft chat session");
+            }
+        },
+    )
 }
 
-fn finish_error(app: &AppHandle, db: &Database, draft_id: &str, why: &str) {
+fn finish_error(app: &AppHandle, db: &Database, draft_id: &str, why: &str) -> String {
     let msg = DraftChatMessage {
         id: uuid::Uuid::new_v4().to_string(),
         draft_id: draft_id.to_string(),
@@ -1142,6 +1195,8 @@ fn finish_error(app: &AppHandle, db: &Database, draft_id: &str, why: &str) {
             error: why.to_string(),
         },
     );
+    // The id the caller attaches this turn's meter to.
+    msg.id
 }
 
 #[cfg(test)]

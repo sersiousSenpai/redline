@@ -933,7 +933,11 @@ fn head_tail_1line(s: &str, head: usize, tail: usize) -> String {
 /// surface matches the browse/mission agents (curl bridge to the localhost
 /// daemon so it can read `/v1/memory/*`), with MCP stripped. The delta corpus is
 /// baked into `prompt` so the core loop doesn't depend on the agent curling.
-pub async fn run_classifier(cwd: &str, prompt: String) -> Result<(String, Option<String>), String> {
+pub async fn run_classifier(
+    db: &Database,
+    cwd: &str,
+    prompt: String,
+) -> Result<(String, Option<String>), String> {
     let claude_bin = tokio::task::spawn_blocking(resolve_claude_bin)
         .await
         .map_err(|e| e.to_string())?;
@@ -969,10 +973,14 @@ pub async fn run_classifier(cwd: &str, prompt: String) -> Result<(String, Option
     let mut session: Option<String> = None;
     let mut final_text: Option<String> = None;
     let mut errored: Option<String> = None;
+    let mut meter = crate::meter::TurnMeter::new();
     while let Ok(Some(line)) = reader.next_line().await {
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
+        // Second pass over the same value — the ONE accounting rule. A
+        // daemon seat has no pane to stream to, but it burns real tokens.
+        meter.observe(&v);
         match classify_line(&v) {
             StreamLine::Init(sid) => session = Some(sid),
             StreamLine::Final { text, session_id } => {
@@ -985,6 +993,8 @@ pub async fn run_classifier(cwd: &str, prompt: String) -> Result<(String, Option
             _ => {}
         }
     }
+    // Booked before any error return: a failed pass spent its input tokens.
+    crate::meter::book(db, "classifier", &meter);
     // Drain stderr for diagnostics on failure.
     let mut errbuf = String::new();
     {
@@ -1074,7 +1084,7 @@ pub async fn organize_once(db: &Database) -> Result<OrganizeOutcome, String> {
         .map(|v| v != "false")
         .unwrap_or(true);
 
-    match run_classifier(&cwd, prompt).await {
+    match run_classifier(db, &cwd, prompt).await {
         Ok((text, session)) => {
             let proposals = parse_proposals(&text);
             let staged =
@@ -1295,7 +1305,7 @@ pub async fn verify_supersede_proposals(db: &Database, cwd: &str) -> (usize, usi
         return (0, 0);
     }
     let prompt = build_supersede_verifier_prompt(db, &pending);
-    let text = match run_classifier(cwd, prompt).await {
+    let text = match run_classifier(db, cwd, prompt).await {
         Ok((text, _session)) => text,
         Err(e) => {
             tracing::info!(error = %e,

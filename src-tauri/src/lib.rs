@@ -4,7 +4,9 @@ mod agent;
 mod ai_commit;
 mod ai_review;
 mod auth;
+mod binprobe;
 mod bookshelf;
+mod boot_trace;
 mod browse;
 mod browse_list;
 mod browse_locate;
@@ -15,6 +17,7 @@ mod classmem;
 mod codehealth;
 mod claude_proc;
 mod code;
+mod combine;
 mod companion;
 mod compose;
 mod context;
@@ -36,7 +39,9 @@ mod harness;
 mod highlight;
 mod hook;
 mod codex_hook;
+mod codex_profile;
 mod codex_app_server;
+mod inspect;
 mod intake;
 mod moot;
 mod keeper;
@@ -51,19 +56,23 @@ mod seatassign;
 /// `crates/redline-mcp` workspace member (size lever — see that crate's docs).
 pub mod mcp;
 mod memchat;
+mod meter;
 mod mirror;
 mod mission;
 mod parser;
 #[cfg(test)]
 mod perf_guard;
+mod postboot;
 mod preflight;
 mod project;
+mod plan_meter;
 mod pty;
 mod push;
 mod query;
 mod queue;
 mod repoicon;
 mod resolutions;
+mod restore_context;
 mod review;
 mod review_feedback;
 mod runwatch;
@@ -85,7 +94,7 @@ mod work;
 mod worktree;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 
@@ -577,6 +586,30 @@ impl Drop for DetachGuard {
     }
 }
 
+/// The "your feedback had nowhere to go" error, naming the harness that
+/// actually left.
+///
+/// A Codex reviewer told "the Claude Code session ended" is being pointed at a
+/// process they never started; the sentence stops describing a recoverable
+/// state and starts reading as a bug in Redline. The recovery is identical for
+/// both — Restore, then submit again — so only the name changes.
+///
+/// The phrase "no longer waiting" is load-bearing: `isDetachError` in
+/// `src/App.tsx` matches on it to raise the detached banner, so both arms keep
+/// it verbatim.
+fn detached_delivery_error(backend: &str) -> String {
+    let (who, what) = if backend == "codex" {
+        ("Codex", "the Codex session")
+    } else {
+        ("Claude", "the Claude Code session")
+    };
+    format!(
+        "{who} is no longer waiting for this plan — {what} ended or the hold \
+         timed out. Use \"Restore plan session\" to resume it, then submit your \
+         review again."
+    )
+}
+
 /// Reconcile a session to `Detached` when an action (approve / submit)
 /// discovers there is no held POST registered for it. The drop-guard and the
 /// startup held→detached sweep catch *most* detaches, but a session can still
@@ -665,14 +698,52 @@ impl PendingFeedback {
     }
 }
 
-/// The calm, self-explaining reason that replaces the full payload in the denied
-/// `ExitPlanMode` send-back. It leads with a defusing sentence so even the
-/// unavoidable `Error:` prefix Claude Code prepends reads as benign, then points
-/// the model at the out-of-band `GET …/feedback` channel for the full review.
-/// Mode-aware so the Ask round-trip keeps its "do not change the plan body"
-/// contract. The full feedback (which `PendingFeedback` now holds) is fetched,
-/// not inlined — see `PendingFeedback` for why.
-fn feedback_deny_reason(mode: SubmissionMode, session_id: &str) -> String {
+/// The reason carried by the denied send-back. It leads with a defusing
+/// sentence so even the unavoidable `Error:` prefix Claude Code prepends reads
+/// as benign, and it is mode-aware so the Ask round-trip keeps its "do not
+/// change the plan body" contract.
+///
+/// The two backends differ in DELIVERY, and that is the whole reason `backend`
+/// is a parameter:
+///
+/// - **claude-code** — one calm line plus a `GET …/feedback` URL. Keeping the
+///   bulk out of it is what turned the old wall into a benign line, and the
+///   body still reaches the model byte-for-byte via the stash.
+/// - **codex** — the payload INLINE. A codex plan session runs under
+///   `-s read-only`, and a command the model runs inside that sandbox cannot
+///   reach 127.0.0.1 at all (verified against the real binary). Pointing it at
+///   a URL would hand the reviewer's feedback to a model physically unable to
+///   fetch it. A Stop hook's `reason` is a continuation instruction rather than
+///   an error box, so inlining costs nothing there.
+///
+/// The payload is taken by reference and inlined HERE, at the one place that
+/// knows this deny is a review send-back. Reading it back out of
+/// `PendingFeedback` later would append a stale review to any *other* deny the
+/// same session happens to get (an ask-mode violation, an orchestrator refusal)
+/// — the stash outlives its delivery by design, so it is not a safe signal.
+fn feedback_deny_reason(
+    mode: SubmissionMode,
+    session_id: &str,
+    backend: &str,
+    payload: &str,
+) -> String {
+    if backend == "codex" {
+        let lead = match mode {
+            SubmissionMode::Revise =>
+                "✅ Plan returned to Redline for revision — nothing failed. The reviewer's \
+                 feedback follows; you already have it, so do not try to fetch anything. \
+                 Produce the revised plan per your Redline plan contract (keep every \
+                 `rl:blk-` marker exactly where its block's content remains, answer every \
+                 comment id in a REDLINE_RESOLUTIONS block) and end your turn with one \
+                 fresh `<proposed_plan>` block.",
+            SubmissionMode::Ask =>
+                "✅ Returned to Redline — the reviewer has questions and is NOT requesting \
+                 changes. They follow; you already have them, so do not try to fetch \
+                 anything. Answer them in the REDLINE_RESOLUTIONS block and re-emit the \
+                 plan body byte-for-byte unchanged in one `<proposed_plan>` block.",
+        };
+        return format!("{lead}\n\n{payload}");
+    }
     let url = format!("http://127.0.0.1:7676/v1/sessions/{session_id}/feedback");
     match mode {
         SubmissionMode::Revise => format!(
@@ -930,6 +1001,41 @@ fn orchestrate_stall_should_fire(run_state: Option<&str>) -> bool {
     run_state == Some("orchestrating")
 }
 
+/// How long a run that reached `running` may go silent — nothing written
+/// anywhere in its artifact set — before the stall sweep calls it.
+///
+/// `ORCHESTRATE_STALL_WINDOW` only ever walks `orchestrating → stalled`: it
+/// covers the launch window and nothing after it. Once the ingest claim
+/// landed, a run that then went quiet had no backstop short of the
+/// abandoned-run sweep's full day, and the only earlier signal was the FE's
+/// per-agent 3-minute dot — which requires someone to be watching the Runs
+/// surface, i.e. exactly the thing a watchdog exists to not require.
+///
+/// An hour is deliberately generous: a workflow phase can be legitimately
+/// quiet, and `run_last_activity_ms` already counts the subagent trees so a
+/// healthy fan-out is never silent. A false positive costs a chip that reads
+/// `stalled` until the next beacon overwrites it (`set_run_state` enforces no
+/// ordering), which is the same self-correcting bargain the other two
+/// watchdogs take.
+pub(crate) const RUNNING_SILENCE_WINDOW: Duration = Duration::from_secs(60 * 60);
+
+/// Pure decision for the running-silence half of the stall sweep. The two
+/// vetoes are the abandoned-run sweep's, for the same reason: a run that is
+/// quiet BECAUSE a human is holding it is not stalled, and saying so is a lie
+/// the user then has to undo.
+pub(crate) fn running_silence_should_stall(
+    run_state: Option<&str>,
+    silent_ms: i64,
+    window_ms: i64,
+    held_post: bool,
+    review_link_live: bool,
+) -> bool {
+    run_state == Some("running")
+        && silent_ms > window_ms
+        && !held_post
+        && !review_link_live
+}
+
 /// The run states the abandoned-run sweep may touch.
 ///
 /// `orchestrating` is the 5-minute launch watchdog's territory (above);
@@ -1146,23 +1252,70 @@ fn schedule_revise_probe(
     );
 }
 
-/// Whether the daemon successfully bound `127.0.0.1:7676`. False means another
-/// process holds the port, so this window can capture no plans — the UI checks
-/// this on mount (and listens for `daemon-bind-failed`) to show a blocking
-/// banner instead of looking healthy. Single-instance makes this rare, but a
-/// non-Redline squatter on the port can still trip it.
+/// Where the daemon's bind of `127.0.0.1:7676` has got to.
+///
+/// Three states, not a boolean, because the boolean conflated two very
+/// different situations: "we have not tried yet" and "we tried and another
+/// process owns the port". The frontend papered over that by *defaulting the
+/// flag to true* so a fresh window wouldn't flash a scary banner — which meant
+/// the honest answer and the optimistic guess were indistinguishable, and
+/// nothing could legitimately wait for readiness. Now shell rendering ignores
+/// this entirely and a launch awaits `Ready`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DaemonState {
+    /// The bind has not resolved yet. Not an error, not a success.
+    Starting,
+    /// Bound. Plans arriving on the port land in this window.
+    Ready,
+    /// The bind failed — another process holds the port, so this window can
+    /// capture no plans. The UI shows a blocking banner rather than looking
+    /// healthy. Single-instance makes this rare; a non-Redline squatter on
+    /// the port can still cause it.
+    Failed,
+}
+
+impl DaemonState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Ready => "ready",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 #[derive(Clone, Default)]
-struct DaemonStatus(Arc<AtomicBool>);
+struct DaemonStatus(Arc<AtomicU8>);
+
+/// `AtomicU8` discriminants for `DaemonState`. `Starting` is 0 so `Default`
+/// (which every `DaemonStatus::new` uses) is the honest "not yet" state.
+const DAEMON_STARTING: u8 = 0;
+const DAEMON_READY: u8 = 1;
+const DAEMON_FAILED: u8 = 2;
 
 impl DaemonStatus {
     fn new() -> Self {
-        Self::default()
+        Self(Arc::new(AtomicU8::new(DAEMON_STARTING)))
     }
     fn set_bound(&self, bound: bool) {
-        self.0.store(bound, Ordering::SeqCst);
+        self.0.store(
+            if bound { DAEMON_READY } else { DAEMON_FAILED },
+            Ordering::SeqCst,
+        );
     }
+    fn state(&self) -> DaemonState {
+        match self.0.load(Ordering::SeqCst) {
+            DAEMON_READY => DaemonState::Ready,
+            DAEMON_FAILED => DaemonState::Failed,
+            _ => DaemonState::Starting,
+        }
+    }
+    /// Legacy boolean view for `get_daemon_status`, whose contract is "can
+    /// this window capture plans". A still-`Starting` daemon answers `true`:
+    /// the caller is asking whether to show the blocking banner, and the
+    /// answer to that while a bind is in flight is "not yet".
     fn is_bound(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.state() != DaemonState::Failed
     }
 }
 
@@ -1597,9 +1750,14 @@ async fn handle_codex_stop(
     State(app_state): State<AppState>,
     Json(payload): Json<Value>,
 ) -> Json<Value> {
-    if payload.get("permission_mode").and_then(Value::as_str) != Some("plan") {
-        return Json(json!({}));
-    }
+    // Gate on the BLOCK, not on the mode. A Redline-launched Codex session
+    // runs in `default` mode with the plan contract injected as
+    // `developer_instructions` (no CLI flag starts the TUI in native Plan
+    // Mode), so a `permission_mode == "plan"` gate would reject every plan
+    // this app launches. Safe because `extract_codex_proposed_plan` is already
+    // strict — exactly one *complete* block, rejecting prose that merely
+    // mentions the marker — and a natively-started Plan Mode session still
+    // matches unchanged.
     let Some(plan) = payload
         .get("last_assistant_message")
         .and_then(Value::as_str)
@@ -1617,6 +1775,9 @@ async fn handle_codex_stop(
     });
     let decision = handle_plan_core(peer, app_state, normalized).await;
     if decision.hook_specific_output.permission_decision == "deny" {
+        // The reason already carries the full review inline — `submit_review`
+        // builds it that way for codex, because this session's sandbox has no
+        // network and could never fetch it.
         Json(json!({
             "decision": "block",
             "reason": decision.hook_specific_output.permission_decision_reason
@@ -1667,7 +1828,7 @@ async fn handle_plan_core(
     // turns, so any of this session's prompts still lacking a model (hook
     // captures carry no seat) get stamped here. Guarded to a single EXISTS
     // probe when there's nothing to do.
-    backfill_model_from_hook(&app_state.store.database(), &payload, &session_id);
+    backfill_from_transcript(&app_state.store.database(), &payload, &session_id);
 
     // A fork agent (a "Discuss" thread) inherits this hook. If one ever calls
     // ExitPlanMode, the POST arrives under the fork's own session id — never
@@ -1928,6 +2089,43 @@ async fn handle_plan_core(
         (upsert.version_number, upsert.is_new_session)
     };
 
+    // Provenance, from the payload the hook actually sent. `redline_provider`
+    // is set by `handle_codex_stop`'s normalizer and absent for Claude, whose
+    // model rides the same `model` field. Sticky: `set_backend` COALESCEs, so
+    // a later status-only upsert can't blank what restore branches on.
+    let hook_model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            // Codex sends `model` on the Stop payload; Claude's ExitPlanMode
+            // hook input does not carry one at all. The transcript does, and
+            // `backfill_from_transcript` already reads its tail for the lake —
+            // so this is the same cheap read, taken only while the column is
+            // still unknown.
+            if app_state
+                .store
+                .get(&session_id)
+                .and_then(|s| s.model)
+                .is_some()
+            {
+                return None;
+            }
+            payload
+                .get("transcript_path")
+                .and_then(Value::as_str)
+                .filter(|p| !p.is_empty())
+                .and_then(model_from_transcript)
+        });
+    app_state.store.set_backend(
+        &session_id,
+        payload
+            .get("redline_provider")
+            .and_then(Value::as_str)
+            .or(Some("claude-code")),
+        hook_model.as_deref(),
+    );
+
     let event_mode: &'static str = if ask_round_trip { "ask" } else { "revise" };
 
     tracing::info!(
@@ -2097,6 +2295,13 @@ const LEDGER_BACKUP_KEEP: usize = 7;
 /// the chain itself. Best-effort and self-contained — logs and returns on any
 /// error rather than propagating.
 fn snapshot_database(db: &db::Database, data_dir: &std::path::Path, keep: usize) {
+    // One vacuum at a time. Three triggers (once per boot, every 6h, on quit)
+    // and, since the startup one moved behind the reveal, real opportunity for
+    // two to overlap — a quit during the launch snapshot, or a 6h tick landing
+    // on a slow one. They each still happen; they take turns.
+    let _serialized = postboot::snapshot_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let dir = data_dir.join("backups");
     if let Err(e) = std::fs::create_dir_all(&dir) {
         tracing::warn!(error = %e, "could not create backups dir");
@@ -2184,12 +2389,12 @@ fn model_from_transcript(path: &str) -> Option<String> {
 /// transcript, where still unknown. Shared by both hook handlers; best-effort.
 /// The `session_needs_model` guard keeps the hot path from re-reading a
 /// transcript tail once every prompt of the session is stamped.
-fn backfill_model_from_hook(
+fn backfill_from_transcript(
     db: &db::Database,
     payload: &serde_json::Value,
     claude_session_id: &str,
 ) {
-    if claude_session_id.is_empty() || !db.session_needs_model(claude_session_id) {
+    if claude_session_id.is_empty() {
         return;
     }
     let Some(path) = payload
@@ -2199,6 +2404,18 @@ fn backfill_model_from_hook(
     else {
         return;
     };
+    // Stamp the path itself FIRST, and unconditionally. This hook fire is the
+    // only authoritative source there is: `--resume` is scoped by the session's
+    // STARTUP cwd, so the transcript's location cannot be derived from the
+    // directory the session is working in. `plan_meter`'s tailer reads it —
+    // and without it the interactive plan session, the surface the user spends
+    // the most time in, is the one with no economics at all.
+    if let Err(e) = db.set_session_transcript_path(claude_session_id, path) {
+        tracing::warn!(error = %e, "failed to stamp session transcript path");
+    }
+    if !db.session_needs_model(claude_session_id) {
+        return;
+    }
     let Some(model) = model_from_transcript(path) else {
         return;
     };
@@ -2281,9 +2498,31 @@ async fn handle_prompts_ingest(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
+
+    // A restore trigger, answered with the protocol the visible prompt no
+    // longer carries. This is the ONE fire per restore where that is true:
+    // the metadata rides the resumed `claude`'s environment, so it is on every
+    // prompt that session ever submits, and only the arming — placed by the
+    // click that dispatched the command — says which of them Redline wrote.
+    // Claiming it here is therefore both the answer and the exclusion: the
+    // trigger never reaches the lake, and the reviewer's own next prompt in
+    // that same terminal is captured byte-for-byte as it always was.
+    if let Some(body) = restore_context::answer(&headers, &prompt) {
+        return (StatusCode::OK, Json(body)).into_response();
+    }
+
     let bh = ledger::body_hash(&prompt);
     let claimed = ledger::claim_agent_prompt(&bh);
-    if claimed || agent_seat.is_some() {
+    // Every seat but one means "machine text, skip it". The restore seat is the
+    // exception, and only because its variable outlives its one prompt: the
+    // block above already claimed the trigger, so a `restore`-seated fire that
+    // reaches here is the reviewer typing in a terminal Redline happened to
+    // open for them. Suppressing it would quietly delete their prompts from
+    // their own lake.
+    let seat_suppresses = agent_seat
+        .as_deref()
+        .is_some_and(|s| s != restore_context::RESTORE_SEAT);
+    if claimed || seat_suppresses {
         // The draft→launched-session handoff: this hook fire is the first
         // moment the spawned session's claude id is known. When the skipped
         // body was a drafter launch, link the new session under its draft —
@@ -2298,14 +2537,21 @@ async fn handle_prompts_ingest(
                 // all, and it applies to every door: only the doors that own a
                 // thread — a Drafter document, or a chat that graduated — carry
                 // one to bind through.
+                // The row's own hash when the door recorded something other
+                // than what it typed (Combine), otherwise the guard key —
+                // `None` is "same as the guard key", so the four original
+                // doors resolve to exactly `bh` as before. Applied in BOTH
+                // arms so the two can never drift, even though only the
+                // threadless arm is reachable from Combine today.
+                let row_key = claim.row_hash.as_deref().unwrap_or(&bh);
                 let bound = match claim.thread.as_ref() {
                     Some((kind, id)) => {
                         if let Err(e) = ledger::record_session_link(&db, "session", sid, kind, id) {
                             tracing::warn!(error = %e, kind = %kind, "failed to link launched session to its origin thread");
                         }
-                        db.bind_threaded_prompt_session(&bh, kind, id, sid)
+                        db.bind_threaded_prompt_session(row_key, kind, id, sid)
                     }
-                    None => db.bind_launch_prompt_session(&bh, sid),
+                    None => db.bind_launch_prompt_session(row_key, sid),
                 };
                 if let Err(e) = bound {
                     tracing::warn!(
@@ -2313,7 +2559,7 @@ async fn handle_prompts_ingest(
                         "failed to bind launch prompt to its session"
                     );
                 }
-                backfill_model_from_hook(&db, &v, sid);
+                backfill_from_transcript(&db, &v, sid);
             }
         }
         // The Orchestrate handoff, same seam: when the skipped body was an
@@ -2439,7 +2685,7 @@ async fn handle_prompts_ingest(
     // the transcript tail. A brand-new session has no assistant turn yet — its
     // model lands on the next fire.
     if let Some(sid) = sid_for_backfill.as_deref().filter(|s| !s.is_empty()) {
-        backfill_model_from_hook(&db, &v, sid);
+        backfill_from_transcript(&db, &v, sid);
     }
     response
 }
@@ -2973,8 +3219,16 @@ async fn marketplace_install(
 /// headless leftover (window died, daemon survived by design) to retire via
 /// `/v1/admin/shutdown`. Open by the read convention; `app` pins the answer
 /// to this daemon rather than whatever else might squat on the port.
+///
+/// The count MUST come from `windows()`, not `webview_windows()`. Once the
+/// browser pane attaches child webviews the main window stops being a 1:1
+/// webview-window and drops out of `webview_windows()` entirely — the same
+/// demotion `menu_anchor_window` already works around. Reading the webview
+/// count here made a live, windowed app report `hasWindow:false`, which is
+/// exactly the answer that tells a booting sibling's preflight to shut it
+/// down — taking every hosted session with it.
 async fn handle_liveness(State(app_state): State<AppState>) -> impl IntoResponse {
-    let has_window = !app_state.app_handle.webview_windows().is_empty();
+    let has_window = !app_state.app_handle.windows().is_empty();
     Json(json!({
         "app": "redline",
         "pid": std::process::id(),
@@ -3183,6 +3437,7 @@ async fn run_server(state: AppState) {
     match tokio::net::TcpListener::bind(DAEMON_ADDR).await {
         Ok(listener) => {
             daemon_status.set_bound(true);
+            boot_trace::mark(boot_trace::DAEMON_BIND);
             tracing::info!("Redline daemon listening on http://127.0.0.1:7676");
             // with_connect_info: handle_plan reads the peer's port to bind a
             // held plan to the dock terminal whose claude sent it.
@@ -3197,6 +3452,7 @@ async fn run_server(state: AppState) {
         }
         Err(e) => {
             daemon_status.set_bound(false);
+            boot_trace::mark(boot_trace::DAEMON_BIND);
             tracing::error!(error = %e, "failed to bind 127.0.0.1:7676");
             // Tell the (now daemon-less) window so it shows a blocking banner.
             // Emit even though the webview may not have mounted its listener yet
@@ -4142,9 +4398,11 @@ async fn handle_global_consult(
                  numbers you already cited.\n\n{question}"
             );
             let repo_for_run = repo.clone();
+            let burn_db = app_state.store.database();
             tokio::time::timeout(outer, async move {
                 let (text, sid) =
-                    shipwright::run_shipwright(&repo_for_run, question, prior.as_deref()).await?;
+                    shipwright::run_shipwright(&burn_db, &repo_for_run, question, prior.as_deref())
+                        .await?;
                 sess.set(sid);
                 Ok::<String, String>(text)
             })
@@ -6563,10 +6821,86 @@ async fn browser_suspend(app: AppHandle, label: String) -> Result<(), String> {
 }
 
 /// Mount-time check: did the daemon bind its port? `false` → another process
-/// holds 7676 and this window cannot capture plans.
+/// holds 7676 and this window cannot capture plans. A bind still in flight
+/// answers `true`; `daemon_state` is the three-state answer.
 #[tauri::command]
 fn get_daemon_status(daemon_status: tauri::State<'_, DaemonStatus>) -> bool {
     daemon_status.is_bound()
+}
+
+/// "starting" | "ready" | "failed". The launch boundary polls this: shell
+/// rendering never waits for the daemon, but starting a harness into a window
+/// that owns no port would send the resulting plan to a different instance —
+/// so ⏎ waits for a real answer rather than proceeding on the optimistic
+/// default the boolean had to carry.
+#[tauri::command]
+fn daemon_state(daemon_status: tauri::State<'_, DaemonStatus>) -> String {
+    daemon_status.state().as_str().to_string()
+}
+
+/// Everything the shell needs to render its first actionable frame, in one
+/// consistent snapshot.
+///
+/// This exists because the boot effect used to fire eight separate `invoke`s
+/// and `Promise.all` the lot — session list, interception mode, daemon status,
+/// workspace manifest, harness flavor, harness list, *and* four integration
+/// probes that can each spawn a child process. The shell was therefore no
+/// faster than the slowest **probe**, and a machine with a slow `codex --help`
+/// paid for it in front of the front door.
+///
+/// The split is by *question*, not by cost: what lands here is what decides
+/// **which surface renders and what is on it**. Whether the hook is installed,
+/// whether the skill is stale, whether curl is new enough — those decide
+/// whether a *launch* will work, which is a question with a later deadline.
+/// They live in `preflight_status`, called after the reveal.
+///
+/// One command rather than six also makes the snapshot *consistent*: the
+/// harness list and the workspace manifest are read within one call, so the
+/// shell can never compose a frame from a manifest and a harness set that
+/// disagree because a file changed between two round trips.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BootstrapState {
+    /// Session summaries, newest activity first, with the live held-sender
+    /// map already folded in — same contract as `list_sessions`.
+    sessions: Vec<SessionSummary>,
+    /// The one session (if any) that is Claude literally paused mid-run
+    /// waiting on a verdict. Boot lands on it instead of the front door.
+    held_session_id: Option<String>,
+    /// "active" | "ambient" | "paused".
+    mode: String,
+    /// "starting" | "ready" | "failed". Rendering never waits on this; a
+    /// launch does.
+    daemon: String,
+    /// Raw `~/.redline/workspace.json`, or null. Decides what mounts.
+    workspace: Option<String>,
+    /// Which harness this BUILD is, if any (A7's boot entry).
+    harness_flavor: Option<String>,
+    /// Installed harness manifests, raw.
+    harnesses: Vec<crate::userconfig::HarnessFileEntry>,
+}
+
+/// `(async)` — reads two user-config trees off disk. Nothing here spawns a
+/// child process, which is the whole point of the split.
+#[tauri::command(async)]
+fn bootstrap_state(
+    store: tauri::State<'_, SessionStore>,
+    pending: tauri::State<'_, PendingResponses>,
+    settings: tauri::State<'_, Settings>,
+    daemon_status: tauri::State<'_, DaemonStatus>,
+) -> BootstrapState {
+    let mut sessions = store.list();
+    fold_pending_into_summaries(&mut sessions, &pending);
+    let held_session_id = held_session_id(&sessions);
+    BootstrapState {
+        sessions,
+        held_session_id,
+        mode: settings.get().as_str().to_string(),
+        daemon: daemon_status.state().as_str().to_string(),
+        workspace: userconfig::get_workspace(),
+        harness_flavor: userconfig::harness_flavor(),
+        harnesses: userconfig::list_harnesses(),
+    }
 }
 
 #[tauri::command]
@@ -6577,6 +6911,25 @@ fn list_sessions(
     let mut sessions = store.list();
     fold_pending_into_summaries(&mut sessions, &pending);
     sessions
+}
+
+/// Which session boot should land on instead of the front door.
+///
+/// A HELD session is Claude literally paused mid-run waiting on a verdict;
+/// burying it behind a prompt box leaves an agent blocked with nothing on
+/// screen saying so. Everything else — including the last plan you happened to
+/// read — loses to the door, which is one click from the sidebar anyway.
+///
+/// Derived from the SAME list the shell will render (after the pending fold,
+/// so a live held POST beats a lagging persisted state), which is what
+/// guarantees the id it returns is in the list it routes within. The frontend
+/// used to compute this itself from a separately-fetched list; one snapshot,
+/// one derivation.
+fn held_session_id(sessions: &[SessionSummary]) -> Option<String> {
+    sessions
+        .iter()
+        .find(|s| s.attach_state == AttachState::Held)
+        .map(|s| s.session_id.clone())
 }
 
 /// Step 4 of the interception chain: overlay the live held-sender map onto the
@@ -6663,6 +7016,102 @@ fn delete_session(
 #[tauri::command]
 fn get_session(store: tauri::State<'_, SessionStore>, id: String) -> Option<ReviewSession> {
     store.get(&id)
+}
+
+/// The rows behind a Combine selection, in the caller's order.
+///
+/// Deliberately NOT `get_session` per id: that ships every revision plus every
+/// comment plus the parsed sections across IPC, all of it discarded here. An
+/// unknown id is an error, not a skip — a pill that silently vanished from a
+/// combination would change what was merged without saying so.
+fn combine_rows(
+    store: &SessionStore,
+    session_ids: &[String],
+) -> Result<Vec<combine::SourceRow>, String> {
+    let mut out = Vec::with_capacity(session_ids.len());
+    for id in session_ids {
+        let s = store
+            .get(id)
+            .ok_or_else(|| format!("no session found for id {id}"))?;
+        let rev = s
+            .revisions
+            .last()
+            .ok_or_else(|| format!("session {id} has no revisions yet"))?;
+        let pending_count = s
+            .revisions
+            .iter()
+            .flat_map(|r| r.comments.iter())
+            .filter(|c| {
+                matches!(
+                    c.status,
+                    state::CommentStatus::Draft | state::CommentStatus::Reopened
+                )
+            })
+            .count() as u32;
+        out.push(combine::SourceRow {
+            session_id: s.session_id.clone(),
+            project_name: s.project_name.clone(),
+            project_path: s.project_path.clone(),
+            version_number: rev.version_number,
+            status: match s.status {
+                SessionStatus::InReview => "in_review",
+                SessionStatus::Approved => "approved",
+                SessionStatus::Aborted => "aborted",
+            }
+            .to_string(),
+            run_state: s.run_state.clone(),
+            pending_count,
+            raw_plan_markdown: rev.raw_plan_markdown.clone(),
+        });
+    }
+    Ok(out)
+}
+
+/// What the pills show, plus the warnings and the one refusal. Called when the
+/// pills are seeded and again whenever one is removed.
+#[tauri::command]
+fn combine_preview(
+    store: tauri::State<'_, SessionStore>,
+    session_ids: Vec<String>,
+) -> Result<combine::CombinePreview, String> {
+    Ok(combine::preview(&combine_rows(&store, &session_ids)?))
+}
+
+/// The brief that gets typed and the record that reaches the lake. Called once
+/// on ⏎, not at preview time, so the brief reflects any revision that landed
+/// in the meantime.
+#[tauri::command]
+fn combine_brief(
+    store: tauri::State<'_, SessionStore>,
+    session_ids: Vec<String>,
+    instruction: Option<String>,
+) -> Result<combine::CombineBrief, String> {
+    let rows = combine_rows(&store, &session_ids)?;
+    let preview = combine::preview(&rows);
+    // The cap is enforced here too, not just in the preview: a revision that
+    // landed between the preview and ⏎ could have pushed the selection over,
+    // and a refusal is the whole point of the cap.
+    if let Some(blocked) = preview.blocked {
+        return Err(blocked);
+    }
+    // The journal is the friction/activity trail Shipwright and the Librarian
+    // read — a different question from what the corpus remembers, which is why
+    // it rides alongside the lake record rather than instead of it.
+    let _ = store.database().append_journal(
+        "plan_combine",
+        Some("front-door"),
+        preview.default_project_path.as_deref(),
+        None,
+        Some(&format!(
+            "{} plans: {}",
+            rows.len(),
+            rows.iter()
+                .map(|r| r.session_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    );
+    Ok(combine::compose(&rows, instruction.as_deref().unwrap_or("")))
 }
 
 /// Collapse an arbitrary name into a filesystem-safe slug: alphanumerics kept,
@@ -7441,26 +7890,30 @@ async fn submit_review(
                 session_id: session_id.clone(),
             },
         );
-        return Err(
-            "Claude is no longer waiting for this plan — the Claude Code session \
-             ended or the hold timed out. Use \"Restore plan session\" to resume \
-             it, then submit your review again."
-                .to_string(),
-        );
+        return Err(detached_delivery_error(&store.backend_of(&session_id)));
     };
     // Ordering invariant: set expected_mode BEFORE unblocking the hook.
     // Claude can't possibly send the next ExitPlanMode POST before this
     // tx.send() returns to the held handle_plan task, so the next
     // handle_plan invocation is guaranteed to see this entry.
     expected_modes.set(&session_id, mode);
-    // Stash the full payload for out-of-band fetch BEFORE the deny is sent, so
-    // the model's follow-up curl can never race ahead of the body being present.
-    // The denied reason itself is now a single calm line; Claude Code renders
-    // the deny as a red `Error:` box sized to the reason, so keeping the bulk
-    // out of it is what turns the old scary wall into one benign line. The body
-    // still reaches the model byte-for-byte via `GET …/feedback`.
+    // Build the reason, then stash the payload — both BEFORE the deny is sent,
+    // so a follow-up curl can never race ahead of the body being present.
+    //
+    // What the reason carries depends on the harness (see `feedback_deny_reason`):
+    // Claude gets a single calm line plus the `GET …/feedback` URL, because
+    // Claude Code renders the deny as a red `Error:` box sized to the reason and
+    // keeping the bulk out of it is what turned the old wall into one benign
+    // line. Codex gets the payload inline, because its plan session's sandbox
+    // has no network and could never make that fetch. Either way the body also
+    // reaches the stash, which is what `GET …/feedback` serves.
+    let reason = feedback_deny_reason(
+        mode,
+        &session_id,
+        &store.backend_of(&session_id),
+        &payload,
+    );
     pending_feedback.set(&session_id, payload);
-    let reason = feedback_deny_reason(mode, &session_id);
     // A failed send means the receiver is gone: the held POST already ended
     // (the Claude Code session/terminal closed, or the long hold timed out).
     // Don't pretend it worked. Roll back the submit (restore comments to draft,
@@ -7491,12 +7944,7 @@ async fn submit_review(
             session_id = %session_id,
             "submit_review delivery failed — held POST no longer listening; rolled back"
         );
-        return Err(
-            "Claude is no longer waiting for this plan — the Claude Code session \
-             ended or the hold timed out. Use \"Restore plan session\" to resume \
-             it, then submit your review again."
-                .to_string(),
-        );
+        return Err(detached_delivery_error(&store.backend_of(&session_id)));
     }
     store.set_attach_state(&session_id, AttachState::Idle);
 
@@ -7706,10 +8154,17 @@ fn record_orchestration_launch(
 }
 
 /// The Orchestrate launch modal's workflows-disabled probe (hook.rs owns the
-/// `~/.claude/settings.json` read).
+/// settings reads). Takes the project so the run's OWN `.claude/settings*`
+/// are read, not just the user-level file — the probe is about the run, and
+/// a project-scoped `disableWorkflows` is exactly as binding.
 #[tauri::command]
-fn workflow_availability() -> hook::WorkflowAvailability {
-    hook::workflow_availability()
+fn workflow_availability(project_path: Option<String>) -> hook::WorkflowAvailability {
+    let dir = project_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(std::path::PathBuf::from);
+    hook::workflow_availability(dir.as_deref())
 }
 
 /// Write the launch modal's checked Bash allow rules before the orchestrator
@@ -7990,7 +8445,7 @@ fn record_handoff_event(
 /// The launch modal's inferred allow-rule candidates for a project (repo
 /// markers → build/test Bash rules).
 #[tauri::command]
-fn orchestrate_allow_candidates(project_path: String) -> Vec<String> {
+fn orchestrate_allow_candidates(project_path: String) -> Vec<hook::AllowCandidate> {
     hook::orchestrate_allow_candidates(std::path::Path::new(&project_path))
 }
 
@@ -8171,6 +8626,9 @@ struct AgentSeatsView {
     seats: std::collections::HashMap<String, seat::SeatConfig>,
     known_seats: Vec<String>,
     claude_bin: Option<String>,
+    /// The same for codex. Its own row because `$PATH` routinely points at an
+    /// older standalone build than the one the ChatGPT app ships.
+    codex_bin: Option<String>,
     /// A previous chart is stashed, so Revert has something to restore.
     can_revert: bool,
     /// What each seat does, for the settings tooltips. Served from the same
@@ -8184,6 +8642,7 @@ fn agent_seats_view(db: &db::Database) -> AgentSeatsView {
         seats: seat::all_seats(),
         known_seats: seat::KNOWN_SEATS.iter().map(|s| s.to_string()).collect(),
         claude_bin: seat::claude_bin_override(),
+        codex_bin: seat::codex_bin_override(),
         can_revert: seat::has_snapshot(db),
         blurbs: seatassign::seat_blurbs(),
     }
@@ -8211,6 +8670,28 @@ fn set_claude_bin_override(
     seat::set_claude_bin_override(&settings.db, &path)
 }
 
+#[tauri::command]
+fn set_codex_bin_override(
+    settings: tauri::State<'_, Settings>,
+    path: String,
+) -> Result<(), String> {
+    seat::set_codex_bin_override(&settings.db, &path)?;
+    // Capability answers are cached per binary identity, so a NEW path
+    // re-probes for free. Re-picking the SAME path is the user saying "look
+    // again" — usually right after installing a newer codex over it — and
+    // handing back the cached "too old" would be maddening.
+    codex_app_server::forget_codex_capability(&path);
+    Ok(())
+}
+
+/// What models the installed codex can run — the Front Door's backend picker
+/// asks once per app session and caches. Live rather than hardcoded: the
+/// catalog ships with the ChatGPT app and changes under us.
+#[tauri::command(async)]
+async fn codex_model_catalog() -> Result<Vec<codex_app_server::CodexModel>, String> {
+    codex_app_server::model_catalog().await
+}
+
 // --- Seat Assignment agent (see `seatassign.rs`) --------------------------
 
 /// Run the Seat Assignment agent once and return its proposed chart. Read-only:
@@ -8233,7 +8714,8 @@ async fn seat_assignment_agent(
     };
     let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
     let started = std::time::Instant::now();
-    let outcome = seatassign::run_seat_assigner(&state, &cwd, prompt).await;
+    let burn_db = store.database();
+    let outcome = seatassign::run_seat_assigner(&burn_db, &state, &cwd, prompt).await;
     let elapsed = started.elapsed();
     let text = match outcome {
         Ok(t) => t,
@@ -8504,12 +8986,19 @@ fn claim_review(claims: tauri::State<'_, ClaimFlags>, session_id: String) -> boo
 }
 
 /// Arm a one-shot restore for a session. Called when the reviewer clicks
-/// "Restore plan session" so the next inbound plan that re-presents the
-/// identical body is tagged as a restore ("vN restored") rather than a fresh
-/// version. See `SessionStore::arm_restore`.
+/// "Restore plan session" (or copies the command for their own terminal) so the
+/// next inbound plan that re-presents the identical body is tagged as a restore
+/// ("vN restored") rather than a fresh version. See `SessionStore::arm_restore`.
+///
+/// Arms the same restore on the *prompt* side too: the resumed session's first
+/// prompt submission is Redline's compact trigger, and this is what entitles it
+/// to the hidden protocol and keeps it out of the lake. Two one-shots for one
+/// click, consumed by the two different events a restore produces (the prompt
+/// going in, the plan coming back).
 #[tauri::command]
 fn arm_restore(store: tauri::State<'_, SessionStore>, session_id: String) {
     store.arm_restore(&session_id);
+    restore_context::arm(&session_id);
 }
 
 /// Where `claude --resume <id>` can actually find a session.
@@ -8522,15 +9011,39 @@ fn arm_restore(store: tauri::State<'_, SessionStore>, session_id: String) {
 /// the conversation is right there on disk. Redline only ever knew the plan's
 /// project path (the cwd at hook time), which is exactly the wrong one in that
 /// case — so it asked, and got told no.
+/// Whether the conversation's own history is there to be resumed into.
+///
+/// This was a Boolean, and a Boolean cannot answer it for both harnesses.
+/// `false` meant one specific thing — "no transcript under `~/.claude`" — and
+/// the UI spends it on a real warning ("resuming as a FRESH conversation
+/// without the plan's history"). Reporting that for a Codex thread would be a
+/// claim about a private session-file layout Redline deliberately never reads:
+/// false, alarming, and unactionable. `Unchecked` is the honest third answer.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+enum RestoreHistory {
+    /// A transcript for this id is on disk — the resume lands back inside the
+    /// same conversation, with the plan's history in context.
+    Available,
+    /// Looked, and there is nothing to resume into. The restore still succeeds
+    /// (the sentinel carries the held plan's id) but the session comes back
+    /// FRESH. Usual cause: transcript saving off, via an inherited
+    /// `CLAUDE_CODE_CHILD_SESSION` marker.
+    Missing,
+    /// Not looked at, deliberately. The default, because "no answer" is what
+    /// every harness Redline hasn't taught this to deserves.
+    #[default]
+    Unchecked,
+}
+
 #[derive(Debug, Default, serde::Serialize)]
 struct ResumeTarget {
     /// The cwd the resume command should run from. `None` only when there is
     /// nothing better to offer than the caller's own guess.
     cwd: Option<String>,
-    /// Did a transcript for this id turn up at all? False means the session was
-    /// never saved (transcript saving off — see the child-session env marker) and
-    /// no cwd will resume it.
-    found: bool,
+    /// Is there a conversation on disk to resume into — and did we even look?
+    /// See `RestoreHistory`; only the Claude arm ever answers anything else.
+    history: RestoreHistory,
     /// The transcript lives under a different cwd than the plan's project path:
     /// the case that used to fail outright.
     relocated: bool,
@@ -8656,11 +9169,38 @@ fn prime_plan_file(plan_file: &str, session_id: &str) -> bool {
 /// exists at all, and whether its plan file has been primed with the restore
 /// marker (which lets the caller ask for a one-tool-call handshake).
 #[tauri::command]
-fn prepare_restore(session_id: String, project_path: Option<String>) -> ResumeTarget {
+fn prepare_restore(
+    session_id: String,
+    project_path: Option<String>,
+    // Which harness holds this conversation (`sessions.backend`). Absent reads
+    // as Claude: every pre-backend row is one, and Claude is what this command
+    // did unconditionally before there was anything else to be.
+    backend: Option<String>,
+) -> ResumeTarget {
+    // The Codex arm, and it is a *refusal to look* rather than a lookup that
+    // happens to come back empty. Everything below reads `~/.claude`: the
+    // transcript scan, the startup-cwd recovery, and the plan-file prime. None
+    // of the three has a Codex meaning — a Codex thread has no Claude
+    // transcript by construction, and `codex resume` is not scoped by the
+    // startup cwd the way `claude --resume` is. Running them anyway would cost
+    // thirty stats to arrive at `Missing`, which the UI then reports to the
+    // reviewer as "no saved transcript — resuming as a fresh conversation".
+    // That sentence would be false, and it would be false every single time.
+    //
+    // So: the plan's own project directory, no Claude file touched, and no
+    // answer claimed about history we never inspected.
+    if backend.as_deref() == Some("codex") {
+        return ResumeTarget {
+            cwd: project_path,
+            history: RestoreHistory::Unchecked,
+            relocated: false,
+            primed: false,
+        };
+    }
     let Some(transcript) = find_transcript(&session_id) else {
         return ResumeTarget {
             cwd: project_path,
-            found: false,
+            history: RestoreHistory::Missing,
             relocated: false,
             primed: false,
         };
@@ -8670,7 +9210,7 @@ fn prepare_restore(session_id: String, project_path: Option<String>) -> ResumeTa
     let Some(cwd) = startup_cwd_from_transcript(&transcript) else {
         return ResumeTarget {
             cwd: project_path,
-            found: true,
+            history: RestoreHistory::Available,
             relocated: false,
             primed,
         };
@@ -8678,7 +9218,7 @@ fn prepare_restore(session_id: String, project_path: Option<String>) -> ResumeTa
     let relocated = project_path.as_deref().is_some_and(|p| p != cwd);
     ResumeTarget {
         cwd: Some(cwd),
-        found: true,
+        history: RestoreHistory::Available,
         relocated,
         primed,
     }
@@ -8688,10 +9228,16 @@ fn prepare_restore(session_id: String, project_path: Option<String>) -> ResumeTa
 /// frontend has rendered its first themed frame, so launch never flashes white.
 #[tauri::command]
 fn show_main_window(app: AppHandle) {
+    boot_trace::mark(boot_trace::WINDOW_REVEAL);
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.show();
         let _ = win.set_focus();
     }
+    // THE boundary. Everything the old `setup` closure did that nobody was
+    // waiting for — the database snapshot, the hook repairs, the grammar set —
+    // starts here, behind the first frame the user can act on. Once per
+    // process; a resurrected window calls this again and must not re-snapshot.
+    postboot::run(app);
 }
 
 /// Re-create the main window on a running instance that has none — the
@@ -10189,6 +10735,26 @@ fn record_plan_launch(
     // we build this" walks back from the plan to the talk that produced it.
     chat_id: Option<String>,
     origin: Option<String>,
+    // What the LAKE should hold, when that is not what was typed. Only
+    // Combine passes it: the typed brief is up to 120 KB of concatenated,
+    // machine-written source plans, and a `CorpusRole::User` row with
+    // `author: None` is permanently uncompactable
+    // (`keeper::select_compaction_candidates` filters `role != "user"`), so
+    // filing the brief there would embed and FTS-index a machine blob as if a
+    // human had typed it. `None` = record what you typed, which is what every
+    // other door does and what makes this change additive.
+    record_body: Option<String>,
+    // The human's own words inside `record_body`, for the lexical index —
+    // the sentence typed into the composer, without the provenance block
+    // wrapped around it. `None` everywhere else, where the body IS the
+    // human's writing.
+    user_text: Option<String>,
+    // Which harness this prompt was launched into, and at what model — the
+    // door's own pick, known here and nowhere else. Before the backend picker
+    // the launch passed no `--model` at all, which is why these were hardcoded
+    // `None` below; they are a real answer now.
+    backend: Option<String>,
+    model: Option<String>,
 ) -> Result<(), String> {
     let body = markdown.trim().to_string();
     if body.is_empty() {
@@ -10197,8 +10763,22 @@ fn record_plan_launch(
     // An unknown origin degrades to the door that has a document, matching what
     // the caller must have been — never a guess that widens the lie.
     let origin = origin
-        .filter(|o| matches!(o.as_str(), "front-door" | "drafter" | "browser" | "chat"))
+        .filter(|o| {
+            matches!(
+                o.as_str(),
+                "front-door" | "drafter" | "browser" | "chat" | "combine"
+            )
+        })
         .unwrap_or_else(|| "drafter".to_string());
+    // Qualify the slug with its harness: `opus` and `gpt-5.6-sol` share one
+    // column, and a bare slug loses which CLI actually ran it.
+    let launch_model = model
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .map(|m| match backend.as_deref().map(str::trim) {
+            Some("codex") => format!("codex/{m}"),
+            _ => m,
+        });
     let bh = ledger::body_hash(&body);
     let db = store.database();
     let draft_id = draft_id.filter(|d| !d.trim().is_empty());
@@ -10235,23 +10815,38 @@ fn record_plan_launch(
     // What the friction/journal/guard rows key on: the thread that owns this
     // launch, whichever kind it is.
     let owner_id: Option<String> = owner.map(|(_, id)| id.clone());
+    // The row's body, and — when it differs — its own hash, which the ingest
+    // bind must follow instead of the guard key.
+    let record_body = record_body
+        .map(|r| r.trim().to_string())
+        .filter(|r| !r.is_empty() && *r != body);
+    let row_hash = record_body.as_deref().map(ledger::body_hash);
+    let user_text = user_text
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
     let input = ledger::PromptInput {
         source: ledger::PromptSource::DrafterLaunch,
         origin: ledger::Origin::Redline,
         surface: origin.clone(),
+        // Unchanged, and deliberately: this row IS the human's writing. The
+        // `role: Agent` variant considered for Combine only existed to
+        // contain a machine blob, and no machine blob reaches the lake.
         role: crate::ledger::CorpusRole::User,
-        user_text: None,
+        user_text,
         session_id: None,
         claude_session_id: None,
         mission_id: None,
         project_path,
-        body: body.clone(),
+        body: record_body.clone().unwrap_or_else(|| body.clone()),
         thread,
         author: None, // the launched prompt is the human's own writing
-        // The launch command passes no --model (buildPlanLaunchCommand); the
-        // transcript backfill stamps it once the session is bound + answering.
-        model: None,
-        model_source: None,
+        // The door's pick, when it made one. `None` still falls through to the
+        // transcript backfill once the session is bound and answering — the
+        // only answer available for a launch left on the backend's default,
+        // and the reason `model_source` must stay `None` alongside it rather
+        // than claim a provenance nobody supplied.
+        model: launch_model.clone(),
+        model_source: launch_model.as_ref().map(|_| "launch".to_string()),
     };
     // Write the ledger row BEFORE arming either guard. Both guards exist to make
     // the spawned session's own hook fire *skip* this body; arming them first
@@ -10270,8 +10865,17 @@ fn record_plan_launch(
         );
         return Err(e);
     }
+    // Deliberately the FULL typed body, never the record: this is the hash the
+    // spawned session's `UserPromptSubmit` hook will compute, and a miss here
+    // means the hook does not skip and files the whole brief as a fresh prompt
+    // row — the blob in the lake PLUS a stray short row.
     ledger::register_agent_prompt(&body);
-    ledger::register_plan_launch(&bh, &origin, owner.map(|(k, i)| (k, i.as_str())));
+    ledger::register_plan_launch(
+        &bh,
+        &origin,
+        owner.map(|(k, i)| (k, i.as_str())),
+        row_hash.as_deref(),
+    );
     let _ = db.append_journal(
         "drafter_launch",
         Some(&origin),
@@ -10594,7 +11198,7 @@ async fn librarian_agent(
     let digest = context::build_digest(&db, context::LIMIT_MAX as usize);
     let prompt = librarian::build_librarian_prompt_from_digest(&digest);
     let cwd = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-    let (text, _session) = librarian::run_librarian(&cwd, prompt).await?;
+    let (text, _session) = librarian::run_librarian(&db, &cwd, prompt).await?;
     let result = librarian::parse_checklist(&text);
     // Producers wave: the checklist lands as durable work items (deduped
     // against the still-open backlog); the advisory strip renders unchanged.
@@ -10672,7 +11276,7 @@ async fn shipwright_agent(
     };
     let prompt = shipwright::build_shipwright_prompt_from_digest(&digest);
     let prior = session.get();
-    let (text, sid) = shipwright::run_shipwright(&repo, prompt, prior.as_deref()).await?;
+    let (text, sid) = shipwright::run_shipwright(&db, &repo, prompt, prior.as_deref()).await?;
     session.set(sid);
     let result = shipwright::parse_findings(&text);
 
@@ -11753,7 +12357,9 @@ fn prompt_text(message: String, default_value: String) -> Result<Option<String>,
     }
 }
 
-#[tauri::command]
+/// `(async)` — reads and parses `~/.claude/settings.json`. Small, but file I/O
+/// on the main thread is file I/O on the main thread (perf-budget rule 4).
+#[tauri::command(async)]
 fn get_hook_status() -> HookStatus {
     hook::get_status()
 }
@@ -11771,7 +12377,11 @@ fn install_hook() -> Result<HookStatus, String> {
     result
 }
 
-#[tauri::command]
+/// `(async)` — `available` runs the codex capability probe, which can spawn
+/// `codex --help` (and, on a machine with an exotic install, an interactive
+/// login shell behind it). This was a plain `#[tauri::command]`: a synchronous
+/// subprocess on the UI thread, fired on every boot.
+#[tauri::command(async)]
 fn get_codex_hook_status() -> codex_hook::CodexHookStatus {
     codex_hook::get_status()
 }
@@ -11785,7 +12395,23 @@ fn install_codex_hook() -> Result<codex_hook::CodexHookStatus, String> {
     result
 }
 
+/// Write the Codex config profile a plan session launches under — the ONLY
+/// delivery of the plan contract on that path. Installed beside the hook and
+/// the skill rather than written at launch, because `codex -p <name>` with no
+/// such file is not an error: it is a session that plans without ever having
+/// been told the revision contract. See `codex_profile`.
 #[tauri::command]
+fn install_codex_profile() -> Result<codex_profile::CodexProfileStatus, String> {
+    let result = codex_profile::install();
+    if let Ok(status) = &result {
+        tracing::info!(path = %status.path, "installed the Redline Codex plan profile");
+    }
+    result
+}
+
+/// `(async)` — same reason as `get_skill_status`: reads the installed skill
+/// files off disk and compares them with the shipped ones.
+#[tauri::command(async)]
 fn get_codex_skill_status() -> SkillStatus {
     skill::get_codex_status()
 }
@@ -11849,7 +12475,9 @@ fn remove_hook_via_menu(app: &AppHandle) {
         });
 }
 
-#[tauri::command]
+/// `(async)` — walks the installed skill directory and diffs its contents
+/// against the shipped payload.
+#[tauri::command(async)]
 fn get_skill_status() -> SkillStatus {
     skill::get_status()
 }
@@ -11869,6 +12497,10 @@ fn install_skill() -> Result<SkillStatus, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // The zero point for every boot milestone (docs/perf-budget.md "Boot
+    // budget"). Before the subscriber, so the very first `Instant` is as close
+    // to process start as this function can observe.
+    boot_trace::init();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -11972,6 +12604,8 @@ pub fn run() {
             get_agent_seats,
             set_agent_seat,
             set_claude_bin_override,
+            set_codex_bin_override,
+            codex_model_catalog,
             seat_assignment_agent,
             seat_assignment_cancel,
             seat_preflight,
@@ -11979,6 +12613,7 @@ pub fn run() {
             revert_seat_assignment,
             seat::get_seat_roster,
             work::get_work_graph,
+            work::work_since,
             userconfig::get_workspace,
             userconfig::save_workspace,
             userconfig::list_harnesses,
@@ -12001,6 +12636,8 @@ pub fn run() {
             get_collab_share,
             set_collab_share,
             get_daemon_status,
+            daemon_state,
+            bootstrap_state,
             claim_review,
             arm_restore,
             prepare_restore,
@@ -12009,6 +12646,7 @@ pub fn run() {
             install_hook,
             get_codex_hook_status,
             install_codex_hook,
+            install_codex_profile,
             get_codex_skill_status,
             install_codex_skill,
             get_skill_status,
@@ -12046,6 +12684,10 @@ pub fn run() {
             fork::review_question_send,
             fork::review_thread_discard,
             fork::fork_kill_all,
+            inspect::inspect_set,
+            inspect::inspect_read,
+            meter::thread_meters,
+            meter::plan_session_meter,
             browse::browse_send,
             browse::browse_turn_status,
             browse::get_browse_thread,
@@ -12255,6 +12897,8 @@ pub fn run() {
             memory_map,
             ledger_get_capture_external,
             ledger_set_capture_external,
+            combine_preview,
+            combine_brief,
             record_plan_launch,
             classmem_organize,
             classmem_tree,
@@ -12299,6 +12943,7 @@ pub fn run() {
             mcp_config_snippet,
         ])
         .setup(|app| {
+            boot_trace::mark(boot_trace::SETUP_ENTER);
             // Register the `redline://` scheme with the OS at runtime. In a
             // bundled release the Info.plist declaration is authoritative; this
             // best-effort call makes the deep link work in dev too. Harmless if
@@ -12311,27 +12956,12 @@ pub fn run() {
                 }
             }
 
-            // Silently bring an existing install's hook timeout up to date, so a
-            // user who installed under the old 10-minute timeout gets the long
-            // hold without re-running setup. No-op if not installed / current.
-            hook::ensure_timeout_current();
-
-            // Backfill the restore-curl permission for installs that predate it,
-            // so "Restore plan session" runs its daemon fetch hands-free instead
-            // of stalling on an approval prompt. No-op if not installed / present.
-            hook::ensure_restore_permission();
-
-            // Install the Polis prompt-capture hook beside the ExitPlanMode hook
-            // for anyone who has already set Redline up. It travels with the main
-            // hook: capturing your prompts is core to the ledger. External-session
-            // storage is separately gated by `redline.capture.externalSessions`.
-            if hook::get_status().installed && !hook::capture_installed() {
-                if let Err(e) = hook::install_capture() {
-                    tracing::warn!(error = %e, "failed to install prompt-capture hook");
-                } else {
-                    tracing::info!("installed Polis prompt-capture hook");
-                }
-            }
+            // The hook repairs (timeout refresh, restore-curl permission,
+            // prompt-capture install) used to run right here, synchronously,
+            // in front of the window. They are file reads and rewrites under
+            // `~/.claude` that nothing on screen depends on, so they moved to
+            // `postboot`, behind the reveal — and `preflight_status` awaits
+            // that coordinator, so a LAUNCH still cannot outrun them.
 
             // Open at a generous, Safari-style fraction of whatever display the
             // window lands on, centered — a fixed pixel size feels small on a
@@ -12377,15 +13007,35 @@ pub fn run() {
             }
             let db_path = data_dir.join("redline.db");
             tracing::info!(path = %db_path.display(), "opening sqlite database");
-            let db = Arc::new(
-                Database::open(&db_path).expect("failed to open sqlite database"),
-            );
+            // A failed open is fatal, but it must not be fatal like THIS was:
+            // `.expect()` inside Tauri's setup panics across an Objective-C
+            // frame that cannot unwind, so the process aborts with a raw
+            // backtrace, no window, and nothing telling the user what to do.
+            // Exit cleanly instead, and leave the reason somewhere a person
+            // who double-clicked an icon can actually find it.
+            let db = Arc::new(boot_trace::timed(boot_trace::DB_OPEN, || {
+                Database::open(&db_path).unwrap_or_else(|e| {
+                    let message = format!(
+                        "Redline could not open its database and has to stop.\n\n\
+                         Database: {}\n\
+                         Reason:   {e}\n",
+                        db_path.display()
+                    );
+                    tracing::error!("{message}");
+                    let _ = std::fs::write(data_dir.join("boot-error.txt"), &message);
+                    eprintln!("\n{message}");
+                    std::process::exit(1);
+                })
+            }));
 
-            // Polis backup: one snapshot now (so a backup always exists). The
-            // 6h cadence is re-homed onto the keeper's watch bus (the
-            // `ledger-backup` watch) — no thread of its own anymore. Also
-            // snapshots on quit.
-            snapshot_database(&db, &data_dir, LEDGER_BACKUP_KEEP);
+            // Polis backup: the once-per-boot snapshot moved to `postboot`.
+            // `VACUUM INTO` walks the WHOLE database — on a large one it is by
+            // far the longest single thing that ever ran in this closure, and
+            // it ran before the window existed. The durability guarantees are
+            // unchanged: once per boot (now after the reveal), every 6h (the
+            // keeper's `ledger-backup` watch), and on quit. All three now take
+            // turns through `postboot::snapshot_lock` — deferring the startup
+            // one is exactly what makes them able to overlap.
 
             // Polis portable mirror (Phase 4): a continuous, one-way markdown
             // mirror of the ledger into the user-chosen directory. Off until a
@@ -12417,16 +13067,17 @@ pub fn run() {
 
             app.manage(fswatch::FsWatcher::new(app.handle().clone()));
 
-            // Warm syntect's per-grammar regexes off the hot path so the first
-            // real file open doesn't pay the one-time compile cost on the user's
-            // click. The compiled-regex cache lives in the shared SyntaxSet, so
-            // the background warm benefits the managed instance the commands use.
-            let highlighter = Arc::new(highlight::Highlighter::new());
-            {
-                let hl = highlighter.clone();
-                std::thread::spawn(move || hl.warm_common());
-            }
-            app.manage(highlighter);
+            // Cheap now: two empty maps. The grammar set itself is a shared
+            // `OnceLock` built by `postboot` (or by the first file open, which
+            // blocks on the same initialization) — building it here meant
+            // deserializing `two_face`'s extended dump in front of the window
+            // on every launch, for the majority of launches that never open a
+            // file at all.
+            // (The grammar warm-up itself moved with it — `warm_common`
+            // reaches through `syntaxes()`, so warming here would have built
+            // the whole set on a boot thread regardless of where the field
+            // lived.)
+            app.manage(Arc::new(highlight::Highlighter::new()));
 
             // `claude` resolution is deliberately lazy (first fork use): the
             // probe can shell out through the user's rc files, and macOS
@@ -12528,7 +13179,7 @@ pub fn run() {
             // an L1 follow-up or a consult check-in continues the run it's about.
             app.manage(ShipwrightSession::default());
 
-            let store = SessionStore::new(db);
+            let store = boot_trace::timed(boot_trace::STORE_HYDRATE, || SessionStore::new(db));
             app.manage(store.clone());
             // Friction telemetry for the two contexts that hold no `Database`
             // (the axum auth middleware, chiefly). Installed once, right after
@@ -12546,6 +13197,14 @@ pub fn run() {
                     }
                 }
             }
+
+            // The interactive plan session's meter. One tailer for the app —
+            // the PTY has no stream to parse, so its economics come from the
+            // session transcript on a slow beat (see `plan_meter`).
+            // The returned flag is the teardown lever. Nothing takes it yet —
+            // the thread dies with the process — but a future `stop` needs it
+            // to exist, and binding it says so rather than dropping it silently.
+            let _plan_meter_stop = plan_meter::start(app.handle(), store.clone());
 
             let pending = PendingResponses::new();
             app.manage(pending.clone());
@@ -12607,6 +13266,7 @@ pub fn run() {
                 active_surface,
             };
             tauri::async_runtime::spawn(run_server(app_state));
+            boot_trace::mark(boot_trace::DAEMON_START);
 
             // Extension tokens (manifest v1 external + v2 wasm): mint
             // per-boot scoped tokens for every valid manifest under
@@ -12625,6 +13285,7 @@ pub fn run() {
                     .and_then(|raw| serde_json::from_str(&raw).ok())
                     .unwrap_or_default();
                 extension_host::start(app.handle().clone(), booted, &disabled);
+                boot_trace::mark(boot_trace::EXTENSION_SCAN);
 
                 // B4 metadata-only launch check: refresh the cached index
                 // and surface available updates — but ONLY when a cache
@@ -12878,6 +13539,7 @@ pub fn run() {
             // prompt hands-free instead of only when they remember to look.
             update::check_for_updates_in_background(app.handle().clone());
 
+            boot_trace::mark(boot_trace::SETUP_DONE);
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -13215,6 +13877,102 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The detached-delivery error names the harness that actually left, and
+    /// keeps the phrase the frontend's `isDetachError` matches on.
+    #[test]
+    fn detached_delivery_error_names_the_right_harness() {
+        let codex = detached_delivery_error("codex");
+        assert!(codex.starts_with("Codex is no longer waiting"));
+        assert!(codex.contains("the Codex session ended"));
+        // Never Claude's name on a Codex reviewer's failure.
+        assert!(!codex.contains("Claude"));
+
+        // Claude, and every legacy/unknown row, keep the sentence they had.
+        for backend in ["claude-code", "", "gemini"] {
+            let msg = detached_delivery_error(backend);
+            assert!(msg.starts_with("Claude is no longer waiting"), "{backend}");
+            assert!(msg.contains("the Claude Code session ended"), "{backend}");
+        }
+
+        // The banner trigger. `isDetachError` (src/App.tsx) substring-matches
+        // this; losing it on either arm leaves the reviewer with a dead
+        // in-review screen and no Restore button.
+        for backend in ["codex", "claude-code"] {
+            assert!(detached_delivery_error(backend).contains("no longer waiting"));
+            assert!(detached_delivery_error(backend).contains("Restore plan session"));
+        }
+    }
+
+    /// `prepare_restore` branches on the harness before it touches a single
+    /// file. The Claude arm answers from `~/.claude`; the Codex arm declines to
+    /// look, because every question it could ask there has a Claude-shaped
+    /// answer and a Codex thread would fail all of them for the wrong reason.
+    #[test]
+    fn prepare_restore_only_reads_claude_files_for_a_claude_session() {
+        // An id no transcript can exist for, so the Claude arm is guaranteed to
+        // reach its "looked, found nothing" branch.
+        let id = format!("rl-no-such-session-{}", uuid::Uuid::new_v4());
+        let project = Some("/Users/me/redline".to_string());
+
+        // Codex: the plan's project directory, and NO claim about history.
+        let codex = prepare_restore(
+            id.clone(),
+            project.clone(),
+            Some("codex".to_string()),
+        );
+        assert_eq!(codex.cwd.as_deref(), Some("/Users/me/redline"));
+        assert_eq!(codex.history, RestoreHistory::Unchecked);
+        // Nothing was relocated (no transcript was consulted to relocate to)
+        // and no plan file was primed — Codex has none to prime.
+        assert!(!codex.relocated);
+        assert!(!codex.primed);
+
+        // Claude, same id: it DID look, and says so. This is the contrast that
+        // matters — `Missing` is what drives the reviewer-facing "resuming as a
+        // fresh conversation" warning, and a Codex user must never see it.
+        for backend in [None, Some("claude-code".to_string())] {
+            let claude = prepare_restore(id.clone(), project.clone(), backend);
+            assert_eq!(claude.history, RestoreHistory::Missing);
+            assert_eq!(claude.cwd.as_deref(), Some("/Users/me/redline"));
+            assert!(!claude.primed);
+        }
+
+        // An unknown harness is not Codex. Legacy rows and anything Redline
+        // hasn't been taught fall to the Claude behaviour they've always had,
+        // never to the arm that skips the lookup.
+        assert_eq!(
+            prepare_restore(id.clone(), project.clone(), Some("gemini".into())).history,
+            RestoreHistory::Missing
+        );
+
+        // With no project path there is nothing to fall back to, and the Codex
+        // arm says so rather than inventing a directory.
+        let bare = prepare_restore(id, None, Some("codex".to_string()));
+        assert_eq!(bare.cwd, None);
+        assert_eq!(bare.history, RestoreHistory::Unchecked);
+    }
+
+    /// The three history states serialize to the strings the frontend switches
+    /// on. A silent rename here would degrade every restore message to its
+    /// fallback branch without failing anything.
+    #[test]
+    fn restore_history_serializes_as_the_ui_contract() {
+        let j = |h: RestoreHistory| {
+            serde_json::to_string(&ResumeTarget {
+                cwd: None,
+                history: h,
+                relocated: false,
+                primed: false,
+            })
+            .unwrap()
+        };
+        assert!(j(RestoreHistory::Available).contains("\"history\":\"available\""));
+        assert!(j(RestoreHistory::Missing).contains("\"history\":\"missing\""));
+        assert!(j(RestoreHistory::Unchecked).contains("\"history\":\"unchecked\""));
+        // The old boolean is gone; nothing may still be reading it.
+        assert!(!j(RestoreHistory::Available).contains("found"));
+    }
+
     /// The plan file is read out of the transcript, last mention wins — a
     /// session that changed plan files mid-life is on its newest one.
     #[test]
@@ -13495,6 +14253,79 @@ mod tests {
         SessionStore::new(db)
     }
 
+    /// The combine reads: latest revision, caller's order, hard error on an
+    /// unknown id. A pill that silently vanished would change what was merged
+    /// without saying so.
+    #[test]
+    fn combine_rows_take_the_latest_revision_and_preserve_order() {
+        let store = make_store();
+        let v1 = "# Auth rework\n\nFirst pass.\n";
+        let v2 = "# Auth rework\n\nSecond pass.\n";
+        store.upsert_plan("s1", "/tmp/a", v1.to_string(), reparse_sections(v1), true, false);
+        store.upsert_plan("s1", "/tmp/a", v2.to_string(), reparse_sections(v2), false, false);
+        let b = "# Billing\n\nBody.\n";
+        store.upsert_plan("s2", "/tmp/b", b.to_string(), reparse_sections(b), true, false);
+
+        let rows = combine_rows(&store, &["s2".into(), "s1".into()]).unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.session_id.as_str()).collect::<Vec<_>>(),
+            vec!["s2", "s1"],
+            "the caller's order is the brief's order"
+        );
+        let auth = &rows[1];
+        assert!(auth.raw_plan_markdown.contains("Second pass."), "latest revision only");
+        assert_eq!(auth.version_number, 2);
+        assert_eq!(auth.status, "in_review");
+
+        let err = combine_rows(&store, &["s1".into(), "nope".into()]).unwrap_err();
+        assert!(err.contains("nope"), "an unknown id errors rather than being skipped: {err}");
+    }
+
+    /// The bind must follow `row_hash` in BOTH arms. Only the threadless arm
+    /// is reachable from Combine today, so a drift here would be invisible
+    /// until the first combination launched from a thread — at which point it
+    /// would bind a hash no row has.
+    #[test]
+    fn both_ingest_bind_arms_follow_the_claim_row_hash() {
+        let body = std::fs::read_to_string(file!()).expect("read own source");
+        let at = body
+            .find("let row_key = claim.row_hash.as_deref().unwrap_or(&bh);")
+            .expect("the ingest resolves a row key from the claim");
+        // The window covers the whole `match claim.thread` block.
+        let arms = &body[at..at + 900];
+        assert!(
+            arms.contains("db.bind_threaded_prompt_session(row_key,"),
+            "the threaded arm still binds the guard key"
+        );
+        assert!(
+            arms.contains("db.bind_launch_prompt_session(row_key,"),
+            "the threadless arm still binds the guard key"
+        );
+        assert!(
+            !arms.contains("bind_launch_prompt_session(&bh"),
+            "a stale &bh bind is left in the ingest"
+        );
+    }
+
+    /// `"combine"` must survive the origin filter, or every combination is
+    /// filed in the lake as a drafter launch — `surface` feeds `resolve_parent`
+    /// and the Companion's account of what you did.
+    #[test]
+    fn the_launch_origin_filter_accepts_combine() {
+        let body = std::fs::read_to_string(file!()).expect("read own source");
+        let f = body
+            .split_once("fn record_plan_launch(")
+            .expect("record_plan_launch exists")
+            .1;
+        let filter = f.split_once("unwrap_or_else").expect("origin filter").0;
+        for origin in ["front-door", "drafter", "browser", "chat", "combine"] {
+            assert!(
+                filter.contains(&format!("\"{origin}\"")),
+                "{origin} must be an accepted launch origin"
+            );
+        }
+    }
+
     #[test]
     fn export_name_uses_plan_title() {
         let title = parser::plan_title_from_markdown(
@@ -13642,6 +14473,38 @@ mod tests {
     }
 
     #[test]
+    fn boot_routes_to_a_held_session_and_only_a_held_one() {
+        // The one carve-out to "boot lands on the front door". The pick comes
+        // from the same folded list the shell renders, so it can never name a
+        // session the sidebar doesn't have.
+        let store = make_store();
+        let pending = PendingResponses::new();
+        let md = "# Plan\n\nBody.\n";
+        for id in ["idle-a", "held-b", "idle-c"] {
+            store.upsert_plan(id, "/tmp/d", md.to_string(), reparse_sections(md), true, false);
+        }
+        let mut sessions = store.list();
+        fold_pending_into_summaries(&mut sessions, &pending);
+        assert_eq!(
+            held_session_id(&sessions),
+            None,
+            "nothing held: boot belongs to the front door"
+        );
+
+        // A live held POST is ground truth, even before the persisted state
+        // catches up — which is exactly why the fold runs first.
+        let (_rx, _token) = register_hold(&pending, "held-b", Some("tab-a".to_string()));
+        let mut sessions = store.list();
+        fold_pending_into_summaries(&mut sessions, &pending);
+        let picked = held_session_id(&sessions).expect("held session claims the plate");
+        assert_eq!(picked, "held-b");
+        assert!(
+            sessions.iter().any(|s| s.session_id == picked),
+            "boot routed to a session that is not in the list it routes within"
+        );
+    }
+
+    #[test]
     fn register_hold_supersedes_a_stale_held_post() {
         // The orphan fix moved into register_hold: a second POST for the same
         // session releases the stale waiter cleanly, then takes over.
@@ -13753,6 +14616,39 @@ mod tests {
         ] {
             assert!(!orchestrate_stall_should_fire(s), "must not fire on {s:?}");
         }
+    }
+
+    /// The launch watchdog covers `orchestrating` and nothing after it — a run
+    /// that reached `running` and then went quiet for an hour had no backstop
+    /// short of the abandoned-run sweep's full day.
+    #[test]
+    fn running_silence_stalls_only_a_quiet_unheld_running_run() {
+        let window = RUNNING_SILENCE_WINDOW.as_millis() as i64;
+        let quiet = window + 1;
+
+        assert!(running_silence_should_stall(Some("running"), quiet, window, false, false));
+
+        // Not past the window yet.
+        assert!(!running_silence_should_stall(Some("running"), window, window, false, false));
+        // The launch window is the other half's territory; terminal states and
+        // the deliberate overnight park are nobody's.
+        for state in [
+            None,
+            Some("orchestrating"),
+            Some("in_code_review"),
+            Some("awaiting_review"),
+            Some("landed"),
+            Some("stalled"),
+        ] {
+            assert!(
+                !running_silence_should_stall(state, quiet, window, false, false),
+                "must not fire on {state:?}"
+            );
+        }
+        // Quiet BECAUSE a human is holding it is not stalled — saying so would
+        // be a lie the user has to undo.
+        assert!(!running_silence_should_stall(Some("running"), quiet, window, true, false));
+        assert!(!running_silence_should_stall(Some("running"), quiet, window, false, true));
     }
 
     /// P0 (overnight queue): a queued run parks at `awaiting_review`, and the
@@ -14478,9 +15374,12 @@ mod tests {
         assert!(pf.get("s1").is_none(), "clear (rollback path) removes it");
     }
 
+    /// A stand-in for a real review payload — the bytes the golden suites pin.
+    const PAYLOAD: &str = "FEEDBACK:\n[edit, local] c-001\n\nCURRENT PLAN\n# Plan\n";
+
     #[test]
     fn feedback_deny_reason_is_calm_one_liner_with_fetch_url() {
-        let revise = feedback_deny_reason(SubmissionMode::Revise, "abc-123");
+        let revise = feedback_deny_reason(SubmissionMode::Revise, "abc-123", "claude-code", PAYLOAD);
         // The defusing words lead so the unavoidable `Error:` prefix reads benign.
         assert!(revise.starts_with("✅ Plan returned to Redline for revision"));
         assert!(revise.contains("nothing"), "must reassure nothing failed");
@@ -14496,7 +15395,7 @@ mod tests {
         // the plan session ever hears the contract exists.
         assert!(revise.contains("redline-plan-review"));
 
-        let ask = feedback_deny_reason(SubmissionMode::Ask, "abc-123");
+        let ask = feedback_deny_reason(SubmissionMode::Ask, "abc-123", "claude-code", PAYLOAD);
         // Ask keeps its load-bearing "do not change the plan body" contract.
         assert!(ask.contains("NOT"));
         assert!(ask.contains("unchanged"));
@@ -14505,6 +15404,69 @@ mod tests {
         ));
         assert!(!ask.contains('\n'), "reason must be one line, got: {ask}");
         assert!(ask.contains("redline-plan-review"));
+    }
+
+    #[test]
+    fn the_codex_deny_reason_inlines_the_review_it_could_never_fetch() {
+        // A codex plan session runs under `-s read-only`; a command the model
+        // runs in that sandbox cannot reach 127.0.0.1 at all. Handing it a URL
+        // would stall the round-trip with the feedback sitting one hop away.
+        for mode in [SubmissionMode::Revise, SubmissionMode::Ask] {
+            let reason = feedback_deny_reason(mode, "abc-123", "codex", PAYLOAD);
+            assert!(reason.starts_with("✅"), "must still lead defusing");
+            assert!(!reason.contains("curl"), "got: {reason}");
+            assert!(!reason.contains("127.0.0.1"), "got: {reason}");
+            // The payload itself, byte-for-byte, is the delivery.
+            assert!(reason.ends_with(PAYLOAD), "got: {reason}");
+            // …and it must name the submission shape codex actually has.
+            assert!(reason.contains("<proposed_plan>"), "got: {reason}");
+            assert!(!reason.contains("ExitPlanMode"), "got: {reason}");
+        }
+        let revise = feedback_deny_reason(SubmissionMode::Revise, "abc-123", "codex", PAYLOAD);
+        // The two halves whose absence is silent.
+        assert!(revise.contains("rl:blk-"));
+        assert!(revise.contains("REDLINE_RESOLUTIONS"));
+        // Ask keeps its load-bearing "do not change the plan body" contract.
+        let ask = feedback_deny_reason(SubmissionMode::Ask, "abc-123", "codex", PAYLOAD);
+        assert!(ask.contains("NOT"));
+        assert!(ask.contains("unchanged"));
+    }
+
+    #[test]
+    fn the_claude_deny_reason_still_inlines_nothing() {
+        // The whole point of the out-of-band channel: a wall of text in an
+        // `Error:` box is the failure this replaced.
+        for mode in [SubmissionMode::Revise, SubmissionMode::Ask] {
+            let reason = feedback_deny_reason(mode, "abc-123", "claude-code", PAYLOAD);
+            assert!(!reason.contains("CURRENT PLAN"), "got: {reason}");
+            assert!(!reason.contains("FEEDBACK:"), "got: {reason}");
+        }
+    }
+
+    #[test]
+    fn codex_stop_gates_on_the_block_not_the_mode() {
+        // A Redline-launched codex runs in `default` mode with the contract
+        // injected — no CLI flag starts the TUI in native Plan Mode — so a
+        // permission_mode gate would reject every plan this app launches.
+        let one = "here you go\n<proposed_plan>\n# Plan\n\nBody.\n</proposed_plan>";
+        assert_eq!(
+            extract_codex_proposed_plan(one).as_deref(),
+            Some("# Plan\n\nBody.")
+        );
+        // …while the strictness that makes the relaxed gate safe still holds.
+        assert!(extract_codex_proposed_plan("no block here").is_none());
+        assert!(
+            extract_codex_proposed_plan("I will emit a <proposed_plan> block soon").is_none(),
+            "prose that merely names the marker must never be captured"
+        );
+        assert!(
+            extract_codex_proposed_plan(
+                "<proposed_plan>a</proposed_plan><proposed_plan>b</proposed_plan>"
+            )
+            .is_none(),
+            "two blocks are ambiguous, not a plan"
+        );
+        assert!(extract_codex_proposed_plan("<proposed_plan>   </proposed_plan>").is_none());
     }
 
     // --- T4.1: the orchestrate -> review link survives a restart ------------

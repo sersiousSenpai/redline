@@ -1,19 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { Check, Mic, Plus, X } from "lucide-react";
+import { Check, FileText, Mic, Plus, Rocket, X } from "lucide-react";
 
 import type { Companion, CompanionMessage } from "../types";
 import { useAgentTurn } from "../hooks/useAgentTurn";
+import { useStickToBottom } from "../hooks/useStickToBottom";
 import { useDictation } from "../lib/useDictation";
+import { useReadAloud } from "../audio/useReadAloud";
 import { composePrompt } from "../lib/launch";
+import { toolbarPose, type ToolbarPose } from "../lib/toolbarPose";
 import { EFFORT_OPTIONS, MODEL_OPTIONS } from "../lib/seatAssign";
 import { usePersistedState } from "../theme/usePersistedState";
 import { useMenuOverlay } from "./menuOverlay";
 import { MarkdownView } from "./MarkdownView";
+import StreamingBubble from "./StreamingBubble";
+import TurnFooter from "./TurnFooter";
+import { contextResets, type TurnMeter } from "../lib/turnMeter";
 import { QueuedChip, UnsentNote } from "./QueuedChip";
 import { WorkingIndicator } from "./WorkingIndicator";
 
@@ -79,6 +86,10 @@ export interface ChatRoomProps {
   cwd: string | null;
   /** False while the Voice panel owns the mic — one capture at a time. */
   dictationEnabled: boolean;
+  /** Present only while this room has the whole plate: shrink it back to the
+   *  conversation column. Absent in the column, where there is nothing to
+   *  shrink. */
+  onCollapse?: () => void;
   onClose: () => void;
 }
 
@@ -88,6 +99,7 @@ export function ChatRoom({
   onEmpty,
   cwd,
   dictationEnabled,
+  onCollapse,
   onClose,
   seed,
   onSeedConsumed,
@@ -101,9 +113,7 @@ export function ChatRoom({
   const [attachments, setAttachments] = useState<string[]>([]);
   const [chats, setChats] = useState<Companion[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
-  const stickRef = useRef(true);
 
   const me = useMemo(
     () => chats.find((c) => c.companionId === companionId) ?? null,
@@ -126,12 +136,16 @@ export function ChatRoom({
     send: sendTurn,
     cancel,
     unqueue,
+    meter,
+    activity,
+    meters,
   } = useAgentTurn<CompanionMessage>({
     // Every name below already matches the hook's convention, so the existing
     // `companion_*` commands and `companion-*` events wire up untouched.
     surface: "companion",
     key: companionId,
     idField: "companionId",
+    meterKind: "companion",
     historyCmd: "companion_get_thread",
     historyArgs: { companionId },
     sendFailPrefix: "Couldn't reach the chat agent",
@@ -156,6 +170,22 @@ export function ChatRoom({
       createdAt: Date.now(),
     }),
   });
+
+  // A pressure drop is not a bug — it is auto-compaction or a fresh CLI
+  // session. Unlabelled, a fall from 78% to 12% reads as a broken meter.
+  const resets = useMemo(
+    () => contextResets(messages.map((m) => m.id), meters),
+    [messages, meters],
+  );
+
+  // Follow a streaming thread only while the reader is parked at the bottom.
+  // The rule lives in `useStickToBottom` — the turn footer changes every
+  // settled bubble's height, so five copies of it would need the same fix.
+  const {
+    ref: scrollRef,
+    onScroll,
+    stick,
+  } = useStickToBottom<HTMLDivElement>([messages, liveText]);
 
   // What the agent is retrieving right now. Retrieval takes most of a first
   // turn's wall clock, so without this the ticker sits blank through the part
@@ -188,22 +218,12 @@ export function ChatRoom({
     };
   }, [refreshChats]);
 
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (el && stickRef.current) el.scrollTop = el.scrollHeight;
-  }, [messages, liveText]);
-
-  const onScroll = () => {
-    const el = scrollRef.current;
-    if (!el) return;
-    stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-  };
 
   const send = useCallback(
     (text: string, opts?: { localBody?: string; extra?: HandoffTarget }) => {
       const composed = composePrompt(text, attachments);
       if (!composed) return;
-      stickRef.current = true;
+      stick();
       setNotice(null);
       sendTurn(composed, {
         localBody: opts?.localBody ?? composed,
@@ -222,11 +242,25 @@ export function ChatRoom({
   useEffect(() => {
     if (seeded.current || !seed?.trim() || !loaded || messages.length > 0) return;
     seeded.current = true;
-    stickRef.current = true;
+    stick();
     sendTurn(seed);
     onSeedConsumed?.();
   }, [seed, loaded, messages.length, sendTurn, onSeedConsumed]);
 
+  const streaming = status === "streaming";
+  // Read replies aloud. Persisted per install, not per chat: it is a property
+  // of how the user likes to work, not of one conversation.
+  const [speakReplies, setSpeakReplies] = usePersistedState<boolean>(
+    "redline.chat.speakReplies",
+    false,
+  );
+  const readAloud = useReadAloud({
+    enabled: speakReplies,
+    liveText,
+    streaming,
+    threadKey: companionId,
+    onError: (m) => setNotice(`🔇 Voice synthesis failed — ${m}`),
+  });
   const dictation = useDictation({
     enabled: dictationEnabled,
     onFinal: (spoken) =>
@@ -317,13 +351,31 @@ export function ChatRoom({
     [send],
   );
 
-  const streaming = status === "streaming";
   const canGraduate = messages.some((m) => m.role === "assistant") && !streaming;
+
+  // The header carries the same actions whether this room has the whole plate
+  // or is the ~360px column beside a surface, and labelled they do not fit the
+  // second — they used to run off the right edge, taking Close with them.
+  // Measured rather than told: the column is user-draggable, so its width is
+  // not something the host can predict on this component's behalf.
+  const headerRef = useRef<HTMLDivElement>(null);
+  const [pose, setPose] = useState<ToolbarPose>("full");
+  useEffect(() => {
+    const el = headerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([entry]) =>
+      setPose((prev) => toolbarPose(entry.contentRect.width, prev)),
+    );
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const compact = pose === "compact";
 
   return (
     <div className="flex h-full min-h-0 flex-col" style={{ background: "var(--color-paper)" }}>
       {/* Header: which chat, on what model, and the two ways out of it. */}
       <div
+        ref={headerRef}
         className="flex shrink-0 items-center gap-2 px-4 py-2"
         style={{ borderBottom: "1px solid var(--color-rule)" }}
       >
@@ -337,30 +389,65 @@ export function ChatRoom({
         />
         <span
           className="font-sans truncate"
-          style={{ fontSize: 12.5, fontWeight: 600, color: "var(--color-ink)" }}
+          style={{
+            fontSize: 12.5,
+            fontWeight: 600,
+            color: "var(--color-ink)",
+            // The title yields room before any action does: it is the one
+            // thing in this row that the conversation below also says.
+            flex: 1,
+            minWidth: 0,
+          }}
           title={me?.title}
         >
           {me?.title ?? "Chat"}
         </span>
-        <div style={{ flex: 1 }} />
         <ModelChip
           model={me?.model ?? null}
           effort={me?.effort ?? null}
           onChange={setModel}
         />
+        {/* Read aloud. The Companion talks WITHOUT becoming a voice session:
+            a `companion:` key would have split this one conversation across
+            two thread tables (see useReadAloud's note). Speaking is stopped
+            by tapping it again, and by anything that ends the turn. */}
         <ToolbarButton
-          label="→ Plan"
+          label={readAloud.speaking ? "🔊 Stop" : "🔊"}
+          title={
+            speakReplies
+              ? "Stop reading replies aloud"
+              : "Read replies aloud as they arrive"
+          }
+          on={speakReplies}
+          onClick={() => {
+            if (readAloud.speaking) readAloud.stop();
+            else setSpeakReplies((v) => !v);
+          }}
+        />
+        <ToolbarButton
+          label={compact ? <Rocket size={13} strokeWidth={2} /> : "→ Plan"}
           title="Distil this conversation into a prompt and launch a plan session from it"
           disabled={!canGraduate}
           onClick={() => graduate("plan")}
         />
         <ToolbarButton
-          label="→ Draft"
+          label={compact ? <FileText size={13} strokeWidth={2} /> : "→ Draft"}
           title="Distil this conversation into a Drafter document"
           disabled={!canGraduate}
           onClick={() => graduate("drafter")}
         />
-        <ToolbarButton label="Close" title="Back to the document" onClick={onClose} />
+        {onCollapse && (
+          <ToolbarButton
+            label="⤡"
+            title="Keep this conversation beside you instead of in front of you"
+            onClick={onCollapse}
+          />
+        )}
+        <ToolbarButton
+          label={compact ? <X size={13} strokeWidth={2} /> : "Close"}
+          title="Back to the document"
+          onClick={onClose}
+        />
       </div>
 
       {notice && (
@@ -400,6 +487,8 @@ export function ChatRoom({
               <ChatBubble
                 key={m.id}
                 msg={m}
+                meter={meters[m.id]}
+                contextReset={resets.has(m.id)}
                 onUnqueue={() => {
                   void unqueue(m.id).then((text) => {
                     if (text)
@@ -410,21 +499,28 @@ export function ChatRoom({
               />
             ))
           )}
-          {streaming &&
-            (liveText ? (
-              <div className="flex flex-col gap-0.5">
-                <RoleTag role="assistant" />
-                <div>
-                  <MarkdownView body={liveText} compact rich />
-                  <span style={{ color: "var(--color-ink-muted)" }}>▌</span>
-                </div>
-              </div>
-            ) : (
-              <WorkingIndicator
-                label={retrieving ?? "Thinking"}
-                startedAt={startedAt ?? undefined}
+          {streaming && (
+            <>
+              {/* One shared bubble now. Note the change of behaviour here: the
+                  chat room was the ONE surface that streamed with `rich`, so a
+                  half-written ```mermaid fence reached MermaidView mid-stream
+                  and flashed a "Diagram error" card. The shared bubble streams
+                  plain and the settled row below renders rich. */}
+              <StreamingBubble
+                text={liveText}
+                agent="Claude"
+                inspect={{ surface: "companion", key: companionId }}
+                meter={meter}
+                activity={activity}
               />
-            ))}
+              {!liveText && (
+                <WorkingIndicator
+                  label={retrieving ?? "Thinking"}
+                  startedAt={startedAt ?? undefined}
+                />
+              )}
+            </>
+          )}
         </div>
       </div>
 
@@ -580,10 +676,16 @@ function ChatBubble({
   msg,
   onUnqueue,
   onResend,
+  meter,
+  contextReset,
 }: {
   msg: CompanionMessage;
   onUnqueue?: () => void;
   onResend?: () => void;
+  /** This row's settled meter — the badge and footer that outlive the turn. */
+  meter?: TurnMeter | null;
+  /** This turn's context restarted (compaction or a fresh CLI session). */
+  contextReset?: boolean;
 }) {
   const isUser = msg.role === "user";
   const isError = msg.status === "error";
@@ -611,6 +713,7 @@ function ChatBubble({
       )}
       {isQueued && <QueuedChip onUnqueue={onUnqueue} />}
       {isUnsent && <UnsentNote onResend={onResend} />}
+      {!isUser && <TurnFooter meter={meter} contextReset={contextReset} />}
     </div>
   );
 }
@@ -620,11 +723,15 @@ function ToolbarButton({
   title,
   onClick,
   disabled,
+  on,
 }: {
-  label: string;
+  label: ReactNode;
   title: string;
   onClick: () => void;
   disabled?: boolean;
+  /** A toggle that is currently ON — tinted rather than merely pressed, the
+   *  same signal the browser chrome's pills use. */
+  on?: boolean;
 }) {
   return (
     <button
@@ -633,6 +740,9 @@ function ToolbarButton({
       onClick={onClick}
       disabled={disabled}
       title={title}
+      // The compact pose is an icon and nothing else, so the accessible name
+      // has to come from here rather than from the button's content.
+      aria-label={title}
       style={{
         fontSize: 11,
         padding: "3px 10px",
@@ -643,7 +753,14 @@ function ToolbarButton({
         color: "var(--color-ink)",
         opacity: disabled ? 0.45 : 1,
         whiteSpace: "nowrap",
+        ...(on
+          ? {
+              color: "var(--color-info)",
+              borderColor: "var(--color-info)",
+            }
+          : null),
       }}
+      aria-pressed={on}
     >
       {label}
     </button>

@@ -5,18 +5,29 @@ import { invoke } from "@tauri-apps/api/core";
 import { useAdjustDiscussionZoom } from "./DiscussionViewContext";
 import type { Comment, CommentAttachment, ThreadMessage } from "../types";
 import { useAgentTurn } from "../hooks/useAgentTurn";
+import { priorUserBody } from "../lib/agentTurn";
+import { RetryNote, UnsentNote } from "./QueuedChip";
 import { useAttachmentCapture } from "../hooks/useAttachmentCapture";
 // The rider note a transcript produces — also used to detect that an attached
 // rider is stale (the discussion continued after attaching).
 import { transcriptNote } from "../lib/attachmentNote";
+import { agentLabelFor } from "../lib/backendChoice";
 import { AttachmentChips } from "./AttachmentChips";
 import { MarkdownView } from "./MarkdownView";
+import StreamingBubble from "./StreamingBubble";
+import TurnFooter from "./TurnFooter";
+import type { TurnMeter } from "../lib/turnMeter";
 import { WorkingIndicator } from "./WorkingIndicator";
 
 interface CommentThreadProps {
   /** The review session id — keys the fork backend with the comment id. */
   sessionId: string;
   comment: Comment;
+  /** Which harness authored this plan (`sessions.backend`) — the discussion
+   *  forks the SAME conversation, so a Codex plan is discussed with Codex.
+   *  `null` on every pre-backend session and reads as Claude. Only the naming
+   *  lives here; `fork.rs` picks the actual binary from the same value. */
+  backend?: string | null;
   /** True once, when a voice-authored comment was just created: expand the
    *  thread so the captured feedback is visible without a click. */
   autoOpen?: boolean;
@@ -37,7 +48,8 @@ function discussSeed(c: Comment): string {
   return "Let's talk through this part of the plan.";
 }
 
-/** A per-comment discussion with a Claude Code fork of the main session.
+/** A per-comment discussion with a fork of the plan session, running on the
+ *  harness that authored the plan (Claude Code or Codex — `backend`).
  *  Rendered inside `CommentCard`; collapses to a one-line summary. Mirrors
  *  Streaming runs on the shared `useAgentTurn` lifecycle (T3.2), so a
  *  mid-turn remount restores the partial reply instead of resuming blank. */
@@ -48,10 +60,15 @@ function discussSeed(c: Comment): string {
 export const CommentThread = memo(function CommentThread({
   sessionId,
   comment,
+  backend = null,
   autoOpen = false,
   onAutoOpenConsumed,
 }: CommentThreadProps) {
   const commentId = comment.id;
+  // Derived ONCE and threaded through every label below: the entry button, the
+  // bubbles, the collapsed summary, the sidecar status copy and the escalated
+  // transcript must all name the same agent, because they describe one process.
+  const agent = agentLabelFor(backend);
   // The shared text size is applied via the `--rl-discussion-zoom` CSS var set
   // once on the discussion pane; here we only need the stable adjuster for A−/A+.
   const adjustZoom = useAdjustDiscussionZoom();
@@ -83,6 +100,8 @@ export const CommentThread = memo(function CommentThread({
     key: `${sessionId}:${commentId}`,
     idField: null,
     idFields: { sessionId, commentId },
+    meterKind: "fork",
+    meterThreadId: sessionId,
     historyCmd: "get_thread",
     historyArgs: { sessionId, commentId },
     commands: {
@@ -116,14 +135,14 @@ export const CommentThread = memo(function CommentThread({
       attachments: role === "user" ? pendingAttachments.current : undefined,
     }),
   });
-  const { messages, liveText, loaded } = turn;
+  const { messages, liveText, loaded, retrying } = turn;
   const status: ThreadStatus = turn.status;
   // When the current wait began — drives the WorkingIndicator's elapsed
   // counter through the dead air before the first delta. Backend clock now,
   // so a remount mid-turn shows the true elapsed time instead of restarting.
   const workStartedAt = turn.startedAt;
   // When the reviewer manually collapses an expanded thread, suppress the
-  // streaming auto-expand until the next send — otherwise a long Claude reply
+  // streaming auto-expand until the next send — otherwise a long streamed reply
   // keeps re-opening a thread they're deliberately trying to set aside.
   const userCollapsedRef = useRef(false);
 
@@ -160,25 +179,33 @@ export const CommentThread = memo(function CommentThread({
 
   const cancel = turn.cancel;
 
+  /** Re-send the question an error row is the failed answer to. Offered on the
+   *  thread's LAST row only: an error further up has already been answered by
+   *  whatever came after it, and re-asking would duplicate the exchange. */
+  const retryAt = (list: ThreadMessage[], i: number): (() => void) | undefined => {
+    const body = priorUserBody(list, i);
+    return body ? () => send(body) : undefined;
+  };
+
   // Route a read-only discussion into the main revise loop: attach the
   // transcript to the comment as its rider note, so the next Submit carries
   // the original feedback + everything we just worked out. Works on drafts
   // (rider rides pre-submit, no wasted round-trip) and on resolved comments
   // (reopens with the transcript as follow-up). The card updates via the
   // comments-changed reload the backend emits.
-  function sendToClaude(transcript: ThreadMessage[]) {
+  function attachTranscript(transcript: ThreadMessage[]) {
     // A discussed question that's escalated has become a decision — promote it
     // so the next Revise actually changes the plan, not just answers again.
     const asChange = comment.type === "question";
     void invoke("attach_discussion", {
       sessionId,
       commentId,
-      note: transcriptNote(transcript),
+      note: transcriptNote(transcript, agent),
       asChange,
     }).catch((err) => console.error("attach discussion failed", err));
   }
 
-  function detachFromClaude() {
+  function detachTranscript() {
     void invoke("attach_discussion", {
       sessionId,
       commentId,
@@ -194,6 +221,10 @@ export const CommentThread = memo(function CommentThread({
   // are resolution keys), so for those only the discussion is removed — same
   // rule as the card's ✕, which is also draft-only.
   const discardRemovesComment = comment.status === "draft";
+  // The turn is over — successfully or not. A failed turn used to lock the
+  // reviewer out of attaching (and then detaching) the transcript, which is
+  // exactly when they most want to route the exchange back into the plan.
+  const settled = status === "idle" || status === "error";
 
   function discard() {
     const threadGone = invoke("fork_thread_discard", {
@@ -217,7 +248,7 @@ export const CommentThread = memo(function CommentThread({
 
   // The opening user turn is the comment's own text (see `discussSeed`), which
   // the CommentCard already renders as the comment body — so don't echo it as a
-  // visible bubble. We still send it to the fork (Claude needs the question);
+  // visible bubble. We still send it to the fork (the agent needs the question);
   // we just hide the redundant first "You:" turn here. Covers both the
   // optimistic path (seed is messages[0]) and the persisted reload (get_thread
   // returns it as rows[0]).
@@ -228,7 +259,7 @@ export const CommentThread = memo(function CommentThread({
   // Escalation is available the moment the discussion has substance — before
   // any round-trip (a draft's rider rides with the next submit) and after a
   // resolution (reopen with the transcript as follow-up). Excluded: submitted
-  // (batch in flight — nothing to attach to until Claude responds) and
+  // (batch in flight — nothing to attach to until the plan agent responds) and
   // accepted/withdrawn (closed; CommentCard's Reopen is the deliberate way
   // back in).
   const canEscalate =
@@ -249,7 +280,7 @@ export const CommentThread = memo(function CommentThread({
   // transcript — offer a one-click refresh instead of silently sending the
   // stale snapshot.
   const riderStale =
-    riderAttached && transcriptNote(visible) !== comment.reopenNote;
+    riderAttached && transcriptNote(visible, agent) !== comment.reopenNote;
 
   // No thread yet (or only the suppressed seed) — the entry point.
   if (visible.length === 0 && status === "idle") {
@@ -270,7 +301,7 @@ export const CommentThread = memo(function CommentThread({
             fontSize: "11px",
           }}
         >
-          💬 Discuss with Claude
+          💬 Discuss with {agent}
         </button>
       </div>
     );
@@ -278,7 +309,7 @@ export const CommentThread = memo(function CommentThread({
 
   const last = visible[visible.length - 1];
   const summary = last
-    ? `${last.role === "user" ? "You" : "Claude"}: ${last.body
+    ? `${last.role === "user" ? "You" : agent}: ${last.body
         .replace(/\s+/g, " ")
         .trim()
         .slice(0, 90)}`
@@ -341,7 +372,7 @@ export const CommentThread = memo(function CommentThread({
           {riderSent && (
             <span className="rl-pulse" style={{ color: "var(--color-warning)" }}>
               {comment.actionable
-                ? "· decision sent · Claude is applying…"
+                ? `· decision sent · ${agent} is applying…`
                 : "· sent · riding with this submit…"}
             </span>
           )}
@@ -409,15 +440,40 @@ export const CommentThread = memo(function CommentThread({
               enlarged ? "rl-thread-scroll-tall" : "rl-thread-scroll"
             }`}
           >
-            {visible.map((m) => (
-              <MessageBubble key={m.id} msg={m} />
+            {visible.map((m, i) => (
+              <MessageBubble
+                key={m.id}
+                msg={m}
+                meter={turn.meters[m.id]}
+                agent={agent}
+                onRetry={
+                  m.status === "error" && i === visible.length - 1
+                    ? retryAt(visible, i)
+                    : undefined
+                }
+                onResend={
+                  m.status === "unsent" ? () => send(m.body) : undefined
+                }
+              />
             ))}
-            {status === "streaming" &&
-              (liveText ? (
-                <StreamingBubble text={liveText} />
-              ) : (
-                <WorkingIndicator startedAt={workStartedAt ?? undefined} />
-              ))}
+            {status === "streaming" && (
+              <>
+                {/* The badge and the activity line fill the wait the blank
+                    ticker used to — so the bubble renders from the first line
+                    of the stream, not the first token. */}
+                <StreamingBubble
+                  text={liveText}
+                  agent={agent}
+                  inspect={{ surface: "fork", key: commentId }}
+                  retrying={retrying}
+                  meter={turn.meter}
+                  activity={turn.activity}
+                />
+                {!liveText && !retrying && (
+                  <WorkingIndicator startedAt={workStartedAt ?? undefined} />
+                )}
+              </>
+            )}
           </div>
 
           <Composer
@@ -435,14 +491,14 @@ export const CommentThread = memo(function CommentThread({
           {/* Once the exchange has settled, let the reviewer route what they
               just worked out back into the revise loop — the fork itself
               can't change the plan. Available pre-submit (the rider bundles
-              into the next Send to Claude Code) and post-resolution (reopens
+              into the next submit) and post-resolution (reopens
               with the transcript as follow-up). Once attached, the button
               gives way to detach (and a refresh when the discussion has
               continued past the attached snapshot). */}
-          {canEscalate && status === "idle" && !riderAttached && (
+          {canEscalate && settled && !riderAttached && (
             <button
               type="button"
-              onClick={() => sendToClaude(visible)}
+              onClick={() => attachTranscript(visible)}
               className="self-start rounded px-2 py-1 font-medium"
               style={{
                 background: "var(--color-warning)",
@@ -460,12 +516,12 @@ export const CommentThread = memo(function CommentThread({
                 : "Attach to next submit →"}
             </button>
           )}
-          {riderAttached && status === "idle" && (
+          {riderAttached && settled && (
             <div className="flex items-center gap-2">
               {riderStale && (
                 <button
                   type="button"
-                  onClick={() => sendToClaude(visible)}
+                  onClick={() => attachTranscript(visible)}
                   title="The discussion continued after attaching — refresh the attached snapshot to include the new turns"
                   className="rounded px-2 py-1 font-medium"
                   style={{
@@ -479,7 +535,7 @@ export const CommentThread = memo(function CommentThread({
               )}
               <button
                 type="button"
-                onClick={detachFromClaude}
+                onClick={detachTranscript}
                 title={
                   comment.actionable
                     ? "Remove from the next submit (also un-promotes the decision)"
@@ -497,7 +553,7 @@ export const CommentThread = memo(function CommentThread({
               className="self-start italic"
               style={{ fontSize: "10px", color: "var(--color-ink-muted)" }}
             >
-              Sent — escalate after Claude responds.
+              Sent — escalate after {agent} responds.
             </span>
           )}
 
@@ -522,9 +578,25 @@ export const CommentThread = memo(function CommentThread({
   );
 });
 
-function MessageBubble({ msg }: { msg: ThreadMessage }) {
+function MessageBubble({
+  msg,
+  agent,
+  onRetry,
+  onResend,
+  meter,
+}: {
+  msg: ThreadMessage;
+  agent: string;
+  /** Present only on the thread's last row when it failed. */
+  onRetry?: () => void;
+  /** Present only on a user row whose send never became a turn. */
+  onResend?: () => void;
+  /** This row's settled meter — the badge and footer that outlive the turn. */
+  meter?: TurnMeter | null;
+}) {
   const isUser = msg.role === "user";
   const isError = msg.status === "error";
+  const isUnsent = msg.status === "unsent";
   return (
     <div className="flex flex-col gap-0.5">
       <span
@@ -533,10 +605,17 @@ function MessageBubble({ msg }: { msg: ThreadMessage }) {
           fontWeight: 600,
           textTransform: "uppercase",
           letterSpacing: "0.07em",
-          color: isUser ? "var(--color-ink-muted)" : "var(--color-info)",
+          color: isUser
+            ? "var(--color-ink-muted)"
+            : isError
+              ? "var(--color-warning)"
+              : "var(--color-info)",
         }}
       >
-        {isUser ? "You" : "Claude"}
+        {/* Redline wrote the error sentence, not the model. Bylining it
+            `agent` is what made a raw machine token read as something Claude
+            had said. */}
+        {isUser ? "You" : isError ? "Redline" : agent}
       </span>
       {isError ? (
         <div
@@ -552,44 +631,13 @@ function MessageBubble({ msg }: { msg: ThreadMessage }) {
       ) : (
         <MarkdownView body={msg.body} compact rich />
       )}
+      {isError && onRetry && <RetryNote onRetry={onRetry} />}
+      {isUnsent && <UnsentNote onResend={onResend} />}
+      {!isUser && <TurnFooter meter={meter} />}
       {/* What the reviewer attached to this turn — read-only in the
           transcript; the fork was given the paths to read. */}
       {msg.attachments && msg.attachments.length > 0 && (
         <AttachmentChips attachments={msg.attachments} />
-      )}
-    </div>
-  );
-}
-
-function StreamingBubble({ text }: { text: string }) {
-  return (
-    <div className="flex flex-col gap-0.5">
-      <span
-        style={{
-          fontSize: "9px",
-          fontWeight: 600,
-          textTransform: "uppercase",
-          letterSpacing: "0.07em",
-          color: "var(--color-info)",
-        }}
-      >
-        Claude
-      </span>
-      {text ? (
-        <div>
-          <MarkdownView body={text} compact />
-          <span style={{ color: "var(--color-ink-muted)" }}>▌</span>
-        </div>
-      ) : (
-        <div
-          style={{
-            fontSize: "calc(12.5px * var(--rl-discussion-zoom, 1))",
-            lineHeight: 1.5,
-            color: "var(--color-ink-muted)",
-          }}
-        >
-          thinking…
-        </div>
       )}
     </div>
   );

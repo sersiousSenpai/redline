@@ -162,10 +162,26 @@ function InterceptStrip() {
  *  terminal that lives in that folder. */
 export interface TerminalTabsHandle {
   selectTab: (id: string) => void;
+  /** Flash a one-shot ring around a terminal's tile. `selectTab` puts the
+   *  right tile under the focus ring; on a wall of fourteen that is not
+   *  always where the eye is. Purely decorative — a no-op for an id that
+   *  isn't open, or isn't currently tiled. */
+  hailTerminal: (id: string) => void;
   /** Open a fresh terminal in `cwd`, show it, and return its id so the host
    *  can drive it (e.g. "Restore plan session" writes `claude --resume …`
-   *  into it). cwd null → backend resolves to $HOME. */
-  openSessionTerminal: (cwd: string | null) => string;
+   *  into it). cwd null → backend resolves to $HOME.
+   *
+   *  `background` creates the terminal without tiling, selecting or focusing
+   *  it: the PTY spawns and the shell runs exactly as always (every tab's
+   *  `<TerminalView>` is mounted whether tiled or not — untiled ones are
+   *  `display:none`), it just doesn't take a tile out from under whatever the
+   *  reviewer is watching. Used by a restore, whose terminal is machinery
+   *  rather than a place to work; it stays in the tile menus and takes
+   *  held/unseen state normally, so `selectTab` promotes it on demand. */
+  openSessionTerminal: (
+    cwd: string | null,
+    opts?: { background?: boolean },
+  ) => string;
 }
 
 /** Trailing-slash-insensitive path compare key. */
@@ -846,11 +862,52 @@ export const TerminalTabs = memo(
     lastHintRef.current = el;
   };
 
+  // "That one" — a one-shot bloom on the tile a caller just revealed. Same
+  // no-render discipline as `hintTile`: a class write on the ref-mapped
+  // element, never a state change that would re-render fourteen terminals.
+  //
+  // The remove/reflow/add dance is what makes a REPEAT hail visible: a CSS
+  // animation restarts only when the element re-enters the animating state,
+  // so re-adding a class the node already carries plays nothing — and
+  // clicking the pill twice is precisely the press that must not look
+  // ignored. Reading `offsetWidth` between the two flushes the style change.
+  const hailTimerRef = useRef<number | null>(null);
+  const hailElRef = useRef<HTMLElement | null>(null);
+  const HAIL_MS = 1400;
+  const hailTile = (id: string) => {
+    if (hailTimerRef.current !== null) {
+      window.clearTimeout(hailTimerRef.current);
+      hailTimerRef.current = null;
+    }
+    // An earlier hail still glowing on a DIFFERENT tile would otherwise be
+    // left lit forever by the timer we just cancelled.
+    hailElRef.current?.classList.remove("is-hailed");
+    const el = tileElsRef.current.get(id);
+    if (!el) return;
+    el.classList.remove("is-hailed");
+    void el.offsetWidth;
+    el.classList.add("is-hailed");
+    hailElRef.current = el;
+    hailTimerRef.current = window.setTimeout(() => {
+      el.classList.remove("is-hailed");
+      hailTimerRef.current = null;
+      if (hailElRef.current === el) hailElRef.current = null;
+    }, HAIL_MS);
+  };
+  useEffect(
+    () => () => {
+      if (hailTimerRef.current !== null) window.clearTimeout(hailTimerRef.current);
+    },
+    [],
+  );
+
   // Expose selection to the host. Handlers are recreated each render, so the
   // handle reads them through refs and guards against a stale id (a terminal
   // closed since the folder→terminal mapping was recorded).
   const selectTabRef = useRef(selectTab);
   selectTabRef.current = selectTab;
+  const hailTileRef = useRef(hailTile);
+  hailTileRef.current = hailTile;
   const openTileRef = useRef(openTerminalTile);
   openTileRef.current = openTerminalTile;
   useImperativeHandle(
@@ -859,12 +916,19 @@ export const TerminalTabs = memo(
       selectTab: (id: string) => {
         if (tabsRef.current.some((t) => t.id === id)) selectTabRef.current(id);
       },
-      openSessionTerminal: (cwd: string | null) => {
+      hailTerminal: (id: string) => {
+        // Same stale-id guard `selectTab` takes: the mapping that produced
+        // this id may outlive the terminal it named.
+        if (tabsRef.current.some((t) => t.id === id)) hailTileRef.current(id);
+      },
+      openSessionTerminal: (cwd: string | null, opts) => {
         const id = crypto.randomUUID();
         setTabs((prev) => [...prev, { id, cwd }]);
         // Prefer an empty slot in the grid over silently evicting whatever
-        // the reviewer was watching in the focused tile.
-        openTileRef.current(id, focusIdxRef.current);
+        // the reviewer was watching in the focused tile. Skipped entirely for
+        // a background terminal: the tab exists (so its PTY spawns and the
+        // menus list it), it simply occupies no tile until something asks.
+        if (!opts?.background) openTileRef.current(id, focusIdxRef.current);
         return id;
       },
     }),
@@ -1044,6 +1108,9 @@ export const TerminalTabs = memo(
                 if (el) tileElsRef.current.set(t.id, el);
                 else tileElsRef.current.delete(t.id);
               }}
+              // A stable hook for the hail keyframe. The wrapper was
+              // style-only; `hailTile` adds `is-hailed` to this same node.
+              className="rl-tile-wrap"
               style={wrapperStyle(rect, isZoomed, hiddenByZoom)}
             >
               {tiled && ident && (

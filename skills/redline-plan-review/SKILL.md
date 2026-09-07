@@ -6,7 +6,7 @@ description: >-
   [feedback], or [question], rl:blk- block-identity sidecars, or a
   REDLINE_RESOLUTIONS block. Covers presentation-aware plan markdown,
   preserving sidecars, and emitting resolutions.
-version: 13
+version: 14
 ---
 
 # Redline review protocol
@@ -208,25 +208,58 @@ resolve it in `REDLINE_RESOLUTIONS` like any other comment id.
 When a reviewer reopens a detached plan, Redline resumes your session and asks
 you to re-present your current plan. Two things are true of a resumed session:
 
-- You start **outside** plan mode (a `--resume` lands you there even with
-  `--permission-mode plan`).
 - Your plan body is **not** in the restored context.
+- You may or may not already be in plan mode. `--permission-mode plan` puts a
+  resumed session there on Claude Code 2.1.222; call `EnterPlanMode` only if you
+  find you are not.
 
 Neither matters, because **Redline already holds your current plan and
 re-presents it itself** — a restore just needs you to re-establish the held
 `ExitPlanMode`. Do the minimum; do **not** fetch the plan from the daemon or
-retype it. Follow this fixed sequence:
+retype it, and do not explore the codebase.
 
-1. **`EnterPlanMode`** — establishes plan mode and gives you a fresh plan-file
-   path. (Don't list session directories.)
-2. **Write exactly the `<!-- REDLINE_RESTORE:… -->` marker the resume command
-   gave you** as your plan file's contents — a one-line placeholder carrying the
-   held plan's session id (e.g. `<!-- REDLINE_RESTORE:36c1d078-… -->`). Write it
-   verbatim, including the id; that id lets Redline rebind the restore even if
-   this resumed session got a new id. Redline recognizes the marker, restores the
-   plan it holds, and **ignores** whatever body you submit. (A bare
-   `<!-- REDLINE_RESTORE -->` still works for an in-place restore.)
-3. **`ExitPlanMode`** — the hook reopens the held plan in Redline's editor.
+### What arrives
+
+One compact line, e.g.
+
+```
+Redline restore · 2026-09-04 15:10 — call ExitPlanMode now, as your very first
+action, with your plan file exactly as it stands. Nothing else — Redline
+re-presents the plan it holds and ignores what you submit.
+```
+
+That is deliberately short. The full protocol reaches you separately as hidden
+context on the same turn (Redline's prompt-ingest hook answers with
+`additionalContext`), because a resumed session replays its earlier user turns —
+so a paragraph here would be replayed to the reviewer on every later restore and
+read as an accidental double-send. **Follow whichever you get; they agree.** If
+only the compact line arrives, it is complete on its own.
+
+### The handshake, in two versions
+
+Redline says which one you are in.
+
+**Primed** — Redline has already written your plan file for you. It contains
+exactly the `<!-- REDLINE_RESTORE:… -->` marker. **Call `ExitPlanMode` now, as
+your very first action**, with no other tool calls and no preamble. (Only if the
+file somehow does not contain that line, write it there first.)
+
+**Unprimed** — **write exactly the `<!-- REDLINE_RESTORE:… -->` marker the
+trigger gave you** as your plan file's contents, then call `ExitPlanMode`. It is
+a one-line placeholder carrying the *held* plan's session id (e.g.
+`<!-- REDLINE_RESTORE:36c1d078-… -->`). Write it verbatim, including the id: that
+id is what lets Redline rebind the restore even though this resumed session may
+have been given a new one. (A bare `<!-- REDLINE_RESTORE -->` still works for an
+in-place restore.)
+
+Each step is a model round trip against a resumed session's full context, so the
+primed path exists precisely to spend one instead of three.
+
+### Rescinded approvals
+
+If the trigger says an earlier Redline stand-down is void, it is: the reviewer
+un-approved an Orchestrate and this plan is back in review. Do not act on the
+stand-down still sitting in your context.
 
 A restore is a **re-presentation, not a revision**: don't fetch the body, don't
 retype it, and don't add a `REDLINE_RESOLUTIONS` block. Any actual changes flow

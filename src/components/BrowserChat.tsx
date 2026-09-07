@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { memo, useEffect, useRef, useState } from "react";
+import { useMemo, memo, useEffect, useRef, useState } from "react";
 import {
   Copy,
   Link2,
@@ -15,8 +15,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { captureSnapshotOrCached } from "../lib/domSnapshot";
 import type { BrowseMessage } from "../types";
 import { useAgentTurn } from "../hooks/useAgentTurn";
+import { useStickToBottom } from "../hooks/useStickToBottom";
 import { usePersistedState } from "../theme/usePersistedState";
 import { MarkdownView } from "./MarkdownView";
+import StreamingBubble from "./StreamingBubble";
+import TurnFooter, { ThreadMeterStrip } from "./TurnFooter";
+import { contextResets, type TurnMeter } from "../lib/turnMeter";
 import { QueuedChip, UnsentNote } from "./QueuedChip";
 import { WorkingIndicator } from "./WorkingIndicator";
 
@@ -175,21 +179,32 @@ export const BrowserChat = memo(function BrowserChat({
   // Per-source thumbs verdicts for this tab's thread (url → +1 / -1), restored
   // from the backend so ratings survive a reload. Only meaningful in tandem mode.
   const [feedback, setFeedback] = useState<Record<string, number>>({});
-  const scrollRef = useRef<HTMLDivElement>(null);
   // Whether to keep the newest content in view as it streams. True only while
   // the user is parked at (or near) the bottom — scroll up to read mid-stream
   // and we leave you where you are, like ChatGPT / Claude desktop.
-  const stickRef = useRef(true);
 
   // The turn lifecycle — persisted thread, live stream, mid-turn remount
   // restore (partial text + spinner), self-heal — lives in the shared hook,
   // keyed by browseId: switching tabs rebinds it; a turn left streaming keeps
   // running backend-side and is picked up loss-free on return.
-  const { messages, liveText, status, startedAt, loaded, send, cancel, unqueue, clear } =
-    useAgentTurn<BrowseMessage>({
+  const {
+    messages,
+    liveText,
+    status,
+    startedAt,
+    loaded,
+    send,
+    cancel,
+    unqueue,
+    clear,
+    meter,
+    activity,
+    meters,
+  } = useAgentTurn<BrowseMessage>({
       surface: "browse",
       key: browseId,
       idField: "browseId",
+      meterKind: "browse",
       historyCmd: "get_browse_thread",
       historyArgs: { browseId },
       sendFailPrefix: "Couldn't reach the browse agent",
@@ -225,6 +240,22 @@ export const BrowserChat = memo(function BrowserChat({
         createdAt: Date.now(),
       }),
     });
+
+  // A pressure drop is not a bug — it is auto-compaction or a fresh CLI
+  // session. Unlabelled, a fall from 78% to 12% reads as a broken meter.
+  const resets = useMemo(
+    () => contextResets(messages.map((m) => m.id), meters),
+    [messages, meters],
+  );
+
+  // Follow a streaming thread only while the reader is parked at the bottom.
+  // The rule lives in `useStickToBottom` — the turn footer changes every
+  // settled bubble's height, so five copies of it would need the same fix.
+  const {
+    ref: scrollRef,
+    onScroll,
+    stick,
+  } = useStickToBottom<HTMLDivElement>([messages, liveText]);
 
   // Restore this tab's source thumbs on mount / tab switch.
   useEffect(() => {
@@ -268,7 +299,7 @@ export const BrowserChat = memo(function BrowserChat({
 
   // Re-pin to the bottom when the active tab changes (fresh thread load).
   useEffect(() => {
-    stickRef.current = true;
+    stick();
   }, [browseId]);
 
   // A seed (`💬` on a list item) MERGES into the draft rather than replacing
@@ -294,7 +325,7 @@ export const BrowserChat = memo(function BrowserChat({
       // one-tap intent mid-answer needs nothing special here, and going through
       // it (rather than `browse_send`) keeps the optimistic bubble and the
       // stream wiring intact.
-      stickRef.current = true;
+      stick();
       send(seed.text);
       onSeedConsumed?.();
       return;
@@ -314,19 +345,9 @@ export const BrowserChat = memo(function BrowserChat({
 
   // Follow streaming/new turns only while the user is parked at the bottom;
   // if they've scrolled up to read, leave their position untouched.
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (el && stickRef.current) el.scrollTop = el.scrollHeight;
-  }, [messages, liveText]);
 
   // Recompute stickiness from the live scroll position. A small threshold keeps
   // "follow" engaged through sub-pixel rounding and the trailing cursor glyph.
-  function onScroll() {
-    const el = scrollRef.current;
-    if (!el) return;
-    stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-  }
-
   function discard() {
     void invoke("browse_discard", { browseId }).catch(() => {});
     clear();
@@ -503,6 +524,8 @@ export const BrowserChat = memo(function BrowserChat({
             <MessageBubble
               key={m.id}
               msg={m}
+              meter={meters[m.id]}
+              contextReset={resets.has(m.id)}
               onOpenLink={onOpenLink}
               onSendToRedline={onSendToRedline}
               onSendToDrafter={onSendToDrafter}
@@ -517,24 +540,36 @@ export const BrowserChat = memo(function BrowserChat({
                 });
               }}
               onResend={() => {
-                stickRef.current = true;
+                stick();
                 send(m.body);
               }}
             />
           ))
         )}
-        {status === "streaming" &&
-          ((tandem ? stripStreamingSources(liveText) : liveText) ? (
+        {status === "streaming" && (
+          <>
+            {/* The bubble renders from the FIRST line of the stream, not the
+                first token: the badge and the activity line are exactly what
+                fills the wait a blank ticker used to. */}
             <StreamingBubble
               text={tandem ? stripStreamingSources(liveText) : liveText}
+              agent="Claude"
+              inspect={{ surface: "browse", key: browseId }}
+              meter={meter}
+              activity={activity}
               onOpenLink={onOpenLink}
             />
-          ) : (
-            <WorkingIndicator startedAt={startedAt ?? undefined} />
-          ))}
+            {!(tandem ? stripStreamingSources(liveText) : liveText) && (
+              <WorkingIndicator startedAt={startedAt ?? undefined} />
+            )}
+          </>
+        )}
       </div>
 
       <div className="px-3 py-2 shrink-0" style={{ borderTop: "1px solid var(--color-rule)" }}>
+        {/* Economics BY SUBPROCESS: a consult spawns a real child `claude`, so
+            "by model" is the honest unit here, not "by message". */}
+        <ThreadMeterStrip meters={meters} />
         <Composer
           taRef={composerRef}
           draft={draft}
@@ -543,7 +578,7 @@ export const BrowserChat = memo(function BrowserChat({
           onSend={() => {
             // Sending a turn jumps you to the bottom to see your message + the
             // reply begin; from there the scroll listener takes over.
-            stickRef.current = true;
+            stick();
             send(draft);
             setDraft("");
           }}
@@ -566,6 +601,8 @@ function MessageBubble({
   onVerdict,
   onUnqueue,
   onResend,
+  meter,
+  contextReset,
 }: {
   msg: BrowseMessage;
   onOpenLink?: (url: string) => void;
@@ -578,6 +615,10 @@ function MessageBubble({
   onVerdict?: (source: Source, verdict: number) => void;
   onUnqueue?: () => void;
   onResend?: () => void;
+  /** This row's settled meter — the badge and footer that outlive the turn. */
+  meter?: TurnMeter | null;
+  /** This turn's context restarted (compaction or a fresh CLI session). */
+  contextReset?: boolean;
 }) {
   const isUser = msg.role === "user";
   const isError = msg.status === "error";
@@ -639,6 +680,7 @@ function MessageBubble({
           onAddToList={onAddToList}
         />
       )}
+      {!isUser && <TurnFooter meter={meter} contextReset={contextReset} />}
     </div>
   );
 }
@@ -851,46 +893,6 @@ function MessageActions({
         >
           Send to Claude Code ▶
         </button>
-      )}
-    </div>
-  );
-}
-
-function StreamingBubble({
-  text,
-  onOpenLink,
-}: {
-  text: string;
-  onOpenLink?: (url: string) => void;
-}) {
-  return (
-    <div className="flex flex-col gap-0.5">
-      <span
-        style={{
-          fontSize: "9px",
-          fontWeight: 600,
-          textTransform: "uppercase",
-          letterSpacing: "0.07em",
-          color: "var(--color-info)",
-        }}
-      >
-        Claude
-      </span>
-      {text ? (
-        <div>
-          <MarkdownView body={text} compact onLinkClick={onOpenLink} />
-          <span style={{ color: "var(--color-ink-muted)" }}>▌</span>
-        </div>
-      ) : (
-        <div
-          style={{
-            fontSize: "calc(12.5px * var(--rl-discussion-zoom, 1))",
-            lineHeight: 1.5,
-            color: "var(--color-ink-muted)",
-          }}
-        >
-          working…
-        </div>
       )}
     </div>
   );

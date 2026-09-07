@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { formatTokens } from "../lib/turnMeter";
+import { costEnabled, SHOW_COST_KEY } from "./TurnFooter";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ChevronDown, Search, Sparkles } from "lucide-react";
@@ -42,6 +44,7 @@ interface AgentSeatsView {
   seats: Record<string, SeatConfig>;
   knownSeats: string[];
   claudeBin: string | null;
+  codexBin: string | null;
   canRevert: boolean;
   blurbs: SeatBlurb[];
 }
@@ -63,14 +66,14 @@ export interface SeatRosterEntry {
   spawns: number;
 }
 
-/** Compact token count: 950 → "950", 12400 → "12.4k", 2000000 → "2M". */
-export function formatTokens(n: number): string {
-  const fmt = (v: number, suffix: string) =>
-    `${v.toFixed(1).replace(/\.0$/, "")}${suffix}`;
-  if (n >= 1_000_000) return fmt(n / 1_000_000, "M");
-  if (n >= 1_000) return fmt(n / 1_000, "k");
-  return String(n);
-}
+/** Compact token count: 950 → "950", 12400 → "12.4k", 2000000 → "2M".
+ *
+ *  Lives in `lib/turnMeter` now — the turn footer needed the same formatter,
+ *  and a third copy is how the first two happened. (NOT the same function as
+ *  `orchestration.ts`'s `formatTokens`, which rounds harder — `887k` where
+ *  this reads `887.2k`. Two deliberately different formatters, not a
+ *  duplicate; the Runs surface's tests pin its rounding.) */
+export { formatTokens };
 
 /** "never ran" / "just now" / "12m ago" / "3h ago" / "5d ago". */
 export function formatLastRun(
@@ -92,6 +95,49 @@ export function burnSummary(e: SeatRosterEntry): string {
     return "no burn recorded";
   }
   return `${formatTokens(e.inputTokens)} tok in · ${formatTokens(e.outputTokens)} tok out · ${e.spawns} spawn${e.spawns === 1 ? "" : "s"}`;
+}
+
+/** The plan session's burn, read-only. No model picker on purpose — the Front
+ *  Door owns that choice, and this row exists to make the biggest spender in
+ *  the app visible rather than configurable a second time. */
+function PlanBurnRow({ entry }: { entry?: SeatRosterEntry }) {
+  return (
+    <div className="px-4 py-2" style={{ borderBottom: "1px solid var(--color-rule)" }}>
+      <div className="flex items-center gap-2">
+        <GlowDot on={!!entry && entry.inputTokens + entry.outputTokens > 0} />
+        <span
+          className="font-sans flex-1 min-w-0"
+          style={{ fontSize: "12px", color: "var(--color-ink)" }}
+        >
+          Plan session (interactive)
+        </span>
+        <span
+          className="font-sans"
+          style={{ fontSize: "10.5px", color: "var(--color-ink-muted)" }}
+          title="The model comes from the Front Door's harness picker, not from a seat"
+        >
+          Front Door
+        </span>
+      </div>
+      <div
+        style={{
+          fontSize: "10px",
+          color: "var(--color-ink-muted)",
+          marginTop: "3px",
+          letterSpacing: "0.02em",
+        }}
+        title={
+          entry
+            ? `input ${entry.inputTokens} · output ${entry.outputTokens} · cache read ${entry.cacheReadTokens} · cache write ${entry.cacheCreationTokens}`
+            : undefined
+        }
+      >
+        {entry
+          ? `${formatTokens(entry.inputTokens)} tok in · ${formatTokens(entry.outputTokens)} tok out`
+          : "no burn recorded yet — read from the session transcript on a few-second tail"}
+      </div>
+    </div>
+  );
 }
 
 interface SeatRow {
@@ -138,6 +184,16 @@ const SEAT_GROUPS: { label: string; seats: SeatRow[] }[] = [
     ],
   },
 ];
+
+/** The interactive plan session's burn key.
+ *
+ *  Deliberately NOT a `KNOWN_SEATS` entry and deliberately NOT configurable:
+ *  the Front Door's backend/model picker already owns which model a plan
+ *  session launches on, and two owners for one setting is a bug factory. It
+ *  renders here as a label plus numbers — the surface the user spends the most
+ *  time in, finally visible in the economics. See `plan_meter.rs`.
+ */
+export const PLAN_SEAT = "plan";
 
 /** Seats whose row reads "Inherit" rather than "Default". */
 function defaultLabelFor(row: SeatRow): string {
@@ -725,6 +781,7 @@ export function AgentSeats() {
   const [open, setOpen] = useState(false);
   const [seats, setSeats] = useState<Record<string, SeatConfig>>({});
   const [claudeBin, setClaudeBin] = useState("");
+  const [codexBin, setCodexBin] = useState("");
   const [blurbs, setBlurbs] = useState<Record<string, SeatBlurb>>({});
   /** The roster rollup by seat: charter/trigger + stats + burn (P3). */
   const [roster, setRoster] = useState<Record<string, SeatRosterEntry>>({});
@@ -775,6 +832,7 @@ export function AgentSeats() {
         if (cancelled) return;
         setSeats(view.seats);
         setClaudeBin(view.claudeBin ?? "");
+        setCodexBin(view.codexBin ?? "");
         setCanRevert(view.canRevert);
         setBlurbs(
           Object.fromEntries((view.blurbs ?? []).map((b) => [b.seat, b])),
@@ -966,9 +1024,31 @@ export function AgentSeats() {
     );
   };
 
+  // The codex override earns its own row for a reason the claude one doesn't
+  // have: `$PATH` on a machine with the ChatGPT desktop app usually still
+  // points at an older standalone install that has no `app-server` and no
+  // `resume`, so "found" and "works" are different answers.
+  const saveCodexBin = (path: string) => {
+    setCodexBin(path);
+    setError(null);
+    void invoke("set_codex_bin_override", { path }).catch((e) =>
+      setError(String(e)),
+    );
+  };
+
   /** One roster row: the seat's name and standing charter/trigger, what it
    *  has actually done (stats + burn, tokens only), and the existing
    *  model/effort/fallback picker. */
+  const [showCost, setShowCostState] = useState(costEnabled);
+  const setShowCost = (on: boolean) => {
+    setShowCostState(on);
+    try {
+      localStorage.setItem(SHOW_COST_KEY, on ? "true" : "false");
+    } catch {
+      // A blocked localStorage just means the choice doesn't stick.
+    }
+  };
+
   const renderSeat = (row: SeatRow) => {
     const cfg = seats[row.name] ?? {};
     const defaultLabel = defaultLabelFor(row);
@@ -1582,6 +1662,59 @@ export function AgentSeats() {
                 </div>
               ))}
 
+              {/* The interactive plan session. A burn row, not a seat: its
+                  model is the Front Door's to choose. */}
+              <div>
+                <div
+                  className="font-sans px-4 pt-3 pb-1"
+                  style={{
+                    fontSize: "10px",
+                    fontWeight: 700,
+                    letterSpacing: "0.14em",
+                    textTransform: "uppercase",
+                    color: "var(--color-ink-muted)",
+                    borderBottom: "1px solid var(--color-rule)",
+                  }}
+                >
+                  Plan sessions
+                </div>
+                <PlanBurnRow entry={roster[PLAN_SEAT]} />
+              </div>
+
+              {/* The one setting the turn footer reads. It lives here, with
+                  the burn rollup, rather than in a settings surface of its
+                  own: this is where the user already comes to ask what things
+                  cost. */}
+              <div className="px-4 pt-3">
+                <label
+                  className="font-sans flex items-start gap-2"
+                  style={{ fontSize: "11.5px", color: "var(--color-ink)" }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={showCost}
+                    onChange={(e) => setShowCost(e.target.checked)}
+                    style={{ marginTop: "2px" }}
+                  />
+                  <span>
+                    Show a cost estimate under each reply
+                    <span
+                      style={{
+                        display: "block",
+                        fontSize: "10.5px",
+                        color: "var(--color-ink-muted)",
+                        marginTop: "1px",
+                      }}
+                    >
+                      The CLI's own list-price figure. Claude Code on a
+                      subscription is not billed per token, so this is an
+                      estimate of list price, not of your bill — tokens are the
+                      honest number, which is why they are always shown.
+                    </span>
+                  </span>
+                </label>
+              </div>
+
               <div className="px-4 py-3">
                 <div
                   className="font-sans"
@@ -1631,6 +1764,57 @@ export function AgentSeats() {
                   >
                     Applies to newly spawned agents; running ones keep their
                     binary.
+                  </div>
+                </div>
+                <div
+                  className="font-sans"
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "8px",
+                    padding: "10px 12px",
+                    marginTop: "8px",
+                    border: "1px solid var(--color-rule)",
+                    borderRadius: "8px",
+                    background: "var(--color-paper)",
+                  }}
+                >
+                  <div
+                    style={{
+                      fontSize: "10px",
+                      fontWeight: 700,
+                      letterSpacing: "0.14em",
+                      textTransform: "uppercase",
+                      color: "var(--color-ink-muted)",
+                    }}
+                  >
+                    Codex binary
+                  </div>
+                  <input
+                    type="text"
+                    aria-label="Codex binary path"
+                    value={codexBin}
+                    placeholder="Auto-detect (or an absolute path)"
+                    onChange={(e) => setCodexBin(e.target.value)}
+                    onBlur={(e) => saveCodexBin(e.target.value.trim())}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        saveCodexBin(
+                          (e.target as HTMLInputElement).value.trim(),
+                        );
+                      }
+                      if (e.key !== "Escape") e.stopPropagation();
+                    }}
+                    style={inputStyle}
+                  />
+                  <div
+                    style={{
+                      fontSize: "10.5px",
+                      color: "var(--color-ink-muted)",
+                    }}
+                  >
+                    Leave empty to auto-detect — the ChatGPT app's bundled
+                    build is preferred over an older one on your PATH.
                   </div>
                 </div>
                 {error && (

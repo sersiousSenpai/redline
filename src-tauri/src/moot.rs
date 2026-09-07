@@ -623,7 +623,7 @@ fn file_linkage(
 /// Run ONE participant pass to completion under the wall-clock ceiling and
 /// return its final text. The argv is fully built (and guarded) by the
 /// caller.
-async fn run_pass(seat: &str, args: Vec<String>) -> Result<String, String> {
+async fn run_pass(db: &Database, seat: &str, args: Vec<String>) -> Result<String, String> {
     let claude_bin = tokio::task::spawn_blocking(crate::claude_proc::resolve_claude_bin)
         .await
         .map_err(|e| e.to_string())?;
@@ -649,7 +649,7 @@ async fn run_pass(seat: &str, args: Vec<String>) -> Result<String, String> {
     let stderr = child.stderr.take().ok_or("moot pass stderr unavailable")?;
     let out = match tokio::time::timeout(
         Duration::from_secs(MOOT_PASS_TIMEOUT_SECS),
-        crate::claude_proc::collect_turn(stdout, stderr),
+        crate::claude_proc::collect_turn_seated(db, seat, stdout, stderr),
     )
     .await
     {
@@ -731,7 +731,7 @@ pub async fn moot_start(
             // Keep the headless `-p` out of the lake (the global hook would
             // otherwise capture the baked prompt as a human one).
             ledger::register_agent_prompt(&args[1]);
-            match run_pass(&seat, args).await {
+            match run_pass(&db, &seat, args).await {
                 Ok(text) => {
                     // ON THE RECORD: the chain event carries a digest of the
                     // turn as spoken — best-effort, never blocking the moot.

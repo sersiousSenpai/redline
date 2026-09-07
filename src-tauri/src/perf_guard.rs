@@ -180,6 +180,37 @@ mod tests {
         );
     }
 
+    /// Not a perf budget but the same mechanism: a source-shape invariant that
+    /// a refactor could silently undo, with real stakes.
+    ///
+    /// `/v1/liveness` is how a booting sibling decides whether the instance on
+    /// :7676 is a live app to defer to or a headless leftover to
+    /// `POST /v1/admin/shutdown`. `webview_windows()` empties as soon as the
+    /// browser pane attaches child webviews, so reading the count from it makes
+    /// a live, windowed app answer `hasWindow:false` — and the next
+    /// `npm run tauri dev` shuts it down with every hosted session inside it.
+    #[test]
+    fn liveness_counts_windows_not_webview_windows() {
+        let src = include_str!("lib.rs");
+        let start = src
+            .find("async fn handle_liveness")
+            .expect("lib.rs: handle_liveness must exist — it backs /v1/liveness");
+        let body = &src[start..];
+        let end = body.find("\n}\n").expect("handle_liveness must be a closed fn");
+        let body = &body[..end];
+        assert!(
+            !body.contains("webview_windows()"),
+            "lib.rs: `handle_liveness` must not read `webview_windows()` — it \
+             empties once the browser pane attaches child webviews, so a live \
+             app would report hasWindow:false and be shut down by a booting \
+             sibling's preflight"
+        );
+        assert!(
+            body.contains(".windows()"),
+            "lib.rs: `handle_liveness` must count real windows via `windows()`"
+        );
+    }
+
     /// PTY output must stay batched over a per-terminal raw-byte Channel — never
     /// a per-read global event (`pty-output`), which is the firehose that froze
     /// the whole app. Guard the structural markers so a refactor can't silently

@@ -93,3 +93,35 @@ export function withChatPatch(
   if (cur && cur.open === next.open && cur.pill === next.pill) return state;
   return { ...state, [browseId]: next };
 }
+
+/** What the browser pane tells the conversation dock about itself.
+ *
+ *  The three browser conversations (this tab's page, the linked thread, the
+ *  mission orchestrator) and the tab's working list all live in the dock now,
+ *  but their state — tabs, `useLinked`, `useMission` — stays inside
+ *  `BrowserPane`, which is the only thing that can own it. So the pane pushes
+ *  up the handful of IDS the dock needs to build its context list, and renders
+ *  the panels themselves into the dock through a portal. Small and
+ *  serializable on purpose: anything richer would be the pane's state living
+ *  in two places. */
+export interface BrowserDockState {
+  /** The tab whose conversation the pane is showing — usually the active tab,
+   *  but pinned to its origin when an agent opened the visible tab. */
+  browseId: string | null;
+  title: string | null;
+  /** The active tab's remembered pill, so the dock can lead with it. */
+  pill: ChatPill;
+  linkedId: string | null;
+  missionId: string | null;
+  missionTitle: string | null;
+}
+
+/** Nothing open — the shape App holds while the browser pane is unmounted. */
+export const NO_BROWSER_DOCK: BrowserDockState = {
+  browseId: null,
+  title: null,
+  pill: "page",
+  linkedId: null,
+  missionId: null,
+  missionTitle: null,
+};

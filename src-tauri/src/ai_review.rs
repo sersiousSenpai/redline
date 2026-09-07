@@ -642,6 +642,7 @@ pub async fn ai_review_start(
             let mut reader = BufReader::new(stdout).lines();
             let mut final_text: Option<String> = None;
             let mut errored: Option<String> = None;
+            let mut meter = crate::meter::TurnMeter::new();
             while let Ok(Some(line)) = reader.next_line().await {
                 activity.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
                 let trimmed = line.trim();
@@ -651,6 +652,8 @@ pub async fn ai_review_start(
                 let Ok(v) = serde_json::from_str::<Value>(trimmed) else {
                     continue;
                 };
+                // Second pass over the same value — the ONE accounting rule.
+                meter.observe(&v);
                 match classify_line(&v) {
                     StreamLine::Delta(text) => emit_log(text),
                     StreamLine::Final { text, .. } => final_text = Some(text),
@@ -658,7 +661,7 @@ pub async fn ai_review_start(
                     StreamLine::Init(_) | StreamLine::Ignore => {}
                 }
             }
-            (final_text, errored)
+            (final_text, errored, meter)
         };
         let stderr_fut = async {
             let mut lines = BufReader::new(stderr).lines();
@@ -667,7 +670,7 @@ pub async fn ai_review_start(
         let read_fut = async { tokio::join!(stdout_fut, stderr_fut).0 };
         tokio::pin!(read_fut);
         let mut stalled = false;
-        let (final_text, errored) = loop {
+        let (final_text, errored, meter) = loop {
             tokio::select! {
                 res = &mut read_fut => break res,
                 _ = tokio::time::sleep(Duration::from_secs(5)) => {
@@ -694,6 +697,10 @@ pub async fn ai_review_start(
                 }
             }
         };
+
+        // Booked above every exit below: cancelled and stalled reviews spent
+        // their input tokens exactly like a completed one.
+        crate::meter::book(&db, "ai_review", &meter);
 
         // A missing registry entry means Cancel (or the stall path) killed it.
         let proc = procs.lock().unwrap().remove(&rid);

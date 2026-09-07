@@ -13,6 +13,10 @@ interface CommentCardProps {
   comment: Comment;
   /** The review session id — passed through to the comment's fork thread. */
   sessionId: string;
+  /** Which harness authored the plan (`sessions.backend`). Passed straight
+   *  through to the discussion thread, which forks that same conversation and
+   *  names its agent accordingly. */
+  backend?: string | null;
   /** True when this card is the currently focused one (driven by the in-doc
    *  highlight click bridge or a direct click on the card). Surfaces a
    *  focused outline. */
@@ -95,6 +99,7 @@ const STATUS_COLORS: Record<CommentStatus, string> = {
 export const CommentCard = memo(function CommentCard({
   comment,
   sessionId,
+  backend = null,
   focused = false,
   autoOpen = false,
   onAutoOpenConsumed,
@@ -1039,6 +1044,7 @@ export const CommentCard = memo(function CommentCard({
         <CommentThread
           sessionId={sessionId}
           comment={comment}
+          backend={backend}
           autoOpen={autoOpen}
           onAutoOpenConsumed={onAutoOpenConsumed}
         />

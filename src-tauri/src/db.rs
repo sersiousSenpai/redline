@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::state::{
-    reparse_sections, AttachState, BrowseList, BrowseListItem, BrowseMessage, CodeReviewSession,
+    AttachState, BrowseList, BrowseListItem, BrowseMessage, CodeReviewSession,
     Comment, CommentAttachment,
     CommentKind, CommentOffer,
     CommentScope, CommentSelection, CommentStatus, EditPayload, Linked, LinkedMessage, Mission,
@@ -620,6 +620,20 @@ pub struct Database {
 /// poisoned lock would recurse forever.
 static POISON_REPORTED: AtomicBool = AtomicBool::new(false);
 
+// How many migration steps have executed **on this thread**. The fast path's
+// contract — an already-current database runs no schema SQL — is otherwise
+// unobservable from outside, and "it felt fast" is not a test.
+//
+// Thread-local, not a global atomic: the test suite runs in parallel and every
+// other test that opens an in-memory database runs the v1 step, so a
+// process-wide counter would measure the suite rather than the case. One test
+// thread per test makes this exact.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static MIGRATION_STEPS_RUN: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
 impl Database {
     /// The ONLY way production code takes the connection.
     ///
@@ -718,8 +732,201 @@ impl Database {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?.join(" | "))
     }
 
+    /// The schema version this build writes and expects.
+    ///
+    /// Bump it and add a step to `MIGRATIONS` in the same diff; never edit a
+    /// step that has shipped. A database stamped with a HIGHER version is
+    /// refused outright — an older build silently "migrating" a newer schema
+    /// by re-running additive steps is how you get a file that neither build
+    /// can read.
+    const SCHEMA_VERSION: i64 = 1;
+
+    /// Ordered migration steps. `(target_version, step)`: running `step` takes
+    /// a database from `target_version - 1` to `target_version`.
+    const MIGRATIONS: &'static [(i64, fn(&Connection) -> rusqlite::Result<()>)] =
+        &[(1, Self::migrate_v1)];
+
+    /// Bring the database to `SCHEMA_VERSION`, or return an error.
+    ///
+    /// The point of versioning is the **fast path**: an already-current
+    /// database costs one `PRAGMA user_version` read and nothing else. Before
+    /// this, every single launch replayed the entire schema — ~60
+    /// `CREATE TABLE IF NOT EXISTS`, ~50 `CREATE INDEX IF NOT EXISTS`, and 68
+    /// `ALTER TABLE ADD COLUMN` statements that were *expected to fail*, each
+    /// one parsed, planned, and turned into an error object, on the critical
+    /// path in front of the window.
+    ///
+    /// **A step owns its own atomicity, and the stamp is written only after it
+    /// returns `Ok`.** The runner deliberately does not wrap steps in a
+    /// transaction: the v1 step contains its own `BEGIN`/`COMMIT` (the legacy
+    /// `comments` primary-key rebuild is a create-copy-drop-rename that has to
+    /// be atomic on its own terms), and SQLite has no nested transactions. The
+    /// invariant that makes stamp-after safe is that every step is written to
+    /// be **idempotent** — a step that dies half-way leaves the version where
+    /// it was, and the next launch simply runs it again from the top. That is
+    /// exactly what the pre-versioning code did on every single launch.
     fn migrate(&self) -> rusqlite::Result<()> {
         let conn = self.lock_conn();
+        let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+
+        if current == Self::SCHEMA_VERSION {
+            crate::boot_trace::mark(crate::boot_trace::DB_MIGRATE);
+            return Ok(());
+        }
+        if current > Self::SCHEMA_VERSION {
+            // A HIGHER stamp is not automatically a newer Redline.
+            //
+            // `PRAGMA user_version` is ONE 32-bit slot in the file, and this
+            // app has had more than one migration lineage claim it: the
+            // `cockpit` branch shipped its own versioned runner years before
+            // this one, so a developer machine that ever ran a cockpit build
+            // carries a stamp from a numbering space that has nothing to do
+            // with `MIGRATIONS` below. Refusing on the integer alone bricked
+            // exactly that database — a hard panic in Tauri's setup, no
+            // window, no message.
+            //
+            // So the integer is a hint and the SCHEMA is the authority. If
+            // everything this build reads and writes is present, the file is
+            // usable: run NO steps (that is the real protection — an older
+            // build must never replay additive steps over a newer schema),
+            // leave the stamp alone (never downgrade someone else's marker),
+            // and carry on. Only a forward stamp whose schema is genuinely
+            // missing something we need is refused.
+            Self::verify_schema(&conn).map_err(|_| {
+                rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+                    Some(format!(
+                        "database schema version {current} is newer than this build \
+                         understands ({}), and it is missing columns this build needs. \
+                         Update Redline, or point it at a different data directory.",
+                        Self::SCHEMA_VERSION
+                    )),
+                )
+            })?;
+            tracing::warn!(
+                stamped = current,
+                understood = Self::SCHEMA_VERSION,
+                "database carries a newer/foreign schema stamp; schema verified, \
+                 running no migrations and leaving the stamp untouched"
+            );
+            crate::boot_trace::mark(crate::boot_trace::DB_MIGRATE);
+            return Ok(());
+        }
+
+        for (version, step) in Self::MIGRATIONS {
+            if *version <= current {
+                continue;
+            }
+            tracing::info!(from = current, to = *version, "migrating database schema");
+            step(&conn)?;
+            conn.pragma_update(None, "user_version", *version)?;
+        }
+
+        // The stamp says the columns are there; this checks. A v0 database
+        // that hit a partial failure in an earlier build's best-effort
+        // migration would otherwise get stamped as current and then fail at
+        // read time, one query at a time, forever.
+        Self::verify_schema(&conn)?;
+        crate::boot_trace::mark(crate::boot_trace::DB_MIGRATE);
+        Ok(())
+    }
+
+    /// Is this database usable by this build?
+    ///
+    /// Two callers, two different questions with the same answer:
+    ///   * after a migration runs — did the best-effort `ALTER TABLE`s
+    ///     actually happen, or would we stamp a half-migrated file as current?
+    ///   * on a FORWARD/foreign stamp — the integer says "newer", but is the
+    ///     schema actually missing anything we need? (See `migrate`: the
+    ///     `cockpit` lineage stamps the same slot with unrelated numbers.)
+    ///
+    /// Deliberately a spot check, not a full schema diff. It covers the core
+    /// tables' existence plus the columns added by `ALTER TABLE` — the
+    /// statements that were best-effort and could silently not have happened —
+    /// on the tables every launch reads. A schema that passes this and is still
+    /// missing something exotic will fail at that feature's first query, which
+    /// is the same failure mode the app had before versioning existed.
+    fn verify_schema(conn: &Connection) -> rusqlite::Result<()> {
+        // Present at all, or nothing works. Cheap: one `sqlite_master` read.
+        const CORE_TABLES: &[&str] = &[
+            "sessions",
+            "revisions",
+            "comments",
+            "app_settings",
+            "thread_messages",
+            "prompts",
+            "ledger_events",
+            "drafts",
+        ];
+        let mut stmt =
+            conn.prepare("SELECT name FROM sqlite_master WHERE type IN ('table','view')")?;
+        let present: std::collections::HashSet<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        drop(stmt);
+        for table in CORE_TABLES {
+            if !present.contains(*table) {
+                return Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+                    Some(format!("schema check: table {table} is missing")),
+                ));
+            }
+        }
+        const REQUIRED: &[(&str, &[&str])] = &[
+            (
+                "sessions",
+                &["attach_state", "updated_at", "run_state", "backend", "model"],
+            ),
+            ("revisions", &["thread_start", "restored"]),
+            (
+                "comments",
+                &[
+                    "resolution_body",
+                    "resolution_version",
+                    "block_id",
+                    "structural_json",
+                    "actionable",
+                    "author",
+                    "attachments",
+                ],
+            ),
+        ];
+        for (table, columns) in REQUIRED {
+            let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+            let present: std::collections::HashSet<String> = stmt
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<rusqlite::Result<_>>()?;
+            for column in *columns {
+                if !present.contains(*column) {
+                    return Err(rusqlite::Error::SqliteFailure(
+                        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+                        Some(format!(
+                            "schema migration finished but {table}.{column} is missing \
+                             — the database is only partly migrated"
+                        )),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// v0 → v1: the whole schema as of this build.
+    ///
+    /// This is the pre-versioning migration, moved wholesale and now run
+    /// **once** instead of on every launch. It is written to be idempotent
+    /// (`IF NOT EXISTS` everywhere, `ALTER TABLE` results discarded), which is
+    /// what makes it correct both as "create a fresh database" and as "bring a
+    /// legacy one up to date" — the two paths therefore cannot diverge, which
+    /// is the usual failure of hand-transcribing a fresh-install schema
+    /// alongside a migration chain.
+    ///
+    /// Do not edit this to add new columns. Add a v2 step.
+    fn migrate_v1(conn: &Connection) -> rusqlite::Result<()> {
+        // The fast path's only observable claim is "this did not run", so it
+        // needs something to observe. Counted in test builds only.
+        #[cfg(test)]
+        MIGRATION_STEPS_RUN.with(|c| c.set(c.get() + 1));
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS sessions (
@@ -2302,6 +2509,14 @@ impl Database {
             "ALTER TABLE comments ADD COLUMN fork_session_id TEXT",
             [],
         );
+        // Which harness owns that fork id — `claude-code` | `codex`. NULL on
+        // every row written before plan sessions could run on Codex, which
+        // reads as `claude-code` because Claude was then the only
+        // implementation. Load-bearing rather than descriptive: the two id
+        // spaces are both UUIDs and neither CLI errors on the other's id
+        // (`claude --resume <codex thread>` silently starts a FRESH session),
+        // so the id alone cannot say which binary can resume it.
+        let _ = conn.execute("ALTER TABLE comments ADD COLUMN fork_backend TEXT", []);
         // Sub-block-grained selection anchor (e.g. `blk-X.s3.w2-w4`). NULL
         // for pre-feature rows and for any selection that doesn't land on a
         // clean word / line / sentence boundary — the comment still has
@@ -2460,6 +2675,38 @@ impl Database {
         // watcher; transition wiring is a later unit) | in_code_review |
         // landed | stalled | abandoned (a stand-down; terminal). NULL = no
         // run (a plain Approve, or a reset after a failed handoff).
+        // Which harness authored the plan, and at what model. `redline_provider`
+        // has ridden the normalized Codex payload since the receive side was
+        // built, but nothing ever read it. Not cosmetic: RESTORE branches on
+        // the backend, because `claude --resume` handed a Codex thread id
+        // fails into a *fresh* session rather than an error.
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN backend TEXT", []);
+        // The PTY plan session's arm of the token meter. `transcript_path` is
+        // stamped from the hook payload (the ONE authoritative source — a
+        // `--resume` is scoped by the STARTUP cwd, so the path cannot be
+        // derived from the working directory); `meter_json` is the tailer's
+        // running read of what that session has spent, so the numbers survive
+        // a relaunch instead of restarting at zero.
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN transcript_path TEXT", []);
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN meter_json TEXT", []);
+        // Per-message provenance + economics (Phase 3). ONE json column per
+        // message table rather than eight numeric ones: forward-compatible
+        // (a new meter field needs no migration) and cheap. Without it the
+        // model badge and the footer vanish the moment a turn settles — which
+        // is the state the user looks at most.
+        for table in [
+            "browse_messages",
+            "linked_messages",
+            "mission_messages",
+            "companion_messages",
+            "mem_chat_messages",
+            "draft_chat_messages",
+            "thread_messages",
+            "voice_messages",
+        ] {
+            let _ = conn.execute(&format!("ALTER TABLE {table} ADD COLUMN meter_json TEXT"), []);
+        }
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN model TEXT", []);
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN run_state TEXT", []);
         let _ = conn.execute(
             "ALTER TABLE sessions ADD COLUMN run_updated_at INTEGER",
@@ -2616,7 +2863,7 @@ impl Database {
         // Shipwright, `build_digest`) on EVERY run, so leaving them in place
         // until somebody remembers to clean up means every ranking in between
         // is wrong.
-        Self::repair_superseded_agent_comments(&conn)?;
+        Self::repair_superseded_agent_comments(conn)?;
         Ok(())
     }
 
@@ -2748,14 +2995,20 @@ impl Database {
     pub fn upsert_session(&self, session: &ReviewSession) -> rusqlite::Result<()> {
         let conn = self.lock_conn();
         conn.execute(
-            "INSERT INTO sessions (session_id, project_path, project_name, created_at, status, attach_state, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO sessions (session_id, project_path, project_name, created_at, status, attach_state, updated_at, backend, model)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(session_id) DO UPDATE SET
                 project_path = excluded.project_path,
                 project_name = excluded.project_name,
                 status = excluded.status,
                 attach_state = excluded.attach_state,
-                updated_at = MAX(sessions.updated_at, excluded.updated_at)",
+                updated_at = MAX(sessions.updated_at, excluded.updated_at),
+                -- COALESCE, not overwrite: most upserts carry no provenance
+                -- (they exist to move `status` or `attach_state`), and letting
+                -- one of those blank the backend would send the NEXT restore
+                -- down the claude arm with a Codex thread id.
+                backend = COALESCE(excluded.backend, sessions.backend),
+                model = COALESCE(excluded.model, sessions.model)",
             params![
                 session.session_id,
                 session.project_path,
@@ -2764,6 +3017,8 @@ impl Database {
                 session_status_str(session.status),
                 session.attach_state.as_str(),
                 session.updated_at,
+                session.backend,
+                session.model,
             ],
         )?;
         Ok(())
@@ -5636,6 +5891,18 @@ impl Database {
         Ok(())
     }
 
+    /// Forget the stored fork so the next turn starts a fresh discussion. The
+    /// recovery half of an over-limit turn (`fork::describe_fork_error`):
+    /// re-`--resume`-ing a context that already overflowed just fails again.
+    pub fn clear_draft_comment_fork_session(&self, id: &str) -> rusqlite::Result<()> {
+        let conn = self.lock_conn();
+        conn.execute(
+            "UPDATE draft_comments SET fork_session_id = NULL WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
     /// Queue an agent write-suggestion (status `pending`).
     pub fn insert_draft_suggestion(
         &self,
@@ -5890,9 +6157,10 @@ impl Database {
         Ok(())
     }
 
-    /// Resolve a thread kind to its `(table, key column, body column)`. The one
-    /// place the generic thread routes map the app's disjoint id-spaces;
-    /// `session`/`fork` reads a plan session's comment threads.
+    /// Resolve a thread kind to its `(table, key column, body column, status
+    /// column)`. The one place the generic thread routes map the app's
+    /// disjoint id-spaces; `session`/`fork` reads a plan session's comment
+    /// threads.
     ///
     /// The third element exists for exactly one table: `voice_messages` names
     /// its body column `text` where every other thread table uses `body`. Three
@@ -5900,16 +6168,29 @@ impl Database {
     /// (which the voice agent itself embeds), the consult 422, and
     /// `/v1/global/agents`'s notes — so the route has to resolve, and a `voice`
     /// arm alone would have produced `no such column: body` instead of a 404.
-    fn thread_table(kind: &str) -> Option<(&'static str, &'static str, &'static str)> {
+    ///
+    /// The fourth is `None` for exactly that same table, for the mirror-image
+    /// reason: `voice_messages` has no `status` column at all. Everywhere else
+    /// it names the column `load_thread_generic` filters error rows out by.
+    fn thread_table(
+        kind: &str,
+    ) -> Option<(&'static str, &'static str, &'static str, Option<&'static str>)> {
         match kind {
-            "browse" => Some(("browse_messages", "browse_id", "body")),
-            "linked" => Some(("linked_messages", "linked_id", "body")),
-            "mission" => Some(("mission_messages", "mission_id", "body")),
-            "companion" => Some(("companion_messages", "companion_id", "body")),
-            "voice" => Some(("voice_messages", "session_key", "text")),
-            "drafter" | "drafter_chat" => Some(("draft_chat_messages", "draft_id", "body")),
-            "memchat" => Some(("mem_chat_messages", "thread_id", "body")),
-            "session" | "fork" => Some(("thread_messages", "session_id", "body")),
+            "browse" => Some(("browse_messages", "browse_id", "body", Some("status"))),
+            "linked" => Some(("linked_messages", "linked_id", "body", Some("status"))),
+            "mission" => Some(("mission_messages", "mission_id", "body", Some("status"))),
+            "companion" => Some((
+                "companion_messages",
+                "companion_id",
+                "body",
+                Some("status"),
+            )),
+            "voice" => Some(("voice_messages", "session_key", "text", None)),
+            "drafter" | "drafter_chat" => {
+                Some(("draft_chat_messages", "draft_id", "body", Some("status")))
+            }
+            "memchat" => Some(("mem_chat_messages", "thread_id", "body", Some("status"))),
+            "session" | "fork" => Some(("thread_messages", "session_id", "body", Some("status"))),
             _ => None,
         }
     }
@@ -5925,7 +6206,7 @@ impl Database {
         message_id: &str,
         status: &str,
     ) -> rusqlite::Result<bool> {
-        let Some((table, _, _)) = Self::thread_table(kind) else {
+        let Some((table, _, _, _)) = Self::thread_table(kind) else {
             return Ok(false);
         };
         let conn = self.lock_conn();
@@ -5933,10 +6214,112 @@ impl Database {
         Ok(conn.execute(&sql, params![message_id, status])? > 0)
     }
 
+    /// Attach a settled turn's meter to its message row. One JSON blob, keyed
+    /// through the same `thread_table` map every surface already shares, so
+    /// all eight get persistence uniformly rather than one at a time.
+    pub fn set_thread_message_meter(
+        &self,
+        kind: &str,
+        message_id: &str,
+        meter_json: &str,
+    ) -> rusqlite::Result<bool> {
+        let Some((table, _, _, _)) = Self::thread_table(kind) else {
+            return Ok(false);
+        };
+        let conn = self.lock_conn();
+        let sql = format!("UPDATE {table} SET meter_json = ?2 WHERE id = ?1");
+        Ok(conn.execute(&sql, params![message_id, meter_json])? > 0)
+    }
+
+    /// One message row's stored meter, if it has one.
+    pub fn thread_message_meter(&self, kind: &str, message_id: &str) -> Option<String> {
+        let (table, _, _, _) = Self::thread_table(kind)?;
+        let conn = self.lock_conn();
+        let sql = format!("SELECT meter_json FROM {table} WHERE id = ?1");
+        conn.query_row(&sql, params![message_id], |r| r.get::<_, Option<String>>(0))
+            .ok()
+            .flatten()
+    }
+
+    /// Every message row's meter for one thread, as `(id, meter_json)`. The
+    /// surfaces load a thread in one call, so the meters come back the same
+    /// way rather than one round-trip per bubble.
+    pub fn thread_meters(&self, kind: &str, thread_id: &str) -> Vec<(String, String)> {
+        let Some((table, key, _, _)) = Self::thread_table(kind) else {
+            return Vec::new();
+        };
+        let conn = self.lock_conn();
+        let sql = format!(
+            "SELECT id, meter_json FROM {table}
+             WHERE {key} = ?1 AND meter_json IS NOT NULL"
+        );
+        let Ok(mut stmt) = conn.prepare(&sql) else {
+            return Vec::new();
+        };
+        let rows = stmt.query_map(params![thread_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        });
+        match rows {
+            Ok(rows) => rows.filter_map(Result::ok).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Stamp a plan session's transcript path (from the hook payload) and its
+    /// tailed meter. Both idempotent no-op updates when unchanged.
+    pub fn set_session_transcript_path(&self, sid: &str, path: &str) -> rusqlite::Result<bool> {
+        let conn = self.lock_conn();
+        Ok(conn.execute(
+            "UPDATE sessions SET transcript_path = ?2
+             WHERE session_id = ?1 AND COALESCE(transcript_path, '') <> ?2",
+            params![sid, path],
+        )? > 0)
+    }
+
+    pub fn set_session_meter(&self, sid: &str, meter_json: &str) -> rusqlite::Result<bool> {
+        let conn = self.lock_conn();
+        Ok(conn.execute(
+            "UPDATE sessions SET meter_json = ?2 WHERE session_id = ?1",
+            params![sid, meter_json],
+        )? > 0)
+    }
+
+    pub fn session_meter(&self, sid: &str) -> Option<String> {
+        let conn = self.lock_conn();
+        conn.query_row(
+            "SELECT meter_json FROM sessions WHERE session_id = ?1",
+            params![sid],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+    }
+
+    /// Plan sessions whose transcript is known, newest activity first — the
+    /// tailer's work list. Bounded: an old, settled session's transcript stops
+    /// growing, so re-walking the whole history buys nothing.
+    pub fn plan_transcripts(&self, limit: i64) -> Vec<(String, String)> {
+        let conn = self.lock_conn();
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT session_id, transcript_path FROM sessions
+             WHERE transcript_path IS NOT NULL AND transcript_path <> ''
+             ORDER BY updated_at DESC LIMIT ?1",
+        ) else {
+            return Vec::new();
+        };
+        let rows = stmt.query_map(params![limit], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        });
+        match rows {
+            Ok(rows) => rows.filter_map(Result::ok).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     /// Delete one thread message by id — backs `*_unqueue` (the queued user
     /// row disappears with its queue entry). Returns whether a row existed.
     pub fn delete_thread_message(&self, kind: &str, message_id: &str) -> rusqlite::Result<bool> {
-        let Some((table, _, _)) = Self::thread_table(kind) else {
+        let Some((table, _, _, _)) = Self::thread_table(kind) else {
             return Ok(false);
         };
         let conn = self.lock_conn();
@@ -5952,7 +6335,8 @@ impl Database {
         let conn = self.lock_conn();
         let mut flipped = 0;
         for kind in ["browse", "linked", "mission", "memchat", "companion"] {
-            let (table, _, _) = Self::thread_table(kind).expect("queue-capable kinds are mapped");
+            let (table, _, _, _) =
+                Self::thread_table(kind).expect("queue-capable kinds are mapped");
             let sql = format!("UPDATE {table} SET status = 'unsent' WHERE status = 'queued'");
             flipped += conn.execute(&sql, [])?;
         }
@@ -5963,21 +6347,34 @@ impl Database {
     /// tables — the tail `limit` turns, oldest-first. `None` for an unknown
     /// kind (the route 404s). Table/column names come from the fixed
     /// `thread_table` map, never from the caller.
+    ///
+    /// **Error rows are excluded.** This backs
+    /// `GET /v1/context/threads/:kind/:id`, which is how the Companion and
+    /// every consult agent read a peer thread — and an `error` row is an
+    /// assistant-role row Redline wrote, not something the model said. Serving
+    /// one is silent context poisoning: a peer agent reads "the model replied
+    /// X" and reasons from it. The UI still shows them (that is where the
+    /// Retry button lives); only the machine-readable route drops them.
     pub fn load_thread_generic(
         &self,
         kind: &str,
         id: &str,
         limit: i64,
     ) -> rusqlite::Result<Option<Vec<GenericThreadMsg>>> {
-        let Some((table, key, body)) = Self::thread_table(kind) else {
+        let Some((table, key, body, status)) = Self::thread_table(kind) else {
             return Ok(None);
         };
         let conn = self.lock_conn();
+        // Appended only where there IS a status column — `voice_messages` has
+        // none, and a bare filter would 500 that route instead of answering it.
+        let drop_errors = status
+            .map(|c| format!(" AND {c} <> 'error'"))
+            .unwrap_or_default();
         // `{body} AS body` is the alias that lets `voice_messages.text` ride the
         // same reader as every `body` column.
         let sql = format!(
             "SELECT role, {body} AS body, created_at FROM {table}
-             WHERE {key} = ?1 ORDER BY created_at DESC, id DESC LIMIT ?2"
+             WHERE {key} = ?1{drop_errors} ORDER BY created_at DESC, id DESC LIMIT ?2"
         );
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params![id, limit.max(1)], |r| {
@@ -5995,7 +6392,7 @@ impl Database {
     /// Message count + newest timestamp for a thread, for the tree route's
     /// child digests. `(0, None)` for an unknown kind or empty thread.
     pub fn thread_stats(&self, kind: &str, id: &str) -> rusqlite::Result<(i64, Option<i64>)> {
-        let Some((table, key, _)) = Self::thread_table(kind) else {
+        let Some((table, key, _, _)) = Self::thread_table(kind) else {
             return Ok((0, None));
         };
         let conn = self.lock_conn();
@@ -9820,6 +10217,35 @@ impl Database {
         Ok(rows)
     }
 
+    /// `plan_session_id → mode` for every run whose mode the watcher has
+    /// settled. Its own tiny query rather than a `list_orchestrations` walk
+    /// because the sidebar's run chip needs one string per session and
+    /// nothing else — and it needs it on every summary refresh.
+    ///
+    /// The mode matters at chip scale because `sequential` is not a
+    /// configuration, it is a DEGRADATION: `runwatch` writes it when no
+    /// Workflow run was found and the orchestrator fell back to running the
+    /// plan one subtask at a time. Rendered neutrally (or not at all) it is
+    /// indistinguishable from the multi-agent run the user asked for.
+    pub fn run_modes(&self) -> std::collections::HashMap<String, String> {
+        let conn = self.lock_conn();
+        let mut out = std::collections::HashMap::new();
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT plan_session_id, mode FROM orchestrations WHERE mode IS NOT NULL",
+        ) else {
+            return out;
+        };
+        let Ok(rows) = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }) else {
+            return out;
+        };
+        for (sid, mode) in rows.filter_map(Result::ok) {
+            out.insert(sid, mode);
+        }
+        out
+    }
+
     fn orchestration_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OrchestrationRow> {
         Ok(OrchestrationRow {
             plan_session_id: row.get(0)?,
@@ -10141,43 +10567,64 @@ impl Database {
         Ok(())
     }
 
-    pub fn get_comment_fork_session(
+    /// A plan comment's discussion fork as `(fork_session_id, backend)`.
+    ///
+    /// The pair is read TOGETHER because neither half is usable alone: the id
+    /// says what to resume and the backend says which binary can resume it,
+    /// and handing one CLI the other's id does not error — it silently starts
+    /// a fresh conversation. A legacy row (non-null id, null backend) is a
+    /// Claude fork, because Claude was the only implementation when it was
+    /// written.
+    pub fn get_comment_fork(
         &self,
         session_id: &str,
         comment_id: &str,
-    ) -> Option<String> {
+    ) -> Option<(String, String)> {
         let conn = self.lock_conn();
-        conn.query_row(
-            "SELECT fork_session_id FROM comments WHERE session_id = ?1 AND id = ?2",
-            params![session_id, comment_id],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .ok()
-        .flatten()
+        let row: Option<(Option<String>, Option<String>)> = conn
+            .query_row(
+                "SELECT fork_session_id, fork_backend FROM comments
+                 WHERE session_id = ?1 AND id = ?2",
+                params![session_id, comment_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .ok();
+        let (fork, backend) = row?;
+        let fork = fork.filter(|f| !f.trim().is_empty())?;
+        let backend = backend
+            .filter(|b| !b.trim().is_empty())
+            .unwrap_or_else(|| "claude-code".to_string());
+        Some((fork, backend))
     }
 
-    pub fn set_comment_fork_session(
+    pub fn set_comment_fork(
         &self,
         session_id: &str,
         comment_id: &str,
         fork_session_id: &str,
+        backend: &str,
     ) -> rusqlite::Result<()> {
         let conn = self.lock_conn();
         conn.execute(
-            "UPDATE comments SET fork_session_id = ?1 WHERE session_id = ?2 AND id = ?3",
-            params![fork_session_id, session_id, comment_id],
+            "UPDATE comments SET fork_session_id = ?1, fork_backend = ?2
+             WHERE session_id = ?3 AND id = ?4",
+            params![fork_session_id, backend, session_id, comment_id],
         )?;
         Ok(())
     }
 
-    pub fn clear_comment_fork_session(
+    /// Discarding a thread clears BOTH fields. Leaving a stale backend behind
+    /// would make the next fork look like a mismatch against a fork id that no
+    /// longer exists.
+    pub fn clear_comment_fork(
         &self,
         session_id: &str,
         comment_id: &str,
     ) -> rusqlite::Result<()> {
         let conn = self.lock_conn();
         conn.execute(
-            "UPDATE comments SET fork_session_id = NULL WHERE session_id = ?1 AND id = ?2",
+            "UPDATE comments SET fork_session_id = NULL, fork_backend = NULL
+             WHERE session_id = ?1 AND id = ?2",
             params![session_id, comment_id],
         )?;
         Ok(())
@@ -11623,6 +12070,22 @@ impl Database {
         Ok(())
     }
 
+    /// Forget the stored fork so the next turn starts a fresh discussion —
+    /// the over-limit recovery, mirroring `clear_review_annotation_fork_session`.
+    pub fn clear_review_question_fork_session(
+        &self,
+        review_id: &str,
+        id: &str,
+    ) -> rusqlite::Result<()> {
+        let conn = self.lock_conn();
+        conn.execute(
+            "UPDATE review_questions SET fork_session_id = NULL
+             WHERE review_id = ?1 AND id = ?2",
+            params![review_id, id],
+        )?;
+        Ok(())
+    }
+
     // --- Voice-agent session (per-plan memory) -----------------------------
     // The voice agent's conversation is a forked claude session, persisted by
     // the plan's session id so re-entering voice mode resumes it. The live
@@ -11895,7 +12358,7 @@ impl Database {
         };
 
         let mut stmt = conn.prepare(&narrow(
-            "SELECT session_id, project_path, project_name, created_at, status, attach_state, updated_at, run_state FROM sessions",
+            "SELECT session_id, project_path, project_name, created_at, status, attach_state, updated_at, run_state, backend, model FROM sessions",
             "",
         ))?;
         let rows = stmt.query_map(refs().as_slice(), |row| {
@@ -11911,6 +12374,8 @@ impl Database {
                 attach_state: AttachState::from_str(&attach_str).unwrap_or(AttachState::Idle),
                 updated_at: row.get(6)?,
                 run_state: row.get(7)?,
+                backend: row.get(8)?,
+                model: row.get(9)?,
             })
         })?;
         for row in rows {
@@ -11937,12 +12402,17 @@ impl Database {
         for r in revs {
             let (session_id, version_number, received_at, raw_plan_markdown, thread_start, restored) = r?;
             if let Some(s) = sessions.get_mut(&session_id) {
-                let sections = reparse_sections(&raw_plan_markdown);
+                // NO `reparse_sections` here. This loop runs once per revision
+                // of every session ever reviewed, at startup, in front of the
+                // window — and the parse it used to do was thrown away for
+                // every session the user did not open. `raw_plan_markdown` is
+                // the record; `SessionStore` materializes the tree on the
+                // first read that needs one. See `Revision::sections`.
                 s.revisions.push(Revision {
                     version_number,
                     received_at,
                     raw_plan_markdown,
-                    sections,
+                    sections: Vec::new(),
                     comments: Vec::new(),
                     thread_start,
                     restored,
@@ -12186,6 +12656,57 @@ impl Database {
             Self::WORK_ITEM_COLS
         ))?;
         let rows = stmt.query_map(params![limit.max(1)], |r| Self::row_to_work_item(r))?;
+        rows.collect()
+    }
+
+    /// Everything the work graph did while the user was elsewhere: items that
+    /// ARRIVED or CLOSED at or after `since_ms`.
+    ///
+    /// One read rather than two because the feed shows them interleaved in
+    /// time, and paging two lists to a shared bound would drop the older half
+    /// of whichever moved more. The caller classifies each row by comparing
+    /// `closed_at`/`created_at` against the same `since_ms` — the row carries
+    /// both, so no second query is needed to tell an arrival from a closure.
+    ///
+    /// Newest-first (unlike the urgent-first graph reads): this is a feed, and
+    /// the most recent thing is the one worth reading.
+    pub fn list_work_items_since(
+        &self,
+        since_ms: i64,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<crate::work::WorkItem>> {
+        let conn = self.lock_conn();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {} FROM work_items
+             WHERE created_at >= ?1 OR (closed_at IS NOT NULL AND closed_at >= ?1)
+             ORDER BY MAX(created_at, COALESCE(closed_at, 0)) DESC
+             LIMIT ?2",
+            Self::WORK_ITEM_COLS
+        ))?;
+        let rows = stmt.query_map(params![since_ms, limit.max(1)], |r| {
+            Self::row_to_work_item(r)
+        })?;
+        rows.collect()
+    }
+
+    /// Ledger events of ONE kind since a wall-clock instant, newest first.
+    /// `ts`, not `seq`: the away feed's watermark is "when the user last
+    /// looked", which is a time, and translating it to a seq would need this
+    /// same table read first.
+    pub fn list_ledger_events_of_kind_since(
+        &self,
+        kind: &str,
+        since_ts: i64,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<crate::ledger::LedgerEventRow>> {
+        let conn = self.lock_conn();
+        let mut stmt = conn.prepare(
+            "SELECT seq, ts, kind, author, prompt_id, session_id, version_number,
+                    ref_kind, ref_id, payload_hash, prev_hash, entry_hash
+             FROM ledger_events WHERE kind = ?1 AND ts >= ?2
+             ORDER BY seq DESC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![kind, since_ts, limit.max(1)], Self::row_to_ledger_event)?;
         rows.collect()
     }
 
@@ -12980,6 +13501,8 @@ mod batched_read_tests {
             attach_state: AttachState::Idle,
             updated_at: 500,
             run_state: None,
+            backend: None,
+            model: None,
         };
         for id in ["wanted", "other"] {
             db.upsert_session(&mk(id)).unwrap();
@@ -13881,6 +14404,10 @@ mod work_graph_tests {
 
 #[cfg(test)]
 mod tests {
+    // The parse helper: no longer a `db` dependency (loading deliberately
+    // does NOT parse), but the fixtures still build revisions the way the
+    // interception path does.
+    use crate::state::reparse_sections;
     use super::*;
     use crate::state::{NewCommentRequest, SessionStore};
     use std::sync::Arc;
@@ -13888,6 +14415,67 @@ mod tests {
     fn make_store() -> SessionStore {
         let db = Arc::new(Database::open_in_memory().unwrap());
         SessionStore::new(db)
+    }
+
+    // --- Backend provenance (which harness authored the plan) --------------
+
+    #[test]
+    fn session_backend_and_model_survive_a_reload() {
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let store = SessionStore::new(db.clone());
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("thr_1", "/repo/x", md.to_string(), Vec::new(), true, false);
+        store.set_backend("thr_1", Some("codex"), Some("gpt-5.6-sol"));
+
+        let reloaded = SessionStore::new(db);
+        let s = reloaded.get("thr_1").expect("session");
+        assert_eq!(s.backend.as_deref(), Some("codex"));
+        assert_eq!(s.model.as_deref(), Some("gpt-5.6-sol"));
+        // …and the accessor restore branches on.
+        assert_eq!(reloaded.backend_of("thr_1"), "codex");
+    }
+
+    #[test]
+    fn a_status_only_upsert_cannot_blank_the_backend() {
+        // This is the whole reason the column is COALESCEd: most upserts exist
+        // to move `status` or `attach_state` and carry no provenance at all.
+        // One of them blanking the backend would send the NEXT restore down
+        // the claude arm holding a Codex thread id — which does not error, it
+        // silently starts a fresh session.
+        let db = Arc::new(Database::open_in_memory().unwrap());
+        let store = SessionStore::new(db.clone());
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("thr_1", "/repo/x", md.to_string(), Vec::new(), true, false);
+        store.set_backend("thr_1", Some("codex"), Some("gpt-5.6-sol"));
+
+        // A caller that knows nothing about backends writes the row back.
+        let mut blind = store.get("thr_1").unwrap();
+        blind.backend = None;
+        blind.model = None;
+        blind.status = crate::state::SessionStatus::Approved;
+        db.upsert_session(&blind).unwrap();
+
+        let reloaded = SessionStore::new(db);
+        assert_eq!(reloaded.backend_of("thr_1"), "codex");
+        assert_eq!(
+            reloaded.get("thr_1").unwrap().model.as_deref(),
+            Some("gpt-5.6-sol")
+        );
+    }
+
+    #[test]
+    fn an_unstamped_session_reads_as_claude_code() {
+        // Every pre-backend row, and every Claude session whose hook payload
+        // carried no provider.
+        let store = make_store();
+        let md = "# Plan\n\nBody.\n";
+        store.upsert_plan("s1", "/repo/x", md.to_string(), Vec::new(), true, false);
+        assert!(store.get("s1").unwrap().backend.is_none());
+        assert_eq!(store.backend_of("s1"), "claude-code");
+        assert_eq!(store.backend_of("no-such-session"), "claude-code");
+        // Blank/whitespace is not an answer either.
+        store.set_backend("s1", Some("   "), None);
+        assert_eq!(store.backend_of("s1"), "claude-code");
     }
 
     // --- Agent shelf (harness program A2) ----------------------------------
@@ -14046,7 +14634,7 @@ mod tests {
             thread_kind: None,
             thread_id: None,
             parent_session_id: None,
-            model: None,
+                model: None,
             model_source: None,
         }
     }
@@ -15620,6 +16208,53 @@ mod tests {
         assert!(db.load_thread_generic("nope", "x", 10).unwrap().is_none());
     }
 
+    /// The context route is how the Companion and every consult agent read a
+    /// peer thread. An `error` row is an assistant-role row REDLINE wrote —
+    /// serving it makes a peer agent reason from "the model said
+    /// `error_during_execution`". The UI still shows them; the machine route
+    /// must not.
+    #[test]
+    fn generic_thread_reader_hides_error_rows_and_still_serves_voice() {
+        use crate::state::VoiceMessage;
+        let db = Database::open_in_memory().unwrap();
+        let msg = |id: &str, role: &str, body: &str, status: &str, at: i64| BrowseMessage {
+            id: id.into(),
+            browse_id: "tab-1".into(),
+            role: role.into(),
+            body: body.into(),
+            status: status.into(),
+            created_at: at,
+        };
+        db.insert_browse_message(&msg("b1", "user", "hello", "complete", 10)).unwrap();
+        db.insert_browse_message(&msg("b2", "assistant", "error_during_execution", "error", 20))
+            .unwrap();
+        db.insert_browse_message(&msg("b3", "assistant", "hi", "complete", 30)).unwrap();
+
+        let msgs = db.load_thread_generic("browse", "tab-1", 50).unwrap().unwrap();
+        assert_eq!(msgs.len(), 2, "the error row is not served");
+        assert!(
+            !msgs.iter().any(|m| m.body.contains("error_during_execution")),
+            "a machine token reached a peer agent"
+        );
+        // `thread_stats` is a count, not context — it deliberately still sees
+        // every row, so a thread does not appear emptier than it is.
+        assert_eq!(db.thread_stats("browse", "tab-1").unwrap().0, 3);
+
+        // `voice_messages` has NO status column: the filter must be omitted
+        // there rather than 500-ing a route three prompts advertise.
+        db.insert_voice_message(&VoiceMessage {
+            id: "v1".into(),
+            session_key: "s-1".into(),
+            role: "agent".into(),
+            text: "spoken".into(),
+            created_at: 10,
+        })
+        .unwrap();
+        let voice = db.load_thread_generic("voice", "s-1", 50).unwrap().unwrap();
+        assert_eq!(voice.len(), 1);
+        assert_eq!(voice[0].body, "spoken");
+    }
+
     #[test]
     fn browse_events_fts_ranks_keyword_hits_and_is_injection_safe() {
         let db = Database::open_in_memory().unwrap();
@@ -16834,7 +17469,14 @@ mod tests {
             )
             .unwrap();
         }
-        db.migrate().unwrap();
+        // Run the STEP, not the runner. `migrate()` is now a no-op on an
+        // already-current database — that is the whole point of the version
+        // stamp — so re-running it would test the fast path, not the backfill
+        // this case is about.
+        {
+            let conn = db.conn.lock().unwrap();
+            Database::migrate_v1(&conn).unwrap();
+        }
 
         let role_of = |id: i64| -> String {
             let conn = db.conn.lock().unwrap();
@@ -18102,20 +18744,57 @@ mod tests {
         let db = store.database();
 
         // Fresh comment: no fork yet.
-        assert!(db.get_comment_fork_session("s-fork", "c-001").is_none());
+        assert!(db.get_comment_fork("s-fork", "c-001").is_none());
         assert!(!db.is_known_fork_session("fork-xyz"));
 
-        db.set_comment_fork_session("s-fork", "c-001", "fork-xyz")
+        db.set_comment_fork("s-fork", "c-001", "fork-xyz", "claude-code")
             .unwrap();
         assert_eq!(
-            db.get_comment_fork_session("s-fork", "c-001").as_deref(),
-            Some("fork-xyz"),
+            db.get_comment_fork("s-fork", "c-001"),
+            Some(("fork-xyz".to_string(), "claude-code".to_string())),
         );
         assert!(db.is_known_fork_session("fork-xyz"));
 
-        db.clear_comment_fork_session("s-fork", "c-001").unwrap();
-        assert!(db.get_comment_fork_session("s-fork", "c-001").is_none());
+        // Provenance survives a re-fork onto the other harness, and the pair
+        // moves together — a stale backend beside a fresh id is the bug this
+        // column exists to prevent.
+        db.set_comment_fork("s-fork", "c-001", "thr-codex", "codex")
+            .unwrap();
+        assert_eq!(
+            db.get_comment_fork("s-fork", "c-001"),
+            Some(("thr-codex".to_string(), "codex".to_string())),
+        );
+
+        // A legacy row — fork id written before the backend column existed —
+        // reads as Claude rather than as "unknown".
+        {
+            let conn = db.lock_conn();
+            conn.execute(
+                "UPDATE comments SET fork_backend = NULL
+                 WHERE session_id = 's-fork' AND id = 'c-001'",
+                [],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            db.get_comment_fork("s-fork", "c-001"),
+            Some(("thr-codex".to_string(), "claude-code".to_string())),
+        );
+
+        db.clear_comment_fork("s-fork", "c-001").unwrap();
+        assert!(db.get_comment_fork("s-fork", "c-001").is_none());
         assert!(!db.is_known_fork_session("fork-xyz"));
+        // Both halves went, not just the id.
+        let leftover: Option<String> = {
+            let conn = db.lock_conn();
+            conn.query_row(
+                "SELECT fork_backend FROM comments WHERE session_id = 's-fork' AND id = 'c-001'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(leftover, None, "clear must null the backend too");
     }
 
     #[test]
@@ -18766,6 +19445,273 @@ body.
         p
     }
 
+    // ── Schema versioning ────────────────────────────────────────────────
+    //
+    // The fast path is the whole point of `PRAGMA user_version`, so it is the
+    // thing under test: an already-current database must execute NO schema
+    // SQL. Everything else here guards the ways a version stamp can lie.
+
+    fn user_version(path: &std::path::Path) -> i64 {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn a_fresh_database_lands_on_the_current_version() {
+        let path = tempfile_path();
+        {
+            let store = SessionStore::new(Arc::new(Database::open(&path).unwrap()));
+            // The schema is real, not just stamped: a write that touches the
+            // tables and the ALTER-added columns has to succeed.
+            let md = "# Fresh\n\nBody.\n";
+            store.upsert_plan(
+                "s-fresh",
+                "/tmp/f",
+                md.to_string(),
+                crate::state::reparse_sections(md),
+                true,
+                false,
+            );
+            store.set_backend("s-fresh", Some("codex"), Some("gpt-5"));
+        }
+        assert_eq!(user_version(&path), Database::SCHEMA_VERSION);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_current_database_runs_no_migration_sql() {
+        // The regression this exists to catch: reintroducing per-launch schema
+        // replay. Before versioning, EVERY launch executed ~60
+        // `CREATE TABLE IF NOT EXISTS`, ~50 `CREATE INDEX IF NOT EXISTS` and
+        // 68 `ALTER TABLE ADD COLUMN` statements that were expected to fail,
+        // in front of the window.
+        let steps = || MIGRATION_STEPS_RUN.with(|c| c.get());
+        let path = tempfile_path();
+        MIGRATION_STEPS_RUN.with(|c| c.set(0));
+        drop(Database::open(&path).unwrap());
+        assert_eq!(steps(), 1, "the first open must build the schema exactly once");
+        assert_eq!(user_version(&path), Database::SCHEMA_VERSION);
+
+        // Every subsequent launch: one `PRAGMA user_version` read and nothing
+        // else.
+        for _ in 0..3 {
+            drop(Database::open(&path).unwrap());
+        }
+        assert_eq!(steps(), 1, "a current-schema launch re-ran a migration step");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_legacy_version_zero_database_migrates_and_keeps_its_rows() {
+        // The shape every existing install is in: a full schema written by a
+        // pre-versioning build, with `user_version` never set.
+        let path = tempfile_path();
+        {
+            let store = SessionStore::new(Arc::new(Database::open(&path).unwrap()));
+            let md = "# Legacy\n\nBody.\n";
+            store.upsert_plan(
+                "legacy",
+                "/tmp/l",
+                md.to_string(),
+                crate::state::reparse_sections(md),
+                true,
+                false,
+            );
+            store.set_backend("legacy", Some("codex"), Some("gpt-5"));
+        }
+        // Rewind the stamp: this is now indistinguishable from a database
+        // written before versioning existed.
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.pragma_update(None, "user_version", 0i64).unwrap();
+        }
+        assert_eq!(user_version(&path), 0);
+
+        let db = Database::open(&path).unwrap();
+        assert_eq!(user_version(&path), Database::SCHEMA_VERSION);
+        let sessions = db.load_all().unwrap();
+        let legacy = sessions.get("legacy").expect("legacy session survived");
+        assert_eq!(legacy.revisions.len(), 1);
+        assert_eq!(legacy.revisions[0].raw_plan_markdown, "# Legacy\n\nBody.\n");
+        // The provenance columns are part of the migration sequence, not
+        // something a later build bolts on outside it.
+        assert_eq!(legacy.backend.as_deref(), Some("codex"));
+        assert_eq!(legacy.model.as_deref(), Some("gpt-5"));
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_forward_stamp_with_a_usable_schema_opens_and_runs_no_migrations() {
+        // THE regression. `PRAGMA user_version` is one 32-bit slot, and this
+        // app has had two migration lineages claim it — the `cockpit` branch
+        // shipped its own runner long before this one, so a developer machine
+        // that ever ran a cockpit build carries a stamp (2) from an unrelated
+        // numbering space. Refusing on the integer alone bricked exactly that
+        // database: a hard panic in Tauri's setup, no window, no message.
+        //
+        // The schema is the authority. A forward stamp whose schema has
+        // everything we need opens, runs NO steps, and — critically — does not
+        // restamp: an older build replaying additive steps over a newer schema
+        // is the corruption the refusal existed to prevent, and that is still
+        // prevented.
+        let path = tempfile_path();
+        drop(Database::open(&path).unwrap());
+        let foreign = Database::SCHEMA_VERSION + 1;
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.pragma_update(None, "user_version", foreign).unwrap();
+        }
+
+        let steps = || MIGRATION_STEPS_RUN.with(|c| c.get());
+        MIGRATION_STEPS_RUN.with(|c| c.set(0));
+        let db = match Database::open(&path) {
+            Ok(db) => db,
+            Err(e) => panic!("a usable schema must open whatever the stamp says: {e}"),
+        };
+        assert_eq!(steps(), 0, "a forward stamp must run no migration steps");
+        assert_eq!(
+            user_version(&path),
+            foreign,
+            "the other lineage's stamp must be left exactly as found"
+        );
+        // And it is genuinely usable, not merely open.
+        let store = SessionStore::new(Arc::new(db));
+        let md = "# Forward\n\nBody.\n";
+        store.upsert_plan("fwd", "/tmp/f", md.to_string(), reparse_sections(md), true, false);
+        assert!(store.get("fwd").is_some());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_forward_stamp_missing_columns_we_need_is_refused() {
+        // The protection that must survive the fix above: "newer" plus a
+        // schema that genuinely lacks something this build reads is still a
+        // refusal, with a message that names the fix.
+        let path = tempfile_path();
+        drop(Database::open(&path).unwrap());
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch("DROP TABLE IF EXISTS drafts;").unwrap();
+            conn.pragma_update(None, "user_version", Database::SCHEMA_VERSION + 7)
+                .unwrap();
+        }
+        let err = match Database::open(&path) {
+            Ok(_) => panic!("a forward stamp missing our columns must be refused"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("newer than this build"),
+            "unhelpful refusal: {err}"
+        );
+        // And the file is untouched — refusing is not corrupting.
+        assert_eq!(user_version(&path), Database::SCHEMA_VERSION + 7);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_partly_migrated_database_fails_verification_instead_of_being_stamped() {
+        // A v0 database whose earlier best-effort migration lost a column: the
+        // stamp would say "current" and every read of that column would then
+        // fail forever, one query at a time. `verify_schema` is what turns
+        // that into one loud failure at open.
+        let path = tempfile_path();
+        drop(Database::open(&path).unwrap());
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            // Rebuild `sessions` without the provenance columns, then rewind
+            // the stamp — and neuter the ALTER that would re-add them by
+            // leaving a legacy-shaped table the batch cannot fix, which is
+            // what a genuinely partial migration looks like.
+            conn.execute_batch(
+                "DROP TABLE IF EXISTS sessions;
+                 CREATE TABLE sessions (
+                     session_id TEXT PRIMARY KEY,
+                     project_path TEXT NOT NULL,
+                     project_name TEXT NOT NULL,
+                     created_at INTEGER NOT NULL,
+                     status TEXT NOT NULL DEFAULT 'in_review'
+                 );",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 0i64).unwrap();
+        }
+        // The v1 step's own ALTERs repair this one, which is the correct
+        // outcome — so assert the repair happened AND the version advanced.
+        match Database::open(&path) {
+            Ok(db) => drop(db),
+            Err(e) => panic!("a repairable legacy shape must open: {e}"),
+        }
+        assert_eq!(user_version(&path), Database::SCHEMA_VERSION);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let mut stmt = conn.prepare("PRAGMA table_info(sessions)").unwrap();
+        let columns: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        for required in ["attach_state", "updated_at", "run_state", "backend", "model"] {
+            assert!(columns.contains(&required.to_string()), "{required} not restored");
+        }
+        drop(stmt);
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn verify_schema_rejects_a_missing_table() {
+        // The cheap half of the guard: a core table absent entirely.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (session_id TEXT PRIMARY KEY);
+             CREATE TABLE revisions (session_id TEXT);
+             CREATE TABLE comments (id TEXT);",
+        )
+        .unwrap();
+        let err = Database::verify_schema(&conn).expect_err("must reject");
+        assert!(
+            err.to_string().contains("table app_settings is missing"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn verify_schema_rejects_a_missing_column() {
+        // The half that catches a genuinely PARTIAL migration: every table
+        // present, but an `ALTER TABLE ADD COLUMN` that silently didn't
+        // happen. Built by opening a real database and then removing one
+        // column, so the fixture cannot drift from the real schema.
+        let path = tempfile_path();
+        drop(Database::open(&path).unwrap());
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        // SQLite ≥3.35 can drop a column; the bundled build is well past that.
+        conn.execute_batch("ALTER TABLE sessions DROP COLUMN model;")
+            .unwrap();
+        let err = Database::verify_schema(&conn).expect_err("must reject");
+        assert!(
+            err.to_string().contains("sessions.model is missing"),
+            "{err}"
+        );
+        assert!(err.to_string().contains("only partly migrated"), "{err}");
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_migration_list_is_ordered_and_ends_at_the_current_version() {
+        let versions: Vec<i64> = Database::MIGRATIONS.iter().map(|(v, _)| *v).collect();
+        let mut sorted = versions.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(versions, sorted, "migrations must be ordered and unique");
+        assert_eq!(
+            versions.last().copied(),
+            Some(Database::SCHEMA_VERSION),
+            "SCHEMA_VERSION must match the last migration step"
+        );
+        assert_eq!(versions.first().copied(), Some(1), "steps start at 1");
+    }
+
     #[test]
     fn comment_ids_are_session_scoped() {
         use crate::state::UpdateCommentRequest;
@@ -18944,15 +19890,16 @@ body.
             .expect("fresh session c-001 persists");
         assert_eq!(c.id, "c-001");
 
-        // The post-rebuild fork_session_id column landed on the rebuilt
-        // legacy `comments` table — set/get round-trips on the legacy row.
+        // The post-rebuild fork_session_id / fork_backend columns landed on
+        // the rebuilt legacy `comments` table — set/get round-trips on the
+        // legacy row.
         let db = store.database();
-        assert!(db.get_comment_fork_session("old", "c-001").is_none());
-        db.set_comment_fork_session("old", "c-001", "fork-legacy")
+        assert!(db.get_comment_fork("old", "c-001").is_none());
+        db.set_comment_fork("old", "c-001", "fork-legacy", "claude-code")
             .unwrap();
         assert_eq!(
-            db.get_comment_fork_session("old", "c-001").as_deref(),
-            Some("fork-legacy"),
+            db.get_comment_fork("old", "c-001"),
+            Some(("fork-legacy".to_string(), "claude-code".to_string())),
         );
 
         let _ = std::fs::remove_file(&tmpfile);
@@ -18974,6 +19921,8 @@ body.
             attach_state: AttachState::Idle,
             updated_at: 0,
             run_state: None,
+            backend: None,
+            model: None,
         };
         db.upsert_session(&mk("with-rev", 500)).unwrap();
         db.insert_revision(
@@ -18993,8 +19942,13 @@ body.
         // Simulate rows written by a pre-updated_at build…
         db.zero_updated_at("with-rev");
         db.zero_updated_at("bare");
-        // …and re-run the idempotent migration: only 0-rows are backfilled.
-        db.migrate().unwrap();
+        // …and re-run the idempotent step: only 0-rows are backfilled. The
+        // STEP, not the runner — `migrate()` is a no-op on an already-current
+        // database, which is what the version stamp buys.
+        {
+            let conn = db.conn.lock().unwrap();
+            Database::migrate_v1(&conn).unwrap();
+        }
         let all = db.load_all().unwrap();
         assert_eq!(all["with-rev"].updated_at, 700); // latest revision time
         assert_eq!(all["bare"].updated_at, 300); // falls back to created_at
@@ -19435,6 +20389,8 @@ body.
             attach_state: AttachState::Idle,
             updated_at: at,
             run_state: None,
+            backend: None,
+            model: None,
         };
         // Approved + unrun (the queue's targets), out of insertion order.
         db.upsert_session(&mk("b-approved", SessionStatus::Approved, 200)).unwrap();
@@ -19481,6 +20437,8 @@ body.
             attach_state: AttachState::Idle,
             updated_at: 1_000,
             run_state: None,
+            backend: None,
+            model: None,
         })
         .unwrap();
         db.insert_revision(
@@ -19918,6 +20876,8 @@ body.
             attach_state: AttachState::Idle,
             updated_at: 1,
             run_state: None,
+            backend: None,
+            model: None,
         })
         .unwrap();
         db.insert_revision(

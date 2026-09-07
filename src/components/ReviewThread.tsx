@@ -3,6 +3,8 @@
 import { useState } from "react";
 
 import { useAgentTurn } from "../hooks/useAgentTurn";
+import { priorUserBody } from "../lib/agentTurn";
+import { RetryNote } from "./QueuedChip";
 import { useAutoGrow } from "../hooks/useAutoGrow";
 
 import type { ThreadMessage } from "../types";
@@ -79,13 +81,32 @@ export function ReviewThread({ reviewId, annotationId, kind = "annotation" }: Re
 
   const cancel = turn.cancel;
 
+  /** Re-send the question an error row is the failed answer to. Last row only
+   *  — an error further up has already been answered by what followed it. */
+  const retryAt = (i: number): (() => void) | undefined => {
+    const body = priorUserBody(messages, i);
+    return body
+      ? () => {
+          if (!streaming) turn.send(body);
+        }
+      : undefined;
+  };
+
   return (
     <div className="rl-review-thread">
-      {messages.map((m) => (
+      {messages.map((m, i) => (
         <div key={m.id} className="rl-review-thread-msg" data-role={m.role}>
           {m.role === "assistant" ? (
             m.status === "error" ? (
-              <div className="rl-review-thread-error">{m.body}</div>
+              // Redline wrote this sentence, not the model.
+              <div className="flex flex-col">
+                <div className="rl-review-thread-error">{m.body}</div>
+                {i === messages.length - 1 &&
+                  (() => {
+                    const onRetry = retryAt(i);
+                    return onRetry ? <RetryNote onRetry={onRetry} /> : null;
+                  })()}
+              </div>
             ) : (
               <MarkdownView body={m.body} compact rich />
             )
@@ -96,7 +117,11 @@ export function ReviewThread({ reviewId, annotationId, kind = "annotation" }: Re
       ))}
       {streaming && (
         <div className="rl-review-thread-msg" data-role="assistant">
-          {liveText ? (
+          {turn.retrying ? (
+            <div style={{ fontSize: "11.5px", color: "var(--color-ink-muted)" }}>
+              ⟳ Temporary model error — retrying…
+            </div>
+          ) : liveText ? (
             <MarkdownView body={liveText} compact />
           ) : (
             // Backend clock, so a pane switch mid-turn comes back showing the

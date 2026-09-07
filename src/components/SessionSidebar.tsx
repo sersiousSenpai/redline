@@ -4,11 +4,17 @@ import { memo, useEffect, useState } from "react";
 
 import type { RevisionSummary, SessionSummary } from "../types";
 import type { JoinedSessionInfo } from "../collab/useJoinedSession";
+import { MIN_COMBINE } from "../lib/launch";
 import {
   computeRevisionDisplay,
   latestDisplayVersion,
 } from "../lib/revisionVersions";
-import { isLiveRunState } from "../lib/orchestration";
+import {
+  isLiveRunState,
+  isSequentialFallback,
+  SEQUENTIAL_FALLBACK_NOTE,
+} from "../lib/orchestration";
+import { detachedPillTitle } from "../lib/restoreHarness";
 
 interface SessionSidebarProps {
   sessions: SessionSummary[];
@@ -41,6 +47,11 @@ interface SessionSidebarProps {
   unseenIds?: ReadonlySet<string>;
   /** Open the RunReport container for an orchestrated run (chip click). */
   onOpenRunReport?: (sessionId: string) => void;
+  /** Hand N selected plans to the Front Door as combine pills. Does what
+   *  "＋ Plan a build" already does — clears the selection — and seeds the
+   *  pills; the composer there becomes the place to add an instruction.
+   *  Absent when the host has no Front Door to hand them to. */
+  onCombine?: (sessionIds: string[]) => void;
   /** Deselect every session so the document plate shows the front door.
    *  This is the ONLY way back to it: boot auto-selects the most recent plan
    *  and nothing else ever clears the selection, so without this row the
@@ -98,6 +109,7 @@ function SessionSidebarBase({
   viewedVersionNumber,
   unseenIds,
   onOpenRunReport,
+  onCombine,
   onNewPlan,
 }: SessionSidebarProps) {
   // Which sessions are expanded to show their revision tree. The active
@@ -122,6 +134,42 @@ function SessionSidebarBase({
       else next.add(id);
       return next;
     });
+
+  // Combine selection. Local because nothing outside the sidebar watches it —
+  // the moment it matters, it leaves as an argument to `onCombine`.
+  //
+  // An ORDERED list rather than a `Set`, which is what lets each picked row
+  // wear its position. That number is not decoration: it is the order the
+  // sources are laid out in the brief (`## Source 1`, `## Source 2`, …), so
+  // picking auth before billing is how you say which one leads without
+  // typing a sentence about it.
+  const [combining, setCombining] = useState(false);
+  const [picked, setPicked] = useState<string[]>([]);
+  const togglePicked = (id: string) =>
+    setPicked((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+    );
+  const cancelCombining = () => {
+    setCombining(false);
+    setPicked([]);
+  };
+  useEffect(() => {
+    if (!combining) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") cancelCombining();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [combining]);
+  // A session deleted while the picker is open must not stay picked — the
+  // launch would then fail on an id that no longer resolves.
+  useEffect(() => {
+    if (!combining) return;
+    setPicked((prev) => {
+      const live = prev.filter((id) => sessions.some((s) => s.sessionId === id));
+      return live.length === prev.length ? prev : live;
+    });
+  }, [combining, sessions]);
 
   // The list renders in the backend's `updated_at DESC` order, full stop.
   // It used to hoist the open plan to index 0, which meant clicking a row
@@ -187,10 +235,24 @@ function SessionSidebarBase({
         </>
       )}
       <div
-        className="rl-chrome-label px-3 py-2 border-b"
+        className="rl-chrome-label px-3 py-2 border-b flex items-center gap-2"
         style={{ borderColor: "var(--color-rule)" }}
       >
-        Sessions
+        <span>Sessions</span>
+        <div className="flex-1" />
+        {/* A text button on the label row, not a header control: the header is
+            a closed set of surfaces, and this is an action on the list under
+            it. Hidden below MIN_COMBINE, where it could only ever refuse. */}
+        {onCombine && !combining && sessions.length >= MIN_COMBINE && (
+          <button
+            type="button"
+            onClick={() => setCombining(true)}
+            title="Combine several plans into one new plan session"
+            className="rl-cmb-enter"
+          >
+            Combine
+          </button>
+        )}
       </div>
       {sessions.length === 0 ? (
         <div
@@ -212,7 +274,11 @@ function SessionSidebarBase({
               viewedVersionNumber={
                 s.sessionId === activeId ? viewedVersionNumber : null
               }
-              onClick={() => onSelect(s.sessionId)}
+              combining={combining}
+              pickedAt={picked.indexOf(s.sessionId)}
+              onClick={() =>
+                combining ? togglePicked(s.sessionId) : onSelect(s.sessionId)
+              }
               onToggleExpand={() => toggleExpand(s.sessionId)}
               onDelete={() => onDelete(s.sessionId)}
               onExport={onExport}
@@ -221,6 +287,41 @@ function SessionSidebarBase({
             />
           ))}
         </ul>
+      )}
+      {combining && (
+        <div className="rl-cmb-bar">
+          {/* States the operation, not the mechanic: "3 plans → 1 plan" is
+              what is about to happen; "3 selected" is only what you clicked. */}
+          <span className="rl-cmb-readout">
+            {picked.length < MIN_COMBINE ? (
+              <>
+                <span className="rl-cmb-n">{picked.length}</span> / {MIN_COMBINE}{" "}
+                minimum
+              </>
+            ) : (
+              <>
+                <span className="rl-cmb-n">{picked.length}</span> plans → 1 plan
+              </>
+            )}
+          </span>
+          <button
+            type="button"
+            disabled={picked.length < MIN_COMBINE}
+            onClick={() => {
+              // PICK order, not list order: the numbers on the rows promised
+              // a sequence, and this is the promise being kept — it becomes
+              // the `## Source N` order the combining session reads.
+              onCombine?.(picked);
+              cancelCombining();
+            }}
+            className={`rl-cmb-go${picked.length >= MIN_COMBINE ? " is-armed" : ""}`}
+          >
+            Combine
+          </button>
+          <button type="button" onClick={cancelCombining} className="rl-cmb-cancel">
+            Cancel
+          </button>
+        </div>
       )}
     </div>
   );
@@ -336,6 +437,8 @@ function SessionRow({
   pending,
   unseen = false,
   viewedVersionNumber,
+  combining = false,
+  pickedAt = -1,
   onClick,
   onToggleExpand,
   onDelete,
@@ -347,6 +450,12 @@ function SessionRow({
   active: boolean;
   expanded: boolean;
   pending: number;
+  /** The sidebar is picking plans to combine: the row is a pick, not a
+   *  destination. */
+  combining?: boolean;
+  /** Zero-based position in the pick order, or -1 when unpicked. Position
+   *  rather than a boolean because the row wears its number. */
+  pickedAt?: number;
   /** A plan arrived for this session but the reviewer was never taken to it. */
   unseen?: boolean;
   /** Which revision the active pane is viewing — only relevant on the active
@@ -368,6 +477,9 @@ function SessionRow({
   // Only multi-revision sessions get a disclosure affordance — a single
   // revision has no tree to reveal, so the row stays flat.
   const expandable = session.revisions.length > 1;
+  const picked = pickedAt >= 0;
+  const rowName =
+    session.planTitle || session.projectName || session.projectPath || session.sessionId;
 
   return (
     <li className="relative group">
@@ -409,7 +521,7 @@ function SessionRow({
           {badgeVersion}
         </span>
       )}
-      {confirming ? (
+      {confirming && !combining ? (
         <div
           className="absolute right-3 top-2 z-10 flex items-center gap-1"
           onClick={(e) => e.stopPropagation()}
@@ -462,7 +574,7 @@ function SessionRow({
             Cancel
           </button>
         </div>
-      ) : (
+      ) : combining ? null : (
         <button
           type="button"
           aria-label="Delete session"
@@ -490,15 +602,24 @@ function SessionRow({
       <button
         type="button"
         onClick={onClick}
-        className="hover-elevated w-full text-left pl-7 pr-3 py-2 border-b"
+        aria-pressed={combining ? picked : undefined}
+        aria-label={
+          combining
+            ? picked
+              ? `${rowName}, source ${pickedAt + 1} of the combination`
+              : `${rowName}, not in the combination`
+            : undefined
+        }
+        className={`hover-elevated w-full text-left pl-7 pr-3 py-2 border-b${
+          combining ? " rl-cmb-row" : ""
+        }${combining && picked ? " is-on" : ""}`}
         style={{
           borderColor: "var(--color-rule)",
-          background: active ? "var(--color-bg-elevated)" : "transparent",
-          // Inset stripe, not a border: the 2px accent must not shift the
-          // row's text alignment against its neighbours.
-          boxShadow: active
-            ? "inset 2px 0 0 var(--color-accent)"
-            : undefined,
+          // While combining, the picked look is the stylesheet's (`.is-on`);
+          // outside it, the active row keeps its own inset accent stripe.
+          background: !combining && active ? "var(--color-bg-elevated)" : undefined,
+          boxShadow:
+            !combining && active ? "inset 2px 0 0 var(--color-accent)" : undefined,
         }}
       >
         <div className="flex items-center justify-between gap-2 mb-1">
@@ -516,16 +637,31 @@ function SessionRow({
               session.projectPath ||
               session.sessionId}
           </span>
-          <span
-            className="font-mono shrink-0 rounded-sm px-1.5 py-0.5 transition-opacity group-hover:opacity-0"
-            style={{
-              background: "var(--color-anchor-bg)",
-              color: "var(--color-anchor-text)",
-              fontSize: "10px",
-            }}
-          >
-            v{badgeVersion}
-          </span>
+          {/* One slot, two occupants that never coexist: the version badge
+              normally, the pick marker while combining (the version is
+              carried by the Front Door pill then). Being a flex sibling of
+              the truncating title is what keeps a long plan name's ellipsis
+              from running underneath the marker.
+
+              `aria-hidden` on the marker because the row button around it
+              already carries the state for assistive tech — this is the
+              visual half of one control, not a second one. */}
+          {combining ? (
+            <span aria-hidden="true" className={`rl-cmb-node${picked ? " is-on" : ""}`}>
+              {picked ? pickedAt + 1 : ""}
+            </span>
+          ) : (
+            <span
+              className="font-mono shrink-0 rounded-sm px-1.5 py-0.5 transition-opacity group-hover:opacity-0"
+              style={{
+                background: "var(--color-anchor-bg)",
+                color: "var(--color-anchor-text)",
+                fontSize: "10px",
+              }}
+            >
+              v{badgeVersion}
+            </span>
+          )}
         </div>
         {/* When the plan title leads, keep the project visible underneath —
             two sessions in one project stay tellable apart by title, and one
@@ -566,12 +702,14 @@ function SessionRow({
           >
             {STATUS_LABELS[session.status]}
           </span>
-          {/* Claude is no longer holding this review — comments and
+          {/* The harness is no longer holding this review — comments and
               discussions still save, but sending needs a restore first.
-              Surfaced here so the reviewer sees it BEFORE interacting. */}
+              Surfaced here so the reviewer sees it BEFORE interacting, and
+              named for the harness that actually left (a legacy row with no
+              stored provenance claims neither). */}
           {session.attachState === "detached" && (
             <span
-              title="Claude Code is no longer waiting on this plan — open the session and use “Restore plan session” before sending."
+              title={detachedPillTitle(session.backend)}
               style={{
                 color: "var(--color-warning, #b45309)",
                 border: "1px solid var(--color-warning, #b45309)",
@@ -586,13 +724,38 @@ function SessionRow({
               detached
             </span>
           )}
+          {/* Which harness authored this plan. Shown ONLY for a non-Claude
+              session: a Claude-only user's list must look exactly as it does
+              today, and the badge exists to answer "why does this one restore
+              differently", not to label every row with the obvious. */}
+          {session.backend === "codex" && (
+            <span
+              title={
+                session.model
+                  ? `Planned by Codex · ${session.model}`
+                  : "Planned by Codex"
+              }
+              style={{
+                color: "var(--color-ink-muted)",
+                border: "1px solid var(--color-rule)",
+                borderRadius: "9999px",
+                padding: "0 6px",
+                fontSize: "9px",
+                fontWeight: 600,
+                textTransform: "uppercase",
+                letterSpacing: "0.06em",
+              }}
+            >
+              codex
+            </span>
+          )}
           {/* Orchestrated-run lifecycle chip — the Runs monitor's one entry
               point (deliberately contextual: it exists only while a session
               has a run). Clicking a live run opens the live monitor; a
               finished run reopens its report. An abandoned/needs-follow-up
               run keeps its last state visible — only a Resolved mark walks
               it to `landed`. */}
-          {session.runState && (
+          {session.runState && !combining && (
             <button
               type="button"
               title={`Orchestrated run: ${session.runState.replace(/_/g, " ")} — click to ${
@@ -616,6 +779,28 @@ function SessionRow({
             >
               {session.runState.replace(/_/g, " ")}
             </button>
+          )}
+          {/* The run degraded to the sequential fallback. Deliberately its
+              own chip rather than a tint on the state chip: the state is
+              still true, and this is a second, independent fact about the
+              run — one that is otherwise only visible after navigating to
+              the Runs surface and reading a neutral-styled word. */}
+          {session.runState && !combining && isSequentialFallback(session.runMode) && (
+            <span
+              title={SEQUENTIAL_FALLBACK_NOTE}
+              style={{
+                color: "var(--color-warning)",
+                border: "1px solid var(--color-warning)",
+                borderRadius: "9999px",
+                padding: "0 6px",
+                fontSize: "9px",
+                fontWeight: 600,
+                textTransform: "uppercase",
+                letterSpacing: "0.06em",
+              }}
+            >
+              seq
+            </span>
           )}
           {pending > 0 && (
             <span

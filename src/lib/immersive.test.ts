@@ -279,3 +279,39 @@ describe("maskPanels", () => {
     expect(pref).toEqual(open);
   });
 });
+
+describe("panelMask: a conversation that has taken the plate", () => {
+  const base = { surface: "document" as const, broken: false, enabled: true, docPinned: false };
+
+  it("hides both panels, though the surface is still the document", () => {
+    // The document surface normally keeps both — they are ABOUT the document.
+    // In the room there is no document, so they are furniture from elsewhere.
+    expect(panelMask({ ...base })).toEqual({ sidebar: false, pane: false });
+    expect(panelMask({ ...base, conversationExpanded: true })).toEqual({
+      sidebar: true,
+      pane: true,
+    });
+  });
+
+  it("outranks docPinned, which cannot pin a document that isn't there", () => {
+    expect(
+      panelMask({ ...base, docPinned: true, conversationExpanded: true }),
+    ).toEqual({ sidebar: true, pane: true });
+  });
+
+  it("still yields to the user reopening something, and to the manifest", () => {
+    expect(
+      panelMask({ ...base, broken: true, conversationExpanded: true }),
+    ).toEqual({ sidebar: false, pane: false });
+    expect(
+      panelMask({ ...base, enabled: false, conversationExpanded: true }),
+    ).toEqual({ sidebar: false, pane: false });
+  });
+
+  it("collapsing the room lifts the mask — nothing was ever stored", () => {
+    const masked = panelMask({ ...base, conversationExpanded: true });
+    const lifted = panelMask({ ...base, conversationExpanded: false });
+    expect(panelsMasked(masked)).toBe(true);
+    expect(panelsMasked(lifted)).toBe(false);
+  });
+});

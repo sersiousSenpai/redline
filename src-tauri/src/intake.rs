@@ -311,7 +311,7 @@ fn land_triage(db: &Database, item: &WorkItem, markdown: &str) -> Result<IntakeT
 
 /// Run the single headless triage turn to completion and return its final
 /// text. The argv is fully built (and guarded) by the caller.
-async fn run_triage(args: Vec<String>) -> Result<String, String> {
+async fn run_triage(db: &Database, args: Vec<String>) -> Result<String, String> {
     let claude_bin = tokio::task::spawn_blocking(crate::claude_proc::resolve_claude_bin)
         .await
         .map_err(|e| e.to_string())?;
@@ -335,7 +335,7 @@ async fn run_triage(args: Vec<String>) -> Result<String, String> {
         })?;
     let stdout = child.stdout.take().ok_or("triage stdout unavailable")?;
     let stderr = child.stderr.take().ok_or("triage stderr unavailable")?;
-    let out = crate::claude_proc::collect_turn(stdout, stderr).await;
+    let out = crate::claude_proc::collect_turn_seated(db, TRIAGE_SEAT, stdout, stderr).await;
     let _ = child.wait().await;
     if let Some(msg) = out.errored {
         return Err(msg);
@@ -366,7 +366,7 @@ pub async fn intake_triage(
     // Keep the headless `-p` out of the lake (the global hook would otherwise
     // capture the baked prompt as a human one).
     ledger::register_agent_prompt(&args[1]);
-    let markdown = run_triage(args).await?;
+    let markdown = run_triage(&db, args).await?;
     land_triage(&db, &item, &markdown)
 }
 

@@ -434,6 +434,122 @@ pub fn get_work_graph(
 }
 
 // ---------------------------------------------------------------------------
+// "While you were away" — the same state plane, read against a watermark.
+//
+// The overnight queue runs at 3am, a moot convenes on an item and reaches a
+// verdict, an intake arrives from a share: all three land in the work graph
+// while nobody is looking at it, and until now the only way to find out was to
+// go to the Runs surface and read the graph. The Companion is the conversation
+// that spans the app, so it is where "here is what happened" belongs.
+//
+// Read-only and derived, exactly like the rollup above. It launches nothing,
+// claims nothing, and closes nothing.
+// ---------------------------------------------------------------------------
+
+/// One thing that happened while the user was elsewhere.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AwayCard {
+    /// `arrived` — a work item was filed (an intake, a triage, a queue park).
+    /// `closed` — an item finished. `moot` — a moot turn was recorded on one.
+    pub kind: String,
+    /// The work item this is about, so the FE can route a tap at the graph.
+    pub item_id: String,
+    pub title: String,
+    /// The close reason, the origin, or the speaking seat — whatever makes the
+    /// line say something. Never required.
+    pub detail: Option<String>,
+    pub at: i64,
+}
+
+/// How many of each kind to read. A feed, not a pager: past a couple of dozen
+/// the honest summary is "and 40 more", which the FE renders from the count.
+const AWAY_LIMIT: i64 = 40;
+
+/// Classify one work-item row against the watermark.
+///
+/// The row carries both timestamps, so a single list read answers both
+/// questions. A closure WINS over an arrival when both fall inside the window:
+/// an item that was filed and finished while the user was away is news because
+/// it is *done*, and reporting it as "arrived" would send them looking for
+/// work that no longer exists.
+pub(crate) fn away_card_for(item: &WorkItem, since_ms: i64) -> Option<AwayCard> {
+    if let Some(closed) = item.closed_at.filter(|c| *c >= since_ms) {
+        return Some(AwayCard {
+            kind: "closed".to_string(),
+            item_id: item.id.clone(),
+            title: item.title.clone(),
+            detail: item.close_reason.clone(),
+            at: closed,
+        });
+    }
+    if item.created_at >= since_ms {
+        return Some(AwayCard {
+            kind: "arrived".to_string(),
+            item_id: item.id.clone(),
+            title: item.title.clone(),
+            detail: item.origin_kind.clone(),
+            at: item.created_at,
+        });
+    }
+    None
+}
+
+/// The speaking seat inside a `moot_turn` event's namespaced author
+/// (`moot:<seat>`), or `None` for anything else. The namespace exists so a
+/// seat name can never collide with a human author identity (`ledger.rs`).
+pub(crate) fn moot_seat(author: &str) -> Option<String> {
+    author.strip_prefix("moot:").map(|s| s.to_string())
+}
+
+/// Testable core of `work_since`: the item rows and the moot turns, merged
+/// newest-first. A moot turn names its item by `ref_id`; the title comes from
+/// the item row when it is still there, and the event stands on its own when
+/// it is not — a decision outlives the row it was about, which is the whole
+/// point of recording it in the ledger.
+pub(crate) fn away_feed(db: &Database, since_ms: i64) -> Result<Vec<AwayCard>, String> {
+    let items = db
+        .list_work_items_since(since_ms, AWAY_LIMIT)
+        .map_err(|e| e.to_string())?;
+    let mut cards: Vec<AwayCard> = items
+        .iter()
+        .filter_map(|i| away_card_for(i, since_ms))
+        .collect();
+    for ev in db
+        .list_ledger_events_of_kind_since("moot_turn", since_ms, AWAY_LIMIT)
+        .map_err(|e| e.to_string())?
+    {
+        let Some(item_id) = ev.ref_id.clone() else {
+            continue;
+        };
+        let title = items
+            .iter()
+            .find(|i| i.id == item_id)
+            .map(|i| i.title.clone())
+            .or_else(|| db.get_work_item(&item_id).map(|i| i.title))
+            .unwrap_or_else(|| item_id.clone());
+        cards.push(AwayCard {
+            kind: "moot".to_string(),
+            item_id,
+            title,
+            detail: moot_seat(&ev.author),
+            at: ev.ts,
+        });
+    }
+    cards.sort_by(|a, b| b.at.cmp(&a.at));
+    Ok(cards)
+}
+
+/// What the work graph did since `sinceMs`. Read-only.
+#[tauri::command]
+pub fn work_since(
+    store: tauri::State<'_, crate::state::SessionStore>,
+    since_ms: i64,
+) -> Result<Vec<AwayCard>, String> {
+    away_feed(&store.database(), since_ms)
+}
+
+// ---------------------------------------------------------------------------
 // Tests — id minting, vocabularies, and the handlers' row plumbing. The
 // deep-logic battery (ready CTE, claim race, lease expiry, ledger chain,
 // origin-outliving, boundary guard) lives beside the SQL in `db.rs`'s
@@ -468,6 +584,134 @@ mod tests {
         };
         db.insert_work_item(&item).unwrap();
         item
+    }
+
+    /// A work item with explicit timestamps — the away feed is entirely about
+    /// which side of the watermark they fall on.
+    fn stamped(
+        db: &Database,
+        id: &str,
+        title: &str,
+        created_at: i64,
+        closed_at: Option<i64>,
+    ) -> WorkItem {
+        let item = WorkItem {
+            id: id.to_string(),
+            title: title.to_string(),
+            body: None,
+            status: if closed_at.is_some() { "closed" } else { "open" }.to_string(),
+            priority: 2,
+            kind: "task".to_string(),
+            assignee: None,
+            claimed_at: None,
+            lease_expires_at: None,
+            closed_at,
+            close_reason: closed_at.map(|_| "shipped".to_string()),
+            defer_until: None,
+            origin_kind: Some("intake".to_string()),
+            origin_id: None,
+            project_path: None,
+            pinned: false,
+            created_at,
+            updated_at: closed_at.unwrap_or(created_at),
+        };
+        db.insert_work_item(&item).unwrap();
+        item
+    }
+
+    #[test]
+    fn away_card_reports_a_closure_over_an_arrival() {
+        // Filed AND finished while the user was away: the news is that it is
+        // done. Calling it an arrival would send them looking for open work.
+        let item = stamped(&Database::open_in_memory().unwrap(), "rl-a", "Ship it", 200, Some(300));
+        let card = away_card_for(&item, 100).unwrap();
+        assert_eq!(card.kind, "closed");
+        assert_eq!(card.at, 300);
+        assert_eq!(card.detail.as_deref(), Some("shipped"));
+    }
+
+    #[test]
+    fn away_card_reports_an_arrival_with_its_origin() {
+        let item = stamped(&Database::open_in_memory().unwrap(), "rl-b", "Route this", 200, None);
+        let card = away_card_for(&item, 100).unwrap();
+        assert_eq!(card.kind, "arrived");
+        assert_eq!(card.at, 200);
+        assert_eq!(card.detail.as_deref(), Some("intake"));
+    }
+
+    #[test]
+    fn away_card_ignores_what_happened_before_the_watermark() {
+        let db = Database::open_in_memory().unwrap();
+        // Old and still open: not news.
+        assert!(away_card_for(&stamped(&db, "rl-c", "Old", 10, None), 100).is_none());
+        // Old and closed BEFORE the watermark: also not news.
+        assert!(away_card_for(&stamped(&db, "rl-d", "Older", 10, Some(20)), 100).is_none());
+        // …but an old item closed after it is exactly what the feed is for.
+        let card = away_card_for(&stamped(&db, "rl-e", "Long-running", 10, Some(300)), 100).unwrap();
+        assert_eq!(card.kind, "closed");
+    }
+
+    #[test]
+    fn the_watermark_instant_itself_counts_as_news() {
+        // `>=`, not `>`: a run that landed on the same millisecond the user
+        // last looked is on the far side of "while you were away".
+        let item = stamped(&Database::open_in_memory().unwrap(), "rl-f", "Edge", 100, None);
+        assert!(away_card_for(&item, 100).is_some());
+    }
+
+    #[test]
+    fn moot_seat_reads_the_namespaced_author_only() {
+        assert_eq!(moot_seat("moot:skeptic").as_deref(), Some("skeptic"));
+        // A human author is never mistaken for a seat — that namespace is why
+        // the prefix exists.
+        assert_eq!(moot_seat("skeptic"), None);
+        assert_eq!(moot_seat(""), None);
+    }
+
+    #[test]
+    fn away_feed_merges_items_and_moot_turns_newest_first() {
+        let db = Database::open_in_memory().unwrap();
+        stamped(&db, "rl-old", "Before the watermark", 10, None);
+        stamped(&db, "rl-new", "Arrived overnight", 200, None);
+        stamped(&db, "rl-done", "Finished overnight", 50, Some(400));
+        ledger::record_moot_turn(&db, "rl-new", "moot-1", 1, "skeptic", "digest-1", 300)
+            .unwrap()
+            .expect("the turn is recorded");
+
+        let feed = away_feed(&db, 100).unwrap();
+        // A ledger event carries the instant it was RECORDED (`record_decision`
+        // stamps `ts` itself; the `at` argument goes into the payload hash), so
+        // the turn just written is the newest thing here — which is also why
+        // the reader filters on `ts`.
+        assert_eq!(
+            feed.iter().map(|c| (c.kind.as_str(), c.item_id.as_str())).collect::<Vec<_>>(),
+            vec![("moot", "rl-new"), ("closed", "rl-done"), ("arrived", "rl-new")],
+            "newest first, and nothing from before the watermark"
+        );
+        // The moot card borrows the item's title rather than showing an id.
+        assert_eq!(feed[0].title, "Arrived overnight");
+        assert_eq!(feed[0].detail.as_deref(), Some("skeptic"));
+    }
+
+    #[test]
+    fn a_moot_verdict_outlives_the_item_row_it_was_about() {
+        // The ledger is the record; a decision does not vanish because the
+        // work item was deleted. The card falls back to naming the id.
+        let db = Database::open_in_memory().unwrap();
+        ledger::record_moot_turn(&db, "rl-gone", "moot-2", 1, "builder", "digest-2", 300)
+            .unwrap()
+            .expect("the turn is recorded");
+        let feed = away_feed(&db, 100).unwrap();
+        assert_eq!(feed.len(), 1);
+        assert_eq!(feed[0].kind, "moot");
+        assert_eq!(feed[0].title, "rl-gone");
+    }
+
+    #[test]
+    fn a_quiet_night_is_an_empty_feed() {
+        let db = Database::open_in_memory().unwrap();
+        stamped(&db, "rl-x", "Filed last week", 10, None);
+        assert!(away_feed(&db, 100).unwrap().is_empty());
     }
 
     #[test]

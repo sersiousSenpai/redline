@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 import {
   blockingItems,
+  codexRestoreBlockers,
   deriveReadiness,
   HOOK_SILENCE_MS,
   sortReadiness,
@@ -14,6 +15,18 @@ import {
 
 const healthyPreflight = (): PreflightStatus => ({
   claude: { found: true, path: "/usr/local/bin/claude", source: "probe" },
+  codex: {
+    found: true,
+    path: "/Applications/ChatGPT.app/Contents/Resources/codex",
+    source: "probe",
+    usable: true,
+    signedIn: true,
+    profile: {
+      installed: true,
+      outdated: false,
+      path: "/Users/me/.codex/redline-plan.config.toml",
+    },
+  },
   curl: { ok: true, version: "8.7.1" },
   mode: "active",
   hook: { installed: true, conflictingUrl: null },
@@ -301,5 +314,238 @@ describe("ext-toolchain — the extension-pack build check", () => {
   it("withholds the item when the probe predates the field", () => {
     // An older backend's status has no `extension` key: no answer, no nag.
     expect(ids(healthy({ targetIsExtension: true }))).toEqual([]);
+  });
+});
+
+describe("the codex routes", () => {
+  // The governing rule: a Claude user must never see a Codex blocker. Every
+  // item below is gated on the door's stored choice, not on what happens to
+  // be installed.
+  const onCodex = (over: Partial<ReadinessInput> = {}) =>
+    healthy({ targetIsCodex: true, codexHookInstalled: true, ...over });
+
+  it("says nothing about codex while the door is on Claude", () => {
+    const pf = healthyPreflight();
+    pf.codex = { found: false, path: null, source: "path", usable: false, signedIn: false };
+    expect(deriveReadiness(healthy({ preflight: pf, codexHookInstalled: false }))).toEqual([]);
+  });
+
+  it("blocks on a missing codex with a locate fix", () => {
+    const pf = healthyPreflight();
+    pf.codex = { found: false, path: null, source: "path", usable: false, signedIn: false };
+    const items = deriveReadiness(onCodex({ preflight: pf }));
+    expect(items.map((i) => i.id)).toEqual(["codex-missing"]);
+    expect(items[0].state).toBe("blocked");
+    expect(items[0].fix?.kind).toBe("locate-codex");
+    expect(items[0].label).toContain("Can't find");
+  });
+
+  it("blocks a codex that EXISTS but is too old — the live bug", () => {
+    // $PATH on a machine with the ChatGPT app usually still resolves an old
+    // standalone build: it starts, plans once, and then fails every restore.
+    const pf = healthyPreflight();
+    pf.codex = {
+      found: true,
+      path: "/opt/homebrew/bin/codex",
+      source: "probe",
+      usable: false,
+      signedIn: true,
+    };
+    const items = deriveReadiness(onCodex({ preflight: pf }));
+    expect(items.map((i) => i.id)).toEqual(["codex-missing"]);
+    expect(items[0].label).toContain("too old");
+    expect(items[0].detail).toContain("/opt/homebrew/bin/codex");
+  });
+
+  it("blocks a missing plan contract — codex ignores the profile silently", () => {
+    // `codex -p redline-plan` with no such file is NOT an error. A session
+    // would plan with no contract, look perfect on v1, and lose every
+    // block-identity sidecar on v2.
+    const pf = healthyPreflight();
+    pf.codex = { ...pf.codex!, profile: { installed: false, outdated: false, path: "/p" } };
+    const items = deriveReadiness(onCodex({ preflight: pf }));
+    expect(items.map((i) => i.id)).toEqual(["codex-contract-missing"]);
+    expect(items[0].state).toBe("blocked");
+    expect(items[0].fix?.kind).toBe("install-integration");
+  });
+
+  it("blocks a STALE contract too — it fails the same silent way", () => {
+    const pf = healthyPreflight();
+    pf.codex = { ...pf.codex!, profile: { installed: true, outdated: true, path: "/p" } };
+    const items = deriveReadiness(onCodex({ preflight: pf }));
+    expect(items.map((i) => i.id)).toEqual(["codex-contract-missing"]);
+    expect(items[0].label).toContain("out of date");
+  });
+
+  it("withholds the contract item while the probe predates the field", () => {
+    const pf = healthyPreflight();
+    pf.codex = { ...pf.codex!, profile: undefined };
+    expect(deriveReadiness(onCodex({ preflight: pf }))).toEqual([]);
+  });
+
+  it("blocks a logged-out codex rather than letting it spin", () => {
+    const pf = healthyPreflight();
+    pf.codex = { ...pf.codex!, signedIn: false };
+    const items = deriveReadiness(onCodex({ preflight: pf }));
+    expect(items.map((i) => i.id)).toEqual(["codex-logged-out"]);
+    expect(items[0].state).toBe("blocked");
+    expect(items[0].fix?.copyText).toBe("codex login");
+  });
+
+  it("names only ONE binary fault at a time", () => {
+    // Missing beats logged-out: a binary that isn't there can't be signed in,
+    // and two blockers for one cause is a wall, not a fix.
+    const pf = healthyPreflight();
+    pf.codex = { found: false, path: null, source: "path", usable: false, signedIn: false };
+    expect(ids(onCodex({ preflight: pf }))).toEqual(["codex-missing"]);
+  });
+
+  it("warns — never blocks — on a missing codex Stop hook", () => {
+    const items = deriveReadiness(onCodex({ codexHookInstalled: false }));
+    expect(items.map((i) => i.id)).toEqual(["codex-hook-missing"]);
+    expect(items[0].state).toBe("warn");
+    expect(blockingItems(items)).toEqual([]);
+    // The one-time trust confirmation is the part nobody would guess.
+    expect(items[0].detail).toContain("trust");
+  });
+
+  it("withholds the hook warning while the probe is unanswered", () => {
+    expect(deriveReadiness(healthy({ targetIsCodex: true }))).toEqual([]);
+  });
+
+  it("keeps codex items in a fixed place in the order", () => {
+    const pf = healthyPreflight();
+    pf.mode = "paused";
+    pf.codex = { ...pf.codex!, signedIn: false };
+    // (signed-out is reported only once the contract is present — one binary
+    // fault at a time, same rule as missing-beats-logged-out.)
+    expect(ids(onCodex({ preflight: pf, codexHookInstalled: false }))).toEqual([
+      "mode-paused",
+      "codex-logged-out",
+      "codex-hook-missing",
+    ]);
+  });
+});
+
+describe("the codex RESTORE gate", () => {
+  // A restore is narrower than a launch and fails differently: it is a round
+  // trip. The command runs, the terminal looks healthy, and the plan never
+  // comes back — with the detached banner already dismissed behind it.
+  const restore = (
+    mutate: (pf: PreflightStatus) => void = () => {},
+    hookInstalled: boolean | undefined = true,
+  ) => {
+    const pf = healthyPreflight();
+    mutate(pf);
+    return codexRestoreBlockers(pf, hookInstalled);
+  };
+
+  it("clears a healthy Codex — nothing between the review and its plan", () => {
+    expect(restore()).toEqual([]);
+  });
+
+  it("says nothing while the probe is still in flight", () => {
+    // Refusing on no answer would be worse than the fault it guards against:
+    // the reviewer's own terminal was always the fallback.
+    expect(codexRestoreBlockers(null, undefined)).toEqual([]);
+    expect(codexRestoreBlockers(null, false)).toEqual([]);
+  });
+
+  it("blocks a missing codex, with the locate fix the door already offers", () => {
+    const items = restore((pf) => {
+      pf.codex = {
+        found: false,
+        path: null,
+        source: "path",
+        usable: false,
+        signedIn: false,
+      };
+    });
+    expect(items.map((i) => i.id)).toEqual(["codex-missing"]);
+    expect(items[0].fix?.kind).toBe("locate-codex");
+  });
+
+  it("blocks a codex too old to have `resume` at all", () => {
+    // The live bug: `$PATH` on a machine with the ChatGPT desktop app usually
+    // resolves an older standalone build. `resume` IS the restore mechanism,
+    // so this one is fatal here in a way it never is at the door.
+    const items = restore((pf) => {
+      pf.codex = {
+        found: true,
+        path: "/opt/homebrew/bin/codex",
+        source: "path",
+        usable: false,
+        signedIn: true,
+      };
+    });
+    expect(items.map((i) => i.id)).toEqual(["codex-missing"]);
+    expect(items[0].detail).toContain("resume");
+  });
+
+  it("blocks a logged-out codex", () => {
+    const items = restore((pf) => {
+      pf.codex = { ...pf.codex!, signedIn: false };
+    });
+    expect(items.map((i) => i.id)).toEqual(["codex-logged-out"]);
+    expect(items[0].fix?.copyText).toBe("codex login");
+  });
+
+  it("blocks a missing or stale plan contract", () => {
+    for (const profile of [
+      { installed: false, outdated: false, path: "/p" },
+      { installed: true, outdated: true, path: "/p" },
+    ]) {
+      const items = restore((pf) => {
+        pf.codex = { ...pf.codex!, profile };
+      });
+      expect(items.map((i) => i.id)).toEqual(["codex-contract-missing"]);
+      expect(items[0].fix?.kind).toBe("install-integration");
+    }
+  });
+
+  it("ESCALATES the missing Stop hook from a warning to a blocker", () => {
+    // At the door this is correctly a warning: the plan still reaches the
+    // model, only the return trip is lost. A restore is nothing BUT the return
+    // trip — the sentinel it writes would reach nothing.
+    const items = restore(() => {}, false);
+    expect(items.map((i) => i.id)).toEqual(["codex-hook-missing"]);
+    expect(items[0].state).toBe("blocked");
+    expect(items[0].fix?.kind).toBe("install-integration");
+
+    // Unprobed is not "missing" — withheld, like every other null answer.
+    expect(restore(() => {}, undefined)).toEqual([]);
+  });
+
+  it("ignores faults that have nothing to do with a restore", () => {
+    // Paused interception, an unbound daemon, a stale skill, an old curl and a
+    // projectless machine are all real — and none of them is what this gate is
+    // for. Refusing a restore on them would strand a review that could have
+    // come back fine.
+    const items = restore((pf) => {
+      pf.mode = "paused";
+      pf.claude = { found: false, path: null, source: "path" };
+      pf.skill = { installed: false, outdated: false };
+      pf.curl = { ok: false, version: "7.88.1" };
+    });
+    expect(items).toEqual([]);
+  });
+
+  it("reports every blocker at once, blockers first", () => {
+    // A reviewer with two faults should see both, not fix one and discover the
+    // next on the following click.
+    const items = restore((pf) => {
+      pf.codex = {
+        found: false,
+        path: null,
+        source: "path",
+        usable: false,
+        signedIn: false,
+      };
+    }, false);
+    expect(items.map((i) => i.id)).toEqual([
+      "codex-missing",
+      "codex-hook-missing",
+    ]);
+    expect(items.every((i) => i.state === "blocked")).toBe(true);
   });
 });

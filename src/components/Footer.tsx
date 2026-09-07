@@ -22,6 +22,10 @@ interface FooterProps {
   termTabCount: number;
   termHasUnseen: boolean;
   onExpandTerminal: () => void;
+  /** Which harness holds this plan ("claude-code" | "codex"; absent reads as
+   *  claude-code). Two buttons say a vendor's name out loud, and saying the
+   *  wrong one is worse than saying none. */
+  backend?: string | null;
 }
 
 export function Footer({
@@ -39,7 +43,9 @@ export function Footer({
   termTabCount,
   termHasUnseen,
   onExpandTerminal,
+  backend,
 }: FooterProps) {
+  const onCodex = backend === "codex";
   const pending = comments.filter(
     (c) => c.status === "draft" || c.status === "reopened",
   );
@@ -193,7 +199,7 @@ export function Footer({
               session, never the per-comment Discuss fork. The caption carries
               the mode so the label can't be mistaken for the sidecar. */}
           <span className="flex flex-col items-center leading-tight">
-            <span>Send to Claude Code</span>
+            <span>{onCodex ? "Send to Codex" : "Send to Claude Code"}</span>
             {total > 0 && (
               <span
                 style={{
@@ -209,13 +215,24 @@ export function Footer({
         </Button>
         {/* Visually subordinate sibling to Approve: same gating, but the plan
             is executed by a fresh orchestrated session (the original session
-            is stood down read-only), so the label carries the mechanism. */}
+            is stood down read-only), so the label carries the mechanism.
+
+            Execution is Claude-only, deliberately — the orchestrate launch
+            depends on `--permission-mode acceptEdits`, the orchestrator seat's
+            `--model` and the multi-agent Workflow opt-in, none of which have a
+            Codex analogue. So a Codex-authored plan is BUILT by Claude. That is
+            a real seam, and the caption names it rather than leaving it to be
+            discovered mid-run. */}
         <Button
           size="sm"
           onClick={onOrchestrate}
           disabled={!canOrchestrate || waiting}
           className="font-medium"
-          title="Approve the plan and execute it as a multi-agent workflow in a new terminal"
+          title={
+            onCodex
+              ? "Approve the plan and execute it as a multi-agent workflow in a new Claude Code terminal — Codex plans, Claude builds"
+              : "Approve the plan and execute it as a multi-agent workflow in a new terminal"
+          }
         >
           <span className="flex flex-col items-center leading-tight">
             <span>Orchestrate</span>
@@ -226,7 +243,9 @@ export function Footer({
                 color: "var(--color-ink-muted)",
               }}
             >
-              approve + multi-agent execute
+              {onCodex
+                ? "approve + execute on Claude"
+                : "approve + multi-agent execute"}
             </span>
           </span>
         </Button>

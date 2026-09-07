@@ -1,0 +1,13 @@
+# Paths under src-tauri/ that must NOT restart a running `tauri dev`.
+#
+# Generated from skills/redline-plan-review/SKILL.md by
+# scripts/gen-codex-contract.mjs, which `npm run build` runs via `prebuild`.
+# It is only "Rust source" in the include_str! sense (codex_profile.rs), so a
+# rewrite of it forces cargo to relink the whole crate — and the watcher kills
+# the running app to do it. That is how two Front Door plan sessions took the
+# dev host down on 2026-09-01: each ran `ANALYZE=1 npm run build` about twenty
+# seconds in, and the app vanished mid-review with no crash report.
+#
+# The generator now only writes when the bytes actually change; this covers the
+# case where they do. A real contract change is picked up by the next restart.
+src/codex_plan_contract.txt

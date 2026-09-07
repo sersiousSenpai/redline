@@ -41,6 +41,12 @@ const MAX_RECENT: i64 = 24;
 const KEEP_ROWS: i64 = 50;
 /// How far up from a listener's cwd we look for its project root.
 const MAX_WALK_UP: usize = 6;
+/// First port of the OS's ephemeral range. A server the kernel handed a port
+/// cannot be brought back AT that port, so remembering the row would offer a
+/// Run button pointing at a URL that will never come up again — and the port
+/// itself says nothing about what ran there. Such servers still show as
+/// running cards while they are up; they are simply not worth remembering.
+const EPHEMERAL_PORT_FLOOR: u16 = 49152;
 
 // ---------------------------------------------------------------------------
 // Parsing (pure)
@@ -404,6 +410,54 @@ pub fn detect_runner(comm: &str, args: &str) -> Option<(&'static str, Family)> {
         .map(|(_, label, family)| (*label, *family))
 }
 
+/// Short command names (`lsof`'s `c` field) that make a process a plausible
+/// dev-server runtime. `node` is deliberately absent from `RUNNERS` — as an
+/// argv token it is far too common — but as the process's OWN command it is
+/// solid evidence, so it belongs here.
+const RUNTIME_COMMS: [&str; 15] = [
+    "node", "bun", "deno", "npm", "pnpm", "yarn", "python", "python3", "ruby",
+    "java", "php", "dotnet", "cargo", "go", "air",
+];
+
+/// Does this process actually claim to be the project's dev server, or does it
+/// merely happen to have the repo as its cwd?
+///
+/// The cwd→project mapping alone is too generous. A live scan proved it: four
+/// copies of an unrelated, long-dead binary — started from a terminal inside
+/// the repo and reparented to launchd — were each presented as a full
+/// "Vite — redline" card, because their cwd was the repo and the repo's
+/// `package.json` names Vite. Nothing about those processes said "dev server";
+/// only their working directory did.
+///
+/// So a card now needs one of three affirmative signals:
+///   * argv names a runner we recognize (`vite`, `next`, `uvicorn`, …), or
+///   * the process's own command is a language runtime or package manager, or
+///   * argv[0] resolves inside the project root — which is what keeps a
+///     genuinely compiled in-repo server (`target/debug/api`, a Go binary, a
+///     repo-built single-file executable) as a real card.
+///
+/// A relative argv[0] carrying a path separator counts as in-repo: it was
+/// resolved against a cwd that this scan already mapped into `root`. A bare
+/// name with no separator is a PATH lookup and proves nothing.
+pub fn claims_project(comm: &str, args: &str, root: &Path) -> bool {
+    if detect_runner(comm, args).is_some() {
+        return true;
+    }
+    let comm_lc = comm.to_ascii_lowercase();
+    if RUNTIME_COMMS.contains(&comm_lc.as_str()) {
+        return true;
+    }
+    let Some(argv0) = args.split_whitespace().next() else {
+        return false;
+    };
+    if !argv0.starts_with('/') {
+        return argv0.contains('/');
+    }
+    let argv0 = normalize_path(argv0);
+    let root = normalize_path(&root.to_string_lossy());
+    argv0 == root || argv0.starts_with(&format!("{root}/"))
+}
+
 /// The succinct label a card leads with: `"Vite — myapp"`.
 ///
 /// Framework beats bundler on purpose. A Next.js app has `vite` nowhere near it
@@ -597,6 +651,7 @@ pub fn partition_recent(
 ) -> Vec<RecentServer> {
     rows.into_iter()
         .filter(|r| !live_keys.contains(&(normalize_path(&r.project_path), r.port)))
+        .filter(|r| r.port < EPHEMERAL_PORT_FLOOR)
         .filter(|r| dir_exists(&r.project_path))
         .map(|r| RecentServer {
             port_busy: busy_ports.contains(&r.port),
@@ -729,27 +784,43 @@ fn scan_with(db: &Database, own_pid: u32) -> Result<DevServerScan, String> {
             }
             continue;
         };
+        let args = args_by_pid.get(pid).cloned().unwrap_or_default();
+        // The repo is this process's cwd — but a neighbor is not a dev server.
+        // Same compact row as the no-project branch, and the same point: no
+        // probe, no remembered row, no thumbnail work for something that only
+        // shares a working directory with the project.
+        if !claims_project(comm, &args, &root) {
+            if others.len() < MAX_OTHERS {
+                others.push(OtherListener {
+                    pid: *pid,
+                    port,
+                    comm: comm.clone(),
+                });
+            }
+            continue;
+        }
         let probe = probes
             .entry(root.clone())
             .or_insert_with(|| probe_project(&root));
-        let args = args_by_pid.get(pid).cloned().unwrap_or_default();
         let stack = detect_stack(Some(probe), comm, &args);
         let run_command = derive_run_command(Some(probe), comm, &args);
         let project_path = normalize_path(&root.to_string_lossy());
         let project_name = probe.dir_name.clone();
         let url = format!("http://localhost:{port}");
 
-        let _ = db.upsert_dev_server(
-            &project_path,
-            &project_name,
-            port,
-            &url,
-            &stack,
-            &run_command,
-            Some(*pid),
-            Some(args.as_str()).filter(|a| !a.is_empty()),
-            now,
-        );
+        if port < EPHEMERAL_PORT_FLOOR {
+            let _ = db.upsert_dev_server(
+                &project_path,
+                &project_name,
+                port,
+                &url,
+                &stack,
+                &run_command,
+                Some(*pid),
+                Some(args.as_str()).filter(|a| !a.is_empty()),
+                now,
+            );
+        }
 
         running.push(RunningServer {
             pid: *pid,
@@ -1226,6 +1297,41 @@ mod tests {
         assert_eq!(derive_run_command(None, "sh", "./serve"), "./serve");
     }
 
+    #[test]
+    fn a_neighbor_process_does_not_claim_the_project() {
+        let root = Path::new("/Users/me/app");
+        // The observed failure: a long-dead standalone binary, living outside
+        // the repo, started once from a terminal whose cwd was the repo.
+        assert!(!claims_project(
+            "legacyapp",
+            "/Users/me/.local/bin/legacyapp",
+            root
+        ));
+        // A bare PATH lookup is not evidence either — no separator, no origin.
+        assert!(!claims_project("myserver", "myserver --port 9000", root));
+        // Nor is an absolute path that merely shares a prefix with the root.
+        assert!(!claims_project("appd", "/Users/me/app-backup/bin/appd", root));
+    }
+
+    #[test]
+    fn a_real_server_still_claims_the_project() {
+        let root = Path::new("/Users/me/app");
+        // 1 — argv names a runner.
+        assert!(claims_project("sh", "vite --port 5173", root));
+        // 2 — the process's own command is a runtime, even with a bare argv.
+        assert!(claims_project("node", "/opt/homebrew/bin/node server.js", root));
+        assert!(claims_project("bun", "/usr/local/bin/bun run serve", root));
+        // 3 — a compiled binary that lives IN the repo, absolute or relative.
+        assert!(claims_project("api", "/Users/me/app/target/debug/api", root));
+        assert!(claims_project("api", "./target/debug/api --port 8080", root));
+        // A trailing slash on the root must not break the prefix test.
+        assert!(claims_project(
+            "api",
+            "/Users/me/app/target/debug/api",
+            Path::new("/Users/me/app/")
+        ));
+    }
+
     fn row(id: i64, path: &str, port: u16) -> crate::db::DevServerRow {
         crate::db::DevServerRow {
             id,
@@ -1258,6 +1364,19 @@ mod tests {
         );
         assert!(!got[0].port_busy);
         assert!(got[1].port_busy, "a foreign listener on 4000 is flagged");
+    }
+
+    #[test]
+    fn recent_forgets_os_assigned_ports() {
+        // Rows written before the floor existed still sit in the table; the
+        // filter is what retires them, without a migration.
+        let rows = vec![row(1, "/a", 3000), row(2, "/a", 54441), row(3, "/a", 49152)];
+        let got = partition_recent(rows, &HashSet::new(), &HashSet::new(), |_| true);
+        assert_eq!(
+            got.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![1],
+            "only the re-runnable port is worth remembering: {got:?}"
+        );
     }
 
     #[test]
@@ -1338,10 +1457,23 @@ mod tests {
                 r.extra_ports.iter().all(|p| *p > r.port),
                 "the primary port is the lowest one the process holds"
             );
+            assert!(
+                claims_project(&r.comm, &r.args, Path::new(&r.project_path)),
+                "a card must be a dev server, not merely a process whose cwd is \
+                 the repo: {r:?}"
+            );
         }
-        // Every running card was recorded, and never also listed as "recent".
+        // Every running card on a re-runnable port was recorded, and no live
+        // server is ever also listed as "recent". Cards on OS-assigned ports
+        // are shown but deliberately not remembered.
         let rows = db.list_dev_servers(100).unwrap();
-        assert_eq!(rows.len(), scan.running.len());
+        assert_eq!(
+            rows.len(),
+            scan.running
+                .iter()
+                .filter(|r| r.port < EPHEMERAL_PORT_FLOOR)
+                .count()
+        );
         for r in &scan.running {
             assert!(
                 !scan.recent.iter().any(|x| x.project_path == r.project_path

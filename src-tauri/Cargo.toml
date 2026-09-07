@@ -208,6 +208,12 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
 # Assemble the extension host's inline test fixtures (real wasm modules from
 # `wat` text) — test-only; the shipped host consumes `.wasm` bytes.
 wat = "1"
+# Parse the Codex config profile Redline writes (`codex_profile.rs`) back out
+# in tests. The contract is delivered to a Codex plan session through that file
+# and nowhere else, so an escaping bug that drops part of it would be silent
+# until a revision destroyed a diff — a real round-trip is the only assertion
+# that catches it. Test-only: nothing in the shipped binary reads TOML.
+toml = "0.8"
 
 # Size levers for the shipped binary (budget + baselines: docs/perf-budget.md
 # "Size budget"; pinned by src-tauri/tests/size_guard.rs so a revert fails

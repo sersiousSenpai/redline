@@ -9,8 +9,11 @@ import {
   formatTokens,
   groupWorkByProject,
   isLiveRunState,
+  isSequentialFallback,
   orderRuns,
   phaseProgress,
+  resolveRunProject,
+  runConflictCount,
   runElapsed,
   runOutcomeLabel,
   runStatusSentence,
@@ -400,5 +403,85 @@ describe("tile display helpers", () => {
         90_000,
       ),
     ).toBe("48m 20s");
+  });
+});
+
+describe("resolveRunProject", () => {
+  const summaries = [
+    { sessionId: "s1", projectPath: "/Users/me/redline" },
+    { sessionId: "s2", projectPath: "/Users/me/other" },
+  ];
+
+  it("prefers the loaded session over the summary list", () => {
+    expect(
+      resolveRunProject(
+        "s1",
+        { sessionId: "s1", projectPath: "/Users/me/live" },
+        summaries,
+      ),
+    ).toBe("/Users/me/live");
+  });
+
+  it("ignores a loaded session for a different id", () => {
+    expect(
+      resolveRunProject(
+        "s2",
+        { sessionId: "s1", projectPath: "/Users/me/live" },
+        summaries,
+      ),
+    ).toBe("/Users/me/other");
+  });
+
+  it("falls back to the summary when no session is loaded", () => {
+    expect(resolveRunProject("s1", null, summaries)).toBe("/Users/me/redline");
+  });
+
+  it("refuses when the session is absent from both", () => {
+    // The regression: this used to yield null and get passed straight to
+    // buildOrchestrateLaunchCommand, which emits no `cd` — an acceptEdits
+    // orchestrator spawning in $HOME.
+    expect(resolveRunProject("gone", null, summaries)).toBeNull();
+  });
+
+  it("treats a blank path as no path at all", () => {
+    expect(
+      resolveRunProject("s3", { sessionId: "s3", projectPath: "   " }, [
+        { sessionId: "s3", projectPath: "" },
+      ]),
+    ).toBeNull();
+  });
+});
+
+describe("runConflictCount / isSequentialFallback", () => {
+  const agent = (id: string, files: string[]) =>
+    tile({ agentId: id, filesChanged: files });
+
+  it("counts files claimed by two or more agents", () => {
+    expect(
+      runConflictCount([
+        agent("a", ["src/App.tsx", "src/lib/x.ts"]),
+        agent("b", ["src/App.tsx"]),
+        agent("c", ["src/lib/x.ts", "README.md"]),
+      ]),
+    ).toBe(2);
+  });
+
+  it("is zero when every agent owns its own files", () => {
+    expect(
+      runConflictCount([agent("a", ["one.ts"]), agent("b", ["two.ts"])]),
+    ).toBe(0);
+    expect(runConflictCount([])).toBe(0);
+  });
+
+  it("does not count one agent touching the same file twice", () => {
+    expect(runConflictCount([agent("a", ["dup.ts", "dup.ts"])])).toBe(0);
+  });
+
+  it("marks only the sequential fallback", () => {
+    expect(isSequentialFallback("sequential")).toBe(true);
+    expect(isSequentialFallback("workflow")).toBe(false);
+    expect(isSequentialFallback("pending")).toBe(false);
+    expect(isSequentialFallback(null)).toBe(false);
+    expect(isSequentialFallback(undefined)).toBe(false);
   });
 });

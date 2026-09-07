@@ -362,11 +362,17 @@ pub(crate) fn apply_journal_line(snap: &mut RunSnapshot, line: &str) -> bool {
 }
 
 /// Per-agent scratch the snapshot doesn't carry (the full prompt for label
-/// matching — previews only in the serialized shape).
+/// matching — previews only in the serialized shape; the meter, whose dedupe
+/// state must persist across lines).
 #[derive(Default)]
 pub(crate) struct AgentAux {
     pub prompt: String,
     pub labeled: bool,
+    /// The ONE accounting rule, per agent. Before this, the block below
+    /// summed `usage` on every `assistant` line — and consecutive lines repeat
+    /// a `message.id` with cumulative usage, so cache-creation read 2.7× its
+    /// true value in every Runs tile and every seat-burn row.
+    pub meter: crate::meter::TurnMeter,
 }
 
 /// Apply one line of an `agent-<id>.jsonl` transcript to its tile.
@@ -391,58 +397,33 @@ pub(crate) fn apply_agent_line(tile: &mut AgentTile, aux: &mut AgentAux, line: &
             tile.duration_ms = Some((e - s).max(0));
         }
     }
-    match v.get("type").and_then(serde_json::Value::as_str) {
-        Some("user") => {
-            // Line 1: the prompt, as a plain content string.
-            if aux.prompt.is_empty() {
-                if let Some(p) = v
-                    .pointer("/message/content")
-                    .and_then(serde_json::Value::as_str)
-                {
-                    aux.prompt = p.chars().take(PROMPT_MATCH_CAP).collect();
-                    tile.prompt_preview = Some(preview(p, PREVIEW_CHARS));
-                    changed = true;
-                }
+    if v.get("type").and_then(serde_json::Value::as_str) == Some("user") {
+        // Line 1: the prompt, as a plain content string.
+        if aux.prompt.is_empty() {
+            if let Some(p) = v
+                .pointer("/message/content")
+                .and_then(serde_json::Value::as_str)
+            {
+                aux.prompt = p.chars().take(PROMPT_MATCH_CAP).collect();
+                tile.prompt_preview = Some(preview(p, PREVIEW_CHARS));
+                changed = true;
             }
         }
-        Some("assistant") => {
-            if let Some(m) = v.get("message") {
-                if let Some(model) = m.get("model").and_then(serde_json::Value::as_str) {
-                    if tile.model.as_deref() != Some(model) {
-                        tile.model = Some(model.to_string());
-                        changed = true;
-                    }
-                }
-                if let Some(effort) = v.get("effort").and_then(serde_json::Value::as_str) {
-                    if tile.effort.as_deref() != Some(effort) {
-                        tile.effort = Some(effort.to_string());
-                        changed = true;
-                    }
-                }
-                if let Some(u) = m.get("usage") {
-                    let g = |k: &str| u.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0);
-                    tile.input_tokens += g("input_tokens");
-                    tile.output_tokens += g("output_tokens");
-                    tile.cache_read_tokens += g("cache_read_input_tokens");
-                    tile.cache_creation_tokens += g("cache_creation_input_tokens");
-                    changed = true;
-                }
-                if let Some(blocks) = m.get("content").and_then(serde_json::Value::as_array) {
-                    for b in blocks {
-                        if b.get("type").and_then(serde_json::Value::as_str) == Some("tool_use") {
-                            tile.tool_calls += 1;
-                            if let Some(name) =
-                                b.get("name").and_then(serde_json::Value::as_str)
-                            {
-                                tile.last_tool_name = Some(name.to_string());
-                            }
-                            changed = true;
-                        }
-                    }
-                }
-            }
-        }
-        _ => {}
+    }
+    // Usage, model, effort and tool calls all come from the ONE accounting
+    // rule — never re-derived here. `meter.rs` documents why summing per line
+    // over-reports; a second copy of that rule is how the bug came back.
+    if aux.meter.observe(&v) {
+        let m = &aux.meter;
+        tile.model.clone_from(&m.model);
+        tile.effort.clone_from(&m.effort);
+        tile.input_tokens = m.input_tokens;
+        tile.output_tokens = m.output_tokens;
+        tile.cache_read_tokens = m.cache_read_tokens;
+        tile.cache_creation_tokens = m.cache_creation_tokens;
+        tile.tool_calls = m.tool_calls;
+        tile.last_tool_name.clone_from(&m.last_tool);
+        changed = true;
     }
     changed
 }
@@ -1145,7 +1126,7 @@ pub(crate) fn local_day(ms: i64) -> String {
 // --- incremental file reading ----------------------------------------------
 
 #[derive(Default)]
-struct Cursor {
+pub(crate) struct Cursor {
     offset: u64,
     partial: String,
     primed: bool,
@@ -1155,7 +1136,7 @@ struct Cursor {
 /// drops the torn line (the `model_from_transcript` pattern) and reports the
 /// skip. Partial trailing lines are held across calls — never parse a torn
 /// line.
-fn read_new_lines(path: &Path, cur: &mut Cursor, cap: u64) -> (Vec<String>, u64) {
+pub(crate) fn read_new_lines(path: &Path, cur: &mut Cursor, cap: u64) -> (Vec<String>, u64) {
     let Ok(mut f) = std::fs::File::open(path) else {
         return (Vec::new(), 0);
     };
@@ -1245,6 +1226,75 @@ impl RunWatchState {
         let snap = h.snapshot.lock().unwrap().clone();
         Some(snap)
     }
+}
+
+/// The newest write anywhere in a run's artifact set — "when did this run
+/// last actually do something".
+///
+/// `WatchCtx::parent_last_growth` is the same idea but lives on the watcher
+/// thread and, worse, stops updating once discovery settles `mode` to
+/// `workflow` (it is only touched in the pre-workflow branch of `scan_once`).
+/// The stall sweep needs an answer that survives a restart and holds for the
+/// whole run, so it reads the artifacts themselves.
+///
+/// A workflow's parent transcript can be legitimately quiet for a long
+/// stretch while subagents work, so the subagent/workflow trees count too —
+/// otherwise a healthy fan-out would look silent. Bounded (`MAX_DEPTH` /
+/// `MAX_ENTRIES`) because this runs on a sweep cadence.
+pub fn run_last_activity_ms(row: &db::OrchestrationRow) -> Option<i64> {
+    const MAX_DEPTH: usize = 3;
+    const MAX_ENTRIES: usize = 400;
+
+    fn mtime_ms(p: &std::path::Path) -> Option<i64> {
+        let m = std::fs::metadata(p).ok()?;
+        let t = m.modified().ok()?;
+        let d = t.duration_since(std::time::UNIX_EPOCH).ok()?;
+        Some(d.as_millis() as i64)
+    }
+
+    fn newest(dir: &std::path::Path, depth: usize, budget: &mut usize, best: &mut Option<i64>) {
+        if depth > MAX_DEPTH || *budget == 0 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            if *budget == 0 {
+                return;
+            }
+            *budget -= 1;
+            let path = entry.path();
+            if let Some(t) = mtime_ms(&path) {
+                if best.is_none_or(|b| t > b) {
+                    *best = Some(t);
+                }
+            }
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                newest(&path, depth + 1, budget, best);
+            }
+        }
+    }
+
+    let transcript = PathBuf::from(&row.transcript_path);
+    let mut best = mtime_ms(&transcript);
+    let mut budget = MAX_ENTRIES;
+    // `<dir>/<sessionId>.jsonl` → `<dir>/<sessionId>/`, where the workflows/
+    // and subagents/ trees live, plus the explicit transcript_dir when the
+    // launch line named one.
+    for dir in [
+        transcript.with_extension(""),
+        row.transcript_dir.clone().map(PathBuf::from).unwrap_or_default(),
+    ] {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        if let Some(t) = mtime_ms(&dir) {
+            if best.is_none_or(|b| t > b) {
+                best = Some(t);
+            }
+        }
+        newest(&dir, 1, &mut budget, &mut best);
+    }
+    best
 }
 
 /// Everything a scan pass needs; lives on the watcher thread (or the stack,
@@ -2081,16 +2131,20 @@ mod tests {
     }
 
     #[test]
-    fn apply_agent_line_sums_usage_and_tracks_tools() {
+    fn apply_agent_line_dedupes_usage_and_tracks_tools() {
         let mut tile = AgentTile::new("a13046496e0682a9d", "running");
         let mut aux = AgentAux::default();
         for line in fixture("agent_head.jsonl").lines() {
             apply_agent_line(&mut tile, &mut aux, line);
         }
-        assert_eq!(tile.input_tokens, 12);
-        assert_eq!(tile.output_tokens, 454);
-        assert_eq!(tile.cache_read_tokens, 95298);
-        assert_eq!(tile.cache_creation_tokens, 103574);
+        // Deduped by `message.id` — six assistant lines, three distinct
+        // messages, cumulative usage. Summing every line (what this did
+        // before `meter.rs`) read 12 / 454 / 95,298 / 103,574, over-reporting
+        // cache-creation 2.7×.
+        assert_eq!(tile.input_tokens, 6);
+        assert_eq!(tile.output_tokens, 440);
+        assert_eq!(tile.cache_read_tokens, 64727);
+        assert_eq!(tile.cache_creation_tokens, 38847);
         assert_eq!(tile.tool_calls, 3);
         assert_eq!(tile.last_tool_name.as_deref(), Some("Bash"));
         assert_eq!(tile.model.as_deref(), Some("claude-sonnet-5"));

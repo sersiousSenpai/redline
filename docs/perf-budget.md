@@ -40,6 +40,18 @@ it, that's the discussion to have before merging.
    instead of flooding the renderer. See `pty.rs` (`Coalescer`, `Flow`) and
    `TerminalView.tsx`.
 
+   > **The token meter's compliance with this rule.** `{surface}-meter`
+   > (`meter.rs` / `turn::MeterPacer`) is an `app.emit` and not a `Channel`,
+   > which is only allowed because it is not high-frequency: it is coalesced to
+   > at most one event per **250 ms**, plus an immediate one on a *discrete*
+   > change (first model observation, a new tool call, a rate-limit onset, the
+   > terminal) — never per text delta. The meter deliberately does NOT ride the
+   > delta path, which does fire per token. Its payload is a bounded snapshot
+   > (a fixed set of counters plus one ≤160-char activity label), and the
+   > backend ring is capped at 200 entries, so nothing here is unbounded
+   > either. If the meter ever needs per-token resolution, it must move to a
+   > `Channel` first.
+
 4. **Heavy Tauri commands MUST be `#[tauri::command(async)]`.** A plain
    `#[tauri::command]` runs on the **main thread** — any fs read, parse, encode,
    or other non-trivial work there beach-balls the UI (this bit us: `open_doc`
@@ -117,6 +129,130 @@ If a change genuinely needs to break a rule, say so explicitly in review and
 explain why the content is bounded — silence reads as "this is safe" when it may
 not be.
 
+## Boot budget
+
+The size budget above governs how much code ships. This one governs **how long
+the user waits before they can act.** They are different questions: a boot can
+be small and still slow, because the cost that matters is the *serial* work
+between process start and the first surface a keystroke reaches.
+
+> **Governing rule:** the first actionable frame waits only on the database,
+> the session store, and the daemon bind. Integration discovery, repair,
+> backups, syntax-set construction, terminal startup, and feature-only
+> JavaScript happen **after** that frame, never in front of it.
+
+### Milestones
+
+One vocabulary, two halves. Names are constants on both sides so a rename is a
+compile/type error rather than a silently-orphaned measurement.
+
+**Native** — `src-tauri/src/boot_trace.rs`. The clock starts at the top of
+`run()`; the post-boot coordinator emits one structured `tracing` record per
+launch (`boot milestone` lines plus a `boot trace` summary). Local console
+only: nothing is persisted, nothing leaves the machine, and milestone names are
+`&'static str`, so no path or plan title can be smuggled into a field.
+
+| Milestone | Recorded when |
+|---|---|
+| `process_start` | `run()` entered — the zero point |
+| `setup_enter` | Tauri's `setup` closure entered |
+| `db_migrate` | schema migration finished inside the open |
+| `db_open` | `Database::open` returned |
+| `store_hydrate` | `SessionStore::new` returned |
+| `daemon_start` | the axum server task was spawned |
+| `daemon_bind` | `127.0.0.1:7676` bound (or the bind failed) |
+| `highlighter_init` | the shared `SyntaxSet` finished building |
+| `extension_scan` | manifests scanned, wasm host started |
+| `hook_maintenance` | hook + skill maintenance finished |
+| `setup_done` | the `setup` closure returned |
+| `window_reveal` | the frontend called `show_main_window` |
+| `post_boot_done` | the post-reveal coordinator finished |
+
+**Frontend** — `src/lib/bootMarks.ts`, thin wrappers over `performance.mark` /
+`performance.measure`. Every mark after the origin also emits a measure *from*
+the origin, so the devtools timeline reads as durations rather than instants.
+
+| Mark | Recorded when |
+|---|---|
+| `rl:entry` | the entry module started evaluating — the zero point |
+| `rl:first-commit` | React's first commit landed (layout effect) |
+| `rl:core-bootstrap` | the core bootstrap IPC resolved |
+| `rl:reveal-call` / `rl:reveal-done` | `show_main_window` invoked / resolved |
+| `rl:actionable` | the first surface the user can act on is rendered |
+| `rl:session-ready` | a held plan session finished loading |
+| `rl:integration-ready` | post-reveal integration health resolved |
+| `rl:terminal-ready` | the dock is mounted with a live PTY |
+| `rl:boot-settled` | the decorative doors-open run finished |
+
+### Measuring
+
+Native, from a dev run:
+
+```bash
+RUST_LOG=info npm run tauri dev 2>&1 | grep -E "boot milestone|boot trace"
+```
+
+Frontend, from the WebView console once the shell is up:
+
+```js
+copy(await import("/src/lib/bootMarks.ts").then((m) => m.bootTimeline()))
+```
+
+Both read the same launch, so a milestone that moved on one side and not the
+other is the interesting case — that is usually work that changed threads
+rather than work that went away.
+
+### Scenarios
+
+A boot number without its scenario is not a measurement. Capture warm and cold
+samples for each:
+
+1. returning launch, no held session (the common case);
+2. launch with a held plan session;
+3. a large historical database;
+4. first run / missing integrations;
+5. Codex selected and unavailable;
+6. extensions enabled.
+
+### Measured — the boot program (2026-09-02)
+
+Baseline is the tree immediately before the work; every number is the same
+machine, same build command.
+
+| Lever | Before | After | Note |
+|---|---|---|---|
+| Boot-path JS | 1,047,586 B | **550,553 B** | −47.4%; ceiling ratcheted 1,052,000 → 660,000 (16.6% headroom) |
+| Fixed interaction floor | ~750 ms | **none** | the front door no longer gates on `bootSettled`; the decorative run is 300 ms |
+| Schema SQL per launch | ~60 `CREATE TABLE` + ~50 `CREATE INDEX` + 68 failing `ALTER TABLE`, **every launch** | **one `PRAGMA user_version` read** | `db.rs` versioned runner; pinned by `a_current_database_runs_no_migration_sql` |
+| Section parses at startup | one per revision of **every** session ever reviewed | **zero** | pinned by `hydrating_and_listing_sessions_parses_nothing` |
+| `VACUUM INTO` in `setup` | synchronous, before the window | **after the reveal** | `postboot.rs`; the 6h + quit snapshots are unchanged and now serialized |
+| `SyntaxSet` construction | synchronous in `setup` | **lazy `OnceLock`** | built by the post-boot warmup, or by the first file open — the same instance |
+| `codex --help` per boot | up to 2 (hook status + preflight, uncached) | **≤ 1, cached by binary identity** | `binprobe.rs`; the login-shell resolver is cached too |
+| Boot IPC round trips | 8 (incl. 4 subprocess-backed probes) | **1** (`bootstrap_state`, no child processes) | integration health follows the reveal |
+| Terminal dock | mounted with the shell (xterm + PTY + cwd poll) | **after the first actionable frame** | launch intent queues on `ensureTerminalReady` |
+
+What did **not** move, deliberately: run-watcher rehydration and extension-host
+startup stay in `setup`. The plan gates deferring them on measurement showing
+they are material, and extension access must remain fail-closed until token
+registration completes — moving it behind the reveal would open a window in
+which an extension could reach the daemon unregistered. The second,
+measurement-gated step on session hydration (keeping only summaries in memory
+and fetching bodies on demand) is likewise not taken: row hydration no longer
+parses anything, so the remaining cost is a `SELECT`, and the plan says to
+measure before spending that complexity.
+
+### Relative goals
+
+Absolute ceilings get ratcheted from the measured baseline, exactly like the
+size budget. These hold regardless of the machine:
+
+- **No fixed interaction floor.** The decorative boot animation must not gate
+  actionability — `src/lib/boot.test.ts` pins this at source level.
+- Warm start-to-actionable median **at least 30% better** than the baseline,
+  with no p95 regression.
+- **Zero** historical section parses before a session is opened.
+- At least **15% headroom** under the static boot-JS budget.
+
 ## Size budget
 
 The shipped artifact is part of the product. Redline counter-positions against
@@ -167,7 +303,10 @@ The budget metric changed with the fold: `bootJsBytes` is the entry chunk
 **plus** every chunk `dist/index.html` modulepreloads (the entry's transitive
 static closure — shared-with-the-viewer modules live in a preloaded chunk, so
 the entry file alone would under-count). `ANALYZE=1 npm run build` writes a
-`dist/stats.html` treemap for attribution.
+`build-analysis/stats.html` treemap for attribution — outside `dist/`, because
+everything under `dist` is embedded into the binary and counted by
+`distTotalBytes`, so the treemap used to inflate the number it exists to
+explain (and shipped to users on any build that ran with `ANALYZE` set).
 
 **`manualChunks` is deliberately absent** (tried and reverted here): pinning
 vendor groups makes rollup co-locate shared dependencies into the pinned

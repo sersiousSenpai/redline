@@ -2172,6 +2172,56 @@ p.rl-block-modified {
   }
 }
 
+/* "That one." A one-shot bloom on a terminal tile something just pointed at —
+   the front door's in-flight pill, revealing the tile its plan is running in.
+   The focus ring alone is not enough on a wall of fourteen: it says which tile
+   is focused, not which one you were just sent to.
+
+   Drawn on an ::after OVERLAY, not as a box-shadow on the wrapper itself. The
+   wrapper's own background sits UNDER its children, and a terminal paints an
+   opaque one over the whole tile — an inset shadow there would be invisible
+   everywhere it mattered. A positioned pseudo-element on a positioned parent
+   paints above those children, and `pointer-events: none` keeps it from ever
+   sitting between the user and the shell.
+
+   One shot, no loop: this is an answer to a click, not a status. The element
+   only exists while `.is-hailed` does, so re-adding the class re-creates it
+   and the animation genuinely restarts. */
+.rl-tile-wrap.is-hailed::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+  border-radius: inherit;
+  animation: rl-tile-hail 1.4s ease-out 1 both;
+}
+@keyframes rl-tile-hail {
+  0% {
+    box-shadow:
+      inset 0 0 0 2px color-mix(in srgb, var(--color-info) 88%, transparent),
+      inset 0 0 24px color-mix(in srgb, var(--color-info) 34%, transparent);
+  }
+  55% {
+    box-shadow:
+      inset 0 0 0 2px color-mix(in srgb, var(--color-info) 55%, transparent),
+      inset 0 0 14px color-mix(in srgb, var(--color-info) 16%, transparent);
+  }
+  100% {
+    box-shadow:
+      inset 0 0 0 2px transparent,
+      inset 0 0 0 transparent;
+  }
+}
+/* Respect reduced-motion: hold a static ring for the same duration rather
+   than blooming. The tile still answers the click — it just doesn't move. */
+@media (prefers-reduced-motion: reduce) {
+  .rl-tile-wrap.is-hailed::after {
+    animation: none;
+    box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--color-info) 70%, transparent);
+  }
+}
+
 /* --- Code Review surface (DiffView / ReviewPanel) --------------------------
    Row tint reuses the tracked-changes palette (success = added, warning =
    removed) so a diff reads like the plan redline; the word-level spans are a
@@ -3308,7 +3358,14 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
    xterm needs no refit. Removing the attribute (hard timeout, first
    keypress/pointer, or the main.tsx dead-man switch) leaves the DOM
    byte-identical to a boot that never ran. The longest delay + duration must
-   finish inside BOOT_OPEN_MS — boot.test.ts pins both invariants. */
+   finish inside BOOT_OPEN_MS — boot.test.ts pins both invariants.
+
+   The run is brisk on purpose (80ms + 220ms = 300ms end to end, down from
+   240 + 460). It used to be long because the shell WAITED for it — the front
+   door gated on `bootSettled`, so the animation doubled as a loading screen
+   and had to cover the boot IPC. Nothing actionable reads the phase anymore,
+   so this is just a plate resolve: long enough to read as motion, short
+   enough that it is over before you reach for the keyboard. */
 @media (prefers-reduced-motion: no-preference) {
   html[data-rl-boot="closed"] .rl-app-header {
     transform: translateY(8px);
@@ -3338,20 +3395,20 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
     opacity: 1;
     transform: none;
     transition:
-      transform 460ms cubic-bezier(0.22, 1, 0.36, 1),
-      opacity 460ms cubic-bezier(0.22, 1, 0.36, 1);
+      transform 220ms cubic-bezier(0.22, 1, 0.36, 1),
+      opacity 220ms cubic-bezier(0.22, 1, 0.36, 1);
   }
   /* The stagger: bars first, the side plates part together, the dock rises,
      and the document resolves last — revealed between the doors. */
   html[data-rl-boot="opening"] .rl-sidebar-clip,
   html[data-rl-boot="opening"] .rl-pane-clip {
-    transition-delay: 80ms;
+    transition-delay: 30ms;
   }
   html[data-rl-boot="opening"] .rl-term-dock {
-    transition-delay: 160ms;
+    transition-delay: 55ms;
   }
   html[data-rl-boot="opening"] .rl-doc-column {
-    transition-delay: 240ms;
+    transition-delay: 80ms;
   }
 }
 
@@ -3586,7 +3643,10 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
     0 0 0 3px color-mix(in srgb, var(--color-info) 12%, transparent),
     0 18px 44px -18px rgba(0, 0, 0, 0.6);
 }
-.rl-fd-island.is-planning,
+/* The Drafter's bar still morphs into a launch card in place — its document
+   never leaves the screen, so the card has something to sit beside. The front
+   door's island no longer does: its sentence LEAVES on ⏎ and the island goes
+   straight back to being a composer, so there is no planning pose to tint. */
 .rl-dl-bar.is-planning {
   border-color: color-mix(in srgb, var(--color-info) 30%, transparent);
 }
@@ -3826,6 +3886,34 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
   font-size: 10.5px;
   opacity: 0.45;
 }
+/* Section rules for a GROUPED menu (the backend picker stacks harness / model
+   / effort). The box itself is `popover.tsx`'s Panel — an absolutely
+   positioned `.rl-fd-menu` capped at a viewport fraction ran off the top of
+   the screen, because a fraction of the window says nothing about the room
+   above the chip. These are the row-level pieces Panel does not own. */
+.rl-fd-menu-sep {
+  height: 1px;
+  margin: 5px 7px;
+  background: color-mix(in srgb, var(--color-ink) 12%, transparent);
+}
+.rl-fd-menu-label {
+  padding: 5px 9px 3px;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-ink-muted);
+}
+/* A waiting/absent state inside the list — sentence case, not a section rule. */
+.rl-fd-menu-note {
+  padding: 5px 9px;
+  font-size: 11.5px;
+  color: var(--color-ink-muted);
+}
+.rl-fd-menu-row:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
 
 /* Attachments ride as a `Context:` path list on the prompt — the plan session
    already has Read/Grep/Glob pre-approved, so paths are all it needs. */
@@ -3859,6 +3947,255 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
 .rl-fd-x:hover {
   color: var(--color-ink);
   background: color-mix(in srgb, var(--color-ink) 10%, transparent);
+}
+
+/* ── Combine ────────────────────────────────────────────────────────────────
+
+   Picking N plans to fuse into one. Everything here is built from the tokens
+   the rest of the app already uses — `color-mix` over `--color-ink`, the
+   `--color-info` "armed" fill from `.rl-fd-go`, the house
+   `cubic-bezier(0.16, 1, 0.3, 1)` — so it inherits every theme rather than
+   pinning a palette of its own.
+
+   The native `<input type="checkbox">` this replaces was the tell: an OS form
+   control dropped into a navigation list, ignoring every variable around it.
+   A row is not a form field — it is a thing you are pointing at. */
+
+/* The entry affordance on the `Sessions` label row. A chip, not a bare word,
+   so it reads as an action on the list rather than another label in it. */
+.rl-cmb-enter {
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--color-ink) 14%, transparent);
+  background: color-mix(in srgb, var(--color-ink) 4%, transparent);
+  color: var(--color-ink-muted);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition:
+    color 160ms ease,
+    border-color 160ms ease,
+    background-color 160ms ease;
+}
+.rl-cmb-enter:hover {
+  color: var(--color-info);
+  border-color: color-mix(in srgb, var(--color-info) 50%, transparent);
+  background: color-mix(in srgb, var(--color-info) 10%, transparent);
+}
+
+/* The selection marker. Holds its slot at both states so nothing shifts when
+   a row is picked, and carries the pick ORDER rather than a tick — the number
+   is the sequence the sources arrive in, which is information a checkbox
+   cannot express.
+
+   IN FLOW, deliberately. It was absolutely positioned at first, which meant
+   the title beside it truncated against the full row width and pushed its
+   ellipsis underneath the marker on any long plan name. As a flex sibling in
+   the slot the version badge already occupied, the space is reserved by
+   construction — at every width, with no padding to keep in sync. */
+.rl-cmb-node {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 19px;
+  height: 19px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--color-ink) 26%, transparent);
+  background: color-mix(in srgb, var(--color-ink) 3%, transparent);
+  color: transparent;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  transition:
+    background-color 200ms ease,
+    border-color 200ms ease,
+    color 200ms ease,
+    box-shadow 240ms ease,
+    transform 240ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+/* Picked: the same "armed" vocabulary the send button uses — solid accent
+   fill, on-accent numeral, a lift and a coloured bloom. */
+.rl-cmb-node.is-on {
+  border-color: transparent;
+  background: var(--color-info);
+  color: var(--color-on-accent);
+  transform: scale(1.12);
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--color-info) 18%, transparent),
+    0 3px 10px -3px color-mix(in srgb, var(--color-info) 70%, transparent);
+}
+/* The row under the cursor previews the ring it would get. */
+.rl-cmb-row:hover .rl-cmb-node:not(.is-on) {
+  border-color: color-mix(in srgb, var(--color-info) 55%, transparent);
+  background: color-mix(in srgb, var(--color-info) 8%, transparent);
+}
+.rl-cmb-row.is-on {
+  background: color-mix(in srgb, var(--color-info) 7%, transparent);
+  box-shadow: inset 2px 0 0 var(--color-info);
+}
+
+/* The bar that appears while picking. Glass, like every other surface that
+   floats above content, and pinned to the bottom of the scroller so the count
+   never scrolls away from the list it counts. */
+.rl-cmb-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  border-top: 1px solid color-mix(in srgb, var(--color-ink) 12%, transparent);
+  background: color-mix(in srgb, var(--color-bg-elevated) 88%, transparent);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
+  backdrop-filter: blur(20px) saturate(160%);
+  box-shadow: 0 -10px 24px -20px rgba(0, 0, 0, 0.8);
+  animation: rl-fd-rise 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+/* A readout, not a sentence: monospace and tabular so the number does not
+   jiggle the label sideways as it counts up. */
+.rl-cmb-readout {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-ink-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rl-cmb-readout .rl-cmb-n {
+  color: var(--color-info);
+  font-weight: 700;
+}
+.rl-cmb-go {
+  padding: 3px 12px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--color-ink) 12%, transparent);
+  background: color-mix(in srgb, var(--color-ink) 4%, transparent);
+  color: var(--color-ink-muted);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: default;
+  transition:
+    background-color 220ms ease,
+    color 220ms ease,
+    border-color 220ms ease,
+    box-shadow 220ms ease,
+    transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.rl-cmb-go.is-armed {
+  border-color: transparent;
+  background: var(--color-info);
+  color: var(--color-on-accent);
+  cursor: pointer;
+  transform: scale(1.03);
+  box-shadow: 0 4px 14px -4px color-mix(in srgb, var(--color-info) 65%, transparent);
+}
+.rl-cmb-go.is-armed:hover {
+  filter: brightness(1.08);
+}
+.rl-cmb-cancel {
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--color-ink-muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+.rl-cmb-cancel:hover {
+  color: var(--color-ink);
+  background: color-mix(in srgb, var(--color-ink) 8%, transparent);
+}
+
+/* The Front Door pills. Deliberately NOT `.rl-fd-chip`: an attachment is a
+   file handed to a prompt, a plan pill is a whole document being fused into
+   one, and reusing the file chip said the wrong thing about both. The leading
+   ordinal ties each pill back to the numbered node in the sidebar and to the
+   `## Source N` heading the combining session reads. */
+.rl-cmb-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 2px;
+}
+.rl-cmb-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 3px 5px 3px 4px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--color-info) 30%, transparent);
+  background:
+    linear-gradient(
+      to right,
+      color-mix(in srgb, var(--color-info) 13%, transparent),
+      color-mix(in srgb, var(--color-info) 5%, transparent)
+    );
+  color: var(--color-ink);
+  font-size: 11.5px;
+  animation: rl-fd-rise 200ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.rl-cmb-ord {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 17px;
+  height: 17px;
+  border-radius: 999px;
+  background: var(--color-info);
+  color: var(--color-on-accent);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 9.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.rl-cmb-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rl-cmb-ver {
+  flex-shrink: 0;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 9.5px;
+  color: var(--color-ink-muted);
+}
+/* The fuse line: N pills resolve into one plan. Pure ornament, and the only
+   thing here that is — it earns its place by making the operation legible at
+   a glance, which a row of chips alone never did. */
+.rl-cmb-fuse {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 1px 4px 0;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-ink-muted);
+}
+.rl-cmb-fuse::before,
+.rl-cmb-fuse::after {
+  content: "";
+  height: 1px;
+  flex: 1;
+  background: linear-gradient(
+    to right,
+    transparent,
+    color-mix(in srgb, var(--color-info) 40%, transparent),
+    transparent
+  );
 }
 
 /* ── Orbit ──────────────────────────────────────────────────────────────── */
@@ -3923,6 +4260,61 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
   color: var(--color-ink);
 }
 
+/* ── In flight ──────────────────────────────────────────────────────────────
+   The receipt for a sentence that already left. It orbits the island in the
+   same pill weight as a suggestion chip, deliberately: it is one more small
+   thing below the composer, not a card that took the composer's place. Muted
+   at rest so a blank, focused door still reads as blank; it lifts on hover
+   because the left half is a real destination — the terminal the plan is
+   running in. */
+.rl-fd-flight {
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 12px;
+  padding: 2px 4px 2px 2px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--color-info) 22%, transparent);
+  background: color-mix(in srgb, var(--color-info) 6%, transparent);
+  max-width: 100%;
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease;
+}
+.rl-fd-flight:hover {
+  background: color-mix(in srgb, var(--color-info) 11%, transparent);
+  border-color: color-mix(in srgb, var(--color-info) 42%, transparent);
+}
+.rl-fd-flight-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 4px 8px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-ink-muted);
+  cursor: pointer;
+}
+/* The destination, spelled out. It fades UP on hover rather than appearing —
+   the pill must not change size under the cursor it is being clicked with. */
+.rl-fd-flight-open .rl-fd-detail {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.75;
+  transition: opacity 160ms ease;
+}
+.rl-fd-flight:hover .rl-fd-flight-open .rl-fd-detail {
+  opacity: 1;
+}
+.rl-fd-flight-open:focus-visible {
+  outline: 2px solid var(--color-info);
+  outline-offset: 1px;
+}
+
 .rl-fd-how {
   align-self: center;
   margin-top: 26px;
@@ -3943,7 +4335,10 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
   color: var(--color-info);
 }
 
-/* ── Planning ───────────────────────────────────────────────────────────── */
+/* ── Planning ─────────────────────────────────────────────────────────────
+   The DRAFTER's launch card only. The front door no longer echoes the prompt
+   after ⏎ — its sentence leaves — but the Drafter's document never leaves the
+   screen, so its card has something to sit beside and keeps this. */
 
 .rl-fd-planning-prompt {
   padding: 2px 4px;
@@ -4117,7 +4512,6 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
 .rl-frontdoor.is-compact .rl-fd-input {
   min-height: 3.1em;
 }
-.rl-frontdoor.is-compact .rl-fd-planning-prompt,
 .rl-frontdoor.is-compact .rl-fd-input {
   font-size: 14px;
 }
@@ -4552,6 +4946,19 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
   }
   .rl-fd-go.is-armed {
     transform: none;
+  }
+  .rl-cmb-node,
+  .rl-cmb-go,
+  .rl-cmb-enter {
+    transition: none;
+  }
+  .rl-cmb-node.is-on,
+  .rl-cmb-go.is-armed {
+    transform: none;
+  }
+  .rl-cmb-bar,
+  .rl-cmb-pill {
+    animation: none;
   }
   .rl-fd-morph,
   .rl-fd-menu,

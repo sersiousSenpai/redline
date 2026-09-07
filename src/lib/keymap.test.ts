@@ -6,6 +6,7 @@ import {
   REVIEW_KEYMAP,
   bindingKeys,
   globalShortcutGroups,
+  isDockKey,
   isNewPlanKey,
   isPaletteKey,
   isSnapBackKey,
@@ -93,6 +94,24 @@ describe("isNewPlanKey", () => {
   });
 });
 
+describe("isDockKey", () => {
+  it("matches ⌘J and Ctrl+J", () => {
+    expect(isDockKey(combo({ key: "j", metaKey: true }))).toBe(true);
+    expect(isDockKey(combo({ key: "J", ctrlKey: true }))).toBe(true);
+  });
+  it("leaves ⌘⇧J and ⌥⌘J free", () => {
+    expect(isDockKey(combo({ key: "j", metaKey: true, shiftKey: true }))).toBe(
+      false,
+    );
+    expect(isDockKey(combo({ key: "j", metaKey: true, altKey: true }))).toBe(
+      false,
+    );
+  });
+  it("a bare J is a keystroke, not a command", () => {
+    expect(isDockKey(combo({ key: "j" }))).toBe(false);
+  });
+});
+
 describe("the registry", () => {
   it("has unique ids", () => {
     const ids = GLOBAL_KEYMAP.map((b) => b.id);
@@ -101,7 +120,7 @@ describe("the registry", () => {
   it("wires exactly the globals this module dispatches — the rest is documentation", () => {
     expect(
       GLOBAL_KEYMAP.filter((b) => b.wired).map((b) => b.id).sort(),
-    ).toEqual(["new-plan", "palette", "snap-back"]);
+    ).toEqual(["dock", "new-plan", "palette", "snap-back"]);
   });
   it("every binding renders: non-empty caps and label", () => {
     for (const b of GLOBAL_KEYMAP) {

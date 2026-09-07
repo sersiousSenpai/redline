@@ -23,7 +23,6 @@ use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{ChildStderr, ChildStdout};
 
-use crate::browse::{is_context_overflow, is_transient};
 use crate::claude_proc::{bridge_args, classify_line, resolve_claude_bin, StreamLine};
 use crate::db::Database;
 use crate::state::{now_millis, MemChatMessage};
@@ -308,6 +307,17 @@ pub struct RecordDelta {
     pub to_seq: i64,
     /// `(kind, count)` over the events in between, heaviest first.
     pub kinds: Vec<(String, i64)>,
+}
+
+/// What the turn is spending and what it is doing. Flattened so the id field
+/// the frontend hook matches on stays at the top level, like every other
+/// memchat event.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MemChatMeter {
+    thread_id: String,
+    #[serde(flatten)]
+    meter: turn::MeterPayload,
 }
 
 impl RecordDelta {
@@ -811,12 +821,29 @@ async fn read_memchat(
         let mut final_text: Option<String> = None;
         let mut errored: Option<String> = None;
         let mut saw_json = false;
+        let mut pacer = turn::MeterPacer::default();
         let mut requeried = false;
         while let Ok(Some(line)) = lines.next_line().await {
             let Ok(v) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
             saw_json = true;
+            // The raw wire, for the inspector. A no-op when it's off —
+            // one relaxed atomic load, nothing buffered.
+            crate::inspect::capture("memchat", MEMCHAT_ID, line.trim());
+            // Second pass over the same value — the meter reads what
+            // `classify_line` throws away. Mutate-then-emit, coalesced.
+            if let Some(payload) = turn::push_meta(&buf, &v) {
+                if pacer.due(&payload) {
+                    let _ = app.emit(
+                        "memchat-meter",
+                        MemChatMeter {
+                            thread_id: MEMCHAT_ID.to_string(),
+                            meter: payload,
+                        },
+                    );
+                }
+            }
             // Live retrieval status. Read before classification because a
             // tool_use rides an `assistant` line, which `classify_line`
             // (rightly) ignores — it carries no answer text.
@@ -880,6 +907,24 @@ async fn read_memchat(
         None => false,
     };
 
+    // ABOVE the terminal branch, so success, error and cancelled all
+    // book. A cancelled turn spent its input tokens too.
+    let settled = crate::meter::settle(&db, "memory", &buf);
+    if !settled.is_empty() {
+        let _ = app.emit(
+            "memchat-meter",
+            MemChatMeter {
+                    thread_id: MEMCHAT_ID.to_string(),
+                meter: turn::MeterPayload {
+                    rev: settled.rev,
+                    meter: settled.clone(),
+                    activity: None,
+                    discrete: true,
+                },
+            },
+        );
+    }
+
     'terminal: {
         if cancelled {
             let _ = app.emit(
@@ -892,12 +937,14 @@ async fn read_memchat(
         }
         if let Some(err) = errored {
             let why = describe_turn_error(&db, &err);
-            finish_error(&app, &db, &why);
+            let row = finish_error(&app, &db, &why);
+            crate::meter::attach(&db, "memchat", &row, &settled);
             break 'terminal;
         }
         if let Some(text) = final_text {
             if text.trim().is_empty() {
-                finish_error(&app, &db, "claude produced an empty reply");
+                let row = finish_error(&app, &db, "claude produced an empty reply");
+                crate::meter::attach(&db, "memchat", &row, &settled);
                 break 'terminal;
             }
             if let Some(sid) = &session {
@@ -916,6 +963,8 @@ async fn read_memchat(
             if let Err(e) = db.insert_mem_chat_message(&msg) {
                 tracing::warn!(error = %e, "failed to persist assistant message");
             }
+            // The badge and the footer outlive the turn.
+            crate::meter::attach(&db, "memchat", &msg.id, &settled);
             // Companion journal: the Ask agent completed a turn.
             let _ = db.append_journal("agent_turn", Some("memchat"), Some(MEMCHAT_ID), None, None);
             // …and whether the prefetch actually saved the turn it exists to
@@ -978,32 +1027,27 @@ async fn read_memchat(
     }
 }
 
-/// Same recovery policy as the browse/draft agents: explicit context overflow
-/// resets the resumable session (the next turn re-teaches the contracts);
-/// transient API errors keep it and ask for a retry.
-///
-/// The overflow branch is the REACTIVE twin of the proactive rotation in
-/// `start_memchat_turn` — same helper, same effect. With the turn budget in
-/// place this should now be the rare path: a conversation normally rotates
-/// long before the window runs out.
+/// Translate a failed memory-chat turn — branches and wording live once, in
+/// `claude_proc::describe_turn_error`.
 fn describe_turn_error(db: &Database, error: &str) -> String {
-    if is_context_overflow(error) {
-        let turns = completed_assistant_turns(&db.load_mem_chat_thread(MEMCHAT_ID).unwrap_or_default());
-        reset_memchat_session(db, turns);
-        return "This conversation outgrew the model's context window, so the \
-                turn failed. I've reset its context — ask again and I'll start \
-                fresh over your memory (the replies above are kept)."
-            .to_string();
-    }
-    if is_transient(error) {
-        return "The model hit a momentary error on that turn. The conversation \
-                is fine — send your question again in a moment."
-            .to_string();
-    }
-    error.to_string()
+    crate::claude_proc::describe_turn_error(
+        db,
+        crate::claude_proc::TurnErrorCopy {
+            surface: "memchat",
+            subject: Some(MEMCHAT_ID),
+            noun: "conversation",
+            next: "I'll start fresh over your memory",
+        },
+        error,
+        || {
+            let turns =
+                completed_assistant_turns(&db.load_mem_chat_thread(MEMCHAT_ID).unwrap_or_default());
+            reset_memchat_session(db, turns);
+        },
+    )
 }
 
-fn finish_error(app: &AppHandle, db: &Database, why: &str) {
+fn finish_error(app: &AppHandle, db: &Database, why: &str) -> String {
     let msg = MemChatMessage {
         id: uuid::Uuid::new_v4().to_string(),
         thread_id: MEMCHAT_ID.to_string(),
@@ -1022,6 +1066,8 @@ fn finish_error(app: &AppHandle, db: &Database, why: &str) {
             error: why.to_string(),
         },
     );
+    // The id the caller attaches this turn's meter to.
+    msg.id
 }
 
 #[cfg(test)]

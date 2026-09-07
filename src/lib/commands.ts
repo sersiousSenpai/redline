@@ -8,6 +8,7 @@
 // App.tsx supplies the closures. Everything here is data-in data-out.
 
 import { bindingKeys } from "./keymap";
+import { innerTabs, type NavTarget } from "./navTarget";
 
 export interface PaletteCommand {
   id: string;
@@ -88,6 +89,16 @@ export interface PaletteChoiceRef {
   label: string;
 }
 
+/** One conversation the dock can hold from where the user is standing — a
+ *  descriptor from `conversationContext`, flattened to what the palette shows.
+ *  `kind` is what the pin is set to, which is how the dock is asked for a
+ *  particular conversation rather than just "open". */
+export interface PaletteConversationRef {
+  kind: string;
+  label: string;
+  detail?: string;
+}
+
 export interface CommandDeps {
   /** From headerSurfaces(workspace) — manifest-hidden surfaces are already
    *  absent, so the palette can't resurrect them by construction. */
@@ -103,10 +114,29 @@ export interface CommandDeps {
   /** The harness the app is inside, if any. `exitHidden` = a boot entry
    *  (a flavored build IS its harness — no exit exists). */
   activeHarness?: { name: string; exitHidden: boolean } | null;
+  /** The conversations available beside the CURRENT surface, in dock order.
+   *  Not a global index: which conversations exist is a property of where you
+   *  are standing, and offering one that this surface hasn't got would be a
+   *  command that lands in an empty column. */
+  conversations?: PaletteConversationRef[];
+  /** The conversation the dock is holding right now (a `kind`), or null when
+   *  the column is closed. */
+  currentConversation?: string | null;
+  /** Recent chats, for coming back to one from anywhere. */
+  chats?: { id: string; title: string }[];
   actions: {
     draftNewPlan: () => void;
     openSession: (id: string) => void;
     selectSurface: (id: string) => void;
+    /** Go to a surface AND a tab inside it, in one step. Falls back to
+     *  `selectSurface` when a build hasn't wired it. */
+    navigateTo?: (t: NavTarget) => void;
+    /** Open the dock on one of `conversations`. */
+    openConversation?: (kind: string) => void;
+    /** ⌘J — show / hide the conversation column. */
+    toggleDock?: () => void;
+    /** Come back to a chat by id (it opens in the dock). */
+    openChat?: (id: string) => void;
     snapBack: () => void;
     toggleSidebar: () => void;
     toggleDiscussion: () => void;
@@ -151,6 +181,8 @@ export function buildCommands(deps: CommandDeps): PaletteCommand[] {
     });
   }
 
+  const navigateTo =
+    actions.navigateTo ?? ((t: NavTarget) => actions.selectSurface(t.surface));
   for (const s of deps.surfaces) {
     commands.push({
       id: `surface:${s.id}`,
@@ -159,6 +191,52 @@ export function buildCommands(deps: CommandDeps): PaletteCommand[] {
       detail: s.id === deps.currentSurface ? "showing now" : s.title,
       run: () => actions.selectSurface(s.id),
     });
+    // …and straight to a tab inside it. Two steps ("go to Memory", then find
+    // the chip) is the exact friction the palette exists to remove, and these
+    // inner tabs are real destinations — the Catalog and the work graph are
+    // where half the app's held work lives.
+    for (const t of innerTabs(s.id)) {
+      commands.push({
+        id: `surface:${s.id}:${t.id}`,
+        title: `Go to ${s.label}: ${t.label}`,
+        group: "Surfaces",
+        run: () => navigateTo({ surface: s.id, tab: t.id }),
+      });
+    }
+  }
+
+  // Conversations — the dock's own contents, reachable by name. `⌘J` opens
+  // whichever one the surface leads with; these pick.
+  if (actions.toggleDock) {
+    commands.push({
+      id: "toggle-dock",
+      title: "Show / hide the conversation",
+      group: "Conversations",
+      keys: bindingKeys("dock"),
+      run: actions.toggleDock,
+    });
+  }
+  if (actions.openConversation) {
+    for (const c of deps.conversations ?? []) {
+      commands.push({
+        id: `conversation:${c.kind}`,
+        title: `Discuss: ${c.label}`,
+        group: "Conversations",
+        detail:
+          c.kind === deps.currentConversation ? "showing now" : c.detail,
+        run: () => actions.openConversation!(c.kind),
+      });
+    }
+  }
+  if (actions.openChat) {
+    for (const c of deps.chats ?? []) {
+      commands.push({
+        id: `chat:${c.id}`,
+        title: `Open chat: ${c.title}`,
+        group: "Conversations",
+        run: () => actions.openChat!(c.id),
+      });
+    }
   }
 
   // Harness mode — enter from anywhere the palette opens; exit only when an

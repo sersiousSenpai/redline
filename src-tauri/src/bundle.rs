@@ -470,6 +470,8 @@ mod tests {
             attach_state: crate::state::AttachState::Idle,
             updated_at: 1,
             run_state: None,
+            backend: None,
+            model: None,
         })
         .unwrap();
         crate::ledger::record_prompt(

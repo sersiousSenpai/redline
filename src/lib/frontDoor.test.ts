@@ -231,4 +231,42 @@ describe("front door clear-on-send wiring", () => {
     expect(text).toBeGreaterThan(fn);
     expect(attachments).toBeGreaterThan(text);
   });
+
+  // The other half of clear-on-send, and the half that actually produced the
+  // report: clearing the composer is worthless if something writes the
+  // sentence back into it. The pay-back is for the INVOLUNTARY case only —
+  // the terminal died under the launch — so it has exactly one caller.
+  it("the pay-back has exactly one caller: the terminal-death effect", () => {
+    const calls = app.match(/repayPending\(/g) ?? [];
+    expect(calls).toHaveLength(1);
+    // And it is the death effect, not something that merely looks like one.
+    const call = app.indexOf("repayPending(");
+    expect(app.slice(call, call + 120)).toContain("that terminal was closed");
+  });
+
+  it("dismissing or revealing the in-flight pill never refills the composer", () => {
+    // "Start something else" was a deliberate dismissal wired to the
+    // involuntary-death machinery: it handed the just-sent sentence back into
+    // the now-empty composer, which is the bug reported as "the prompt comes
+    // back and I have to delete it".
+    const start = app.indexOf("onCancelPending={");
+    const end = app.indexOf("onHowItWorks=", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const wiring = app.slice(start, end);
+    // Both halves of the pill live in this slice — neither pays anything back.
+    expect(wiring).toContain("onRevealPending=");
+    expect(wiring).not.toContain("repayPending(");
+    expect(wiring).toContain("setPendingLaunch(null)");
+  });
+
+  it("displacing an older pending launch does not refill the composer either", () => {
+    // The displaced plan keeps running in its own tile. Handing its sentence
+    // back would drop a stale prompt on top of the one that just shipped.
+    const fn = app.indexOf("const launchPlan = async (req:");
+    const end = app.indexOf("const runDevServer", fn);
+    expect(fn).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(fn);
+    expect(app.slice(fn, end)).not.toContain("repayPending(");
+  });
 });

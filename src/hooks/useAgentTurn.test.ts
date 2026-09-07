@@ -83,8 +83,8 @@ describe("mount ordering", () => {
     const ctl = new AgentTurnController<TurnMessage>(() => makeCfg(), io);
     const attached = ctl.attach();
     await flush();
-    // All five subscriptions requested, nothing invoked yet.
-    expect(listen).toHaveBeenCalledTimes(5);
+    // All seven subscriptions requested, nothing invoked yet.
+    expect(listen).toHaveBeenCalledTimes(7);
     expect(invoke).not.toHaveBeenCalled();
     releases.forEach((r) => r());
     await attached;
@@ -467,7 +467,9 @@ describe("the companion surface", () => {
       "companion-delta",
       "companion-done",
       "companion-error",
+      "companion-meter",
       "companion-queue-advanced",
+      "companion-retry",
     ]);
     expect(
       invoke.mock.calls.find((c) => c[0] === "companion_turn_status")?.[1],
@@ -704,6 +706,67 @@ describe("fork contract", () => {
     // Unqueue is inert — nothing was ever queued.
     await expect(ctl.unqueue("m-1")).resolves.toBe(null);
     expect(invoke.mock.calls.some((c) => c[0] === "fork_unqueue")).toBe(false);
+    ctl.detach();
+  });
+
+  it("keeps the turn streaming across an auto-retry without doubling the bubble", async () => {
+    const { io, emit, invokeImpl } = forkIo();
+    invokeImpl.set("fork_thread_status", () => forkStatus());
+    const ctl = new AgentTurnController<TurnMessage>(() => forkCfg(), io);
+    await ctl.attach();
+    await flush();
+    ctl.send("why?");
+    await flush();
+    const asked = ctl.getState().messages.length;
+    expect(ctl.getState().phase).toBe("streaming");
+
+    // The backend hit a transient error and is quietly running the turn again.
+    emit("fork-retry", { sessionId: "s-1", commentId: "c-001", attempt: 2 });
+    const s = ctl.getState();
+    expect(s.phase).toBe("streaming");
+    expect(s.retrying).toBe(true);
+    // Nothing terminal happened: no error row, and the question is not re-asked.
+    expect(s.messages.length).toBe(asked);
+    expect(s.messages.some((m) => m.status === "error")).toBe(false);
+
+    // The retry's first delta ends the caption and streams normally.
+    emit("fork-delta", { sessionId: "s-1", commentId: "c-001", text: "Because", seq: 1 });
+    expect(ctl.getState().retrying).toBe(false);
+    expect(ctl.getState().liveText).toBe("Because");
+
+    emit("fork-done", {
+      sessionId: "s-1",
+      commentId: "c-001",
+      messageId: "m-1",
+      body: "Because.",
+    });
+    const done = ctl.getState();
+    expect(done.phase).toBe("idle");
+    expect(done.retrying).toBe(false);
+    expect(done.messages.length).toBe(asked + 1);
+    ctl.detach();
+  });
+
+  it("ignores a retry event that lands after the turn already settled", async () => {
+    const { io, emit, invokeImpl } = forkIo();
+    invokeImpl.set("fork_thread_status", () => forkStatus());
+    const ctl = new AgentTurnController<TurnMessage>(() => forkCfg(), io);
+    await ctl.attach();
+    await flush();
+    ctl.send("why?");
+    await flush();
+    emit("fork-error", {
+      sessionId: "s-1",
+      commentId: "c-001",
+      error: "The model hit a temporary error on this turn.",
+    });
+    expect(ctl.getState().phase).toBe("error");
+
+    emit("fork-retry", { sessionId: "s-1", commentId: "c-001", attempt: 2 });
+    // A late event must not reanimate a bubble the reviewer already sees as
+    // finished (and is looking at a Retry button under).
+    expect(ctl.getState().phase).toBe("error");
+    expect(ctl.getState().retrying).toBe(false);
     ctl.detach();
   });
 

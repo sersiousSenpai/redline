@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useMemo, useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
@@ -9,8 +9,12 @@ import type { ClassNode } from "../lib/classTree";
 import type { TimelineFocus } from "../lib/timeline";
 import { extractCitations } from "../lib/memcite";
 import { useAgentTurn } from "../hooks/useAgentTurn";
+import { useStickToBottom } from "../hooks/useStickToBottom";
 import { usePersistedState } from "../theme/usePersistedState";
 import { MarkdownView } from "./MarkdownView";
+import StreamingBubble from "./StreamingBubble";
+import TurnFooter from "./TurnFooter";
+import { contextResets, type TurnMeter } from "../lib/turnMeter";
 import { QueuedChip, UnsentNote } from "./QueuedChip";
 import { WorkingIndicator } from "./WorkingIndicator";
 
@@ -30,8 +34,6 @@ export function MemoryAsk({ onCite }: MemoryAskProps) {
   // thread is a singleton, so one key).
   const [draft, setDraft] = usePersistedState<string>("rl.chatDraft.memchat", "");
   const [notice, setNotice] = useState<string | null>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const stickRef = useRef(true);
   // The accepted class tree, loaded lazily on the first class-chip click and
   // cached for the session — chip resolution, not a browsing surface.
   const treeRef = useRef<ClassNode[] | null>(null);
@@ -49,10 +51,15 @@ export function MemoryAsk({ onCite }: MemoryAskProps) {
     cancel,
     unqueue,
     clear: clearLocal,
+    meter,
+    activity,
+    meters,
   } = useAgentTurn<MemChatMessage>({
     surface: "memchat",
     key: "memchat",
     idField: null,
+    meterKind: "memchat",
+    meterThreadId: "memchat",
     historyCmd: "memchat_thread",
     sendFailPrefix: "Couldn't reach the memory agent",
     buildSendArgs: (text) => ({ text }),
@@ -65,6 +72,22 @@ export function MemoryAsk({ onCite }: MemoryAskProps) {
       createdAt: Date.now(),
     }),
   });
+
+  // A pressure drop is not a bug — it is auto-compaction or a fresh CLI
+  // session. Unlabelled, a fall from 78% to 12% reads as a broken meter.
+  const resets = useMemo(
+    () => contextResets(messages.map((m) => m.id), meters),
+    [messages, meters],
+  );
+
+  // Follow a streaming thread only while the reader is parked at the bottom.
+  // The rule lives in `useStickToBottom` — the turn footer changes every
+  // settled bubble's height, so five copies of it would need the same fix.
+  const {
+    ref: scrollRef,
+    onScroll,
+    stick,
+  } = useStickToBottom<HTMLDivElement>([messages, liveText]);
 
   // What the agent is retrieving right now. Retrieval takes most of a turn's
   // wall clock, so without this the user watches a blank ticker through the
@@ -85,20 +108,10 @@ export function MemoryAsk({ onCite }: MemoryAskProps) {
     if (status !== "streaming" || liveText) setRetrieving(null);
   }, [status, liveText]);
 
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (el && stickRef.current) el.scrollTop = el.scrollHeight;
-  }, [messages, liveText]);
-
-  const onScroll = () => {
-    const el = scrollRef.current;
-    if (!el) return;
-    stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-  };
 
   const send = useCallback(
     (text: string) => {
-      stickRef.current = true;
+      stick();
       setNotice(null);
       sendTurn(text);
     },
@@ -224,6 +237,8 @@ export function MemoryAsk({ onCite }: MemoryAskProps) {
               <AskBubble
                 key={m.id}
                 msg={m}
+                meter={meters[m.id]}
+                contextReset={resets.has(m.id)}
                 onCite={onCite}
                 onCiteClass={citeClass}
                 onUnqueue={() => {
@@ -235,21 +250,25 @@ export function MemoryAsk({ onCite }: MemoryAskProps) {
               />
             ))
           )}
-          {status === "streaming" &&
-            (liveText ? (
-              <div className="flex flex-col gap-0.5">
-                <RoleTag role="assistant" />
-                <div>
-                  <MarkdownView body={liveText} compact />
-                  <span style={{ color: "var(--color-ink-muted)" }}>▌</span>
-                </div>
-              </div>
-            ) : (
-              <WorkingIndicator
-                label={retrieving ?? "Thinking"}
-                startedAt={startedAt ?? undefined}
+          {status === "streaming" && (
+            <>
+              {/* One shared bubble now — the badge and the activity line fill
+                  the wait the blank ticker used to. */}
+              <StreamingBubble
+                text={liveText}
+                agent="Memory"
+                inspect={{ surface: "memchat", key: "memchat" }}
+                meter={meter}
+                activity={activity}
               />
-            ))}
+              {!liveText && (
+                <WorkingIndicator
+                  label={retrieving ?? "Thinking"}
+                  startedAt={startedAt ?? undefined}
+                />
+              )}
+            </>
+          )}
         </div>
       </div>
 
@@ -368,12 +387,18 @@ function AskBubble({
   onCiteClass,
   onUnqueue,
   onResend,
+  meter,
+  contextReset,
 }: {
   msg: MemChatMessage;
   onCite: (focus: TimelineFocus) => void;
   onCiteClass: (title: string) => void;
   onUnqueue?: () => void;
   onResend?: () => void;
+  /** This row's settled meter — the badge and footer that outlive the turn. */
+  meter?: TurnMeter | null;
+  /** This turn's context restarted (compaction or a fresh CLI session). */
+  contextReset?: boolean;
 }) {
   const isUser = msg.role === "user";
   const isError = msg.status === "error";
@@ -402,6 +427,7 @@ function AskBubble({
       )}
       {isQueued && <QueuedChip onUnqueue={onUnqueue} />}
       {isUnsent && <UnsentNote onResend={onResend} />}
+      {!isUser && <TurnFooter meter={meter} contextReset={contextReset} />}
       {(cites.seqs.length > 0 || cites.classes.length > 0) && (
         <div
           className="font-sans"

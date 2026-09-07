@@ -28,6 +28,10 @@ use crate::db::Database;
 const SETTING_AGENT_SEATS: &str = "redline.agentSeats";
 /// The `app_settings` key holding the global claude binary override.
 const SETTING_CLAUDE_BIN: &str = "redline.claudeBin";
+/// The same, for the codex binary. Its own key because the two resolve
+/// independently: a machine can have a perfectly good `claude` and a `codex`
+/// that `$PATH` points at the wrong (older) build.
+const SETTING_CODEX_BIN: &str = "redline.codexBin";
 /// The `app_settings` key holding the pre-apply seat map — the undo for a
 /// Seat Assignment "Apply all" (see `snapshot_seats` / `restore_snapshot`).
 const SETTING_SEATS_PREVIOUS: &str = "redline.agentSeats.previous";
@@ -38,6 +42,8 @@ const SETTING_SEATS_PREVIOUS: &str = "redline.agentSeats.previous";
 const SEAT_THREAD_PREFIX: &str = "redline.seatThread.";
 /// Environment override for the claude binary — checked before everything.
 pub const ENV_CLAUDE_BIN: &str = "REDLINE_CLAUDE_BIN";
+/// The same, for codex.
+pub const ENV_CODEX_BIN: &str = "REDLINE_CODEX_BIN";
 
 /// Every seat the GUI offers and the spawn sites use. A `set_agent_seat` for
 /// anything else is rejected so junk keys can't accumulate in the setting.
@@ -310,6 +316,7 @@ impl SeatConfig {
 struct Store {
     seats: HashMap<String, SeatConfig>,
     claude_bin: Option<String>,
+    codex_bin: Option<String>,
     /// The app database, registered by `load_from_db` at startup. The spawn
     /// sites that consume this module have no DB handle of their own (the
     /// reason the seat map is mirrored here at all); the thread-continuity
@@ -323,6 +330,7 @@ fn store() -> &'static RwLock<Store> {
         RwLock::new(Store {
             seats: HashMap::new(),
             claude_bin: None,
+            codex_bin: None,
             db: None,
         })
     })
@@ -336,13 +344,17 @@ pub fn load_from_db(db: &Arc<Database>) {
         .get_setting(SETTING_AGENT_SEATS)
         .and_then(|json| serde_json::from_str::<HashMap<String, SeatConfig>>(&json).ok())
         .unwrap_or_default();
-    let claude_bin = db
-        .get_setting(SETTING_CLAUDE_BIN)
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
+    let bin = |key: &str| {
+        db.get_setting(key)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    let claude_bin = bin(SETTING_CLAUDE_BIN);
+    let codex_bin = bin(SETTING_CODEX_BIN);
     let mut s = store().write().unwrap();
     s.seats = seats;
     s.claude_bin = claude_bin;
+    s.codex_bin = codex_bin;
     s.db = Some(db.clone());
 }
 
@@ -508,6 +520,25 @@ pub fn set_claude_bin_override(db: &Database, path: &str) -> Result<(), String> 
         Some(trimmed.to_string())
     };
     db.set_setting(SETTING_CLAUDE_BIN, trimmed)
+        .map_err(|e| e.to_string())
+}
+
+/// The global codex binary override (settings surface). Load-bearing in a way
+/// the claude one is not: `$PATH` on a machine with the ChatGPT desktop app
+/// usually still points at an old standalone `codex` install, and a plan
+/// session needs the app's build.
+pub fn codex_bin_override() -> Option<String> {
+    store().read().unwrap().codex_bin.clone()
+}
+
+pub fn set_codex_bin_override(db: &Database, path: &str) -> Result<(), String> {
+    let trimmed = path.trim();
+    store().write().unwrap().codex_bin = if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    };
+    db.set_setting(SETTING_CODEX_BIN, trimmed)
         .map_err(|e| e.to_string())
 }
 
@@ -690,7 +721,7 @@ fn is_deliberate_stop(err: &str) -> bool {
 /// and surfaces as the error it is.
 fn is_resume_failure(err: &str) -> bool {
     err.to_lowercase().contains("no conversation found")
-        || crate::browse::is_context_overflow(err)
+        || crate::claude_proc::is_context_overflow(err)
 }
 
 /// One async lock per seat name: two concurrent `run_with_thread` calls on
@@ -788,9 +819,16 @@ pub fn roster(db: &Database) -> Vec<SeatRosterEntry> {
         .into_iter()
         .filter_map(|r| r.seat.clone().map(|s| (s, r)))
         .collect();
+    // `KNOWN_SEATS` plus the ONE burn-only key: the interactive plan session
+    // (`plan_meter::PLAN_SEAT`). It is deliberately not a configurable seat —
+    // the Front Door's picker owns the plan session's model, and two owners
+    // for one setting is a bug factory — but it is by far the biggest spender
+    // in the app, so leaving it out of the rollup would make the rollup wrong.
     KNOWN_SEATS
         .iter()
-        .map(|&seat| {
+        .copied()
+        .chain(std::iter::once(crate::plan_meter::PLAN_SEAT))
+        .map(|seat| {
             let (charter, trigger) = charter_for(seat);
             let st = stats.get(seat);
             let b = burn.get(seat);
@@ -1441,7 +1479,15 @@ mod tests {
         db.add_seat_burn("librarian", "2026-08-12", 100, 40, 7, 3, 2).unwrap();
 
         let r = roster(&db);
-        assert_eq!(r.len(), KNOWN_SEATS.len());
+        // Every configurable seat, PLUS the burn-only `plan` key — the
+        // interactive plan session spends more than any of them and has no
+        // seat row of its own by design (`plan_meter`).
+        assert_eq!(r.len(), KNOWN_SEATS.len() + 1);
+        let plan = r
+            .iter()
+            .find(|e| e.seat == crate::plan_meter::PLAN_SEAT)
+            .expect("the plan session is in the rollup");
+        assert_eq!(plan.spawns, 0);
         let lib = r.iter().find(|e| e.seat == "librarian").unwrap();
         assert_eq!(lib.last_run_at, Some(1234));
         assert_eq!(lib.input_tokens, 100);

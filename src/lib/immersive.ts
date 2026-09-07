@@ -135,12 +135,26 @@ export interface PanelMaskInput extends ImmersiveInput {
    *  something on screen after all. Read from the EFFECTIVE shape, before
    *  masking — `maskPanels` never touches `docPinned`, so there is no cycle. */
   docPinned: boolean;
+  /** A conversation has taken the plate (`conversationPose` → "expanded").
+   *  Not a surface — the surface underneath is still "document" — which is
+   *  exactly why it needs saying here. */
+  conversationExpanded?: boolean;
 }
+
+const BOTH: PanelMask = { sidebar: true, pane: true };
 
 /** The mask actually in force: the surface's, unless a gate cancels it.
  *  Mirrors `isImmersive`, one tier narrower. */
 export function panelMask(i: PanelMaskInput): PanelMask {
-  if (!i.enabled || i.broken || i.docPinned) return NO_MASK;
+  if (!i.enabled || i.broken) return NO_MASK;
+  // A conversation that has taken the plate is a ROOM, and it outranks the
+  // surface's own answer. The surface is "document", which keeps both panels
+  // precisely because the document is what they are ABOUT — and right now
+  // there is no document, there is a conversation. Same overlay law as
+  // everything else here: nothing is stored, so collapsing back to the column
+  // is the overlay lifting, not a restore.
+  if (i.conversationExpanded) return BOTH;
+  if (i.docPinned) return NO_MASK;
   return panelMaskFor(i.surface);
 }
 

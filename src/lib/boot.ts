@@ -22,18 +22,21 @@ export const BOOT_PLAYED_KEY = "redline.bootPlayed";
 /** Hard budget for the opening run. The choreography settles on this timeout
  *  — never on transitionend, which a dropped frame or a mid-flight display
  *  change can swallow. The CSS stagger must finish inside it (the CSS's
- *  longest delay + duration; pinned by the source-invariant test below). */
-export const BOOT_OPEN_MS = 750;
-
-/** Extra hold on the closed frame for a first-ever launch — a breath before
- *  the first thing the user ever sees starts moving. */
-export const BOOT_FIRST_BREATH_MS = 200;
+ *  longest delay + duration; pinned by the source-invariant test below).
+ *
+ *  This is a DECORATIVE budget, not an interaction one. It used to be 750 ms
+ *  and the shell waited it out: the front door rendered `visible={bootSettled
+ *  && !loading}`, so every launch carried a fixed ~750 ms floor before the
+ *  composer would even take focus. The floor is gone — nothing actionable
+ *  reads the phase anymore — which is also what let the run itself shrink to
+ *  a brisk plate resolve rather than a thing you sit through. */
+export const BOOT_OPEN_MS = 300;
 
 /** Module-scope dead-man switch armed in main.tsx alongside the attribute:
  *  if React never mounts, the attribute comes off on this timer and the
  *  native 2 s fallback show reveals today's static layout. Must outlast the
- *  longest legitimate run (breath + opening + frame slack). */
-export const BOOT_FAILSAFE_MS = 1500;
+ *  longest legitimate run (opening + frame slack). */
+export const BOOT_FAILSAFE_MS = 800;
 
 /** How long `data-rl-snapback` rides <html> after ⌘⇧0 — the window in which
  *  the canonical jumps travel as one short fold (A3). */
@@ -52,10 +55,10 @@ export function shouldArm(i: {
   return !i.reducedMotion && !i.alreadyPlayed;
 }
 
-/** The closed hold between the window reveal and the doors parting. */
-export function holdMs(firstLaunch: boolean): number {
-  return firstLaunch ? BOOT_FIRST_BREATH_MS : 0;
-}
+// There is no first-launch "breath" anymore. It held the closed frame an
+// extra 200 ms on a first-ever launch, which is 200 ms of a brand-new user
+// looking at a frozen picture of an app — and the onboarding tour already
+// supplies first-use pacing, deliberately and with something to read.
 
 /** Pure phase step. "settled" is terminal and absorbing; skip and timeout
  *  settle from anywhere — the user's first keystroke or pointer press always

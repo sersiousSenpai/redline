@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { lazy, memo, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 import { rafCoalesce } from "../lib/raf";
 import {
@@ -28,6 +29,7 @@ import {
   chatEntryFor,
   pruneChatState,
   withChatPatch,
+  type BrowserDockState,
   type ChatPill,
   type ChatStateMap,
 } from "../lib/browseChatState";
@@ -58,7 +60,6 @@ import type {
   Mission,
 } from "../types";
 import { onResizeSession } from "../lib/resizeSession";
-import { SplitPane } from "./SplitPane";
 import { BrowserChat } from "./BrowserChat";
 import { MissionChat } from "./MissionChat";
 import { LinkedChat } from "./LinkedChat";
@@ -92,18 +93,10 @@ const MAX_TABS = 100;
 // Cap on simultaneously-live native webviews (active + MRU). The rest are
 // suspended to the snapshot cache. Tunable.
 const MAX_LIVE_WEBVIEWS = 3;
-// Visible band for the page-discussion split ratio (fraction given to the
-// browser slot). Kept away from 0/1 so the chat pane can never be folded to a
-// zero-width sliver — see `clampChatRatio`. Browser stays 20–80%, so the chat
-// is always at least ~20% wide.
-const CHAT_MIN_RATIO = 0.2;
-const CHAT_MAX_RATIO = 0.8;
-/** Keep the page-discussion split ratio inside its visible band so the chat pane
- *  can never be folded to a zero-width sliver (which reads as "the discussion
- *  won't open"). Also self-heals a NaN or an out-of-band value a prior build
- *  let drag/persist all the way to 1 or 0. Exported for unit testing. */
-export const clampChatRatio = (r: number): number =>
-  Math.min(CHAT_MAX_RATIO, Math.max(CHAT_MIN_RATIO, Number.isFinite(r) ? r : 0.62));
+// (The page-discussion split — and the ratio clamp that kept its chat side off
+// zero width — is gone: the four panels moved into the app's conversation
+// dock, whose own ceiling is `voicePaneMaxW`. The webview now has the whole
+// pane, and the dock shrinks the plate around it rather than the pane.)
 // The embedded WKWebView's default user-agent omits the "Safari" token, so
 // sites (Google included) serve a legacy/basic layout. Presenting a current
 // Safari UA makes them serve the modern experience the engine can render.
@@ -289,11 +282,33 @@ interface BrowserPaneProps {
    *  and appended another tab. */
   onOpenRequestConsumed?: () => void;
   /** Opaque token that changes whenever a SURROUNDING App pane toggles (comment
-   *  pane, sidebar, doc-split orientation/visibility). These reflow the slot
-   *  without a drag — and a `ResizeObserver` on the slot doesn't reliably catch
-   *  the resulting geometry shift — so the native webview must be re-synced when
-   *  it changes. The value itself is never read, only its identity. */
+   *  pane, sidebar, doc-split orientation/visibility, the conversation dock).
+   *  These reflow the slot without a drag — and a `ResizeObserver` on the slot
+   *  doesn't reliably catch the resulting geometry shift — so the native webview
+   *  must be re-synced when it changes. The value itself is never read, only
+   *  its identity. */
   layoutKey?: string;
+  /** The conversation dock's slot for this pane's four panels.
+   *
+   *  They render INTO it through a portal rather than being lifted into App:
+   *  everything they need — the tab list, `useMission`, `useLinked`, the
+   *  workspace swaps — is this pane's own state, and hoisting it would put the
+   *  browser's state in two places to move its panels one level up. The pane
+   *  keeps the state, the dock keeps the column. Null while the dock is closed
+   *  or holding another surface's conversation. */
+  dockSlot?: HTMLElement | null;
+  /** Which of this pane's panels the dock is showing — the dock's context,
+   *  translated back into the pane's own vocabulary. Null = none of them. */
+  dockPill?: ChatPill | null;
+  /** Ask the dock to show one of this pane's panels (and to open, if closed).
+   *  Every internal "open the chat on X" already writes the per-tab memory;
+   *  `setChatFor` forwards those writes here, so the call sites are unchanged. */
+  onOpenDockPill?: (pill: ChatPill) => void;
+  /** A panel's own ✕ — closes the dock, not just this panel. */
+  onCloseDock?: () => void;
+  /** The ids the dock needs to build its context list. Pushed on change; App
+   *  clears it when this pane unmounts. */
+  onDockState?: (s: BrowserDockState) => void;
 }
 
 const hostnameOf = (u: string): string => {
@@ -314,6 +329,11 @@ function BrowserPaneBase({
   openRequest = null,
   onOpenRequestConsumed,
   layoutKey,
+  dockSlot = null,
+  dockPill = null,
+  onOpenDockPill,
+  onCloseDock,
+  onDockState,
 }: BrowserPaneProps) {
   const slotRef = useRef<HTMLDivElement | null>(null);
   // id → live Webview handle. Kept in a ref (not state) because these are
@@ -497,18 +517,33 @@ function BrowserPaneBase({
   const activeBrowseId =
     (tabs.find((t) => t.id === activeId) ?? tabs[0])?.browseId ?? null;
   const chatHere = chatEntryFor(chatState, activeBrowseId);
-  const chatOpen = chatHere.open;
-  const chatTab = chatHere.pill;
+  // Which panel is up is the DOCK's answer now — one column, one open bit, one
+  // place in the app that knows what conversation you are in. `chatState`
+  // survives as what it always really was underneath: the per-tab MEMORY of
+  // where you left each tab, which is what the dock leads with when you come
+  // back to it (`conversationContexts`' `browsePill`).
+  const chatOpen = dockPill != null;
+  const chatTab = dockPill ?? chatHere.pill;
   const activeBrowseIdRef = useRef(activeBrowseId);
   activeBrowseIdRef.current = activeBrowseId;
+  const dockPillRef = useRef(dockPill);
+  dockPillRef.current = dockPill;
   /** Write one tab's panel state. Every old `setChatOpen`/`setChatTab` pair
-   *  becomes one of these — the change surface is exactly the call sites. */
+   *  becomes one of these — the change surface is exactly the call sites.
+   *
+   *  It also forwards to the dock, which is what keeps those ~10 call sites
+   *  untouched by the fold: `{open: true, pill}` means "show me this", and a
+   *  bare `{pill}` retargets only a column that is already up (the localhost
+   *  list offer is a nudge, not an interruption). */
   const setChatFor = useCallback(
     (browseId: string | null, patch: { open?: boolean; pill?: ChatPill }) => {
       if (!browseId) return;
       setChatState((prev) => withChatPatch(prev, browseId, patch, Date.now()));
+      if (patch.open === false) onCloseDock?.();
+      else if (patch.pill && (patch.open === true || dockPillRef.current != null))
+        onOpenDockPill?.(patch.pill);
     },
-    [setChatState],
+    [setChatState, onOpenDockPill, onCloseDock],
   );
   /** …and this one for the common case: the tab the user is on right now. */
   const setChatHere = useCallback(
@@ -758,16 +793,6 @@ function BrowserPaneBase({
   }
   // Debounce timer for saving the active mission's tab workspace.
   const missionTabsTimerRef = useRef<number | null>(null);
-  const [chatRatio, setChatRatio] = usePersistedState<number>(
-    "redline.browser.chatRatio",
-    0.62,
-    // The chat divider commits a ratio per frame while dragging; batch the
-    // localStorage writes so the drag stays main-thread-cheap.
-    { debounceMs: 250 },
-  );
-  // While dragging the chat divider, hide the native webview so it doesn't
-  // swallow the pointer (same rule App uses for its document/browser split).
-  const [chatDragging, setChatDragging] = useState(false);
   // Tab drag-to-reorder. `tabDragging` hides the native webview during a drag
   // (so it doesn't swallow the pointer, same rule as the split divider);
   // `dragOverId` is the tab the pointer is currently over (drop target).
@@ -836,13 +861,47 @@ function BrowserPaneBase({
   activeIdRef.current = activeId;
   const discussionIdRef = useRef(discussionId);
   discussionIdRef.current = discussionId;
+  // Tell the dock which conversations exist beside this pane. Only ids and
+  // labels cross — the panels themselves stay here and are portalled into the
+  // dock's slot, so this is a description, never a second copy of the state.
+  //
+  // The discussion tab, not the active one: that is whose thread the page
+  // conversation shows, and the two deliberately diverge when an agent opens a
+  // tab on the current conversation's behalf.
+  const dockDiscussionTab =
+    tabs.find((t) => t.id === discussionId) ??
+    tabs.find((t) => t.id === activeId) ??
+    tabs[0];
+  const dockBrowseId = dockDiscussionTab?.browseId ?? null;
+  const dockTitle = dockDiscussionTab?.title ?? null;
+  const dockLinkedId = linked.activeLinkedId ?? null;
+  const dockMissionId = mission.activeMission?.missionId ?? null;
+  const dockMissionTitle = mission.activeMission?.title ?? null;
+  const dockMemoPill = chatHere.pill;
+  useEffect(() => {
+    onDockState?.({
+      browseId: dockBrowseId,
+      title: dockTitle,
+      pill: dockMemoPill,
+      linkedId: dockLinkedId,
+      missionId: dockMissionId,
+      missionTitle: dockMissionTitle,
+    });
+  }, [
+    onDockState,
+    dockBrowseId,
+    dockTitle,
+    dockMemoPill,
+    dockLinkedId,
+    dockMissionId,
+    dockMissionTitle,
+  ]);
   // The native webview is hidden whenever the pane is logically hidden, the
   // chat divider is being dragged, or an HTML overlay we own is up (the mission
   // start dialog / menu) — a native webview paints OVER React DOM, so it must
   // step aside for those, the same reason bookmarks use a native popup menu.
   const effectiveVisible =
     visible &&
-    !chatDragging &&
     !tabDragging &&
     !missionDialogOpen &&
     !missionMenuOpen;
@@ -1201,19 +1260,21 @@ function BrowserPaneBase({
     syncBounds();
   }, [activeId, ensureLive, touchMru, enforceLiveBudget, syncBounds]);
 
-  // (Visibility/chat/divider reflows are handled by the active-tracking effect
-  // below, which keys on effectiveVisible/chatOpen/chatRatio.)
+  // (Visibility reflows are handled by the active-tracking effect below, which
+  // keys on effectiveVisible and `layoutKey`.)
 
-  // Observe the slot for size changes. Keyed on `chatOpen` because toggling the
-  // chat re-parents the slot div into/out of the SplitPane (a new DOM node), so
-  // the observer must re-attach to keep the webview tracking the slot.
+  // Observe the slot for size changes. It used to re-attach on `chatOpen`
+  // because opening the discussion re-parented this div into a SplitPane — a
+  // new DOM node the old observer no longer watched. The panels live in the
+  // app's dock now, so the slot is the same element for the pane's whole life
+  // and one observer covers it.
   useEffect(() => {
     const el = slotRef.current;
     if (!el) return;
     const ro = new ResizeObserver(scheduleSync);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [chatOpen, scheduleSync]);
+  }, [scheduleSync]);
 
   // The JS webview API surfaces no navigation events, so poll the active tab's
   // real URL to keep the address bar and tab title honest as the page navigates
@@ -1337,12 +1398,12 @@ function BrowserPaneBase({
   // slot grows (closing the sidecar), or the page spilling OVER the appearing
   // pane when the slot shrinks (opening the sidecar).
   //
-  // Any no-drag slot reflow — a surrounding App pane toggling (`layoutKey`:
-  // comment pane, sidebar, doc-split) OR the page-discussion split opening/
-  // closing/resizing (`chatOpen`/`chatRatio`) — moves the slot, and the
-  // OS-composited webview (which always paints ON TOP of the React DOM) must
-  // follow it: a gap when the slot grows, the page spilling over the chat pane
-  // when it shrinks.
+  // Any no-drag slot reflow — a surrounding App pane toggling: comment pane,
+  // sidebar, doc-split, and (since the four panels moved out to it) the
+  // conversation dock opening, closing or being dragged. All of them arrive
+  // through `layoutKey`. The OS-composited webview, which always paints ON TOP
+  // of the React DOM, must follow the slot: a gap when it grows, the page
+  // spilling over the dock when it shrinks.
   //
   // These reflows can land a frame — or several — late, and the slot's
   // ResizeObserver doesn't reliably fire for them; sampling at fixed delays
@@ -1385,7 +1446,7 @@ function BrowserPaneBase({
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [layoutKey, chatOpen, chatRatio, effectiveVisible, syncBounds]);
+  }, [layoutKey, effectiveVisible, syncBounds]);
 
   // Listeners + deferred teardown. A pending teardown from a StrictMode
   // pseudo-unmount (or a fast toggle off/on) is cancelled here so the webviews
@@ -2090,18 +2151,12 @@ function BrowserPaneBase({
     }).catch((err) => console.error("show_browser_settings_menu failed", err));
   };
 
-  // Tandem agent mode drives the layout: force the page-discussion split open at
-  // a clean 50/50 the moment it turns on, so every browser/new-tab lands
-  // agent-first. The divider stays user-draggable afterward.
-  const prevTandemRef = useRef(tandem);
+  // Tandem agent mode drives the layout: force the page discussion open the
+  // moment it turns on, so every browse/new-tab lands agent-first. Its width is
+  // the dock's own now — the user's one column width, not a second ratio this
+  // pane would snap out from under them.
   useEffect(() => {
-    if (tandem) {
-      setChatHere({ open: true, pill: "page" });
-      // Snap to 50/50 only on the on-transition, not on every render, so a user
-      // who later drags the divider isn't yanked back to center.
-      if (!prevTandemRef.current) setChatRatio(0.5);
-    }
-    prevTandemRef.current = tandem;
+    if (tandem) setChatHere({ open: true, pill: "page" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tandem]);
 
@@ -2592,8 +2647,9 @@ function BrowserPaneBase({
             </div>
           </div>
         );
-        // Fullscreen takes over the whole pane — no chat split, just the slot.
-        if (browserFullscreen || !chatOpen) return slot;
+        // Fullscreen takes over the whole pane; a closed dock (or one holding
+        // another surface's conversation) leaves nowhere to portal into.
+        if (browserFullscreen || !chatOpen || !dockSlot) return slot;
         const activeTab = tabs.find((t) => t.id === activeId) ?? tabs[0];
         // The chat shows the DISCUSSION tab's thread (usually the active tab, but
         // pinned to its origin when an agent opened the active tab). It still
@@ -2604,14 +2660,10 @@ function BrowserPaneBase({
         // agent and the user call "tab N".
         const activeN =
           tabs.findIndex((t) => t.id === activeId) + 1 || null;
+        // No switcher of its own any more: the dock's context strip is the one
+        // place in the app that says which conversation you are in.
         const chatPanel = (
           <div className="flex flex-col h-full min-h-0">
-            <DiscussionSwitcher
-              tab={chatTab}
-              setTab={(pill) => setChatHere({ pill })}
-              hasMission={!!mission.activeMission}
-              pinCount={mission.findings.length}
-            />
             <div className="flex-1 min-h-0">
               {chatTab === "list" ? (
                 <Suspense fallback={<div className="h-full" />}>
@@ -2758,15 +2810,14 @@ function BrowserPaneBase({
             </div>
           </div>
         );
+        // The pane keeps the whole slot; the panel goes to the app's one
+        // conversation column. A portal rather than a lift: everything the
+        // panel needs is this component's state.
         return (
-          <SplitPane
-            vertical={false}
-            ratio={clampChatRatio(chatRatio)}
-            onRatioChange={(r) => setChatRatio(clampChatRatio(r))}
-            onDraggingChange={setChatDragging}
-            first={slot}
-            second={chatPanel}
-          />
+          <>
+            {slot}
+            {createPortal(chatPanel, dockSlot)}
+          </>
         );
       })()}
 
@@ -2783,55 +2834,6 @@ function BrowserPaneBase({
   );
 }
 
-/** The slim switcher atop the discussion split: this tab's page chat, this
- *  tab's working list, the mission orchestrator (a tier above), and the linked
- *  discussion (one thread spanning every tab). */
-function DiscussionSwitcher({
-  tab,
-  setTab,
-  hasMission,
-  pinCount,
-}: {
-  tab: ChatPill;
-  setTab: (t: ChatPill) => void;
-  hasMission: boolean;
-  pinCount: number;
-}) {
-  const pill = (active: boolean): React.CSSProperties => ({
-    fontSize: "10px",
-    fontWeight: 600,
-    padding: "2px 8px",
-    borderRadius: "5px",
-    border: "1px solid var(--color-rule)",
-    background: active ? "var(--color-info)" : "var(--color-paper)",
-    color: active ? "var(--color-on-accent)" : "var(--color-ink-muted)",
-    cursor: "pointer",
-    whiteSpace: "nowrap",
-    display: "inline-flex",
-    alignItems: "center",
-    gap: "4px",
-  });
-  return (
-    <div
-      className="flex items-center gap-1.5 px-3 py-1.5 shrink-0"
-      style={{ borderBottom: "1px solid var(--color-rule)", background: "var(--color-bg-elevated)" }}
-    >
-      <button type="button" style={pill(tab === "page")} onClick={() => setTab("page")}>
-        <MessageSquare size={11} strokeWidth={2} /> This page
-      </button>
-      <button type="button" style={pill(tab === "list")} onClick={() => setTab("list")}>
-        <ListChecks size={11} strokeWidth={2} /> List
-      </button>
-      <button type="button" style={pill(tab === "mission")} onClick={() => setTab("mission")}>
-        <Target size={11} strokeWidth={2} /> Mission
-        {hasMission && pinCount > 0 ? ` · ${pinCount}` : ""}
-      </button>
-      <button type="button" style={pill(tab === "linked")} onClick={() => setTab("linked")}>
-        <Link2 size={11} strokeWidth={2} /> Linked
-      </button>
-    </div>
-  );
-}
 
 /** Shown in the Linked tab before a linked discussion is created. When the
  *  current tab already has a page discussion going, the PRIMARY action is to

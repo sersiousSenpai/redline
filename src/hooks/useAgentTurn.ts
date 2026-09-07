@@ -32,6 +32,7 @@ import {
   type TurnPhase,
   type TurnState,
 } from "../lib/agentTurn";
+import type { Activity, TurnMeter } from "../lib/turnMeter";
 import type { QueuedTurn, SendOutcome, TurnStatus } from "../types";
 
 export type AgentSurface =
@@ -95,6 +96,15 @@ export interface AgentTurnConfig<M extends TurnMessage> {
   /** Error-bubble prefix for a send that never reached the backend,
    *  e.g. "Couldn't reach the browse agent". */
   sendFailPrefix: string;
+  /** This surface's key in the backend `thread_table` map (`browse` |
+   *  `linked` | `mission` | `companion` | `memchat` | `drafter` | `fork`),
+   *  used to load the settled rows' stored meters. Omit and the surface simply
+   *  shows no footers on reload — never an error. */
+  meterKind?: string;
+  /** The thread id those meters are keyed by, when it isn't `key` (the fork
+   *  registry keys turns on `{scope, item}` but stores rows under the scope's
+   *  session id). */
+  meterThreadId?: string;
   /** Build the `${surface}_send` args. Async is fine (surface quirks: browse
    *  first-turn snapshot, linked per-turn snapshot); the controller bails if
    *  the panel unmounted or switched keys during the await. */
@@ -116,6 +126,16 @@ export interface AgentTurn<M extends TurnMessage> {
   messages: M[];
   liveText: string;
   status: TurnPhase;
+  /** What the in-flight turn is spending, and which model is spending it. */
+  meter: TurnMeter | null;
+  /** What it has been doing while you waited — newest last. */
+  activity: Activity[];
+  /** Settled rows' meters by message id (the badge + footer under a bubble). */
+  meters: Record<string, TurnMeter>;
+  /** The backend is quietly re-running this turn after a transient model
+   *  error. Still `status: "streaming"` — surfaces swap the caret for a
+   *  "retrying" caption rather than showing anything terminal. */
+  retrying: boolean;
   startedAt: number | null;
   queued: QueuedTurn[];
   loaded: boolean;
@@ -158,6 +178,8 @@ type DeltaPayload = { text: string; seq: number };
 type DonePayload = { messageId: string; body: string };
 type ErrorPayload = { error: string };
 type QueueAdvancedPayload = { messageId: string };
+type RetryPayload = { attempt: number };
+type MeterPayload = { rev: number; meter: TurnMeter; activity: Activity | null };
 
 export class AgentTurnController<M extends TurnMessage> {
   private state: TurnState<M> = initialTurnState<M>();
@@ -263,6 +285,18 @@ export class AgentTurnController<M extends TurnMessage> {
       on<Record<string, never>>("cancelled", () => this.dispatch({ type: "cancelled" })),
       on<QueueAdvancedPayload>("queue-advanced", (p) =>
         this.dispatch({ type: "queue-advanced", messageId: p.messageId }),
+      ),
+      // Only `fork` emits this today. Subscribing it here rather than in the
+      // component is the point of the shared hook: a surface that later grows
+      // an auto-retry gets the caption for free.
+      on<RetryPayload>("retry", (p) =>
+        this.dispatch({ type: "retry", attempt: p.attempt }),
+      ),
+      // The token/provenance meter. Coalesced backend-side (at most one per
+      // 250ms, plus an immediate one on a discrete change), so unlike `delta`
+      // this subscription is nowhere near the per-token path.
+      on<MeterPayload>("meter", (p) =>
+        this.dispatch({ type: "meter", meter: p.meter, activity: p.activity }),
       ),
     ]);
     if (!this.alive) {
@@ -390,6 +424,20 @@ export class AgentTurnController<M extends TurnMessage> {
       // Best-effort: an unreadable thread starts the panel empty.
       if (this.alive) this.dispatch({ type: "history", rows: [] });
     }
+    // The settled rows' badges and footers. Separate from the history call
+    // because it is a shared command over the `thread_table` map, not each
+    // surface's own bespoke loader — and a failure here costs a footer, not a
+    // thread, so it never blocks the messages landing.
+    if (!cfg.meterKind) return;
+    try {
+      const meters = await this.io.invoke<Record<string, TurnMeter>>(
+        "thread_meters",
+        { kind: cfg.meterKind, threadId: cfg.meterThreadId ?? cfg.key },
+      );
+      if (this.alive && meters) this.dispatch({ type: "meters", rows: meters });
+    } catch {
+      // No stored meters is a normal state (a thread from before this landed).
+    }
   }
 
   private async probe(): Promise<void> {
@@ -491,6 +539,10 @@ export function useAgentTurn<M extends TurnMessage>(
     messages: state.messages,
     liveText: state.liveText,
     status: state.phase,
+    meter: state.meter,
+    activity: state.activity,
+    meters: state.meters,
+    retrying: state.retrying,
     startedAt: state.startedAt,
     queued: state.queued,
     loaded: state.loaded,

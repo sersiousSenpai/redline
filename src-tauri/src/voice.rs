@@ -32,6 +32,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::claude_proc::{classify_line, resolve_claude_bin, StreamLine};
 use crate::db::Database;
 use crate::state::{now_millis, SessionStore, VoiceMessage};
+use crate::turn;
 
 /// Standing instruction prepended to the first turn of a *fresh* voice fork
 /// (skipped when resuming an existing one — it was primed in a past run). It
@@ -310,6 +311,18 @@ impl VoiceState {
 struct VoiceDelta {
     session_id: String,
     text: String,
+}
+
+/// What the warm session's CURRENT turn is spending and what it is doing.
+/// Voice keeps its own hand-rolled listener rather than `useAgentTurn` (the
+/// TTS `SpeechQueue` coupling is its own piece of work), but it reads
+/// `classify_line` like every other surface — so it gets the same meter.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VoiceMeter {
+    session_id: String,
+    #[serde(flatten)]
+    meter: turn::MeterPayload,
 }
 
 #[derive(Clone, Serialize)]
@@ -1125,6 +1138,37 @@ pub fn voice_kill_all(voice: tauri::State<'_, VoiceState>) -> Result<(), String>
 /// `voice-error` on a failed turn — while leaving the process running for the
 /// next turn. On stdout EOF (process gone) it removes itself from the registry
 /// and emits `voice-exit`. Persists the forked session id (memory) every turn.
+/// Close out one warm-session turn: emit its settled meter, book its burn to
+/// the `voice` seat, and start a fresh meter for the next turn. Called at BOTH
+/// terminals — a failed turn spent its input tokens exactly like a successful
+/// one, and burn that books only on success looks right and is wrong.
+fn book_and_reset(
+    app: &AppHandle,
+    db: &Database,
+    session_id: &str,
+    meter: &mut crate::meter::TurnMeter,
+    pacer: &mut turn::MeterPacer,
+) {
+    if meter.is_empty() {
+        return;
+    }
+    crate::meter::book(db, "voice", meter);
+    let _ = app.emit(
+        "voice-meter",
+        VoiceMeter {
+            session_id: session_id.to_string(),
+            meter: turn::MeterPayload {
+                rev: meter.rev,
+                meter: meter.clone(),
+                activity: None,
+                discrete: true,
+            },
+        },
+    );
+    *meter = crate::meter::TurnMeter::new();
+    *pacer = turn::MeterPacer::default();
+}
+
 async fn read_voice(
     app: AppHandle,
     db: Arc<Database>,
@@ -1146,6 +1190,10 @@ async fn read_voice(
     // Whether a turn ever completed with a real (non-empty) answer. A resume that
     // never reaches this produced nothing usable → its fork id is stale.
     let mut saw_success = false;
+    // ONE meter per TURN, not per process: this child serves many turns, so
+    // the meter is booked and reset at each terminal rather than at EOF.
+    let mut meter = crate::meter::TurnMeter::new();
+    let mut pacer = turn::MeterPacer::default();
     while let Ok(Some(line)) = reader.next_line().await {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -1154,6 +1202,31 @@ async fn read_voice(
         let Ok(v) = serde_json::from_str::<Value>(trimmed) else {
             continue;
         };
+        // Second pass over the same value — the meter reads what
+        // `classify_line` throws away.
+        let before = meter.clone();
+        let changed = meter.observe(&v);
+        let activity = crate::meter::activity_from(&v, &before, &meter, now_millis());
+        if changed || activity.is_some() {
+            if !changed {
+                meter.bump_rev();
+            }
+            let payload = turn::MeterPayload {
+                rev: meter.rev,
+                discrete: meter.is_discrete_change(&before) || activity.is_some(),
+                meter: meter.clone(),
+                activity,
+            };
+            if pacer.due(&payload) {
+                let _ = app.emit(
+                    "voice-meter",
+                    VoiceMeter {
+                        session_id: session_id.clone(),
+                        meter: payload,
+                    },
+                );
+            }
+        }
         match classify_line(&v) {
             StreamLine::Init(sid) => {
                 current_sid = Some(sid);
@@ -1176,6 +1249,7 @@ async fn read_voice(
             }
             StreamLine::Final { text, session_id: sid } => {
                 saw_result = true;
+                book_and_reset(&app, &db, &session_id, &mut meter, &mut pacer);
                 if sid.is_some() {
                     current_sid = sid;
                 }
@@ -1238,12 +1312,35 @@ async fn read_voice(
             }
             StreamLine::Failed(msg) => {
                 saw_result = true;
+                // A failed turn spent its input tokens too.
+                book_and_reset(&app, &db, &session_id, &mut meter, &mut pacer);
                 in_flight.store(false, Ordering::SeqCst);
+                // Humanise before it reaches the banner: `msg` is a machine
+                // string (`error_during_execution`) and the panel renders it
+                // verbatim. The overflow branch clears the stored fork id —
+                // the warm child is already over-limit and cannot be saved,
+                // but the next start then comes up fresh instead of resuming
+                // straight back into the same wall.
+                let why = crate::claude_proc::describe_turn_error(
+                    &db,
+                    crate::claude_proc::TurnErrorCopy {
+                        surface: "voice",
+                        subject: Some(&session_id),
+                        noun: "conversation",
+                        next: "I'll start fresh on this plan",
+                    },
+                    &msg,
+                    || {
+                        if let Err(e) = db.clear_voice_fork_session(&session_id) {
+                            tracing::warn!(error = %e, "failed to clear over-limit voice fork id");
+                        }
+                    },
+                );
                 let _ = app.emit(
                     "voice-error",
                     VoiceError {
                         session_id: session_id.clone(),
-                        error: msg,
+                        error: why,
                     },
                 );
             }

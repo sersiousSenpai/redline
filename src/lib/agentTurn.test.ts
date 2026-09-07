@@ -4,12 +4,14 @@ import { describe, expect, it } from "vitest";
 
 import type { TurnStatus } from "../types";
 import {
+  ACTIVITY_KEEP,
   initialTurnState,
   reduceTurn,
   type TurnAction,
   type TurnMessage,
   type TurnState,
 } from "./agentTurn";
+import { emptyMeter, type TurnMeter } from "./turnMeter";
 
 const msg = (over: Partial<TurnMessage> = {}): TurnMessage => ({
   id: "m1",
@@ -352,5 +354,126 @@ describe("settle and reset", () => {
       { type: "reset" },
     ]);
     expect(s).toEqual(initialTurnState());
+  });
+});
+
+// --- the token/provenance meter --------------------------------------------
+
+const meter = (over: Partial<TurnMeter> = {}): TurnMeter => ({
+  ...emptyMeter(),
+  ...over,
+});
+
+describe("the meter", () => {
+  it("merges by rev and drops a stale event", () => {
+    const s = run([
+      { type: "meter", meter: meter({ rev: 2, outputTokens: 40 }) },
+      { type: "meter", meter: meter({ rev: 1, outputTokens: 9 }) },
+    ]);
+    expect(s.meter?.rev).toBe(2);
+    expect(s.meter?.outputTokens).toBe(40);
+  });
+
+  it("appends activity, newest last, bounded", () => {
+    const many: TurnAction<TurnMessage>[] = Array.from({ length: 60 }, (_, i) => ({
+      type: "meter" as const,
+      meter: meter({ rev: i + 1 }),
+      activity: { at: i, kind: "tool", label: `t${i}` },
+    }));
+    const s = run(many);
+    expect(s.activity).toHaveLength(ACTIVITY_KEEP);
+    expect(s.activity[s.activity.length - 1]?.label).toBe("t59");
+  });
+
+  it("adopts the probe's meter and ring on a remount", () => {
+    const s = run([
+      {
+        type: "probe",
+        status: status({
+          streaming: true,
+          partial: "A",
+          seq: 1,
+          meter: meter({ rev: 7, model: "claude-opus-5", outputTokens: 12 }),
+          activity: [{ at: 1, kind: "tool", label: "Grep…" }],
+        }),
+      },
+    ]);
+    expect(s.meter?.model).toBe("claude-opus-5");
+    expect(s.activity).toHaveLength(1);
+  });
+
+  /** The probe is a command round trip: it can be BEHIND on the meter even
+   *  while it is ahead on text. The rev guard, not the seq guard, decides. */
+  it("keeps a newer live meter over a stale probe", () => {
+    const s = run([
+      { type: "meter", meter: meter({ rev: 9, outputTokens: 99 }) },
+      {
+        type: "probe",
+        status: status({
+          streaming: true,
+          partial: "AB",
+          seq: 4,
+          meter: meter({ rev: 3, outputTokens: 3 }),
+        }),
+      },
+    ]);
+    expect(s.liveText).toBe("AB");
+    expect(s.meter?.rev).toBe(9);
+  });
+
+  it("hands the turn's meter to the row it settled into", () => {
+    const s = run([
+      { type: "meter", meter: meter({ rev: 4, outputTokens: 40 }) },
+      { type: "done", message: msg({ id: "row-1" }) },
+    ]);
+    expect(s.meter).toBeNull();
+    expect(s.activity).toEqual([]);
+    expect(s.meters["row-1"]?.outputTokens).toBe(40);
+  });
+
+  it("keeps a failed turn's economics too", () => {
+    const s = run([
+      { type: "meter", meter: meter({ rev: 4, inputTokens: 40_000 }) },
+      { type: "error", message: msg({ id: "row-err", status: "error", body: "boom" }) },
+    ]);
+    expect(s.meters["row-err"]?.inputTokens).toBe(40_000);
+  });
+
+  it("does not let a new turn inherit the last one's meter", () => {
+    const s = run([
+      { type: "meter", meter: meter({ rev: 4, outputTokens: 40 }) },
+      { type: "done", message: msg({ id: "row-1" }) },
+      { type: "send-optimistic", message: msg({ id: "u1", role: "user", body: "next" }) },
+    ]);
+    expect(s.meter).toBeNull();
+    expect(s.meters["row-1"]?.outputTokens).toBe(40);
+  });
+
+  it("does not let a DRAINED queued send inherit it either", () => {
+    const s = run([
+      { type: "meter", meter: meter({ rev: 4, outputTokens: 40 }) },
+      { type: "queue-advanced", messageId: "q1" },
+    ]);
+    expect(s.meter).toBeNull();
+  });
+
+  it("lets stored meters seed the settled rows without clobbering live ones", () => {
+    const s = run([
+      { type: "meter", meter: meter({ rev: 4, outputTokens: 40 }) },
+      { type: "done", message: msg({ id: "row-1" }) },
+      { type: "meters", rows: { "row-1": meter({ rev: 1, outputTokens: 1 }), old: meter({ rev: 1 }) } },
+    ]);
+    // The live terminal meter is the newer truth for a row we just settled.
+    expect(s.meters["row-1"]?.outputTokens).toBe(40);
+    expect(s.meters.old).toBeDefined();
+  });
+
+  it("cancelling clears the live readout (the burn is booked backend-side)", () => {
+    const s = run([
+      { type: "meter", meter: meter({ rev: 4, outputTokens: 40 }) },
+      { type: "cancelled" },
+    ]);
+    expect(s.meter).toBeNull();
+    expect(s.activity).toEqual([]);
   });
 });

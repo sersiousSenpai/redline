@@ -167,7 +167,7 @@ impl MissionState {
 
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(180),
-            crate::claude_proc::collect_turn(stdout, stderr),
+            crate::claude_proc::collect_turn_seated(&self.db, "mission", stdout, stderr),
         )
         .await;
         // Token-matched: a consult draining its stream after a cancel must
@@ -229,6 +229,17 @@ struct MissionDelta {
     /// reports the seq already folded into `partial`, and the frontend drops
     /// any delta at or below that watermark.
     seq: u64,
+}
+
+/// What the turn is spending and what it is doing. Flattened so the id field
+/// the frontend hook matches on stays at the top level, like every other
+/// mission event.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MissionMeter {
+    mission_id: String,
+    #[serde(flatten)]
+    meter: turn::MeterPayload,
 }
 
 #[derive(Clone, Serialize)]
@@ -973,6 +984,7 @@ async fn read_mission(
         let mut final_text: Option<String> = None;
         let mut errored: Option<String> = None;
         let mut saw_json = false;
+        let mut pacer = turn::MeterPacer::default();
         while let Ok(Some(line)) = reader.next_line().await {
             let trimmed = line.trim();
             if trimmed.is_empty() {
@@ -982,6 +994,22 @@ async fn read_mission(
                 continue;
             };
             saw_json = true;
+            // The raw wire, for the inspector. A no-op when it's off —
+            // one relaxed atomic load, nothing buffered.
+            crate::inspect::capture("mission", &mission_id, trimmed);
+            // Second pass over the same value — the meter reads what
+            // `classify_line` throws away. Mutate-then-emit, coalesced.
+            if let Some(payload) = turn::push_meta(&buf, &v) {
+                if pacer.due(&payload) {
+                    let _ = app.emit(
+                        "mission-meter",
+                        MissionMeter {
+                            mission_id: mission_id.clone(),
+                            meter: payload,
+                        },
+                    );
+                }
+            }
             match classify_line(&v) {
                 StreamLine::Init(sid) => session = Some(sid),
                 StreamLine::Delta(text) => {
@@ -1033,6 +1061,24 @@ async fn read_mission(
     // error/cancel must not leave it armed for an unrelated later turn.
     let synthesize = { pending_synthesize.lock().unwrap().remove(&mission_id) };
 
+    // ABOVE the terminal branch, so success, error and cancelled all
+    // book. A cancelled turn spent its input tokens too.
+    let settled = crate::meter::settle(&db, "mission", &buf);
+    if !settled.is_empty() {
+        let _ = app.emit(
+            "mission-meter",
+            MissionMeter {
+                    mission_id: mission_id.clone(),
+                meter: turn::MeterPayload {
+                    rev: settled.rev,
+                    meter: settled.clone(),
+                    activity: None,
+                    discrete: true,
+                },
+            },
+        );
+    }
+
     'terminal: {
         if cancelled {
             let _ = app.emit(
@@ -1045,12 +1091,15 @@ async fn read_mission(
         }
         if let Some(err) = errored {
             let why = describe_turn_error(&db, &mission_id, &err);
-            finish_error(&app, &db, &mission_id, &why);
+            let row = finish_error(&app, &db, &mission_id, &why);
+            crate::meter::attach(&db, "mission", &row, &settled);
             break 'terminal;
         }
         if let Some(text) = final_text {
             if text.trim().is_empty() {
-                finish_error(&app, &db, &mission_id, "claude produced an empty reply");
+                let row =
+                    finish_error(&app, &db, &mission_id, "claude produced an empty reply");
+                crate::meter::attach(&db, "mission", &row, &settled);
                 break 'terminal;
             }
             if let Some(sid) = &session {
@@ -1069,6 +1118,8 @@ async fn read_mission(
             if let Err(e) = db.insert_mission_message(&msg) {
                 tracing::warn!(error = %e, "failed to persist assistant message");
             }
+            // The badge and the footer outlive the turn.
+            crate::meter::attach(&db, "mission", &msg.id, &settled);
             // Companion journal: the mission orchestrator completed a turn.
             let _ = db.append_journal("agent_turn", Some("mission"), Some(&mission_id), None, None);
             let _ = app.emit(
@@ -1139,45 +1190,29 @@ async fn read_mission(
     }
 }
 
-/// Translate a failed turn's raw error into the message to surface, and
-/// recover the mission where that's the right move. Twin of
-/// `browse::describe_turn_error` — the orchestrator is the heaviest context
-/// consumer in the app, so an overflowed session that is never cleared makes
-/// every later turn `--resume` the same over-limit context and fail forever.
+/// Translate a failed mission turn — branches and wording live once, in
+/// `claude_proc::describe_turn_error`. The orchestrator is the heaviest
+/// context in the app, so the overflow reset matters most here.
 fn describe_turn_error(db: &Database, mission_id: &str, error: &str) -> String {
-    if crate::browse::is_context_overflow(error) {
-        if let Err(e) = db.clear_mission_session(mission_id) {
-            tracing::warn!(error = %e, "failed to clear over-limit mission session");
-        }
-        let _ = db.record_friction(
-            "context_overflow",
-            Some("mission"),
-            Some(mission_id),
-            Some(error),
-        );
-        return "This mission outgrew the model's context window, so the turn \
-                failed. I've reset its context — send your message again and \
-                I'll re-orient from the goal, pins, and tabs (the replies \
-                above are kept)."
-            .to_string();
-    }
-    if crate::browse::is_transient(error) {
-        let _ = db.record_friction(
-            "transient_fail",
-            Some("mission"),
-            Some(mission_id),
-            Some(error),
-        );
-        return "The model hit a temporary error on this turn (not something \
-                you did) — send your message again in a moment. Your \
-                conversation is intact."
-            .to_string();
-    }
-    error.to_string()
+    crate::claude_proc::describe_turn_error(
+        db,
+        crate::claude_proc::TurnErrorCopy {
+            surface: "mission",
+            subject: Some(mission_id),
+            noun: "mission",
+            next: "I'll re-orient from the goal, pins, and tabs",
+        },
+        error,
+        || {
+            if let Err(e) = db.clear_mission_session(mission_id) {
+                tracing::warn!(error = %e, "failed to clear over-limit mission session");
+            }
+        },
+    )
 }
 
 /// Persist a failed turn as a terminal `error` row and emit `mission-error`.
-fn finish_error(app: &AppHandle, db: &Database, mission_id: &str, error: &str) {
+fn finish_error(app: &AppHandle, db: &Database, mission_id: &str, error: &str) -> String {
     let msg = MissionMessage {
         id: uuid::Uuid::new_v4().to_string(),
         mission_id: mission_id.to_string(),
@@ -1196,6 +1231,8 @@ fn finish_error(app: &AppHandle, db: &Database, mission_id: &str, error: &str) {
             error: error.to_string(),
         },
     );
+    // The id the caller attaches this turn's meter to.
+    msg.id
 }
 
 #[cfg(test)]

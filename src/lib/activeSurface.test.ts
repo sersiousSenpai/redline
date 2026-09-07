@@ -180,4 +180,32 @@ describe("deriveActiveSurface", () => {
     });
     expect(s.detail).toBe("/repo/src/main.rs");
   });
+
+  it("the file viewer outranks the plan selected beneath it", () => {
+    // Without `plateMode` the old precedence stands (the case above); with it,
+    // the reported surface is the one actually on screen.
+    const s = deriveActiveSurface({
+      ...base,
+      activeId: "sess-1",
+      activeFile: "/repo/src/main.rs",
+      plateMode: "file",
+    });
+    expect(s).toMatchObject({
+      kind: "terminal",
+      id: null,
+      detail: "/repo/src/main.rs",
+    });
+  });
+
+  it("the plan wins back on the door and plan faces", () => {
+    for (const plateMode of ["door", "plan"] as const) {
+      const s = deriveActiveSurface({
+        ...base,
+        activeId: "sess-1",
+        activeFile: "/repo/src/main.rs",
+        plateMode,
+      });
+      expect(s.kind).toBe("plan");
+    }
+  });
 });

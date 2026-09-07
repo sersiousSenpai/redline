@@ -30,9 +30,25 @@ export default defineConfig(async () => ({
   plugins: [
     react(),
     tailwindcss(),
-    // ANALYZE=1 npm run build → dist/stats.html treemap (docs/perf-budget.md).
+    // ANALYZE=1 npm run build → build-analysis/stats.html treemap
+    // (docs/perf-budget.md). Deliberately OUTSIDE `dist/`: everything under
+    // dist is embedded into the binary by Tauri and counted by
+    // `distTotalBytes`, so writing the treemap there inflated the very number
+    // the treemap exists to explain — and shipped a ~1 MB developer artifact
+    // to users on any build that happened to run with ANALYZE set.
+    // Two outputs: the treemap to look at, and the raw module graph to
+    // MEASURE. Per-module attribution ("what is actually in the boot chunk,
+    // rolled up by package") is a query over the JSON — the HTML can only be
+    // read by a human, which is how a 670 kB markdown stack sat on the boot
+    // path unnoticed.
     ...(analyze
-      ? [visualizer({ filename: "dist/stats.html", gzipSize: true })]
+      ? [
+          visualizer({ filename: "build-analysis/stats.html", gzipSize: true }),
+          visualizer({
+            filename: "build-analysis/stats.json",
+            template: "raw-data",
+          }),
+        ]
       : []),
   ],
 

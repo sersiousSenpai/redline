@@ -822,8 +822,11 @@ async fn drive_run(app: &AppHandle, store: &SessionStore, entry: &QueueEntry) {
 
     // Drain the pipes off to the side (a full pipe would block the child);
     // the outcome is read from durable state, not from stdout.
+    let burn_db = db.clone();
     let drain = match (child.stdout.take(), child.stderr.take()) {
-        (Some(o), Some(e)) => Some(tokio::spawn(crate::claude_proc::collect_turn(o, e))),
+        (Some(o), Some(e)) => Some(tokio::spawn(async move {
+            crate::claude_proc::collect_turn_seated(&burn_db, "orchestrator", o, e).await
+        })),
         _ => None,
     };
 
@@ -864,14 +867,21 @@ async fn drive_run(app: &AppHandle, store: &SessionStore, entry: &QueueEntry) {
     if outcome == "parked" {
         finish_entry(&db, sid, "parked", None);
     } else {
-        let note = killed
-            .or_else(|| turn.as_ref().and_then(|t| t.errored.clone()))
-            .unwrap_or_else(|| {
-                format!(
-                    "exited without parking a review (run_state={})",
-                    rs.as_deref().unwrap_or("none")
-                )
-            });
+        // A turn's `errored` is a MACHINE string (`error_during_execution`);
+        // this note is read by a person in the Runs surface deciding whether
+        // to relaunch. Same classifier the discussion surfaces use, worded for
+        // a run. Anything unrecognised — including the generic fallback below
+        // and a kill reason — passes through untouched.
+        let note = crate::claude_proc::describe_run_error(
+            &killed
+                .or_else(|| turn.as_ref().and_then(|t| t.errored.clone()))
+                .unwrap_or_else(|| {
+                    format!(
+                        "exited without parking a review (run_state={})",
+                        rs.as_deref().unwrap_or("none")
+                    )
+                }),
+        );
         finish_entry(&db, sid, "stalled", Some(&note));
         crate::advance_run_state(app, store, sid, "stalled");
     }

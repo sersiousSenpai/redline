@@ -34,6 +34,9 @@ import {
   formatTokens,
   groupWorkByProject,
   isLiveRunState,
+  isSequentialFallback,
+  runConflictCount,
+  SEQUENTIAL_FALLBACK_NOTE,
   orderRuns,
   phaseProgress,
   runElapsed,
@@ -46,6 +49,7 @@ import {
   workStatusLabel,
 } from "../lib/orchestration";
 import { EmptyState } from "./EmptyState";
+import type { TabRequest } from "../lib/navTarget";
 
 /** Agent Seats' pill chip, copied — `chipStyle(true)` doubles as primary. */
 function chipStyle(active: boolean): React.CSSProperties {
@@ -62,6 +66,19 @@ function chipStyle(active: boolean): React.CSSProperties {
       ? "color-mix(in srgb, var(--color-info) 14%, transparent)"
       : "transparent",
     color: "var(--color-ink)",
+  };
+}
+
+/** The same pill in warning dress. Its own function rather than a third
+ *  boolean on `chipStyle` because it means something different: not "this is
+ *  selected", but "read this — the run is not what you asked for". */
+function warnChipStyle(): React.CSSProperties {
+  return {
+    ...chipStyle(false),
+    border: "1px solid color-mix(in srgb, var(--color-warning) 65%, var(--color-rule))",
+    background: "color-mix(in srgb, var(--color-warning) 14%, transparent)",
+    color: "var(--color-warning)",
+    fontWeight: 600,
   };
 }
 
@@ -460,12 +477,15 @@ function RunMonitorPane({
   now,
   onOpenAgent,
   onOpenRunReport,
+  onStandDown,
 }: {
   snap: RunSnapshot;
   planTitle: string | null;
   now: number;
   onOpenAgent: (agentId: string) => void;
   onOpenRunReport: (planSessionId: string) => void;
+  /** Absent on a reconstructed history run — there is nothing left to stop. */
+  onStandDown?: (planSessionId: string) => void;
 }) {
   const chip = runStateChip(snap.runState);
   const t = snap.totals;
@@ -479,6 +499,8 @@ function RunMonitorPane({
     .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
   const conflictFilesOf = (tile: AgentTile) =>
     tile.filesChanged.filter((f) => conflicts.has(f));
+  const conflictCount = runConflictCount(snap.agents);
+  const runLive = isLiveRunState(snap.runState);
   return (
     <div style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
       {/* Summary card row */}
@@ -496,9 +518,46 @@ function RunMonitorPane({
           </div>
           <div style={{ display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap" }}>
             <span style={{ ...chipStyle(chip.live), cursor: "default" }}>{chip.text}</span>
-            <span style={{ ...chipStyle(false), cursor: "default" }}>
-              {snap.mode === "pending" ? "waiting for launch" : snap.mode}
+            {/* `sequential` is a degradation, not a setting — it used to
+                render through the neutral style, so a run that never found
+                its Workflow looked identical to one that did. */}
+            <span
+              title={
+                isSequentialFallback(snap.mode) ? SEQUENTIAL_FALLBACK_NOTE : undefined
+              }
+              style={{
+                ...(isSequentialFallback(snap.mode) ? warnChipStyle() : chipStyle(false)),
+                cursor: "default",
+              }}
+            >
+              {snap.mode === "pending"
+                ? "waiting for launch"
+                : isSequentialFallback(snap.mode)
+                  ? "sequential fallback"
+                  : snap.mode}
             </span>
+            {/* Files two or more agents both changed. The set has always been
+                computed; it only reached the individual tiles, so a collision
+                was findable but not visible. The count belongs here, beside
+                the action that answers it. */}
+            {conflictCount > 0 && (
+              <span
+                title={`${[...conflicts.keys()].join(", ")} — changed by more than one agent`}
+                style={{ ...warnChipStyle(), cursor: "default" }}
+              >
+                {conflictCount} file{conflictCount === 1 ? "" : "s"} in conflict
+              </span>
+            )}
+            {conflictCount > 0 && runLive && onStandDown && (
+              <button
+                type="button"
+                title="Mark the run abandoned and stop watching it"
+                onClick={() => onStandDown(snap.planSessionId)}
+                style={warnChipStyle()}
+              >
+                Stand down
+              </button>
+            )}
             <span style={{ fontSize: "11px", color: "var(--color-ink-muted)" }}>
               {runElapsed(snap, now)}
             </span>
@@ -771,7 +830,15 @@ function HistoryRow({
         </div>
       </div>
       {run.mode && (
-        <span style={{ ...chipStyle(false), cursor: "default" }}>{run.mode}</span>
+        <span
+          title={isSequentialFallback(run.mode) ? SEQUENTIAL_FALLBACK_NOTE : undefined}
+          style={{
+            ...(isSequentialFallback(run.mode) ? warnChipStyle() : chipStyle(false)),
+            cursor: "default",
+          }}
+        >
+          {isSequentialFallback(run.mode) ? "sequential fallback" : run.mode}
+        </span>
       )}
       <span style={{ ...chipStyle(live), cursor: "default" }}>{runOutcomeLabel(run)}</span>
     </button>
@@ -922,6 +989,9 @@ function WorkGraphPane({ graph }: { graph: WorkGraph }) {
 
 // --- the surface ------------------------------------------------------------
 
+type RunsTab = "live" | "history" | "work";
+const RUNS_TABS: readonly RunsTab[] = ["live", "history", "work"];
+
 export interface OrchestrationSurfaceProps {
   /** Whether this surface is the one on screen — gates every poll. */
   active: boolean;
@@ -937,6 +1007,9 @@ export interface OrchestrationSurfaceProps {
   onResetRun: (planSessionId: string) => void;
   onUnapprove: (planSessionId: string) => void;
   onStandDown: (planSessionId: string) => void;
+  /** "Go to Runs: Work" from the command palette. Nonce'd: a controlled prop
+   *  would drag this surface back to that tab on every render. */
+  tabRequest?: TabRequest | null;
 }
 
 /** The failure state this surface exists to make visible: `run_state` says a
@@ -1024,6 +1097,7 @@ export function OrchestrationSurface({
   onResetRun,
   onUnapprove,
   onStandDown,
+  tabRequest = null,
 }: OrchestrationSurfaceProps) {
   const { runs } = useOrchestrationRuns(active);
   const ordered = useMemo(() => orderRuns(runs), [runs]);
@@ -1043,7 +1117,14 @@ export function OrchestrationSurface({
       ),
     [summaries, runs],
   );
-  const [tab, setTab] = useState<"live" | "history" | "work">("live");
+  const [tab, setTab] = useState<RunsTab>("live");
+  const tabNonce = tabRequest?.nonce;
+  useEffect(() => {
+    if (!tabRequest) return;
+    if (RUNS_TABS.includes(tabRequest.tab as RunsTab))
+      setTab(tabRequest.tab as RunsTab);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabNonce]);
   const [pickedLive, setPickedLive] = useState<string | null>(null);
   const [historySid, setHistorySid] = useState<string | null>(null);
   const [drawerAgent, setDrawerAgent] = useState<string | null>(null);
@@ -1168,7 +1249,7 @@ export function OrchestrationSurface({
         >
           <span style={{ flex: 1 }}>{sentence}</span>
           <div style={{ display: "flex", gap: 4 }}>
-            {(["live", "history", "work"] as const).map((t) => (
+            {RUNS_TABS.map((t) => (
               <button
                 key={t}
                 type="button"
@@ -1284,6 +1365,7 @@ export function OrchestrationSurface({
                   now={now}
                   onOpenAgent={setDrawerAgent}
                   onOpenRunReport={onOpenRunReport}
+                  onStandDown={onStandDown}
                 />
               ) : (
                 <div style={{ fontSize: "12px", color: "var(--color-ink-muted)" }}>

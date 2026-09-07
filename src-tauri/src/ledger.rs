@@ -487,13 +487,31 @@ pub fn claim_agent_prompt(body_hash: &str) -> bool {
 /// first hook fire claims it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchClaim {
-    /// Which door launched it: `front-door` | `drafter` | `browser` | `chat`.
+    /// Which door launched it: `front-door` | `drafter` | `browser` | `chat`
+    /// | `combine`.
     pub origin: String,
     /// The THREAD it was launched from, as `(kind, id)` — a Drafter document
     /// (`drafter`) or a chat (`companion`). `None` for the doors that own no
     /// thread — the front door's one sentence and the browser's Send — whose
     /// prompts still need binding even though there is nothing to link them to.
     pub thread: Option<(String, String)>,
+    /// The hash of the PROMPT ROW's body, when it differs from the guard key.
+    ///
+    /// Every door but one records the body it typed, so one hash serves as
+    /// both the guard key (what the spawned session's hook will hash) and the
+    /// row key (what the bind looks up). Combine is the exception: it types a
+    /// brief of concatenated source plans but records only the human's typed
+    /// context plus the source hashes — because a launch filed as
+    /// `CorpusRole::User` with `author: None` is, by that role, uncompactable
+    /// (`keeper::select_compaction_candidates` filters `role != "user"`), and
+    /// filing 120 KB of machine-written plan text under it would put a
+    /// permanently-uncompactable blob into the searchable lake.
+    ///
+    /// The guard key MUST stay the full typed body or `claim_agent_prompt`
+    /// misses and the hook files the whole brief as a fresh prompt anyway.
+    /// `None` means "same as the guard key" — so all four existing doors stay
+    /// byte-identical.
+    pub row_hash: Option<String>,
 }
 
 fn launch_guard() -> &'static Mutex<HashMap<String, (LaunchClaim, Instant)>> {
@@ -508,6 +526,7 @@ pub fn register_plan_launch(
     body_hash: &str,
     origin: &str,
     thread: Option<(&str, &str)>,
+    row_hash: Option<&str>,
 ) {
     let mut g = launch_guard().lock().unwrap();
     let now = Instant::now();
@@ -518,6 +537,7 @@ pub fn register_plan_launch(
             LaunchClaim {
                 origin: origin.to_string(),
                 thread: thread.map(|(k, i)| (k.to_string(), i.to_string())),
+                row_hash: row_hash.map(str::to_string),
             },
             now,
         ),
@@ -1374,12 +1394,13 @@ mod tests {
     fn launch_guard_claims_once_with_origin_and_owning_thread() {
         let bh = format!("draftguard-{}", now_millis());
         assert_eq!(claim_plan_launch(&bh), None);
-        register_plan_launch(&bh, "drafter", Some(("drafter", "draft-7")));
+        register_plan_launch(&bh, "drafter", Some(("drafter", "draft-7")), None);
         assert_eq!(
             claim_plan_launch(&bh),
             Some(LaunchClaim {
                 origin: "drafter".to_string(),
                 thread: Some(("drafter".to_string(), "draft-7".to_string())),
+                row_hash: None,
             })
         );
         assert_eq!(claim_plan_launch(&bh), None, "consume-once");
@@ -1391,7 +1412,7 @@ mod tests {
     #[test]
     fn launch_guard_carries_a_chat_as_the_owning_thread() {
         let bh = format!("chatguard-{}", now_millis());
-        register_plan_launch(&bh, "chat", Some(("companion", "chat-3")));
+        register_plan_launch(&bh, "chat", Some(("companion", "chat-3")), None);
         let claim = claim_plan_launch(&bh).expect("a graduation registers");
         assert_eq!(claim.origin, "chat");
         assert_eq!(
@@ -1401,6 +1422,23 @@ mod tests {
         );
     }
 
+    /// Combine types one body and records another. The guard MUST stay keyed
+    /// on what gets typed — that is the hash the spawned session's hook will
+    /// compute — while the bind follows `row_hash` to the row that actually
+    /// exists. `None` keeps every other door byte-identical.
+    #[test]
+    fn launch_guard_carries_a_separate_row_hash_when_the_row_is_not_the_body() {
+        let typed = format!("combineguard-typed-{}", now_millis());
+        let row = format!("combineguard-row-{}", now_millis());
+        register_plan_launch(&typed, "combine", None, Some(&row));
+        // Claimed by the TYPED hash — the only one the hook can produce.
+        let claim = claim_plan_launch(&typed).expect("the typed body is the guard key");
+        assert_eq!(claim.origin, "combine");
+        assert_eq!(claim.row_hash.as_deref(), Some(row.as_str()));
+        // The row hash is not itself a key.
+        assert_eq!(claim_plan_launch(&row), None);
+    }
+
     #[test]
     fn launch_guard_holds_the_doors_that_have_no_document() {
         // The front door and the browser's Send launch the same plan session
@@ -1408,7 +1446,7 @@ mod tests {
         // the prompt row to its session is what the claim is *for* — leaving
         // them out is why those prompts had a permanently NULL session id.
         let bh = format!("fdguard-{}", now_millis());
-        register_plan_launch(&bh, "front-door", None);
+        register_plan_launch(&bh, "front-door", None, None);
         let claim = claim_plan_launch(&bh).expect("a threadless launch still registers");
         assert_eq!(claim.origin, "front-door");
         assert_eq!(claim.thread, None);

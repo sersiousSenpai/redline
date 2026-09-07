@@ -18,6 +18,7 @@ import {
   type ProjectChoice,
 } from "./launch";
 import type { ReadinessItem } from "./readiness";
+import type { CombineSource } from "../types";
 
 // The `launchStillLive` / `resolveLaunchProject` / `composePrompt` suites below
 // moved here from `frontDoor.test.ts` unchanged — that is the proof the move
@@ -313,17 +314,47 @@ describe("restoreInto", () => {
     attachments: ["/a.ts"],
   };
 
+  const pill = (sessionId: string): CombineSource => ({
+    sessionId,
+    planTitle: `Plan ${sessionId}`,
+    projectName: "redline",
+    projectPath: "/repo",
+    versionNumber: 1,
+    status: "in_review",
+    runState: null,
+    pendingCount: 0,
+    bytes: 100,
+  });
+
   it("gives the sentence back when the composer is empty", () => {
     expect(restoreInto({ text: "", attachments: [] }, restore)).toEqual({
       text: "add a toggle",
       attachments: ["/a.ts"],
+      combine: [],
     });
   });
 
   it("never clobbers newer typing", () => {
     expect(
       restoreInto({ text: "something newer", attachments: ["/b.ts"] }, restore),
-    ).toEqual({ text: "something newer", attachments: ["/b.ts"] });
+    ).toEqual({ text: "something newer", attachments: ["/b.ts"], combine: [] });
+  });
+
+  it("gives the plans back too — a dead combine must not lose them", () => {
+    // The sentence alone is not what a Combine launch took away.
+    const withPills = { ...restore, combine: [pill("s1"), pill("s2")] };
+    expect(restoreInto({ text: "", attachments: [] }, withPills).combine).toEqual([
+      pill("s1"),
+      pill("s2"),
+    ]);
+  });
+
+  it("returns the plans only when the composer holds none", () => {
+    const withPills = { ...restore, combine: [pill("s1")] };
+    expect(
+      restoreInto({ text: "", attachments: [], combine: [pill("s9")] }, withPills)
+        .combine,
+    ).toEqual([pill("s9")]);
   });
 
   it("owes nothing back for a surface that never took anything away", () => {

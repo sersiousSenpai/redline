@@ -195,7 +195,7 @@ pub async fn ai_commit_draft(
     let prompt = build_prompt(&session.repo_path, &diff, &recent_log, &annotation_bodies);
 
     if crate::seat::backend_for("ai_commit") == "codex" {
-        let text = tokio::time::timeout(
+        let (text, meter) = tokio::time::timeout(
             DRAFT_TIMEOUT,
             crate::codex_app_server::run_one_shot(
                 std::path::Path::new(&session.repo_path),
@@ -205,6 +205,9 @@ pub async fn ai_commit_draft(
         )
         .await
         .map_err(|_| format!("the Codex draft agent produced nothing for {}s — killed", DRAFT_TIMEOUT.as_secs()))??;
+        // The same seat, the same rule — a Codex turn burns tokens too, even
+        // when its protocol declines to say how many.
+        crate::meter::book(&state.db, "ai_commit", &meter);
         return parse_draft(&text);
     }
 
@@ -233,10 +236,12 @@ pub async fn ai_commit_draft(
     let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
     let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
 
+    let burn_db = state.db.clone();
     let outcome = tokio::time::timeout(DRAFT_TIMEOUT, async move {
         let _ = stdin.write_all(prompt.as_bytes()).await;
         drop(stdin);
-        let outcome = claude_proc::collect_turn(stdout, stderr).await;
+        let outcome =
+            claude_proc::collect_turn_seated(&burn_db, "ai_commit", stdout, stderr).await;
         let _ = child.wait().await;
         outcome
     })

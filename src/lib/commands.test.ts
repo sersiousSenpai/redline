@@ -192,3 +192,117 @@ describe("tour wiring", () => {
     expect(settings).toContain('data-tour="settings"');
   });
 });
+
+describe("buildCommands: inner tabs", () => {
+  const withTabbed = (over: Partial<CommandDeps> = {}) =>
+    deps({
+      surfaces: [
+        { id: "document", label: "Document", title: "The plan document" },
+        { id: "memory", label: "Memory", title: "Your memory" },
+      ],
+      ...over,
+    });
+
+  it("offers a surface AND each tab inside it", () => {
+    const ids = buildCommands(withTabbed({ actions: { ...deps().actions, navigateTo: vi.fn() } }))
+      .filter((c) => c.id.startsWith("surface:"))
+      .map((c) => c.id);
+    expect(ids).toEqual([
+      "surface:document",
+      "surface:memory",
+      "surface:memory:ask",
+      "surface:memory:timeline",
+      "surface:memory:catalog",
+      "surface:memory:map",
+      "surface:memory:health",
+    ]);
+  });
+
+  it("a surface with no inner tabs gets exactly one entry", () => {
+    const ids = buildCommands(deps())
+      .filter((c) => c.id.startsWith("surface:"))
+      .map((c) => c.id);
+    expect(ids).toEqual(["surface:document", "surface:drafter"]);
+  });
+
+  it("routes a tab command through navigateTo with the whole target", () => {
+    const navigateTo = vi.fn();
+    const d = withTabbed({ actions: { ...deps().actions, navigateTo } });
+    buildCommands(d).find((c) => c.id === "surface:memory:catalog")!.run();
+    expect(navigateTo).toHaveBeenCalledWith({
+      surface: "memory",
+      tab: "catalog",
+    });
+  });
+
+  it("falls back to selectSurface when a build has not wired navigateTo", () => {
+    const d = withTabbed();
+    buildCommands(d).find((c) => c.id === "surface:memory:map")!.run();
+    expect(d.actions.selectSurface).toHaveBeenCalledWith("memory");
+  });
+});
+
+describe("buildCommands: conversations", () => {
+  const convDeps = (over: Partial<CommandDeps> = {}) =>
+    deps({
+      conversations: [
+        { kind: "voice", label: "Ship the palette" },
+        { kind: "companion", label: "Companion" },
+      ],
+      currentConversation: "voice",
+      chats: [{ id: "c1", title: "Naming things" }],
+      actions: {
+        ...deps().actions,
+        toggleDock: vi.fn(),
+        openConversation: vi.fn(),
+        openChat: vi.fn(),
+      },
+      ...over,
+    });
+
+  it("names every conversation the current surface offers", () => {
+    const titles = buildCommands(convDeps())
+      .filter((c) => c.group === "Conversations")
+      .map((c) => c.title);
+    expect(titles).toEqual([
+      "Show / hide the conversation",
+      "Discuss: Ship the palette",
+      "Discuss: Companion",
+      "Open chat: Naming things",
+    ]);
+  });
+
+  it("marks the conversation already up instead of describing it", () => {
+    const byId = new Map(buildCommands(convDeps()).map((c) => [c.id, c]));
+    expect(byId.get("conversation:voice")?.detail).toBe("showing now");
+    expect(byId.get("conversation:companion")?.detail).toBeUndefined();
+  });
+
+  it("a closed dock marks nothing as showing", () => {
+    const byId = new Map(
+      buildCommands(convDeps({ currentConversation: null })).map((c) => [
+        c.id,
+        c,
+      ]),
+    );
+    expect(byId.get("conversation:voice")?.detail).toBeUndefined();
+  });
+
+  it("opens a conversation by kind", () => {
+    const d = convDeps();
+    buildCommands(d).find((c) => c.id === "conversation:companion")!.run();
+    expect(d.actions.openConversation).toHaveBeenCalledWith("companion");
+  });
+
+  it("carries the dock's ⌘J caps", () => {
+    const toggle = buildCommands(convDeps()).find(
+      (c) => c.id === "toggle-dock",
+    )!;
+    expect(toggle.keys).toEqual(["⌘", "J"]);
+  });
+
+  it("a build with no dock wiring offers no conversation commands", () => {
+    const bare = buildCommands(deps());
+    expect(bare.filter((c) => c.group === "Conversations")).toEqual([]);
+  });
+});

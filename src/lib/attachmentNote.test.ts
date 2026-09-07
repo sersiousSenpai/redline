@@ -78,6 +78,22 @@ describe("transcriptNote", () => {
     expect(note).toContain("Reviewer: padded");
     expect(note).not.toContain("  padded");
   });
+
+  it("names the agent that actually answered", () => {
+    // A Codex-authored plan's discussions run on Codex, and this rider is
+    // read back BY that agent on the next revise — attributing its own words
+    // to Claude is the one place the lie would be believed.
+    const note = transcriptNote(
+      [msg("user", "Why this order?"), msg("assistant", "Dependency order.")],
+      "Codex",
+    );
+    expect(note).toBe(
+      "Following a discussion with Codex:\n\n" +
+        "Reviewer: Why this order?\n\n" +
+        "Codex: Dependency order.",
+    );
+    expect(note).not.toContain("Claude");
+  });
 });
 
 describe("formatBytes", () => {

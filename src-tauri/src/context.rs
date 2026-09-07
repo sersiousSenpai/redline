@@ -2816,6 +2816,8 @@ mod tests {
             attach_state: AttachState::Idle,
             updated_at: 1_000,
             run_state: None,
+            backend: None,
+            model: None,
         };
         db.upsert_session(&mk("approved-unexported", SessionStatus::Approved)).unwrap();
         db.upsert_session(&mk("approved-exported", SessionStatus::Approved)).unwrap();
@@ -2846,6 +2848,8 @@ mod tests {
             attach_state: AttachState::Idle,
             updated_at: 500,
             run_state: None,
+            backend: None,
+            model: None,
         })
         .unwrap();
         // A revision row (what `load_all` reads) + its ledger event.

@@ -32,6 +32,37 @@ pub struct ClaudeProbe {
     pub source: String,
 }
 
+/// The same three questions for `codex`, plus the two that only apply to it.
+/// Read by the front door when the stored backend choice is Codex — a Claude
+/// user never sees any of it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexProbe {
+    /// The resolved path exists (or the bare name is on PATH).
+    pub found: bool,
+    /// What `resolve_codex_bin()` returned. Shown because it is the whole
+    /// point: on a machine with the ChatGPT app AND an old `brew` install,
+    /// seeing which one answered is the difference between a working plan
+    /// session and one that dies at the first `resume`.
+    pub path: Option<String>,
+    /// `env` | `override` | `probe` | `path`.
+    pub source: String,
+    /// Present AND new enough: `--help` lists `app-server`, `resume` and
+    /// `exec`, AND `codex exec --help` lists `fork` and `resume` — the
+    /// non-interactive pair a plan comment's discussion thread runs on
+    /// (`fork.rs`). A 0.24-era build is `found: true, usable: false`.
+    pub usable: bool,
+    /// `~/.codex/auth.json` carries a credential. A present, hooked, logged-
+    /// *out* codex spins forever over nothing, which is the exact failure
+    /// shape readiness exists to name.
+    pub signed_in: bool,
+    /// The config profile carrying the plan contract (`codex_profile`). Its
+    /// own probe because `codex -p <name>` with no such file is SILENT: the
+    /// session plans, looks fine, and then loses every block-identity sidecar
+    /// on the first revision.
+    pub profile: crate::codex_profile::CodexProfileStatus,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CurlProbe {
@@ -58,10 +89,27 @@ pub struct ExtensionToolchainProbe {
     pub template_dir: Option<String>,
 }
 
+/// The whole integration-health answer: "can this machine deliver a plan", and
+/// everything the setup surfaces need to say why not.
+///
+/// This is deliberately ONE payload rather than the six commands boot used to
+/// fire (`get_hook_status`, `get_codex_hook_status`, `get_skill_status`,
+/// `get_codex_skill_status`, `get_daemon_status`, `preflight_status`). Three of
+/// those recomputed the *same* facts — the codex `--help` capability probe ran
+/// once for the hook status and again, uncached, inside the preflight — and
+/// every one of them was a separate IPC round trip on the critical path.
+///
+/// Fields that a given launch cannot need are `None`, not fabricated: a Claude
+/// user's payload carries no codex probe at all, so nothing spawns `codex
+/// --help` on their machine and no derivation can accidentally read a
+/// default-shaped answer as a real one.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PreflightStatus {
     pub claude: ClaudeProbe,
+    /// `None` when the selected backend is Claude — see `probe_codex`, which
+    /// spawns a child process this user has no reason to pay for.
+    pub codex: Option<CodexProbe>,
     pub curl: CurlProbe,
     /// "active" | "ambient" | "paused". Folded in here so ONE call answers
     /// the whole question; the `mode-changed` event App already listens for
@@ -69,9 +117,16 @@ pub struct PreflightStatus {
     pub mode: String,
     pub hook: crate::hook::HookStatus,
     pub skill: crate::skill::SkillStatus,
+    /// Redline's Stop + capture hooks in `~/.codex/hooks.json`. `None` on the
+    /// same condition as `codex` — reading it runs the capability probe.
+    pub codex_hook: Option<crate::codex_hook::CodexHookStatus>,
+    /// The Codex-side skill install. `None` on the same condition.
+    pub codex_skill: Option<crate::skill::SkillStatus>,
     /// Can this machine BUILD an extension pack? Advisory, never blocking:
-    /// planning one needs no toolchain, compiling it does.
-    pub extension: ExtensionToolchainProbe,
+    /// planning one needs no toolchain, compiling it does. `None` unless the
+    /// launch target actually is an extension pack — `rustup target list`
+    /// is a child process, and a plain build never needs the answer.
+    pub extension: Option<ExtensionToolchainProbe>,
 }
 
 /// The curl release that introduced `--variable` / `--expand-header`. The
@@ -159,6 +214,71 @@ fn probe_claude() -> ClaudeProbe {
     }
 }
 
+/// Which layer of `resolve_codex_bin()` answered. Same label-only discipline
+/// as `claude_source` — the probe layers are never re-executed here.
+fn codex_source(resolved: &str) -> &'static str {
+    if std::env::var(crate::seat::ENV_CODEX_BIN)
+        .ok()
+        .is_some_and(|p| !p.trim().is_empty())
+    {
+        return "env";
+    }
+    if crate::seat::codex_bin_override().is_some() {
+        return "override";
+    }
+    if resolved.contains('/') {
+        "probe"
+    } else {
+        "path"
+    }
+}
+
+/// Does `~/.codex/auth.json` carry a usable credential? Either the OAuth
+/// token set (`codex login`) or an API key.
+///
+/// Deliberately NOT `codex doctor`, which answers the same question among
+/// thirty others and takes **14 seconds** on this machine — measured. The
+/// front door's preflight runs on boot and on every mode change; a 14s child
+/// process there would be a worse bug than the one it diagnoses. `logout`
+/// removes exactly this file, so reading it is the same signal for free.
+pub fn codex_auth_present(auth_json: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(auth_json) else {
+        return false;
+    };
+    let nonempty = |v: Option<&serde_json::Value>| {
+        v.and_then(serde_json::Value::as_str)
+            .is_some_and(|s| !s.trim().is_empty())
+    };
+    nonempty(value.get("OPENAI_API_KEY")) || nonempty(value.pointer("/tokens/access_token"))
+}
+
+fn probe_codex() -> CodexProbe {
+    let resolved = crate::codex_app_server::resolve_codex_bin();
+    let source = codex_source(&resolved);
+    let (found, path) = if resolved.contains('/') {
+        (Path::new(&resolved).is_file(), Some(resolved.clone()))
+    } else {
+        match on_path(&resolved) {
+            Some(p) => (true, Some(p.to_string_lossy().into_owned())),
+            None => (false, None),
+        }
+    };
+    let usable = found && crate::codex_app_server::codex_capability(&resolved).0;
+    let signed_in = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|h| h.join(".codex/auth.json"))
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .is_some_and(|text| codex_auth_present(&text));
+    CodexProbe {
+        found,
+        path,
+        source: source.to_string(),
+        usable,
+        signed_in,
+        profile: crate::codex_profile::get_status(),
+    }
+}
+
 async fn probe_curl() -> CurlProbe {
     // `curl` as the spawned agent would find it, falling back to the CLT/system
     // binary (a Finder-launched app's minimal PATH still carries /usr/bin).
@@ -235,22 +355,74 @@ async fn probe_extension_toolchain() -> ExtensionToolchainProbe {
     }
 }
 
-/// One answer to "can this machine deliver a plan". Async because the curl
-/// probe and the `claude` login-shell fallback both spawn a child; neither may
-/// block the UI thread on a cold boot.
+/// One answer to "can this machine deliver a plan".
+///
+/// `backend` is the launch target the front door would actually use — the
+/// frontend's own `Backend` identifiers, `"claude-code"` | `"codex"` (see
+/// `src/lib/backendChoice.ts`; `None` means "probe both", which the setup
+/// panel wants and a launch never does). `extension` says the target is an
+/// extension pack, which is the only case that needs a Rust toolchain answer.
+///
+/// Everything independent runs **concurrently**. That is not micro-tuning: the
+/// serial version awaited the binary probes, then curl, then `rustup target
+/// list` — three child processes back to back, each with its own process
+/// spawn latency, on a path the front door's readiness strip waits for. The
+/// blocking probes ride `spawn_blocking` (they use `std::process`, and one
+/// layer can still reach an interactive login shell on a machine with an
+/// exotic install), and the tokio-native ones are plain futures.
 #[tauri::command(async)]
-pub async fn preflight_status(settings: tauri::State<'_, crate::Settings>) -> Result<PreflightStatus, String> {
+pub async fn preflight_status(
+    settings: tauri::State<'_, crate::Settings>,
+    backend: Option<String>,
+    extension: Option<bool>,
+) -> Result<PreflightStatus, String> {
+    // Post-boot maintenance repairs the hook files this very function is about
+    // to read. Waiting here is what makes deferring those repairs safe: the
+    // launch path runs a preflight, so a launch cannot outrun them. Returns
+    // immediately once maintenance is done — which, for every call after the
+    // first, it is. Bounded inside `ready()`.
+    crate::postboot::ready().await;
     let mode = settings.get().as_str().to_string();
-    let claude = tokio::task::spawn_blocking(probe_claude)
-        .await
-        .map_err(|e| e.to_string())?;
+    // "Not claude-code" rather than "is codex": an unset/unknown choice must
+    // probe both, because withholding an answer the door needs is a worse
+    // failure than one extra `--help` on a machine we know nothing about.
+    let want_codex = backend.as_deref() != Some("claude-code");
+    let want_extension = extension.unwrap_or(false);
+
+    let bins = tokio::task::spawn_blocking(move || {
+        let claude = probe_claude();
+        // All three codex answers share the one cached capability probe, so
+        // this is a single `--help` at most, not three.
+        let codex = want_codex.then(probe_codex);
+        let codex_hook = want_codex.then(crate::codex_hook::get_status);
+        let codex_skill = want_codex.then(crate::skill::get_codex_status);
+        (claude, codex, codex_hook, codex_skill)
+    });
+    // Reads two files and compares their contents; cheap, but it is still I/O
+    // and it has no business on the UI thread.
+    let files =
+        tokio::task::spawn_blocking(|| (crate::hook::get_status(), crate::skill::get_status()));
+    let curl = probe_curl();
+    let ext = async move {
+        match want_extension {
+            true => Some(probe_extension_toolchain().await),
+            false => None,
+        }
+    };
+
+    let (bins, files, curl, extension) = tokio::join!(bins, files, curl, ext);
+    let (claude, codex, codex_hook, codex_skill) = bins.map_err(|e| e.to_string())?;
+    let (hook, skill) = files.map_err(|e| e.to_string())?;
     Ok(PreflightStatus {
         claude,
-        curl: probe_curl().await,
+        codex,
+        curl,
         mode,
-        hook: crate::hook::get_status(),
-        skill: crate::skill::get_status(),
-        extension: probe_extension_toolchain().await,
+        hook,
+        skill,
+        codex_hook,
+        codex_skill,
+        extension,
     })
 }
 
@@ -352,6 +524,22 @@ mod tests {
         }
         assert_ne!(dirs[0], dirs[1]);
         assert_ne!(dirs[1], dirs[2]);
+    }
+
+    #[test]
+    fn auth_json_reads_both_credential_shapes() {
+        // The OAuth shape `codex login` actually writes.
+        assert!(codex_auth_present(
+            r#"{"OPENAI_API_KEY":null,"tokens":{"access_token":"abc","refresh_token":"d"},"last_refresh":"x"}"#
+        ));
+        // An API-key install.
+        assert!(codex_auth_present(r#"{"OPENAI_API_KEY":"sk-x"}"#));
+        // What `codex logout` leaves behind, and the near-misses.
+        assert!(!codex_auth_present(r#"{"OPENAI_API_KEY":null,"tokens":null}"#));
+        assert!(!codex_auth_present(r#"{"tokens":{"access_token":"  "}}"#));
+        assert!(!codex_auth_present("{}"));
+        assert!(!codex_auth_present("not json"));
+        assert!(!codex_auth_present(""));
     }
 
     #[test]

@@ -7,6 +7,8 @@
 // exclusive occupants of the center pane, so review > drafter > browser >
 // servers wins over the plan/terminal fallbacks.
 
+import type { DocumentPlateMode } from "./documentPlate";
+
 export interface SurfaceInfo {
   kind:
     | "plan"
@@ -52,6 +54,13 @@ export interface SurfaceInputs {
   drafterProject: string | null;
   /** The file open in the folder-explorer viewer (terminal-ish context). */
   activeFile: string | null;
+  /** Which face the document plate is showing. Optional: callers that predate
+   *  `documentPlate.ts` keep the old plan-wins-over-file precedence, which is
+   *  what the pre-existing cases here pin. Supplying it fixes one honest lie —
+   *  a folder tab with a file open reported the selected PLAN as the active
+   *  surface while the screen showed the viewer, and the Companion grounded on
+   *  a document the user could not see. */
+  plateMode?: DocumentPlateMode;
   /** Whether any dock terminal exists (the welcome/terminal fallback split). */
   hasTerminal: boolean;
 }
@@ -135,6 +144,19 @@ export function deriveActiveSurface(s: SurfaceInputs): SurfaceInfo {
       id: s.chatId,
       label: s.chatTitle,
       detail: null,
+      projectPath: null,
+    };
+  }
+  // The file viewer replaces the document body outright, so it outranks a
+  // plan session selected underneath it — same precedence the plate itself
+  // uses (`documentPlateMode`).
+  if (s.plateMode === "file" && s.activeFile) {
+    return {
+      ...base,
+      kind: "terminal",
+      id: null,
+      label: null,
+      detail: s.activeFile,
       projectPath: null,
     };
   }

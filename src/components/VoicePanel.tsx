@@ -29,6 +29,8 @@ import {
 } from "../lib/commentOffers";
 import { VoiceSettings, type TtsEngine } from "./VoiceSettings";
 import { PulseLogo, type PulseState } from "./PulseLogo";
+import TurnFooter from "./TurnFooter";
+import { mergeMeter, meterBadgeLabel, type TurnMeter } from "../lib/turnMeter";
 
 interface VoiceDeltaEvent {
   sessionId: string;
@@ -273,6 +275,11 @@ function VoicePanelBase({
   const [error, setError] = useState<string | null>(null);
   const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
   const [streaming, setStreaming] = useState("");
+  // The voice agent keeps its own hand-rolled listeners (the TTS SpeechQueue
+  // coupling makes migrating it to `useAgentTurn` its own piece of work), but
+  // its reader calls `classify_line` like every other surface — so it gets the
+  // same meter, and the same badge, for free.
+  const [meter, setMeter] = useState<TurnMeter | null>(null);
   // Staged, not-yet-written plan items the agent offered this conversation, plus
   // per-offer in-flight/error state for the chip row.
   const [offers, setOffers] = useState<CommentOffer[]>([]);
@@ -683,6 +690,15 @@ function VoicePanelBase({
             queueRef.current?.enqueue(e.payload.text);
           }
         }),
+      );
+      add(
+        await listen<{ sessionId: string; rev: number; meter: TurnMeter }>(
+          "voice-meter",
+          (e) => {
+            if (e.payload.sessionId !== sessionId) return;
+            setMeter((cur) => mergeMeter(cur, e.payload.meter));
+          },
+        ),
       );
       add(
         await listen<VoiceDoneEvent>("voice-done", (e) => {
@@ -1469,9 +1485,10 @@ function VoicePanelBase({
             {streaming && (
               <div className="mb-2">
                 <span style={{ fontWeight: 600, color: "var(--color-ink)" }}>
-                  Claude:
+                  {meterBadgeLabel(meter) ?? "Claude"}:
                 </span>{" "}
                 <span style={{ color: "var(--color-ink)" }}>{streaming}</span>
+                <TurnFooter meter={meter} />
               </div>
             )}
             {/* Offers not yet bound to a reply — under the one still streaming,

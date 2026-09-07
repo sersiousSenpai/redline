@@ -337,3 +337,70 @@ export function browserSpeechDriver(): SpeechDriver {
     resume: () => synth.resume(),
   };
 }
+
+// ---- Reading a streamed reply aloud ----------------------------------------
+
+/** Where a read-aloud subscriber is between frames. */
+export interface ReadAloudState {
+  /** How much of the cumulative reply has been handed to the queue. */
+  spokenLen: number;
+  /** Whether the previous frame was mid-turn. */
+  wasStreaming: boolean;
+}
+
+/** What to do with the queue this frame, plus the state to carry forward. */
+export interface ReadAloudStep extends ReadAloudState {
+  /** Begin a turn: speak from the first CLAUSE so the reply starts sounding
+   *  like an answer sooner. */
+  prime: boolean;
+  /** New text to enqueue — never the whole buffer. */
+  delta: string;
+  /** The turn ended: speak the tail, which has no terminator of its own. */
+  flush: boolean;
+}
+
+export const READ_ALOUD_START: ReadAloudState = {
+  spokenLen: 0,
+  wasStreaming: false,
+};
+
+/**
+ * One frame of reading a streamed reply aloud, as a pure step.
+ *
+ * The bookkeeping is the whole feature, and every part of it is a rule someone
+ * would otherwise get wrong:
+ *
+ * - `liveText` is CUMULATIVE, so only the suffix is ever spoken. Enqueuing the
+ *   buffer would repeat every sentence on every streamed frame.
+ * - The watermark advances even while muted. Unmuting mid-reply therefore
+ *   starts from HERE, rather than reading back the paragraph the user has
+ *   already read — which is what "read replies aloud" means when you switch it
+ *   on halfway through one.
+ * - A shrinking buffer is a new turn's reset, not a rewind to re-speak.
+ * - `flush` fires once, on the streaming edge, so the last sentence is not left
+ *   half-said and is not said twice.
+ */
+export function readAloudStep(
+  prev: ReadAloudState,
+  next: { liveText: string; streaming: boolean; enabled: boolean },
+): ReadAloudStep {
+  const { liveText, streaming, enabled } = next;
+  const turnStarting = streaming && !prev.wasStreaming;
+  let spokenLen = turnStarting ? 0 : prev.spokenLen;
+  let delta = "";
+  if (liveText.length > spokenLen) {
+    delta = liveText.slice(spokenLen);
+    spokenLen = liveText.length;
+  } else if (liveText.length < spokenLen) {
+    spokenLen = liveText.length;
+  }
+  return {
+    prime: enabled && turnStarting,
+    // Speech only follows a LIVE stream: text that arrives outside a turn (a
+    // history load, a restored partial) is something to read, not to hear.
+    delta: enabled && streaming ? delta : "",
+    flush: enabled && !streaming && prev.wasStreaming,
+    spokenLen,
+    wasStreaming: streaming,
+  };
+}

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import { useState } from "react";
-import type { GitStatus } from "../types";
+import type { AllowCandidate, GitStatus, WorkflowAvailability } from "../types";
 
 interface OrchestrateLaunchModalProps {
   /** The plan session's project — where the orchestrator terminal opens. */
@@ -9,11 +9,12 @@ interface OrchestrateLaunchModalProps {
   /** `push_status` result; null when the project isn't a known repo (the git
    *  duty is skipped, the rest of the modal stands). */
   gitStatus: GitStatus | null;
-  /** Locally detected `disableWorkflows` / env kill-switch — the run would
-   *  silently execute sequentially. */
-  workflowsDisabled: boolean;
-  /** Inferred build/test Bash allow rules (repo markers, from Rust). */
-  allowRules: string[];
+  /** The workflows probe, whole — the modal reports what was actually read
+   *  and what could not be, rather than collapsing both into one boolean. */
+  availability: WorkflowAvailability | null;
+  /** Inferred build/test Bash allow rules (repo markers, from Rust), each
+   *  marked with whether the user already has it. */
+  allowRules: AllowCandidate[];
   /** Launch with the rules the user left checked. */
   onLaunch: (checkedRules: string[]) => void;
   onCancel: () => void;
@@ -28,12 +29,24 @@ interface OrchestrateLaunchModalProps {
 export function OrchestrateLaunchModal({
   projectPath,
   gitStatus,
-  workflowsDisabled,
+  availability,
   allowRules,
   onLaunch,
   onCancel,
 }: OrchestrateLaunchModalProps) {
-  const [checked, setChecked] = useState<Set<string>>(new Set(allowRules));
+  // Only the rules that would CHANGE something are offered as choices.
+  // Pre-checking every candidate — including ones already in
+  // `permissions.allow` — is what made this step read as ceremony: the user
+  // re-confirmed rules they already had and got no signal about the rest.
+  const missing = allowRules.filter((c) => !c.present);
+  const present = allowRules.filter((c) => c.present);
+  const [checked, setChecked] = useState<Set<string>>(
+    new Set(missing.map((c) => c.rule)),
+  );
+  const workflowsDisabled = !!(
+    availability &&
+    (availability.disabledInSettings || availability.disabledInEnv)
+  );
   const dirty = gitStatus
     ? gitStatus.staged + gitStatus.unstaged + gitStatus.untracked
     : 0;
@@ -102,7 +115,7 @@ export function OrchestrateLaunchModal({
           </p>
         )}
 
-        {workflowsDisabled && (
+        {workflowsDisabled ? (
           <p
             style={{
               fontSize: "12px",
@@ -111,42 +124,95 @@ export function OrchestrateLaunchModal({
               marginBottom: 12,
             }}
           >
-            Workflows appear disabled; this run will execute sequentially
-            (enable via claude&rsquo;s /config).
+            Workflows are disabled
+            {availability?.settingsSource ? (
+              <>
+                {" "}
+                by <code style={{ fontSize: "11px" }}>{availability.settingsSource}</code>
+              </>
+            ) : availability?.disabledInEnv ? (
+              " by CLAUDE_CODE_DISABLE_WORKFLOWS in the environment"
+            ) : null}
+            ; this run will execute sequentially (enable via claude&rsquo;s
+            /config).
           </p>
+        ) : (
+          availability && (
+            /* Honesty about the blind spot rather than silence that reads as
+               an all-clear: the run happens inside `$SHELL -l`, which sources
+               rc files Redline never sees. An export in ~/.zshrc is fully
+               active there and undetectable here — the run's own mode chip is
+               the ground truth, which is why a sequential run is now marked. */
+            <p
+              style={{
+                fontSize: "11.5px",
+                lineHeight: 1.5,
+                color: "var(--color-ink-muted)",
+                marginBottom: 12,
+              }}
+            >
+              Nothing in your settings files disables workflows. Redline
+              can&rsquo;t read your login shell&rsquo;s rc files, though — if
+              this run comes back marked &ldquo;sequential fallback&rdquo;,
+              a shell <code style={{ fontSize: "11px" }}>export</code> is the
+              usual reason.
+            </p>
+          )
         )}
 
         {allowRules.length > 0 && (
           <div style={{ marginBottom: 14 }}>
-            <p
-              style={{
-                fontSize: "12px",
-                color: "var(--color-ink-muted)",
-                marginBottom: 6,
-              }}
-            >
-              Pre-approve build/test commands so the run doesn&rsquo;t stall on
-              permission prompts while you&rsquo;re elsewhere:
-            </p>
-            {allowRules.map((rule) => (
-              <label
-                key={rule}
-                className="flex items-center gap-2"
+            {missing.length > 0 && (
+              <>
+                <p
+                  style={{
+                    fontSize: "12px",
+                    color: "var(--color-ink-muted)",
+                    marginBottom: 6,
+                  }}
+                >
+                  Pre-approve build/test commands so the run doesn&rsquo;t stall
+                  on permission prompts while you&rsquo;re elsewhere:
+                </p>
+                {missing.map((c) => (
+                  <label
+                    key={c.rule}
+                    className="flex items-center gap-2"
+                    style={{
+                      fontSize: "12px",
+                      color: "var(--color-ink)",
+                      padding: "2px 0",
+                      cursor: "pointer",
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked.has(c.rule)}
+                      onChange={() => toggle(c.rule)}
+                    />
+                    <code>{c.rule}</code>
+                  </label>
+                ))}
+              </>
+            )}
+            {present.length > 0 && (
+              <p
                 style={{
-                  fontSize: "12px",
-                  color: "var(--color-ink)",
-                  padding: "2px 0",
-                  cursor: "pointer",
+                  fontSize: "11.5px",
+                  color: "var(--color-ink-muted)",
+                  marginTop: missing.length > 0 ? 8 : 0,
+                  lineHeight: 1.5,
                 }}
               >
-                <input
-                  type="checkbox"
-                  checked={checked.has(rule)}
-                  onChange={() => toggle(rule)}
-                />
-                <code>{rule}</code>
-              </label>
-            ))}
+                Already allowed:{" "}
+                {present.map((c, i) => (
+                  <span key={c.rule}>
+                    {i > 0 ? ", " : ""}
+                    <code style={{ fontSize: "11px" }}>{c.rule}</code>
+                  </span>
+                ))}
+              </p>
+            )}
           </div>
         )}
 

@@ -235,18 +235,79 @@ fn ensure_restore_permission_at(path: &std::path::Path) {
 pub struct WorkflowAvailability {
     pub disabled_in_settings: bool,
     pub disabled_in_env: bool,
+    /// Which settings file turned it off, so the modal can name the file
+    /// instead of saying "somewhere". `None` when nothing did.
+    pub settings_source: Option<String>,
+    /// Always true, and stated rather than implied: the run executes inside
+    /// `$SHELL -l`, which sources the user's rc files AFTER Redline's own
+    /// environment is inherited. An `export CLAUDE_CODE_DISABLE_WORKFLOWS=1`
+    /// in `~/.zshrc` is therefore fully active in the run and completely
+    /// invisible here. `disabled_in_env: false` means "not in OUR env",
+    /// never "not set" — the durable answer is the run's own mode chip.
+    pub env_unreadable: bool,
 }
 
-pub fn workflow_availability() -> WorkflowAvailability {
-    workflow_availability_at(&settings_path())
+/// Every settings file that can carry `disableWorkflows`, in ASCENDING
+/// precedence — later entries override earlier ones.
+///
+/// `settings_path()` alone resolved only `~/.claude/settings.json`, so a flag
+/// in `settings.local.json`, in the project's `.claude/`, or in managed
+/// settings was simply unread and the probe reported "available" with
+/// confidence it had not earned.
+pub fn workflow_settings_files(project_dir: Option<&std::path::Path>) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    if let Some(home) = &home {
+        out.push(home.join(".claude").join("settings.json"));
+        out.push(home.join(".claude").join("settings.local.json"));
+    }
+    if let Some(dir) = project_dir {
+        out.push(dir.join(".claude").join("settings.json"));
+        out.push(dir.join(".claude").join("settings.local.json"));
+    }
+    // Managed (enterprise) settings outrank everything a user can write.
+    #[cfg(target_os = "macos")]
+    out.push(PathBuf::from(
+        "/Library/Application Support/ClaudeCode/managed-settings.json",
+    ));
+    #[cfg(target_os = "windows")]
+    out.push(PathBuf::from(
+        "C:\\ProgramData\\ClaudeCode\\managed-settings.json",
+    ));
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    out.push(PathBuf::from("/etc/claude-code/managed-settings.json"));
+    out
 }
 
-pub fn workflow_availability_at(path: &std::path::Path) -> WorkflowAvailability {
-    let disabled_in_settings = fs::read_to_string(path)
-        .ok()
-        .and_then(|content| serde_json::from_str::<Value>(&content).ok())
-        .and_then(|json| json.get("disableWorkflows").and_then(|v| v.as_bool()))
-        .unwrap_or(false);
+fn read_json(path: &std::path::Path) -> Option<Value> {
+    serde_json::from_str::<Value>(&fs::read_to_string(path).ok()?).ok()
+}
+
+/// The highest-precedence file that states `disableWorkflows`, and what it
+/// said. A file that doesn't mention the key does not override one that does.
+fn disable_workflows_from(files: &[PathBuf]) -> (bool, Option<String>) {
+    let mut disabled = false;
+    let mut source = None;
+    for f in files {
+        let Some(stated) = read_json(f)
+            .as_ref()
+            .and_then(|j| j.get("disableWorkflows"))
+            .and_then(|v| v.as_bool())
+        else {
+            continue;
+        };
+        disabled = stated;
+        source = stated.then(|| f.display().to_string());
+    }
+    (disabled, source)
+}
+
+pub fn workflow_availability(project_dir: Option<&std::path::Path>) -> WorkflowAvailability {
+    workflow_availability_for(&workflow_settings_files(project_dir))
+}
+
+pub fn workflow_availability_for(files: &[PathBuf]) -> WorkflowAvailability {
+    let (disabled_in_settings, settings_source) = disable_workflows_from(files);
     let disabled_in_env = std::env::var("CLAUDE_CODE_DISABLE_WORKFLOWS")
         .map(|v| {
             let v = v.trim();
@@ -256,7 +317,32 @@ pub fn workflow_availability_at(path: &std::path::Path) -> WorkflowAvailability 
     WorkflowAvailability {
         disabled_in_settings,
         disabled_in_env,
+        settings_source,
+        env_unreadable: true,
     }
+}
+
+/// Every `permissions.allow` rule in effect, unioned across the same files.
+/// "Already allowed" in the launch modal means EFFECTIVE, so a rule the user
+/// put in `settings.local.json` counts even though Redline writes new ones to
+/// `settings.json`.
+pub fn effective_allow_rules(files: &[PathBuf]) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for f in files {
+        let Some(json) = read_json(f) else { continue };
+        let Some(arr) = json
+            .pointer("/permissions/allow")
+            .and_then(|v| v.as_array())
+        else {
+            continue;
+        };
+        for v in arr {
+            if let Some(rule) = v.as_str() {
+                out.insert(rule.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// Write the Orchestrate launch modal's checked Bash allow rules into
@@ -310,23 +396,65 @@ pub fn apply_orchestrate_allows_at(
     fs::write(path, format!("{}\n", serialized)).map_err(|e| e.to_string())
 }
 
+/// One offered rule, and whether offering it changes anything.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AllowCandidate {
+    pub rule: String,
+    /// Already effective in some `permissions.allow` — the modal marks it and
+    /// stops asking. Pre-checking rules the user already has is what made the
+    /// step read as ceremony: every box ticked, no signal about which ones
+    /// actually do something.
+    pub present: bool,
+}
+
 /// Infer the build/test Bash allow rules the Orchestrate launch modal offers,
 /// from repo markers — pure filesystem sniffing, nothing executes. The rule
 /// strings live here (next to `apply_orchestrate_allows`' validation) so the
 /// frontend never invents permission syntax.
-pub fn orchestrate_allow_candidates(project_dir: &std::path::Path) -> Vec<String> {
+///
+/// Cargo and npm were the only two inferences, so a Go, Make or pytest repo
+/// opened an empty modal — a preflight step that asked nothing and told
+/// nothing.
+pub fn orchestrate_allow_rules(project_dir: &std::path::Path) -> Vec<String> {
     let mut out = Vec::new();
-    if project_dir.join("Cargo.toml").exists()
-        || project_dir.join("src-tauri").join("Cargo.toml").exists()
-    {
+    let has = |rel: &str| project_dir.join(rel).exists();
+    if has("Cargo.toml") || has("src-tauri/Cargo.toml") {
         out.push("Bash(cargo build:*)".to_string());
         out.push("Bash(cargo test:*)".to_string());
     }
-    if project_dir.join("package.json").exists() {
+    if has("package.json") {
         out.push("Bash(npm test:*)".to_string());
         out.push("Bash(npm run build:*)".to_string());
     }
+    if has("go.mod") {
+        out.push("Bash(go build:*)".to_string());
+        out.push("Bash(go test:*)".to_string());
+    }
+    // pytest is the runner; a bare `pyproject.toml` is the weakest of these
+    // markers but by far the most common way a Python repo declares itself.
+    if has("pytest.ini") || has("tox.ini") || has("conftest.py") || has("setup.cfg")
+        || has("pyproject.toml")
+    {
+        out.push("Bash(pytest:*)".to_string());
+    }
+    // Last: `make` usually wraps the tools above, so it reads as the
+    // catch-all rather than the headline.
+    if has("Makefile") || has("makefile") || has("GNUmakefile") {
+        out.push("Bash(make:*)".to_string());
+    }
     out
+}
+
+pub fn orchestrate_allow_candidates(project_dir: &std::path::Path) -> Vec<AllowCandidate> {
+    let effective = effective_allow_rules(&workflow_settings_files(Some(project_dir)));
+    orchestrate_allow_rules(project_dir)
+        .into_iter()
+        .map(|rule| AllowCandidate {
+            present: effective.contains(&rule),
+            rule,
+        })
+        .collect()
 }
 
 pub fn install_at(path: &std::path::Path) -> Result<HookStatus, String> {
@@ -534,19 +662,79 @@ pub const CAPTURE_AGENT_HEADER: &str = "X-Redline-Agent";
 /// 2.1.199, see docs/protocol-verification.md) to this command's stdin;
 /// `--data-binary @-` forwards it verbatim to the ingest route. Always exits 0.
 ///
-/// The agent header uses `"…"` (not `'…'`) deliberately: the shell must expand
-/// the variable. `${VAR:-}` keeps the header present-but-empty for a session
-/// Redline did not spawn, so the route reads one shape either way. Note this is
-/// a *label*, not an authorization — the route treats a non-empty value as "skip
-/// this, it's machine text", which is fail-safe: forging it can only cause a
-/// prompt to be dropped from your own lake, never to be read.
+/// The headers use `"…"` (not `'…'`) deliberately: the shell must expand the
+/// variables. `${VAR:-}` keeps each header present-but-empty for a session
+/// Redline did not spawn, so the route reads one shape either way. Note the
+/// agent value is a *label*, not an authorization — the route treats a non-empty
+/// value as "skip this, it's machine text", which is fail-safe: forging it can
+/// only cause a prompt to be dropped from your own lake, never to be read. The
+/// three restore variables (`restore_context::ENV_*`) ride the resumed
+/// `claude`'s environment on a "Restore plan session", and are how the route
+/// recognises the compact restore trigger.
+///
+/// Stdout is the reason this is no longer a fire-and-forget `>/dev/null`.
+/// UserPromptSubmit reads a command hook's stdout as context for the model, so
+/// the route can answer the restore trigger with the full protocol as
+/// `hookSpecificOutput.additionalContext` — the model gets it, the conversation
+/// never shows it. Everything else the route returns is a receipt (`{"seq":…}`)
+/// and must stay invisible, hence the `case` guard rather than an unconditional
+/// echo: only a body actually carrying `hookSpecificOutput` is printed. A
+/// timeout, a closed Redline or a partial read all fall through it silently,
+/// so prompt submission is still never blocked or altered by Redline.
 fn capture_command() -> String {
+    use crate::restore_context as rc;
     format!(
-        "curl -s --max-time 1 -X POST -H 'Content-Type: application/json' \
-         -H \"{CAPTURE_AGENT_HEADER}: ${{{}:-}}\" \
-         --data-binary @- {CAPTURE_INGEST_URL} >/dev/null 2>&1; exit 0",
-        crate::claude_proc::ENV_AGENT_SEAT
+        "resp=$(curl -s --max-time 1 -X POST -H 'Content-Type: application/json' \
+         -H \"{CAPTURE_AGENT_HEADER}: ${{{seat}:-}}\" \
+         -H \"{h_target}: ${{{env_target}:-}}\" \
+         -H \"{h_primed}: ${{{env_primed}:-}}\" \
+         -H \"{h_rescinded}: ${{{env_rescinded}:-}}\" \
+         --data-binary @- {CAPTURE_INGEST_URL} 2>/dev/null); \
+         case \"$resp\" in *hookSpecificOutput*) printf '%s' \"$resp\";; esac; exit 0",
+        seat = crate::claude_proc::ENV_AGENT_SEAT,
+        h_target = rc::HEADER_TARGET,
+        h_primed = rc::HEADER_PRIMED,
+        h_rescinded = rc::HEADER_RESCINDED,
+        env_target = rc::ENV_TARGET,
+        env_primed = rc::ENV_PRIMED,
+        env_rescinded = rc::ENV_RESCINDED,
     )
+}
+
+/// Is the installed capture hook the command we would write *today*?
+///
+/// `capture_installed_at` only answers "is some hook of ours there", which was
+/// enough while the command was a fire-and-forget POST — an old one still
+/// captured. It is not enough now: an install predating the restore headers
+/// captures prompts perfectly and silently never delivers the restore protocol,
+/// which is exactly the kind of failure that looks like the feature was never
+/// built. Compared byte-for-byte on purpose; `install_capture_at` already
+/// rewrites in place, so a mismatch just means "run it".
+pub fn capture_current() -> bool {
+    capture_current_at(&settings_path())
+}
+
+pub fn capture_current_at(path: &std::path::Path) -> bool {
+    let Ok(content) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(json) = serde_json::from_str::<Value>(&content) else {
+        return false;
+    };
+    let want = capture_command();
+    json.pointer("/hooks/UserPromptSubmit")
+        .and_then(|v| v.as_array())
+        .is_some_and(|entries| {
+            entries.iter().filter(|e| entry_is_capture(e)).any(|e| {
+                e.get("hooks")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|hooks| {
+                        hooks.iter().any(|h| {
+                            h.get("command").and_then(|v| v.as_str()) == Some(want.as_str())
+                        })
+                    })
+            })
+        })
 }
 
 /// Is the entry's `hooks` array one of ours (a command hook whose command
@@ -743,6 +931,111 @@ mod tests {
         );
         // Still fail-open, still the same route.
         assert!(cmd.contains(CAPTURE_INGEST_URL) && cmd.contains("exit 0"));
+    }
+
+    /// The restore metadata rides the same shell-expansion mechanism as the
+    /// seat, for the same reason: the hook runs inside the resumed `claude`'s
+    /// environment, and single quotes would ship the literal variable names.
+    #[test]
+    fn capture_hook_command_forwards_the_restore_metadata() {
+        use crate::restore_context as rc;
+        let cmd = capture_command();
+        for (header, env) in [
+            (rc::HEADER_TARGET, rc::ENV_TARGET),
+            (rc::HEADER_PRIMED, rc::ENV_PRIMED),
+            (rc::HEADER_RESCINDED, rc::ENV_RESCINDED),
+        ] {
+            assert!(
+                cmd.contains(&format!("-H \"{header}: ${{{env}:-}}\"")),
+                "{header} must be double-quoted and default to empty: {cmd}"
+            );
+        }
+    }
+
+    /// UserPromptSubmit reads a command hook's stdout as context for the model.
+    /// That is how the restore protocol reaches the model without becoming a
+    /// message — and exactly why the ordinary receipt must NOT be echoed: an
+    /// unconditional print would inject `{"seq":1234}` into every prompt the
+    /// user ever submits.
+    #[test]
+    fn capture_hook_command_echoes_only_a_hook_output_response() {
+        let cmd = capture_command();
+        assert!(
+            cmd.contains("case \"$resp\" in *hookSpecificOutput*)"),
+            "only a response carrying hook output may be printed: {cmd}"
+        );
+        assert!(
+            cmd.contains("printf '%s' \"$resp\""),
+            "and printed verbatim when it is there: {cmd}"
+        );
+        assert!(
+            !cmd.contains(">/dev/null 2>&1"),
+            "the response has to be readable to be conditional on: {cmd}"
+        );
+        // Still fail-open: a dead daemon leaves $resp empty and prints nothing.
+        assert!(cmd.contains("--max-time 1") && cmd.trim_end().ends_with("exit 0"));
+    }
+
+    /// "Some capture hook is installed" is not the same question as "the one we
+    /// would write today", and only the second one can notice an install that
+    /// predates the restore headers.
+    #[test]
+    fn capture_current_distinguishes_a_stale_install_from_a_fresh_one() {
+        let path = tmppath();
+        assert!(!capture_current_at(&path), "nothing installed");
+
+        let stale = format!(
+            "curl -s --max-time 1 -X POST --data-binary @- {CAPTURE_INGEST_URL} >/dev/null 2>&1; exit 0"
+        );
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&json!({
+                "hooks": { "UserPromptSubmit": [
+                    { "hooks": [{ "type": "command", "command": stale, "timeout": 5 }] }
+                ]}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            capture_installed_at(&path),
+            "the old check is satisfied by a stale command"
+        );
+        assert!(!capture_current_at(&path), "the new one is not");
+
+        install_capture_at(&path).unwrap();
+        assert!(capture_current_at(&path), "refreshed → current");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The refresh rewrites OUR entry and nothing else — a user's own
+    /// UserPromptSubmit hook survives it untouched.
+    #[test]
+    fn capture_refresh_preserves_unrelated_user_hooks() {
+        let path = tmppath();
+        let stale = format!(
+            "curl -s --max-time 1 -X POST --data-binary @- {CAPTURE_INGEST_URL} >/dev/null 2>&1; exit 0"
+        );
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&json!({
+                "hooks": { "UserPromptSubmit": [
+                    { "matcher": "*", "hooks": [{ "type": "command", "command": "my-own-logger" }] },
+                    { "hooks": [{ "type": "command", "command": stale, "timeout": 5 }] }
+                ]}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        install_capture_at(&path).unwrap();
+        let json: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let arr = json["hooks"]["UserPromptSubmit"].as_array().unwrap();
+        assert_eq!(arr.len(), 2, "refreshed in place, nothing appended");
+        assert_eq!(arr[0]["hooks"][0]["command"], "my-own-logger");
+        assert_eq!(arr[0]["matcher"], "*", "the user's matcher is theirs");
+        assert_eq!(arr[1]["hooks"][0]["command"].as_str().unwrap(), capture_command());
+        let _ = std::fs::remove_file(&path);
     }
 
     /// A stale command from an older build must self-heal on the next boot —
@@ -1128,19 +1421,119 @@ mod tests {
     fn workflow_availability_reads_disable_flag() {
         let path = tmppath();
         // Absent file → not disabled.
-        assert!(!workflow_availability_at(&path).disabled_in_settings);
+        assert!(!workflow_availability_for(&[path.clone()]).disabled_in_settings);
         std::fs::write(
             &path,
             serde_json::to_string_pretty(&json!({"disableWorkflows": true})).unwrap(),
         )
         .unwrap();
-        assert!(workflow_availability_at(&path).disabled_in_settings);
+        assert!(workflow_availability_for(&[path.clone()]).disabled_in_settings);
         std::fs::write(
             &path,
             serde_json::to_string_pretty(&json!({"disableWorkflows": false})).unwrap(),
         )
         .unwrap();
-        assert!(!workflow_availability_at(&path).disabled_in_settings);
+        assert!(!workflow_availability_for(&[path.clone()]).disabled_in_settings);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// The probe read exactly one file — `~/.claude/settings.json` — so a
+    /// flag in `settings.local.json` or the project's own `.claude/` was
+    /// invisible and the modal reported "available" with confidence it had
+    /// not earned. Precedence is ascending: the later file wins, and a file
+    /// that doesn't mention the key overrides nothing.
+    #[test]
+    fn workflow_availability_walks_settings_files_in_precedence_order() {
+        let dir = std::env::temp_dir().join(format!("redline-wf-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let user = dir.join("settings.json");
+        let local = dir.join("settings.local.json");
+        let project = dir.join("project.json");
+        let files = vec![user.clone(), local.clone(), project.clone()];
+
+        // Nothing on disk at all → not disabled, and no source to blame.
+        let a = workflow_availability_for(&files);
+        assert!(!a.disabled_in_settings);
+        assert!(a.settings_source.is_none());
+        // The env is ALWAYS unreadable — the run happens in `$SHELL -l`.
+        assert!(a.env_unreadable);
+
+        // The local file alone disables it, and names itself.
+        std::fs::write(&local, r#"{"disableWorkflows": true}"#).unwrap();
+        let a = workflow_availability_for(&files);
+        assert!(a.disabled_in_settings);
+        assert_eq!(a.settings_source.as_deref(), Some(local.to_string_lossy().as_ref()));
+
+        // A silent higher-precedence file does not override a stated one.
+        std::fs::write(&project, r#"{"model": "opus"}"#).unwrap();
+        assert!(workflow_availability_for(&files).disabled_in_settings);
+
+        // A stated higher-precedence file does.
+        std::fs::write(&project, r#"{"disableWorkflows": false}"#).unwrap();
+        let a = workflow_availability_for(&files);
+        assert!(!a.disabled_in_settings);
+        assert!(a.settings_source.is_none());
+
+        // A lower-precedence file cannot re-enable it.
+        std::fs::write(&user, r#"{"disableWorkflows": true}"#).unwrap();
+        assert!(!workflow_availability_for(&files).disabled_in_settings);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn workflow_settings_files_are_ordered_user_then_project_then_managed() {
+        let files = workflow_settings_files(Some(std::path::Path::new("/tmp/repo")));
+        let names: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
+        let project_idx = names
+            .iter()
+            .position(|n| n.starts_with("/tmp/repo/.claude/settings.json"))
+            .expect("project settings.json is read");
+        let local_idx = names
+            .iter()
+            .position(|n| n.ends_with("/tmp/repo/.claude/settings.local.json"))
+            .expect("project settings.local.json is read");
+        assert!(project_idx < local_idx, "local overrides shared");
+        // Managed settings outrank everything a user can write.
+        assert_eq!(local_idx, names.len() - 2);
+    }
+
+    /// Cargo and npm were the only inferences, so a Go, Make or pytest repo
+    /// opened a modal with an empty list — a step that asked nothing.
+    #[test]
+    fn orchestrate_allow_rules_cover_more_than_cargo_and_npm() {
+        let dir = std::env::temp_dir().join(format!("redline-cand-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(orchestrate_allow_rules(&dir).is_empty());
+
+        std::fs::write(dir.join("go.mod"), "module x
+").unwrap();
+        std::fs::write(dir.join("Makefile"), "all:
+").unwrap();
+        std::fs::write(dir.join("pyproject.toml"), "[project]
+").unwrap();
+        let rules = orchestrate_allow_rules(&dir);
+        for want in ["Bash(go test:*)", "Bash(go build:*)", "Bash(make:*)", "Bash(pytest:*)"] {
+            assert!(rules.iter().any(|r| r == want), "missing {want} in {rules:?}");
+        }
+        // Every rule it offers must survive the writer's own validation.
+        assert!(apply_orchestrate_allows_at(&dir.join("settings.json"), &rules).is_ok());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn effective_allow_rules_union_across_files_marks_candidates_present() {
+        let dir = std::env::temp_dir().join(format!("redline-eff-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.json");
+        let b = dir.join("b.json");
+        std::fs::write(&a, r#"{"permissions": {"allow": ["Bash(cargo test:*)"]}}"#).unwrap();
+        std::fs::write(&b, r#"{"permissions": {"allow": ["Bash(make:*)"]}}"#).unwrap();
+        let eff = effective_allow_rules(&[a, b, dir.join("missing.json")]);
+        assert!(eff.contains("Bash(cargo test:*)"));
+        assert!(eff.contains("Bash(make:*)"));
+        assert_eq!(eff.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

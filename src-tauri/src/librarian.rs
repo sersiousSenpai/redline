@@ -355,9 +355,13 @@ pub fn librarian_argv(prompt: String, prior: Option<&str>) -> Vec<String> {
 /// yesterday's survey said, persist the new session id on success, and fall
 /// back to a fresh session (overwriting the stored id) if the resume fails.
 /// Returns the final text + session id.
-pub async fn run_librarian(cwd: &str, prompt: String) -> Result<(String, Option<String>), String> {
+pub async fn run_librarian(
+    db: &Database,
+    cwd: &str,
+    prompt: String,
+) -> Result<(String, Option<String>), String> {
     crate::seat::run_with_thread("librarian", None, |prior| {
-        run_librarian_once(cwd, prompt.clone(), prior)
+        run_librarian_once(db, cwd, prompt.clone(), prior)
     })
     .await
 }
@@ -368,6 +372,7 @@ pub async fn run_librarian(cwd: &str, prompt: String) -> Result<(String, Option<
 /// the agent-prompt guard first so the headless `-p` doesn't leak into the
 /// lake via the global hook.
 async fn run_librarian_once(
+    db: &Database,
     cwd: &str,
     prompt: String,
     prior: Option<String>,
@@ -403,10 +408,14 @@ async fn run_librarian_once(
     let mut session: Option<String> = None;
     let mut final_text: Option<String> = None;
     let mut errored: Option<String> = None;
+    let mut meter = crate::meter::TurnMeter::new();
     while let Ok(Some(line)) = reader.next_line().await {
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
+        // Second pass over the same value — the ONE accounting rule. A
+        // daemon seat has no pane to stream to, but it burns real tokens.
+        meter.observe(&v);
         match classify_line(&v) {
             StreamLine::Init(sid) => session = Some(sid),
             StreamLine::Final { text, session_id } => {
@@ -419,6 +428,8 @@ async fn run_librarian_once(
             _ => {}
         }
     }
+    // Booked before any error return: a failed pass spent its input tokens.
+    crate::meter::book(db, "librarian", &meter);
     let mut errbuf = String::new();
     {
         let mut elines = BufReader::new(stderr).lines();

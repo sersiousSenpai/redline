@@ -20,6 +20,7 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+build-analysis
 *.local
 /target/
 

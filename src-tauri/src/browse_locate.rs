@@ -304,10 +304,12 @@ pub async fn browse_list_locate(
     let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
     let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
 
+    let burn_db = db.clone();
     let outcome = tokio::time::timeout(LOCATE_TIMEOUT, async move {
         let _ = stdin.write_all(prompt.as_bytes()).await;
         drop(stdin);
-        let outcome = claude_proc::collect_turn(stdout, stderr).await;
+        let outcome =
+            claude_proc::collect_turn_seated(&burn_db, "browse_locator", stdout, stderr).await;
         let _ = child.wait().await;
         outcome
     })

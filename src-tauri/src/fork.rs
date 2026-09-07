@@ -1,27 +1,48 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-//! Headless Claude Code forks backing per-comment discussion threads.
+//! Headless agent forks backing per-comment discussion threads.
 //!
-//! Each "Discuss" thread runs `claude -p --resume <id> [--fork-session]
-//! --output-format stream-json …` — a context-aware fork of the main
-//! plan-mode session that answers a comment inline without disturbing the
-//! held `:7676` hook. The first turn forks the main session (capturing a new
-//! session id); follow-ups plain-resume the fork.
+//! Each "Discuss" thread is a context-aware fork of the plan session that
+//! answers a comment inline without disturbing the held `:7676` hook. The
+//! first turn forks the plan session (capturing a new session id); follow-ups
+//! plain-resume the fork.
+//!
+//! **Two command protocols, one lifecycle.** A plan-comment thread runs on the
+//! harness that AUTHORED the plan (`sessions.backend`), because a fork is a
+//! fork *of that conversation*:
+//!
+//! - `claude-code` — `claude -p --resume <id> [--fork-session] --output-format
+//!   stream-json --include-partial-messages …`, classified by
+//!   `claude_proc::classify_line`. Token-level deltas.
+//! - `codex` — `codex -s read-only -a never --search -c
+//!   developer_instructions=… exec fork|resume --json --skip-git-repo-check
+//!   <id> <prompt>`, classified by `classify_codex_line`. `codex exec --json`
+//!   has no delta flag, so the reply lands as ONE `item.completed` chunk.
+//!
+//! Handing one CLI the other's id does not error — `claude --resume <codex
+//! thread>` silently starts a FRESH session — so the backend is persisted
+//! beside the fork id (`comments.fork_backend`) and a mismatch is repaired by
+//! re-forking on the right harness rather than resumed.
+//!
+//! Everything downstream of the classifier is shared: `fork-delta` events,
+//! `fork-done` / `fork-error` / `fork-cancelled`, cancellation, the partial
+//! buffer, and `thread_messages` rows written only when a turn finishes.
+//!
+//! Review-annotation, Ask-AI and Drafter threads stay on the standalone Claude
+//! path: they have no plan session to fork, so there is no provenance to obey.
 //!
 //! Mirrors `pty.rs`'s keyed-registry pattern, but with `tokio::process`
-//! (headless, no PTY) instead of `portable-pty`. Streaming text is pushed to
-//! the frontend as `fork-delta` events; `fork-done` / `fork-error` /
-//! `fork-cancelled` close a turn. `thread_messages` rows are written only
-//! when a turn finishes — live streaming is frontend-only state.
+//! (headless, no PTY) instead of `portable-pty`.
 
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{ChildStderr, ChildStdout};
+use tokio::process::{Child, ChildStderr, ChildStdout};
 
 use crate::claude_proc::{classify_line, resolve_claude_bin, StreamLine};
 use crate::db::Database;
@@ -45,6 +66,46 @@ enum ThreadTarget {
     DraftComment,
 }
 
+/// Which harness a discussion fork runs on. Only plan-comment threads can be
+/// anything but `Claude`: the other three families start a fresh session in a
+/// repo rather than forking a conversation, so there is no provenance to obey.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForkBackend {
+    Claude,
+    Codex,
+}
+
+impl ForkBackend {
+    /// Read a stored `sessions.backend` / `comments.fork_backend` value.
+    /// Anything missing, blank or unrecognised is Claude — every row written
+    /// before this column existed belongs to the only implementation there
+    /// then was.
+    fn from_stored(value: &str) -> Self {
+        if value.trim().eq_ignore_ascii_case("codex") {
+            Self::Codex
+        } else {
+            Self::Claude
+        }
+    }
+
+    /// The persisted form, matching `sessions.backend`.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude-code",
+            Self::Codex => "codex",
+        }
+    }
+
+    /// The CLI's own name — what failure text must say, so "codex exited
+    /// abnormally" never reads as a Claude problem the user can't find.
+    fn cli(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+}
+
 /// Composite registry key. Comment ids are session-scoped (`c-001` restarts
 /// per session), so a bare comment_id collides across sessions. NUL cannot
 /// appear in a session UUID or a `c-NNN` id, so it is a safe separator.
@@ -66,6 +127,11 @@ pub struct ForkState {
     /// and macOS attributes that child's file access to Redline (TCC), so it
     /// must never run at app startup.
     claude_bin: Arc<OnceLock<String>>,
+    /// Absolute path to the `codex` binary, resolved lazily on the same terms
+    /// and for a sharper reason: on a machine with the ChatGPT desktop app,
+    /// `$PATH` usually still resolves `codex` to an older standalone build
+    /// with no `exec fork` at all.
+    codex_bin: Arc<OnceLock<String>>,
 }
 
 impl ForkState {
@@ -74,6 +140,7 @@ impl ForkState {
             turns: Arc::new(Turns::new()),
             db,
             claude_bin: Arc::new(OnceLock::new()),
+            codex_bin: Arc::new(OnceLock::new()),
         }
     }
 
@@ -135,7 +202,7 @@ impl ForkState {
 
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(180),
-            crate::claude_proc::collect_turn(stdout, stderr),
+            crate::claude_proc::collect_turn_seated(&self.db, "fork_plan", stdout, stderr),
         )
         .await;
         let proc = self.turns.take(&key).and_then(|p| p.child);
@@ -176,6 +243,19 @@ impl ForkState {
             .map_err(|e| format!("failed to resolve the `claude` CLI: {e}"))
     }
 
+    /// The resolved `codex` path, on the same lazy/blocking terms as
+    /// `claude_bin` — `resolve_codex_bin` can end in an interactive login-shell
+    /// probe, which must never run on the async runtime or at app startup.
+    async fn codex_bin(&self) -> Result<String, String> {
+        let cell = self.codex_bin.clone();
+        tokio::task::spawn_blocking(move || {
+            cell.get_or_init(crate::codex_app_server::resolve_codex_bin)
+                .clone()
+        })
+        .await
+        .map_err(|e| format!("failed to resolve the `codex` CLI: {e}"))
+    }
+
     /// True if `session_id` is the forked session of any comment — the
     /// `handle_plan` guard against a stray `ExitPlanMode` POST from a fork.
     pub fn is_known_fork_session(&self, session_id: &str) -> bool {
@@ -203,6 +283,18 @@ struct ForkDelta {
     seq: u64,
 }
 
+/// What the turn is spending and what it is doing. Flattened so the composite
+/// key the frontend hook matches on (`sessionId` + `commentId`) stays at the
+/// top level, like every other fork event.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ForkMeter {
+    session_id: String,
+    comment_id: String,
+    #[serde(flatten)]
+    meter: turn::MeterPayload,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ForkDone {
@@ -218,6 +310,18 @@ struct ForkError {
     session_id: String,
     comment_id: String,
     error: String,
+}
+
+/// A transient failure is being retried, silently, on the same message. The
+/// turn never leaves `streaming` — this only changes what the bubble says
+/// while the second attempt runs.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ForkRetry {
+    session_id: String,
+    comment_id: String,
+    /// 1-based index of the attempt about to start (always 2 today).
+    attempt: u32,
 }
 
 #[derive(Clone, Serialize)]
@@ -249,6 +353,50 @@ fn attachments_block(attachments: &[CommentAttachment]) -> String {
     p
 }
 
+/// Render the turns a REPLACEMENT fork must inherit as text.
+///
+/// A replacement happens when the stored fork belongs to the other harness (see
+/// `fork_thread_send`): the transcript the reviewer can see is real and must
+/// not vanish, but the conversation behind it cannot be resumed. So the visible
+/// history is carried into the new fork's first turn as *context*, bounded in
+/// both turns and characters — a discussion thread can run long, and the point
+/// is continuity, not replaying the whole exchange.
+///
+/// Only completed, non-error turns: an error row is Redline's own failure text,
+/// never something the previous agent said.
+fn continuity_block(messages: &[ThreadMessage]) -> Option<String> {
+    /// Turns carried forward, newest-last.
+    const MAX_TURNS: usize = 8;
+    /// Per-turn character ceiling — a pasted stack trace must not crowd out
+    /// the turns around it.
+    const MAX_CHARS: usize = 1_200;
+
+    let usable: Vec<&ThreadMessage> = messages
+        .iter()
+        .filter(|m| m.status == "complete" && !m.body.trim().is_empty())
+        .collect();
+    if usable.is_empty() {
+        return None;
+    }
+    let recent = &usable[usable.len().saturating_sub(MAX_TURNS)..];
+    let mut out = String::from(
+        "This discussion already has history, carried over from an earlier \
+         agent. Treat it as CONTEXT ONLY — you did not write these replies, and \
+         you are not being asked to repeat or defend them:\n",
+    );
+    for m in recent {
+        let who = if m.role == "user" { "Reviewer" } else { "Assistant" };
+        let body = m.body.trim();
+        let truncated: String = body.chars().take(MAX_CHARS).collect();
+        out.push_str(&format!("\n{who}: {truncated}"));
+        if truncated.len() < body.len() {
+            out.push('…');
+        }
+        out.push('\n');
+    }
+    Some(out)
+}
+
 fn build_first_turn_prompt(
     is_question: bool,
     anchor_id: &str,
@@ -256,6 +404,10 @@ fn build_first_turn_prompt(
     opening: &str,
     prior_resolution: Option<&str>,
     attachments: &[CommentAttachment],
+    // Prior turns to inherit (`continuity_block`). `None` for an ordinary
+    // first turn, which keeps this prompt byte-identical to the one every
+    // Claude discussion has always been given.
+    continuity: Option<&str>,
 ) -> String {
     let mut p = String::from(
         "You are discussing a plan you produced earlier in this session with \
@@ -279,7 +431,16 @@ fn build_first_turn_prompt(
         _ => p.push_str(".\n"),
     }
     p.push('\n');
-    p.push_str("Their comment:\n");
+    // Inherited history sits BEFORE the message it leads up to, and relabels
+    // that message as the latest one — "their comment" would otherwise read as
+    // the opening of a conversation that visibly already happened.
+    if let Some(block) = continuity.filter(|c| !c.trim().is_empty()) {
+        p.push_str(block);
+        p.push('\n');
+        p.push_str("Their latest message:\n");
+    } else {
+        p.push_str("Their comment:\n");
+    }
     for line in opening.lines() {
         p.push_str("> ");
         p.push_str(line);
@@ -362,6 +523,144 @@ fn discussion_fork_args(seat: &str, prompt: String) -> Vec<String> {
     args
 }
 
+/// The Codex fork's `developer_instructions`.
+///
+/// A Codex discussion fork inherits the plan session's whole rollout, and that
+/// rollout carries the *planning* contract (`codex_profile::CONTRACT`, layered
+/// in by `-p redline-plan`). Two things follow, and this text exists for both:
+///
+/// 1. **The plan profile must NOT be re-applied here.** Its contract tells the
+///    model to end its turn with a `<proposed_plan>` block, which the Stop hook
+///    would then capture as a revision of the very plan under review — a
+///    discussion thread silently rewriting the document it is discussing.
+/// 2. **The inherited history must be demoted to context.** Without saying so,
+///    a forked thread reads its own planning instructions as still in force.
+///
+/// So the sandbox stays `read-only` with approvals `never` (the physical half),
+/// and this is the instruction half. Kept short: it is prepended to a
+/// conversation that already has thousands of tokens of plan behind it.
+const CODEX_SIDECAR_INSTRUCTIONS: &str = "\
+You are a READ-ONLY SIDE CONVERSATION about a plan you already produced. The \
+planning history you inherited is CONTEXT ONLY: any earlier instruction to \
+produce, revise or submit a plan is void for this conversation.
+
+Rules for every turn here:
+- Never emit a `<proposed_plan>` block, and never submit or revise the plan. \
+The reviewer routes anything actionable back into the plan themselves.
+- Never edit, create or delete files, and never run a command that changes \
+anything. Reading the repo, searching it and searching the web are all fine.
+- Answer the reviewer directly, in Markdown, leading with the answer. Add a \
+table, a mermaid diagram or a short code block only where it adds signal. No \
+raw HTML.
+- The turn prompt may mention a `sidecar` skill or `ExitPlanMode`; both are \
+Claude-side and do not apply to you. Ignore them and answer directly.";
+
+/// Spawn args for one Codex discussion-fork turn.
+///
+/// `subcommand` is `fork` on the first turn (of the PLAN thread, minting a new
+/// thread id) and `resume` thereafter (of this discussion's own thread). The
+/// two take identical flags, which is why they share one builder.
+///
+/// Flag placement is not stylistic: `-s`, `-a`, `--search` and `-c` are
+/// TOP-LEVEL options and are rejected after the subcommand, while `--json` and
+/// `--skip-git-repo-check` belong to `exec fork` / `exec resume`. Verified
+/// against codex-cli 0.149.0-alpha.4.3.
+///
+/// No `-p redline-plan`: see `CODEX_SIDECAR_INSTRUCTIONS`. `-s read-only -a
+/// never` is the physical counterpart to the Claude arm's withheld
+/// `Edit`/`Write` tools, and `--search` its `WebSearch`/`WebFetch` allow.
+fn codex_discussion_fork_args(
+    subcommand: &str,
+    thread_id: &str,
+    prompt: String,
+) -> Vec<String> {
+    vec![
+        "-s".to_string(),
+        "read-only".to_string(),
+        "-a".to_string(),
+        "never".to_string(),
+        "--search".to_string(),
+        "-c".to_string(),
+        // `-c` parses its value as TOML and only falls back to a raw literal
+        // when that fails, so the instructions are TOML-quoted rather than
+        // handed over bare (`codex_profile::toml_string`, same encoder the
+        // profile file uses).
+        format!(
+            "developer_instructions={}",
+            crate::codex_profile::toml_string(CODEX_SIDECAR_INSTRUCTIONS)
+        ),
+        "exec".to_string(),
+        subcommand.to_string(),
+        "--json".to_string(),
+        // Discussion threads follow the plan session's cwd, which is not
+        // required to be a git repo (a plan can be about anything).
+        "--skip-git-repo-check".to_string(),
+        thread_id.to_string(),
+        prompt,
+    ]
+}
+
+/// One classified line of `codex exec --json` output.
+///
+/// Deliberately its own enum rather than `claude_proc::StreamLine`: the two
+/// protocols disagree about what a "final" line is. Claude ends a turn with one
+/// authoritative `result` carrying the whole reply; Codex emits each agent
+/// message as it completes and then a separate `turn.completed` with only
+/// usage. Pure, so the whole wire contract is testable from fixtures.
+#[derive(Debug, PartialEq, Eq)]
+enum CodexLine {
+    /// `thread.started` — the thread this turn runs in. On `exec fork` that is
+    /// the NEW fork id (what gets persisted); on `exec resume` it is the id we
+    /// passed in, so persisting it again is a harmless no-op.
+    Thread(String),
+    /// A completed `agent_message` item — reply text.
+    Message(String),
+    /// `turn.completed` — the turn ended cleanly. Carries only usage, never
+    /// text, so it is never mistaken for a reply.
+    Completed,
+    /// `turn.failed`, a top-level `error`, or a completed `error` item.
+    Failed(String),
+    /// `turn.started`, `item.started`/`item.updated`, and every non-message
+    /// item (`reasoning`, `command_execution`, `file_change`, `mcp_tool_call`,
+    /// `web_search`, `todo_list`) — a reviewer must never see the agent's
+    /// scratch work rendered as its answer.
+    Ignore,
+}
+
+fn classify_codex_line(v: &Value) -> CodexLine {
+    let text_at = |v: &Value, path: &str| {
+        v.pointer(path)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    match v.get("type").and_then(Value::as_str) {
+        Some("thread.started") => match text_at(v, "/thread_id") {
+            Some(id) => CodexLine::Thread(id),
+            None => CodexLine::Ignore,
+        },
+        Some("item.completed") => match v.pointer("/item/type").and_then(Value::as_str) {
+            Some("agent_message") => match text_at(v, "/item/text") {
+                Some(text) => CodexLine::Message(text),
+                None => CodexLine::Ignore,
+            },
+            Some("error") => CodexLine::Failed(
+                text_at(v, "/item/message")
+                    .unwrap_or_else(|| "codex reported an error".to_string()),
+            ),
+            _ => CodexLine::Ignore,
+        },
+        Some("turn.completed") => CodexLine::Completed,
+        Some("turn.failed") | Some("error") => CodexLine::Failed(
+            text_at(v, "/error/message")
+                .or_else(|| text_at(v, "/message"))
+                .unwrap_or_else(|| "codex reported an error".to_string()),
+        ),
+        _ => CodexLine::Ignore,
+    }
+}
+
 // --- Commands --------------------------------------------------------------
 
 /// Send a turn to a comment's fork agent. The first turn forks the main
@@ -407,7 +706,36 @@ pub async fn fork_thread_send(
         .flat_map(|r| &r.comments)
         .find(|c| c.id == comment_id)
         .ok_or_else(|| format!("no comment {comment_id} in session {session_id}"))?;
-    let prior_fork = fork.db.get_comment_fork_session(&session_id, &comment_id);
+
+    // Which harness authored this plan — the fork has to run on it, because a
+    // fork is a fork OF that conversation. Legacy/absent provenance is Claude.
+    let backend = ForkBackend::from_stored(&store.backend_of(&session_id));
+
+    // The stored fork, and whether it is still usable. A fork id from the OTHER
+    // harness must never be resumed: neither CLI errors on the other's id, so
+    // resuming would silently open a fresh, contextless conversation under an
+    // id Redline then keeps writing to. Instead the plan session is re-forked
+    // on the right harness and the visible transcript is carried across
+    // (`continuity_block`) — this is the repair path for any Codex session that
+    // already picked up a stray Claude fork.
+    let stored_fork = fork.db.get_comment_fork(&session_id, &comment_id);
+    let mismatched = stored_fork
+        .as_ref()
+        .is_some_and(|(_, b)| ForkBackend::from_stored(b) != backend);
+    let prior_fork: Option<String> = if mismatched {
+        None
+    } else {
+        stored_fork.map(|(id, _)| id)
+    };
+    // The turns already on screen, needed only when re-forking — reading them
+    // otherwise would be a query per follow-up for nothing.
+    let carried = if mismatched {
+        fork.db
+            .load_thread(&session_id, &comment_id)
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
     // Persist the user turn (a terminal row).
     let user_msg = ThreadMessage {
@@ -443,6 +771,9 @@ pub async fn fork_thread_send(
                 &text,
                 comment.resolution.as_ref().map(|r| r.body.as_str()),
                 &all,
+                // Empty for a genuine first turn, so that prompt is unchanged;
+                // populated only when replacing a wrong-harness fork.
+                continuity_block(&carried).as_deref(),
             )
         }
         // Follow-ups go verbatim, so a file dropped into one has to announce
@@ -482,51 +813,56 @@ pub async fn fork_thread_send(
         crate::ledger::register_agent_prompt(&prompt);
     }
 
-    // Read-only discussion fork: the Read/Grep/Glob + web tool surface plus the
-    // scoped localhost-daemon `curl` allow (the ClassMemory retrieval surface).
-    // Edit/Write/ExitPlanMode stay excluded and MCP is stripped; never plan mode.
-    // See `discussion_fork_args` and docs/protocol-verification.md Experiment (i).
-    let mut args: Vec<String> = discussion_fork_args("fork_plan", prompt);
-    match &prior_fork {
-        None => {
-            args.push("--resume".to_string());
-            args.push(session_id.clone());
-            args.push("--fork-session".to_string());
+    // Build the command on the plan's own harness. Both arms are read-only —
+    // Claude by withholding Edit/Write/ExitPlanMode from `--tools` (plus the
+    // scoped localhost-daemon curl allow, the ClassMemory retrieval surface),
+    // Codex by `-s read-only -a never`. Neither ever runs in plan mode. See
+    // `discussion_fork_args` / `codex_discussion_fork_args` and
+    // docs/protocol-verification.md Experiment (i).
+    let spawn = match backend {
+        ForkBackend::Claude => {
+            let mut args: Vec<String> = discussion_fork_args("fork_plan", prompt);
+            match &prior_fork {
+                None => {
+                    args.push("--resume".to_string());
+                    args.push(session_id.clone());
+                    args.push("--fork-session".to_string());
+                }
+                Some(fork_sid) => {
+                    args.push("--resume".to_string());
+                    args.push(fork_sid.clone());
+                }
+            }
+            ForkSpawn {
+                backend,
+                seat: "fork_plan",
+                bin: fork.claude_bin().await?,
+                cwd: cwd.clone(),
+                args,
+            }
         }
-        Some(fork_sid) => {
-            args.push("--resume".to_string());
-            args.push(fork_sid.clone());
+        ForkBackend::Codex => {
+            // First turn forks the PLAN thread (minting a new id); follow-ups
+            // resume this discussion's own thread.
+            let (subcommand, thread_id) = match &prior_fork {
+                None => ("fork", session_id.as_str()),
+                Some(fork_sid) => ("resume", fork_sid.as_str()),
+            };
+            ForkSpawn {
+                backend,
+                seat: "fork_plan",
+                bin: fork.codex_bin().await?,
+                cwd: cwd.clone(),
+                args: codex_discussion_fork_args(subcommand, thread_id, prompt),
+            }
         }
-    }
+    };
 
     // Spawn. Take stdout/stderr before the child enters the registry.
-    // `claude_command` prepends the binary's own dir to PATH so an
-    // `#!/usr/bin/env node` shebang (npm installs) finds its `node`.
-    let claude_bin = fork.claude_bin().await?;
-    let mut cmd = crate::claude_proc::claude_command_for_seat("fork_plan", &claude_bin);
-    let mut child = cmd
-        .current_dir(&cwd)
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                format!(
-                    "could not find the `claude` CLI (looked for `{claude_bin}`). \
-                     Install Claude Code, or launch Redline from a terminal \
-                     so it inherits your shell's PATH."
-                )
-            } else {
-                format!("failed to spawn claude: {e}")
-            }
-        })?;
-    let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
-    let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
+    let (child, stdout, stderr) = spawn.spawn()?;
 
     // Attach the running child to the reservation, then start the reader.
+    let token = slot.token();
     let buf = slot.buf();
     if let Err(mut child) = slot.attach(child) {
         // Cancelled during the spawn window.
@@ -546,9 +882,11 @@ pub async fn fork_thread_send(
         fork.turns.clone(),
         buf,
         key,
+        token,
         session_id,
         comment_id,
         ThreadTarget::PlanComment,
+        spawn,
         stdout,
         stderr,
     ));
@@ -717,30 +1055,18 @@ pub async fn review_thread_send(
         args.push(fork_sid.clone());
     }
 
-    let claude_bin = fork.claude_bin().await?;
-    let mut cmd = crate::claude_proc::claude_command_for_seat("fork_review", &claude_bin);
-    let mut child = cmd
-        .current_dir(&cwd)
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                format!(
-                    "could not find the `claude` CLI (looked for `{claude_bin}`). \
-                     Install Claude Code, or launch Redline from a terminal \
-                     so it inherits your shell's PATH."
-                )
-            } else {
-                format!("failed to spawn claude: {e}")
-            }
-        })?;
-    let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
-    let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
+    let spawn = ForkSpawn {
+        // No plan session behind these threads — always the standalone Claude
+        // path (see the module header).
+        backend: ForkBackend::Claude,
+        seat: "fork_review",
+        bin: fork.claude_bin().await?,
+        cwd: cwd.clone(),
+        args,
+    };
+    let (child, stdout, stderr) = spawn.spawn()?;
 
+    let token = slot.token();
     let buf = slot.buf();
     if let Err(mut child) = slot.attach(child) {
         // Cancelled during the spawn window.
@@ -760,9 +1086,11 @@ pub async fn review_thread_send(
         fork.turns.clone(),
         buf,
         key,
+        token,
         review_id,
         annotation_id,
         ThreadTarget::ReviewAnnotation,
+        spawn,
         stdout,
         stderr,
     ));
@@ -897,20 +1225,18 @@ pub async fn review_question_send(
         args.push(fork_sid.clone());
     }
 
-    let claude_bin = fork.claude_bin().await?;
-    let mut cmd = crate::claude_proc::claude_command_for_seat("fork_review", &claude_bin);
-    let mut child = cmd
-        .current_dir(&cwd)
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| format!("failed to spawn claude: {e}"))?;
-    let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
-    let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
+    let spawn = ForkSpawn {
+        // No plan session behind these threads — always the standalone Claude
+        // path (see the module header).
+        backend: ForkBackend::Claude,
+        seat: "fork_review",
+        bin: fork.claude_bin().await?,
+        cwd: cwd.clone(),
+        args,
+    };
+    let (child, stdout, stderr) = spawn.spawn()?;
 
+    let token = slot.token();
     let buf = slot.buf();
     if let Err(mut child) = slot.attach(child) {
         // Cancelled during the spawn window.
@@ -930,9 +1256,11 @@ pub async fn review_question_send(
         fork.turns.clone(),
         buf,
         key,
+        token,
         review_id,
         question_id,
         ThreadTarget::ReviewQuestion,
+        spawn,
         stdout,
         stderr,
     ));
@@ -1121,30 +1449,18 @@ pub async fn draft_thread_send(
         args.push(fork_sid.clone());
     }
 
-    let claude_bin = fork.claude_bin().await?;
-    let mut cmd = crate::claude_proc::claude_command_for_seat("fork_drafter", &claude_bin);
-    let mut child = cmd
-        .current_dir(&cwd)
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                format!(
-                    "could not find the `claude` CLI (looked for `{claude_bin}`). \
-                     Install Claude Code, or launch Redline from a terminal \
-                     so it inherits your shell's PATH."
-                )
-            } else {
-                format!("failed to spawn claude: {e}")
-            }
-        })?;
-    let stdout = child.stdout.take().ok_or("claude stdout unavailable")?;
-    let stderr = child.stderr.take().ok_or("claude stderr unavailable")?;
+    let spawn = ForkSpawn {
+        // No plan session behind these threads — always the standalone Claude
+        // path (see the module header).
+        backend: ForkBackend::Claude,
+        seat: "fork_drafter",
+        bin: fork.claude_bin().await?,
+        cwd: cwd.clone(),
+        args,
+    };
+    let (child, stdout, stderr) = spawn.spawn()?;
 
+    let token = slot.token();
     let buf = slot.buf();
     if let Err(mut child) = slot.attach(child) {
         // Cancelled during the spawn window.
@@ -1164,9 +1480,11 @@ pub async fn draft_thread_send(
         fork.turns.clone(),
         buf,
         key,
+        token,
         draft_id,
         comment_id,
         ThreadTarget::DraftComment,
+        spawn,
         stdout,
         stderr,
     ));
@@ -1259,7 +1577,7 @@ pub fn fork_thread_discard(
         .delete_thread(&session_id, &comment_id)
         .map_err(|e| format!("failed to delete thread: {e}"))?;
     fork.db
-        .clear_comment_fork_session(&session_id, &comment_id)
+        .clear_comment_fork(&session_id, &comment_id)
         .map_err(|e| format!("failed to clear fork session: {e}"))?;
     Ok(())
 }
@@ -1279,24 +1597,162 @@ pub fn fork_kill_all(fork: tauri::State<'_, ForkState>) -> Result<(), String> {
 /// `fork-cancelled`. stdout and stderr are drained concurrently — a full
 /// stderr pipe would otherwise block the child.
 #[allow(clippy::too_many_arguments)]
-async fn read_fork(
-    app: AppHandle,
-    db: Arc<Database>,
-    turns: Arc<Turns<()>>,
-    buf: Arc<Mutex<PartialBuf>>,
-    key: String,
-    session_id: String,
-    comment_id: String,
-    target: ThreadTarget,
+/// Everything one fork turn's child process needs to run — kept whole instead
+/// of being consumed at the spawn, because the auto-retry has to run it a
+/// second time.
+///
+/// The retry deliberately re-runs the IDENTICAL arg vector. On a first turn
+/// that means re-forking the plan session rather than resuming the fork the
+/// failed attempt happened to mint: reusing that id would replay the question
+/// *inside* that fork and answer it twice. The cost is one orphaned
+/// transcript, which is the cheaper trade.
+struct ForkSpawn {
+    backend: ForkBackend,
+    /// The agent seat. Picks the model/effort flags already baked into `args`,
+    /// and labels the child's environment for the prompt-capture hooks.
+    seat: &'static str,
+    bin: String,
+    cwd: String,
+    args: Vec<String>,
+}
+
+impl ForkSpawn {
+    /// Start the child and take its pipes. Callable more than once for the
+    /// same turn; every call produces a fresh, identically-configured process.
+    fn spawn(&self) -> Result<(Child, ChildStdout, ChildStderr), String> {
+        let mut cmd = match self.backend {
+            // `claude_command_for_seat` prepends the binary's own dir to PATH
+            // so an `#!/usr/bin/env node` shebang (npm installs) finds `node`.
+            ForkBackend::Claude => {
+                crate::claude_proc::claude_command_for_seat(self.seat, &self.bin)
+            }
+            ForkBackend::Codex => {
+                let mut cmd = tokio::process::Command::new(&self.bin);
+                // The same labelling the claude arm gets from
+                // `claude_command_for_seat`: command-type capture hooks run
+                // inside the child's environment, so this is how a
+                // Redline-constructed prompt stays recognisable as machine
+                // text rather than the user's typing.
+                cmd.env(crate::claude_proc::ENV_AGENT_SEAT, self.seat);
+                cmd
+            }
+        };
+        let bin = &self.bin;
+        let cli = self.backend.cli();
+        let mut child = cmd
+            .current_dir(&self.cwd)
+            .args(&self.args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    match self.backend {
+                        ForkBackend::Claude => format!(
+                            "could not find the `claude` CLI (looked for `{bin}`). \
+                             Install Claude Code, or launch Redline from a terminal \
+                             so it inherits your shell's PATH."
+                        ),
+                        ForkBackend::Codex => format!(
+                            "could not find the `codex` CLI (looked for `{bin}`). \
+                             This plan was written by Codex, so its discussions need \
+                             Codex too — install it, or point Redline at it in \
+                             Settings."
+                        ),
+                    }
+                } else {
+                    format!("failed to spawn {cli}: {e}")
+                }
+            })?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| format!("{cli} stdout unavailable"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| format!("{cli} stderr unavailable"))?;
+        Ok((child, stdout, stderr))
+    }
+}
+
+/// How long to wait before an auto-retry: long enough that a capacity blip has
+/// a chance to clear, short enough that the reviewer reads it as one slow turn
+/// rather than a hang.
+const RETRY_DELAY: Duration = Duration::from_secs(2);
+
+/// Whether a drained attempt should be quietly run again.
+///
+/// Three conditions, all necessary:
+/// - `attempt == 1` — one retry and only one. A second transient failure in a
+///   row is signal, not noise, and the reviewer should see it.
+/// - `!streamed` — nothing reached the screen. A silent respawn after partial
+///   text would have to un-say it.
+/// - the error is transient — an overload/capacity blip, not an overflow (the
+///   session is over-limit and would fail identically) and not a hard failure.
+fn should_retry(attempt: u32, streamed: bool, errored: Option<&str>) -> bool {
+    attempt == 1 && !streamed && errored.is_some_and(crate::claude_proc::is_transient)
+}
+
+/// What one attempt's drain produced.
+struct ForkDrain {
+    fork_session: Option<String>,
+    final_text: Option<String>,
+    errored: Option<String>,
+    saw_json: bool,
+    /// Whether any `fork-delta` reached the frontend on this attempt.
+    ///
+    /// This is the auto-retry's precondition. Once a partial reply is on
+    /// screen a silent respawn would have to un-say it, and the reviewer would
+    /// watch the answer rewrite itself. A transient `error_during_execution`
+    /// carries an empty `result` and streams nothing at all, so the case this
+    /// whole mechanism exists for is still covered.
+    streamed: bool,
+    stderr_text: String,
+}
+
+/// Drain one attempt's stdout and stderr to EOF, emitting deltas as they land.
+/// Split out of `read_fork` because the auto-retry runs it twice.
+async fn drain_fork(
+    app: &AppHandle,
+    buf: &Arc<Mutex<PartialBuf>>,
+    session_id: &str,
+    comment_id: &str,
+    backend: ForkBackend,
+    // The fork's Agent Seat, for the Codex arm's model provenance.
+    seat: &str,
     stdout: ChildStdout,
     stderr: ChildStderr,
-) {
+) -> ForkDrain {
+    // Codex names no model on the wire; the seat's configured one is the only
+    // truth available, and it is the one the badge should show.
+    let codex_model = crate::seat::model_for(seat);
+    let codex_model = codex_model.as_deref();
     let stdout_fut = async {
         let mut reader = BufReader::new(stdout).lines();
         let mut fork_session: Option<String> = None;
         let mut final_text: Option<String> = None;
         let mut errored: Option<String> = None;
         let mut saw_json = false;
+        let mut streamed = false;
+        let mut pacer = turn::MeterPacer::default();
+        // One delta emitter for both protocols, so the frontend's
+        // append-before-emit / seq-watermark contract cannot diverge between
+        // them. See `turn::push_delta`.
+        let emit_delta = |text: String| {
+            let seq = turn::push_delta(buf, &text);
+            let _ = app.emit(
+                "fork-delta",
+                ForkDelta {
+                    session_id: session_id.to_string(),
+                    comment_id: comment_id.to_string(),
+                    text,
+                    seq,
+                },
+            );
+        };
         while let Ok(Some(line)) = reader.next_line().await {
             let trimmed = line.trim();
             if trimmed.is_empty() {
@@ -1307,32 +1763,79 @@ async fn read_fork(
                 continue;
             };
             saw_json = true;
-            match classify_line(&v) {
-                StreamLine::Init(sid) => fork_session = Some(sid),
-                StreamLine::Delta(text) => {
-                    // Append-before-emit: see `turn::push_delta`.
-                    let seq = turn::push_delta(&buf, &text);
+            // The raw wire, for the inspector. A no-op when it's off —
+            // one relaxed atomic load, nothing buffered.
+            crate::inspect::capture("fork", comment_id, trimmed);
+            // Second pass over the same value — the meter reads what
+            // `classify_line` throws away. Codex lines simply fold to nothing,
+            // which is the honest reading of a protocol that reports no usage.
+            if let Some(payload) = turn::push_meta(buf, &v) {
+                if pacer.due(&payload) {
                     let _ = app.emit(
-                        "fork-delta",
-                        ForkDelta {
-                            session_id: session_id.clone(),
-                            comment_id: comment_id.clone(),
-                            text,
-                            seq,
+                        "fork-meter",
+                        ForkMeter {
+                            session_id: session_id.to_string(),
+                            comment_id: comment_id.to_string(),
+                            meter: payload,
                         },
                     );
                 }
-                StreamLine::Final { text, session_id: sid } => {
-                    if sid.is_some() {
-                        fork_session = sid;
+            }
+            match backend {
+                ForkBackend::Claude => match classify_line(&v) {
+                    StreamLine::Init(sid) => fork_session = Some(sid),
+                    StreamLine::Delta(text) => {
+                        streamed = true;
+                        emit_delta(text);
                     }
-                    final_text = Some(text);
-                }
-                StreamLine::Failed(msg) => errored = Some(msg),
-                StreamLine::Ignore => {}
+                    StreamLine::Final { text, session_id: sid } => {
+                        if sid.is_some() {
+                            fork_session = sid;
+                        }
+                        final_text = Some(text);
+                    }
+                    StreamLine::Failed(msg) => errored = Some(msg),
+                    StreamLine::Ignore => {}
+                },
+                ForkBackend::Codex => match classify_codex_line(&v) {
+                    CodexLine::Thread(id) => fork_session = Some(id),
+                    CodexLine::Message(text) => {
+                        // `codex exec --json` has no delta flag, so a message
+                        // arrives whole. It is still pushed through the delta
+                        // path: that is what fills the partial buffer a
+                        // mid-turn remount recovers from, and what puts the
+                        // reply on screen a beat before `fork-done`.
+                        streamed = true;
+                        emit_delta(text.clone());
+                        // Codex can complete more than one agent message in a
+                        // turn and has no single authoritative "result" line,
+                        // so they accumulate — last-wins would silently drop
+                        // everything said before the closing paragraph.
+                        match &mut final_text {
+                            Some(prev) => {
+                                prev.push_str("\n\n");
+                                prev.push_str(&text);
+                            }
+                            None => final_text = Some(text),
+                        }
+                    }
+                    CodexLine::Failed(msg) => errored = Some(msg),
+                    CodexLine::Completed => {
+                        // Codex reports no usage on any captured shape, so
+                        // this is provenance more than economics: the badge
+                        // reads "Codex · <model>" instead of nothing. The
+                        // fold still goes through the ONE accounting rule.
+                        let codex = crate::meter::from_codex_turn(&v, codex_model);
+                        if !codex.is_empty() {
+                            let mut b = buf.lock().unwrap();
+                            b.meter = codex;
+                        }
+                    }
+                    CodexLine::Ignore => {}
+                },
             }
         }
-        (fork_session, final_text, errored, saw_json)
+        (fork_session, final_text, errored, saw_json, streamed)
     };
     let stderr_fut = async {
         let mut buf = String::new();
@@ -1343,20 +1846,142 @@ async fn read_fork(
         }
         buf
     };
-    let ((fork_session, final_text, errored, saw_json), stderr_text) =
+    let ((fork_session, final_text, errored, saw_json, streamed), stderr_text) =
         tokio::join!(stdout_fut, stderr_fut);
+    ForkDrain {
+        fork_session,
+        final_text,
+        errored,
+        saw_json,
+        streamed,
+        stderr_text,
+    }
+}
+
+async fn read_fork(
+    app: AppHandle,
+    db: Arc<Database>,
+    turns: Arc<Turns<()>>,
+    buf: Arc<Mutex<PartialBuf>>,
+    key: String,
+    // The reservation's token. Threaded through so the terminal reap and the
+    // retry's `reattach` only ever touch THIS turn's slot — a successor
+    // started after a cancel must not be stolen by a dead reader.
+    token: u64,
+    session_id: String,
+    comment_id: String,
+    target: ThreadTarget,
+    // The recipe that produced the running child, kept so a transient failure
+    // can be retried on an identical one.
+    spawn: ForkSpawn,
+    stdout: ChildStdout,
+    stderr: ChildStderr,
+) {
+    // Which protocol this child speaks, and whose name its failures carry.
+    let backend = spawn.backend;
+    let cli = backend.cli();
+
+    // Drain, and on a transient failure that produced no visible text at all,
+    // quietly run the turn once more. One retry only: a second transient
+    // failure is signal, not noise, and the reviewer should see it.
+    let mut stdout = stdout;
+    let mut stderr = stderr;
+    let mut attempt: u32 = 1;
+    let drain = loop {
+        let d = drain_fork(&app, &buf, &session_id, &comment_id, backend, spawn.seat, stdout, stderr)
+            .await;
+
+        if !should_retry(attempt, d.streamed, d.errored.as_deref()) {
+            break d;
+        }
+
+        attempt += 1;
+        // Say so before the wait, so the bubble stops looking stalled.
+        let _ = app.emit(
+            "fork-retry",
+            ForkRetry {
+                session_id: session_id.clone(),
+                comment_id: comment_id.clone(),
+                attempt,
+            },
+        );
+        tokio::time::sleep(RETRY_DELAY).await;
+
+        // Cancelled during the wait? Don't spawn a child just to kill it. The
+        // token-matched `reattach` below is still the correctness boundary —
+        // this only skips the pointless work in the common case.
+        if !turns.is_running(&key) {
+            break d;
+        }
+        // A spawn failure here is not worth reporting over the transient error
+        // that caused the retry — fall through to the normal error path.
+        let Ok((child, out, err)) = spawn.spawn() else {
+            break d;
+        };
+        // Swap the child INTO the existing reservation rather than taking a new
+        // one: the turn must stay busy across the retry so Stop keeps killing
+        // the live child and a queued send cannot start underneath it.
+        match turns.reattach(&key, token, child) {
+            Ok(previous) => {
+                // The exhausted child has already hit EOF on both pipes; reap
+                // it so it does not linger.
+                if let Some(mut old) = previous {
+                    let _ = old.wait().await;
+                }
+            }
+            Err(mut fresh) => {
+                // Cancelled (or superseded) during the wait — kill what we just
+                // spawned and let the terminal path settle this as cancelled.
+                let _ = fresh.start_kill();
+                break d;
+            }
+        }
+        stdout = out;
+        stderr = err;
+    };
+
+    let ForkDrain {
+        fork_session,
+        final_text,
+        errored,
+        saw_json,
+        stderr_text,
+        streamed: _,
+    } = drain;
 
     // Reap: pull the entry, then await the child. The key being gone before
     // we removed it means cancel/discard/kill_all already pulled it. Removal
     // happens BEFORE the terminal event — the (Phase 3) queue drain fires at
     // terminal time and must pass the busy guard.
-    let proc = turns.take(&key);
+    let proc = turns.take_owned(&key, token);
     let cancelled = proc.is_none() && final_text.is_none();
     let exit_ok = match proc.and_then(|p| p.child) {
         Some(mut child) => child.wait().await.map(|s| s.success()).unwrap_or(false),
         None => false,
     };
 
+    // ABOVE the terminal branch, so success, error and cancelled all book.
+    // A cancelled turn spent its input tokens too — and a RETRIED turn spent
+    // both attempts', which is why the meter lives on the buffer across the
+    // retry loop rather than per drain.
+    let settled = crate::meter::settle(&db, spawn.seat, &buf);
+    if !settled.is_empty() {
+        let _ = app.emit(
+            "fork-meter",
+            ForkMeter {
+                session_id: session_id.clone(),
+                comment_id: comment_id.clone(),
+                meter: turn::MeterPayload {
+                    rev: settled.rev,
+                    meter: settled.clone(),
+                    activity: None,
+                    discrete: true,
+                },
+            },
+        );
+    }
+
+    'terminal: {
     if cancelled {
         let _ = app.emit(
             "fork-cancelled",
@@ -1365,30 +1990,40 @@ async fn read_fork(
                 comment_id,
             },
         );
-        return;
+        break 'terminal;
     }
     if let Some(err) = errored {
-        finish_error(&app, &db, &session_id, &comment_id, &err);
-        return;
+        // Humanise BEFORE persisting: `err` is a machine string
+        // (`error_during_execution`), and `finish_error` writes it into
+        // `thread_messages.body` under an assistant role, where the reviewer
+        // reads it as Claude's reply and peer agents read it as context.
+        let why = describe_fork_error(&db, target, &session_id, &comment_id, &err);
+        let row = finish_error(&app, &db, &session_id, &comment_id, &why);
+        crate::meter::attach(&db, "fork", &row, &settled);
+        break 'terminal;
     }
     if let Some(text) = final_text {
         if text.trim().is_empty() {
-            finish_error(
+            let row = finish_error(
                 &app,
                 &db,
                 &session_id,
                 &comment_id,
-                "claude produced an empty reply",
+                &format!("{cli} produced an empty reply"),
             );
-            return;
+            crate::meter::attach(&db, "fork", &row, &settled);
+            break 'terminal;
         }
         // Persist the fork session id so the next turn resumes (not re-forks).
+        // For plan comments the BACKEND rides with it — the id alone cannot say
+        // which binary can resume it, and a mismatch is what re-forks the thread
+        // rather than silently opening a contextless conversation.
         // For review threads, `session_id`/`comment_id` are the review /
         // annotation ids and the resume id lives on the annotation row.
         if let Some(fork_sid) = &fork_session {
             let persisted = match target {
                 ThreadTarget::PlanComment => {
-                    db.set_comment_fork_session(&session_id, &comment_id, fork_sid)
+                    db.set_comment_fork(&session_id, &comment_id, fork_sid, backend.as_str())
                 }
                 ThreadTarget::ReviewAnnotation => {
                     db.set_review_annotation_fork_session(&session_id, &comment_id, fork_sid)
@@ -1417,6 +2052,8 @@ async fn read_fork(
         if let Err(e) = db.insert_thread_message(&msg) {
             tracing::warn!(error = %e, "failed to persist assistant message");
         }
+        // The badge and the footer outlive the turn.
+        crate::meter::attach(&db, "fork", &msg.id, &settled);
         // Companion journal: a discussion-thread fork completed a turn.
         let _ = db.append_journal("agent_turn", Some("fork"), Some(&comment_id), None, None);
         // No-op for review/question threads, whose ids aren't plan sessions.
@@ -1430,19 +2067,72 @@ async fn read_fork(
                 body: text,
             },
         );
-        return;
+        break 'terminal;
     }
 
-    // The stream ended without a `result` — surface stderr or a generic cause.
+    // The stream ended without a final message — surface stderr or a generic
+    // cause. Named for the harness that actually ran: a Codex fork reporting
+    // that "claude failed" sends the user looking in the wrong place. These
+    // three are already human AND carry a stderr tail worth keeping, so they
+    // skip `describe_fork_error` (which passes them through unchanged anyway,
+    // unless the tail happens to contain a word like "timeout").
     let why = if !exit_ok && !stderr_text.trim().is_empty() {
         let detail: String = stderr_text.trim().chars().take(500).collect();
-        format!("claude exited abnormally: {detail}")
+        format!("{cli} exited abnormally: {detail}")
     } else if !saw_json {
-        "claude produced no parseable output".to_string()
+        format!("{cli} produced no parseable output")
     } else {
-        "claude ended without producing a reply".to_string()
+        format!("{cli} ended without producing a reply")
     };
-    finish_error(&app, &db, &session_id, &comment_id, &why);
+    let row = finish_error(&app, &db, &session_id, &comment_id, &why);
+    crate::meter::attach(&db, "fork", &row, &settled);
+    }
+}
+
+/// Translate a failed fork turn into the sentence to show. The branches and
+/// the wording live once, in `claude_proc::describe_turn_error`; what is
+/// fork's own is the overflow recovery, dispatched on `ThreadTarget` exactly
+/// like the `set_*_fork_session` match in `read_fork`. Clearing the stored
+/// fork id is what makes the next turn start a fresh discussion instead of
+/// re-`--resume`-ing a context that has already proved too big.
+///
+/// Only the `StreamLine::Failed` path routes through here. The generic endings
+/// ("claude exited abnormally: …") are already human AND carry a stderr tail
+/// worth keeping, so they go straight to `finish_error` — running them through
+/// a classifier that matches the substring "timeout" would throw that detail
+/// away for a generic retry sentence.
+fn describe_fork_error(
+    db: &Database,
+    target: ThreadTarget,
+    session_id: &str,
+    comment_id: &str,
+    error: &str,
+) -> String {
+    crate::claude_proc::describe_turn_error(
+        db,
+        crate::claude_proc::TurnErrorCopy {
+            surface: "fork",
+            subject: Some(session_id),
+            noun: "discussion",
+            next: "I'll start fresh on this thread",
+        },
+        error,
+        || {
+            let cleared = match target {
+                ThreadTarget::PlanComment => db.clear_comment_fork(session_id, comment_id),
+                ThreadTarget::ReviewAnnotation => {
+                    db.clear_review_annotation_fork_session(session_id, comment_id)
+                }
+                ThreadTarget::ReviewQuestion => {
+                    db.clear_review_question_fork_session(session_id, comment_id)
+                }
+                ThreadTarget::DraftComment => db.clear_draft_comment_fork_session(comment_id),
+            };
+            if let Err(e) = cleared {
+                tracing::warn!(error = %e, "failed to clear over-limit fork session");
+            }
+        },
+    )
 }
 
 /// Persist a failed turn as a terminal `error` row and emit `fork-error`, so
@@ -1453,7 +2143,7 @@ fn finish_error(
     session_id: &str,
     comment_id: &str,
     error: &str,
-) {
+) -> String {
     let msg = ThreadMessage {
         id: uuid::Uuid::new_v4().to_string(),
         session_id: session_id.to_string(),
@@ -1484,6 +2174,8 @@ fn finish_error(
             error: error.to_string(),
         },
     );
+    // The id the caller attaches this turn's meter to.
+    msg.id
 }
 
 #[cfg(test)]
@@ -1653,6 +2345,7 @@ mod tests {
             "Why this order?",
             None,
             &[],
+            None,
         );
         assert!(p.contains("Why this order?"));
         assert!(p.contains("the detail section"));
@@ -1665,7 +2358,7 @@ mod tests {
 
     #[test]
     fn first_turn_prompt_without_selection_uses_anchor_only() {
-        let p = build_first_turn_prompt(false, "B", None, "Reconsider this.", None, &[]);
+        let p = build_first_turn_prompt(false, "B", None, "Reconsider this.", None, &[], None);
         assert!(p.contains("§B"));
         assert!(p.contains("left a comment"));
         assert!(p.contains("Reconsider this."));
@@ -1745,8 +2438,501 @@ mod tests {
             "But what about retries?",
             Some("I added exponential backoff in §A."),
             &[],
+            None,
         );
         assert!(p.contains("You previously resolved this comment with:"));
         assert!(p.contains("exponential backoff"));
+    }
+
+    // --- Codex plan-comment forks -----------------------------------------
+
+    fn thread_msg(role: &str, body: &str, status: &str) -> ThreadMessage {
+        ThreadMessage {
+            id: format!("m-{role}-{body}"),
+            session_id: "s-1".to_string(),
+            comment_id: "c-001".to_string(),
+            role: role.to_string(),
+            body: body.to_string(),
+            status: status.to_string(),
+            created_at: 0,
+            attachments: Vec::new(),
+        }
+    }
+
+    /// Stored provenance is the only thing that can answer "which binary can
+    /// resume this id" — both id spaces are UUIDs — so an absent or unknown
+    /// value must land on Claude, which is what every pre-column row is.
+    #[test]
+    fn stored_backend_defaults_to_claude() {
+        assert_eq!(ForkBackend::from_stored("codex"), ForkBackend::Codex);
+        assert_eq!(ForkBackend::from_stored("Codex"), ForkBackend::Codex);
+        assert_eq!(ForkBackend::from_stored(" codex "), ForkBackend::Codex);
+        for legacy in ["", "  ", "claude-code", "anything-else"] {
+            assert_eq!(
+                ForkBackend::from_stored(legacy),
+                ForkBackend::Claude,
+                "`{legacy}` must read as claude"
+            );
+        }
+        assert_eq!(ForkBackend::Codex.as_str(), "codex");
+        assert_eq!(ForkBackend::Claude.as_str(), "claude-code");
+    }
+
+    /// The first Codex turn forks the PLAN thread. Every element here is
+    /// load-bearing and several are position-sensitive: `-s`/`-a`/`--search`/`-c`
+    /// are top-level options codex rejects after the subcommand, while `--json`
+    /// belongs to `exec fork`.
+    #[test]
+    fn codex_first_turn_forks_the_plan_thread_read_only() {
+        let args = codex_discussion_fork_args("fork", "plan-thread-uuid", "the prompt".to_string());
+
+        // Sandbox + approvals: the physical half of "read-only discussion".
+        let sandbox = args.iter().position(|a| a == "-s").expect("-s");
+        assert_eq!(args[sandbox + 1], "read-only");
+        let approval = args.iter().position(|a| a == "-a").expect("-a");
+        assert_eq!(args[approval + 1], "never");
+        // Web research parity with the Claude arm's WebSearch/WebFetch allow.
+        assert!(args.iter().any(|a| a == "--search"));
+
+        // The subcommand pair, the thread, then the prompt — in that order.
+        let exec = args.iter().position(|a| a == "exec").expect("exec");
+        assert_eq!(args[exec + 1], "fork");
+        assert!(args[exec..].iter().any(|a| a == "--json"));
+        assert!(args[exec..].iter().any(|a| a == "--skip-git-repo-check"));
+        assert_eq!(args[args.len() - 2], "plan-thread-uuid");
+        assert_eq!(args[args.len() - 1], "the prompt");
+
+        // Top-level flags must all precede `exec`.
+        for flag in ["-s", "-a", "--search", "-c"] {
+            let at = args.iter().position(|a| a == flag).unwrap();
+            assert!(at < exec, "`{flag}` is a top-level option and must precede `exec`");
+        }
+
+        // NEVER the plan profile: its contract would have this thread emit a
+        // `<proposed_plan>` block, which the Stop hook captures as a revision
+        // of the very plan being discussed.
+        assert!(
+            !args.iter().any(|a| a == "-p" || a == "--profile"),
+            "the plan profile must not be layered onto a discussion fork"
+        );
+        assert!(!args.iter().any(|a| a.contains("redline-plan")));
+
+        // The sidecar contract rides as TOML-quoted developer_instructions.
+        let instructions = args
+            .iter()
+            .find(|a| a.starts_with("developer_instructions="))
+            .expect("developer_instructions");
+        let value = instructions.trim_start_matches("developer_instructions=");
+        assert!(value.starts_with('"') && value.ends_with('"'), "must be TOML-quoted");
+        let parsed: toml::Value =
+            toml::from_str(&format!("k = {value}\n")).expect("must parse as TOML");
+        let delivered = parsed["k"].as_str().unwrap();
+        assert_eq!(delivered, CODEX_SIDECAR_INSTRUCTIONS);
+        assert!(delivered.contains("<proposed_plan>"), "must forbid plan submission");
+        assert!(delivered.contains("CONTEXT ONLY"), "inherited history is context");
+        assert!(delivered.contains("Never edit"), "must forbid edits");
+        assert!(delivered.contains("Markdown"), "must ask for a direct markdown answer");
+    }
+
+    /// Follow-ups resume the DISCUSSION's own thread — never re-fork the plan,
+    /// which would throw away everything already said.
+    #[test]
+    fn codex_follow_up_resumes_the_discussion_thread() {
+        let first = codex_discussion_fork_args("fork", "plan-thread", "a".to_string());
+        let next = codex_discussion_fork_args("resume", "fork-thread", "b".to_string());
+        let exec = next.iter().position(|a| a == "exec").expect("exec");
+        assert_eq!(next[exec + 1], "resume");
+        assert_eq!(next[next.len() - 2], "fork-thread");
+        // Identical otherwise: same sandbox, same instructions, same flags.
+        assert_eq!(first.len(), next.len());
+        assert_eq!(first[..exec], next[..exec]);
+    }
+
+    /// The Claude arm is untouched by the Codex work — the flag block, the
+    /// partial-message streaming and the fork/resume tail must all still be
+    /// exactly what they were.
+    #[test]
+    fn claude_first_turn_and_follow_up_args_are_unchanged() {
+        let mut first = discussion_fork_args("fork_plan", "the prompt".to_string());
+        first.extend([
+            "--resume".to_string(),
+            "plan-session".to_string(),
+            "--fork-session".to_string(),
+        ]);
+        assert!(first.iter().any(|a| a == "--include-partial-messages"));
+        assert_eq!(&first[first.len() - 3..], ["--resume", "plan-session", "--fork-session"]);
+
+        let mut next = discussion_fork_args("fork_plan", "the prompt".to_string());
+        next.extend(["--resume".to_string(), "fork-session-id".to_string()]);
+        assert_eq!(&next[next.len() - 2..], ["--resume", "fork-session-id"]);
+        assert!(!next.iter().any(|a| a == "--fork-session"));
+        // And nothing Codex leaked into it.
+        for codex_only in ["exec", "--json", "--search", "--skip-git-repo-check"] {
+            assert!(!first.iter().any(|a| a == codex_only));
+        }
+    }
+
+    /// The `codex exec --json` wire contract, from lines the real CLI emits
+    /// (captured against codex-cli 0.149.0-alpha.4.3).
+    #[test]
+    fn codex_jsonl_yields_the_fork_id_the_reply_and_errors_only() {
+        let line = |raw: &str| classify_codex_line(&serde_json::from_str(raw).unwrap());
+
+        assert_eq!(
+            line(r#"{"type":"thread.started","thread_id":"01a0619d-69a5-7cd3"}"#),
+            CodexLine::Thread("01a0619d-69a5-7cd3".to_string()),
+        );
+        assert_eq!(
+            line(r#"{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"The answer."}}"#),
+            CodexLine::Message("The answer.".to_string()),
+        );
+        assert_eq!(
+            line(r#"{"type":"turn.completed","usage":{"input_tokens":18612,"output_tokens":5}}"#),
+            CodexLine::Completed,
+        );
+
+        // Noise a reviewer must never see rendered as an answer.
+        for noise in [
+            r#"{"type":"turn.started"}"#,
+            r#"{"type":"item.started","item":{"type":"agent_message","text":"partial"}}"#,
+            r#"{"type":"item.completed","item":{"type":"reasoning","text":"thinking out loud"}}"#,
+            r#"{"type":"item.completed","item":{"type":"command_execution","command":"ls"}}"#,
+            r#"{"type":"item.completed","item":{"type":"web_search","query":"tcp"}}"#,
+            r#"{"type":"item.completed","item":{"type":"todo_list","items":[]}}"#,
+            r#"{"type":"thread.started"}"#,
+            r#"{"type":"something.new"}"#,
+        ] {
+            assert_eq!(line(noise), CodexLine::Ignore, "must ignore: {noise}");
+        }
+
+        // Failures, in all three shapes.
+        assert_eq!(
+            line(r#"{"type":"turn.failed","error":{"message":"model overloaded"}}"#),
+            CodexLine::Failed("model overloaded".to_string()),
+        );
+        assert_eq!(
+            line(r#"{"type":"error","message":"no rollout found for thread id"}"#),
+            CodexLine::Failed("no rollout found for thread id".to_string()),
+        );
+        assert_eq!(
+            line(r#"{"type":"item.completed","item":{"type":"error","message":"sandbox denied"}}"#),
+            CodexLine::Failed("sandbox denied".to_string()),
+        );
+        // A failure with nothing quotable still surfaces AS a failure.
+        assert_eq!(
+            line(r#"{"type":"turn.failed"}"#),
+            CodexLine::Failed("codex reported an error".to_string()),
+        );
+    }
+
+    /// An ordinary first turn must produce the prompt it always has — the
+    /// continuity block exists for the repair path only.
+    #[test]
+    fn continuity_is_absent_from_an_ordinary_first_turn() {
+        let plain = build_first_turn_prompt(false, "A", None, "Why?", None, &[], None);
+        let empty = build_first_turn_prompt(
+            false,
+            "A",
+            None,
+            "Why?",
+            None,
+            &[],
+            continuity_block(&[]).as_deref(),
+        );
+        assert_eq!(plain, empty, "no usable history must change nothing");
+        assert!(plain.contains("Their comment:"));
+        assert!(!plain.contains("Their latest message:"));
+    }
+
+    /// Replacing a wrong-harness fork keeps the transcript the reviewer can
+    /// see: it rides into the new fork as context, bounded, and error rows —
+    /// which are Redline's own failure text, not something an agent said —
+    /// stay out.
+    #[test]
+    fn a_replacement_fork_inherits_the_visible_transcript_as_context() {
+        let history = vec![
+            thread_msg("user", "Why this order?", "complete"),
+            thread_msg("assistant", "Because the parser needs it first.", "complete"),
+            thread_msg("assistant", "claude exited abnormally: boom", "error"),
+            thread_msg("assistant", "   ", "complete"),
+        ];
+        let block = continuity_block(&history).expect("history to carry");
+        assert!(block.contains("CONTEXT ONLY"));
+        assert!(block.contains("Reviewer: Why this order?"));
+        assert!(block.contains("Assistant: Because the parser needs it first."));
+        assert!(
+            !block.contains("exited abnormally"),
+            "Redline's own error rows are not conversation"
+        );
+
+        let p = build_first_turn_prompt(
+            false,
+            "A.1",
+            None,
+            "And what about retries?",
+            None,
+            &[],
+            Some(&block),
+        );
+        assert!(p.contains("Their latest message:"));
+        assert!(p.contains("And what about retries?"));
+        assert!(p.contains("Because the parser needs it first."));
+        // Still the same read-only guardrails.
+        assert!(p.contains("do not edit files"));
+    }
+
+    /// The screenshot bug, guarded on every surface `fork.rs` backs: a raw
+    /// `error_during_execution` must never survive as the body of a
+    /// `thread_messages` row — it renders under a byline and peer agents read
+    /// it as context.
+    #[test]
+    fn a_transient_failure_is_humanised_for_every_thread_target() {
+        let db = Database::open_in_memory().unwrap();
+        for target in [
+            ThreadTarget::PlanComment,
+            ThreadTarget::ReviewAnnotation,
+            ThreadTarget::ReviewQuestion,
+            ThreadTarget::DraftComment,
+        ] {
+            let msg = describe_fork_error(&db, target, "s-1", "c-1", "error_during_execution");
+            assert!(!msg.contains("error_during_execution"), "leaked: {msg}");
+            assert!(!msg.contains('_'), "machine-looking token in: {msg}");
+            assert!(msg.to_lowercase().contains("again"), "no way forward: {msg}");
+        }
+    }
+
+    /// The overflow branch's recovery, per target: forget the stored fork so
+    /// the next turn starts a fresh discussion instead of re-`--resume`-ing a
+    /// context that already proved too big. A transient error must NOT do
+    /// this — the session is fine.
+    #[test]
+    fn overflow_clears_the_stored_fork_transient_keeps_it() {
+        use crate::state::{
+            AttachState, CodeReviewSession, Comment, CommentStatus, DraftComment, ReviewQuestion,
+            ReviewSession, Revision, SessionStatus,
+        };
+
+        let db = Database::open_in_memory().unwrap();
+
+        // Parent rows first — every thread table is foreign-keyed to the
+        // session / review / draft it hangs off.
+        db.upsert_session(&ReviewSession {
+            session_id: "s-1".to_string(),
+            project_path: "/repo".to_string(),
+            project_name: "repo".to_string(),
+            created_at: 1,
+            revisions: Vec::new(),
+            status: SessionStatus::InReview,
+            attach_state: AttachState::Idle,
+            updated_at: 1,
+            run_state: None,
+            backend: None,
+            model: None,
+        })
+        .unwrap();
+        db.insert_revision(
+            "s-1",
+            &Revision {
+                version_number: 1,
+                received_at: 1,
+                raw_plan_markdown: "# plan".to_string(),
+                sections: Vec::new(),
+                comments: Vec::new(),
+                thread_start: true,
+                restored: false,
+            },
+        )
+        .unwrap();
+        db.upsert_code_review(&CodeReviewSession {
+            review_id: "rev-1".to_string(),
+            repo_path: "/repo".to_string(),
+            source: "uncommitted".to_string(),
+            base_ref: None,
+            commit_sha: None,
+            terminal_id: None,
+            round: 1,
+            created_at: 1,
+        })
+        .unwrap();
+        db.upsert_draft("d-1", Some("draft"), None, "# draft", None).unwrap();
+
+        // --- plan comment ---
+        db.insert_comment(
+            "s-1",
+            1,
+            &Comment {
+                id: "c-1".to_string(),
+                kind: CommentKind::Feedback,
+                scope: None,
+                anchor_id: "A.1".to_string(),
+                block_id: None,
+                body: "why?".to_string(),
+                structural: None,
+                edit: None,
+                created_at: 1,
+                status: CommentStatus::Draft,
+                resolution: None,
+                selection: None,
+                reopen_note: None,
+                reopen_history: Vec::new(),
+                actionable: false,
+                author: None,
+                agent_state: None,
+                reviewer: None,
+                external_created_at: None,
+                share_request_id: None,
+                attachments: Vec::new(),
+            },
+        )
+        .unwrap();
+        db.set_comment_fork("s-1", "c-1", "fork-sid", "claude-code").unwrap();
+        describe_fork_error(&db, ThreadTarget::PlanComment, "s-1", "c-1", "error_during_execution");
+        assert!(
+            db.get_comment_fork("s-1", "c-1").is_some(),
+            "a transient error must keep the session"
+        );
+        describe_fork_error(
+            &db,
+            ThreadTarget::PlanComment,
+            "s-1",
+            "c-1",
+            "prompt is too long: 1200000 tokens",
+        );
+        assert!(db.get_comment_fork("s-1", "c-1").is_none());
+
+        // --- review annotation ---
+        db.insert_review_annotation(&ReviewAnnotation {
+            id: "rc-1".to_string(),
+            review_id: "rev-1".to_string(),
+            round: 1,
+            file_path: "src/main.rs".to_string(),
+            side: "new".to_string(),
+            start_line: 1,
+            end_line: 1,
+            kind: "comment".to_string(),
+            body: "why?".to_string(),
+            suggestion_replacement: None,
+            quoted_text: "let x = 1;".to_string(),
+            status: "draft".to_string(),
+            resolution: None,
+            created_at: 1,
+            scope: "line".to_string(),
+            label: None,
+            blocking: None,
+            source: "user".to_string(),
+        })
+        .unwrap();
+        db.set_review_annotation_fork_session("rev-1", "rc-1", "fork-sid").unwrap();
+        describe_fork_error(
+            &db,
+            ThreadTarget::ReviewAnnotation,
+            "rev-1",
+            "rc-1",
+            "maximum context length exceeded",
+        );
+        assert!(db.get_review_annotation_fork_session("rev-1", "rc-1").is_none());
+
+        // --- review question (the clear helper this fix had to add) ---
+        db.insert_review_question(&ReviewQuestion {
+            id: "rq-1".to_string(),
+            review_id: "rev-1".to_string(),
+            file_path: "src/main.rs".to_string(),
+            side: "new".to_string(),
+            start_line: 1,
+            end_line: 1,
+            quoted_text: "let x = 1;".to_string(),
+            created_at: 1,
+        })
+        .unwrap();
+        db.set_review_question_fork_session("rev-1", "rq-1", "fork-sid").unwrap();
+        describe_fork_error(
+            &db,
+            ThreadTarget::ReviewQuestion,
+            "rev-1",
+            "rq-1",
+            "error_during_execution",
+        );
+        assert!(
+            db.get_review_question_fork_session("rev-1", "rq-1").is_some(),
+            "a transient error must keep the session"
+        );
+        describe_fork_error(
+            &db,
+            ThreadTarget::ReviewQuestion,
+            "rev-1",
+            "rq-1",
+            "the prompt is too long",
+        );
+        assert!(db.get_review_question_fork_session("rev-1", "rq-1").is_none());
+
+        // --- draft comment (the other clear helper this fix had to add) ---
+        db.insert_draft_comment(&DraftComment {
+            id: "dc-1".to_string(),
+            draft_id: "d-1".to_string(),
+            block_id: None,
+            sel_char_start: None,
+            sel_char_end: None,
+            sel_quoted_text: None,
+            body: "tighten this".to_string(),
+            author: None,
+            created_at: 1,
+            fork_session_id: None,
+        })
+        .unwrap();
+        db.set_draft_comment_fork_session("dc-1", "fork-sid").unwrap();
+        describe_fork_error(
+            &db,
+            ThreadTarget::DraftComment,
+            "d-1",
+            "dc-1",
+            "error_during_execution",
+        );
+        assert!(
+            db.get_draft_comment_fork_session("dc-1").is_some(),
+            "a transient error must keep the session"
+        );
+        describe_fork_error(
+            &db,
+            ThreadTarget::DraftComment,
+            "d-1",
+            "dc-1",
+            "input exceeds the context window",
+        );
+        assert!(db.get_draft_comment_fork_session("dc-1").is_none());
+    }
+
+    /// The auto-retry's whole decision, in one place. The `streamed` guard is
+    /// the load-bearing one: retrying after text is on screen would make the
+    /// answer rewrite itself.
+    #[test]
+    fn a_transient_failure_retries_once_and_only_with_nothing_on_screen() {
+        // Transient, nothing streamed → retry.
+        assert!(should_retry(1, false, Some("error_during_execution")));
+        assert!(should_retry(1, false, Some("model overloaded, please retry")));
+        // …but only once.
+        assert!(!should_retry(2, false, Some("error_during_execution")));
+        // Partial text already on screen → never.
+        assert!(!should_retry(1, true, Some("error_during_execution")));
+        // Not transient → never. An overflow would fail identically on a
+        // resume, and a hard failure is not a blip.
+        assert!(!should_retry(1, false, Some("prompt is too long")));
+        assert!(!should_retry(1, false, Some("claude exited abnormally: boom")));
+        // No error at all → nothing to retry.
+        assert!(!should_retry(1, false, None));
+    }
+
+    /// Bounded on both axes: a long thread carries its most recent turns, and
+    /// one enormous turn cannot crowd out the rest.
+    #[test]
+    fn continuity_is_bounded_by_turns_and_by_size() {
+        let mut history: Vec<ThreadMessage> = (0..20)
+            .map(|i| thread_msg("user", &format!("turn{i}"), "complete"))
+            .collect();
+        history.push(thread_msg("assistant", &"x".repeat(5_000), "complete"));
+        let block = continuity_block(&history).expect("history");
+        assert!(block.contains("turn19"), "the newest turns are the ones kept");
+        assert!(!block.contains("turn0:"), "the oldest turns are dropped");
+        assert!(block.contains('…'), "an oversized turn is truncated, not dropped");
+        assert!(block.len() < 8_000, "the block stays bounded: {}", block.len());
     }
 }

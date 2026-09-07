@@ -1128,12 +1128,13 @@ pub fn assigner_argv(prompt: String, prior: Option<&str>) -> Vec<String> {
 /// success, and fall back to a fresh session (overwriting the stored id) if
 /// the resume fails. A user cancel or a stall never auto-retries.
 pub async fn run_seat_assigner(
+    db: &Database,
     state: &SeatAssignState,
     cwd: &str,
     prompt: String,
 ) -> Result<String, String> {
     let (text, _sid) = crate::seat::run_with_thread("seatassign", None, |prior| {
-        run_seat_assigner_once(state, cwd, prompt.clone(), prior)
+        run_seat_assigner_once(db, state, cwd, prompt.clone(), prior)
     })
     .await?;
     Ok(text)
@@ -1144,6 +1145,7 @@ pub async fn run_seat_assigner(
 /// so the headless `-p` doesn't leak into the lake via the global
 /// `UserPromptSubmit` hook.
 async fn run_seat_assigner_once(
+    db: &Database,
     state: &SeatAssignState,
     cwd: &str,
     prompt: String,
@@ -1195,11 +1197,14 @@ async fn run_seat_assigner_once(
             let mut final_text: Option<String> = None;
             let mut errored: Option<String> = None;
             let mut session: Option<String> = None;
+            let mut meter = crate::meter::TurnMeter::new();
             while let Ok(Some(line)) = reader.next_line().await {
                 last_activity.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
                 let Ok(v) = serde_json::from_str::<Value>(&line) else {
                     continue;
                 };
+                // Second pass over the same value — the ONE accounting rule.
+                meter.observe(&v);
                 match classify_line(&v) {
                     StreamLine::Init(sid) => session = Some(sid),
                     StreamLine::Final { text, session_id } => {
@@ -1212,7 +1217,7 @@ async fn run_seat_assigner_once(
                     _ => {}
                 }
             }
-            (final_text, errored, session)
+            (final_text, errored, session, meter)
         }
     };
     let stderr_fut = async {
@@ -1230,7 +1235,7 @@ async fn run_seat_assigner_once(
     tokio::pin!(read_fut);
 
     let mut stalled = false;
-    let ((final_text, errored, session), errbuf) = loop {
+    let ((final_text, errored, session, meter), errbuf) = loop {
         tokio::select! {
             res = &mut read_fut => break res,
             _ = tokio::time::sleep(Duration::from_secs(5)) => {
@@ -1247,6 +1252,10 @@ async fn run_seat_assigner_once(
             }
         }
     };
+
+    // Booked above every exit below: cancelled and stalled runs spent their
+    // input tokens exactly like a completed one.
+    crate::meter::book(db, "seatassign", &meter);
 
     // An empty slot (or one already claimed by a newer run) means Cancel — or
     // the stall path above — took our child.

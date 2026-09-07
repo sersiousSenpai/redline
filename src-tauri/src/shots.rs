@@ -438,7 +438,7 @@ pub async fn shots_caption_run(
             continue;
         }
         let prompt = build_caption_prompt(&url, &title, &path.to_string_lossy());
-        let Ok(text) = crate::keeper::run_keeper_summarizer(&cwd, prompt).await else {
+        let Ok(text) = crate::keeper::run_keeper_summarizer(&db, &cwd, prompt).await else {
             continue;
         };
         let caption = text.trim();

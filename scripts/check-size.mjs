@@ -71,6 +71,19 @@ function bootPathJs() {
 
 const mb = (bytes) => (bytes / 1_000_000).toFixed(2) + " MB";
 
+// Build analysis is a DEVELOPER artifact, and `dist/` is what Tauri embeds
+// into the binary. A treemap written there inflates `distTotalBytes` — the
+// exact number it exists to explain — and rides the .app to users on any build
+// that ran with ANALYZE set. `vite.config.ts` writes it to `build-analysis/`;
+// this is the guard that it stays there.
+function strayAnalysisArtifacts() {
+  const dist = join(root, "dist");
+  if (!existsSync(dist)) return [];
+  return ["stats.html", "stats.json", "bundle-analysis.html"].filter((name) =>
+    existsSync(join(dist, name)),
+  );
+}
+
 const binaryPath = join(root, "src-tauri", "target", "release", "redline");
 const mcpBinPath = join(root, "src-tauri", "target", "release", "redline-mcp");
 const boot = bootPathJs();
@@ -125,6 +138,14 @@ for (const { name, actual, limit, hint } of checks) {
   // debugs the number before debugging the code.
   if (!ok && hint) console.log(`      ↳ ${hint}`);
   if (!ok) failed = true;
+}
+
+const stray = strayAnalysisArtifacts();
+if (stray.length > 0) {
+  console.log(
+    `OVER  build analysis inside dist: ${stray.join(", ")} — write it to build-analysis/ (see vite.config.ts)`,
+  );
+  failed = true;
 }
 
 if (boot && boot.problems.length > 0) {

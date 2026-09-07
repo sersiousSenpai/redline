@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import type { Activity, TurnMeter } from "./lib/turnMeter";
+
 export type SessionId = string;
 export type AnchorId = string;
 
@@ -222,6 +224,10 @@ export interface ReviewSession {
   revisions: Revision[];
   status: SessionStatus;
   attachState: AttachState;
+  /** Which harness authored the plan: "claude-code" | "codex". See
+   *  `SessionSummary.backend` — RESTORE branches on this. */
+  backend?: string | null;
+  model?: string | null;
 }
 
 /** Lightweight per-revision projection for the sidebar's revisions tree —
@@ -264,6 +270,18 @@ export interface SessionSummary {
   /** Orchestrated-run lifecycle (orchestrating | running | in_code_review |
    *  landed | stalled); null for plain Approves. Drives the run chip. */
   runState?: string | null;
+  /** How the run actually executed — "workflow" | "sequential" — joined from
+   *  the orchestrations row; null until the watcher settles it. `sequential`
+   *  is a DEGRADATION (no Workflow run was found), so the sidebar chip marks
+   *  it rather than letting it read as the run that was asked for. */
+  runMode?: string | null;
+  /** Which harness authored the plan: "claude-code" | "codex". Null/absent on
+   *  every pre-backend row, and read as claude-code everywhere. RESTORE
+   *  branches on it — `claude --resume` handed a Codex thread id falls back to
+   *  a *fresh* session instead of erroring. */
+  backend?: string | null;
+  /** The model behind the latest revision, when known. */
+  model?: string | null;
 }
 
 /** Mirrors Rust's `db::PlanRunRow` — one orchestrated run's durable record:
@@ -531,6 +549,34 @@ export interface HookStatus {
   conflictingUrl: string | null;
 }
 
+/** How far the daemon's bind of 127.0.0.1:7676 has got.
+ *
+ *  Three states, not a boolean, because the boolean conflated "we have not
+ *  tried yet" with "another process owns the port" — which is why the shell
+ *  defaulted it to `true` and nothing could legitimately *wait* for
+ *  readiness. Rendering ignores this; a launch awaits `"ready"`. */
+export type DaemonState = "starting" | "ready" | "failed";
+
+/** Everything the shell needs for its first actionable frame, in one
+ *  consistent snapshot (`bootstrap_state`).
+ *
+ *  Split by QUESTION, not by cost: what lands here decides which surface
+ *  renders and what is on it. Whether a *launch* will work — hooks, skills,
+ *  binaries, curl — has a later deadline and lives in `preflight_status`,
+ *  behind `lib/integrationHealth`. */
+export interface BootstrapState {
+  sessions: SessionSummary[];
+  /** The one session Claude is paused mid-run on, if any. Picked from the
+   *  `sessions` above, so routing to it can never miss. */
+  heldSessionId: SessionId | null;
+  mode: InterceptionMode;
+  daemon: DaemonState;
+  /** Raw `~/.redline/workspace.json`, or null. */
+  workspace: string | null;
+  harnessFlavor: string | null;
+  harnesses: { id: string; json: string }[];
+}
+
 export interface CodexHookStatus {
   available: boolean;
   installed: boolean;
@@ -633,6 +679,13 @@ export interface TurnStatus {
   partial: string | null;
   seq: number;
   queued: QueuedTurn[];
+  /** What the in-flight turn has spent (`turn::TurnStatus.meter`). Null when
+   *  idle or when nothing has been observed yet; OPTIONAL because a probe
+   *  answered by an older backend build genuinely carries neither field, and
+   *  the reducer already reads both defensively. */
+  meter?: TurnMeter | null;
+  /** The turn's activity ring — what it was doing while you waited. */
+  activity?: Activity[];
 }
 
 // The `fork-*` wire payloads, mirroring `fork.rs`'s ForkDelta / ForkDone /
@@ -1191,6 +1244,55 @@ export interface ReviewQuestion {
 export interface WorkflowAvailability {
   disabledInSettings: boolean;
   disabledInEnv: boolean;
+  /** Which settings file turned it off, so the warning can name it. */
+  settingsSource: string | null;
+  /** Always true. The run executes in `$SHELL -l`, which sources the user's
+   *  rc files after Redline's environment is inherited — an
+   *  `export CLAUDE_CODE_DISABLE_WORKFLOWS=1` in `~/.zshrc` is active in the
+   *  run and structurally invisible here. `disabledInEnv: false` means "not
+   *  in Redline's env", never "not set". */
+  envUnreadable: boolean;
+}
+
+/** Mirrors Rust's `combine::CombineSource` — one plan session selected for a
+ *  combination, as its Front Door pill shows it. */
+export interface CombineSource {
+  sessionId: string;
+  planTitle: string | null;
+  projectName: string;
+  projectPath: string;
+  versionNumber: number;
+  status: string;
+  runState: string | null;
+  pendingCount: number;
+  /** Sidecar-stripped size — what this source costs the brief. */
+  bytes: number;
+}
+
+/** Mirrors Rust's `combine::CombinePreview`. `blocked` is a refusal sentence,
+ *  never a truncation: silently dropping half of someone's plan and then
+ *  producing a confident merge is the worst failure this flow could have. */
+export interface CombinePreview {
+  sources: CombineSource[];
+  defaultProjectPath: string | null;
+  warnings: string[];
+  blocked: string | null;
+  totalBytes: number;
+}
+
+/** Mirrors Rust's `combine::CombineBrief` — what gets typed, and what reaches
+ *  the prompt lake. They are produced together so they can never disagree
+ *  about which sources went in. */
+export interface CombineBrief {
+  brief: string;
+  record: string;
+}
+
+/** Mirrors Rust's `hook::AllowCandidate` — an inferred build/test rule the
+ *  Orchestrate modal offers, and whether the user already has it. */
+export interface AllowCandidate {
+  rule: string;
+  present: boolean;
 }
 
 export interface GitStatus {

@@ -16,6 +16,8 @@
 // `whenPtySpawned` / `awaitPtyOutput` (TerminalView) and the
 // `pty_write_checked` / `get_run_state` Tauri commands at the call site.
 
+import { isLiveRunState } from "./orchestration";
+
 /** Where a handoff can fail. `spawn` = the terminal never came up; `launch` =
  *  the first write (the shell command) was refused; `prompt` = the typed
  *  prompt never produced evidence of arrival. */
@@ -226,12 +228,38 @@ export async function orchestrateHandoff(
     deps.journal("handoff_prompt_written", `attempt ${attempt + 1}`);
 
     for (let i = 0; i < polls; i++) {
-      const state = await deps.getRunState(planSessionId).catch(() => null);
-      if (state !== "orchestrating") {
-        // The claim advanced the chip (or something else took over the
-        // run) — either way the click is no longer the only evidence.
+      // The condition is POSITIVE on purpose. It used to be
+      // `state !== "orchestrating"` over a `.catch(() => null)`, which made
+      // two very different things read as delivery: a transient IPC error on
+      // the very first poll, and a `run_state` of `null` — the value
+      // `reset_run` writes. Either one ended the loop with `{ ok: true }`,
+      // reporting a run delivered with no evidence it ever was, which is the
+      // one failure this whole verified handoff exists to prevent.
+      let state: string | null;
+      try {
+        state = await deps.getRunState(planSessionId);
+      } catch {
+        // Not knowing is not evidence. Keep polling; the timeout below is
+        // the honest verdict if every probe stays blind.
+        await deps.sleep(t.claimPollMs);
+        continue;
+      }
+      if (state === null) {
+        // Observed, not inferred: something reset the run out from under the
+        // launch. Retrying the prompt cannot fix that, so stop now and say so.
+        return fail(
+          "prompt",
+          "the run was reset while the orchestrator prompt was being " +
+            "delivered — its run state went back to none",
+        );
+      }
+      if (isLiveRunState(state) && state !== "orchestrating") {
+        // The ingest claim advanced the chip: the click is no longer the
+        // only evidence the run started.
         return { ok: true };
       }
+      // Still `orchestrating`, or some non-live state (`landed`, `stalled`)
+      // that is not a claim landing — keep watching.
       await deps.sleep(t.claimPollMs);
     }
   }

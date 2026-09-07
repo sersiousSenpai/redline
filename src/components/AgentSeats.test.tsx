@@ -33,6 +33,7 @@ vi.mock("@tauri-apps/api/core", () => ({
         seats: {},
         knownSeats: [],
         claudeBin: null,
+        codexBin: null,
         canRevert: false,
         blurbs: [],
       });

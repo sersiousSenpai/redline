@@ -25,6 +25,60 @@ export function isLiveRunState(state: string | null | undefined): boolean {
   );
 }
 
+/** Where a run must be launched — the project directory, or `null` meaning
+ *  REFUSE.
+ *
+ *  `relaunchOrchestrator` used to recover the path from `summaries` alone and
+ *  hand `summary?.projectPath || null` straight to the launch builder. A miss
+ *  yields `null`, `buildOrchestrateLaunchCommand` then emits no `cd`, and the
+ *  PTY spawns in `$HOME`. The orchestrator runs `--permission-mode
+ *  acceptEdits`, so the severity is not "it fails" — it is "it succeeds,
+ *  write-capable, in the wrong tree". The first launch reads the path off the
+ *  loaded session; the recovery path resolves the same way and then falls
+ *  back, and a `null` here is an instruction to refuse rather than a default
+ *  directory. */
+export function resolveRunProject(
+  sessionId: string,
+  loaded: { sessionId: string; projectPath?: string | null } | null | undefined,
+  summaries: readonly { sessionId: string; projectPath?: string | null }[],
+): string | null {
+  const clean = (p: string | null | undefined): string | null => {
+    const t = (p ?? "").trim();
+    return t.length > 0 ? t : null;
+  };
+  if (loaded && loaded.sessionId === sessionId) {
+    const fromLoaded = clean(loaded.projectPath);
+    if (fromLoaded) return fromLoaded;
+  }
+  return clean(summaries.find((x) => x.sessionId === sessionId)?.projectPath);
+}
+
+/** A run whose `mode` is `sequential` did NOT execute the way it was asked
+ *  to. `runwatch::scan_once` writes that value when it finds no Workflow run
+ *  and the orchestrator fell back to working through the plan one subtask at
+ *  a time — it even records the note "no Workflow run found — sequential
+ *  fallback". Ground truth already exists; the defect was that every surface
+ *  rendered it in the neutral chip style, so a degraded run looked exactly
+ *  like the multi-agent run the user launched. */
+export function isSequentialFallback(mode: string | null | undefined): boolean {
+  return mode === "sequential";
+}
+
+/** The one sentence every surface uses for it, so the run card, the history
+ *  row and the sidebar chip can't drift into three explanations. */
+export const SEQUENTIAL_FALLBACK_NOTE =
+  "Sequential fallback — no Workflow run was found, so this plan ran one " +
+  "subtask at a time instead of in parallel agents.";
+
+/** How many files two or more agents in this run both claim to have changed.
+ *  `fileConflicts` has always computed the set; it only ever reached the
+ *  individual agent tiles, so noticing a collision meant reading every tile.
+ *  The count is what belongs at run level, next to the action that answers
+ *  it. */
+export function runConflictCount(agents: AgentTile[]): number {
+  return fileConflicts(agents).size;
+}
+
 /** 887191 → "887k", 1234567 → "1.2M", 431 → "431". */
 export function formatTokens(n: number): string {
   if (n >= 1_000_000) {

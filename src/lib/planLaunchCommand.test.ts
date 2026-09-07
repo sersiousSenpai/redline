@@ -5,7 +5,12 @@ import {
   buildOrchestrateLaunchCommand,
   buildOrchestratePrompt,
   buildPlanLaunchCommand,
+  tomlString,
 } from "./planLaunchCommand";
+
+const CLAUDE = { backend: "claude-code" as const, model: null, effort: null };
+const CODEX = { backend: "codex" as const, model: null, effort: null };
+const BIN = "/Applications/ChatGPT.app/Contents/Resources/codex";
 
 describe("buildPlanLaunchCommand", () => {
   const ALLOW = "--allowedTools Read Grep Glob WebSearch WebFetch Bash";
@@ -92,6 +97,157 @@ describe("buildPlanLaunchCommand — --add-dir grants", () => {
   });
 });
 
+describe("buildPlanLaunchCommand — the claude arm's model/effort", () => {
+  const ALLOW = "--allowedTools Read Grep Glob WebSearch WebFetch Bash";
+
+  it("is byte-identical to the legacy command when nothing is chosen", () => {
+    // Every existing door launches through this line; a default choice must
+    // not move a single byte.
+    expect(buildPlanLaunchCommand("hi", "/p", [], CLAUDE)).toBe(
+      buildPlanLaunchCommand("hi", "/p"),
+    );
+  });
+
+  it("puts --model/--effort ahead of the variadic --allowedTools", () => {
+    // After it, they would swallow the tool list's terminator.
+    const cmd = buildPlanLaunchCommand("hi", null, [], {
+      backend: "claude-code",
+      model: "opus",
+      effort: "high",
+    });
+    expect(cmd).toBe(
+      `claude --model 'opus' --effort 'high' ${ALLOW} --permission-mode plan 'hi'`,
+    );
+  });
+
+  it("emits only the flag that is set", () => {
+    expect(
+      buildPlanLaunchCommand("hi", null, [], {
+        backend: "claude-code",
+        model: "opus",
+        effort: null,
+      }),
+    ).toBe(`claude --model 'opus' ${ALLOW} --permission-mode plan 'hi'`);
+    expect(
+      buildPlanLaunchCommand("hi", null, [], {
+        backend: "claude-code",
+        model: null,
+        effort: "max",
+      }),
+    ).toBe(`claude --effort 'max' ${ALLOW} --permission-mode plan 'hi'`);
+  });
+
+  it("still grants --add-dir before the model flags", () => {
+    const cmd = buildPlanLaunchCommand("hi", null, ["/abi"], {
+      backend: "claude-code",
+      model: "opus",
+      effort: null,
+    });
+    expect(cmd).toContain("claude --add-dir '/abi' --model 'opus' --allowedTools");
+  });
+});
+
+describe("buildPlanLaunchCommand — the codex arm", () => {
+  it("uses the ABSOLUTE binary, never the bare word", () => {
+    // $PATH on a machine with the ChatGPT app usually still resolves `codex`
+    // to an older standalone build with no `resume` — it plans once and then
+    // fails every restore.
+    const cmd = buildPlanLaunchCommand("hi", "/p", [], CODEX, { codex: BIN });
+    expect(cmd.startsWith(`cd '/p' && '${BIN}' `)).toBe(true);
+  });
+
+  it("runs read-only with approvals off — plan mode's physical equivalent", () => {
+    const cmd = buildPlanLaunchCommand("hi", null, [], CODEX, { codex: BIN });
+    expect(cmd).toContain("-s read-only -a never");
+  });
+
+  it("delivers the contract by profile, not on the command line", () => {
+    const cmd = buildPlanLaunchCommand("hi", null, [], CODEX, { codex: BIN });
+    expect(cmd).toContain("-p 'redline-plan'");
+    expect(cmd).not.toContain("developer_instructions");
+  });
+
+  it("stays under the tty input queue — the whole reason for the profile", () => {
+    // The macOS tty queue is 1024 bytes and DISCARDS the excess silently. The
+    // inline-contract version of this command was 6,476 bytes and arrived at
+    // zsh truncated at byte 1023, sitting unexecuted with no error anywhere.
+    // The prompt can still be long (a Drafter document) — `pty::paced` covers
+    // that — but the fixed part of the launch must never be the problem.
+    const cmd = buildPlanLaunchCommand("hi", "/Users/me/redline", [], {
+      backend: "codex",
+      model: "gpt-5.6-sol",
+      effort: "xhigh",
+    }, { codex: BIN });
+    expect(cmd.length).toBeLessThan(400);
+  });
+
+  it("is ONE physical line", () => {
+    // A literal newline anywhere in the fixed part would submit the line early
+    // and leave the rest as garbage at the prompt.
+    const cmd = buildPlanLaunchCommand("hi", null, [], CODEX, { codex: BIN });
+    expect(cmd).not.toContain("\n");
+  });
+
+  it("quotes the effort as TOML, and omits it when unset", () => {
+    const withEffort = buildPlanLaunchCommand(
+      "hi",
+      null,
+      [],
+      { backend: "codex", model: "gpt-5.6-sol", effort: "xhigh" },
+      { codex: BIN },
+    );
+    expect(withEffort).toContain(`-m 'gpt-5.6-sol' `);
+    expect(withEffort).toContain(`-c 'model_reasoning_effort="xhigh"' `);
+    expect(
+      buildPlanLaunchCommand("hi", null, [], CODEX, { codex: BIN }),
+    ).not.toContain("model_reasoning_effort");
+    expect(
+      buildPlanLaunchCommand("hi", null, [], CODEX, { codex: BIN }),
+    ).not.toContain(" -m ");
+  });
+
+  it("keeps the prompt the sole positional, shq-quoted, at the end", () => {
+    const cmd = buildPlanLaunchCommand("it's a plan", null, [], CODEX, {
+      codex: BIN,
+    });
+    expect(cmd.endsWith(`'it'\\''s a plan'`)).toBe(true);
+  });
+
+  it("never grants --add-dir — that would be a WRITE grant under read-only", () => {
+    const cmd = buildPlanLaunchCommand("hi", "/p", ["/abi"], CODEX, {
+      codex: BIN,
+    });
+    expect(cmd).not.toContain("--add-dir");
+  });
+
+  it("degrades to the bare name rather than emitting an empty argument", () => {
+    expect(buildPlanLaunchCommand("hi", null, [], CODEX, {})).toContain(
+      "'codex' ",
+    );
+    expect(buildPlanLaunchCommand("hi", null, [], CODEX, { codex: "  " })).toContain(
+      "'codex' ",
+    );
+  });
+});
+
+describe("tomlString", () => {
+  it("escapes what a TOML basic string must escape", () => {
+    expect(tomlString("plain")).toBe('"plain"');
+    expect(tomlString('say "hi"')).toBe('"say \\"hi\\""');
+    expect(tomlString("a\nb")).toBe('"a\\nb"');
+    expect(tomlString("a\\b")).toBe('"a\\\\b"');
+    expect(tomlString("a\tb")).toBe('"a\\tb"');
+  });
+
+  it("quotes values that would otherwise parse as another TOML type", () => {
+    // `-c developer_instructions=12345` really does fail with "invalid type:
+    // integer" — an unquoted value is TOML-parsed before falling back to a
+    // literal, so quoting is what keeps a string a string.
+    expect(tomlString("12345")).toBe('"12345"');
+    expect(tomlString("true")).toBe('"true"');
+  });
+});
+
 describe("buildOrchestrateLaunchCommand", () => {
   it("builds a bare acceptEdits launch that carries no prompt", () => {
     const cmd = buildOrchestrateLaunchCommand("/Users/me/redline", "sonnet");
@@ -143,3 +299,4 @@ describe("buildOrchestratePrompt", () => {
     expect(buildOrchestratePrompt("abc-123")).toContain("orchestrate skill");
   });
 });
+

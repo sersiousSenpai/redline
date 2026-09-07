@@ -59,7 +59,7 @@ struct EmbeddedSkill {
 const SKILLS: &[EmbeddedSkill] = &[
     EmbeddedSkill {
         name: "redline-plan-review",
-        version: 13,
+        version: 14,
         content: include_str!("../../skills/redline-plan-review/SKILL.md"),
     },
     EmbeddedSkill {

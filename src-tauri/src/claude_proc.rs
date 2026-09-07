@@ -8,8 +8,8 @@
 //! against captured stream-json fixtures.
 
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 
+use crate::binprobe;
 use serde_json::Value;
 use tokio::process::Command;
 
@@ -45,23 +45,10 @@ pub fn resolve_claude_bin() -> String {
     if let Some(path) = known_install_locations().into_iter().find(|p| p.is_file()) {
         return path.to_string_lossy().into_owned();
     }
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    std::process::Command::new(&shell)
-        .args(["-ilc", "command -v claude"])
-        // An interactive rc that reads stdin must hit EOF, not hang.
-        .stdin(Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .rev()
-                .map(str::trim)
-                .find(|line| Path::new(line).is_file())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "claude".to_string())
+    // Cached in `binprobe`: this layer is an INTERACTIVE LOGIN shell sourcing
+    // the user's whole rc chain, and it used to run again on every caller —
+    // boot, the settings panel, each focus refresh, every launch attempt.
+    binprobe::login_shell_which("claude").unwrap_or_else(|| "claude".to_string())
 }
 
 /// Well-known `claude` install locations to probe when the shell can't tell
@@ -338,6 +325,10 @@ pub struct TurnOutcome {
     pub errored: Option<String>,
     pub saw_json: bool,
     pub stderr_text: String,
+    /// What the turn spent, folded by the ONE accounting rule. Silent paths
+    /// have no pane to stream a meter to, but they still burn tokens — this
+    /// is what `collect_turn_seated` books.
+    pub meter: crate::meter::TurnMeter,
 }
 
 /// Drain a spawned `claude`'s stdout/stderr to completion and classify the
@@ -363,12 +354,14 @@ pub async fn collect_turn(
         errored: None,
         saw_json: false,
         stderr_text: String::new(),
+        meter: crate::meter::TurnMeter::new(),
     };
     while let Ok(Some(line)) = lines.next_line().await {
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
         out.saw_json = true;
+        out.meter.observe(&v);
         match classify_line(&v) {
             StreamLine::Init(sid) => out.session = Some(sid),
             StreamLine::Final { text, session_id } => {
@@ -382,6 +375,24 @@ pub async fn collect_turn(
         }
     }
     out.stderr_text = stderr_task.await.unwrap_or_default();
+    out
+}
+
+/// [`collect_turn`], with the turn's burn booked to `seat` on the way out.
+///
+/// The silent paths (consults, the daemon seats, the queue's overnight runs)
+/// have no pane to stream a meter to — but they are `claude` subprocesses
+/// spending real tokens, and before this exactly ONE caller in the app wrote
+/// to `seat_burn`. Booking here rather than at each call site is what makes
+/// "every exit books" true by construction: the drain has exactly one exit.
+pub async fn collect_turn_seated(
+    db: &crate::db::Database,
+    seat: &str,
+    stdout: tokio::process::ChildStdout,
+    stderr: tokio::process::ChildStderr,
+) -> TurnOutcome {
+    let out = collect_turn(stdout, stderr).await;
+    crate::meter::book(db, seat, &out.meter);
     out
 }
 
@@ -440,6 +451,15 @@ pub fn classify_line(v: &Value) -> StreamLine {
                 .and_then(Value::as_str)
                 .map(str::to_string);
             if v.get("is_error").and_then(Value::as_bool) == Some(true) {
+                // The subtype fallback is a MACHINE KEY, not a message. When
+                // `result` is empty (the overload/capacity case) this yields
+                // the bare `error_during_execution`, and `is_transient` below
+                // matches on that literal substring — as does
+                // `seat::is_resume_failure`. Do NOT humanise it here: friendly
+                // text at the source silently breaks the classification for
+                // every surface. `StreamLine::Failed` stays raw; humanising
+                // happens at the persist/display boundary, in
+                // `describe_turn_error`. Guarded by `classify_result_error`.
                 let msg = v
                     .get("result")
                     .and_then(Value::as_str)
@@ -459,6 +479,142 @@ pub fn classify_line(v: &Value) -> StreamLine {
         }
         _ => StreamLine::Ignore,
     }
+}
+
+// --- Failed-turn vocabulary -------------------------------------------------
+//
+// `StreamLine::Failed` carries a MACHINE string (see `classify_line`). These
+// functions are the single place that string is interpreted and turned into
+// something a person should read. They live here, beside the classifier that
+// produces it, because every conversational surface needs them — and because
+// six near-identical copies of the same three branches is exactly how
+// `fork.rs` and `voice.rs` came to never get one.
+
+/// Whether a failed turn's error is an EXPLICIT context-length signature — the
+/// resumable session genuinely outgrew the model's window, so every `--resume`
+/// of it will keep throwing until we start fresh. This is deliberately narrow:
+/// only claude's own "prompt is too long" / context-length phrasings, NOT the
+/// generic `error_during_execution` bucket. That bucket is dominated by
+/// *transient* API errors (overload / capacity) whose session is perfectly fine
+/// on the next attempt — clearing it there would throw away a healthy
+/// conversation over a momentary blip. (Empirically: the sessions that produced
+/// `error_during_execution` here were only ~60-70K tokens and resume cleanly.)
+pub fn is_context_overflow(error: &str) -> bool {
+    let e = error.to_lowercase();
+    e.contains("prompt is too long")
+        || e.contains("context length")
+        || e.contains("context window")
+        || e.contains("too many tokens")
+        || e.contains("maximum context")
+}
+
+/// Whether an error looks TRANSIENT — a momentary model/API failure (the generic
+/// `error_during_execution` subtype claude emits for an empty-message errored
+/// `result`, plus overload/capacity/timeout wording). The session is healthy;
+/// retrying in a moment usually works. Account-level limits are transient-ish
+/// too (they reset), so they also land here rather than triggering a reset.
+pub fn is_transient(error: &str) -> bool {
+    let e = error.to_lowercase();
+    e.contains("error_during_execution")
+        || e.contains("overloaded")
+        || e.contains("capacity")
+        || e.contains("timeout")
+        || e.contains("timed out")
+        || e.contains("temporarily")
+        || e.contains("rate limit")
+        || e.contains("usage limit")
+        || e.contains("session limit")
+}
+
+/// The only two things that genuinely differ between surfaces when a turn
+/// fails: how the surface names itself in the friction table, and how the
+/// overflow sentence refers to the conversation it just reset. The branch
+/// order, the recovery and the transient wording are identical everywhere —
+/// and keeping them identical is the whole point of this type existing.
+pub struct TurnErrorCopy<'a> {
+    /// Friction `surface` label: `"fork"`, `"browse"`, `"voice"`, ...
+    pub surface: &'a str,
+    /// Friction `session_id`: the thread/tab/session this turn belonged to.
+    pub subject: Option<&'a str>,
+    /// What overflowed, as the sentence names it: `"discussion"`, `"mission"`,
+    /// `"conversation"`.
+    pub noun: &'a str,
+    /// What the NEXT send will do once the context is reset — e.g. `"I'll
+    /// start fresh on this page"`. Reads straight on from "send your message
+    /// again and".
+    pub next: &'a str,
+}
+
+/// Translate a failed turn's raw error into the sentence to SHOW, performing
+/// the recovery that error calls for and recording the friction:
+///
+/// - EXPLICIT context overflow -> run `reset` (the surface's own "forget the
+///   stored session id"), so the next turn starts fresh instead of
+///   re-`--resume`-ing an over-limit context forever, and say so.
+/// - TRANSIENT model/API error -> keep the session (it is fine) and tell the
+///   user plainly to retry. `fork.rs` additionally retries this one itself.
+/// - Anything else -> pass through unchanged. Callers depend on that: it is
+///   how their own already-human messages ("claude exited abnormally: ...")
+///   reach the user intact.
+///
+/// The return value is persisted as the `error` row's body and shown under a
+/// `Redline` byline, so it must never carry a machine token. Guarded by
+/// `describe_turn_error_never_leaks_the_machine_token`.
+pub fn describe_turn_error(
+    db: &crate::db::Database,
+    copy: TurnErrorCopy<'_>,
+    error: &str,
+    reset: impl FnOnce(),
+) -> String {
+    if is_context_overflow(error) {
+        reset();
+        let _ = db.record_friction(
+            "context_overflow",
+            Some(copy.surface),
+            copy.subject,
+            Some(error),
+        );
+        return format!(
+            "This {noun} outgrew the model's context window, so the turn failed. \
+             I've reset its context — send your message again and {next} (the \
+             replies above are kept).",
+            noun = copy.noun,
+            next = copy.next,
+        );
+    }
+    if is_transient(error) {
+        let _ = db.record_friction(
+            "transient_fail",
+            Some(copy.surface),
+            copy.subject,
+            Some(error),
+        );
+        return "The model hit a temporary error on this turn (not something you \
+                did) — send your message again in a moment. Your conversation is \
+                intact."
+            .to_string();
+    }
+    error.to_string()
+}
+
+/// The same classification as `describe_turn_error`, worded for a surface with
+/// nobody sitting in front of it: an overnight run's stall note, read later in
+/// the Runs surface. No "send your message again" here — the reader is
+/// deciding whether to relaunch, not typing into a conversation. Shares the
+/// two predicates so a run and a discussion can never disagree about what an
+/// error means.
+pub fn describe_run_error(error: &str) -> String {
+    if is_context_overflow(error) {
+        return "The session outgrew the model's context window and stopped. A \
+                relaunch starts fresh."
+            .to_string();
+    }
+    if is_transient(error) {
+        return "The model hit a temporary error and the run stopped — not \
+                something the plan or the prompt did. Relaunching usually works."
+            .to_string();
+    }
+    error.to_string()
 }
 
 /// The tool calls carried by one parsed stream line, as `(name, input)`.
@@ -505,7 +661,18 @@ pub fn retrieval_status_label(name: &str, input: &Value) -> String {
         .or_else(|| input.get("url"))
         .and_then(Value::as_str)
         .unwrap_or("");
-    let phrase = if text.contains("/v1/memory/answer-pack") {
+    // A consult spawns a real CHILD `claude` on another surface's seat. The
+    // child books its own burn (correct, and new) — but there is no precise
+    // parent→child cost edge: the consult request carries no caller identity,
+    // and adding a spoofable one buys nothing. This label is the honest
+    // middle: the parent's activity line SAYS it delegated, and the
+    // by-subprocess rollup makes the child's cost visible. The exact edge is
+    // follow-on work.
+    let phrase = if text.contains("/v1/global/consult") {
+        "checking in with a colleague…"
+    } else if text.contains("/v1/linked/consult") {
+        "checking in with a tab's agent…"
+    } else if text.contains("/v1/memory/answer-pack") {
         "searching your memory…"
     } else if text.contains("/v1/memory/tree") {
         "reading the catalog…"
@@ -796,6 +963,99 @@ mod tests {
     fn classify_result_error() {
         let line = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"boom"}"#;
         assert_eq!(parse(line), StreamLine::Failed("boom".to_string()));
+    }
+
+    /// `StreamLine::Failed` must stay RAW. `is_transient` matches the literal
+    /// substring `error_during_execution`, and `seat::is_resume_failure` reads
+    /// it too — humanising at the source silently breaks the classification for
+    /// every surface at once. Humanising happens in `describe_turn_error`.
+    #[test]
+    fn classify_result_error_keeps_the_machine_subtype_raw() {
+        let line = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":""}"#;
+        assert_eq!(
+            parse(line),
+            StreamLine::Failed("error_during_execution".to_string())
+        );
+        // ...which is what makes the transient classification work at all.
+        let StreamLine::Failed(raw) = parse(line) else {
+            panic!("expected Failed");
+        };
+        assert!(is_transient(&raw));
+    }
+
+    #[test]
+    fn only_explicit_overflow_counts_as_context_overflow() {
+        // Explicit context-length phrasings, however claude words them.
+        assert!(is_context_overflow("prompt is too long: 250000 tokens"));
+        assert!(is_context_overflow("maximum context length exceeded"));
+        assert!(is_context_overflow("input exceeds the context window"));
+        // The generic subtype is NOT overflow — it's transient (empirically the
+        // sessions that produced it were ~60-70K tokens and resume fine).
+        assert!(!is_context_overflow("error_during_execution"));
+        assert!(is_transient("error_during_execution"));
+        assert!(is_transient("model overloaded, please retry"));
+        assert!(is_transient("You've hit your session limit \u{b7} resets 12:30pm"));
+    }
+
+    /// The bug this whole path exists to prevent: a raw machine token reaching
+    /// a reader as if it were the model's reply. Whatever else changes, the
+    /// humanised string must never contain one.
+    #[test]
+    fn describe_turn_error_never_leaks_the_machine_token() {
+        let db = crate::db::Database::open_in_memory().unwrap();
+        let copy = || TurnErrorCopy {
+            surface: "fork",
+            subject: Some("s-1"),
+            noun: "discussion",
+            next: "I'll start fresh",
+        };
+
+        // Transient: humanised, and the reset does NOT fire (the session is fine).
+        let mut reset_fired = false;
+        let msg = describe_turn_error(&db, copy(), "error_during_execution", || {
+            reset_fired = true
+        });
+        assert!(!msg.contains("error_during_execution"), "leaked: {msg}");
+        assert!(!msg.contains('_'), "machine-looking token in: {msg}");
+        assert!(msg.to_lowercase().contains("again"));
+        assert!(!reset_fired, "a transient error must keep the session");
+
+        // Explicit overflow: humanised, and the reset DOES fire.
+        let mut reset_fired = false;
+        let msg = describe_turn_error(&db, copy(), "prompt is too long: 1200000 tokens", || {
+            reset_fired = true
+        });
+        assert!(msg.to_lowercase().contains("reset"));
+        assert!(msg.contains("This discussion outgrew"));
+        assert!(reset_fired, "an overflow must reset the stored session");
+
+        // Anything else passes through unchanged — that is how each surface's
+        // own already-human messages reach the user.
+        let mut reset_fired = false;
+        let msg = describe_turn_error(&db, copy(), "claude exited abnormally: boom", || {
+            reset_fired = true
+        });
+        assert_eq!(msg, "claude exited abnormally: boom");
+        assert!(!reset_fired);
+    }
+
+    /// A run's stall note gets the same classification with run-shaped words:
+    /// no machine token, and no "send your message again" to somebody who
+    /// isn't there.
+    #[test]
+    fn run_errors_are_humanised_without_conversational_wording() {
+        let transient = describe_run_error("error_during_execution");
+        assert!(!transient.contains("error_during_execution"), "leaked: {transient}");
+        assert!(!transient.contains("send your message"));
+        assert!(transient.to_lowercase().contains("relaunch"));
+
+        let overflow = describe_run_error("prompt is too long: 1200000 tokens");
+        assert!(overflow.to_lowercase().contains("context window"));
+        assert!(!overflow.contains("send your message"));
+
+        // The generic non-model reasons the queue composes itself pass through.
+        let generic = "exited without parking a review (run_state=none)";
+        assert_eq!(describe_run_error(generic), generic);
     }
 
     #[test]

@@ -1,0 +1,85 @@
+## Your job
+
+The plans listed above are reproduced in full at the bottom of this message.
+They overlap in scope, they may contradict each other, and they have a
+dependency order nobody has written down. Your whole job this turn is to read
+them and produce **one plan** deliberately shaped for multi-agent execution.
+
+Do not execute anything. Do not edit files. You are planning.
+
+## Before you write
+
+Read the repository first. These plans were written at different times against
+a moving codebase, so parts of them may already be done, already be wrong, or
+refer to code that has since moved. You have `Read`, `Grep`, `Glob` and `Bash`
+available — use them. Where a source plan disagrees with what is actually on
+disk, the disk wins, and you say so in the Conflicts section.
+
+## What the combined plan must contain
+
+Write it as ordinary plan markdown with these sections, in this order.
+
+### 1. Scope
+
+One paragraph: the deduplicated union of what these plans are asking for.
+Where two of them describe the same work in different words, that is one item,
+not two.
+
+### 2. Tracks
+
+The heart of the plan. Break the scope into tracks that can each be executed
+independently by one agent, working at the same time as the others.
+
+For every track:
+
+- Give it a short name and a numbered heading (`### Track 1 — …`).
+- State **the files and areas it owns**. This is a claim of exclusivity: two
+  tracks must not name the same file. If two pieces of work genuinely have to
+  touch the same file, they belong in the same track — split by ownership, not
+  by topic.
+- State its dependencies with an explicit line: `Depends on: Track 2` (or
+  `Depends on: nothing`). Only real ordering, never taste. A track that
+  depends on nothing must say so.
+- Describe the work concretely enough that an agent with no other context can
+  do it.
+
+Prefer more independent tracks over fewer, but never manufacture a track by
+splitting one file's work in half.
+
+### 3. Verification per track
+
+For each track, a **runnable command** — the thing that proves that track is
+done, and fails when it isn't. `cargo test -p foo bar::baz`,
+`npx vitest run src/lib/x.test.ts`, `npm run build`. Not a description of a
+check, not "confirm it looks right", not a manual click-through. If a track
+genuinely has no machine-checkable outcome, say that explicitly and give the
+narrowest manual check you can.
+
+### 4. Conflicts & decisions
+
+Where the sources disagreed, or where a source disagreed with the current code:
+what the disagreement was, which way you resolved it, and why. One short
+paragraph or bullet per conflict. This section is the reason a combined plan
+can be trusted — do not leave it empty if there was anything to resolve.
+
+### 5. Deferred
+
+Anything from a source plan you deliberately did NOT carry forward, with a
+sentence on why. Nothing from an input plan may vanish silently: it is either
+in the scope, or it is in this list.
+
+### 6. Sources
+
+One line per input plan: its title, its session id, and its version, exactly as
+given in the per-source headers below.
+
+## Notes on the sources
+
+- Each source is reproduced verbatim under its own `## Source N` heading.
+- The header line carries the project, the version, the review status, and the
+  run state. A source whose run state is `landed` describes work that has
+  ALREADY SHIPPED — do not re-plan it; treat it as context for the rest, and
+  note in Deferred what you dropped because of it.
+- A source with unresolved review comments is a plan someone was still arguing
+  with. The disagreement is not in the text you are given, so where that plan
+  is load-bearing, prefer the conservative reading and flag it in Conflicts.

@@ -15,6 +15,7 @@ import { ProjectPicker, type ProjectOption } from "./ProjectPicker";
 import { BlockedLaunch, ReadinessStrip } from "./ReadinessStrip";
 import { WorkingIndicator } from "./WorkingIndicator";
 import { useMenuOverlay } from "./menuOverlay";
+import { Panel, useClickPopover } from "./popover";
 import { useDictation } from "../lib/useDictation";
 import {
   fallbackDestination,
@@ -26,9 +27,21 @@ import {
 import {
   attemptChat as gateChat,
   attemptLaunch as gateLaunch,
+  MIN_COMBINE,
   type ProjectChoice,
 } from "../lib/launch";
+import type { CombineSource } from "../types";
 import type { ReadinessItem } from "../lib/readiness";
+import {
+  BACKENDS,
+  backendLabel,
+  choiceLabel,
+  effortsFor,
+  modelsFor,
+  normalizeChoice,
+  type BackendChoice,
+  type CodexModel,
+} from "../lib/backendChoice";
 
 // The front door. The document plate's resting state and where Redline opens:
 // one line of type, one box, and ⏎ starts a real plan-mode session in a real
@@ -51,8 +64,14 @@ function basename(path: string): string {
 }
 
 export interface FrontDoorProps {
-  /** Boot doors settled and sessions loaded — the door resolves after the
-   *  choreography, never through it. */
+  /** The shell's core bootstrap has resolved — session summaries are in and
+   *  the door knows which project it would launch into. Drives the entrance
+   *  transition and, more importantly, the autofocus: the whole promise of
+   *  this surface is that you can start typing without aiming at anything.
+   *
+   *  Deliberately NOT the boot choreography. This used to be
+   *  `bootSettled && !loading`, which made a decorative 750 ms plate animation
+   *  into a hard floor on when the composer would accept a keystroke. */
   visible: boolean;
   text: string;
   onTextChange: (next: string | ((prev: string) => string)) => void;
@@ -63,6 +82,15 @@ export interface FrontDoorProps {
   resolvedProject: string | null;
   attachments: string[];
   onAttachmentsChange: (next: string[]) => void;
+  /** Plan sessions handed over by the sidebar's Combine picker. While these
+   *  are up, ⏎ launches a fresh plan session whose job is to synthesise them
+   *  into one plan — the composer becomes the place to add an instruction,
+   *  not the thing being launched. */
+  combine?: CombineSource[];
+  onCombineChange?: (next: CombineSource[]) => void;
+  /** `combine_preview` on the current pills: what to say and, for a
+   *  selection too large to carry, why it can't be launched at all. */
+  combinePreview?: { warnings: string[]; blocked: string | null } | null;
   readiness: ReadinessItem[];
   /** Runs an item's fix; resolves true when the fault is cleared. */
   onFix: (item: ReadinessItem) => Promise<boolean>;
@@ -88,7 +116,25 @@ export interface FrontDoorProps {
   /** Where ⏎ sends. Sticky and persisted — `Plan ▾` sets it. */
   destination: LaunchDestination;
   onDestinationChange: (next: LaunchDestination) => void;
+  /** WHICH HARNESS ⏎ launches on, and at what model/effort. Sticky and
+   *  persisted for the same reason the destination is. `Plan ▾` deliberately
+   *  stays a destination picker; this is its sibling, not its second job. */
+  backend: BackendChoice;
+  onBackendChange: (next: BackendChoice) => void;
+  /** The live `codex debug models` catalog, or empty until it answers. Never
+   *  a hardcoded list — it ships with the ChatGPT app and changes under us. */
+  codexModels: CodexModel[];
+  /** Fetch the catalog. Called when the picker opens rather than at boot, so
+   *  a Claude-only user never spawns a codex child process. */
+  onNeedCodexModels: () => void;
+  /** Retire the in-flight indicator. Does NOT cancel the plan and does not
+   *  hand the sentence back — the composer was cleared on send and stays
+   *  cleared. */
   onCancelPending: () => void;
+  /** Go watch it: reveal the terminal dock and bring the tile this plan is
+   *  running in forward. The pill is the only thing left on this surface that
+   *  knows which terminal that is. */
+  onRevealPending: () => void;
   onHowItWorks: () => void;
   /** Create a project folder; resolves its absolute path, or null on
    *  failure (the error is surfaced by App as a toast). `kind: "extension"`
@@ -131,6 +177,9 @@ export function FrontDoor(props: FrontDoorProps) {
     resolvedProject,
     attachments,
     onAttachmentsChange,
+    combine = [],
+    onCombineChange,
+    combinePreview = null,
     readiness,
     onFix,
     pending,
@@ -141,7 +190,12 @@ export function FrontDoor(props: FrontDoorProps) {
     chatEnabled,
     destination,
     onDestinationChange,
+    backend,
+    onBackendChange,
+    codexModels,
+    onNeedCodexModels,
     onCancelPending,
+    onRevealPending,
     onHowItWorks,
     onCreateProject,
     focusNonce,
@@ -263,7 +317,7 @@ export function FrontDoor(props: FrontDoorProps) {
     if (!el) return;
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, inputCap)}px`;
-  }, [text, pending, inputCap]);
+  }, [text, inputCap]);
 
   // Type-to-start handoff. A LAYOUT effect, not a passive one: it must focus
   // and drain the seed buffer before the browser can dispatch the next
@@ -279,8 +333,14 @@ export function FrontDoor(props: FrontDoorProps) {
 
   // Autofocus when the door is the resting state — the whole point is that
   // you can start typing without aiming at anything.
+  //
+  // `pending` stays in the deps but is no longer a GUARD, and the inversion is
+  // the point: it used to mean "a card has replaced the composer, don't reach
+  // for it", and now it means "a sentence just shipped, put the caret back".
+  // ⏎ from the keyboard never lost focus, but the send button steals it — and
+  // clicking send is exactly the gesture after which the box must be ready.
   useEffect(() => {
-    if (!visible || pending) return;
+    if (!visible) return;
     taRef.current?.focus();
   }, [visible, pending]);
 
@@ -293,7 +353,13 @@ export function FrontDoor(props: FrontDoorProps) {
   // The island's growth into the document editor. Declared here, above the
   // send path, because `send` captures the FLIP's starting box on the gesture.
   const hasText = text.trim().length > 0;
-  const canSubmit = hasText && !pending;
+  // Combining plans with no extra instruction is a legitimate ⏎: the plans
+  // ARE the input, and the composer is optional context on top of them.
+  const hasPills = combine.length >= MIN_COMBINE;
+  // A launch in flight is NOT a reason to refuse the next one. The door hands
+  // the sentence off and goes back to being a door; a second ⏎ starts a second
+  // plan in its own terminal tile and the flight pill re-points at the newest.
+  const canSubmit = hasText || hasPills;
 
   const attemptLaunch = useCallback(() => {
     if (!canSubmit) return;
@@ -306,6 +372,12 @@ export function FrontDoor(props: FrontDoorProps) {
     // This gate is the PLAN route's alone. Opening the Drafter needs no
     // `claude`, no hook and no interception mode — refusing to open a
     // document because a plan couldn't be captured would be nonsense.
+    // Oversize is a refusal, not a truncation — it comes back through the
+    // same path as any other refused ⏎ rather than growing a control.
+    if (combinePreview?.blocked) {
+      refuse(combinePreview.blocked);
+      return;
+    }
     const gate = gateLaunch(readiness);
     if (gate.kind === "blocked") {
       setBlocked(gate.item);
@@ -321,20 +393,30 @@ export function FrontDoor(props: FrontDoorProps) {
     setOffer(null);
     setRefusedWhy(null);
     onLaunch();
-  }, [canSubmit, readiness, projectOptions.length, choice, text, onLaunch, refuse]);
+  }, [
+    canSubmit,
+    readiness,
+    projectOptions.length,
+    choice,
+    text,
+    onLaunch,
+    refuse,
+    combinePreview,
+  ]);
 
   const send = useCallback(
     (to: LaunchDestination) => {
-      // The one genuinely SILENT branch. `canSubmit` is false for two very
-      // different reasons and only one of them is self-evident: an empty box
-      // explains itself, a launch already in flight does not — and that is the
-      // case where the sentence really is sitting in the composer with ⏎ doing
-      // nothing. (It can't be: the Planning card replaces the composer. But it
-      // is exactly the shape of the report, so it says so rather than
-      // swallowing the key.)
+      // One refusal left, and it explains itself: an empty box. "A plan is
+      // already launching" used to live here too — it no longer can, because
+      // a launch in flight no longer blocks ⏎.
       if (!canSubmit) {
-        if (pending) refuse("A plan is already launching.");
-        else if (!hasText) refuse();
+        refuse();
+        return;
+      }
+      // While plans are pilled the destination is locked to `plan`: neither
+      // the drafter nor a chat has a meaning for a combination in v1.
+      if (combine.length > 0) {
+        attemptLaunch();
         return;
       }
       if (to === "drafter") {
@@ -360,7 +442,15 @@ export function FrontDoor(props: FrontDoorProps) {
       }
       attemptLaunch();
     },
-    [canSubmit, pending, hasText, refuse, onDrafter, onChat, readiness, attemptLaunch],
+    [
+      canSubmit,
+      refuse,
+      onDrafter,
+      onChat,
+      readiness,
+      attemptLaunch,
+      combine.length,
+    ],
   );
 
   // A sticky destination outlives the manifest that allowed it: someone who
@@ -440,15 +530,15 @@ export function FrontDoor(props: FrontDoorProps) {
   // Squeezed, the chips are the first thing to go: they are a way in, and a
   // door narrow enough to wrap them into three rows has no room to spare for
   // one.
-  const suggestionsHidden = hasText || !!pending || !!offer || tight;
+  const suggestionsHidden = hasText || !!offer || tight;
 
   // The island's shape state. `lifted` is focus-or-content: the slab settles
-  // when you aren't using it and rises when you are.
-  const lifted = focused || hasText || !!pending;
+  // when you aren't using it and rises when you are. A launch in flight is
+  // neither — it left, and the door is back at rest.
+  const lifted = focused || hasText;
   const islandClass = [
     "rl-fd-island",
     lifted ? "is-lifted" : "",
-    pending ? "is-planning" : "",
     refusedNonce === 0 ? "" : refusedNonce % 2 ? "is-refused" : "is-refused-alt",
   ]
     .filter(Boolean)
@@ -490,26 +580,37 @@ export function FrontDoor(props: FrontDoorProps) {
       </p>
 
       <div className={islandClass}>
-        {pending ? (
-          <PlanningCard
-            pending={pending}
-            onCancel={onCancelPending}
-            readiness={readiness}
-            onFix={handleFix}
-          />
-        ) : (
-          <div className="rl-fd-morph">
-            {attachments.length > 0 && (
-              <div className="rl-fd-attach">
-                {attachments.map((p) => (
-                  <span key={p} className="rl-fd-chip" title={p}>
-                    {basename(p)}
+        <div className="rl-fd-morph">
+          {/* Plan pills. Deliberately NOT the attachment chip: an
+              attachment is a file handed to a prompt, and these are whole
+              documents being fused into one. Each wears the ordinal it was
+              picked with, which is the same number the sidebar showed and
+              the same `## Source N` the combining session will read. */}
+          {combine.length > 0 && (
+            <>
+              <div className="rl-cmb-pills">
+                {combine.map((c, i) => (
+                  <span
+                    key={c.sessionId}
+                    className="rl-cmb-pill"
+                    title={`${c.projectName} · v${c.versionNumber} · ${c.status}${
+                      c.runState ? ` · run: ${c.runState}` : ""
+                    }`}
+                  >
+                    <span className="rl-cmb-ord">{i + 1}</span>
+                    <span className="rl-cmb-name">
+                      {c.planTitle || c.sessionId.slice(0, 8)}
+                    </span>
+                    <span className="rl-cmb-ver">v{c.versionNumber}</span>
                     <button
                       type="button"
                       onClick={() =>
-                        onAttachmentsChange(attachments.filter((a) => a !== p))
+                        onCombineChange?.(
+                          combine.filter((x) => x.sessionId !== c.sessionId),
+                        )
                       }
-                      title="Remove"
+                      title="Remove this plan from the combination"
+                      aria-label={`Remove ${c.planTitle ?? c.sessionId} from the combination`}
                       className="rl-fd-x"
                     >
                       <X size={11} />
@@ -517,91 +618,148 @@ export function FrontDoor(props: FrontDoorProps) {
                   </span>
                 ))}
               </div>
-            )}
-            <textarea
-              ref={taRef}
-              className="rl-fd-input rl-thin-scroll-y"
-              placeholder="What do you want to build?"
-              value={text}
-              rows={1}
-              spellCheck
-              onFocus={() => setFocused(true)}
-              onBlur={() => setFocused(false)}
-              onChange={(e) => onTextChange(e.target.value)}
-              onKeyDown={onKeyDown}
-            />
-            {dictation.listening && (
-              <div className="rl-fd-partial">
-                {dictation.partial || "Listening…"}
+              {/* Says what ⏎ does, in the one place the eye already is. */}
+              <div className="rl-cmb-fuse">
+                {combine.length < MIN_COMBINE
+                  ? `${MIN_COMBINE - combine.length} more plan needed`
+                  : `${combine.length} plans → one plan`}
               </div>
-            )}
-            <div className="rl-fd-tools">
-              <button
-                type="button"
-                onClick={attach}
-                title="Attach files as context"
-                className="rl-fd-tool"
+            </>
+          )}
+          {combine.length > 0 &&
+            (combinePreview?.blocked
+              ? [combinePreview.blocked]
+              : (combinePreview?.warnings ?? [])
+            ).map((w) => (
+              <div
+                key={w}
+                className="rl-fd-refused"
+                role="status"
+                style={{ marginTop: 0 }}
               >
-                <Plus size={14} />
-              </button>
-              <ProjectPicker
-                options={projectOptions}
-                value={choice ? choice.path : resolvedProject}
-                onChange={(path) => onChoiceChange({ path })}
-                onNewProject={() =>
-                  setOffer({
-                    name: projectNameFromPrompt(text),
-                    launchAfter: false,
-                    kind: "app",
-                  })
-                }
-                onAfterPick={() => taRef.current?.focus()}
-                chromeless
-              />
+                {w}
+              </div>
+            ))}
+          {attachments.length > 0 && (
+            <div className="rl-fd-attach">
+              {attachments.map((p) => (
+                <span key={p} className="rl-fd-chip" title={p}>
+                  {basename(p)}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onAttachmentsChange(attachments.filter((a) => a !== p))
+                    }
+                    title="Remove"
+                    className="rl-fd-x"
+                  >
+                    <X size={11} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+          <textarea
+            ref={taRef}
+            className="rl-fd-input rl-thin-scroll-y"
+            placeholder={
+              combine.length > 0
+                ? "Anything to add? (optional)"
+                : "What do you want to build?"
+            }
+            value={text}
+            rows={1}
+            spellCheck
+            onFocus={() => setFocused(true)}
+            onBlur={() => setFocused(false)}
+            onChange={(e) => onTextChange(e.target.value)}
+            onKeyDown={onKeyDown}
+          />
+          {dictation.listening && (
+            <div className="rl-fd-partial">
+              {dictation.partial || "Listening…"}
+            </div>
+          )}
+          <div className="rl-fd-tools">
+            <button
+              type="button"
+              onClick={attach}
+              title="Attach files as context"
+              className="rl-fd-tool"
+            >
+              <Plus size={14} />
+            </button>
+            <ProjectPicker
+              options={projectOptions}
+              value={choice ? choice.path : resolvedProject}
+              onChange={(path) => onChoiceChange({ path })}
+              onNewProject={() =>
+                setOffer({
+                  name: projectNameFromPrompt(text),
+                  launchAfter: false,
+                  kind: "app",
+                })
+              }
+              onAfterPick={() => taRef.current?.focus()}
+              chromeless
+            />
+            {/* Locked while plans are pilled: the destination picker also
+                offers drafter and chat, and neither has a meaning for a
+                combination in v1. */}
+            {combine.length === 0 && (
               <PlanMenu
                 destination={liveDestination}
                 onDestinationChange={onDestinationChange}
                 chatEnabled={chatEnabled}
               />
-              <div style={{ flex: 1 }} />
-              {dictation.error && (
-                <span className="rl-fd-err" title={dictation.error}>
-                  mic error
-                </span>
-              )}
-              <button
-                type="button"
-                onClick={dictation.toggle}
-                disabled={!dictationEnabled}
-                title={
-                  dictationEnabled
-                    ? dictation.listening
-                      ? "Stop dictating"
-                      : "Dictate"
-                    : "The voice panel is using the microphone"
-                }
-                className={`rl-fd-tool${dictation.listening ? " is-hot" : ""}`}
-              >
-                <Mic size={14} />
-              </button>
-              <button
-                type="button"
-                onClick={() => send(liveDestination)}
-                disabled={!canSubmit}
-                title={
-                  liveDestination === "drafter"
+            )}
+            <BackendMenu
+              choice={backend}
+              onChange={onBackendChange}
+              codexModels={codexModels}
+              onOpen={onNeedCodexModels}
+              compact={tight}
+            />
+            <div style={{ flex: 1 }} />
+            {dictation.error && (
+              <span className="rl-fd-err" title={dictation.error}>
+                mic error
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={dictation.toggle}
+              disabled={!dictationEnabled}
+              title={
+                dictationEnabled
+                  ? dictation.listening
+                    ? "Stop dictating"
+                    : "Dictate"
+                  : "The voice panel is using the microphone"
+              }
+              className={`rl-fd-tool${dictation.listening ? " is-hot" : ""}`}
+            >
+              <Mic size={14} />
+            </button>
+            <button
+              type="button"
+              onClick={() => send(liveDestination)}
+              disabled={!canSubmit}
+              title={
+                combine.length > 0
+                  ? `Combine ${combine.length} plans into one new plan (⏎)`
+                  : liveDestination === "drafter"
                     ? "Open this in the drafter (⏎)"
                     : liveDestination === "chat"
                       ? "Talk this through (⏎)"
                       : "Plan this (⏎)"
-                }
-                className={`rl-fd-go${canSubmit ? " is-armed" : ""}`}
-              >
-                <CornerDownLeft size={15} />
-              </button>
-            </div>
+              }
+              className={`rl-fd-go${canSubmit ? " is-armed" : ""}`}
+            >
+              <CornerDownLeft size={15} />
+            </button>
           </div>
-        )}
+        </div>
 
         {/* A refusal with no panel of its own — the only one that would
             otherwise be completely silent. `role="status"` so a screen reader
@@ -640,6 +798,47 @@ export function FrontDoor(props: FrontDoorProps) {
           />
         )}
       </div>
+
+      {/* In flight. The sentence LEFT on ⏎ — the composer above is blank and
+          focused — so what survives is a receipt, not a copy: an indicator
+          that a plan is running and one click to go watch it. The prompt
+          rides as a tooltip and never as body text, because body text on this
+          surface reads as "still here, not sent yet", which is the whole
+          complaint this replaced.
+
+          Two SIBLING buttons, not a nested one: "go watch it" and "stop
+          showing me this" are different actions, and a button inside a button
+          is invalid HTML that swallows one of them. */}
+      {pending && (
+        <div className="rl-fd-flight" title={pending.prompt}>
+          <button
+            type="button"
+            className="rl-fd-flight-open"
+            onClick={onRevealPending}
+            // No `title` of its own, deliberately: a tooltip here would mask
+            // the wrapper's, and the wrapper's is the prompt — the one thing
+            // you might actually want to check. The visible label already
+            // says where the click goes.
+            aria-label="Show the terminal this plan is running in"
+          >
+            <WorkingIndicator
+              compact
+              label="Planning"
+              startedAt={pending.startedAt}
+            />
+            <span className="rl-fd-detail">in the terminal ↓</span>
+          </button>
+          <button
+            type="button"
+            className="rl-fd-x"
+            onClick={onCancelPending}
+            title="Dismiss — the plan keeps running"
+            aria-label="Dismiss the in-flight indicator"
+          >
+            <X size={11} />
+          </button>
+        </div>
+      )}
 
       {/* Orbit: everything secondary fades against the island rather than
           shifting it. The chips retire the moment there is a sentence to
@@ -747,43 +946,6 @@ export function FrontDoor(props: FrontDoorProps) {
   );
 }
 
-/** After ⏎ the island doesn't disappear — it becomes this. The prompt as
- *  submitted, a live indicator, and where to watch it, so the hero never sits
- *  there looking unchanged while a terminal quietly scrolls. This is also
- *  where the 90s `/hooks` nudge lands — the one failure with no other signal
- *  at all. */
-function PlanningCard({
-  pending,
-  onCancel,
-  readiness,
-  onFix,
-}: {
-  pending: { prompt: string; startedAt: number };
-  onCancel: () => void;
-  readiness: ReadinessItem[];
-  onFix: (item: ReadinessItem) => Promise<boolean>;
-}) {
-  const nudge = readiness.find((i) => i.id === "hook-unapproved");
-  return (
-    <div className="rl-fd-morph">
-      <div className="rl-fd-planning-prompt">{pending.prompt}</div>
-      <div className="rl-fd-tools">
-        <WorkingIndicator label="Planning" startedAt={pending.startedAt} />
-        <span className="rl-fd-detail">watch it in the terminal below ↓</span>
-        <div style={{ flex: 1 }} />
-        <button type="button" className="rl-fd-quiet" onClick={onCancel}>
-          start something else
-        </button>
-      </div>
-      {nudge && (
-        <div className="rl-fd-block">
-          <ReadinessStrip items={[nudge]} onFix={onFix} />
-        </div>
-      )}
-    </div>
-  );
-}
-
 const DESTINATIONS: { id: LaunchDestination; label: string; chip: string }[] = [
   { id: "plan", label: "Plan a build", chip: "Plan" },
   { id: "drafter", label: "Draft a document first", chip: "Draft" },
@@ -864,6 +1026,184 @@ function PlanMenu({
     </div>
   );
 }
+
+/** `Claude ▾` / `Codex · GPT-5.6-Sol · xhigh ▾` — which harness ⏎ launches on.
+ *
+ *  Deliberately a SECOND control beside `Plan ▾` rather than more rows inside
+ *  it: that menu answers "where does this go", this one answers "who does it",
+ *  and folding two independent axes into one popover is how a picker becomes
+ *  a settings screen. Sticky the same way, for the same reason.
+ *
+ *  "Harness" is the word on screen and nowhere else — every identifier here is
+ *  `backend`, because the repo already spends *harness* on three other things.
+ *
+ *  Claude's options come from `seatAssign.ts` (the frontend source of truth
+ *  the Agent Seats chart also reads); Codex's are fetched live, so the model
+ *  list can't go stale behind an app update. Picking a model whose efforts
+ *  don't include the current one drops the effort rather than launching a
+ *  command that dies at the first token — `normalizeChoice` owns that rule.
+ *
+ *  **Built on `useClickPopover`/`Panel`, not on `.rl-fd-menu`.** Its siblings
+ *  are three or four rows and fit above the composer by luck; this one stacks
+ *  three sections (harness + up to nine models + up to seven efforts) and
+ *  cannot. An absolutely-positioned `bottom: 100%` menu with a `56vh` cap is
+ *  quoting a fraction of the WINDOW, which has nothing to do with the room
+ *  above the chip — so it ran off the top of the screen and the Harness rows,
+ *  rendered first, became unreachable. `placeOver` measures the room that is
+ *  actually there and hands it back as `maxHeight`; the panel portals to
+ *  `document.body`, so no ancestor's clip can cut it either. The glass look of
+ *  the door's other menus is restored through `style` — Panel spreads it last. */
+function BackendMenu({
+  choice,
+  onChange,
+  codexModels,
+  onOpen,
+  compact,
+}: {
+  choice: BackendChoice;
+  onChange: (next: BackendChoice) => void;
+  codexModels: CodexModel[];
+  onOpen: () => void;
+  compact: boolean;
+}) {
+  const btnRef = useRef<HTMLButtonElement | null>(null);
+  // "above": the chip sits on the composer's bottom toolbar. `placeOver`
+  // still flips below on its own if the door is squeezed against the top.
+  // Stays open across picks, like `ChatRoom`'s ModelChip and unlike
+  // `PlanMenu`: this menu has THREE axes, and choosing a harness usually means
+  // choosing its model next. Outside-click and Escape dismiss it (`useDismiss`,
+  // inside the hook).
+  const { open, panelProps, toggle } = useClickPopover(btnRef, "left", "above");
+
+  const models = modelsFor(choice.backend, codexModels);
+  const efforts = effortsFor(choice.backend, choice.model, codexModels);
+  const set = (next: BackendChoice) => onChange(normalizeChoice(next, codexModels));
+  const full = choiceLabel(choice, codexModels);
+  // The chip narrows before the composer does: in a squeezed pane the harness
+  // is the part you still need to see, the effort is not.
+  const label = compact ? backendLabel(choice.backend) : full;
+
+  const row = (
+    key: string,
+    on: boolean,
+    text: string,
+    onClick: () => void,
+    extra?: { title?: string; disabled?: boolean },
+  ) => (
+    <button
+      key={key}
+      type="button"
+      role="menuitem"
+      disabled={extra?.disabled}
+      title={extra?.title}
+      className={`rl-fd-menu-row${on ? " is-on" : ""}`}
+      onClick={onClick}
+    >
+      <span className="rl-fd-menu-name">
+        <Check
+          size={12}
+          className="rl-fd-menu-tick"
+          style={{ opacity: on ? 1 : 0 }}
+        />
+        {text}
+      </span>
+    </button>
+  );
+
+  return (
+    <>
+      <div data-no-drag="true">
+        <button
+          type="button"
+          ref={btnRef}
+          onClick={() => {
+            if (!open) onOpen();
+            toggle();
+          }}
+          title={`⏎ launches on ${full}`}
+          aria-haspopup="menu"
+          aria-expanded={open}
+          className="rl-fd-tool is-wide"
+        >
+          {label} <span className="rl-fd-caret">▾</span>
+        </button>
+      </div>
+      {open && (
+        <Panel
+          label="Harness"
+          {...panelProps}
+          style={{ ...panelProps.style, ...MENU_GLASS }}
+        >
+          {/* The scroller, not the Panel, takes the overflow — `maxHeight` is
+              only a real bound in a flex column with a `minHeight: 0` child. */}
+          <div
+            className="rl-thin-scroll-y"
+            style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", padding: 5 }}
+          >
+            <div className="rl-fd-menu-label">Harness</div>
+            {BACKENDS.map((b) =>
+              row(b.id, b.id === choice.backend, b.label, () =>
+                // Switching harness drops the model and effort: a Claude alias
+                // is not a Codex slug, and `normalizeChoice` says so.
+                set({ backend: b.id, model: null, effort: null }),
+              ),
+            )}
+
+            <div className="rl-fd-menu-sep" aria-hidden />
+            <div className="rl-fd-menu-label">Model</div>
+            {row("model-default", !choice.model, "Default", () =>
+              set({ ...choice, model: null, effort: null }),
+            )}
+            {models.map((m) =>
+              // The description rides as a tooltip rather than a second column:
+              // truncated to a menu's width it reads as noise, and the row's
+              // job is to be clickable.
+              row(m.value, m.value === choice.model, m.label, () => set({ ...choice, model: m.value }), {
+                title: m.hint,
+              }),
+            )}
+            {choice.backend === "codex" && models.length === 0 && (
+              // Not an error row: the catalog is fetched on open, and a codex
+              // that can't answer still launches fine on its own default model.
+              <div className="rl-fd-menu-note">Reading the Codex model list…</div>
+            )}
+
+            <div className="rl-fd-menu-sep" aria-hidden />
+            <div className="rl-fd-menu-label">Effort</div>
+            {row("effort-default", !choice.effort, "Default", () =>
+              set({ ...choice, effort: null }),
+            )}
+            {efforts.map((e) =>
+              row(e, e === choice.effort, e, () => set({ ...choice, effort: e }), {
+                // Codex advertises efforts per MODEL, so there is nothing to
+                // offer until one is picked — hence the disable rather than a
+                // list that would be wrong for whatever gets chosen next.
+                disabled: choice.backend === "codex" && !choice.model,
+                title:
+                  choice.backend === "codex" && !choice.model
+                    ? "Pick a Codex model first — efforts differ per model"
+                    : undefined,
+              }),
+            )}
+          </div>
+        </Panel>
+      )}
+    </>
+  );
+}
+
+/** The door's menus are glass slabs, not the app's solid dropdowns. `Panel`
+ *  owns placement and the flex column; this is the appearance it spreads last,
+ *  lifted verbatim from `.rl-fd-menu` so the two can't look different. */
+const MENU_GLASS: React.CSSProperties = {
+  padding: 0,
+  borderRadius: 12,
+  border: "1px solid color-mix(in srgb, var(--color-ink) 14%, transparent)",
+  background: "color-mix(in srgb, var(--color-bg-elevated) 90%, transparent)",
+  WebkitBackdropFilter: "blur(24px) saturate(160%)",
+  backdropFilter: "blur(24px) saturate(160%)",
+  boxShadow: "0 16px 40px -16px rgba(0, 0, 0, 0.7)",
+};
 
 /** The first-run hole this closes: `projectOptions` is derived entirely from
  *  existing sessions and open folders, so a genuine first run has none and
