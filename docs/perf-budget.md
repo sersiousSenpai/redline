@@ -337,3 +337,38 @@ ratcheted ceilings): binary 25.66 MB, mcp proxy 1.50 MB, boot-path JS
 `release.yml` makes in CI. Re-measured after the B3 wasmi host landed:
 binary 25.49 MB, boot-path JS 1.13 MB (Extensions panel), mcp 1.50 MB,
 dist 7.74 MB — all green, ceilings untouched.
+
+Re-measured 2026-09-07 (docs/polis-extraction.md, A7): main @ ba3b8cf
+**30.54 MB** locally and 30.39 MB on CI's `size.yml` — over the 28 MB
+ceiling before the Polis extraction began; the extraction branch adds
+~0.54 MB (A1–A6) plus 16 KB for the git dependency. The ceiling is not
+loosened; a lever list for main's overage is owed its own session.
+
+## Memory latency budget
+
+The memory system (Polis Memory, linked from
+https://github.com/sersiousSenpai/polis-memory since docs/polis-extraction.md
+A7) carries its own latency budget, stated in the plan's §6.1 and kept in the
+new repo's `docs/bench.md` beside the measured baseline. The same table lives
+here so a Redline change that lands on a memory path (a surface calling the
+answer pack on every keystroke, a route added in front of it) is measured
+against the same numbers. Instruments: `tracing::info_span!` with `ms` on
+every retrieval arm and route, a per-op latency ring exposed on
+`GET /v1/context/stats` (`latency: [{op, n, p50Ms, p95Ms, maxMs}]`), criterion
+benches over a seeded synthetic corpus, and a real-DB instrument
+(`POLIS_REAL_DB=<copy>`) that prints p50/p95 per op.
+
+| Operation | Corpus | p50 | p95 |
+|---|---|---|---|
+| ingest | any | < 5 ms | < 20 ms |
+| answer pack warm / cold | 10k prompts | < 50 / < 300 ms | < 200 / < 800 ms |
+| semantic search alone | 100k chunks | < 60 ms | < 120 ms |
+| grep (trigram) | 10k | < 30 ms | < 100 ms |
+| MCP `memory_context` round-trip | 10k | < 100 ms | < 300 ms |
+| canary set (200 packs) | real DB | < 3 s | < 8 s |
+| organize per item / per run | any | < 3 s / p50 < 20 s | p90 < 60 s |
+| embed one chunk (model2vec) | — | < 1 ms | — |
+
+A Redline path that calls into the memory (the sidecar's class-router reads,
+Memory Ask, the Companion's consults) inherits these rows; anything new that
+sits in front of them is budgeted as its own row here, with a measurement.
