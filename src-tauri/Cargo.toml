@@ -30,6 +30,7 @@ members = [
     "crates/polis/polis-store",
     "crates/polis/polis-embed",
     "crates/polis/polis-llm",
+    "crates/polis/polis-memory",
 ]
 default-members = [
     ".",
@@ -40,6 +41,7 @@ default-members = [
     "crates/polis/polis-store",
     "crates/polis/polis-embed",
     "crates/polis/polis-llm",
+    "crates/polis/polis-memory",
 ]
 
 [lib]
@@ -134,6 +136,9 @@ polis-embed = { path = "crates/polis/polis-embed", features = ["apple"] }
 # The Agent trait the memory seats speak (A4). Default features only: the
 # CLI backends; the HTTP backends would add a second reqwest to this graph.
 polis-llm = { path = "crates/polis/polis-llm" }
+# THE crate an integrator adds (A5): the Polis handle, retrieval, the gardener,
+# export, the mirror. `apple` = the on-device embedder this app has always used.
+polis-memory = { path = "crates/polis/polis-memory", features = ["apple"] }
 # Deflate for the compaction archive (`prompt_archive`): a cold compaction
 # releases a body at ~59:1 and used to be irrecoverable. Already present in the
 # dependency tree (via `png` → `tauri-utils`), so naming it here is a visibility

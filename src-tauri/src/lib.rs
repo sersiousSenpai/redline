@@ -5540,7 +5540,6 @@ async fn handle_code_git(
 /// total link count (leaf-count badge).
 // The tree/link view rows are `polis-core` API types (Session A1 of the Polis
 // extraction) — the same shape the MCP tools and the generated clients read.
-use polis_core::api::{LinkView, TreeNodeView};
 
 #[derive(Deserialize)]
 struct MemoryTreeQ {
@@ -5556,58 +5555,17 @@ async fn handle_memory_tree(
     Query(q): Query<MemoryTreeQ>,
 ) -> axum::response::Response {
     let db = app_state.store.database();
-    let all = match db.list_class_nodes_with_counts() {
-        Ok(v) => v,
-        Err(e) => return browser_error_response(e.to_string()),
-    };
-    // Resolve an optional root filter (explicit root id, or the root bound to a
-    // project path).
-    let root_id: Option<String> = if let Some(r) = q.root.as_deref().filter(|s| !s.trim().is_empty()) {
-        Some(r.trim().to_string())
-    } else if let Some(p) = q.project.as_deref().filter(|s| !s.trim().is_empty()) {
-        all.iter()
-            .find(|(n, _)| n.parent_id.is_none() && n.project_path.as_deref() == Some(p.trim()))
-            .map(|(n, _)| n.id.clone())
-    } else {
-        None
-    };
-    let views: Vec<TreeNodeView> = match &root_id {
-        Some(rid) => {
-            // Keep the root and its descendants.
-            let keep = subtree_ids(&all, rid);
-            all.into_iter()
-                .filter(|(n, _)| keep.contains(&n.id))
-                .map(|(node, link_count)| TreeNodeView { node, link_count })
-                .collect()
-        }
-        None => all
-            .into_iter()
-            .map(|(node, link_count)| TreeNodeView { node, link_count })
-            .collect(),
-    };
-    Json(serde_json::json!({ "nodes": views })).into_response()
+    match polis_memory::retrieval::tree_view(
+        &polis_host::polis_for(&db),
+        q.root.as_deref(),
+        q.project.as_deref(),
+    ) {
+        Ok(views) => Json(serde_json::json!({ "nodes": views })).into_response(),
+        Err(e) => browser_error_response(e.to_string()),
+    }
 }
 
 /// Ids of `root` and everything beneath it.
-fn subtree_ids(all: &[(crate::classmem::ClassNode, i64)], root: &str) -> std::collections::HashSet<String> {
-    let mut keep = std::collections::HashSet::new();
-    keep.insert(root.to_string());
-    // Iterate to a fixpoint (tree is small).
-    loop {
-        let before = keep.len();
-        for (n, _) in all {
-            if let Some(p) = &n.parent_id {
-                if keep.contains(p) {
-                    keep.insert(n.id.clone());
-                }
-            }
-        }
-        if keep.len() == before {
-            break;
-        }
-    }
-    keep
-}
 
 /// A link with a resolved display label + supersession status.
 
@@ -5618,44 +5576,12 @@ fn build_node_view(
     db: &crate::db::Database,
     id: &str,
 ) -> Result<Option<serde_json::Value>, String> {
-    let Some(node) = db.get_class_node(id).map_err(|e| e.to_string())? else {
-        return Ok(None);
-    };
-    // Children straight off the parent index — never "read every node, then
-    // filter"; the class table grows with the catalog.
-    let children = db.list_class_children(id).map_err(|e| e.to_string())?;
-    let raw_links = db.list_class_links_for_node(id).map_err(|e| e.to_string())?;
-    let ledger_seq = |l: &crate::classmem::ClassLink| -> Option<i64> {
-        matches!(l.target_kind.as_str(), "prompt" | "decision" | "ledger")
-            .then(|| l.target_id.trim().parse().ok())
-            .flatten()
-    };
-    let seqs: Vec<i64> = raw_links.iter().filter_map(&ledger_seq).collect();
-    // Two batched reads for the whole link set — the per-link `link_preview`
-    // took the connection mutex once per link, so a hundred-link node was a
-    // hundred round trips through the shared lock.
-    let labels = db.link_previews_for_seqs(&seqs).unwrap_or_default();
-    let superseded = db.supersessions_for_seqs(&seqs).unwrap_or_default();
-    let links: Vec<LinkView> = raw_links
-        .into_iter()
-        .map(|link| {
-            let seq = ledger_seq(&link);
-            LinkView {
-                label: seq.and_then(|s| labels.get(&s).cloned()),
-                superseded_by: seq.and_then(|s| superseded.get(&s).copied()),
-                link,
-            }
-        })
-        .collect();
-    let observations = db
-        .list_class_observations(id, false)
-        .map_err(|e| e.to_string())?;
-    Ok(Some(serde_json::json!({
-        "node": node,
-        "children": children,
-        "links": links,
-        "observations": observations,
-    })))
+    // The view is the facade's (`polis_memory::retrieval::node_view`, the
+    // same `NodeView` the MCP tools serve); the command's JSON shape is its
+    // serialization.
+    polis_memory::retrieval::node_view(&polis_host::polis_for(db), id)
+        .map(|v| v.map(|n| serde_json::to_value(n).unwrap_or(serde_json::Value::Null)))
+        .map_err(|e| e.to_string())
 }
 
 /// `GET /v1/memory/node/:id` — one node, its children, its links (pointers
@@ -11966,12 +11892,14 @@ fn memory_notes_list(
 
 /// The class tree (flat + link counts); the FE builds the hierarchy.
 #[tauri::command]
-fn classmem_tree(store: tauri::State<'_, SessionStore>) -> Result<Vec<TreeNodeView>, String> {
+fn classmem_tree(
+    store: tauri::State<'_, SessionStore>,
+) -> Result<Vec<polis_core::api::TreeNodeView>, String> {
     let db = store.database();
     let rows = db.list_class_nodes_with_counts().map_err(|e| e.to_string())?;
     Ok(rows
         .into_iter()
-        .map(|(node, link_count)| TreeNodeView { node, link_count })
+        .map(|(node, link_count)| polis_core::api::TreeNodeView { node, link_count })
         .collect())
 }
 
@@ -13183,6 +13111,8 @@ pub fn run() {
             db::install_friction_sink(store.database());
             // The memory seats' agent (Session A4 of the Polis extraction).
             polis_host::install_agent(Arc::new(polis_host::RedlineAgent));
+            // The owned handle (`MemoryApi`) for the router and the MCP mount (A6).
+            polis_host::install_polis(store.database());
 
             // Run watchers for the Orchestration Monitor. Rehydrate one per
             // still-live orchestrated run — the durable `orchestrations`

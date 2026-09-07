@@ -200,11 +200,61 @@ pass through `Agent`, and every exit books through the sink. Error strings
 are seat-named (`keeper produced no output`, was `summarizer …`; nothing
 asserted on it). `ledger.rs`'s guard-arming scrape includes `polis_host.rs`.
 
+## Session A5 — `polis-memory`, the facade (built 2026-09-07)
+
+The memory logic leaves the host. What moved, by module, verbatim except for
+the receiver and `crate::` paths:
+
+| Facade module | Lifted from | Items |
+|---|---|---|
+| `organize` | `classmem.rs` | seeding (`GENERAL_ROOT_ID`, `root_id_for_path`, `seed_root_rows`), `stage_proposals`, the classifier prompt (`build_classifier_prompt`, `render_catalog_snapshot`, the head/tail clippers), `OrganizeOutcome`, `organize_once`, the supersede verifier (`build_supersede_verifier_prompt`, `verify_supersede_proposals`) + 5 tests |
+| `gardener` | `keeper.rs` | the memory constants, `is_idle`, compaction (`PromptCand`, `group_candidates`, `pin_protected_nodes`, `select_compaction_candidates`, `build_keeper_prompt`, `parse_compaction_actions`, `compaction_pass`), observations (`select_observation_nodes`, `build_observations_prompt`, `parse_observations`, `observations_pass`) + 9 tests; NEW `GardenerConfig` / `GardenerState` / `Gate` / `StepOutcome` / `step` — the tick that lived in `keeper::spawn` (idle → debounce → growth → organize → compact → every-Nth observe → events), plus the semantic index on its own cadence (the retired `embedding-index` watch) |
+| `retrieval` | `context.rs` + `lib.rs` | `clamp_prompt_limit`, `list_prompts`, `build_stats(_cached)`, `build_memory_map`, `build_answer_pack`, `build_thread_tree`; NEW `query_ledger` (store rows + the host's `surface_shot_keys`), `tree_view` / `subtree_ids` / `node_view` (the tree and node routes' assembly, once, for the router, the MCP tools and the commands) |
+| `bundle` | `bundle.rs` | `build_bundle`, `full_tree`, `ClassKeep`, `class_scope` |
+| `mirror` | `mirror.rs` | everything: `note_for`, `collect_notes`, `sync`, `rebuild`, `status`, the settings (now `polis.mirror.dir` / `polis.mirror.lastSeq` in `polis_meta`) |
+| `agent` | new | `run_memory_agent` (one seam: agent → sink on both exits), `run_classifier`, `run_keeper_summarizer`, `NO_MODEL` |
+| `skill` | `skills/classmemory/SKILL.md` (`git mv` to the staging tree) | `CLASSMEMORY_SKILL` — one file, included by both crates; the text still names the host's bridge (E1 templates it) |
+| `lib` | new | `Polis<'a>` (store + `Option<Agent>` + `HostResolver` + `UsageSink` + `Option<Embedder>`) with the host seams spelled as the moved bodies call them (`get_setting` → `polis_meta`, `list_project_paths` → `project_roots`, `thread_stats`/`thread_label`, `revision_markdown`, `decision_event_context` → `decision_evidence`, `reject_class_proposal` → store delete + log, `query_ledger_events` → store + shot join); `PolisHandle` (owned) implementing **`MemoryApi`** end to end: search, grep, tree, node, prompts, timeline, stats, map, verify, remember (prompt row or standalone note), ingest (`record_prompt_at` with the item's clock, dedup on `(body_hash, run)`), annotate, forget (`confirm: "forget"`, prompts only until E2), supersede, stage_proposals |
+
+`polis-store` gained `record.rs` (the A3 item deferred): `ThreadRef`, `PromptInput`,
+`record_prompt` / `record_prompt_at`, `BrowseAction`, `BrowseEventInput`,
+`record_browse_event`, `record_revision_event`, `DecisionInput`,
+`record_decision`, `record_session_link`, `record_work_event`,
+`record_moot_turn`, `resolve_parent`, and the catalog writers
+`record_curate` / `revert_link` / `record_reorg` — the default author is the
+store's. `query_ledger_events` moved to the store minus its `surface_shots`
+join; `HostResolver::surface_shot_keys` (default: none) is the host half.
+`polis_core::ledger::PromptSource::Api` names what `remember`/`ingest` write.
+
+**Host side.** `Database` implements `HostResolver` and `UsageSink` itself
+(`polis_host.rs`); `polis_for(&db)` builds the borrowed view every shim uses,
+and `install_polis` stores the owned handle for A6. `Database.polis` is an
+`Arc<PolisStore>` so the handle can share it. `keeper::spawn` keeps the watch
+bus and calls `gardener::step` for the memory passes; the `embedding-index`
+watch is gone (the step owns the cadence). Every Redline module keeps
+signature-preserving shims over `polis_for` (20 of them) so no command,
+route or test changed; the shims nothing calls any more were deleted, and the
+ones only tests call are `#[cfg(test)]`. `meta::adopt_legacy` copies six keys
+on first attach (the two versions + the four settings above).
+
+**Stayed on the host, on purpose:** `build_digest` / `render_digest_prompt_block`
+and `build_session_history` (friction and plan history are Redline's),
+`record_agent_prompt` (arms the hook guard) and `record_review_verdict`
+(writes a host setting), `provider_for` (setting-driven provider selection),
+the watch bus, the friction row on a refuted proposal (the B2 journal is its
+successor — the facade logs the refusal).
+
+**Gates.** `real_db_gardener_ticks_behave` (`REDLINE_REAL_DB`): twenty
+`gardener::step` ticks over a copy of the live database with no model — the
+gates evaluate, nothing errors, nothing lands on the chain, the chain stays
+green. `real_db_attach_is_a_noop` still passes (now `>= 2` keys adopted).
+`the_gates_hold_and_a_run_without_a_model_reports_no_model` pins the gate order
+and the R12 state on a fresh store.
+
 ## Sessions ahead
 
 | Session | Work | Gate |
 |---|---|---|
-| A5 | `polis-memory` facade: organize/verify over `&dyn Agent` + `HostResolver`, the retrieval half of `context.rs`, keeper memory passes as `gardener::step`, `bundle`/`mirror`, the `Polis` handle implementing `MemoryApi`, host-neutral `skills/classmemory/SKILL.md` | 20 keeper ticks on a real-DB copy behave as before |
 | A6 | `polis-server`: router over `dyn MemoryApi` + `ROUTES` + ingest/`IngestObserver` + hook installer; Redline merges it, `auth.rs` shrinks by the 11 memory rows, `docs/api-v1.md` regenerates | drift + parity tests green |
 | A7 | Guards (`core_has_no_native_deps_by_default`, `polis_deps_stay_lean`) + `git filter-repo` extraction → `polis-memory` repo; Redline on the git rev | Redline ≤ 27.4 MB from the git dep; new-repo CI green on 3 OSes |
 
@@ -216,6 +266,8 @@ cargo test -p polis-core                         # 41 tests, no I/O
 cargo test -p polis-store                        # 9 tests: attach, adoption, WAL, cross-process append
 cargo build -p polis-embed --features apple      # the on-device providers (macOS)
 cargo test -p polis-llm --features anthropic,openai-compat   # every backend
+cargo test -p polis-memory --features apple      # the facade, the handle's MemoryApi, the gardener's gates
+REDLINE_REAL_DB=/tmp/real.db cargo test -p redline --lib real_db_gardener -- --ignored --nocapture
 cargo test -p redline --test polis_store_guard   # Deref method-name guard
 REDLINE_REAL_DB=/tmp/real.db cargo test -p redline --lib real_db_attach -- --ignored --nocapture
 cargo test -p redline --test schema_golden       # the DDL referee

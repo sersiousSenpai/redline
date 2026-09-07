@@ -40,6 +40,9 @@ pub enum PromptSource {
     RustFirstTurn,
     /// The voice agent's stdin-delivered first-turn prompt.
     VoiceStream,
+    /// Handed to Polis directly — `remember` / `ingest` over the API or MCP —
+    /// rather than captured from a session.
+    Api,
 }
 
 impl PromptSource {
@@ -49,6 +52,7 @@ impl PromptSource {
             PromptSource::DrafterLaunch => "drafter_launch",
             PromptSource::RustFirstTurn => "rust_firstturn",
             PromptSource::VoiceStream => "voice_stream",
+            PromptSource::Api => "api",
         }
     }
 }

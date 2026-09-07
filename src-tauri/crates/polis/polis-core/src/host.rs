@@ -35,6 +35,13 @@ pub trait HostResolver: Send + Sync {
     /// The evidence behind a decision event — the comment text, the
     /// annotation, the revision digest — rendered for a prompt or a pack.
     fn decision_evidence(&self, seq: i64) -> Option<String>;
+    /// Pictures the host took of its OWN surfaces, keyed by the ledger seq
+    /// they record — the Timeline joins them onto its rows. A host with no
+    /// pictures answers nothing.
+    fn surface_shot_keys(&self, seqs: &[i64]) -> Vec<(i64, String)> {
+        let _ = seqs;
+        Vec::new()
+    }
 }
 
 /// When the user was last active, so the gardener runs in the gaps. A host

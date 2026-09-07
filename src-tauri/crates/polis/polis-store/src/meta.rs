@@ -30,6 +30,19 @@ pub const STORE_SCHEMA_VERSION: &str = "1";
 pub const LEGACY_LEXICAL_KEY: &str = "redline.memory.lexicalVersion";
 pub const LEGACY_CORPUS_ROLE_KEY: &str = "redline.memory.corpusRoleVersion";
 
+/// Every `(host key, ours)` pair adoption copies: the two versions, and the
+/// four memory settings that moved out of `app_settings` with their code in
+/// Session A5 (the organize gate, the observation counter, the mirror's
+/// directory and high-water mark).
+pub const LEGACY_PAIRS: &[(&str, &str)] = &[
+    (LEGACY_LEXICAL_KEY, LEXICAL_VERSION_KEY),
+    (LEGACY_CORPUS_ROLE_KEY, CORPUS_ROLE_VERSION_KEY),
+    ("redline.classmem.autoApply", "polis.classmem.autoApply"),
+    ("redline.keeper.observeCounter", "polis.keeper.observeCounter"),
+    ("redline.mirrorDir", "polis.mirror.dir"),
+    ("redline.mirror.lastSeq", "polis.mirror.lastSeq"),
+];
+
 pub fn ensure_table(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS polis_meta (
@@ -86,17 +99,14 @@ pub fn adopt_legacy(conn: &Connection, settings_table: &str) -> rusqlite::Result
         return Ok(0);
     }
     let mut adopted = 0;
-    for (legacy, ours) in [
-        (LEGACY_LEXICAL_KEY, LEXICAL_VERSION_KEY),
-        (LEGACY_CORPUS_ROLE_KEY, CORPUS_ROLE_VERSION_KEY),
-    ] {
+    for (legacy, ours) in LEGACY_PAIRS {
         if get(conn, ours)?.is_some() {
             continue;
         }
         let legacy_value: Option<String> = conn
             .query_row(
                 &format!("SELECT value FROM {settings_table} WHERE key = ?1"),
-                params![legacy],
+                params![*legacy],
                 |r| r.get(0),
             )
             .optional()?;

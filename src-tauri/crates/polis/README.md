@@ -24,7 +24,7 @@ Same convention as `marketplace/`: the workflows under `.github/` here are
 | `polis-llm` | **A4 · built** | `Agent` trait + `Usage`/`UsageSink`; backends `ClaudeCli` (stream-json) and `CodexCli` (`exec --json`) by default, `AnthropicApi` and `OpenAiCompat` behind features; the `StreamLine` classifier every Redline surface reads with | `polis-core`, `async-trait`, `tokio` (process); features add `reqwest` |
 | `polis-server` | A6 | axum router over `Arc<dyn MemoryApi>`, the `ROUTES` table (source of `api-v1.md` and the generated clients), ingest + `IngestObserver`, capture-hook installer | `polis-core`, `axum` |
 | `polis-mcp` | E1 | rmcp server over `Arc<dyn MemoryApi>` (stdio + streamable HTTP) | `polis-core`, `rmcp` |
-| `polis-memory` | A5 | THE crate integrators add: the `Polis` handle implementing `MemoryApi`, retrieval, the gardener, host traits; `cli` feature adds the `polis` binary | re-exports the above |
+| `polis-memory` | **A5 · built** (E1 adds `cli`) | THE crate integrators add: `Polis` (borrowed view) + `PolisHandle` (owned, implements `MemoryApi`), retrieval (answer pack, timeline, map, tree/node views), the organizer and the gardener's `step` (organize, compaction, observations, the semantic index), bundle export, the markdown mirror, the `classmemory` skill | re-exports the four crates above; `apple` → `polis-embed/apple` |
 
 What Redline links stays exactly what it links today: `polis-memory` with
 `default-features = false` and the `gardener` + `embed-apple` features on

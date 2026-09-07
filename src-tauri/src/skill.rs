@@ -105,7 +105,9 @@ const SKILLS: &[EmbeddedSkill] = &[
     EmbeddedSkill {
         name: "classmemory",
         version: 4,
-        content: include_str!("../../skills/classmemory/SKILL.md"),
+        // The classmemory skill ships with polis-memory (Session A5 of the Polis
+        // extraction); one file, included from the staging tree.
+        content: include_str!("../crates/polis/skills/classmemory/SKILL.md"),
     },
     EmbeddedSkill {
         name: "librarian",

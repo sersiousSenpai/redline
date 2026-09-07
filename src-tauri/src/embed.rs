@@ -155,21 +155,3 @@ pub fn provider_for(db: &crate::db::Database) -> Option<Arc<dyn Embedder>> {
     }
     provider()
 }
-
-/// Nearest targets to `query` by cosine, best first — with the provider this
-/// host selected (`provider_for`). `None` when no provider is configured: the
-/// arm is ABSENT, not empty.
-pub fn semantic_search(
-    db: &crate::db::Database,
-    query: &str,
-    limit: usize,
-) -> Option<Vec<SemanticHit>> {
-    let provider = provider_for(db)?;
-    polis_embed::semantic_search(db, &*provider, query, limit)
-}
-
-/// Embed one tick's worth of backlog with the provider this host selected.
-pub fn index_tick(db: &crate::db::Database, max_targets: usize) -> usize {
-    let Some(provider) = provider_for(db) else { return 0 };
-    polis_embed::index_tick(db, &*provider, max_targets)
-}

@@ -5,4 +5,5 @@
 //! (docs/polis-extraction.md). This shim keeps every `crate::dedup::…` path
 //! compiling unchanged.
 
+#[allow(unused_imports)]
 pub use polis_core::dedup::*;

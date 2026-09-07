@@ -31,6 +31,7 @@ pub mod search;
 pub mod chain;
 pub mod compaction;
 pub mod prompts;
+pub mod record;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
