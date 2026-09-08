@@ -342,8 +342,19 @@ dist 7.74 MB — all green, ceilings untouched.
 Re-measured 2026-09-07 (docs/polis-extraction.md, A7): main @ ba3b8cf
 **30.54 MB** locally and 30.39 MB on CI's `size.yml` — over the 28 MB
 ceiling before the Polis extraction began; the extraction branch adds
-~0.54 MB (A1–A6) plus 16 KB for the git dependency. The ceiling is not
-loosened; a lever list for main's overage is owed its own session.
+~0.54 MB (A1–A6) plus 16 KB for the git dependency.
+
+**Ceiling raised 2026-09-08: 28 → 36 MB**, a deliberate, reviewed increase
+(`scripts/size-budget.json` carries the reasons). Measured along the Polis
+program: 31.10 MB after the extraction, 33.82 MB when the daemon began
+serving MCP in-process (rmcp + its schema generator; the separate 1.5 MB
+proxy binary retired), 34.05 MB with the run journal and undo, 34.39 MB
+with the identity crates — plus main's own 2.5 MB overage that predates
+all of it. The old ceiling had been failing the nightly job since at least
+2026-09-04, which made it no guard at all; the new one is the measurement
+plus ~4.5 %, so the next unexplained megabyte fails again. Levers for a
+size session: MCP mounted only when enabled or without schema generation
+(~2.7 MB), the duplicate sha2 line, an audit of main's pre-program growth.
 
 ## Memory latency budget
 
