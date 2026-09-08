@@ -112,7 +112,7 @@ const SKILLS: &[EmbeddedSkill] = &[
     },
     EmbeddedSkill {
         name: "librarian",
-        version: 2,
+        version: 3,
         content: include_str!("../../skills/librarian/SKILL.md"),
     },
     EmbeddedSkill {
@@ -422,8 +422,8 @@ mod tests {
         // categories, on-demand-only, and the do-not-fabricate rule.
         for needle in [
             "checklist",
-            "held_proposal",
             "stalled_review",
+            "waiting for a run", // B3: the queue is a fact, never F1 friction
             "unstructured_backlog",
             "on-demand",
             "un_exported", // F6: real Phase-4 signal, now surfaced (was deferred)

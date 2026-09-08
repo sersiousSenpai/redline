@@ -39,10 +39,13 @@ import { rootMasses, type MemoryMapData } from "../lib/memoryMap";
 import { squarify } from "../lib/treemap";
 import {
   buildTree,
+  catalogHealthFields,
   OP_LABEL,
   proposalSubject,
+  queueLine,
   sortObservations,
   supersedeLabel,
+  type CatalogHealth,
   type ClassNode,
   type ClassRun,
   type LinkView,
@@ -81,14 +84,15 @@ import { ClassTreeRow, SettingsTab as PortabilitySections } from "./MemoryInspec
 // lake + catalog, whose citation chips drive the Timeline — see
 // MemoryAsk.tsx), the Timeline (faceted, searchable, grouped — including the
 // §1.5 trail view — over the whole hash-chained history via the cursor-paged
-// `ledger_query`), the Catalog (the class tree with the full curation
-// cockpit — the held-proposal review strip is the terminus of the keeper's
-// escalation channel: merges, uncertain collapses and supersessions queue
-// there instead of auto-applying), the Map (the record's shape under §3's
+// `ledger_query`), the Catalog (the class tree, read-only since B3 — the
+// gardener adjudicates on its own, its structural proposals sit in a work
+// queue "waiting for a run", and the RunTimeline's Undo is the one lever the
+// surface keeps), the Map (the record's shape under §3's
 // four rules — node clicks land back on the Timeline; see MemoryMap.tsx),
 // and Health (the status the pill compresses, rendered in full, the P6
-// Librarian attention strip — on-demand, advisory only — the catalog mass
-// treemap, plus the portability sections shared with the quick inspector).
+// Librarian attention strip — on-demand, advisory only — the gardener's
+// catalog health (§6.3), the catalog mass treemap, plus the portability
+// sections shared with the quick inspector).
 //
 // Styling follows the Agent Seats language (hero header with the corner glow,
 // hairline gradient seam, glow-dot markers, pill chips, paper-on-elevated
@@ -1290,42 +1294,12 @@ function TimelineTab({
 
 // --- Catalog ---------------------------------------------------------------
 
-/** The dead pane's mini action button, revived (small square, not a pill). */
-function ActionBtn({ label, title, onClick }: { label: string; title: string; onClick: () => void }) {
-  return (
-    <button
-      type="button"
-      title={title}
-      aria-label={title}
-      className="font-sans"
-      onClick={(e) => {
-        e.stopPropagation();
-        onClick();
-      }}
-      style={{
-        border: "1px solid var(--color-rule)",
-        borderRadius: 4,
-        background: "var(--color-bg-elevated)",
-        color: "var(--color-ink)",
-        cursor: "pointer",
-        fontSize: 11,
-        lineHeight: 1.2,
-        padding: "1px 6px",
-        flexShrink: 0,
-      }}
-    >
-      {label}
-    </button>
-  );
-}
 
-const AMBER = "#e0913a";
-
-type ActFn = (cmd: string, args: Record<string, unknown>) => void;
-
-/** One held structural proposal: op badge, subject, rationale, digest preview
- *  + citations (collapse), the seq pair (supersede), and accept/reject. */
-function ProposalCard({ p, now, onAct }: { p: ProposalView; now: number; onAct: ActFn }) {
+/** One row of the gardener's work queue (B3): op badge, subject, where it
+ *  sits in the queue (attempts so far, the run it waits for), rationale,
+ *  digest preview + citations (collapse), the seq pair (supersede). Read-only:
+ *  the gardener adjudicates it on its next run, and the run is what you undo. */
+function ProposalCard({ p, now }: { p: ProposalView; now: number }) {
   return (
     <div
       className="font-sans"
@@ -1369,8 +1343,9 @@ function ProposalCard({ p, now, onAct }: { p: ProposalView; now: number; onAct: 
           staged {relativeTime(p.createdAt, now)}
         </span>
         <div style={{ flex: 1 }} />
-        <ActionBtn label="✓ Accept" title="Apply this reorganization" onClick={() => onAct("classmem_accept_proposal", { id: p.id })} />
-        <ActionBtn label="✕ Reject" title="Drop this proposal (the rejection is recorded)" onClick={() => onAct("classmem_reject_proposal", { id: p.id })} />
+        <span style={{ fontSize: 11, color: "var(--color-ink-muted)", flexShrink: 0 }}>
+          {queueLine(p)}
+        </span>
       </div>
       {p.op === "supersede" && supersedeLabel(p.extraJson) && (
         <div style={{ fontSize: 12 }}>
@@ -1631,7 +1606,6 @@ function CatalogTab() {
   const [nodes, setNodes] = useState<ClassNode[]>([]);
   const [proposals, setProposals] = useState<ProposalView[]>([]);
   const [run, setRun] = useState<ClassRun | null>(null);
-  const [autoApply, setAutoApply] = useState(true);
   const [organizing, setOrganizing] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1666,26 +1640,16 @@ function CatalogTab() {
     }
   }, []);
 
-  // Curation actions reload the open node themselves; the tree/proposal lists
-  // refresh through the classmem-changed event every action emits.
-  const act = useCallback<ActFn>(
-    async (cmd, args) => {
-      try {
-        await invoke(cmd, args);
-        if (selected) void openNode(selected);
-      } catch (e) {
-        setError(String(e));
-      }
-    },
-    [selected, openNode],
-  );
-
+  // The tree, the queue and the open node all refresh through the
+  // classmem-changed event every gardener write (and every Undo) emits.
   useEffect(() => {
     void load();
-    void invoke<boolean>("classmem_get_auto_apply").then(setAutoApply).catch(() => {});
-    const un = listen("classmem-changed", () => void load());
+    const un = listen("classmem-changed", () => {
+      void load();
+      if (selected) void openNode(selected);
+    });
     return () => void un.then((f) => f());
-  }, [load]);
+  }, [load, selected, openNode]);
 
   const organize = useCallback(async () => {
     setOrganizing(true);
@@ -1699,24 +1663,6 @@ function CatalogTab() {
       setOrganizing(false);
     }
   }, []);
-
-  const toggleAutoApply = useCallback(async () => {
-    const next = !autoApply;
-    setAutoApply(next);
-    try {
-      await invoke("classmem_set_auto_apply", { enabled: next });
-    } catch {
-      setAutoApply(!next); // revert on failure
-    }
-  }, [autoApply]);
-
-  const rename = useCallback(
-    (node: TreeNode | ClassNode) => {
-      const title = window.prompt("Rename class", node.title);
-      if (title && title.trim()) act("classmem_rename_node", { id: node.id, title: title.trim() });
-    },
-    [act],
-  );
 
   const tree = useMemo(() => buildTree(nodes), [nodes]);
   const selectedNode = selected ? nodes.find((n) => n.id === selected) : undefined;
@@ -1742,42 +1688,6 @@ function CatalogTab() {
     setCollapsedIds(withChildren);
   };
 
-  // The per-row trailing cluster injected into the shared tree rows: proposed
-  // classes get their verdict buttons; accepted ones get pin + rename.
-  const rowActions = useCallback(
-    (n: TreeNode) => (
-      <span style={{ display: "inline-flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
-        {n.status === "proposed" ? (
-          <>
-            <span
-              style={{
-                fontSize: 10,
-                padding: "0 6px",
-                borderRadius: 999,
-                color: "#fff",
-                background: AMBER,
-              }}
-            >
-              proposed
-            </span>
-            <ActionBtn label="✓" title="Accept class" onClick={() => act("classmem_accept_node", { id: n.id })} />
-            <ActionBtn label="✕" title="Reject class" onClick={() => act("classmem_reject_node", { id: n.id })} />
-          </>
-        ) : (
-          <>
-            <ActionBtn
-              label={n.pinned ? "📌" : "📍"}
-              title={n.pinned ? "Unpin" : "Pin (anti-decay)"}
-              onClick={() => act("classmem_pin_node", { id: n.id, pinned: !n.pinned })}
-            />
-            <ActionBtn label="✎" title="Rename class" onClick={() => rename(n)} />
-          </>
-        )}
-      </span>
-    ),
-    [act, rename],
-  );
-
   const now = Date.now();
   const treeCtlBtn: React.CSSProperties = {
     border: "1px solid var(--color-rule)",
@@ -1791,7 +1701,9 @@ function CatalogTab() {
 
   return (
     <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-      {/* Toolbar: Organize + auto-apply, over the whole catalog. */}
+      {/* Toolbar: Organize, over the whole catalog. No auto-organize toggle
+          since B3 — the gardener always organizes on its own; Undo is the
+          lever (the RunTimeline below). */}
       <div
         style={{
           display: "flex",
@@ -1806,19 +1718,6 @@ function CatalogTab() {
           {nodes.length} class{nodes.length === 1 ? "" : "es"}
           {run?.summary ? ` · last run: ${run.summary}` : ""}
         </span>
-        <label
-          className="font-sans"
-          style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, cursor: "pointer", flexShrink: 0 }}
-          title="On: Organize files new lake items directly (destructive reorgs still wait below). Off: everything stages for review."
-        >
-          <input
-            type="checkbox"
-            checked={autoApply}
-            onChange={() => void toggleAutoApply()}
-            style={{ accentColor: "var(--color-info)" }}
-          />
-          Auto-organize
-        </label>
         <button
           type="button"
           className="font-sans"
@@ -1852,8 +1751,10 @@ function CatalogTab() {
 
       <RunTimeline now={now} />
 
-      {/* The held-proposal review strip — the escalation channel's terminus.
-          Prominent when anything is queued; a quiet promise when nothing is. */}
+      {/* The gardener's work queue (B3) — structural proposals waiting for a
+          run. A fact about the gardener, never a review: nothing here takes a
+          verdict, and a queued row is applied, refused, deferred with backoff
+          or expired by the next run — which the timeline above can undo. */}
       {proposals.length > 0 ? (
         <div
           className="rl-thin-scroll-y"
@@ -1862,22 +1763,22 @@ function CatalogTab() {
             maxHeight: "42%",
             overflowY: "auto",
             padding: "10px 16px 12px",
-            borderBottom: `2px solid color-mix(in srgb, ${AMBER} 55%, var(--color-rule))`,
-            background: `color-mix(in srgb, ${AMBER} 6%, transparent)`,
+            borderBottom: "1px solid var(--color-rule)",
             display: "flex",
             flexDirection: "column",
             gap: 8,
           }}
         >
-          <div className="font-sans" style={{ ...eyebrowStyle, color: AMBER }}>
-            Held for review · {proposals.length}
+          <div className="font-sans" style={eyebrowStyle}>
+            Waiting for a run · {proposals.length}
           </div>
           <div className="font-sans" style={{ fontSize: 12, color: "var(--color-ink-muted)" }}>
-            The keeper never applies these on its own — each one reshapes or retires part of
-            the catalog, so it waits for your verdict.
+            The gardener adjudicates these on its next run — each is verified first, deferred
+            with backoff when the verify fails, and expires after three attempts or seven lake-days.
+            Undo a run above if it got one wrong.
           </div>
           {proposals.map((p) => (
-            <ProposalCard key={p.id} p={p} now={now} onAct={act} />
+            <ProposalCard key={p.id} p={p} now={now} />
           ))}
         </div>
       ) : (
@@ -1891,8 +1792,8 @@ function CatalogTab() {
             borderBottom: "1px solid var(--color-rule)",
           }}
         >
-          Nothing held for review — merges, uncertain collapses and supersessions queue here
-          instead of auto-applying.
+          Nothing waiting for a run — merges, collapses and supersessions queue here until the
+          gardener's next run adjudicates them.
         </div>
       )}
 
@@ -1934,8 +1835,8 @@ function CatalogTab() {
             {tree.length === 0 ? (
               <div className="font-sans" style={{ padding: 16, color: "var(--color-ink-muted)", fontSize: 13 }}>
                 No classes yet. Click <b>Organize now</b> to seed one class per repo and let
-                the keeper build a tree over your captured prompts
-                {autoApply ? " — it organizes on its own; curate here only if you want." : " for you to review."}
+                the keeper build a tree over your captured prompts — it organizes on its own,
+                and every run is undoable from the timeline above.
               </div>
             ) : (
               tree.map((n) => (
@@ -1947,7 +1848,6 @@ function CatalogTab() {
                   onSelect={openNode}
                   collapsedIds={collapsedIds}
                   onToggle={toggleBranch}
-                  actions={rowActions}
                 />
               ))
             )}
@@ -1966,18 +1866,6 @@ function CatalogTab() {
                 <span style={{ fontWeight: 600, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {selectedNode.title}
                 </span>
-                {selectedNode.pinned && <span title="Pinned (anti-decay)">📌</span>}
-                <div style={{ flex: 1 }} />
-                {selectedNode.status !== "proposed" && (
-                  <>
-                    <ActionBtn
-                      label={selectedNode.pinned ? "📌 Unpin" : "📍 Pin"}
-                      title={selectedNode.pinned ? "Unpin" : "Pin (anti-decay)"}
-                      onClick={() => act("classmem_pin_node", { id: selectedNode.id, pinned: !selectedNode.pinned })}
-                    />
-                    <ActionBtn label="✎ Rename" title="Rename class" onClick={() => rename(selectedNode)} />
-                  </>
-                )}
               </div>
               {selectedNode.summary && (
                 <div style={{ fontSize: 12, color: "var(--color-ink-muted)" }}>{selectedNode.summary}</div>
@@ -2006,7 +1894,6 @@ function CatalogTab() {
                         padding: "6px 8px",
                         border: "1px solid var(--color-rule)",
                         borderRadius: 4,
-                        background: l.status === "proposed" ? `color-mix(in srgb, ${AMBER} 8%, transparent)` : "transparent",
                       }}
                     >
                       <span style={{ flex: "0 0 auto", fontSize: 10, textTransform: "uppercase", color: "var(--color-ink-muted)" }}>
@@ -2033,32 +1920,12 @@ function CatalogTab() {
                           superseded → #{l.supersededBy}
                         </span>
                       )}
-                      {l.supersededBy != null && selectedNode.pinned && (
-                        <span
-                          title="You pinned this class, and one of its decisions is now marked superseded — worth a look."
-                          style={{ flex: "0 0 auto", fontSize: 10, padding: "0 6px", borderRadius: 999, color: "#fff", background: AMBER }}
-                        >
-                          pinned · superseded
-                        </span>
-                      )}
-                      {l.status === "proposed" ? (
-                        <>
-                          <ActionBtn label="✓" title="Accept link" onClick={() => act("classmem_accept_link", { linkId: l.id })} />
-                          <ActionBtn label="✕" title="Reject link" onClick={() => act("classmem_reject_link", { linkId: l.id })} />
-                        </>
-                      ) : (
-                        <ActionBtn
-                          label="Unfile"
-                          title="Unfile this link (rolls back the gardener; keeps the ledger intact)"
-                          onClick={() => act("memory_revert_link", { linkId: l.id })}
-                        />
-                      )}
                     </div>
                   ))}
                   {detail.observations.length > 0 && (
                     <>
                       <div style={{ color: "var(--color-ink-muted)", marginTop: 8, marginBottom: 2, fontSize: 12 }}>
-                        Patterns (agent-derived — hypotheses, not facts)
+                        Patterns (agent-derived — hypotheses, not facts; the gardener retires the ones it can no longer support)
                       </div>
                       {sortObservations(detail.observations).map((o) => (
                         <div
@@ -2073,7 +1940,7 @@ function CatalogTab() {
                           }}
                         >
                           <span style={{ flex: "0 0 auto" }} title="Agent-derived pattern">
-                            {o.pinned ? "📌" : "🔎"}
+                            🔎
                           </span>
                           <span style={{ flex: 1, minWidth: 0 }}>
                             {o.summary}
@@ -2081,16 +1948,6 @@ function CatalogTab() {
                               cites {o.citeSeqs.map((s) => `#${s}`).join(", ")}
                             </span>
                           </span>
-                          <ActionBtn
-                            label={o.pinned ? "📌" : "📍"}
-                            title={o.pinned ? "Unpin pattern" : "Pin pattern (promote into this class's permanent context)"}
-                            onClick={() => act("classmem_pin_observation", { id: o.id, pinned: !o.pinned })}
-                          />
-                          <ActionBtn
-                            label="✕"
-                            title="Dismiss pattern (never resurfaces)"
-                            onClick={() => act("classmem_dismiss_observation", { id: o.id })}
-                          />
                         </div>
                       ))}
                     </>
@@ -2320,8 +2177,8 @@ function LibrarianStrip({ onOpenCatalog }: { onOpenCatalog: () => void }) {
             className="font-sans"
             style={{ fontSize: 12, lineHeight: 1.45, color: "var(--color-ink-muted)" }}
           >
-            On demand, the Librarian surveys the workspace — held proposals,
-            stalled reviews, the unorganized backlog, aging sessions, missions —
+            On demand, the Librarian surveys the workspace — stalled reviews,
+            the unorganized backlog, bulging branches, aging sessions, missions —
             and ranks what needs attention. Advisory only: it states what is
             unreconciled; it never dispatches work.
           </div>
@@ -2676,6 +2533,7 @@ function HealthTab({
   const [verifying, setVerifying] = useState(false);
   const [captureExternal, setCaptureExternal] = useState<boolean | null>(null);
   const [mapData, setMapData] = useState<MemoryMapData | null>(null);
+  const [catalog, setCatalog] = useState<CatalogHealth | null>(null);
   const now = Date.now();
 
   useEffect(() => {
@@ -2685,10 +2543,14 @@ function HealthTab({
   }, []);
 
   // The catalog mass rollup behind "where does my memory live" — the same
-  // `memory_map` payload the Map tab draws, reduced to root masses here.
+  // `memory_map` payload the Map tab draws, reduced to root masses here — and
+  // the gardener's own health (§6.3), read lazily here rather than folded
+  // into the status the pill polls.
   useEffect(() => {
-    const load = () =>
+    const load = () => {
       void invoke<MemoryMapData>("memory_map").then(setMapData).catch(() => {});
+      void invoke<CatalogHealth | null>("memory_catalog_health").then(setCatalog).catch(() => {});
+    };
     load();
     const un = listen("classmem-changed", load);
     return () => void un.then((f) => f());
@@ -2881,6 +2743,22 @@ function HealthTab({
           </div>
         )}
 
+        {/* The gardener (B3 / §6.3): how well the autonomous catalog is doing.
+            Nothing here is a control — the queue depth is a fact, and the one
+            alarm (the canary) reverts and quarantines on its own. */}
+        <div style={card}>
+          <div className="font-sans" style={eyebrowStyle}>
+            The gardener
+          </div>
+          {catalog ? (
+            catalogHealthFields(catalog).map((f) => <Field key={f.label} label={f.label} value={f.value} />)
+          ) : (
+            <div className="font-sans" style={{ fontSize: 12, color: "var(--color-ink-muted)" }}>
+              Reading the catalog…
+            </div>
+          )}
+        </div>
+
         <PictureStoreCard card={card} />
       </div>
 
@@ -2969,8 +2847,8 @@ export function MemorySurface({
       coalesce = window.setTimeout(() => void loadStatus(), 1_000);
     };
     const un = listen("memory-changed", reload);
-    // Proposal verdicts emit only classmem-changed; the hero's held-for-review
-    // count and the catalog chip badge must follow them too.
+    // Gardener runs emit only classmem-changed; the hero's queue count and
+    // the catalog chip badge must follow them too.
     const unClass = listen("classmem-changed", reload);
     return () => {
       window.clearTimeout(coalesce);
@@ -2980,12 +2858,12 @@ export function MemorySurface({
   }, [loadStatus]);
 
   const now = Date.now();
-  const held = status?.pendingProposals ?? 0;
+  const queued = status?.queuedProposals ?? 0;
   const sentence = status
     ? `${status.itemCount.toLocaleString()} event${status.itemCount === 1 ? "" : "s"} · chain ${
         status.chainOk ? "OK" : "BROKEN"
       } · organized ${status.lastOrganizedTs ? relativeTime(status.lastOrganizedTs, now) : "never"}${
-        held > 0 ? ` · ${held} held for review` : ""
+        queued > 0 ? ` · ${queued} waiting for a run` : ""
       }`
     : "Reading the lake…";
 
@@ -3053,19 +2931,19 @@ export function MemorySurface({
                 style={{ ...chipStyle(tab === t), fontSize: "11px", textTransform: "capitalize" }}
               >
                 {t}
-                {t === "catalog" && held > 0 && (
+                {t === "catalog" && queued > 0 && (
                   <span
-                    title={`${held} proposal${held === 1 ? "" : "s"} held for review`}
+                    title={`${queued} proposal${queued === 1 ? "" : "s"} waiting for the gardener's next run`}
                     style={{
                       marginLeft: 5,
                       padding: "0 5px",
                       borderRadius: 999,
                       fontSize: "10px",
-                      color: "#fff",
-                      background: "#e0913a",
+                      color: "var(--color-ink-muted)",
+                      border: "1px solid var(--color-rule)",
                     }}
                   >
-                    {held}
+                    {queued}
                   </span>
                 )}
               </button>

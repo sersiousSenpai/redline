@@ -15,7 +15,7 @@ const base: MemoryStatus = {
   compactedCount: 0,
   reclaimedBytes: 0,
   lastCompactionTs: null,
-  pendingProposals: 0,
+  queuedProposals: 0,
 };
 
 describe("relativeTime", () => {
@@ -48,9 +48,9 @@ describe("pillLabel", () => {
     expect(pillLabel(s, NOW)).toBe("Memory · 12 captured");
   });
 
-  it("lets held proposals outrank the ambient line — a queued destructive op is never invisible", () => {
-    const s = { ...base, itemCount: 40, lastOrganizedTs: NOW - 60_000, pendingProposals: 2 };
-    expect(pillLabel(s, NOW)).toBe("Memory · 2 to review");
+  it("never lets the gardener's queue outrank the ambient line — a queued proposal is a fact, not a call to action (B3)", () => {
+    const s = { ...base, itemCount: 40, lastOrganizedTs: NOW - 60_000, queuedProposals: 2 };
+    expect(pillLabel(s, NOW)).toBe("Memory · organized 1m ago");
   });
 
   it("hides the ready-depth segment at zero", () => {
@@ -66,7 +66,7 @@ describe("pillLabel", () => {
     const organized = { ...base, itemCount: 40, lastOrganizedTs: NOW - 60_000 };
     expect(pillLabel(organized, NOW, 3)).toBe("Memory · organized 1m ago · 3 ready");
     // Held proposals still outrank the memory line; ready depth still appends.
-    const held = { ...organized, pendingProposals: 2 };
-    expect(pillLabel(held, NOW, 3)).toBe("Memory · 2 to review · 3 ready");
+    const queued = { ...organized, queuedProposals: 2 };
+    expect(pillLabel(queued, NOW, 3)).toBe("Memory · organized 1m ago · 3 ready");
   });
 });

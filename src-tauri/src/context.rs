@@ -100,7 +100,6 @@ pub const MAX_IN_REVIEW: usize = 20;
 pub const MAX_BULGING: usize = 8;
 pub const MAX_MISSIONS: usize = 12;
 pub const MAX_SOURCE_TRUST: usize = 8;
-pub const MAX_HELD_PROPOSALS: usize = 20;
 /// Cap on the F6 "un-exported approved plan" list (Phase 4).
 pub const MAX_UNEXPORTED: usize = 20;
 /// Clamp bounds for the route's optional `?limit=` (applies to the ranked lists).
@@ -125,18 +124,10 @@ pub struct LakeSignal {
     pub last_organized_seq: i64,
     /// Unstructured backlog = `total_events − last_organized_seq` (never < 0).
     pub backlog: i64,
-}
-
-/// A queued structural proposal awaiting review (promote/split/merge/collapse).
-/// A held `collapse` is the sharp case — destructive and pending a human.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HeldProposal {
-    pub id: i64,
-    pub op: String,
-    pub node_id: Option<String>,
-    pub title: Option<String>,
-    pub rationale: Option<String>,
+    /// The gardener's work queue: structural proposals waiting for a run
+    /// (due or deferred). A FACT about the lake since Session B3 of the
+    /// Polis extraction, not friction — nothing in it waits for a person.
+    pub queued_proposals: i64,
 }
 
 /// An in-review session with unresolved comments — stalled in-flight work.
@@ -191,7 +182,6 @@ pub struct UnExportedSignal {
 pub struct FrictionDigest {
     pub generated_ts: i64,
     pub lake: LakeSignal,
-    pub held_proposals: Vec<HeldProposal>,
     pub in_review: Vec<InReviewSignal>,
     pub bulging_branches: Vec<BulgingBranch>,
     pub missions: Vec<MissionSignal>,
@@ -217,21 +207,8 @@ pub fn build_digest(db: &Database, limit: usize) -> FrictionDigest {
     let last_organized_seq = db.last_run_seq_to().unwrap_or(0);
     let backlog = (total_events - last_organized_seq).max(0);
 
-    // Held structural proposals (destructive collapses sort first within the list).
-    let mut held_proposals: Vec<HeldProposal> = db
-        .list_class_proposals()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|p| HeldProposal {
-            id: p.id,
-            op: p.op,
-            node_id: p.node_id,
-            title: p.title,
-            rationale: p.rationale,
-        })
-        .collect();
-    held_proposals.sort_by_key(|p| if p.op == "collapse" { 0 } else { 1 });
-    held_proposals.truncate(MAX_HELD_PROPOSALS);
+    // The gardener's queue depth — a fact (B3), never a "held for review" list.
+    let queued_proposals = db.count_pending_class_proposals().unwrap_or(0);
 
     // Stalled in-review work: sessions with unresolved comments, most-unresolved
     // and oldest first (the archetypal friction row bubbles to the top).
@@ -304,8 +281,8 @@ pub fn build_digest(db: &Database, limit: usize) -> FrictionDigest {
             total_events,
             last_organized_seq,
             backlog,
+            queued_proposals,
         },
-        held_proposals,
         in_review,
         bulging_branches: bulging,
         missions,
@@ -456,24 +433,9 @@ pub fn render_digest_prompt_block(d: &FrictionDigest) -> String {
     p.push_str("## Friction digest (GROUND TRUTH — do not re-derive; rank these)\n\n");
 
     p.push_str(&format!(
-        "### Lake stewardship\n- total ledger events: {}\n- last Organize consumed up to seq: {}\n- **unstructured backlog: {}** (events awaiting the next Organize)\n\n",
-        d.lake.total_events, d.lake.last_organized_seq, d.lake.backlog
+        "### Lake stewardship\n- total ledger events: {}\n- last Organize consumed up to seq: {}\n- **unstructured backlog: {}** (events awaiting the next Organize)\n- gardener queue: {} structural proposal(s) waiting for a run (a fact — the gardener adjudicates them itself; nothing here needs a person)\n\n",
+        d.lake.total_events, d.lake.last_organized_seq, d.lake.backlog, d.lake.queued_proposals
     ));
-
-    p.push_str("### Held structural proposals (destructive collapses first)\n");
-    if d.held_proposals.is_empty() {
-        p.push_str("- (none queued)\n");
-    } else {
-        for h in &d.held_proposals {
-            p.push_str(&format!(
-                "- op={} node={} title={} — {}\n",
-                h.op,
-                h.node_id.as_deref().unwrap_or("-"),
-                h.title.as_deref().unwrap_or("-"),
-                h.rationale.as_deref().unwrap_or("no rationale")
-            ));
-        }
-    }
     p.push('\n');
 
     p.push_str("### In-review sessions (unresolved comments × age)\n");
@@ -545,7 +507,7 @@ mod tests {
         let d = build_digest(&db, clamp_limit(None));
         // A fresh workspace: zero backlog, empty lists — a correct, honest state.
         assert_eq!(d.lake.backlog, 0);
-        assert!(d.held_proposals.is_empty());
+        assert_eq!(d.lake.queued_proposals, 0);
         assert!(d.in_review.is_empty());
         assert!(d.bulging_branches.is_empty());
         // The prompt block renders without panicking and marks itself ground truth.
@@ -563,8 +525,8 @@ mod tests {
                 total_events: 5,
                 last_organized_seq: 12,
                 backlog: (5i64 - 12).max(0),
+                queued_proposals: 0,
             },
-            held_proposals: vec![],
             in_review: vec![],
             bulging_branches: vec![],
             missions: vec![],
@@ -797,7 +759,6 @@ mod tests {
     fn seed_class(db: &Database, id: &str, title: &str) {
         db.seed_class_roots(&[(id.to_string(), title.to_string(), Some("/repo".into()))])
             .unwrap();
-        db.accept_class_node(id).unwrap();
     }
 
     /// The inline block must be honest about itself — that property is what

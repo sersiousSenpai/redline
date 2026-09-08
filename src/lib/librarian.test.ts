@@ -15,7 +15,7 @@ describe("coerceRun", () => {
       {
         summary: "412 events unstructured; one stalled review.",
         checklist: [
-          { priority: 5, category: "held_proposal", title: "1 collapse held", detail: "Review it.", action: "review_proposals", count: 1 },
+          { priority: 5, category: "bulging_branch", title: "1 branch bulging", detail: "140 links under one class.", action: "organize", count: 1 },
           { priority: 5, category: "stalled_review", title: "15 comments unresolved", detail: "" },
         ],
       },
@@ -24,7 +24,7 @@ describe("coerceRun", () => {
     expect(run).not.toBeNull();
     expect(run!.ranAtMs).toBe(1754400000000);
     expect(run!.checklist.map((c) => c.priority)).toEqual([1, 2]);
-    expect(run!.checklist[0].action).toBe("review_proposals");
+    expect(run!.checklist[0].action).toBe("organize");
     expect(run!.checklist[0].count).toBe(1);
   });
 
@@ -80,14 +80,16 @@ describe("parseStoredRun", () => {
 
 describe("category vocabulary", () => {
   it("labels the known categories and prettifies unknown snake_case", () => {
+    expect(categoryLabel("bulging_branch")).toBe("Bulging branch");
+    // B3 retired the category; an old stored run's label prettifies, nothing throws.
     expect(categoryLabel("held_proposal")).toBe("Held proposal");
     expect(categoryLabel("unstructured_backlog")).toBe("Backlog");
     expect(categoryLabel("brand_new_signal")).toBe("Brand new signal");
     expect(categoryLabel("")).toBe("Item");
   });
 
-  it("tones: held amber, stalled warning, stewardship info, unknown muted", () => {
-    expect(categoryTone("held_proposal")).toBe("#e0913a");
+  it("tones: stalled warning, stewardship info, unknown (and the retired held_proposal) muted", () => {
+    expect(categoryTone("held_proposal")).toBe("var(--color-ink-muted)");
     expect(categoryTone("stalled_review")).toBe("var(--color-warning)");
     expect(categoryTone("unstructured_backlog")).toBe("var(--color-info)");
     expect(categoryTone("something_else")).toBe("var(--color-ink-muted)");
@@ -100,10 +102,8 @@ describe("actionHint", () => {
       label: "Organize in the Catalog",
       target: "catalog",
     });
-    expect(actionHint("review_proposals")).toEqual({
-      label: "Review in the Catalog",
-      target: "catalog",
-    });
+    // B3: there is nothing to review — the gardener's queue takes no verdict.
+    expect(actionHint("review_proposals")).toBeNull();
     expect(actionHint("open_session")).toBeNull();
     expect(actionHint("export_bundle")).toBeNull();
     expect(actionHint(undefined)).toBeNull();

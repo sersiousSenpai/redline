@@ -23,8 +23,9 @@ export interface MemoryStatus {
   compactedCount: number;
   reclaimedBytes: number;
   lastCompactionTs: number | null;
-  /** Structural proposals held awaiting human review (the escalation channel). */
-  pendingProposals: number;
+  /** Structural proposals in the gardener's work queue, waiting for a run
+   *  (B3). A fact about the gardener, never a count to review. */
+  queuedProposals: number;
   /** Corpus composition — rows and bytes per role. The number that was missing:
    *  92.6% of the lake's searchable bytes were machine text and nothing
    *  reported it, so the only symptom was that search "felt wrong". */
@@ -77,7 +78,6 @@ export function pillLabel(
 ): string {
   const base = (() => {
     if (!status) return "Memory";
-    if (status.pendingProposals > 0) return `Memory · ${status.pendingProposals} to review`;
     if (status.lastOrganizedTs) return `Memory · organized ${relativeTime(status.lastOrganizedTs, now)}`;
     if (status.itemCount > 0) return `Memory · ${status.itemCount} captured`;
     return "Memory";
@@ -174,7 +174,7 @@ export function MemoryStatusPill({
 
   const now = Date.now();
   const chainBad = status != null && !status.chainOk;
-  const heldOps = status != null && status.pendingProposals > 0;
+  const queued = status != null && status.queuedProposals > 0;
 
   const row: React.CSSProperties = {
     display: "flex",
@@ -217,13 +217,11 @@ export function MemoryStatusPill({
             height: 6,
             borderRadius: 999,
             flex: "0 0 auto",
-            // Red (broken chain) outranks amber (held ops) outranks green.
-            background: chainBad ? "#d64545" : heldOps ? "#e0913a" : "#2fae66",
-            boxShadow: chainBad
-              ? "none"
-              : heldOps
-                ? "0 0 4px rgba(224,145,58,0.8)"
-                : "0 0 4px rgba(47,174,102,0.8)",
+            // Red (broken chain) outranks green. The gardener's queue no
+            // longer colours the dot (B3): a queued proposal is a fact about
+            // the next run, not an op waiting on a person.
+            background: chainBad ? "#d64545" : "#2fae66",
+            boxShadow: chainBad ? "none" : "0 0 4px rgba(47,174,102,0.8)",
           }}
         />
         <span style={{ whiteSpace: "nowrap" }}>{pillLabel(status, now, readyWork)}</span>
@@ -271,12 +269,11 @@ export function MemoryStatusPill({
                 : "—"}
             </span>
           </div>
-          {heldOps && (
+          {queued && (
             <div style={row}>
-              <span style={muted}>To review</span>
-              <span style={{ color: "#e0913a" }}>
-                {status!.pendingProposals} held proposal
-                {status!.pendingProposals === 1 ? "" : "s"}
+              <span style={muted}>Queued</span>
+              <span>
+                {status!.queuedProposals} waiting for a run
               </span>
             </div>
           )}

@@ -46,11 +46,11 @@
 //!
 //! | signal | accessor |
 //! |---|---|
-//! | held class proposals | `list_class_proposals()` (F1, unchanged) |
+//! | the gardener's queue depth (a fact, not friction since B3) | `LakeSignal::queued_proposals` |
 //! | in-review sessions with unresolved comments | `in_review_friction()` (F3) |
 //! | stale missions / browse + linked threads | `list_missions()` (F7) + `thread_stats` |
 //! | pending draft suggestions | `draft_suggestions.status = 'pending'` |
-//! | unaccepted memory proposals / observations | `class_observations` undismissed, unpinned |
+//! | live observations | `class_observations` not retired |
 //! | open code-review annotations | `review_annotations` unresolved, by round |
 //! | the Shipwright's own open findings | `shipwright_findings.status = 'pending'` |
 //!
@@ -87,16 +87,17 @@ pub struct ChecklistItem {
     /// 1-based rank (most urgent = 1). Reassigned to list position if the model
     /// omits/duplicates it, so the UI always renders a clean 1..N.
     pub priority: i64,
-    /// One of the Spike-3a friction categories (`held_proposal`,
-    /// `stalled_review`, `unstructured_backlog`, `bulging_branch`,
-    /// `aging_session`, `mission`, `source_trust`) — free-form but expected.
+    /// One of the Spike-3a friction categories (`stalled_review`,
+    /// `unstructured_backlog`, `bulging_branch`, `aging_session`, `mission`,
+    /// `source_trust`; the held-proposal category retired with the holds in
+    /// B3) — free-form but expected.
     pub category: String,
     /// Short, number-carrying headline.
     pub title: String,
     /// One sentence: the specific next action.
     #[serde(default)]
     pub detail: String,
-    /// Optional UI hint (`organize`, `review_proposals`, `open_session`, `none`).
+    /// Optional UI hint (`organize`, `open_session`, `export_bundle`, `none`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
     /// Optional magnitude (events / comments / days).
@@ -136,17 +137,17 @@ pub fn build_librarian_prompt(digest_block: &str) -> String {
     p.push_str(digest_block);
     p.push_str(
         "\n## Your task\n\nEmit a prioritized next-actions checklist. Rank by the \
-         priority order in your `librarian` skill (held destructive proposals \
-         first, then stalled in-review work, then the unstructured-backlog \
+         priority order in your `librarian` skill (stalled in-review work first, then the unstructured-backlog \
          stewardship signal scaled by size, then taxonomy drift, then hygiene, then \
          informational), floating a lower category up only when its magnitude is \
-         extreme. Emit only items that earn a line; a near-empty lake yields a \
+         extreme. The gardener's queue (structural proposals waiting for a run) is a \
+         FACT in the digest, never a friction item — it adjudicates itself. Emit only items that earn a line; a near-empty lake yields a \
          short, honest checklist. Never fabricate a signal the digest doesn't \
          carry — but note the digest now DOES carry the 'un-exported approved \
          plan' (F6) signal (real Phase-4 state), so surface it when present.\n\n\
          Return ONLY a JSON object (optionally in a ```json fence):\n\n\
          {\"summary\":\"<one-line read>\",\"checklist\":[\n  \
-         {\"priority\":1,\"category\":\"held_proposal|stalled_review|unstructured_backlog|bulging_branch|aging_session|un_exported|mission|source_trust\",\"title\":\"<number-carrying headline>\",\"detail\":\"<one-sentence next action>\",\"action\":\"organize|review_proposals|open_session|export_bundle|none\",\"count\":<magnitude or omit>}\n]}\n",
+         {\"priority\":1,\"category\":\"stalled_review|unstructured_backlog|bulging_branch|aging_session|un_exported|mission|source_trust\",\"title\":\"<number-carrying headline>\",\"detail\":\"<one-sentence next action>\",\"action\":\"organize|open_session|export_bundle|none\",\"count\":<magnitude or omit>}\n]}\n",
     );
     p
 }
@@ -464,7 +465,7 @@ mod tests {
 ```json
 {"summary":"412 events unstructured; one stalled review.",
  "checklist":[
-   {"priority":5,"category":"held_proposal","title":"1 collapse held for review","detail":"Review it in the 🧠 pane.","action":"review_proposals","count":1},
+   {"priority":5,"category":"bulging_branch","title":"1 branch bulging at 140 links","detail":"Organize; the consolidation pass splits it.","action":"organize","count":140},
    {"priority":9,"category":"stalled_review","title":"15 comments unresolved 19 days","detail":"Open the redline plan and resolve them.","action":"open_session","count":15},
    {"category":"unstructured_backlog","title":"412 events unstructured","detail":"Run Organize.","action":"organize","count":412}
  ]}
@@ -476,7 +477,7 @@ That's it."#;
         assert_eq!(r.checklist[0].priority, 1);
         assert_eq!(r.checklist[1].priority, 2);
         assert_eq!(r.checklist[2].priority, 3);
-        assert_eq!(r.checklist[0].category, "held_proposal");
+        assert_eq!(r.checklist[0].category, "bulging_branch");
         assert_eq!(r.checklist[1].count, Some(15));
         // Missing priority defaulted then normalized; action `organize` kept.
         assert_eq!(r.checklist[2].action.as_deref(), Some("organize"));
@@ -553,7 +554,7 @@ That's it."#;
     fn checklist_items_file_with_run_provenance_and_mapped_priority() {
         let db = Database::open_in_memory().unwrap();
         let result = checklist(&[
-            (1, "held_proposal", "1 collapse held for review"),
+            (1, "bulging_branch", "1 branch bulging at 140 links"),
             (5, "unstructured_backlog", "412 events unstructured"),
         ]);
         assert_eq!(file_checklist_items(&db, &result), 2);
@@ -561,7 +562,7 @@ That's it."#;
         assert_eq!(items.len(), 2);
         let urgent = items
             .iter()
-            .find(|i| i.title == "1 collapse held for review")
+            .find(|i| i.title == "1 branch bulging at 140 links")
             .unwrap();
         assert_eq!(urgent.priority, 1, "rank 1 stays urgent");
         assert_eq!(urgent.origin_kind.as_deref(), Some("librarian_run"));
@@ -569,7 +570,7 @@ That's it."#;
         assert_eq!(urgent.kind, "task");
         assert_eq!(urgent.status, "open");
         let body = urgent.body.as_deref().unwrap();
-        assert!(body.contains("[held_proposal]"), "category rides the body");
+        assert!(body.contains("[bulging_branch]"), "category rides the body");
         assert!(body.contains("Magnitude: 7"));
         let calm = items
             .iter()
@@ -584,19 +585,19 @@ That's it."#;
     #[test]
     fn rederiving_the_same_backlog_dedupes_against_still_open_items() {
         let db = Database::open_in_memory().unwrap();
-        let run1 = checklist(&[(1, "held_proposal", "1 collapse held for review")]);
+        let run1 = checklist(&[(1, "bulging_branch", "1 branch bulging at 140 links")]);
         assert_eq!(file_checklist_items(&db, &run1), 1);
         // The next survey re-derives the same line (rank drifted — the title
         // is the stable key): nothing re-files while the item stands open.
         let run2 = checklist(&[
-            (2, "held_proposal", "1 collapse held for review"),
+            (2, "bulging_branch", "1 branch bulging at 140 links"),
             (1, "stalled_review", "15 comments unresolved 19 days"),
         ]);
         assert_eq!(file_checklist_items(&db, &run2), 1, "only the new line files");
         assert_eq!(db.list_work_items(None, None, 50).unwrap().len(), 2);
         // Close the standing item and the SAME line may honestly recur.
         let id = db
-            .find_unclosed_work_item("librarian_run", None, Some("1 collapse held for review"))
+            .find_unclosed_work_item("librarian_run", None, Some("1 branch bulging at 140 links"))
             .unwrap()
             .unwrap()
             .id;

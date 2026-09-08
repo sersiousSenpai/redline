@@ -31,7 +31,6 @@ export type LibrarianRun = {
 export const LIBRARIAN_STORE_KEY = "redline.memory.librarianRun";
 
 const CATEGORY_LABEL: Record<string, string> = {
-  held_proposal: "Held proposal",
   stalled_review: "Stalled review",
   unstructured_backlog: "Backlog",
   bulging_branch: "Bulging branch",
@@ -50,12 +49,11 @@ export function categoryLabel(category: string): string {
   return words ? words[0].toUpperCase() + words.slice(1) : "Item";
 }
 
-/** Held destructive ops share the catalog badge's amber; stalled work warns;
- *  stewardship signals read informational; anything else stays muted. */
+/** Stalled work warns; stewardship signals read informational; anything
+ *  else stays muted. (B3 retired the `held_proposal` category: the gardener's
+ *  queue is a fact the digest states, never friction the Librarian ranks.) */
 export function categoryTone(category: string): string {
   switch (category) {
-    case "held_proposal":
-      return "#e0913a"; // the held-for-review amber the catalog badge uses
     case "stalled_review":
     case "aging_session":
     case "bulging_branch":
@@ -80,8 +78,6 @@ export function actionHint(
   switch (action) {
     case "organize":
       return { label: "Organize in the Catalog", target: "catalog" };
-    case "review_proposals":
-      return { label: "Review in the Catalog", target: "catalog" };
     default:
       return null;
   }

@@ -11056,7 +11056,9 @@ fn memory_status(store: tauri::State<'_, SessionStore>) -> Result<serde_json::Va
         .map_err(|e| e.to_string())?;
     let (compacted, reclaimed, last_compaction_ts) =
         db.compaction_stats().map_err(|e| e.to_string())?;
-    let pending_proposals = db
+    // The gardener's work queue (B3): structural proposals waiting for a run
+    // — a fact the surface reports, never a count "to review".
+    let queued_proposals = db
         .count_pending_class_proposals()
         .map_err(|e| e.to_string())?;
     // Corpus composition — the number that was missing. Reported as rows AND
@@ -11105,7 +11107,7 @@ fn memory_status(store: tauri::State<'_, SessionStore>) -> Result<serde_json::Va
         "compactedCount": compacted,
         "reclaimedBytes": reclaimed,
         "lastCompactionTs": last_compaction_ts,
-        "pendingProposals": pending_proposals,
+        "queuedProposals": queued_proposals,
         "corpusRoles": corpus_roles,
         "corpusBytes": corpus_bytes,
         "corpusUserBytes": user_bytes,
@@ -11244,31 +11246,6 @@ fn memory_forget(
     Ok(seq)
 }
 
-/// Roll back a curation the gardener (or a user) accepted: remove the class link
-/// and append a compensating `class_curate` event. The supervisor's override on
-/// the always-on gardener — a bad auto-file is undone without ever deleting a
-/// ledger event, so the hash chain stays green. Returns whether a link was
-/// removed (`false` if the id was already gone).
-#[tauri::command]
-fn memory_revert_link(
-    app: AppHandle,
-    store: tauri::State<'_, SessionStore>,
-    link_id: i64,
-) -> Result<bool, String> {
-    let db = store.database();
-    let reverted = classmem::revert_link(&db, &ledger::local_author(), link_id)?;
-    if reverted {
-        let _ = app.emit("memory-changed", ());
-        let _ = app.emit("ledger-changed", ());
-        extension_host::publish(
-            ext_events::LEDGER_CHANGED,
-            &ext_events::LedgerChanged { ts_ms: extension_host::now_ms() },
-        );
-        let _ = app.emit("classmem-changed", ());
-    }
-    Ok(reverted)
-}
-
 /// Second Brain P3: one note/star act — write or edit a note's text, star or
 /// unstar a target, or create a standalone thought (`targetKind` absent /
 /// `none`). Exactly one of `text`/`starred` per call: each act appends one
@@ -11360,8 +11337,11 @@ struct CitationView {
     label: Option<String>,
 }
 
-/// A structural proposal enriched for review: the subject node's title + (for a
-/// collapse) the digest's cited ledger rows.
+/// A queued structural proposal, enriched: the subject node's title + (for a
+/// collapse) the digest's cited ledger rows. Since B3 the queue is the
+/// gardener's, adjudicated run by run — a row here is WAITING FOR A RUN
+/// (`attempts`, `nextAfterRun`, `expiresLakeTs` ride the flattened row),
+/// never waiting for a person.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProposalView {
@@ -11371,8 +11351,9 @@ struct ProposalView {
     citations: Vec<CitationView>,
 }
 
-/// The pending structural proposals (promote/split/merge/collapse), enriched
-/// with the digest preview + citations the pane shows for review.
+/// The gardener's work queue (promote/split/merge/collapse/supersede — due
+/// and deferred), enriched with the digest preview + citations the surface
+/// shows as "waiting for a run".
 #[tauri::command]
 fn classmem_proposals(store: tauri::State<'_, SessionStore>) -> Result<Vec<ProposalView>, String> {
     let db = store.database();
@@ -11453,222 +11434,27 @@ fn classmem_revert_run(app: AppHandle, id: i64) -> Result<polis_core::types::Rev
     Ok(receipt)
 }
 
-/// Whether Organize applies the classifier's work directly (default) or stages
-/// it for per-item review. Default on: no required human decision-making.
+/// The catalog's health (plan §6.3) — the gardener's efficacy rebuilt from
+/// the runs, the canary trail and the live tree on every read: organize
+/// latency, error rate, canary reverts + trend, fan-out, digest ratio,
+/// orphan/duplicate rates, provenance violations, the queue depth. The
+/// Health tab reads it lazily; it is NOT folded into `memory_status`, which
+/// the pill polls on every `memory-changed`.
 #[tauri::command]
-fn classmem_get_auto_apply(store: tauri::State<'_, SessionStore>) -> bool {
-    store
-        .database()
-        .get_setting("redline.classmem.autoApply")
-        .map(|v| v != "false")
-        .unwrap_or(true)
+fn memory_catalog_health() -> Result<Option<polis_core::types::CatalogHealth>, String> {
+    use polis_core::MemoryApi;
+    let api = polis_host::polis_handle().ok_or("memory is not installed")?;
+    Ok(api.health().map_err(|e| e.to_string())?.catalog)
 }
 
-#[tauri::command]
-fn classmem_set_auto_apply(
-    store: tauri::State<'_, SessionStore>,
-    enabled: bool,
-) -> Result<(), String> {
-    store
-        .database()
-        .set_setting(
-            "redline.classmem.autoApply",
-            if enabled { "true" } else { "false" },
-        )
-        .map_err(|e| e.to_string())
-}
+// The human curation commands — accept / reject / pin / rename on nodes,
+// links and structural proposals, dismiss / pin on observations, the
+// organize gate — are gone (Session B3 of the Polis extraction, plan §5.4):
+// the gardener applies under adjudication, nothing is held for a person,
+// and what survives is `memory_note_write` / `memory_forget` / the B2
+// `classmem_revert_run`. The proposals a run has not yet adjudicated are
+// read through `classmem_proposals` as a queue, never as a review list.
 
-#[tauri::command]
-fn classmem_accept_node(
-    app: AppHandle,
-    store: tauri::State<'_, SessionStore>,
-    id: String,
-) -> Result<(), String> {
-    let db = store.database();
-    let flipped = db.accept_class_node(&id).map_err(|e| e.to_string())?;
-    let actor = ledger::local_author();
-    for nid in &flipped {
-        classmem::record_curate(&db, &actor, nid, "accept", "");
-    }
-    let _ = app.emit("classmem-changed", ());
-    let _ = app.emit("ledger-changed", ());
-    extension_host::publish(
-        ext_events::LEDGER_CHANGED,
-        &ext_events::LedgerChanged { ts_ms: extension_host::now_ms() },
-    );
-    Ok(())
-}
-
-#[tauri::command]
-fn classmem_reject_node(
-    app: AppHandle,
-    store: tauri::State<'_, SessionStore>,
-    id: String,
-) -> Result<(), String> {
-    store.database().reject_class_node(&id).map_err(|e| e.to_string())?;
-    let _ = app.emit("classmem-changed", ());
-    Ok(())
-}
-
-#[tauri::command]
-fn classmem_accept_link(
-    app: AppHandle,
-    store: tauri::State<'_, SessionStore>,
-    link_id: i64,
-) -> Result<(), String> {
-    let db = store.database();
-    if let Some((node_id, flipped)) = db.accept_class_link(link_id).map_err(|e| e.to_string())? {
-        let actor = ledger::local_author();
-        for nid in &flipped {
-            classmem::record_curate(&db, &actor, nid, "accept", "");
-        }
-        classmem::record_curate(&db, &actor, &node_id, "accept_link", &link_id.to_string());
-        let _ = app.emit("ledger-changed", ());
-        extension_host::publish(
-            ext_events::LEDGER_CHANGED,
-            &ext_events::LedgerChanged { ts_ms: extension_host::now_ms() },
-        );
-    }
-    let _ = app.emit("classmem-changed", ());
-    Ok(())
-}
-
-#[tauri::command]
-fn classmem_reject_link(
-    app: AppHandle,
-    store: tauri::State<'_, SessionStore>,
-    link_id: i64,
-) -> Result<(), String> {
-    store.database().reject_class_link(link_id).map_err(|e| e.to_string())?;
-    let _ = app.emit("classmem-changed", ());
-    Ok(())
-}
-
-#[tauri::command]
-fn classmem_accept_proposal(
-    app: AppHandle,
-    store: tauri::State<'_, SessionStore>,
-    id: i64,
-) -> Result<(), String> {
-    let db = store.database();
-    let actor = ledger::local_author();
-    if let Some(applied) = db.apply_class_proposal(id, &actor).map_err(|e| e.to_string())? {
-        // A supersede records its own `supersede` ledger event inside the
-        // apply — recording a taxonomy_reorg on top would double-log it
-        // (with an empty node_id, breaking the reorg contract).
-        if applied.op != "supersede" {
-            classmem::record_reorg(&db, &actor, &applied.op, &applied.node_id, &applied.detail);
-        }
-        let _ = app.emit("ledger-changed", ());
-        extension_host::publish(
-            ext_events::LEDGER_CHANGED,
-            &ext_events::LedgerChanged { ts_ms: extension_host::now_ms() },
-        );
-    }
-    let _ = app.emit("classmem-changed", ());
-    Ok(())
-}
-
-#[tauri::command]
-fn classmem_reject_proposal(
-    app: AppHandle,
-    store: tauri::State<'_, SessionStore>,
-    id: i64,
-) -> Result<(), String> {
-    store.database().reject_class_proposal(id).map_err(|e| e.to_string())?;
-    let _ = app.emit("classmem-changed", ());
-    Ok(())
-}
-
-#[tauri::command]
-fn classmem_pin_node(
-    app: AppHandle,
-    store: tauri::State<'_, SessionStore>,
-    id: String,
-    pinned: bool,
-) -> Result<(), String> {
-    let db = store.database();
-    db.set_class_node_pinned(&id, pinned).map_err(|e| e.to_string())?;
-    classmem::record_curate(&db, &ledger::local_author(), &id, "pin", if pinned { "1" } else { "0" });
-    let _ = app.emit("classmem-changed", ());
-    let _ = app.emit("ledger-changed", ());
-    extension_host::publish(
-        ext_events::LEDGER_CHANGED,
-        &ext_events::LedgerChanged { ts_ms: extension_host::now_ms() },
-    );
-    Ok(())
-}
-
-/// Dismiss an observation — "never resurface this pattern". The row is kept
-/// (dismissed=1) so the keeper's dedup guard keeps holding.
-#[tauri::command]
-fn classmem_dismiss_observation(
-    app: AppHandle,
-    store: tauri::State<'_, SessionStore>,
-    id: i64,
-) -> Result<(), String> {
-    let db = store.database();
-    if let Some(node_id) = db.set_observation_dismissed(id).map_err(|e| e.to_string())? {
-        classmem::record_curate(&db, &ledger::local_author(), &node_id, "observation_dismiss", &id.to_string());
-        let _ = app.emit("classmem-changed", ());
-        let _ = app.emit("ledger-changed", ());
-        extension_host::publish(
-            ext_events::LEDGER_CHANGED,
-            &ext_events::LedgerChanged { ts_ms: extension_host::now_ms() },
-        );
-    }
-    Ok(())
-}
-
-/// Pin an observation — promote the pattern into the node's permanent context.
-#[tauri::command]
-fn classmem_pin_observation(
-    app: AppHandle,
-    store: tauri::State<'_, SessionStore>,
-    id: i64,
-    pinned: bool,
-) -> Result<(), String> {
-    let db = store.database();
-    if let Some(node_id) = db.set_observation_pinned(id, pinned).map_err(|e| e.to_string())? {
-        classmem::record_curate(
-            &db,
-            &ledger::local_author(),
-            &node_id,
-            "observation_pin",
-            &format!("{id}:{}", pinned as i64),
-        );
-        let _ = app.emit("classmem-changed", ());
-        let _ = app.emit("ledger-changed", ());
-        extension_host::publish(
-            ext_events::LEDGER_CHANGED,
-            &ext_events::LedgerChanged { ts_ms: extension_host::now_ms() },
-        );
-    }
-    Ok(())
-}
-
-#[tauri::command]
-fn classmem_rename_node(
-    app: AppHandle,
-    store: tauri::State<'_, SessionStore>,
-    id: String,
-    title: String,
-) -> Result<(), String> {
-    let title = title.trim().to_string();
-    if title.is_empty() {
-        return Err("title cannot be empty".into());
-    }
-    let db = store.database();
-    db.rename_class_node(&id, &title).map_err(|e| e.to_string())?;
-    classmem::record_curate(&db, &ledger::local_author(), &id, "rename", &title);
-    let _ = app.emit("classmem-changed", ());
-    let _ = app.emit("ledger-changed", ());
-    extension_host::publish(
-        ext_events::LEDGER_CHANGED,
-        &ext_events::LedgerChanged { ts_ms: extension_host::now_ms() },
-    );
-    Ok(())
-}
 
 /// Pop up the native browser "Settings" menu over the embedded browser (HTML
 /// can't overlay a native webview, same as bookmarks/view). `tandem` and
@@ -12311,25 +12097,13 @@ pub fn run() {
             classmem_runs,
             classmem_run,
             classmem_revert_run,
-            classmem_get_auto_apply,
-            classmem_set_auto_apply,
-            classmem_accept_node,
-            classmem_reject_node,
-            classmem_accept_link,
-            classmem_reject_link,
-            classmem_accept_proposal,
-            classmem_reject_proposal,
-            classmem_pin_node,
-            classmem_rename_node,
-            classmem_dismiss_observation,
-            classmem_pin_observation,
+            memory_catalog_health,
             memory_status,
             memory_forget,
             memory_reindex,
             memory_restore,
             memory_set_embed_provider,
             memory_embed_settings,
-            memory_revert_link,
             memory_note_write,
             memory_note_get,
             memory_notes_list,

@@ -48,7 +48,7 @@ use crate::ledger::now_millis;
 use crate::state::{AttachState, SessionStatus, SessionStore};
 
 #[allow(unused_imports)]
-pub use polis_memory::gardener::{CompactionAction, EMBED_BATCH, GIST_SOURCE_AGENT, GIST_SOURCE_DETERMINISTIC, GROWTH_THRESHOLD, IDLE_WINDOW_MS, KEEPER_ACTOR, MACHINE_COLD_MS, MAX_BATCH, MAX_CORPUS_BYTES, MAX_INTERVAL_MS, MIN_INTERVAL_MS, OBSERVE_COUNTER_KEY, OBSERVE_EVERY_N_ORGANIZES, OBSERVE_MAX_ITEMS_PER_NODE, OBSERVE_MAX_NODES, OBSERVE_MIN_ITEMS, ObservationAction, PromptCand, SIZE_FLOOR_BYTES, build_keeper_prompt, build_observations_prompt, group_candidates, is_idle, parse_compaction_actions, parse_observations, pin_protected_nodes, select_compaction_candidates, select_observation_nodes};
+pub use polis_memory::gardener::{CompactionAction, EMBED_BATCH, GIST_SOURCE_AGENT, GIST_SOURCE_DETERMINISTIC, GROWTH_THRESHOLD, IDLE_WINDOW_MS, KEEPER_ACTOR, MACHINE_COLD_MS, MAX_BATCH, MAX_CORPUS_BYTES, MAX_INTERVAL_MS, MIN_INTERVAL_MS, OBSERVE_COUNTER_KEY, OBSERVE_EVERY_N_ORGANIZES, OBSERVE_MAX_ITEMS_PER_NODE, OBSERVE_MAX_NODES, OBSERVE_MIN_ITEMS, ObservationAction, PromptCand, SIZE_FLOOR_BYTES, build_keeper_prompt, build_observations_prompt, group_candidates, is_idle, parse_compaction_actions, parse_observations, protected_set, select_compaction_candidates, select_observation_nodes};
 
 /// Signature-preserving shim (Session A5): the summarizer turn runs through
 /// the facade's agent seam (`polis_memory::agent::run_keeper_summarizer`).

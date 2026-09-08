@@ -8245,8 +8245,6 @@ mod batched_read_tests {
             ("n-second".into(), "Second Home".into(), None),
         ])
         .unwrap();
-        db.accept_class_node("n-first").unwrap();
-        db.accept_class_node("n-second").unwrap();
         // Two accepted filings on the SAME target; the earlier link id wins.
         for node in ["n-first", "n-second"] {
             db.stage_proposal(
@@ -9616,22 +9614,25 @@ mod tests {
         assert_eq!(ev.kind, "observation");
         assert_eq!(ev.ref_id.as_deref(), Some("cn-x"));
 
-        // Identical summary dedups — including after a dismiss, so a
-        // dismissed pattern never resurfaces under the same wording.
+        // Identical summary dedups — including after a retirement (B3's
+        // re-validation replaces dismiss), so a retired pattern never
+        // resurfaces under the same wording.
         assert!(db
             .insert_class_observation("cn-x", "deploys follow auth changes", &[4], "keeper")
             .unwrap()
             .is_none());
-        let node = db.set_observation_dismissed(id).unwrap();
+        let node = db.retire_observation(id, "the items moved on", "keeper").unwrap();
         assert_eq!(node.as_deref(), Some("cn-x"));
         assert!(db.list_class_observations("cn-x", false).unwrap().is_empty());
-        assert_eq!(db.list_class_observations("cn-x", true).unwrap().len(), 1);
+        // The old `include_dismissed` flag is ignored: retired rows are never served.
+        assert!(db.list_class_observations("cn-x", true).unwrap().is_empty());
         assert!(db
             .insert_class_observation("cn-x", "deploys follow auth changes", &[4, 9], "keeper")
             .unwrap()
             .is_none());
-        // A dismissed observation can't be pinned.
-        assert!(db.set_observation_pinned(id, true).unwrap().is_none());
+        // Retiring twice is a no-op, and the retirement is on the chain.
+        assert!(db.retire_observation(id, "again", "keeper").unwrap().is_none());
+        assert!(db.verify_ledger_chain().unwrap().ok);
     }
 
     #[test]
@@ -9755,37 +9756,30 @@ mod tests {
         assert_eq!(db.seed_class_roots(&rows).unwrap(), 0); // idempotent
         let nodes = db.list_class_nodes().unwrap();
         assert_eq!(nodes.len(), 3);
-        assert!(nodes.iter().all(|n| n.status == "proposed" && n.parent_id.is_none()));
+        // Live on creation since B3 (there is no `proposed` state any more).
+        assert!(nodes.iter().all(|n| n.status == "accepted" && n.parent_id.is_none()));
     }
 
     #[test]
-    fn stage_create_then_accept_writes_curate_event_and_is_idempotent() {
+    fn stage_create_writes_a_live_node_and_one_curate_event_records_it() {
         let db = Database::open_in_memory().unwrap();
         accepted_node(&db, "root-r", None, "redline");
-        let out = db
-            .stage_proposal(
-                None,
-                &Proposal::Create {
-                    parent_id: "root-r".into(),
-                    title: "Loop Engineering".into(),
-                    rationale: None,
-                },
-            )
-            .unwrap();
+        let create = Proposal::Create {
+            parent_id: "root-r".into(),
+            title: "Loop Engineering".into(),
+            rationale: None,
+        };
+        let out = db.stage_proposal(None, &create).unwrap();
         assert!(matches!(out, crate::classmem::StagedOutcome::Node));
         let staged = db.list_class_nodes().unwrap();
         let node = staged.iter().find(|n| n.title == "Loop Engineering").unwrap();
-        assert_eq!(node.status, "proposed");
-
-        // Accept → accepted + exactly one class_curate ledger event.
-        let flipped = db.accept_class_node(&node.id).unwrap();
-        assert_eq!(flipped, vec![node.id.clone()]);
-        for nid in &flipped {
-            crate::classmem::record_curate(&db, "tester", nid, "accept", "");
-        }
-        assert_eq!(db.get_class_node(&node.id).unwrap().unwrap().status, "accepted");
-        // Re-accept flips nothing (idempotent — no duplicate flip).
-        assert!(db.accept_class_node(&node.id).unwrap().is_empty());
+        // B3: staging writes the row LIVE — nothing waits for an accept.
+        assert_eq!(node.status, "accepted");
+        crate::classmem::record_curate(&db, "tester", &node.id, "create", "");
+        // Re-staging the same create is a skip, not a duplicate.
+        assert!(matches!(db.stage_proposal(None, &create).unwrap(), crate::classmem::StagedOutcome::Skipped));
+        // The legacy flip finds nothing on a current store.
+        assert!(db.accept_all_pending("classifier").unwrap().is_empty());
         let n: i64 = {
             let conn = db.conn.lock().unwrap();
             conn.query_row(
@@ -11116,10 +11110,10 @@ mod tests {
     }
 
     #[test]
-    fn accepting_a_link_accepts_its_ancestor_chain() {
+    fn filing_with_a_sub_class_writes_the_node_and_the_link_live() {
         let db = Database::open_in_memory().unwrap();
         accepted_node(&db, "root-r", None, "redline");
-        // file with a new sub_class → stages a proposed sub-node + a proposed link.
+        // file with a new sub_class → the sub-node and the link, both live (B3).
         let out = db
             .stage_proposal(
                 None,
@@ -11140,44 +11134,20 @@ mod tests {
             .into_iter()
             .find(|n| n.title == "Loop Engineering")
             .unwrap();
-        assert_eq!(sub.status, "proposed");
+        assert_eq!(sub.status, "accepted");
         let link = db.list_class_links_for_node(&sub.id).unwrap().remove(0);
-        assert_eq!(link.status, "proposed");
-
-        // Accepting the link accepts the (proposed) sub-node too.
-        let (node_id, flipped) = db.accept_class_link(link.id).unwrap().unwrap();
-        assert_eq!(node_id, sub.id);
-        assert_eq!(flipped, vec![sub.id.clone()]);
-        assert_eq!(db.get_class_node(&sub.id).unwrap().unwrap().status, "accepted");
-        assert_eq!(
-            db.list_class_links_for_node(&sub.id).unwrap()[0].status,
-            "accepted"
-        );
+        assert_eq!(link.status, "accepted");
+        assert_eq!(link.node_id, sub.id);
     }
 
     #[test]
-    fn reject_node_deletes_its_subtree_and_links() {
-        let db = Database::open_in_memory().unwrap();
-        accepted_node(&db, "root-r", None, "redline");
-        accepted_node(&db, "topic", Some("root-r"), "Topic");
-        accepted_node(&db, "sub", Some("topic"), "Sub");
-        add_link(&db, "sub", "prompt", "7");
-        db.reject_class_node("topic").unwrap();
-        assert!(db.get_class_node("topic").unwrap().is_none());
-        assert!(db.get_class_node("sub").unwrap().is_none());
-        assert!(db.list_class_links_for_node("sub").unwrap().is_empty());
-        assert!(db.get_class_node("root-r").unwrap().is_some()); // root untouched
-    }
-
-    #[test]
-    fn promotion_preserves_id_links_pins_and_subtree_and_writes_reorg() {
+    fn promotion_preserves_id_links_and_subtree_and_writes_reorg() {
         let db = Database::open_in_memory().unwrap();
         accepted_node(&db, "root-a", None, "A");
         accepted_node(&db, "root-b", None, "B");
         accepted_node(&db, "grown", Some("root-a"), "Grown Topic");
         accepted_node(&db, "child", Some("grown"), "Child");
         let link_id = add_link(&db, "grown", "prompt", "99");
-        db.set_class_node_pinned("grown", true).unwrap();
 
         // Stage + apply a promote of `grown` from root-a to root-b.
         db.stage_proposal(
@@ -11196,7 +11166,6 @@ mod tests {
         let g = db.get_class_node("grown").unwrap().unwrap();
         assert_eq!(g.id, "grown"); // id preserved
         assert_eq!(g.parent_id.as_deref(), Some("root-b")); // re-parented
-        assert!(g.pinned); // pin preserved
         // links preserved (same id)
         let links = db.list_class_links_for_node("grown").unwrap();
         assert_eq!(links.len(), 1);
@@ -11250,32 +11219,6 @@ mod tests {
         assert_eq!(cites.len(), 2);
         assert!(cites.iter().all(|l| l.target_kind == "ledger"));
         assert_eq!(count_reorg_events(&db), 1);
-    }
-
-    #[test]
-    fn collapse_refuses_a_pinned_branch() {
-        let db = Database::open_in_memory().unwrap();
-        accepted_node(&db, "root-r", None, "redline");
-        accepted_node(&db, "cold", Some("root-r"), "Pinned Topic");
-        add_link(&db, "cold", "prompt", "1");
-        db.set_class_node_pinned("cold", true).unwrap();
-        assert!(db.subtree_has_pin("cold").unwrap());
-
-        db.stage_proposal(
-            None,
-            &Proposal::Collapse {
-                node_id: "cold".into(),
-                summary: "should not happen".into(),
-                cite_seqs: vec![1],
-                rationale: None,
-            },
-        )
-        .unwrap();
-        let prop = db.list_class_proposals().unwrap().remove(0);
-        // Pins veto collapse — the op is a no-op and the branch survives intact.
-        assert!(db.apply_class_proposal(prop.id, "tester").unwrap().is_none());
-        assert!(db.get_class_node("cold").unwrap().is_some());
-        assert!(db.list_class_nodes().unwrap().iter().all(|n| n.kind != "digest"));
     }
 
     #[test]
@@ -11438,10 +11381,9 @@ mod tests {
     }
 
     #[test]
-    fn accept_all_pending_applies_the_whole_staged_batch() {
+    fn staging_writes_live_rows_so_the_legacy_flip_finds_nothing() {
         let db = Database::open_in_memory().unwrap();
         accepted_node(&db, "root-r", None, "redline");
-        // Stage a create + a file (proposed node + proposed link).
         db.stage_proposal(
             None,
             &Proposal::Create { parent_id: "root-r".into(), title: "Loop".into(), rationale: None },
@@ -11459,14 +11401,7 @@ mod tests {
             },
         )
         .unwrap();
-        // Before: two proposed nodes.
-        assert_eq!(
-            db.list_class_nodes().unwrap().iter().filter(|n| n.status == "proposed").count(),
-            2
-        );
-        // Auto-organize flips everything to accepted in one shot.
-        let flipped = db.accept_all_pending("classifier").unwrap();
-        assert_eq!(flipped.len(), 2);
+        // B3: nothing is `proposed`; both nodes and the link are live at once.
         assert!(db.list_class_nodes().unwrap().iter().all(|n| n.status == "accepted"));
         let collab = db
             .list_class_nodes()
@@ -11475,7 +11410,7 @@ mod tests {
             .find(|n| n.title == "Collab")
             .unwrap();
         assert_eq!(db.list_class_links_for_node(&collab.id).unwrap()[0].status, "accepted");
-        // Idempotent: nothing left to flip.
+        // The pre-B3 flip is a no-op on a current store.
         assert!(db.accept_all_pending("classifier").unwrap().is_empty());
     }
 
@@ -11972,7 +11907,6 @@ mod tests {
             ("n-voice".into(), "Voice agent".into(), None),
         ])
         .unwrap();
-        db.accept_class_node("n-browser").unwrap();
 
         // Verbatim from the live probe that returned `node: null`.
         let hits = db
@@ -12379,6 +12313,40 @@ mod tests {
                 "idx_user_notes_unscoped",
                 "idx_class_nodes_unscoped",
                 "idx_class_observations_unscoped",
+                // B3 (autonomy): the proposal work queue's index.
+                "idx_class_proposals_next",
+                // C1 (centroid-first filing).
+                "class_centroids",
+                "sqlite_autoindex_class_centroids_1",
+                // E3 (sharing core): the foreign tables, their PK autoindexes,
+                // the chain index, the FTS table with its shadow tables and
+                // triggers.
+                "foreign_chains",
+                "sqlite_autoindex_foreign_chains_1",
+                "foreign_principals",
+                "sqlite_autoindex_foreign_principals_1",
+                "foreign_events",
+                "sqlite_autoindex_foreign_events_1",
+                "foreign_prompts",
+                "sqlite_autoindex_foreign_prompts_1",
+                "foreign_notes",
+                "sqlite_autoindex_foreign_notes_1",
+                "foreign_redactions",
+                "sqlite_autoindex_foreign_redactions_1",
+                "foreign_acks",
+                "sqlite_autoindex_foreign_acks_1",
+                "foreign_trust",
+                "sqlite_autoindex_foreign_trust_1",
+                "foreign_subscriptions",
+                "idx_foreign_prompts_chain",
+                "foreign_prompts_fts",
+                "foreign_prompts_fts_data",
+                "foreign_prompts_fts_idx",
+                "foreign_prompts_fts_docsize",
+                "foreign_prompts_fts_config",
+                "foreign_prompts_fts_ai",
+                "foreign_prompts_fts_ad",
+                "foreign_prompts_fts_au",
             ];
             let unexpected: Vec<_> = added
                 .iter()

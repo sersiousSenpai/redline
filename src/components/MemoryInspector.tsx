@@ -573,24 +573,6 @@ function CatalogTab() {
     }
   }, []);
 
-  // Supervisor override on the always-on gardener: unfile a link it auto-added.
-  // The rollback appends a compensating ledger event (never deletes one), so the
-  // hash chain stays intact.
-  const revertLink = useCallback(
-    async (linkId: number) => {
-      try {
-        await invoke<boolean>("memory_revert_link", { linkId });
-        if (selected) {
-          const d = await invoke<{ links: LinkView[] }>("classmem_node", { id: selected });
-          setLinks(d.links);
-        }
-      } catch (e) {
-        setError(String(e));
-      }
-    },
-    [selected],
-  );
-
   const tree = buildTree(nodes);
 
   const toggleBranch = useCallback((id: string) => {
@@ -744,23 +726,6 @@ function CatalogTab() {
                     superseded → #{l.supersededBy}
                   </span>
                 )}
-                <button
-                  type="button"
-                  onClick={() => void revertLink(l.id)}
-                  title="Unfile this link (rolls back the gardener; keeps the ledger intact)"
-                  style={{
-                    flex: "0 0 auto",
-                    fontSize: 11,
-                    border: "1px solid var(--color-rule)",
-                    background: "var(--color-bg-elevated)",
-                    color: "var(--color-ink-muted)",
-                    borderRadius: 3,
-                    padding: "1px 6px",
-                    cursor: "pointer",
-                  }}
-                >
-                  Unfile
-                </button>
               </div>
             ))}
             {observations.length > 0 && (
@@ -781,7 +746,7 @@ function CatalogTab() {
                     }}
                   >
                     <span style={{ flex: "0 0 auto" }} title="Agent-derived pattern">
-                      {o.pinned ? "📌" : "🔎"}
+                      🔎
                     </span>
                     <span style={{ flex: 1, minWidth: 0 }}>
                       {o.summary}
@@ -801,10 +766,10 @@ function CatalogTab() {
 }
 
 /**
- * One class-tree row (chevron, depth rails, pinned/link-count/"n inside"
- * badges). Exported: the Memory surface's Catalog tab renders the same rows
- * (the SettingsTab precedent — one implementation, two mounts), injecting its
- * curation buttons through `actions`; the inspector stays read-only.
+ * One class-tree row (chevron, depth rails, link-count/"n inside" badges).
+ * Exported: the Memory surface's Catalog tab renders the same rows (the
+ * SettingsTab precedent — one implementation, two mounts). Read-only in both
+ * since B3: the gardener curates, and a run is what a person undoes.
  */
 export function ClassTreeRow({
   node,
@@ -813,7 +778,6 @@ export function ClassTreeRow({
   onSelect,
   collapsedIds,
   onToggle,
-  actions,
 }: {
   node: TreeNode;
   depth: number;
@@ -821,8 +785,6 @@ export function ClassTreeRow({
   onSelect: (id: string) => void;
   collapsedIds: Set<string>;
   onToggle: (id: string) => void;
-  /** Per-row trailing cluster (status badge + curation buttons). */
-  actions?: (node: TreeNode) => React.ReactNode;
 }) {
   const isDigest = node.kind === "digest";
   const hasChildren = node.children.length > 0;
@@ -898,11 +860,6 @@ export function ClassTreeRow({
         >
           {node.title}
         </span>
-        {node.pinned && (
-          <span title="Pinned (anti-decay)" style={{ flexShrink: 0 }}>
-            📌
-          </span>
-        )}
         {node.linkCount > 0 && (
           <span
             style={{
@@ -930,7 +887,6 @@ export function ClassTreeRow({
             {countDescendants(node)} inside
           </span>
         )}
-        {actions?.(node)}
       </div>
       {!collapsed &&
         node.children.map((c) => (
@@ -942,7 +898,6 @@ export function ClassTreeRow({
             onSelect={onSelect}
             collapsedIds={collapsedIds}
             onToggle={onToggle}
-            actions={actions}
           />
         ))}
     </>

@@ -64,7 +64,7 @@ CREATE TABLE class_nodes (
                 curated_by TEXT,              -- 'classifier' | author on accept
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
-            , retired_by_run INTEGER, retired_into TEXT, principal_id TEXT, device_id TEXT, agent_id TEXT, run_id TEXT, org_id TEXT, visibility TEXT NOT NULL DEFAULT 'private');
+            , retired_by_run INTEGER, retired_into TEXT, principal_id TEXT, device_id TEXT, agent_id TEXT, run_id TEXT, org_id TEXT, visibility TEXT NOT NULL DEFAULT 'private', last_recalled_at INTEGER);
 
 -- index sqlite_autoindex_class_nodes_1 (class_nodes) [auto]
 
@@ -83,7 +83,7 @@ CREATE TABLE class_links (
                 note TEXT,
                 status TEXT NOT NULL DEFAULT 'proposed',  -- proposed | accepted
                 created_at INTEGER NOT NULL
-            , retired_by_run INTEGER);
+            , retired_by_run INTEGER, last_recalled_at INTEGER);
 
 -- index idx_class_links_node (class_links)
 CREATE INDEX idx_class_links_node ON class_links (node_id);
@@ -105,7 +105,7 @@ CREATE TABLE class_proposals (
                 rationale TEXT,               -- agent's stated why (size/recency/coherence)
                 status TEXT NOT NULL DEFAULT 'proposed',
                 created_at INTEGER NOT NULL
-            );
+            , attempts INTEGER NOT NULL DEFAULT 0, next_after_run INTEGER, expires_lake_ts INTEGER, last_reason TEXT);
 
 -- index idx_class_proposals_status (class_proposals)
 CREATE INDEX idx_class_proposals_status ON class_proposals (status);
@@ -164,7 +164,7 @@ CREATE TABLE class_observations (
                 pinned INTEGER NOT NULL DEFAULT 0,
                 dismissed INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL
-            , retired_by_run INTEGER, principal_id TEXT, device_id TEXT, agent_id TEXT, run_id TEXT, org_id TEXT, visibility TEXT NOT NULL DEFAULT 'private');
+            , retired_by_run INTEGER, principal_id TEXT, device_id TEXT, agent_id TEXT, run_id TEXT, org_id TEXT, visibility TEXT NOT NULL DEFAULT 'private', retired_at INTEGER, retired_reason TEXT);
 
 -- index idx_class_observations_node (class_observations)
 CREATE INDEX idx_class_observations_node
@@ -353,6 +353,182 @@ CREATE INDEX idx_user_notes_scope ON user_notes (principal_id, org_id);
 
 -- index idx_class_observations_scope (class_observations)
 CREATE INDEX idx_class_observations_scope ON class_observations (principal_id, org_id);
+
+-- table foreign_chains (foreign_chains)
+CREATE TABLE foreign_chains (
+                chain_id TEXT PRIMARY KEY,       -- the peer's device id
+                human_id TEXT NOT NULL,          -- its parent human
+                device_name TEXT,
+                display_name TEXT,
+                head_seq INTEGER NOT NULL,       -- newest seq we hold
+                head_hash TEXT NOT NULL,         -- its entry_hash
+                forked INTEGER NOT NULL DEFAULT 0,
+                fork_detail TEXT,
+                first_import_at INTEGER NOT NULL,
+                last_import_at INTEGER NOT NULL
+            );
+
+-- index sqlite_autoindex_foreign_chains_1 (foreign_chains) [auto]
+
+-- table foreign_principals (foreign_principals)
+CREATE TABLE foreign_principals (
+                principal_id TEXT PRIMARY KEY,
+                chain_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                pubkey TEXT,
+                parent_id TEXT,
+                display_name TEXT
+            );
+
+-- index sqlite_autoindex_foreign_principals_1 (foreign_principals) [auto]
+
+-- table foreign_events (foreign_events)
+CREATE TABLE foreign_events (
+                chain_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                ts INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                author TEXT NOT NULL,
+                prompt_id INTEGER,
+                session_id TEXT,
+                version_number INTEGER,
+                ref_kind TEXT,
+                ref_id TEXT,
+                payload_hash TEXT NOT NULL,
+                prev_hash TEXT NOT NULL,
+                entry_hash TEXT NOT NULL,
+                PRIMARY KEY (chain_id, seq)
+            );
+
+-- index sqlite_autoindex_foreign_events_1 (foreign_events) [auto]
+
+-- table foreign_prompts (foreign_prompts)
+CREATE TABLE foreign_prompts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,  -- what an embedding row targets
+                chain_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,                  -- the prompt event's seq on its chain
+                prompt_id INTEGER NOT NULL,            -- the peer's own row id
+                role TEXT NOT NULL,
+                body_hash TEXT NOT NULL,
+                redaction TEXT NOT NULL,               -- full | gist | stub
+                text TEXT,
+                project TEXT,
+                tombstoned INTEGER NOT NULL DEFAULT 0,
+                imported_at INTEGER NOT NULL,
+                UNIQUE (chain_id, seq)
+            );
+
+-- index sqlite_autoindex_foreign_prompts_1 (foreign_prompts) [auto]
+
+-- table foreign_notes (foreign_notes)
+CREATE TABLE foreign_notes (
+                chain_id TEXT NOT NULL,
+                note_id INTEGER NOT NULL,
+                seq INTEGER,
+                target_kind TEXT NOT NULL,
+                target_id TEXT,
+                text TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (chain_id, note_id)
+            );
+
+-- index sqlite_autoindex_foreign_notes_1 (foreign_notes) [auto]
+
+-- table foreign_redactions (foreign_redactions)
+CREATE TABLE foreign_redactions (
+                chain_id TEXT NOT NULL,           -- the chain that emitted it
+                event_seq INTEGER NOT NULL,
+                target_chain TEXT NOT NULL,
+                target_seq INTEGER NOT NULL,
+                imported_at INTEGER NOT NULL,
+                PRIMARY KEY (chain_id, event_seq)
+            );
+
+-- index sqlite_autoindex_foreign_redactions_1 (foreign_redactions) [auto]
+
+-- table foreign_acks (foreign_acks)
+CREATE TABLE foreign_acks (
+                chain_id TEXT PRIMARY KEY,        -- a peer
+                acked_seq INTEGER NOT NULL,       -- newest seq of OUR chain it reported importing
+                updated_at INTEGER NOT NULL
+            );
+
+-- index sqlite_autoindex_foreign_acks_1 (foreign_acks) [auto]
+
+-- table foreign_trust (foreign_trust)
+CREATE TABLE foreign_trust (
+                principal_id TEXT PRIMARY KEY,    -- a human
+                pubkey TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                source TEXT NOT NULL,             -- tofu | admin
+                display_name TEXT,
+                added_at INTEGER NOT NULL
+            );
+
+-- index sqlite_autoindex_foreign_trust_1 (foreign_trust) [auto]
+
+-- table foreign_subscriptions (foreign_subscriptions)
+CREATE TABLE foreign_subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                principal TEXT,                   -- a human id, a fingerprint prefix, or a display name
+                project TEXT,
+                class TEXT,
+                created_at INTEGER NOT NULL
+            );
+
+-- index idx_foreign_prompts_chain (foreign_prompts)
+CREATE INDEX idx_foreign_prompts_chain ON foreign_prompts (chain_id, seq);
+
+-- table foreign_prompts_fts (foreign_prompts_fts)
+CREATE VIRTUAL TABLE foreign_prompts_fts USING fts5(
+                text,
+                content='foreign_prompts', content_rowid='id',
+                tokenize='porter unicode61 remove_diacritics 2 tokenchars ''_-./@''', prefix='2 3'
+            );
+
+-- table foreign_prompts_fts_data (foreign_prompts_fts_data)
+CREATE TABLE 'foreign_prompts_fts_data'(id INTEGER PRIMARY KEY, block BLOB);
+
+-- table foreign_prompts_fts_idx (foreign_prompts_fts_idx)
+CREATE TABLE 'foreign_prompts_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID;
+
+-- table foreign_prompts_fts_docsize (foreign_prompts_fts_docsize)
+CREATE TABLE 'foreign_prompts_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB);
+
+-- table foreign_prompts_fts_config (foreign_prompts_fts_config)
+CREATE TABLE 'foreign_prompts_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID;
+
+-- trigger foreign_prompts_fts_ai (foreign_prompts)
+CREATE TRIGGER foreign_prompts_fts_ai AFTER INSERT ON foreign_prompts BEGIN
+                INSERT INTO foreign_prompts_fts(rowid, text) VALUES (new.id, COALESCE(new.text, ''));
+            END;
+
+-- trigger foreign_prompts_fts_ad (foreign_prompts)
+CREATE TRIGGER foreign_prompts_fts_ad AFTER DELETE ON foreign_prompts BEGIN
+                INSERT INTO foreign_prompts_fts(foreign_prompts_fts, rowid, text) VALUES ('delete', old.id, COALESCE(old.text, ''));
+            END;
+
+-- trigger foreign_prompts_fts_au (foreign_prompts)
+CREATE TRIGGER foreign_prompts_fts_au AFTER UPDATE ON foreign_prompts BEGIN
+                INSERT INTO foreign_prompts_fts(foreign_prompts_fts, rowid, text) VALUES ('delete', old.id, COALESCE(old.text, ''));
+                INSERT INTO foreign_prompts_fts(rowid, text) VALUES (new.id, COALESCE(new.text, ''));
+            END;
+
+-- table class_centroids (class_centroids)
+CREATE TABLE class_centroids (
+                node_id TEXT NOT NULL,
+                model TEXT NOT NULL,
+                dim INTEGER NOT NULL,
+                n INTEGER NOT NULL,
+                sum_vec BLOB NOT NULL,          -- f32 little-endian, the SUM of unit vectors
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (node_id, model)
+            );
+
+-- index sqlite_autoindex_class_centroids_1 (class_centroids) [auto]
+
+-- index idx_class_proposals_next (class_proposals)
+CREATE INDEX idx_class_proposals_next ON class_proposals (status, next_after_run);
 
 -- table embeddings (embeddings)
 CREATE TABLE embeddings (
