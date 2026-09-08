@@ -324,6 +324,21 @@ CREATE TABLE principal_aliases (
 
 -- index sqlite_autoindex_principal_aliases_1 (principal_aliases) [auto]
 
+-- index idx_prompts_unscoped (prompts)
+CREATE INDEX idx_prompts_unscoped ON prompts (principal_id) WHERE principal_id IS NULL;
+
+-- index idx_browse_events_unscoped (browse_events)
+CREATE INDEX idx_browse_events_unscoped ON browse_events (principal_id) WHERE principal_id IS NULL;
+
+-- index idx_user_notes_unscoped (user_notes)
+CREATE INDEX idx_user_notes_unscoped ON user_notes (principal_id) WHERE principal_id IS NULL;
+
+-- index idx_class_nodes_unscoped (class_nodes)
+CREATE INDEX idx_class_nodes_unscoped ON class_nodes (principal_id) WHERE principal_id IS NULL;
+
+-- index idx_class_observations_unscoped (class_observations)
+CREATE INDEX idx_class_observations_unscoped ON class_observations (principal_id) WHERE principal_id IS NULL;
+
 -- index idx_prompts_scope (prompts)
 CREATE INDEX idx_prompts_scope ON prompts (principal_id, org_id, project_path);
 

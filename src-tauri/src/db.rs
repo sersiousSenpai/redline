@@ -12359,11 +12359,11 @@ mod tests {
                 "idx_class_nodes_retired",
                 "idx_class_links_retired",
                 // E2 (identity): the two tables, their PK autoindexes, the
-                // parent index, and the scope index per scoped table. (The
-                // store's partial `idx_<table>_unscoped` indexes are NOT here:
-                // at rev c2019ae their CREATE names `rowid`, which SQLite
-                // refuses, so the statement is a silent no-op — see the E2
-                // report; when the store fixes it they join this list.)
+                // parent index, the scope index per scoped table, and — since
+                // the store's f8d5066 fix (its first CREATE named `rowid`,
+                // which SQLite refuses; a silent no-op this very check
+                // exposed) — the partial `idx_<table>_unscoped` index per
+                // scoped table.
                 "principals",
                 "sqlite_autoindex_principals_1",
                 "principal_aliases",
@@ -12374,6 +12374,11 @@ mod tests {
                 "idx_user_notes_scope",
                 "idx_class_nodes_scope",
                 "idx_class_observations_scope",
+                "idx_prompts_unscoped",
+                "idx_browse_events_unscoped",
+                "idx_user_notes_unscoped",
+                "idx_class_nodes_unscoped",
+                "idx_class_observations_unscoped",
             ];
             let unexpected: Vec<_> = added
                 .iter()
