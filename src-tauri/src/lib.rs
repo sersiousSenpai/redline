@@ -3139,7 +3139,10 @@ async fn run_server(state: AppState) {
         // three Open rows. (`nest_service` would also serve `/mcp/anything`
         // with NO MatchedPath — outside the table, rmcp being path-agnostic —
         // so it is not used; a sub-path here is the router's own 404.)
-        .route("/mcp", axum::routing::any_service(polis_mcp::http_service(memory_api)))
+        // E2: the five write tools ride this mount too; `require_mcp_write_token`
+        // authorizes a `tools/call` of one of them exactly as its HTTP route
+        // (bearer + scope), so the fail-closed rule holds and reads stay open.
+        .route("/mcp", axum::routing::any_service(polis_mcp::http_service(memory_api)).layer(axum::middleware::from_fn(auth::require_mcp_write_token)))
         // Context access (Phase 3): the Librarian agent's friction digest —
         // ground-truth counts/staleness (backlog, held proposals, stalled
         // reviews, bulging branches). Read-only; rides the same `curl` allow.
@@ -12590,7 +12593,15 @@ pub fn run() {
             db::install_friction_sink(store.database());
             // The memory seats' agent (Session A4 of the Polis extraction).
             polis_host::install_agent(Arc::new(polis_host::RedlineAgent));
-            // The owned handle (`MemoryApi`) for the router and the MCP mount (A6).
+            // This install's identity (E2): the key under <data>/polis/, the
+            // store adopted under it — its own explicit step after attach
+            // (attach appends nothing; the first adoption appends the bind).
+            // Boot survives a failure: writes then carry the legacy author.
+            if let Err(e) = polis_host::install_identity(&data_dir, &store.database()) {
+                tracing::warn!(error = %e, "polis identity could not be installed; writes carry the login name");
+            }
+            // The owned handle (`MemoryApi`) for the router and the MCP mount (A6),
+            // writing as the identity above (E2).
             polis_host::install_polis(store.database());
 
             // Run watchers for the Orchestration Monitor. Rehydrate one per

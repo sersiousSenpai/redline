@@ -787,11 +787,76 @@ pub fn authorize(path: &str, method: &str, bearer: Option<&str>) -> Result<(), D
 }
 
 fn bearer_of(req: &Request) -> Option<String> {
-    let header = req.headers().get(axum::http::header::AUTHORIZATION)?;
+    bearer_of_headers(req.headers())
+}
+
+fn bearer_of_headers(headers: &axum::http::HeaderMap) -> Option<String> {
+    let header = headers.get(axum::http::header::AUTHORIZATION)?;
     let value = header.to_str().ok()?;
     value
         .strip_prefix("Bearer ")
         .map(|t| t.trim().to_string())
+}
+
+/// The largest JSON-RPC body the MCP write gate will read before deciding.
+/// A `memory_ingest` batch is bounded by the same budget the HTTP events
+/// route accepts.
+const MCP_BODY_CAP: usize = 4 * 1024 * 1024;
+
+/// The HTTP route an MCP `tools/call` is authorized AS, when the tool is one
+/// of the writes (E2): `memory_forget` is the `memory.forget` route, the other
+/// four are `memory.write`. `None` for reads, notifications, other methods,
+/// and anything that is not JSON-RPC — those pass as the mount's Open rows
+/// say. A batch is a write if any element is.
+pub fn mcp_write_route(body: &[u8]) -> Option<&'static str> {
+    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let messages: Vec<&serde_json::Value> = match &v {
+        serde_json::Value::Array(items) => items.iter().collect(),
+        other => vec![other],
+    };
+    let mut route = None;
+    for m in messages {
+        if m.get("method").and_then(|x| x.as_str()) != Some("tools/call") {
+            continue;
+        }
+        let Some(name) = m.get("params").and_then(|p| p.get("name")).and_then(|n| n.as_str()) else { continue };
+        if !polis_mcp::WRITE_TOOLS.contains(&name) {
+            continue;
+        }
+        if name == "memory_forget" {
+            return Some("/v1/memory/forget");
+        }
+        route = Some("/v1/memory/remember");
+    }
+    route
+}
+
+/// The MCP mount (E1) is three Open rows — a read-only surface by contract —
+/// and E2's five write tools ride the same JSON-RPC endpoint. This layer,
+/// on the `/mcp` route alone, keeps the fail-closed rule for them: a
+/// `tools/call` naming a write tool is authorized exactly as the HTTP route
+/// it maps to (the same bearer, the same scope, the same 401 text); every
+/// other message passes untouched. Reads stay open, as the plan wants.
+pub async fn require_mcp_write_token(req: Request, next: Next) -> Response {
+    if req.method() != axum::http::Method::POST {
+        return next.run(req).await;
+    }
+    let (parts, body) = req.into_parts();
+    let bytes = match axum::body::to_bytes(body, MCP_BODY_CAP).await {
+        Ok(b) => b,
+        Err(_) => {
+            return (StatusCode::PAYLOAD_TOO_LARGE, axum::Json(json!({ "error": "MCP body too large" }))).into_response();
+        }
+    };
+    if let Some(route) = mcp_write_route(&bytes) {
+        let bearer = bearer_of_headers(&parts.headers);
+        if let Err(denial) = authorize(route, "POST", bearer.as_deref()) {
+            let message = denial.message();
+            crate::db::note_friction("auth_denied", Some("daemon"), None, Some(&format!("POST /mcp (as {route}): {message}")));
+            return (StatusCode::UNAUTHORIZED, axum::Json(json!({ "error": message }))).into_response();
+        }
+    }
+    next.run(Request::from_parts(parts, axum::body::Body::from(bytes))).await
 }
 
 /// Axum middleware applying `authorize` to every daemon request. Requests
@@ -1041,6 +1106,28 @@ mod tests {
     /// (mounted as a route, not nested — a nested tail would carry no
     /// MatchedPath and rmcp would serve it anyway), and the mount's
     /// `MatchedPath` is exactly "/mcp" — what the three table rows are keyed on.
+    /// The MCP write gate's mapping: only a `tools/call` of a write tool is
+    /// authorized as a write, `memory_forget` as the forget route, a batch
+    /// by its strongest element, and everything else passes.
+    #[test]
+    fn mcp_write_gate_maps_write_tools_to_their_http_routes() {
+        let call = |name: &str| format!(r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{{}}}}}}"#);
+        assert_eq!(mcp_write_route(call("memory_search").as_bytes()), None);
+        assert_eq!(mcp_write_route(call("memory_remember").as_bytes()), Some("/v1/memory/remember"));
+        assert_eq!(mcp_write_route(call("memory_ingest").as_bytes()), Some("/v1/memory/remember"));
+        assert_eq!(mcp_write_route(call("memory_annotate").as_bytes()), Some("/v1/memory/remember"));
+        assert_eq!(mcp_write_route(call("memory_supersede").as_bytes()), Some("/v1/memory/remember"));
+        assert_eq!(mcp_write_route(call("memory_forget").as_bytes()), Some("/v1/memory/forget"));
+        assert_eq!(mcp_write_route(br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#), None);
+        assert_eq!(mcp_write_route(br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#), None);
+        assert_eq!(mcp_write_route(b"not json"), None);
+        let batch = format!("[{},{}]", call("memory_stats"), call("memory_forget"));
+        assert_eq!(mcp_write_route(batch.as_bytes()), Some("/v1/memory/forget"));
+        for w in polis_mcp::WRITE_TOOLS {
+            assert!(mcp_write_route(call(w).as_bytes()).is_some(), "{w} is gated");
+        }
+    }
+
     #[test]
     fn merged_router_serves_mcp_initialize_and_tools_list() {
         use axum::body::Body;
@@ -1056,7 +1143,10 @@ mod tests {
         let seen: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>> = Default::default();
         let probe = seen.clone();
         let app = polis_server::router::<polis_server::PolisState>()
-            .route("/mcp", axum::routing::any_service(polis_mcp::http_service(api)))
+            .route(
+                "/mcp",
+                axum::routing::any_service(polis_mcp::http_service(api.clone())).layer(axum::middleware::from_fn(require_mcp_write_token)),
+            )
             .layer(axum::middleware::from_fn(move |req: axum::extract::Request, next: axum::middleware::Next| {
                 let probe = probe.clone();
                 async move {
@@ -1102,7 +1192,43 @@ mod tests {
         for tool in ["memory_search", "memory_context", "memory_grep", "memory_tree", "memory_node", "memory_timeline", "memory_stats", "memory_verify", "answer_pack", "query_prompts"] {
             assert!(body.contains(&format!("\"name\":\"{tool}\"")), "tools/list names {tool}: {body}");
         }
-        assert!(!body.contains("memory_remember") && !body.contains("memory_forget"), "no write tools on this surface");
+        // E2: the five write tools ARE on this surface — gated below by the
+        // same token and scope as their HTTP routes; revert never is.
+        for tool in polis_mcp::WRITE_TOOLS {
+            assert!(body.contains(&format!("\"name\":\"{tool}\"")), "tools/list names the write tool {tool}");
+        }
+        assert!(!body.contains("revert"), "revert is never an MCP tool");
+        // A write without a token is refused as its HTTP twin would be.
+        let remember = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"memory_remember","arguments":{"text":"gated","as_user":true}}}"#;
+        let denied = rt.block_on(app.clone().oneshot(post(remember, Some(&session)))).unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED, "a write over MCP needs the token");
+        let denied_body = String::from_utf8_lossy(&rt.block_on(denied.into_body().collect()).unwrap().to_bytes()).to_string();
+        assert!(denied_body.contains("memory.write"), "the denial names the scope: {denied_body}");
+        let forget = r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"memory_forget","arguments":{"target_kind":"prompt","target_id":"1","confirm":"forget"}}}"#;
+        let denied = rt.block_on(app.clone().oneshot(post(forget, Some(&session)))).unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        let denied_body = String::from_utf8_lossy(&rt.block_on(denied.into_body().collect()).unwrap().to_bytes()).to_string();
+        assert!(denied_body.contains("memory.forget"), "forget is the forget scope: {denied_body}");
+        // With the master token the write goes through to the memory.
+        let mut authed = post(remember, Some(&session));
+        authed.headers_mut().insert(axum::http::header::AUTHORIZATION, format!("Bearer {}", daemon_token()).parse().unwrap());
+        let ok = rt.block_on(app.clone().oneshot(authed)).unwrap();
+        assert_eq!(ok.status(), StatusCode::OK, "the tokened write is served");
+        // The transport streams the result: the tool runs as the body is
+        // produced, so read it to the end before looking for the row.
+        let ok_body = String::from_utf8_lossy(&rt.block_on(ok.into_body().collect()).unwrap().to_bytes()).to_string();
+        assert!(ok_body.contains("remembered"), "the write's receipt rides the stream: {ok_body}");
+        let found = api.search(&polis_core::api::SearchRequest { q: Some("gated".into()), ..Default::default() }).unwrap();
+        assert!(!found.prompt_hits.is_empty(), "the remembered row is in the lake");
+        // …and the daemon's own router carries the same gate on its `/mcp`
+        // route (a source scrape, the drift test's style): a mount without it
+        // would serve `memory_forget` to any loopback process token-free.
+        let lib_src = include_str!("lib.rs");
+        let mcp_line = lib_src.lines().find(|l| l.contains(".route(\"/mcp\"")).expect("lib.rs registers /mcp");
+        assert!(mcp_line.contains("require_mcp_write_token"), "the /mcp route must carry require_mcp_write_token: {mcp_line}");
+        // A read on the same session still needs no token.
+        let stats = rt.block_on(app.clone().oneshot(post(r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"memory_stats","arguments":{}}}"#, Some(&session)))).unwrap();
+        assert_eq!(stats.status(), StatusCode::OK, "reads stay open");
         // A sub-path is not a route: the router's own 404 (empty body), never
         // rmcp answering as if it were the mount.
         let sub = rt.block_on(app.clone().oneshot(HttpRequest::builder().uri("/mcp/nope").header("host", "127.0.0.1:7676").body(Body::empty()).unwrap())).unwrap();

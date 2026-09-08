@@ -470,11 +470,72 @@ pub fn polis_for(db: &Database) -> Polis<'_> {
 
 static POLIS: OnceLock<Arc<PolisHandle>> = OnceLock::new();
 
+/// This install's identity (Session E2 of the Polis extraction, plan §4.5):
+/// the Ed25519 key at `<app-data-dir>/polis/identity.key` — the same place
+/// `polis init --from-redline <app-data-dir>` looks, so the CLI and this app
+/// are ONE device on ONE chain. `None` until [`install_identity`] ran (tests,
+/// and the window before setup).
+static IDENTITY: OnceLock<Arc<polis_memory::identity::Identity>> = OnceLock::new();
+
+/// Load or create the key under `data_dir/polis/`, adopt the store under it
+/// (idempotent: aliases for every legacy author string, the device's ONE
+/// `principal_bind`, the scope stamp — a second boot seeds, binds and stamps
+/// nothing), and make the identity reachable to every record site. Its own
+/// explicit step, never inside attach: attach appends nothing
+/// (`real_db_attach_is_a_noop`); the first adoption appends exactly the bind.
+pub fn install_identity(data_dir: &std::path::Path, db: &Database) -> Result<polis_memory::identity::AdoptReport, String> {
+    use polis_memory::identity::{adopt, default_device_name, login_name, Identity};
+    let dir = data_dir.join("polis");
+    let (identity, created) = Identity::load_or_create(&dir, default_device_name())?;
+    let identity = Arc::new(identity);
+    let report = adopt(&db.polis_store(), &identity, &login_name())?;
+    tracing::info!(
+        key = %dir.join(polis_memory::identity::KEY_FILE).display(),
+        created_key = created,
+        principal = %identity.fingerprint(),
+        device = %polis_core::identity::fingerprint(&identity.device_id()),
+        device_name = %identity.device_name,
+        bind_seq = ?report.bind_seq,
+        bind_appended = !report.already_bound,
+        aliases_seeded = report.aliases_seeded.len(),
+        principals_seeded = report.principals_seeded,
+        stamped = report.stamped,
+        "polis identity adopted"
+    );
+    let _ = IDENTITY.set(identity);
+    Ok(report)
+}
+
+/// The installed identity, if setup ran.
+pub fn identity() -> Option<Arc<polis_memory::identity::Identity>> {
+    IDENTITY.get().cloned()
+}
+
+/// The author a seat's own writes carry: `agent:<seat>` under this device
+/// once an identity exists, the seat's name until then (the alias table
+/// resolves the legacy string either way).
+pub fn agent_author(seat: &str) -> String {
+    match identity() {
+        Some(id) => {
+            if let Some(handle) = polis_handle() {
+                if let Err(e) = polis_memory::identity::ensure_agent(&handle.store, &id, seat) {
+                    tracing::warn!(error = %e, seat, "could not register the seat's agent principal");
+                }
+            }
+            id.agent_id(seat)
+        }
+        None => seat.to_string(),
+    }
+}
+
 /// Install the owned handle (setup) — what the router and the MCP mount
-/// serve as `MemoryApi` (A6). Idempotent.
+/// serve as `MemoryApi` (A6), writing as this install's identity when
+/// [`install_identity`] ran first (E2). Idempotent.
 pub fn install_polis(db: Arc<Database>) {
     let embedder = crate::embed::provider_for(&db);
-    let handle = PolisHandle::new(db.polis_store(), Some(agent()), db.clone(), db).with_embedder(embedder);
+    let handle = PolisHandle::new(db.polis_store(), Some(agent()), db.clone(), db)
+        .with_embedder(embedder)
+        .with_identity(identity());
     let _ = POLIS.set(Arc::new(handle));
 }
 
@@ -538,6 +599,87 @@ mod tests {
         let api: &dyn MemoryApi = &handle;
         assert!(api.verify().unwrap().ok);
         assert!(api.tree(&polis_core::api::TreeRequest::default()).unwrap().is_empty());
+    }
+
+    /// E2: adoption is idempotent — one `principal_bind` after the first
+    /// call, none after the second — and the alias table resolves the login
+    /// to the device and a seat to its agent. Runs against the library
+    /// directly (the `OnceLock` is process-global, so the boot installer is
+    /// exercised by the app, not here).
+    #[test]
+    fn adoption_binds_once_and_resolves_the_login_and_the_seats() {
+        use polis_memory::identity::{adopt, Identity};
+        let db = Database::open_in_memory().unwrap();
+        crate::classmem::record_curate(&db, "classifier", "cn-x", "organize", "");
+        let dir = std::env::temp_dir().join(format!("redline-identity-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let (identity, created) = Identity::load_or_create(&dir, "test-box").unwrap();
+        assert!(created);
+        let store = db.polis_store();
+        let head_before = store.chain_head().unwrap().0;
+        let first = adopt(&store, &identity, "yusuf").unwrap();
+        assert!(!first.already_bound);
+        let (head, _) = store.chain_head().unwrap();
+        assert_eq!(head, head_before + 1, "exactly the bind was appended");
+        let top = store.list_ledger_events_asc(head - 1, 1).unwrap().remove(0);
+        assert_eq!(top.kind, "principal_bind");
+        assert_eq!(top.author, identity.device_id());
+        let second = adopt(&store, &identity, "yusuf").unwrap();
+        assert!(second.already_bound && second.aliases_seeded.is_empty() && second.stamped == 0);
+        assert_eq!(store.chain_head().unwrap().0, head, "a second adoption appends nothing");
+        assert_eq!(store.resolve_author("yusuf").unwrap().as_deref(), Some(identity.device_id().as_str()));
+        assert_eq!(store.resolve_author("classifier").unwrap().as_deref(), Some(identity.agent_id("classifier").as_str()));
+        // A seat that has never written has its agent PRINCIPAL (seeded as a
+        // builtin) but no alias row yet — aliases are for author strings the
+        // lake has actually seen; `agent_author("keeper")` writes the id.
+        assert!(store.get_principal(&identity.agent_id("keeper")).unwrap().is_some());
+        assert_eq!(store.resolve_author("keeper").unwrap(), None);
+        assert!(db.verify_ledger_chain().unwrap().ok);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The boot path's adoption on a COPY of the live database
+    /// (`REDLINE_REAL_DB=<copy>`): what `install_identity` reports on first
+    /// boot — the bind appended, every legacy author aliased, the rows
+    /// stamped — and that the chain still verifies. Ignored: it needs the
+    /// copy and it sets the process-global identity.
+    #[test]
+    #[ignore]
+    fn real_db_install_identity_reports() {
+        let Ok(path) = std::env::var("REDLINE_REAL_DB") else {
+            eprintln!("set REDLINE_REAL_DB to a COPY of a live redline.db");
+            return;
+        };
+        let db = Database::open(std::path::Path::new(&path)).unwrap();
+        let store = db.polis_store();
+        let before = store.chain_head().unwrap().0;
+        let authors = store.distinct_authors().unwrap();
+        let data_dir = std::env::temp_dir().join(format!("redline-identity-real-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let t0 = std::time::Instant::now();
+        let report = install_identity(&data_dir, &db).unwrap();
+        let ms = t0.elapsed().as_millis();
+        let (head, _) = store.chain_head().unwrap();
+        assert_eq!(head, before + 1, "the first boot appends exactly the bind");
+        assert!(!report.already_bound);
+        assert!(db.verify_ledger_chain().unwrap().ok);
+        let unresolved: Vec<_> = authors.iter().filter(|a| store.resolve_author(a).unwrap().is_none()).cloned().collect();
+        assert!(unresolved.is_empty(), "unaliased authors: {unresolved:?}");
+        assert!(data_dir.join("polis").join(polis_memory::identity::KEY_FILE).exists());
+        // the user's writes now carry the device id; a seat's its agent id
+        assert_eq!(crate::ledger::local_author(), report.device);
+        assert_eq!(agent_author("keeper"), identity().unwrap().agent_id("keeper"));
+        eprintln!(
+            "real_db_install_identity: events {before} → {head} · authors {} · aliases +{} · principals +{} · stamped {} · unscoped {:?} · bind #{:?} · {} ms · key {}",
+            authors.len(),
+            report.aliases_seeded.len(),
+            report.principals_seeded,
+            report.stamped,
+            report.unscoped,
+            report.bind_seq,
+            ms,
+            data_dir.join("polis").display()
+        );
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 
     #[test]

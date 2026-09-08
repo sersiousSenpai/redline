@@ -57,6 +57,13 @@ pub use polis_core::ledger::{
 /// then `"local"`. Stored per event and hashed into `entry_hash`, so changing
 /// it retroactively would break the chain — which is the point.
 pub fn local_author() -> String {
+    // E2: once this install has an identity, the user's writes are authored
+    // by the DEVICE id (plan §4.5 — never a chosen name). The login below is
+    // the legacy string the alias table resolves to that same device, so
+    // history and new events read as one author.
+    if let Some(id) = crate::polis_host::identity() {
+        return id.device_id();
+    }
     std::env::var("REDLINE_AUTHOR")
         .ok()
         .filter(|s| !s.trim().is_empty())
@@ -217,7 +224,9 @@ pub fn record_agent_prompt(
         thread,
         // The constructed body is the surface agent's artifact, so it authors
         // the event as itself — the surface string is already ground truth here.
-        author: Some(surface.to_string()),
+        // …as `agent:<seat>` under this device once an identity exists (E2),
+        // as the seat's name until then (the alias table resolves both).
+        author: Some(crate::polis_host::agent_author(surface)),
         model,
         model_source,
     };

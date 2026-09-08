@@ -16,7 +16,7 @@ CREATE TABLE prompts (
                 project_path TEXT,
                 body TEXT NOT NULL,
                 body_hash TEXT NOT NULL
-            , gist TEXT, compacted_at INTEGER, original_bytes INTEGER, user_text TEXT, gist_source TEXT, fts_text TEXT GENERATED ALWAYS AS (
+            , gist TEXT, compacted_at INTEGER, original_bytes INTEGER, user_text TEXT, gist_source TEXT, principal_id TEXT, device_id TEXT, agent_id TEXT, run_id TEXT, org_id TEXT, visibility TEXT NOT NULL DEFAULT 'private', fts_text TEXT GENERATED ALWAYS AS (
                     CASE WHEN role = 'agent'  THEN COALESCE(NULLIF(user_text, ''), '')
                          WHEN role = 'system' THEN substr(COALESCE(NULLIF(body, ''), gist, ''),
                                                           1, 600)
@@ -64,7 +64,7 @@ CREATE TABLE class_nodes (
                 curated_by TEXT,              -- 'classifier' | author on accept
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
-            , retired_by_run INTEGER, retired_into TEXT);
+            , retired_by_run INTEGER, retired_into TEXT, principal_id TEXT, device_id TEXT, agent_id TEXT, run_id TEXT, org_id TEXT, visibility TEXT NOT NULL DEFAULT 'private');
 
 -- index sqlite_autoindex_class_nodes_1 (class_nodes) [auto]
 
@@ -144,7 +144,7 @@ CREATE TABLE user_notes (
                 starred INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
-            );
+            , principal_id TEXT, device_id TEXT, agent_id TEXT, run_id TEXT, org_id TEXT, visibility TEXT NOT NULL DEFAULT 'private');
 
 -- index idx_user_notes_target (user_notes)
 CREATE UNIQUE INDEX idx_user_notes_target
@@ -164,7 +164,7 @@ CREATE TABLE class_observations (
                 pinned INTEGER NOT NULL DEFAULT 0,
                 dismissed INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL
-            , retired_by_run INTEGER);
+            , retired_by_run INTEGER, principal_id TEXT, device_id TEXT, agent_id TEXT, run_id TEXT, org_id TEXT, visibility TEXT NOT NULL DEFAULT 'private');
 
 -- index idx_class_observations_node (class_observations)
 CREATE INDEX idx_class_observations_node
@@ -195,7 +195,7 @@ CREATE TABLE browse_events (
                 text TEXT NOT NULL,           -- normalized page content (for P3 FTS)
                 context_hash TEXT NOT NULL,   -- body_hash over `text`
                 from_event_id INTEGER         -- trail edge: preceding browse_events.id (NULL = trail root)
-            , shot_key TEXT, caption TEXT);
+            , shot_key TEXT, caption TEXT, principal_id TEXT, device_id TEXT, agent_id TEXT, run_id TEXT, org_id TEXT, visibility TEXT NOT NULL DEFAULT 'private');
 
 -- index idx_browse_events_hash (browse_events)
 CREATE INDEX idx_browse_events_hash ON browse_events (context_hash);
@@ -282,6 +282,62 @@ CREATE INDEX idx_class_nodes_retired ON class_nodes (retired_by_run);
 
 -- index idx_class_links_retired (class_links)
 CREATE INDEX idx_class_links_retired ON class_links (retired_by_run);
+
+-- table class_run_ops (class_run_ops)
+CREATE TABLE class_run_ops (
+                run_id INTEGER NOT NULL,
+                op_ix INTEGER NOT NULL,
+                op TEXT NOT NULL,             -- file | create | promote | split | merge | collapse | supersede | compact | observe
+                subject_ids TEXT NOT NULL,    -- JSON array: node:<id> link:<id> obs:<id> prompt:<id> seq:<n>
+                outcome TEXT NOT NULL,        -- applied | refused | expired | reverted
+                reason TEXT,
+                pre_image BLOB,               -- deflate(JSON), NULL once vacuumed
+                pre_hash TEXT,
+                post_image BLOB,
+                ledger_seq INTEGER,
+                reverted_by_run INTEGER,
+                PRIMARY KEY (run_id, op_ix)
+            );
+
+-- index sqlite_autoindex_class_run_ops_1 (class_run_ops) [auto]
+
+-- table principals (principals)
+CREATE TABLE principals (
+                principal_id TEXT PRIMARY KEY,   -- hex(sha256(pubkey)) or a derived id
+                kind TEXT NOT NULL,              -- human | device | agent | org
+                pubkey TEXT,                     -- hex; keyed principals only
+                parent_id TEXT,                  -- device → human, agent → device
+                display_name TEXT,
+                created_at INTEGER NOT NULL
+            );
+
+-- index sqlite_autoindex_principals_1 (principals) [auto]
+
+-- index idx_principals_parent (principals)
+CREATE INDEX idx_principals_parent ON principals (parent_id);
+
+-- table principal_aliases (principal_aliases)
+CREATE TABLE principal_aliases (
+                alias TEXT PRIMARY KEY,          -- a legacy author string
+                principal_id TEXT NOT NULL
+            );
+
+-- index sqlite_autoindex_principal_aliases_1 (principal_aliases) [auto]
+
+-- index idx_prompts_scope (prompts)
+CREATE INDEX idx_prompts_scope ON prompts (principal_id, org_id, project_path);
+
+-- index idx_class_nodes_scope (class_nodes)
+CREATE INDEX idx_class_nodes_scope ON class_nodes (principal_id, org_id, project_path);
+
+-- index idx_browse_events_scope (browse_events)
+CREATE INDEX idx_browse_events_scope ON browse_events (principal_id, org_id);
+
+-- index idx_user_notes_scope (user_notes)
+CREATE INDEX idx_user_notes_scope ON user_notes (principal_id, org_id);
+
+-- index idx_class_observations_scope (class_observations)
+CREATE INDEX idx_class_observations_scope ON class_observations (principal_id, org_id);
 
 -- table embeddings (embeddings)
 CREATE TABLE embeddings (

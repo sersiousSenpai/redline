@@ -47,6 +47,9 @@ fn memory_schema_golden_covers_every_memory_table() {
         "session_tree",
         "prompt_archive",
         "embeddings",
+        // E2 (identity)
+        "principals",
+        "principal_aliases",
     ] {
         assert!(
             rendered.contains(&format!("-- table {table} (")),

@@ -12353,10 +12353,27 @@ mod tests {
             // two retire-mark indexes. (The store exposes no list of its own
             // objects yet; when it does, read it from there.)
             const STORE_BUMP_OBJECTS: &[&str] = &[
+                // B2
                 "class_run_ops",
                 "sqlite_autoindex_class_run_ops_1",
                 "idx_class_nodes_retired",
                 "idx_class_links_retired",
+                // E2 (identity): the two tables, their PK autoindexes, the
+                // parent index, and the scope index per scoped table. (The
+                // store's partial `idx_<table>_unscoped` indexes are NOT here:
+                // at rev c2019ae their CREATE names `rowid`, which SQLite
+                // refuses, so the statement is a silent no-op — see the E2
+                // report; when the store fixes it they join this list.)
+                "principals",
+                "sqlite_autoindex_principals_1",
+                "principal_aliases",
+                "sqlite_autoindex_principal_aliases_1",
+                "idx_principals_parent",
+                "idx_prompts_scope",
+                "idx_browse_events_scope",
+                "idx_user_notes_scope",
+                "idx_class_nodes_scope",
+                "idx_class_observations_scope",
             ];
             let unexpected: Vec<_> = added
                 .iter()
