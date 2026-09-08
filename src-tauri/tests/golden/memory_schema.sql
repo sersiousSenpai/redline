@@ -64,7 +64,7 @@ CREATE TABLE class_nodes (
                 curated_by TEXT,              -- 'classifier' | author on accept
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
-            );
+            , retired_by_run INTEGER, retired_into TEXT);
 
 -- index sqlite_autoindex_class_nodes_1 (class_nodes) [auto]
 
@@ -83,7 +83,7 @@ CREATE TABLE class_links (
                 note TEXT,
                 status TEXT NOT NULL DEFAULT 'proposed',  -- proposed | accepted
                 created_at INTEGER NOT NULL
-            );
+            , retired_by_run INTEGER);
 
 -- index idx_class_links_node (class_links)
 CREATE INDEX idx_class_links_node ON class_links (node_id);
@@ -120,7 +120,7 @@ CREATE TABLE class_runs (
                 seq_to INTEGER,
                 claude_session_id TEXT,
                 summary TEXT
-            , duration_ms INTEGER, items INTEGER, ops INTEGER, model TEXT, outcome TEXT, canary_before REAL, canary_after REAL, error TEXT);
+            , duration_ms INTEGER, items INTEGER, ops INTEGER, model TEXT, outcome TEXT, canary_before REAL, canary_after REAL, error TEXT, mode TEXT, llm_calls INTEGER, prompt_bytes INTEGER, tokens_in INTEGER, tokens_out INTEGER, wall_ms INTEGER, canary_json TEXT);
 
 -- table supersessions (supersessions)
 CREATE TABLE supersessions (
@@ -164,7 +164,7 @@ CREATE TABLE class_observations (
                 pinned INTEGER NOT NULL DEFAULT 0,
                 dismissed INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL
-            );
+            , retired_by_run INTEGER);
 
 -- index idx_class_observations_node (class_observations)
 CREATE INDEX idx_class_observations_node
@@ -276,6 +276,12 @@ CREATE TABLE prompt_archive (
 
 -- index idx_browse_events_shot (browse_events)
 CREATE INDEX idx_browse_events_shot ON browse_events (shot_key);
+
+-- index idx_class_nodes_retired (class_nodes)
+CREATE INDEX idx_class_nodes_retired ON class_nodes (retired_by_run);
+
+-- index idx_class_links_retired (class_links)
+CREATE INDEX idx_class_links_retired ON class_links (retired_by_run);
 
 -- table embeddings (embeddings)
 CREATE TABLE embeddings (

@@ -52,6 +52,19 @@ import {
 } from "../lib/classTree";
 import { noteOnEvent, standaloneNote, type NoteAct, type UserNote } from "../lib/notes";
 import {
+  modeLabel,
+  opLabel,
+  outcomeLabel,
+  outcomeTone,
+  refusalReason,
+  runHeadline,
+  subjectLabel,
+  undoState,
+  type RunOp,
+  type RunRow,
+  type RunView,
+} from "../lib/classRuns";
+import {
   actionHint,
   categoryLabel,
   categoryTone,
@@ -1406,6 +1419,214 @@ interface NodeDetail {
   observations: Observation[];
 }
 
+/**
+ * The run timeline (Session B2 of the Polis extraction): the gardener's last
+ * runs — organize / compaction / observations / undo — each expandable to the
+ * ops it journaled, with **Undo** per run. Undo is one `revert_run`: every op
+ * restored from its pre-image in one transaction, nothing deleted, and the
+ * undo is itself a run here. No confirm dialog for that reason; a refusal
+ * ("revert run #N first — …", the horizon, already undone) shows inline.
+ * Collapsed by default so the toolbar stays one line.
+ */
+function RunTimeline({ now }: { now: number }) {
+  const [open, setOpen] = useState(false);
+  const [runs, setRuns] = useState<RunRow[]>([]);
+  const [expanded, setExpanded] = useState<number | null>(null);
+  const [ops, setOps] = useState<Record<number, RunOp[]>>({});
+  const [busy, setBusy] = useState<number | null>(null);
+  const [refusal, setRefusal] = useState<{ id: number; why: string } | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setRuns(await invoke<RunRow[]>("classmem_runs", { limit: 20 }));
+      // A run's journal may have changed (an undo marks its ops); drop the cache.
+      setOps({});
+    } catch {
+      // The pane header reports memory errors; the timeline stays quiet.
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+    const un = listen("classmem-changed", () => void load());
+    return () => void un.then((f) => f());
+  }, [load]);
+
+  const toggle = useCallback(
+    async (id: number) => {
+      if (expanded === id) {
+        setExpanded(null);
+        return;
+      }
+      setExpanded(id);
+      if (!ops[id]) {
+        try {
+          const v = await invoke<RunView | null>("classmem_run", { id });
+          if (v) setOps((prev) => ({ ...prev, [id]: v.ops }));
+        } catch {
+          /* shown as an empty journal */
+        }
+      }
+    },
+    [expanded, ops],
+  );
+
+  const undo = useCallback(async (id: number) => {
+    setBusy(id);
+    setRefusal(null);
+    try {
+      await invoke("classmem_revert_run", { id });
+      // classmem-changed reloads the list; the undone run reads "undone" and
+      // the undo itself appears as its own run.
+    } catch (e) {
+      setRefusal({ id, why: refusalReason(e) });
+    } finally {
+      setBusy(null);
+    }
+  }, []);
+
+  const latest = runs[0];
+  const toneColor = (t: "ok" | "warn" | "muted") =>
+    t === "warn" ? "var(--color-warning)" : t === "muted" ? "var(--color-ink-muted)" : "var(--color-info)";
+
+  return (
+    <div style={{ flexShrink: 0, borderBottom: "1px solid var(--color-rule)" }}>
+      <button
+        type="button"
+        className="font-sans"
+        onClick={() => setOpen((o) => !o)}
+        style={{
+          width: "100%",
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          padding: "5px 16px",
+          fontSize: 11,
+          color: "var(--color-ink-muted)",
+          background: "transparent",
+          border: "none",
+          cursor: "pointer",
+          textAlign: "left",
+        }}
+        title="The gardener's runs — what each did, and Undo"
+      >
+        <span style={{ display: "inline-block", width: 10, transform: open ? "rotate(90deg)" : "none", transition: "transform 120ms" }}>▸</span>
+        <span style={{ fontWeight: 600 }}>Runs</span>
+        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {runs.length === 0
+            ? "none yet — the gardener writes one per pass"
+            : `${runs.length}${runs.length === 20 ? "+" : ""} · last: ${runHeadline(latest)} · ${relativeTime(latest.finishedAt ?? latest.startedAt, now)}`}
+        </span>
+      </button>
+      {open && runs.length > 0 && (
+        <div className="rl-thin-scroll-y" style={{ maxHeight: "34%", overflowY: "auto", padding: "0 16px 8px", display: "flex", flexDirection: "column", gap: 4 }}>
+          {runs.map((r) => {
+            const state = undoState(r);
+            const tone = outcomeTone(r);
+            const isOpen = expanded === r.id;
+            const journal = ops[r.id];
+            return (
+              <div
+                key={r.id}
+                className="font-sans"
+                style={{
+                  border: "1px solid var(--color-rule)",
+                  borderRadius: 6,
+                  background: "var(--color-paper)",
+                  padding: "5px 8px",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 3,
+                  opacity: tone === "muted" ? 0.75 : 1,
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11 }}>
+                  <button
+                    type="button"
+                    onClick={() => void toggle(r.id)}
+                    title={isOpen ? "Hide this run's ops" : "Show what this run did"}
+                    style={{ border: "none", background: "transparent", color: "var(--color-ink-muted)", cursor: "pointer", padding: 0, width: 12 }}
+                  >
+                    {isOpen ? "▾" : "▸"}
+                  </button>
+                  <span
+                    style={{
+                      fontSize: 10,
+                      fontWeight: 600,
+                      padding: "1px 7px",
+                      borderRadius: 999,
+                      color: "#fff",
+                      background: toneColor(tone),
+                      flexShrink: 0,
+                    }}
+                  >
+                    {modeLabel(r)}
+                  </span>
+                  <span style={{ color: "var(--color-ink-muted)", flexShrink: 0 }}>#{r.id}</span>
+                  <span style={{ flexShrink: 0 }}>
+                    {r.ops != null ? `${r.ops} op${r.ops === 1 ? "" : "s"} · ` : ""}
+                    {outcomeLabel(r)}
+                    {r.wallMs != null || r.durationMs != null
+                      ? ` · ${(() => { const ms = r.wallMs ?? r.durationMs ?? 0; return ms >= 1000 ? `${(ms / 1000).toFixed(1)} s` : `${ms} ms`; })()}`
+                      : ""}
+                  </span>
+                  <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--color-ink-muted)" }} title={r.summary ?? undefined}>
+                    {r.summary ?? r.error ?? ""}
+                  </span>
+                  <span style={{ color: "var(--color-ink-muted)", flexShrink: 0 }}>{relativeTime(r.finishedAt ?? r.startedAt, now)}</span>
+                  {state.can ? (
+                    <button
+                      type="button"
+                      className="font-sans"
+                      onClick={() => void undo(r.id)}
+                      disabled={busy != null}
+                      title="Undo this run: every op restored from its journal in one transaction; nothing is deleted, and the undo is a run of its own"
+                      style={{ ...chipStyle(false), fontSize: 10, padding: "1px 8px", cursor: busy != null ? "wait" : "pointer", flexShrink: 0 }}
+                    >
+                      {busy === r.id ? "Undoing…" : "Undo"}
+                    </button>
+                  ) : (
+                    <span style={{ color: "var(--color-ink-muted)", fontSize: 10, flexShrink: 0 }} title={state.why}>
+                      {state.why}
+                    </span>
+                  )}
+                </div>
+                {refusal?.id === r.id && (
+                  <div style={{ fontSize: 11, color: "var(--color-warning)" }}>Not undone: {refusal.why}</div>
+                )}
+                {isOpen && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 2, paddingLeft: 20, fontSize: 11 }}>
+                    {journal == null ? (
+                      <span style={{ color: "var(--color-ink-muted)" }}>Loading the journal…</span>
+                    ) : journal.length === 0 ? (
+                      <span style={{ color: "var(--color-ink-muted)" }}>No ops journaled — nothing this run did can be undone, and nothing needs to be.</span>
+                    ) : (
+                      journal.map((o) => (
+                        <div key={o.opIx} style={{ display: "flex", gap: 8, alignItems: "baseline", opacity: o.outcome === "reverted" ? 0.6 : 1 }}>
+                          <span style={{ color: "var(--color-ink-muted)", width: 22, flexShrink: 0, textAlign: "right" }}>{o.opIx}</span>
+                          <span style={{ fontWeight: 600, width: 68, flexShrink: 0 }}>{opLabel(o.op)}</span>
+                          <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={o.subjectIds.join(", ")}>
+                            {o.subjectIds.map(subjectLabel).join(", ")}
+                          </span>
+                          <span style={{ color: "var(--color-ink-muted)", flexShrink: 0 }}>
+                            {o.outcome === "reverted" && o.revertedByRun != null ? `undone by #${o.revertedByRun}` : o.outcome}
+                            {o.reason ? ` · ${o.reason}` : ""}
+                            {o.ledgerSeq != null ? ` · seq ${o.ledgerSeq}` : ""}
+                          </span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CatalogTab() {
   const [nodes, setNodes] = useState<ClassNode[]>([]);
   const [proposals, setProposals] = useState<ProposalView[]>([]);
@@ -1628,6 +1849,8 @@ function CatalogTab() {
           {error}
         </div>
       )}
+
+      <RunTimeline now={now} />
 
       {/* The held-proposal review strip — the escalation channel's terminus.
           Prominent when anything is queued; a quiet promise when nothing is. */}

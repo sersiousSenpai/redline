@@ -12340,8 +12340,33 @@ mod tests {
             let missing: Vec<_> = objects_before.iter().filter(|o| !after.contains(o)).collect();
             let added: Vec<_> = after.iter().filter(|o| !objects_before.contains(o)).collect();
             assert!(
-                missing.is_empty() && added.is_empty(),
-                "schema objects changed on attach — dropped/rebuilt: {missing:?}, added: {added:?}"
+                missing.is_empty(),
+                "schema objects dropped or rebuilt on attach: {missing:?}"
+            );
+            // A store schema bump (`polis_store::meta::STORE_SCHEMA_VERSION`) may
+            // CREATE objects on first attach — that is the one legitimate
+            // "added". The allowance names exactly what each bump introduced,
+            // by the version that introduced it, so an unexpected object (a
+            // rebuilt FTS table, a stray index) still fails. Columns added by
+            // ALTER do not appear here: the list reads type/name/rootpage.
+            // 3 (B2): the `class_run_ops` journal (+ its PK autoindex) and the
+            // two retire-mark indexes. (The store exposes no list of its own
+            // objects yet; when it does, read it from there.)
+            const STORE_BUMP_OBJECTS: &[&str] = &[
+                "class_run_ops",
+                "sqlite_autoindex_class_run_ops_1",
+                "idx_class_nodes_retired",
+                "idx_class_links_retired",
+            ];
+            let unexpected: Vec<_> = added
+                .iter()
+                .filter(|(_, name, _)| !STORE_BUMP_OBJECTS.contains(&name.as_str()))
+                .collect();
+            assert!(
+                unexpected.is_empty(),
+                "schema objects added on attach beyond the store's own bump: {unexpected:?} \
+                 (allowed: {STORE_BUMP_OBJECTS:?}; store schema version {})",
+                polis_store::meta::STORE_SCHEMA_VERSION
             );
         }
         assert!(db.verify_ledger_chain().unwrap().ok, "the chain still verifies");

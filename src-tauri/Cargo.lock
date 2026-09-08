@@ -3372,7 +3372,7 @@ dependencies = [
 [[package]]
 name = "polis-core"
 version = "0.1.0"
-source = "git+https://github.com/sersiousSenpai/polis-memory?rev=af5fa59de193cfb63a9d18b034a098f9aee4e523#af5fa59de193cfb63a9d18b034a098f9aee4e523"
+source = "git+https://github.com/sersiousSenpai/polis-memory?rev=62b722130d5a15a3342801cb78d817fa31fea522#62b722130d5a15a3342801cb78d817fa31fea522"
 dependencies = [
  "serde",
  "serde_json",
@@ -3382,7 +3382,7 @@ dependencies = [
 [[package]]
 name = "polis-embed"
 version = "0.1.0"
-source = "git+https://github.com/sersiousSenpai/polis-memory?rev=af5fa59de193cfb63a9d18b034a098f9aee4e523#af5fa59de193cfb63a9d18b034a098f9aee4e523"
+source = "git+https://github.com/sersiousSenpai/polis-memory?rev=62b722130d5a15a3342801cb78d817fa31fea522#62b722130d5a15a3342801cb78d817fa31fea522"
 dependencies = [
  "block2",
  "objc2",
@@ -3396,7 +3396,7 @@ dependencies = [
 [[package]]
 name = "polis-llm"
 version = "0.1.0"
-source = "git+https://github.com/sersiousSenpai/polis-memory?rev=af5fa59de193cfb63a9d18b034a098f9aee4e523#af5fa59de193cfb63a9d18b034a098f9aee4e523"
+source = "git+https://github.com/sersiousSenpai/polis-memory?rev=62b722130d5a15a3342801cb78d817fa31fea522#62b722130d5a15a3342801cb78d817fa31fea522"
 dependencies = [
  "async-trait",
  "polis-core",
@@ -3409,7 +3409,7 @@ dependencies = [
 [[package]]
 name = "polis-mcp"
 version = "0.1.0"
-source = "git+https://github.com/sersiousSenpai/polis-memory?rev=af5fa59de193cfb63a9d18b034a098f9aee4e523#af5fa59de193cfb63a9d18b034a098f9aee4e523"
+source = "git+https://github.com/sersiousSenpai/polis-memory?rev=62b722130d5a15a3342801cb78d817fa31fea522#62b722130d5a15a3342801cb78d817fa31fea522"
 dependencies = [
  "polis-core",
  "rmcp",
@@ -3423,7 +3423,7 @@ dependencies = [
 [[package]]
 name = "polis-memory"
 version = "0.1.0"
-source = "git+https://github.com/sersiousSenpai/polis-memory?rev=af5fa59de193cfb63a9d18b034a098f9aee4e523#af5fa59de193cfb63a9d18b034a098f9aee4e523"
+source = "git+https://github.com/sersiousSenpai/polis-memory?rev=62b722130d5a15a3342801cb78d817fa31fea522#62b722130d5a15a3342801cb78d817fa31fea522"
 dependencies = [
  "polis-core",
  "polis-embed",
@@ -3438,7 +3438,7 @@ dependencies = [
 [[package]]
 name = "polis-server"
 version = "0.1.0"
-source = "git+https://github.com/sersiousSenpai/polis-memory?rev=af5fa59de193cfb63a9d18b034a098f9aee4e523#af5fa59de193cfb63a9d18b034a098f9aee4e523"
+source = "git+https://github.com/sersiousSenpai/polis-memory?rev=62b722130d5a15a3342801cb78d817fa31fea522#62b722130d5a15a3342801cb78d817fa31fea522"
 dependencies = [
  "axum",
  "polis-core",
@@ -3451,7 +3451,7 @@ dependencies = [
 [[package]]
 name = "polis-store"
 version = "0.1.0"
-source = "git+https://github.com/sersiousSenpai/polis-memory?rev=af5fa59de193cfb63a9d18b034a098f9aee4e523#af5fa59de193cfb63a9d18b034a098f9aee4e523"
+source = "git+https://github.com/sersiousSenpai/polis-memory?rev=62b722130d5a15a3342801cb78d817fa31fea522#62b722130d5a15a3342801cb78d817fa31fea522"
 dependencies = [
  "flate2",
  "polis-core",

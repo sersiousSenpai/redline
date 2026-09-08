@@ -102,6 +102,9 @@ Unregistered routes fail closed: a route added to the router without a `ROUTE_TA
 | GET | `/v1/context/browse/search` | open | Search captured browsing history | ?q=... | JSON hits |
 | GET | `/v1/context/threads/:kind/:id` | open | Generic read of any per-surface message thread (memory-by-session spine) | kind + id in path | JSON message list |
 | GET | `/v1/context/tree/:kind/:id` | open | Session-tree walk: a node with parent + child digests | kind + id in path | JSON tree node |
+| GET | `/v1/memory/runs` | open | The gardener's runs, newest first (organize / compaction / observations / revert) | ?limit= | JSON {runs} |
+| GET | `/v1/memory/runs/:id` | open | One run with its journaled ops (what it did, to what, whether undone) | id in path | JSON {run, ops} |
+| POST | `/v1/memory/runs/:id/revert` | token: `memory.organize` | Undo one run from its journal, in one transaction; appends gardener_revert (never an MCP tool) | id in path | JSON {runId, revertedOps, eventSeq, revertRunId}; 400 with the reason when blocked |
 
 ## Scopes
 
@@ -113,7 +116,7 @@ Unregistered routes fail closed: a route added to the router without a `ROUTE_TA
 - `memory.propose` — `POST /v1/memory/proposals`
 - `memory.write` — `POST /v1/memory/remember`, `POST /v1/memory/annotate`, `POST /v1/memory/events`, `POST /v1/memory/browse`
 - `memory.forget` — `POST /v1/memory/forget`
-- `memory.organize` — `POST /v1/memory/organize`, `POST /v1/memory/reindex`
+- `memory.organize` — `POST /v1/memory/organize`, `POST /v1/memory/reindex`, `POST /v1/memory/runs/:id/revert`
 - `drafter.suggest` — `POST /v1/drafter/:draft_id/suggestions`
 - `review.annotate` — `POST /v1/reviews/annotations`, `DELETE /v1/reviews/annotations`
 - `orchestration.report` — `POST /v1/orchestration/report`

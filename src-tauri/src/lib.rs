@@ -11409,6 +11409,47 @@ fn classmem_latest_run(
     store.database().latest_class_run().map_err(|e| e.to_string())
 }
 
+/// The gardener's runs, newest first (Session B2 of the Polis extraction):
+/// organize / compaction / observations / revert, with what each did and
+/// cost — the memory surface's run timeline. Same shape as
+/// `GET /v1/memory/runs`.
+#[tauri::command]
+fn classmem_runs(limit: Option<i64>) -> Result<Vec<polis_core::types::ClassRun>, String> {
+    use polis_core::MemoryApi;
+    let api = polis_host::polis_handle().ok_or("memory is not installed")?;
+    api.list_runs(limit.unwrap_or(50), &polis_core::Scope::default()).map_err(|e| e.to_string())
+}
+
+/// One run with its journaled ops (op, subjects, outcome, reason — no image
+/// blobs). Same shape as `GET /v1/memory/runs/:id`.
+#[tauri::command]
+fn classmem_run(id: i64) -> Result<Option<polis_core::types::RunView>, String> {
+    use polis_core::MemoryApi;
+    let api = polis_host::polis_handle().ok_or("memory is not installed")?;
+    api.run(id).map_err(|e| e.to_string())
+}
+
+/// Undo one run from its journal, in one transaction (§5.2). The store
+/// refuses as data — "revert run #N first — …", past the vacuum horizon,
+/// already reverted — and the reason comes back as the error string the
+/// surface shows inline; nothing is deleted, and the revert is itself a run.
+/// Emits what every memory write emits, so the surface, the ledger pane and
+/// the status pill refresh.
+#[tauri::command]
+fn classmem_revert_run(app: AppHandle, id: i64) -> Result<polis_core::types::RevertReceipt, String> {
+    use polis_core::MemoryApi;
+    let api = polis_host::polis_handle().ok_or("memory is not installed")?;
+    let receipt = api.revert_run(id).map_err(|e| e.to_string())?;
+    let _ = app.emit("memory-changed", ());
+    let _ = app.emit("ledger-changed", ());
+    extension_host::publish(
+        ext_events::LEDGER_CHANGED,
+        &ext_events::LedgerChanged { ts_ms: extension_host::now_ms() },
+    );
+    let _ = app.emit("classmem-changed", ());
+    Ok(receipt)
+}
+
 /// Whether Organize applies the classifier's work directly (default) or stages
 /// it for per-item review. Default on: no required human decision-making.
 #[tauri::command]
@@ -12264,6 +12305,9 @@ pub fn run() {
             classmem_node,
             classmem_proposals,
             classmem_latest_run,
+            classmem_runs,
+            classmem_run,
+            classmem_revert_run,
             classmem_get_auto_apply,
             classmem_set_auto_apply,
             classmem_accept_node,
