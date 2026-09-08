@@ -917,6 +917,35 @@ rule-gisted compactions, never twice on the same lake — and on the newest
 backup it filed and compacted once, then saw nothing new. Gates: workspace
 1147 / 7 ignored, deny, both real-DB tests, tsc, vitest 1906.
 
+## Published (2026-09-08)
+
+- **GitHub release `v0.1.0`** of polis-memory: https://github.com/sersiousSenpai/polis-memory/releases/tag/v0.1.0 —
+  the five targets (Apple Silicon and Intel macOS, x64 and ARM64 Linux,
+  x64 Windows), the shell and PowerShell installers, checksums, the formula
+  file, the source tarball, GitHub artifact attestations. A dry-run
+  dispatch built everything first; the real dispatch created the tag from
+  main @ 8e1c9ec. The published `curl | sh` installer was run end to end
+  in a sandboxed home on this machine: install → `polis init` → capture →
+  search → `doctor` clean → chain verified → `polis 0.1.0`.
+- **The Homebrew tap repository** `sersiousSenpai/homebrew-tap` exists
+  (public, empty). The formula-publish job needs a `HOMEBREW_TAP_TOKEN`
+  repository secret (a fine-grained PAT with contents: write on the tap)
+  and fails with "Input required and not supplied: token" until it is
+  set; re-running that job then writes the formula. Everything else in the
+  release is live without it.
+- **Not published, by the owner's choice for now:** crates.io, npm and
+  PyPI, the MCP registry, the org-node image on GitHub's container
+  registry (needs a `write:packages` token). The keyed LongMemEval run is
+  also held.
+- **Redline `main` fast-forwarded** to this branch (f5ba334, then the
+  379bc5a test fix): the app's binary ceiling raised 28 → 36 MB with the
+  measurements; the untracked `tests/golden/stream/` on main was
+  byte-identical to the branch's tracked copy and was moved aside for the
+  fast-forward. Redline's CI on the first push went red on the three guards
+  that read the polis crates' sources: `cargo metadata --offline` cannot
+  answer on a cold cache (it reads every platform's manifests); fixed by
+  dropping `--offline`.
+
 ## Sessions ahead
 
 | Program | Session | Work |
