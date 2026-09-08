@@ -946,6 +946,40 @@ backup it filed and compacted once, then saw nothing new. Gates: workspace
   answer on a cold cache (it reads every platform's manifests); fixed by
   dropping `--offline`.
 
+## Post-release fix (2026-09-08): the answer pack claimed the wrong class
+
+Seen in Memory Ask: "what repos did i look at for Redline's memory?"
+resolved to an astronomy class, and once that was fixed, to "Payload CMS
+lookup", then to a repo-comparison class. Three faults, three commits
+upstream (f5272ab, 57ca008, 36137c8 → 911d24e, the rev Redline pins at
+afc0d2a):
+
+- The tokenizer split possessives and contractions into a lone letter
+  ("Redline's" → `s`, and the astronomy title's "Polymathic's" too), so the
+  resolver matched them on `s`. A lone ASCII letter is dropped now unless
+  it is a stopword (left to the stopword rule) or the only token.
+- The resolver's OR stage promoted a node on any single loose term
+  (`look*` → `lookup`). `PolisStore::resolve_class_node` now asks the index
+  itself — its own tokenizer, stemming included, so "compacting" still
+  finds "compaction" — whether each candidate carries the query's terms:
+  a class needs one whole-token term to be considered, the widest cover
+  wins, a prefix alone never resolves, and when the widest cover is a
+  single term shared out among several classes ("repos" in a
+  repo-comparison class, "memory" in the memory class) the question is
+  ambiguous and no class is claimed: the candidates are listed and the
+  lexical and semantic arms answer (the miss path).
+- Redline's own golden questions ("browser tab suspension" → "Embedded
+  browser"; "compacting cold bodies" → "Memory keeper compaction") are what
+  caught the first two cuts of the rule; they and six behavioural tests in
+  the new repo (`crates/polis-memory/tests/resolution.rs`) pin it now.
+
+Also learned on the way: the newest backups already carry `polis_meta` at
+schema 5 with the identity bind, so the app in `/Applications` is a current
+build and the real-DB attach instrument needs a pre-attach copy; and the
+top lexical hits for that question were the gardener's own seat prompts
+stored as the user's — the seat-prompt leak and per-prompt provenance
+(surface · harness · device · agent, for teams) are the next session.
+
 ## Sessions ahead
 
 | Program | Session | Work |
