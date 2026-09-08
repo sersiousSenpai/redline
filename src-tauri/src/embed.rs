@@ -38,8 +38,14 @@ use std::sync::Arc;
 #[allow(unused_imports)]
 pub use polis_core::vec::{
     chunk_text, cosine, pack, quantize, unpack, Chunk, QVec, CHUNK_MAX, CHUNK_OVERLAP, CHUNK_TARGET,
-    DIM, OPENING_CHARS,
+    OPENING_CHARS,
 };
+/// The dimension this app's index has always stored — the Apple sentence
+/// provider's, and what the cloud embedder is asked for below so one index
+/// can hold either. polis-core dropped its global `DIM` in Session C2 (the
+/// dimension is per model now, read from each row); this constant is
+/// Redline's own choice, not the vocabulary's.
+pub const DIM: usize = 512;
 #[allow(unused_imports)]
 pub use polis_embed::{
     cache, provider, provider_kind, Embedder, ProviderKind, SemanticHit, VectorCache,

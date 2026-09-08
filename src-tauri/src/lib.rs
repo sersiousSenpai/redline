@@ -12452,6 +12452,10 @@ pub fn run() {
                     store.clone(),
                 )),
                 events: Arc::new(polis_host::TauriEvents::new(app.handle().clone())),
+                // E4: this daemon is not an org node — `/v1/sync/*` answers
+                // 503 "not an org node"; the standalone `polis serve --org`
+                // installs the real relay.
+                sync: Arc::new(polis_core::sync::NoSyncRelay),
             };
             let app_state = AppState {
                 store: store.clone(),

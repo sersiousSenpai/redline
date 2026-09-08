@@ -106,6 +106,13 @@ Unregistered routes fail closed: a route added to the router without a `ROUTE_TA
 | GET | `/v1/memory/runs/:id` | open | One run with its journaled ops (what it did, to what, whether undone) | id in path | JSON {run, ops} |
 | POST | `/v1/memory/runs/:id/revert` | token: `memory.organize` | Undo one run from its journal, in one transaction; appends gardener_revert (never an MCP tool) | id in path | JSON {runId, revertedOps, eventSeq, revertRunId}; 400 with the reason when blocked |
 | POST | `/v1/memory/supersede` | token: `memory.write` | Supersede a decision: a newer one replaces an older one on the same subject; the old stays in the lake | JSON {oldSeq, newSeq, rationale?, scope?} | JSON {applied, effectiveOld, eventSeq, rejected} |
+| GET | `/v1/sync/chains` | token: `memory.write` | The org node's card and every chain it relays (org node only) | - | JSON {node, chains} |
+| GET | `/v1/sync/segments/:chain` | token: `memory.write` | One chain's segments past a seq, oldest first (org node only) | chain in path; ?after= | JSON {segments: [{chainId, fromSeq, toSeq}]} |
+| GET | `/v1/sync/segments/:chain/:from/:to` | token: `memory.write` | One segment's envelope, verbatim — the peer re-verifies it (org node only) | chain, from, to in path | JSON polis.bundle/2 envelope; 404 unknown |
+| POST | `/v1/sync/segments` | token: `memory.write` | Publish a signed segment to the org node; verified on receipt exactly as an import (org node only) | JSON polis.bundle/2 envelope | 201 JSON {chainId, fromSeq, toSeq, outcome, appended, trustedNow}; 400 refused with the reason; 409 forked |
+| GET | `/v1/sync/redactions` | token: `memory.write` | Every redaction relayed, with the subscribers that have and have not moved past it (org node only) | - | JSON {redactions: [{chainId, eventSeq, targetSeq, ackedBy, pending}]} |
+| GET | `/v1/sync/acks` | token: `memory.write` | What every subscriber has reported holding of a chain (org node only) | ?chain= | JSON {acks: [{ackerChain, chainId, ackedSeq}]} |
+| POST | `/v1/sync/acks` | token: `memory.write` | A subscriber's signed report of what it holds, after a fetch — verified against its trusted key, then recorded (org node only) | JSON {ackerChain, acks: [[chain, seq]], at, signature} | JSON {recorded}; 400 refused with the reason |
 
 ## Scopes
 
@@ -115,7 +122,7 @@ Unregistered routes fail closed: a route added to the router without a `ROUTE_TA
 - `browser.drive` — `POST /v1/browser/query`, `POST /v1/browser/navigate`, `POST /v1/browser/click`, `POST /v1/browser/open`, `POST /v1/browser/focus`, `POST /v1/browser/download`
 - `consult` — `POST /v1/linked/consult`, `POST /v1/global/consult`
 - `memory.propose` — `POST /v1/memory/proposals`
-- `memory.write` — `POST /v1/memory/remember`, `POST /v1/memory/annotate`, `POST /v1/memory/events`, `POST /v1/memory/browse`, `POST /v1/memory/supersede`
+- `memory.write` — `POST /v1/memory/remember`, `POST /v1/memory/annotate`, `POST /v1/memory/events`, `POST /v1/memory/browse`, `POST /v1/memory/supersede`, `GET /v1/sync/chains`, `GET /v1/sync/segments/:chain`, `GET /v1/sync/segments/:chain/:from/:to`, `POST /v1/sync/segments`, `GET /v1/sync/redactions`, `GET /v1/sync/acks`, `POST /v1/sync/acks`
 - `memory.forget` — `POST /v1/memory/forget`
 - `memory.organize` — `POST /v1/memory/organize`, `POST /v1/memory/reindex`, `POST /v1/memory/runs/:id/revert`
 - `drafter.suggest` — `POST /v1/drafter/:draft_id/suggestions`

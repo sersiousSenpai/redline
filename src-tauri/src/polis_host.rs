@@ -736,8 +736,30 @@ mod tests {
             *clock.0.lock().unwrap() += cfg.min_interval_ms + 1;
         }
         assert!(gates.iter().all(|g| matches!(g, Gate::Ran | Gate::NothingNew | Gate::Debounced)));
-        assert_eq!(db.max_ledger_seq().unwrap(), events_before, "no model → nothing appended");
+        // No model: the deterministic filing tier (C1, R12) may still file the
+        // lake's unorganized items under their root's `~inbox` (a `class_curate`
+        // event per filing), and the keeper's compaction may gist a cold prompt
+        // by rule (a `compaction` event) — the two kinds a model-less pass may
+        // append. Nothing structural, nothing twice: after the first pass that
+        // found work, the rest must see nothing new.
+        let events_after = db.max_ledger_seq().unwrap();
+        let appended: Vec<String> =
+            db.list_ledger_events_asc(events_before, 10_000).unwrap().into_iter().map(|e| e.kind).collect();
+        assert!(
+            appended.iter().all(|k| k == "class_curate" || k == "compaction"),
+            "a model-less pass appended {appended:?} — only inbox filings (class_curate) and rule-gisted compactions are allowed"
+        );
+        let first_ran = gates.iter().position(|g| matches!(g, Gate::Ran));
+        if let Some(i) = first_ran {
+            assert!(
+                !gates[i + 1..].iter().any(|g| matches!(g, Gate::Ran)),
+                "the filing tier ran more than once on the same lake: {gates:?}"
+            );
+        }
         assert!(db.verify_ledger_chain().unwrap().ok);
-        eprintln!("real_db_gardener_ticks_behave: gates={gates:?} events={events_before}");
+        eprintln!(
+            "real_db_gardener_ticks_behave: gates={gates:?} events={events_before}→{events_after} appended={}",
+            appended.len()
+        );
     }
 }

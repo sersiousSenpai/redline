@@ -530,6 +530,42 @@ CREATE TABLE class_centroids (
 -- index idx_class_proposals_next (class_proposals)
 CREATE INDEX idx_class_proposals_next ON class_proposals (status, next_after_run);
 
+-- table foreign_class_nodes (foreign_class_nodes)
+CREATE TABLE foreign_class_nodes (
+                chain_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                parent_id TEXT,
+                kind TEXT NOT NULL,              -- node | digest
+                title TEXT NOT NULL,
+                summary TEXT,
+                imported_at INTEGER NOT NULL,
+                PRIMARY KEY (chain_id, node_id)
+            );
+
+-- index sqlite_autoindex_foreign_class_nodes_1 (foreign_class_nodes) [auto]
+
+-- table foreign_class_links (foreign_class_links)
+CREATE TABLE foreign_class_links (
+                chain_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                target_kind TEXT NOT NULL,       -- prompt | browse_event | foreign | …
+                target_id TEXT NOT NULL,         -- a seq on that chain, or chain:seq
+                PRIMARY KEY (chain_id, node_id, target_kind, target_id)
+            );
+
+-- index sqlite_autoindex_foreign_class_links_1 (foreign_class_links) [auto]
+
+-- table org_acks (org_acks)
+CREATE TABLE org_acks (
+                acker_chain TEXT NOT NULL,
+                chain_id TEXT NOT NULL,
+                acked_seq INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (acker_chain, chain_id)
+            );
+
+-- index sqlite_autoindex_org_acks_1 (org_acks) [auto]
+
 -- table embeddings (embeddings)
 CREATE TABLE embeddings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

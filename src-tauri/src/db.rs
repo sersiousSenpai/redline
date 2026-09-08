@@ -12347,6 +12347,14 @@ mod tests {
                 "foreign_prompts_fts_ai",
                 "foreign_prompts_fts_ad",
                 "foreign_prompts_fts_au",
+                // E4 (the org node): the firm's catalog as a peer sees it, and
+                // the relay's per-peer acknowledgements.
+                "foreign_class_nodes",
+                "sqlite_autoindex_foreign_class_nodes_1",
+                "foreign_class_links",
+                "sqlite_autoindex_foreign_class_links_1",
+                "org_acks",
+                "sqlite_autoindex_org_acks_1",
             ];
             let unexpected: Vec<_> = added
                 .iter()
