@@ -114,32 +114,32 @@ wasmi = "1.1"
 # answer-pack types and budget, bundle verification and the MemoryApi trait.
 # Pure (serde + sha2), so it adds nothing to the binary that was not already
 # linked.
-polis-core = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "bd9e5404020f461c7cff08498acebc4783e61522" }
+polis-core = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "f5272abb07e545aa2c5f88e8fba823ac08e1829a" }
 # The memory schema + its own `polis_meta` versioning + the cross-process-safe
 # chain append (A2). Same rusqlite as the app, so one SQLite is linked.
-polis-store = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "bd9e5404020f461c7cff08498acebc4783e61522" }
+polis-store = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "f5272abb07e545aa2c5f88e8fba823ac08e1829a" }
 # The semantic arm (A3): providers, vector cache, search, index tick. `apple`
 # is the on-device backend this app has always used; the objc2 crates it needs
 # were already in the graph (below), so the feature costs no new build edge.
-polis-embed = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "bd9e5404020f461c7cff08498acebc4783e61522", features = ["apple"] }
+polis-embed = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "f5272abb07e545aa2c5f88e8fba823ac08e1829a", features = ["apple"] }
 # The Agent trait the memory seats speak (A4). Default features only: the
 # CLI backends; the HTTP backends would add a second reqwest to this graph.
-polis-llm = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "bd9e5404020f461c7cff08498acebc4783e61522" }
+polis-llm = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "f5272abb07e545aa2c5f88e8fba823ac08e1829a" }
 # THE crate an integrator adds (A5): the Polis handle, retrieval, the gardener,
 # export, the mirror, the classmemory skill text. `apple` = the on-device
 # embedder this app has always used.
-polis-memory = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "bd9e5404020f461c7cff08498acebc4783e61522", features = ["apple"] }
+polis-memory = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "f5272abb07e545aa2c5f88e8fba823ac08e1829a", features = ["apple"] }
 # The HTTP surface (A6): the memory + context routes this daemon used to
 # define inline, the ROUTES table its auth contract maps in, the capture
 # route with Redline's `IngestObserver` behind it, and the hook installer.
 # Default features only: `standalone` (bind + token) is the `polis` daemon's.
-polis-server = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "bd9e5404020f461c7cff08498acebc4783e61522" }
+polis-server = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "f5272abb07e545aa2c5f88e8fba823ac08e1829a" }
 # The Model Context Protocol surface (E1): the read tools over the same
 # `MemoryApi`, served by this daemon at `/mcp` (streamable HTTP) so an
 # external `claude mcp add --transport http` needs no bundled binary — the
 # `redline-mcp` proxy crate retired with it. Default features only: `remote`
 # (an HTTP client for the `polis` binary) would add a second HTTP stack.
-polis-mcp = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "bd9e5404020f461c7cff08498acebc4783e61522" }
+polis-mcp = { git = "https://github.com/sersiousSenpai/polis-memory", rev = "f5272abb07e545aa2c5f88e8fba823ac08e1829a" }
 # Deflate for the compaction archive (`prompt_archive`): a cold compaction
 # releases a body at ~59:1 and used to be irrecoverable. Already present in the
 # dependency tree (via `png` → `tauri-utils`), so naming it here is a visibility
