@@ -18,14 +18,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-/// `cargo metadata` for this workspace, parsed once. `--locked --offline`:
-/// a test must never rewrite `Cargo.lock` or reach the network — everything
-/// it needs was fetched by the build that produced this test binary.
+/// `cargo metadata` for this workspace, parsed once. `--locked`: a test must
+/// never rewrite `Cargo.lock`. NOT `--offline`: metadata reads every
+/// package's manifest, including the other platforms' crates the build never
+/// fetched, so on a cold cache (CI) an offline call fails before it starts —
+/// it did, on the first main push after the extraction.
 pub fn metadata() -> &'static serde_json::Value {
     static META: OnceLock<serde_json::Value> = OnceLock::new();
     META.get_or_init(|| {
         let out = Command::new(env!("CARGO"))
-            .args(["metadata", "--format-version", "1", "--locked", "--offline"])
+            .args(["metadata", "--format-version", "1", "--locked"])
             .arg("--manifest-path")
             .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
             .output()
