@@ -534,14 +534,146 @@ is the discussion thread, not the plan-session history
 skills say so. `Database::snapshot_to` went (the store's, through `Deref`,
 is the same `VACUUM INTO`; the Deref method-name guard caught the collision).
 
-## Sessions ahead
+## Sessions B2 ∥ E2 — reversible runs, identity + writes (built 2026-09-07, parallel sessions in the new repo)
 
-Programs B and E continue in the new repo, landing here as rev bumps:
+Two more parallel agents on worktrees from af5fa59 (branches `b2-reversible`,
+`e2-identity`), paused once for a usage limit and resumed, merged onto main
+as c2019ae (E2 after B2; five keep-both conflicts exactly where the briefs
+said they would be — the `EventKind` tail, the `ROUTES` tail, the two
+`Migration::additive` blocks, the version comment). Store schema version
+**2 → 3**, one bump for both blocks.
+
+### B2 — reversible gardener runs (`docs/ledger.md`)
+
+Retire-marks instead of deletes (`class_nodes.retired_by_run / retired_into`,
+`class_links.retired_by_run`, `class_observations.retired_by_run`; every
+reader filters `retired_by_run IS NULL`; `retire_node_subtree` replaces
+`delete_node_subtree`; `vacuum_retired(older_than_runs = 50)` past the
+horizon, gardener-only). The per-op journal `class_run_ops(run_id, op_ix, op,
+subject_ids, outcome applied|refused|expired|reverted, reason, pre_image
+deflate, pre_hash, post_image, ledger_seq, reverted_by_run)` written for
+file / create / promote / split / merge / collapse / supersede and for
+compaction's `compact` and the observation pass's `observe`; `class_runs` +
+`mode, llm_calls, prompt_bytes, tokens_in, tokens_out, wall_ms, canary_json`.
+**`revert_run`**: one `BEGIN IMMEDIATE`, `op_ix` descending, the inverse per
+op from its pre-image (file → delete the link; create → retire; promote →
+old parent; split → links back, retire the parts; merge → title/parent back,
+un-retire the absorbed; collapse → retire the digest, clear the marks;
+supersede → delete the row; compact → `restore_prompt_body` hash-verified;
+observe → retire), refused by name when a later run's subjects overlap
+("revert run #N first"), past the horizon, or already reverted;
+`EventKind::GardenerRevert` (`ref_kind = class_run`) + the reserved
+`GardenerRegression`, both accepted by `verify_bundle`. Surface:
+`MemoryApi::{list_runs, run, revert_run}` on the handle and the remote
+client; routes `GET /v1/memory/runs`, `GET /v1/memory/runs/:id`,
+`POST /v1/memory/runs/:id/revert` (`memory.organize`; never an MCP tool).
+**Gate:** the property test — seeds 1–4, six runs of 2–5 random ops through
+the real stage → accept → apply path, snapshot before each, reverts
+newest-first equal to each pre-snapshot, the chain verifying after every
+step, a full bundle with `gardener_revert` verifying; exclusions stated
+(retired rows, `updated_at`, the journal and chain, FTS/embedding tables,
+autoincrement ids). Real-DB pack p50 13 ms after vs 14 before.
+
+**Redline half (ac4f3c4):** Tauri commands `classmem_runs / classmem_run /
+classmem_revert_run` beside `classmem_latest_run`; `src/lib/classRuns.ts`
+(undo-state derivation, labels; 7 tests) + a `RunTimeline` strip in
+`MemorySurface.tsx` under the catalog toolbar — collapsed by default, rows
+per run with the journal expandable, **Undo** per run with the refusal
+inline and no confirm (nothing is deleted; a revert is itself a run).
+The schema golden regenerated (retire columns, seven `class_runs` columns,
+two indexes); `real_db_attach_is_a_noop` allows exactly the objects a store
+bump creates (`STORE_BUMP_OBJECTS`, hard-coded with a comment — the store
+exposes no list of its own objects). Found on the way: `class_run_ops` was
+missing from polis-store's `MEMORY_TABLES`, so neither the schema dump nor
+`Migration::verify` covered the journal — fixed in the merge commit; the
+golden grows by one table at the next bump.
+
+### E2 — identity, device chains, writes (`docs/identity.md`)
+
+Ed25519 keys (`identity.key` 0600 before bytes land, `identity.pub`);
+`principal_id = hex(sha256(pubkey))`, fingerprint 16 hex; **one chain per
+device**: `device_id = hex(sha256(pubkey ‖ 0x00 ‖ "device:" ‖ name))`,
+`chain_id = device_id`, the human is the parent; agents derived, not keyed
+(`sha256(pubkey ‖ 0x00 ‖ "agent:" ‖ name)`); pinned vectors in core. Tables
+`principals(principal_id, kind, pubkey, parent_id, display_name,
+created_at)`, `principal_aliases(alias, principal_id)`; the scope columns
+`principal_id, device_id, agent_id, run_id, org_id, visibility` on prompts /
+browse_events / user_notes / class_nodes / class_observations with scope
+indexes and a partial "unscoped" index; `EventKind::PrincipalBind`
+(signature over `polis.bind/1\n ‖ chain_id ‖ \n ‖ head_hash`, payload the
+cards + chain id + head + signature) and the reserved `Redaction`, both in
+the bundle whitelist. **Existing authors are never rewritten:** the alias
+rule is total — login / `local` → this device, `classifier | keeper |
+router` → `agent:<name>`, everything else → `agent:surface:<name>`; reads
+resolve `COALESCE(alias.principal_id, author)`; new writes stamp the device
+id (or `agent:mcp:<client>`, `agent:claude-code` for the hook) and the scope
+columns; `Scope` filters are bound WHERE clauses now. Adoption:
+`polis init --device <name>`, `polis init --from-redline <app-data-dir>`, and
+the idempotent `identity::adopt(store, &identity, login)` a host runs every
+boot. The five MCP write tools (`memory_remember / ingest / annotate /
+forget / supersede`; forget destructive with `confirm:"forget"`) and
+`RemoteApi`'s writes; `POST /v1/memory/supersede`. Signed export /
+verify-only import: envelope `polis.bundle/2` (chain id, principal cards,
+org, `segment{fromSeq,toSeq,prevHashAtFrom,headHash}`, policy, payload at
+full|gist|stub, payload sha256, Ed25519 over the canonical header line);
+import verifies id, signature, bind, per-event hash + linkage, continuity —
+and stores nothing (E3). **Gates on the real-DB copy:** adoption appends
+exactly one event (the bind, head kind `principal_bind`), chain green, all
+16 author strings resolve (17 aliases with `local`), 3,934 rows stamped,
+0 unscoped, 650 ms; a second adopt appends nothing; two homes with one
+copied key → one human, two devices, two chains, never one id with two
+heads; export → verify-only green, and a tampered byte / wrong key /
+foreign pubkey / missing bind / forged bind / wrong device / rebuilt chain
+each fail by name. Redline's graph gains ed25519-dalek unconditionally
+(size re-measured at the rev bump — see "Size" below).
+
+**Redline half (cf3ea8b, then the f8d5066 bump):** the install's identity
+lives at `<app-data-dir>/polis/identity.key` + `identity.pub` (device name =
+hostname), created or loaded by `polis_host::install_identity(&data_dir,
+&db)` — its own boot step between attach and `install_polis`, every boot,
+never inside attach (`real_db_attach_is_a_noop` keeps its zero-events
+rule); the handle is built `.with_identity(…)`. On a copy of the newest
+backup: events 5870 → 5871 (exactly the bind), all 16 author strings
+aliased, +20 principals, 4,042 rows stamped, 0 unscoped, 739 ms.
+`ledger::local_author()` returns the device id once the identity is
+installed, so the two attach sites and the twelve curation/decision sites
+flip at once; `record_agent_prompt` authors `agent:<seat>` via
+`polis_host::agent_author(seat)`; the organizer's own actors and hook
+captures carrying `X-Redline-Agent` stay legacy strings (alias-resolved —
+`CaptureRequest` has no agent field yet). Beyond the brief and needed: the
+`/mcp` mount is three Open rows and now lists five write tools, so
+`auth::require_mcp_write_token` (layered on the `/mcp` route only) reads
+the JSON-RPC body and authorizes a `tools/call` of a write tool as its HTTP
+twin (`memory_forget` → `memory.forget`, the other four → `memory.write`),
+same bearer, same 401; reads stay open; the mount test proves all of it.
+Schema golden regenerated (the scope columns, `class_run_ops`, the identity
+tables and indexes; then the five unscoped indexes at f8d5066);
+`STORE_BUMP_OBJECTS` extended twice. Found on the way: the store's five
+`idx_<table>_unscoped` partial indexes indexed `rowid`, which SQLite
+refuses — a silent no-op behind `let _ =`, exposed by this test's object
+count; fixed upstream (7502cb4 + its test f8d5066) and picked up by the
+bump.
+
+**Size (release, this machine).** The A7 number (31,096,528 B) was the
+last real rebuild until now; E1's Redline half only re-read that artifact.
+Rebuilt at each Redline commit: a5da4f2 (E1 half: rmcp + polis-mcp + the
+`/mcp` route) **33,816,080 B**, ac4f3c4 (B1 + B2 halves) **34,049,840 B**,
+cf3ea8b (E2 half: ed25519-dalek 3 + curve25519-dalek 5 + a second sha2 0.11
+line beside the app's 0.10) **34,385,264 B** = 122.8% of the 28.0 MB
+ceiling — so +2.72 MB is the MCP surface, +0.23 MB the B1/B2 halves,
++0.34 MB the identity crates. Nothing here loosens the budget; the levers are the new repo's
+(rmcp features — `schemars` and the streamable-HTTP server are the bulk —
+and one sha2 line), and main was already 30.54 MB before Program A.
+
+## Sessions ahead
 
 | Program | Session | Work |
 |---|---|---|
-| B (autonomy) | B2 | retire-marks, `class_run_ops`, pre-images, `revert_run`, `GardenerRevert`; the Redline run timeline + Undo |
-| E (MCP, identity, sharing) | E2 | keys + device sub-principals, `PrincipalBind`, scope columns, the write tools and routes, signed export/import; `session_history` needs a host hook if it is to answer the plan-session history |
+| B (autonomy) | B3 | adjudication per op, the three holds deleted, classifier retry/TTL, curation commands and columns deleted, canary auto-revert + quarantine, the §5.5 fences + injection fixtures; Redline FE curation strip removed, surfaces read-only + Undo |
+| E (MCP, identity, sharing) | E3 | envelope import into `foreign_*` tables, trust store + TOFU, `SegmentTransport` (folder, git), selective subscribe, union retrieval with source labels |
+| C (speed) | C1 | `polis init → capture → search` on the keyless job made real; the standalone daemon's idle signal |
+
+Open across both: `forget` does not yet append `redaction` (E4); `tokens_in/out` stay `None` on organize runs (usage rides the `UsageSink`); `session_history` still needs a host hook; the canary set is 12% over its 3 s row; the pack's 40-link per-node cap (B3 / §6.3).
 
 ## How to run
 
