@@ -665,15 +665,144 @@ ceiling — so +2.72 MB is the MCP surface, +0.23 MB the B1/B2 halves,
 (rmcp features — `schemars` and the streamable-HTTP server are the bulk —
 and one sha2 line), and main was already 30.54 MB before Program A.
 
+## Sessions B3 ∥ E3 ∥ C1 — autonomy, sharing core, fast filing (built 2026-09-07/08, three parallel sessions in the new repo)
+
+Three agents on worktrees from f8d5066 (branches `b3-autonomous`,
+`e3-sharing`, `c1-filing`), merged in the order E3 (0007b0f) → C1 (4987431)
+→ B3 (c549d7d). Store schema version **3 → 4**, one bump for the three
+additive blocks. Keep-both conflicts landed where the briefs put them plus
+two real ones: C1's filing tier and B3's classifier back-off both sit at
+the top of `organize_once` (kept in that order — the tier needs no model,
+the back-off gates the classifier; C1's early return learned B3's
+`OrganizeOutcome` fields), and C1's `no_model` mark had to move inside
+B3's canary-wrapped organize match in `gardener::step`. One B3 test
+(`the_canary_reverts_a_run_…`) scripts a classifier that collapses every
+class, which a plain run no longer reaches behind C1's tier; the test now
+makes its run a consolidation run through C1's own signals. CI's stable
+moved to rustc 1.98.1 while this machine builds on 1.95, so one lint C1
+never saw locally (`chunks_exact_to_as_chunks`) turned the C1 merge red on
+all three OSes; fixed, and the local chain now also runs `cargo +1.98.1
+clippy` both ways.
+
+### B3 — the autonomous gardener (`docs/architecture.md`)
+
+`adjudicate.rs` = §5.1's table as code: file (parent + target exist,
+provenance root or `~general`, else `Refuse("provenance")`), create
+(sibling Jaccard ≥ 0.8 → the create refused, its filings re-parented to the
+twin, two twins → their merge queued), promote (parent, no cycle, depth ≤
+4), split (links belong, parts ≥ 3), merge (cross-root refused; title
+Jaccard ≥ 0.8 applies; same parent ∧ both ≥ 3 links ∧ centroid cos ≥ 0.85
+through the `SimilarityOracle` seam C1 fills; else the adversarial
+verifier), collapse (`auto_collapse_safe ∧ items ≥ 5 ∧ not protected`,
+else `Refuse("not_cold")`), supersede (decision kinds, same `(ref_kind,
+ref_id)` applies, different `ref_kind` refuses, else verify).
+`class_proposals` is a WORK QUEUE (`attempts`, `next_after_run`,
+`expires_lake_ts`, `last_reason`; 1/2/4-run backoff, expiry at 3 attempts
+or 7 lake-days); every refusal / expiry is a `class_run_ops` row and a
+`class_curate action=refuse|expire` event; the classifier spawn has the
+same back-off. **Human curation is gone (§5.4):** the migration flips
+every `proposed` row live, `pinned` / `dismissed` / `starred` are ignored,
+the store's `accept_* / reject_* / set_*_pinned / rename_class_node /
+set_observation_*` methods and the `autoApply` setting are deleted
+(`remember`, `annotate`, `forget`, `revert_run` stay). Warmth without pins:
+`last_recalled_at` on nodes and links, bumped from an in-memory
+`RecallLog` the answer pack fills (one line at the pack's end) and the
+gardener flushes; protected iff `max(last_recalled_at) ≥ newest −
+0.34·span` or a note. Observations are re-validated (`keep|retire`;
+`retired_at/retired_reason`; deterministic retirement when a cited seq is
+forgotten). **Canary auto-revert (§5.3):** B1's set frozen at run start,
+evaluated before and after; a regression reverts the run through B2's
+journal, releases its seq window, quarantines the failing subjects for 3
+runs, appends `gardener_regression`, `outcome = reverted_by_canary`.
+**§5.5 fences:** `fence.rs` (a per-run nonce delimiter, the standing rule,
+`role=page` / `role=foreign` items with their source) used by all five
+prompt builders; `tests/injection.rs` (the page, the foreign body and the
+ingested item with a forged closer all stay inside their fences; an
+obedient adversary's `file 999999`, cross-root `merge`, `supersede #12`
+and `collapse` are all refused and journaled, catalog unchanged, chain
+green) and `tests/fences_scrape.rs`. `catalog_health()` (§6.3) rides
+`HealthReport.catalog`. **The 20-run gate on the real-DB copy** with a
+scripted model: 20 runs, 0 errors, 0 regressions, 0 held rows, chain green,
+error rate 0.06 → 0.029, provenance violations 267 → 267 (pre-B3 filings the
+adjudicator now prevents but does not re-home), organize p50/p90 167/215 ms.
+
+### E3 — sharing core (`docs/sharing.md`)
+
+E2's verify-only import became the real one: `foreign_chains`,
+`foreign_principals`, `foreign_events` (`PK (chain_id, seq)`),
+`foreign_prompts` (+ its own FTS5 built in the additive block, deliberately
+outside the lexical version gate), `foreign_notes`, `foreign_redactions`,
+`foreign_acks`, `foreign_trust`, `foreign_subscriptions`; continuity
+against the held head (append / no-op / overlap-check / gap-reject /
+**forked**, surfaced by `doctor`); never re-chained. Trust is a TABLE
+(backed up with the DB, insert-only; `polis trust add|rm|list|fingerprint`,
+`--tofu` prints the fingerprint; a key change is a new principal by
+construction, a disagreeing row is refused). `SegmentTransport` with
+`FolderTransport` and `GitTransport` (shelling out to `git` — no crate; the
+same append-only `<root>/<chain>/<from>-<to>.polis.json` layout, a segment
+file is never rewritten). `polis sync / subscribe / import / peers`;
+`export --dry-run`. Union retrieval: `Arm::Shared` and
+`AnswerPack.shared_hits`, only under `include_shared`, labelled by source,
+rendered as a SHARED (third-party) section in the context block and the MCP
+result; foreign text re-embedded locally by the index tick, a foreign vector
+kept only when its model id matches. `forget` now appends `redaction`;
+peers tombstone on import; acks ride the peer's next segment head. Gates as
+tests + a two-home smoke through a folder and a bare git repo.
+
+### C1 — fast filing (`docs/filing.md`)
+
+`class_centroids(node_id, model, dim, n, sum_vec)` from members' chunk-0
+vectors, rebuilt at organize start and by `reindex`; `filing.rs` runs
+first in `organize_once`: file by centroid when `top1 ≥ T1 ∧ top1 − top2 ≥
+M`, send the ambiguous rest to a ≤ 20-item candidates-only batch (fenced;
+median 6,776 B per batch on the synthetic corpus), or to the root's
+`~inbox` when no model is configured; consolidation every 5th organize or
+on health pressure. **Calibration on the real corpus is honest:** under the
+current Apple sentence embedder no `(T1, M)` reaches precision 0.90 (best
+0.864 at 1.8 % coverage; the plan's 0.55/0.10 gives 0.738), so the tier is
+written `OFF` there and filing is batch-or-inbox until C2's embedders
+(synthetic: consistency 0.803, (0.45, 0.02) at precision 0.914 and 76 %
+coverage). No-model organize on the real copy: p50 581 ms, p90 675 ms
+(against 20 s / 60 s; the classifier path was 79.6 s). API transport by
+default under `cli` when a key is configured; `polis organize`; **the
+keyless CI job is real**: init → capture → search → organize files under
+`~inbox` with no model → `doctor` reports `no_model` as a fact → verify.
+
+**Redline half (c513d00):** rev c549d7d; the schema golden carries all
+three sessions (B3's queue, warmth and retirement columns +
+`idx_class_proposals_next`; C1's `class_centroids`; E3's nine `foreign_*`
+tables, eight autoindexes, `idx_foreign_prompts_chain`, `foreign_prompts_fts`
+with its four shadows and three triggers — 180 lines) and
+`STORE_BUMP_OBJECTS` lists exactly that set, so a fresh attach on the real
+DB is still a no-op (5870 events, 244 objects). Thirteen Tauri commands
+gone (`classmem_accept_*` / `reject_*` / `pin_*` / `rename_node` /
+`dismiss_observation` / `get_auto_apply` / `set_auto_apply`,
+`memory_revert_link`); `keeper.rs` re-exports `protected_set`;
+`context.rs` lost `HeldProposal` (the Librarian's F1 — the queue depth is a
+fact, not friction; skill v3); `memory_catalog_health` added; `memory_status`
+reports `queuedProposals`. FE: the held-review strip became "Waiting for a
+run · N", ProposalCard's Accept/Reject became a queue line ("due after run
+#14 · attempt 1 of 3 failed to verify"), the Auto-organize toggle, Pin /
+Rename / Unfile / link ✓✕ / observation Pin / Dismiss and the "proposed"
+badge are gone, the Health tab gained "The gardener" from `catalog_health`,
+and B2's `RunTimeline` Undo is the only lever left. Gates: workspace 1122 /
+6 ignored, deny, both real-DB tests, tsc, vitest 1906. GUI-unverified.
+
 ## Sessions ahead
 
 | Program | Session | Work |
 |---|---|---|
-| B (autonomy) | B3 | adjudication per op, the three holds deleted, classifier retry/TTL, curation commands and columns deleted, canary auto-revert + quarantine, the §5.5 fences + injection fixtures; Redline FE curation strip removed, surfaces read-only + Undo |
-| E (MCP, identity, sharing) | E3 | envelope import into `foreign_*` tables, trust store + TOFU, `SegmentTransport` (folder, git), selective subscribe, union retrieval with source labels |
-| C (speed) | C1 | `polis init → capture → search` on the keyless job made real; the standalone daemon's idle signal |
+| C (speed) | C2 | per-model dim, `ProviderKind` fix, model2vec + fastembed + Apple + remote providers, download policy, `reindex`, SIMD dot; re-run the filing calibration per provider — the tier turns on for the first that clears the floor |
+| E (sharing) | E4 | the org node (`polis serve --org`, `/v1/sync/*`, its own principal and gardener), redaction propagation and acks per peer, `docs/sharing.md`'s cooperative limit stated |
+| F / G | F1, G1 | benchmarks (LongMemEval, the competitor table under identical conditions) and distribution (cargo-dist, the size ceiling ratchet) |
 
-Open across both: `forget` does not yet append `redaction` (E4); `tokens_in/out` stay `None` on organize runs (usage rides the `UsageSink`); `session_history` still needs a host hook; the canary set is 12% over its 3 s row; the pack's 40-link per-node cap (B3 / §6.3).
+Open across the wave: 267 pre-B3 cross-root filings on the real lake are
+surfaced, not re-homed; the canary costs ~2 × 3.4 s per organize on the real
+lake; `tokens_in/out` stay `None` on organize runs; an inbox member refiled
+by the model has its inbox link retired by a mark, not journaled; the
+`class` subscription filter is inert until E4; the peer label is the human
+card's display name (a login), so two peers with one login collide on the
+label, not the id.
 
 ## How to run
 
