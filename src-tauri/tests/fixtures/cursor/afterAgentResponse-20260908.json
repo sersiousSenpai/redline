@@ -1,0 +1,16 @@
+{
+  "conversation_id": "fixture-conversation",
+  "generation_id": "generation-0",
+  "model": "gpt-5.6-luna-high",
+  "text": "<proposed_plan>\n# Compatibility plan\nKeep this plan unchanged.\n</proposed_plan>",
+  "input_tokens": 21879,
+  "output_tokens": 38,
+  "cache_read_tokens": 0,
+  "cache_write_tokens": 21876,
+  "session_id": "fixture-conversation",
+  "hook_event_name": "afterAgentResponse",
+  "cursor_version": "2026.09.08-6caf4ff",
+  "workspace_roots": [
+    "/fixture/project"
+  ]
+}

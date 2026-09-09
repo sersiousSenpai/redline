@@ -182,6 +182,7 @@ pub struct ReviewSession {
     /// The model that produced the latest revision. Codex sends it on the
     /// Stop payload; a Claude launch fills it from the door's pick.
     pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
 /// A lightweight per-revision projection for the sidebar's revisions tree —
@@ -238,6 +239,7 @@ pub struct SessionSummary {
     /// header's badge. `None` reads as claude-code.
     pub backend: Option<String>,
     pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -311,7 +313,11 @@ impl SubmissionMode {
                 // plan, so even an all-questions batch flips to Revise.
                 || (matches!(c.kind, CommentKind::Question) && c.actionable)
         });
-        if any_driver { Self::Revise } else { Self::Ask }
+        if any_driver {
+            Self::Revise
+        } else {
+            Self::Ask
+        }
     }
 }
 
@@ -1160,10 +1166,13 @@ pub struct UpsertResult {
 
 impl SessionStore {
     pub fn new(db: Arc<Database>) -> Self {
-        let mut map = db.load_all().unwrap_or_else(|e| {
-            tracing::error!(error = %e, "failed to load sessions from db; starting empty");
-            HashMap::new()
-        });
+        Self::try_new(db).expect("session history must load before opening the store")
+    }
+
+    /// A database read failure must never look like an empty history. Desktop
+    /// startup reports this error before making an empty store available.
+    pub fn try_new(db: Arc<Database>) -> rusqlite::Result<Self> {
+        let mut map = db.load_all()?;
         // A held POST can never survive a process restart — any session
         // persisted as Held was orphaned when the previous instance died, so
         // it is detached now. Flip in memory and in one sweep on disk.
@@ -1179,12 +1188,12 @@ impl SessionStore {
                 tracing::error!(error = %e, "failed to persist startup held→detached flip");
             }
         }
-        Self {
+        Ok(Self {
             inner: Arc::new(Mutex::new(map)),
             db,
             pending_restores: Arc::new(Mutex::new(HashSet::new())),
             sections: Arc::new(Mutex::new(HashMap::new())),
-        }
+        })
     }
 
     // ── Lazy sections ────────────────────────────────────────────────────
@@ -1208,10 +1217,7 @@ impl SessionStore {
         // Parsed OUTSIDE the cache lock: a large plan's parse must not
         // serialize every other session's reads behind it.
         let parsed = Arc::new(reparse_sections(&revision.raw_plan_markdown));
-        self.sections
-            .lock()
-            .unwrap()
-            .insert(key, parsed.clone());
+        self.sections.lock().unwrap().insert(key, parsed.clone());
         parsed
     }
 
@@ -1364,6 +1370,7 @@ impl SessionStore {
                 run_state: None,
                 backend: None,
                 model: None,
+                effort: None,
             };
             if let Err(e) = self.db.upsert_session(&s) {
                 tracing::error!(error = %e, "failed to persist session");
@@ -1483,7 +1490,10 @@ impl SessionStore {
             revision.comments = kept;
         }
         for c in &carried {
-            if let Err(e) = self.db.set_comment_revision(session_id, &c.id, version_number) {
+            if let Err(e) = self
+                .db
+                .set_comment_revision(session_id, &c.id, version_number)
+            {
                 note_comment_persist_failure(session_id, "carried-forward comment", &e);
             }
         }
@@ -1503,12 +1513,7 @@ impl SessionStore {
                     .revisions
                     .iter()
                     .flat_map(|r| r.comments.iter())
-                    .filter(|c| {
-                        matches!(
-                            c.status,
-                            CommentStatus::Draft | CommentStatus::Reopened
-                        )
-                    })
+                    .filter(|c| matches!(c.status, CommentStatus::Draft | CommentStatus::Reopened))
                     .count() as u32;
                 let awaiting_review = matches!(s.status, SessionStatus::InReview);
                 let plan_title = s
@@ -1543,6 +1548,7 @@ impl SessionStore {
                     run_mode: run_modes.get(s.session_id.as_str()).cloned(),
                     backend: s.backend.clone(),
                     model: s.model.clone(),
+                    effort: s.effort.clone(),
                 }
             })
             .collect();
@@ -1562,12 +1568,7 @@ impl SessionStore {
     /// signature would touch every caller and every test for a value only the
     /// plan route knows. Sticky by COALESCE at the DB layer, so a later
     /// status-only upsert can't blank it.
-    pub fn set_backend(
-        &self,
-        session_id: &str,
-        backend: Option<&str>,
-        model: Option<&str>,
-    ) {
+    pub fn set_backend(&self, session_id: &str, backend: Option<&str>, model: Option<&str>) {
         let clean = |v: Option<&str>| {
             v.map(str::trim)
                 .filter(|v| !v.is_empty())
@@ -1591,6 +1592,24 @@ impl SessionStore {
         drop(map);
         if let Err(e) = self.db.upsert_session(&snapshot) {
             tracing::error!(error = %e, "failed to persist session backend");
+        }
+    }
+
+    /// The selected effort is launch provenance, not inferable from a model
+    /// name or a transcript. Missing values never erase a persisted choice.
+    pub fn set_effort(&self, session_id: &str, effort: Option<&str>) {
+        let Some(effort) = effort.map(str::trim).filter(|value| !value.is_empty()) else {
+            return;
+        };
+        let mut map = self.inner.lock().unwrap();
+        let Some(session) = map.get_mut(session_id) else {
+            return;
+        };
+        session.effort = Some(effort.to_owned());
+        let snapshot = session.clone();
+        drop(map);
+        if let Err(e) = self.db.upsert_session(&snapshot) {
+            tracing::error!(error = %e, "failed to persist session effort");
         }
     }
 
@@ -1748,7 +1767,10 @@ impl SessionStore {
             attachments: request.attachments,
         };
 
-        let latest = session.revisions.last_mut().expect("non-empty checked above");
+        let latest = session
+            .revisions
+            .last_mut()
+            .expect("non-empty checked above");
         if let Err(e) = self
             .db
             .insert_comment(session_id, latest.version_number, &comment)
@@ -1854,12 +1876,10 @@ impl SessionStore {
         for rev in &mut session.revisions {
             for c in &mut rev.comments {
                 for a in &mut c.attachments {
-                    a.path = a
-                        .path
-                        .replace(
-                            &format!("/attachments/{old_id}/"),
-                            &format!("/attachments/{new_id}/"),
-                        );
+                    a.path = a.path.replace(
+                        &format!("/attachments/{old_id}/"),
+                        &format!("/attachments/{new_id}/"),
+                    );
                 }
             }
         }
@@ -1920,10 +1940,8 @@ impl SessionStore {
             return report;
         };
 
-        let mut matched: HashMap<String, bool> = resolutions
-            .keys()
-            .map(|k| (k.clone(), false))
-            .collect();
+        let mut matched: HashMap<String, bool> =
+            resolutions.keys().map(|k| (k.clone(), false)).collect();
 
         for revision in session.revisions.iter_mut() {
             for comment in revision.comments.iter_mut() {
@@ -1968,8 +1986,7 @@ impl SessionStore {
 
         for revision in &session.revisions {
             for c in &revision.comments {
-                if matches!(c.status, CommentStatus::Submitted)
-                    && !resolutions.contains_key(&c.id)
+                if matches!(c.status, CommentStatus::Submitted) && !resolutions.contains_key(&c.id)
                 {
                     report.unresolved_submitted_ids.push(c.id.clone());
                 }
@@ -1996,19 +2013,13 @@ impl SessionStore {
                 .revisions
                 .iter()
                 .flat_map(|r| r.comments.iter())
-                .filter(|c| {
-                    matches!(c.status, CommentStatus::Draft | CommentStatus::Reopened)
-                })
+                .filter(|c| matches!(c.status, CommentStatus::Draft | CommentStatus::Reopened))
                 .cloned()
                 .collect();
             (latest, comments)
         };
         let sections = self.sections_for(session_id, &latest);
-        Some((
-            (*sections).clone(),
-            comments,
-            latest.raw_plan_markdown,
-        ))
+        Some(((*sections).clone(), comments, latest.raw_plan_markdown))
     }
 
     pub fn mark_submitted(&self, session_id: &str) -> Vec<String> {
@@ -2045,9 +2056,7 @@ impl SessionStore {
         };
         for revision in session.revisions.iter_mut() {
             for comment in revision.comments.iter_mut() {
-                if matches!(comment.status, CommentStatus::Submitted)
-                    && ids.contains(&comment.id)
-                {
+                if matches!(comment.status, CommentStatus::Submitted) && ids.contains(&comment.id) {
                     comment.status = CommentStatus::Draft;
                     if let Err(e) = self.db.update_comment(session_id, comment) {
                         tracing::error!(error = %e, "failed to persist submit rollback");
@@ -2087,9 +2096,9 @@ impl SessionStore {
                     tracing::warn!(error = %e, "failed to record approval ledger event");
                 }
                 // Companion journal: the plan was approved.
-                let _ = self
-                    .db
-                    .append_journal("approval", Some("plan"), Some(session_id), None, None);
+                let _ =
+                    self.db
+                        .append_journal("approval", Some("plan"), Some(session_id), None, None);
                 // Producers wave: the approved plan's to-dos become durable
                 // work items (one per top-level section, parented under the
                 // plan itself). Strictly best-effort — filing logs on failure
@@ -2124,9 +2133,7 @@ impl SessionStore {
         // section trees. Reading `r.sections` directly here would file an
         // approved plan as ONE fallback item instead of one per section.
         let latest = session.revisions.last().cloned();
-        let materialized = latest
-            .as_ref()
-            .map(|r| self.sections_for(sid, r));
+        let materialized = latest.as_ref().map(|r| self.sections_for(sid, r));
         let (version, plan_md, sections): (u32, Option<&str>, &[Section]) =
             match (latest.as_ref(), materialized.as_deref()) {
                 (Some(r), Some(parsed)) => (
@@ -2452,9 +2459,9 @@ impl SessionStore {
                     Err(format!("comment not found: {comment_id}"))
                 }
             }
-            CommentStatus::Submitted => Err(
-                "comment already sent — wait for Claude's response, then reopen".to_string(),
-            ),
+            CommentStatus::Submitted => {
+                Err("comment already sent — wait for Claude's response, then reopen".to_string())
+            }
             CommentStatus::Withdrawn => Err("comment was withdrawn".to_string()),
         }
     }
@@ -2526,6 +2533,29 @@ thread_local! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_read_error_is_not_an_empty_session_store() {
+        let path = std::env::temp_dir().join(format!(
+            "redline-history-load-error-{}.db", uuid::Uuid::new_v4()
+        ));
+        let db = Arc::new(crate::db::Database::open(&path).unwrap());
+        seed_history(&db, 1, 2);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn
+            .execute("ALTER TABLE sessions RENAME COLUMN effort TO unavailable_effort", [])
+            .unwrap();
+        let error = match SessionStore::try_new(db.clone()) {
+            Ok(_) => panic!("a failed history query must not produce an empty store"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("effort"));
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM revisions", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+        drop(conn);
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
 
     // ── Lazy sections ────────────────────────────────────────────────────
     //
@@ -2599,7 +2629,10 @@ mod tests {
             2,
             "one parse per revision of the session actually opened, and no others"
         );
-        assert!(!first.revisions[0].sections.is_empty(), "sections must be materialized on the way out");
+        assert!(
+            !first.revisions[0].sections.is_empty(),
+            "sections must be materialized on the way out"
+        );
 
         let again = store.get("hist-1").expect("session");
         assert_eq!(parses(), 2, "the second read re-parsed");
@@ -2655,7 +2688,14 @@ mod tests {
         let md = "# Bare\n\n## Alpha\n\nNo sidecars here.\n";
         {
             let store = SessionStore::new(db.clone());
-            store.upsert_plan("bare", "/tmp/b", md.to_string(), reparse_sections(md), true, false);
+            store.upsert_plan(
+                "bare",
+                "/tmp/b",
+                md.to_string(),
+                reparse_sections(md),
+                true,
+                false,
+            );
         }
         let store = reloaded(&db);
         let first = store.get("bare").expect("session").revisions.pop().unwrap();
@@ -2713,11 +2753,25 @@ mod tests {
         let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
         let store = SessionStore::new(db);
         let first = "# First\n\n## Alpha\n\nOne.\n";
-        store.upsert_plan("reused", "/tmp/r", first.to_string(), reparse_sections(first), true, false);
+        store.upsert_plan(
+            "reused",
+            "/tmp/r",
+            first.to_string(),
+            reparse_sections(first),
+            true,
+            false,
+        );
         assert!(store.delete_session("reused"));
 
         let second = "# Second\n\n## Beta\n\nTwo.\n";
-        store.upsert_plan("reused", "/tmp/r", second.to_string(), reparse_sections(second), true, false);
+        store.upsert_plan(
+            "reused",
+            "/tmp/r",
+            second.to_string(),
+            reparse_sections(second),
+            true,
+            false,
+        );
         let session = store.get("reused").expect("session");
         let rendered = format!("{:?}", session.revisions[0].sections);
         assert!(rendered.contains("Beta"), "stale parse served: {rendered}");
@@ -2729,7 +2783,14 @@ mod tests {
         let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
         let store = SessionStore::new(db);
         let md = "# Plan\n\n## Gamma\n\nBody.\n";
-        store.upsert_plan("old-id", "/tmp/r", md.to_string(), reparse_sections(md), true, false);
+        store.upsert_plan(
+            "old-id",
+            "/tmp/r",
+            md.to_string(),
+            reparse_sections(md),
+            true,
+            false,
+        );
         store.get("old-id").expect("materialize");
         assert!(store.rekey_session("old-id", "new-id"));
 
@@ -2869,7 +2930,11 @@ mod tests {
         let roots: Vec<_> = all.iter().filter(|i| !i.id.contains('.')).collect();
         assert_eq!(roots.len(), 1);
         let umbrella = roots[0];
-        assert!(umbrella.title.starts_with("Plan v1 approved:"), "{}", umbrella.title);
+        assert!(
+            umbrella.title.starts_with("Plan v1 approved:"),
+            "{}",
+            umbrella.title
+        );
         assert!(umbrella.title.contains("Ship the widget"));
         assert_eq!(umbrella.status, "held");
         assert_eq!(umbrella.kind, "task");
@@ -2902,9 +2967,7 @@ mod tests {
         );
 
         // Frontier law: children claimable, the held umbrella not.
-        let ready = db
-            .list_ready_work_items(None, now_millis(), 50)
-            .unwrap();
+        let ready = db.list_ready_work_items(None, now_millis(), 50).unwrap();
         let ids: Vec<&str> = ready.iter().map(|i| i.id.as_str()).collect();
         for child in &children {
             assert!(ids.contains(&child.id.as_str()));
@@ -3019,8 +3082,6 @@ mod tests {
         store.set_status("sess-appr", SessionStatus::Approved);
         let all = db.list_work_items(None, None, 100).unwrap();
         assert!(all.len() > v1_count, "the new version filed its own items");
-        assert!(all
-            .iter()
-            .any(|i| i.title.starts_with("Plan v2 approved:")));
+        assert!(all.iter().any(|i| i.title.starts_with("Plan v2 approved:")));
     }
 }

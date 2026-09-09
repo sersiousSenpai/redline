@@ -1,0 +1,9 @@
+{
+  "cliVersion": "1.1.28",
+  "launchIdForwarded": true,
+  "projectPathForwarded": true,
+  "hookCwd": "~/.gemini/config",
+  "workspaceRootsWithAddDir": [
+    "/fixture/project"
+  ]
+}

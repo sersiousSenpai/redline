@@ -1,0 +1,24 @@
+{
+  "cliVersion": "2026.09.08-6caf4ff",
+  "fixture": "interactive PTY, scratch project, no tools or model writes",
+  "stopHoldSeconds": 10,
+  "events": [
+    {
+      "event": "beforeSubmitPrompt",
+      "secondsFromStopStart": -0.00096
+    },
+    {
+      "event": "stop",
+      "secondsFromStopStart": 0.0
+    },
+    {
+      "event": "afterAgentResponse",
+      "secondsFromStopStart": -0.00101
+    },
+    {
+      "event": "stop-return",
+      "secondsFromStopStart": 10.002721
+    }
+  ],
+  "responseBeforeStopReturn": true
+}

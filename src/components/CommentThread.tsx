@@ -23,8 +23,8 @@ interface CommentThreadProps {
   /** The review session id — keys the fork backend with the comment id. */
   sessionId: string;
   comment: Comment;
-  /** Which harness authored this plan (`sessions.backend`) — the discussion
-   *  forks the SAME conversation, so a Codex plan is discussed with Codex.
+  /** Which harness authored this plan (`sessions.backend`). Claude/Codex
+   *  fork natively; Cursor/Antigravity use a separate read-only Claude sidecar.
    *  `null` on every pre-backend session and reads as Claude. Only the naming
    *  lives here; `fork.rs` picks the actual binary from the same value. */
   backend?: string | null;
@@ -68,7 +68,9 @@ export const CommentThread = memo(function CommentThread({
   // Derived ONCE and threaded through every label below: the entry button, the
   // bubbles, the collapsed summary, the sidecar status copy and the escalated
   // transcript must all name the same agent, because they describe one process.
-  const agent = agentLabelFor(backend);
+  const author = agentLabelFor(backend);
+  const sidecar = ["cursor", "antigravity"].includes((backend ?? "").trim().toLowerCase());
+  const agent = sidecar ? "Claude sidecar" : author;
   // The shared text size is applied via the `--rl-discussion-zoom` CSS var set
   // once on the discussion pane; here we only need the stable adjuster for A−/A+.
   const adjustZoom = useAdjustDiscussionZoom();
@@ -303,6 +305,7 @@ export const CommentThread = memo(function CommentThread({
         >
           💬 Discuss with {agent}
         </button>
+        {sidecar && <p style={{ color: "var(--color-ink-muted)", fontSize: "10px", marginTop: 5 }}>A separate read-only discussion seeded with this {author} plan.</p>}
       </div>
     );
   }
@@ -372,7 +375,7 @@ export const CommentThread = memo(function CommentThread({
           {riderSent && (
             <span className="rl-pulse" style={{ color: "var(--color-warning)" }}>
               {comment.actionable
-                ? `· decision sent · ${agent} is applying…`
+                ? `· decision sent · ${author} is applying…`
                 : "· sent · riding with this submit…"}
             </span>
           )}

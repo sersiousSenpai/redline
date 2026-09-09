@@ -39,6 +39,7 @@ crate-type = ["rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+toml = "0.8"
 # `unstable` enables the multi-webview API (embedding a native child webview
 # inside the main window — the embedded browser pane). It's the only supported
 # way to do in-window child webviews in Tauri 2 today; the JS `new Webview(...)`
@@ -249,7 +250,6 @@ http-body-util = "0.1"
 # and nowhere else, so an escaping bug that drops part of it would be silent
 # until a revision destroyed a diff — a real round-trip is the only assertion
 # that catches it. Test-only: nothing in the shipped binary reads TOML.
-toml = "0.8"
 
 # Size levers for the shipped binary (budget + baselines: docs/perf-budget.md
 # "Size budget"; pinned by src-tauri/tests/size_guard.rs so a revert fails

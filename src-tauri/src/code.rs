@@ -305,6 +305,7 @@ mod tests {
             run_state: None,
             backend: None,
             model: None,
+            effort: None,
         };
         db.upsert_session(&mk("s1", "/a", 100)).unwrap();
         db.upsert_session(&mk("s2", "/b", 300)).unwrap();

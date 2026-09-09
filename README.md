@@ -89,13 +89,34 @@ Redline also detects a stale installed build from inside the app and can prompt 
 On launch, Redline checks for its Claude Code integration and offers a one-click install that writes:
 
 - a `PreToolUse` hook entry in `~/.claude/settings.json` pointing at the local daemon (plus a few `curl` allow-rules so Redline's own agents can reach the local bridge without prompts)
-- the plan-revision skill at `~/.claude/skills/redline/SKILL.md`
+- the plan-revision skill at `~/.claude/skills/redline-plan-review/SKILL.md`
 
 Both are inspectable, and the hook can be paused from inside the app at any time. The `browse`, `mission`, and `sidecar` skills that govern Redline's browser and research agents ship inside the app.
 
+### Planning backends
+
+The Front Door supports Claude Code, Codex, Cursor, and **Antigravity Preview**. Choose a provider, then use its readiness row to locate the executable, install the integration, or sign in. These are local CLI sessions in Redline's terminal; Cursor and Antigravity's editors are not embedded.
+
+| Provider | CLI and sign-in | User hook file | Planning skill directory |
+| --- | --- | --- | --- |
+| Claude Code | `claude` | `~/.claude/settings.json` | `~/.claude/skills/redline-plan-review/` |
+| Codex | `codex login` | `~/.codex/hooks.json` | `~/.codex/skills/redline-plan-review/` |
+| Cursor | `agent login` (`cursor-agent` also supported) | `~/.cursor/hooks.json` | `~/.cursor/skills/redline-plan-review/` |
+| Antigravity Preview | Launch `agy` to sign in | `~/.gemini/config/hooks.json` | `~/.gemini/antigravity-cli/skills/redline-plan-review/` |
+
+Installers preserve other integrations and report malformed or conflicting hook files instead of replacing them. Optional executable overrides are `REDLINE_CLAUDE_BIN`, `REDLINE_CODEX_BIN`, `REDLINE_CURSOR_BIN`, and `REDLINE_ANTIGRAVITY_BIN`; environment choices take precedence over the in-app Locate selection.
+
+Codex automatically chooses the newest capable installation, with version/capability results invalidated when its file changes. Its picker reads `codex debug models`; Claude's picker discovers model ids from the installed binary and always retains the four familiar aliases as fallback. Cursor and Antigravity use their own live `models` commands. Changing the selected executable refreshes that provider's catalog.
+
+Claude and Codex discussions fork their own author conversations. Cursor and Antigravity discussions use a clearly labeled **Claude sidecar**, seeded with the current plan and comment; they never resume the held author conversation. Their plan sessions still restore through the original provider. Keep Claude installed for these sidecars and Redline's other Claude-backed surfaces.
+
+Native-provider sidecars have only Read, Grep, Glob, WebFetch, and WebSearch. Shell and Skill tools, additional MCP tools, and arbitrary seat flags are excluded. They cannot curl Redline's memory bridge; the current plan and discussion context are supplied directly. Non-Claude plan consultations use this same boundary.
+
+Cursor Cloud Agents are outside this local-hook integration. Antigravity's later manually typed prompts are not yet captured independently; Redline records its initial launch request. Extension-pack planning remains on Claude. Captured compatibility evidence and the Preview limits are in [the protocol notes](docs/protocol-verification.md).
+
 ## Local-first
 
-Redline runs on your machine: no account, no telemetry. The daemon binds to `127.0.0.1`, your documents live in a local SQLite database, and every agent is your *own* local Claude Code driven as a subprocess — Redline never calls a model API itself. The only things that reach the network are the ones that inherently must: the embedded web browser, and text-to-speech if you choose a cloud voice (an on-device option is available).
+Redline runs on your machine: no Redline account, no telemetry. The daemon binds to `127.0.0.1`, and documents live in a local SQLite database. Planning and task execution use your installed vendor CLIs and their accounts. The native runner can optionally use an OpenAI-compatible endpoint for structured decomposition and review; its default uses the local Claude CLI. Browsing, model providers, and optional cloud text-to-speech use the network.
 
 ## Status
 
@@ -105,7 +126,7 @@ Redline is an early release (v0.1) under active development. It currently suppor
 
 Directions we're exploring, in no particular order:
 
-- **Loop orchestrator** — turn an approved plan into parallel, individually-verified subtasks, each executed in an isolated git worktree and graded by an independent reviewer (a prototype lives on the `feature/loop-orchestrator` branch; not in the product).
+- **Optional worktree isolation** — the [native runner](docs/native-runner.md) now reviews and executes task graphs in the existing working tree; isolated worktrees remain future work.
 - **Multiplayer** — several reviewers in one document at once, each paired with their own agent, over a CRDT (Yjs/Hocuspocus).
 - **Documents beyond Claude Code plans** — a born-in-app Word-class editor with clean `.docx` export, and eventually high-fidelity import of arbitrary `.docx` files. See [docs/document-ide-northstar.md](docs/document-ide-northstar.md).
 - Finer-grained comment anchoring (sentence- and word-level).
@@ -113,7 +134,7 @@ Directions we're exploring, in no particular order:
 
 ## Architecture
 
-Redline is a Tauri 2 app: a React 19 + TypeScript frontend and a Rust backend that embeds an axum HTTP daemon (the hook and agent-bridge endpoints), a SQLite session store, portable-pty terminals, and native browser webviews. Every agent surface — plan revision, discussion forks, browser page-discussion, missions, and voice — runs your own local `claude` binary as a subprocess, driven over the `127.0.0.1:7676` bridge. The full as-built specification — including the hook wire protocol, the feedback payload format, and the session lifecycle — is in [SPEC.md](SPEC.md), and the contracts Claude Code follows are in [skills/](skills/) (`redline`, `browse`, `mission`, `sidecar`).
+Redline is a Tauri 2 app: a React 19 + TypeScript frontend and a Rust backend that embeds an axum HTTP daemon (the hook and agent-bridge endpoints), a SQLite session store, portable-pty terminals, and native browser webviews. Provider adapters normalize local planning CLIs into the same `127.0.0.1:7676` review bridge. Browser, mission, voice, and other agent surfaces keep their existing Claude execution paths. The [native runner](docs/native-runner.md) owns task graphs, processes, claims, checks, and intervention. The full as-built specification is in [SPEC.md](SPEC.md), and agent contracts are in [skills/](skills/).
 
 ## Contributing
 

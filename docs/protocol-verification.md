@@ -620,3 +620,100 @@ prompt forcing two tool calls; (2) `--tools ""`, a one-word reply; (3)
 `content_block_start` and `system`/`thinking_tokens` for the activity line.
 `classify_line` is untouched; `observe` is a second pass over the same
 `Value`, the way `tool_uses()` already sits beside it.
+
+---
+
+## Native planning providers and live catalogs (2026-09-09)
+
+These captures are checked into `src-tauri/tests/fixtures/`. Conversation ids,
+project paths, and prompt bodies use fixture values. They establish the local
+CLI protocol used by the adapters; they do not establish cloud or IDE-only
+hook compatibility.
+
+### Cursor CLI 2026.09.08-6caf4ff
+
+The `cursor/` fixtures cover `beforeSubmitPrompt`, `afterAgentResponse`, `stop`,
+and launch environment. `review-roundtrip-20260908.json` records a 35-second
+first Stop hold and seven follow-up generations with the same plan body. The
+capture includes both event orderings: Stop sometimes arrives before
+`afterAgentResponse`. The adapter therefore cannot assume the response spool
+already exists when Stop starts. It waits for the response associated with the
+same conversation/generation, and serializes review ownership for that session.
+
+`conversation_id` is the native identity; `generation_id` distinguishes turns.
+Completed Stop payloads include usage and `loop_count`. A continuation returns
+feedback through `followup_message`, while an allow response terminates the
+review hold. Parser and replay tests cover repeated plan bodies, retries,
+conversation isolation, empty responses, and preserving Ask-mode plan content.
+
+The launch probe confirms the CLI uses `agent` (with `cursor-agent` accepted as
+an installed alias), and that hook wiring is local CLI configuration. Redline
+does not advertise cloud-agent hook support.
+
+### Antigravity CLI 1.1.28
+
+The `antigravity/` fixtures cover launch environment, PreInvocation, Stop,
+transcript records, and a headless init event. The review-roundtrip fixture
+records an initial plan, a revision adding Step B, and an Ask continuation that
+preserves the revised body. Successful Stop events have
+`terminationReason: "NO_TOOL_CALL"` and `fullyIdle: true`, with `executionNum`
+and transcript step indices distinguishing turns. An abnormal or cancelled
+termination is not treated as a reviewable completed plan.
+
+The adapter reads the native transcript below either supported local brain
+root, `.gemini/antigravity-cli/brain` or `.gemini/antigravity/brain`, at the
+conversation's `.system_generated/logs/transcript_full.jsonl`. It checks the
+canonical path belongs to that conversation and reads a bounded tail. A hook
+cannot point it at an unrelated file or escape the root through a symlink.
+
+The headless init capture is a material capability limit: `/plan` was expanded
+and `permission_mode` was `request-review`, but the available tools still
+included `write_to_file`, `replace_file_content`, `multi_replace_file_content`,
+`notebook_edit`, and `run_command`. **Plan mode alone is not a read-only sidecar
+boundary.** Cursor and Antigravity plan discussions therefore use fresh Claude
+sidecars with the current plan, selection, and completed discussion history as
+context. The native author conversation is never resumed by that sidecar.
+Original provider provenance remains on the plan, and feedback still returns
+to the native author. General plan consultation uses the same safe context
+fallback for non-Claude authors.
+
+The native fallback's Claude argv physically lists only
+`Read,Grep,Glob,WebFetch,WebSearch`, uses strict MCP configuration, and omits
+arbitrary seat extra flags. Bash and Skill are absent, so inherited shell grants
+cannot enlarge this sidecar's tools. This also means it cannot curl the memory
+bridge; its current plan and discussion context are supplied directly. An
+explicit argv regression test covers first turns, resumed sidecars, non-Claude
+consultations, and a seat attempting to add shell/write/MCP flags. The original
+Claude and Codex discussion contracts remain separately tested.
+
+Antigravity remains marked Preview. The captures verify the supported local
+CLI hook cycle; interactive permission prompts and other versions still need
+their own compatibility verification.
+
+### Binary resolution and model catalogs
+
+A local metadata smoke on 2026-09-09 found both the ChatGPT-bundled Codex and
+Homebrew Codex reporting **0.153.4**, and Claude Code reporting **2.1.266**.
+The input plan's older bundled-version example no longer described this
+machine. Resolver unit fixtures retain the older-bundle/newer-Homebrew case,
+including an incapable newer candidate and explicit override precedence.
+
+The installed Codex catalog returned six model rows, including `gpt-6-astra`
+with `ultra` effort. Claude binary extraction returned eighteen rows including
+four floating aliases. These are discovery results, not a promise that every
+account can run every model. Readiness separately checks the effective Codex
+configured model against its runnable catalog and preserves the CLI's own
+default when no explicit model was chosen.
+
+Codex discovery and version caches use executable identity (path, modification
+time, and length). Each new discussion resolves its binary again, so an
+installation or override change takes effect without restarting Redline.
+Claude extraction streams bounded chunks and rejects malformed or oversized
+candidate sets; `claude-model-sets.js` is explicitly synthetic parser coverage.
+If extraction fails, its result is the stable alias fallback, not an invented
+list of pinned models. Frontend catalog regression tests exercise provider
+separation, identity changes, retries, and late success/error replies across an
+A → B → A switch.
+
+Native execution verification, actual process ownership, checked scope, and
+measured run reports are documented in [native-runner.md](native-runner.md).

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { DevServerScan } from "../types";
+import type { StopPlan } from "../lib/devServerTypes";
 
 /** How often the Localhost surface re-sweeps the machine while it is visible.
  *  Each sweep forks three subprocesses, so this is deliberately slower than a
@@ -16,9 +17,10 @@ export interface UseDevServers {
   refresh: () => void;
   stopServer: (
     pid: number,
-    expectedComm: string,
+    port: number,
     projectPath: string | null,
   ) => Promise<void>;
+  planStop: (pid: number, port: number, projectPath: string | null) => Promise<StopPlan | null>;
 }
 
 /** Owns the Localhost surface's data: what is listening, what we remember, and
@@ -34,6 +36,7 @@ export interface UseDevServers {
 export function useDevServers(active: boolean): UseDevServers {
   const [scan, setScan] = useState<DevServerScan | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [stopError, setStopError] = useState<string | null>(null);
   // Guards against a reply from a sweep that started before the surface closed.
   const aliveRef = useRef(true);
   const inFlightRef = useRef(false);
@@ -85,21 +88,36 @@ export function useDevServers(active: boolean): UseDevServers {
     };
   }, [active]);
 
-  /** SIGTERM a running server, then re-sweep so the card moves to "recent"
-   *  without waiting out the poll. The pid-reuse guard lives in Rust — the comm
-   *  we pass is the one the card is displaying, and a mismatch is an error. */
+  /** Errors from Stop survive the follow-up sweep instead of disappearing
+   *  behind a successful scan before the user can read them. */
   const stopServer = useCallback(
-    async (pid: number, expectedComm: string, projectPath: string | null) => {
+    async (pid: number, port: number, projectPath: string | null) => {
+      setStopError(null);
+      let failure: string | null = null;
       try {
-        await invoke("dev_server_stop", { pid, expectedComm, projectPath });
-        setError(null);
+        await invoke("dev_server_stop", { pid, port, projectPath });
       } catch (e) {
-        setError(String(e));
+        failure = String(e);
       }
       await refreshRef.current();
+      if (aliveRef.current) setStopError(failure);
     },
     [],
   );
 
-  return { scan, error, refresh: () => void refreshRef.current(), stopServer };
+  const planStop = useCallback(
+    async (pid: number, port: number, projectPath: string | null) => {
+      try {
+        return await invoke<StopPlan>("dev_server_stop_plan", { pid, port, projectPath });
+      } catch {
+        // Advisory only: the actual stop recomputes and validates its plan.
+        return null;
+      } finally {
+        void refreshRef.current();
+      }
+    },
+    [],
+  );
+
+  return { scan, error: stopError ?? error, refresh: () => { setStopError(null); void refreshRef.current(); }, stopServer, planStop };
 }

@@ -71,7 +71,8 @@ impl Agent for RedlineAgent {
         // the lake, and the next run would try to classify it.
         crate::ledger::register_agent_prompt(&req.prompt);
         let seat = req.seat.clone();
-        let args = crate::claude_proc::bridge_args(&seat, req.prompt.clone(), req.resume.as_deref());
+        let args =
+            crate::claude_proc::bridge_args(&seat, req.prompt.clone(), req.resume.as_deref());
         let mut cmd = crate::claude_proc::claude_command_for_seat(&seat, &claude_bin);
         if let Some(cwd) = &req.cwd {
             cmd.current_dir(cwd);
@@ -93,8 +94,14 @@ impl Agent for RedlineAgent {
                     AgentError::spawn(format!("failed to spawn the {seat}: {e}"))
                 }
             })?;
-        let stdout = child.stdout.take().ok_or_else(|| AgentError::spawn(format!("{seat} stdout unavailable")))?;
-        let stderr = child.stderr.take().ok_or_else(|| AgentError::spawn(format!("{seat} stderr unavailable")))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| AgentError::spawn(format!("{seat} stdout unavailable")))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| AgentError::spawn(format!("{seat} stderr unavailable")))?;
         let out = crate::claude_proc::collect_turn(stdout, stderr).await;
         let _ = child.wait().await;
         let usage = usage_from_meter(&out.meter);
@@ -141,7 +148,10 @@ pub fn install_agent(agent: Arc<dyn Agent>) {
 /// The memory agent — the installed one, else Redline's own (so a test that
 /// never ran setup still spawns exactly what the app would).
 pub fn agent() -> Arc<dyn Agent> {
-    AGENT.get().cloned().unwrap_or_else(|| Arc::new(RedlineAgent))
+    AGENT
+        .get()
+        .cloned()
+        .unwrap_or_else(|| Arc::new(RedlineAgent))
 }
 
 // ---------------------------------------------------------------------------
@@ -183,7 +193,9 @@ impl HostResolver for Database {
     }
 
     fn revision_markdown(&self, session: &str, version: i64) -> Option<String> {
-        Database::revision_markdown(self, session, version).ok().flatten()
+        Database::revision_markdown(self, session, version)
+            .ok()
+            .flatten()
     }
 
     fn revision_title(&self, session: &str, version: i64) -> Option<String> {
@@ -216,11 +228,18 @@ impl HostResolver for Database {
     /// reads as "no such thread" — the route 404s rather than 502s, which is
     /// the same answer its callers get for a kind Redline has no table for.
     fn thread_messages(&self, kind: &str, id: &str, limit: i64) -> Option<Vec<ThreadMessage>> {
-        self.load_thread_generic(kind, id, limit).ok().flatten().map(|msgs| {
-            msgs.into_iter()
-                .map(|m| ThreadMessage { role: m.role, body: m.body, created_at: m.created_at })
-                .collect()
-        })
+        self.load_thread_generic(kind, id, limit)
+            .ok()
+            .flatten()
+            .map(|msgs| {
+                msgs.into_iter()
+                    .map(|m| ThreadMessage {
+                        role: m.role,
+                        body: m.body,
+                        created_at: m.created_at,
+                    })
+                    .collect()
+            })
     }
 }
 
@@ -245,6 +264,44 @@ impl RedlineIngest {
     }
 }
 
+/// Share launch lineage binding between prompt capture and native providers
+/// whose first reliable event is their completed plan.
+pub fn bind_launch_lineage(store: &SessionStore, sid: &str, bh: &str, v: &serde_json::Value) {
+    if let Some(claim) = ledger::claim_plan_launch(bh) {
+        let db = store.database();
+        // Bind the launch-time prompt row (recorded with no claude
+        // session — claude hadn't spawned) to the session that now runs
+        // it, then let the transcript stamp its model. This is the seam
+        // that makes launched prompts reachable by the model backfill at
+        // all, and it applies to every door: only the doors that own a
+        // thread — a Drafter document, or a chat that graduated — carry
+        // one to bind through.
+        // The row's own hash when the door recorded something other
+        // than what it typed (Combine), otherwise the guard key —
+        // `None` is "same as the guard key", so the four original
+        // doors resolve to exactly `bh` as before. Applied in BOTH
+        // arms so the two can never drift, even though only the
+        // threadless arm is reachable from Combine today.
+        let row_key = claim.row_hash.as_deref().unwrap_or(bh);
+        let bound = match claim.thread.as_ref() {
+            Some((kind, id)) => {
+                if let Err(e) = ledger::record_session_link(&db, "session", sid, kind, id) {
+                    tracing::warn!(error = %e, kind = %kind, "failed to link launched session to its origin thread");
+                }
+                db.bind_threaded_prompt_session(row_key, kind, id, sid)
+            }
+            None => db.bind_launch_prompt_session(row_key, sid),
+        };
+        if let Err(e) = bound {
+            tracing::warn!(
+                error = %e, origin = %claim.origin,
+                "failed to bind launch prompt to its session"
+            );
+        }
+        crate::backfill_from_transcript(&db, v, sid);
+    }
+}
+
 impl IngestObserver for RedlineIngest {
     /// A restore trigger, answered with the protocol the visible prompt no
     /// longer carries. This is the ONE fire per restore where that is true:
@@ -255,6 +312,20 @@ impl IngestObserver for RedlineIngest {
     /// trigger never reaches the lake, and the reviewer's own next prompt in
     /// that same terminal is captured byte-for-byte as it always was.
     fn intercept(&self, cx: &IngestContext<'_>) -> Option<serde_json::Value> {
+        // Capture runs before the first plan creates a ReviewSession. Bind its
+        // unique launch token now; handle_plan_core consumes the chosen fields
+        // after creating the session. Ambiguous legacy body hashes never bind.
+        if let Some(sid) = cx.session_id {
+            crate::plan_launch::bind_prompt(
+                cx.headers.get(crate::plan_launch::HEADER),
+                &ledger::body_hash(cx.prompt.trim()),
+                sid,
+                cx.payload
+                    .get("redline_provider")
+                    .and_then(serde_json::Value::as_str),
+                cx.cwd.unwrap_or(""),
+            );
+        }
         crate::restore_context::answer_with(cx.headers, cx.prompt)
     }
 
@@ -286,40 +357,8 @@ impl IngestObserver for RedlineIngest {
         // moment the spawned session's claude id is known. When the skipped
         // body was a drafter launch, link the new session under its draft —
         // the seam the whole temporal hierarchy hinges on.
-        if let Some(claim) = ledger::claim_plan_launch(bh) {
-            if let Some(sid) = claude_session_id {
-                let db = self.store.database();
-                // Bind the launch-time prompt row (recorded with no claude
-                // session — claude hadn't spawned) to the session that now runs
-                // it, then let the transcript stamp its model. This is the seam
-                // that makes launched prompts reachable by the model backfill at
-                // all, and it applies to every door: only the doors that own a
-                // thread — a Drafter document, or a chat that graduated — carry
-                // one to bind through.
-                // The row's own hash when the door recorded something other
-                // than what it typed (Combine), otherwise the guard key —
-                // `None` is "same as the guard key", so the four original
-                // doors resolve to exactly `bh` as before. Applied in BOTH
-                // arms so the two can never drift, even though only the
-                // threadless arm is reachable from Combine today.
-                let row_key = claim.row_hash.as_deref().unwrap_or(bh);
-                let bound = match claim.thread.as_ref() {
-                    Some((kind, id)) => {
-                        if let Err(e) = ledger::record_session_link(&db, "session", sid, kind, id) {
-                            tracing::warn!(error = %e, kind = %kind, "failed to link launched session to its origin thread");
-                        }
-                        db.bind_threaded_prompt_session(row_key, kind, id, sid)
-                    }
-                    None => db.bind_launch_prompt_session(row_key, sid),
-                };
-                if let Err(e) = bound {
-                    tracing::warn!(
-                        error = %e, origin = %claim.origin,
-                        "failed to bind launch prompt to its session"
-                    );
-                }
-                crate::backfill_from_transcript(&db, v, sid);
-            }
+        if let Some(sid) = claude_session_id {
+            bind_launch_lineage(&self.store, sid, bh, v);
         }
         // The Orchestrate handoff, same seam: when the skipped body was an
         // Orchestrate launch, this hook fire is the first moment the
@@ -358,11 +397,9 @@ impl IngestObserver for RedlineIngest {
                         cwd,
                         launch_terminal.as_deref(),
                     ) {
-                        Ok(()) => crate::runwatch::start(
-                            &self.app,
-                            self.store.clone(),
-                            plan_sid.clone(),
-                        ),
+                        Ok(()) => {
+                            crate::runwatch::start(&self.app, self.store.clone(), plan_sid.clone())
+                        }
                         Err(e) => {
                             tracing::warn!(error = %e, "failed to anchor orchestration for the run monitor")
                         }
@@ -483,7 +520,10 @@ static IDENTITY: OnceLock<Arc<polis_memory::identity::Identity>> = OnceLock::new
 /// nothing), and make the identity reachable to every record site. Its own
 /// explicit step, never inside attach: attach appends nothing
 /// (`real_db_attach_is_a_noop`); the first adoption appends exactly the bind.
-pub fn install_identity(data_dir: &std::path::Path, db: &Database) -> Result<polis_memory::identity::AdoptReport, String> {
+pub fn install_identity(
+    data_dir: &std::path::Path,
+    db: &Database,
+) -> Result<polis_memory::identity::AdoptReport, String> {
     use polis_memory::identity::{adopt, default_device_name, login_name, Identity};
     let dir = data_dir.join("polis");
     let (identity, created) = Identity::load_or_create(&dir, default_device_name())?;
@@ -572,8 +612,18 @@ mod tests {
         assert_eq!(observed.total_tokens(), rebuilt.total_tokens());
         assert_eq!(observed.is_empty(), rebuilt.is_empty());
         assert_eq!(
-            (rebuilt.input_tokens, rebuilt.output_tokens, rebuilt.cache_read_tokens, rebuilt.cache_creation_tokens),
-            (observed.input_tokens, observed.output_tokens, observed.cache_read_tokens, observed.cache_creation_tokens)
+            (
+                rebuilt.input_tokens,
+                rebuilt.output_tokens,
+                rebuilt.cache_read_tokens,
+                rebuilt.cache_creation_tokens
+            ),
+            (
+                observed.input_tokens,
+                observed.output_tokens,
+                observed.cache_read_tokens,
+                observed.cache_creation_tokens
+            )
         );
         assert!(TurnMeter::from_totals(None, 0, 0, 0, 0).is_empty());
     }
@@ -589,7 +639,10 @@ mod tests {
         assert!(host.surface_shot_keys(&[1, 2]).is_empty());
         assert_eq!(host.label("browser", "t"), None);
         let polis = polis_for(&db);
-        assert_eq!(polis.agent.as_ref().map(|a| a.name()), Some("redline-claude-cli"));
+        assert_eq!(
+            polis.agent.as_ref().map(|a| a.name()),
+            Some("redline-claude-cli")
+        );
     }
 
     #[test]
@@ -598,7 +651,10 @@ mod tests {
         let handle = PolisHandle::new(db.polis_store(), None, db.clone(), db.clone());
         let api: &dyn MemoryApi = &handle;
         assert!(api.verify().unwrap().ok);
-        assert!(api.tree(&polis_core::api::TreeRequest::default()).unwrap().is_empty());
+        assert!(api
+            .tree(&polis_core::api::TreeRequest::default())
+            .unwrap()
+            .is_empty());
     }
 
     /// E2: adoption is idempotent — one `principal_bind` after the first
@@ -611,7 +667,14 @@ mod tests {
         use polis_memory::identity::{adopt, Identity};
         let db = Database::open_in_memory().unwrap();
         crate::classmem::record_curate(&db, "classifier", "cn-x", "organize", "");
-        let dir = std::env::temp_dir().join(format!("redline-identity-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let dir = std::env::temp_dir().join(format!(
+            "redline-identity-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let (identity, created) = Identity::load_or_create(&dir, "test-box").unwrap();
         assert!(created);
         let store = db.polis_store();
@@ -625,13 +688,26 @@ mod tests {
         assert_eq!(top.author, identity.device_id());
         let second = adopt(&store, &identity, "yusuf").unwrap();
         assert!(second.already_bound && second.aliases_seeded.is_empty() && second.stamped == 0);
-        assert_eq!(store.chain_head().unwrap().0, head, "a second adoption appends nothing");
-        assert_eq!(store.resolve_author("yusuf").unwrap().as_deref(), Some(identity.device_id().as_str()));
-        assert_eq!(store.resolve_author("classifier").unwrap().as_deref(), Some(identity.agent_id("classifier").as_str()));
+        assert_eq!(
+            store.chain_head().unwrap().0,
+            head,
+            "a second adoption appends nothing"
+        );
+        assert_eq!(
+            store.resolve_author("yusuf").unwrap().as_deref(),
+            Some(identity.device_id().as_str())
+        );
+        assert_eq!(
+            store.resolve_author("classifier").unwrap().as_deref(),
+            Some(identity.agent_id("classifier").as_str())
+        );
         // A seat that has never written has its agent PRINCIPAL (seeded as a
         // builtin) but no alias row yet — aliases are for author strings the
         // lake has actually seen; `agent_author("keeper")` writes the id.
-        assert!(store.get_principal(&identity.agent_id("keeper")).unwrap().is_some());
+        assert!(store
+            .get_principal(&identity.agent_id("keeper"))
+            .unwrap()
+            .is_some());
         assert_eq!(store.resolve_author("keeper").unwrap(), None);
         assert!(db.verify_ledger_chain().unwrap().ok);
         let _ = std::fs::remove_dir_all(&dir);
@@ -653,7 +729,8 @@ mod tests {
         let store = db.polis_store();
         let before = store.chain_head().unwrap().0;
         let authors = store.distinct_authors().unwrap();
-        let data_dir = std::env::temp_dir().join(format!("redline-identity-real-{}", std::process::id()));
+        let data_dir =
+            std::env::temp_dir().join(format!("redline-identity-real-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&data_dir);
         let t0 = std::time::Instant::now();
         let report = install_identity(&data_dir, &db).unwrap();
@@ -662,12 +739,22 @@ mod tests {
         assert_eq!(head, before + 1, "the first boot appends exactly the bind");
         assert!(!report.already_bound);
         assert!(db.verify_ledger_chain().unwrap().ok);
-        let unresolved: Vec<_> = authors.iter().filter(|a| store.resolve_author(a).unwrap().is_none()).cloned().collect();
+        let unresolved: Vec<_> = authors
+            .iter()
+            .filter(|a| store.resolve_author(a).unwrap().is_none())
+            .cloned()
+            .collect();
         assert!(unresolved.is_empty(), "unaliased authors: {unresolved:?}");
-        assert!(data_dir.join("polis").join(polis_memory::identity::KEY_FILE).exists());
+        assert!(data_dir
+            .join("polis")
+            .join(polis_memory::identity::KEY_FILE)
+            .exists());
         // the user's writes now carry the device id; a seat's its agent id
         assert_eq!(crate::ledger::local_author(), report.device);
-        assert_eq!(agent_author("keeper"), identity().unwrap().agent_id("keeper"));
+        assert_eq!(
+            agent_author("keeper"),
+            identity().unwrap().agent_id("keeper")
+        );
         eprintln!(
             "real_db_install_identity: events {before} → {head} · authors {} · aliases +{} · principals +{} · stamped {} · unscoped {:?} · bind #{:?} · {} ms · key {}",
             authors.len(),
@@ -699,7 +786,7 @@ mod tests {
     #[ignore = "needs REDLINE_REAL_DB pointing at a copy of a live database"]
     fn real_db_gardener_ticks_behave() {
         use polis_core::host::{Clock, GardenerEvents, IdleSignal};
-        use polis_memory::gardener::{step, Gate, GardenerConfig, GardenerState};
+        use polis_memory::gardener::{step, GardenerConfig, GardenerState, Gate};
         let Ok(path) = std::env::var("REDLINE_REAL_DB") else {
             eprintln!("set REDLINE_REAL_DB to a COPY of a live redline.db");
             return;
@@ -735,7 +822,9 @@ mod tests {
             gates.push(o.gate);
             *clock.0.lock().unwrap() += cfg.min_interval_ms + 1;
         }
-        assert!(gates.iter().all(|g| matches!(g, Gate::Ran | Gate::NothingNew | Gate::Debounced)));
+        assert!(gates
+            .iter()
+            .all(|g| matches!(g, Gate::Ran | Gate::NothingNew | Gate::Debounced)));
         // No model: the deterministic filing tier (C1, R12) may still file the
         // lake's unorganized items under their root's `~inbox` (a `class_curate`
         // event per filing), and the keeper's compaction may gist a cold prompt
@@ -743,8 +832,12 @@ mod tests {
         // append. Nothing structural, nothing twice: after the first pass that
         // found work, the rest must see nothing new.
         let events_after = db.max_ledger_seq().unwrap();
-        let appended: Vec<String> =
-            db.list_ledger_events_asc(events_before, 10_000).unwrap().into_iter().map(|e| e.kind).collect();
+        let appended: Vec<String> = db
+            .list_ledger_events_asc(events_before, 10_000)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.kind)
+            .collect();
         assert!(
             appended.iter().all(|k| k == "class_curate" || k == "compaction"),
             "a model-less pass appended {appended:?} — only inbox filings (class_curate) and rule-gisted compactions are allowed"

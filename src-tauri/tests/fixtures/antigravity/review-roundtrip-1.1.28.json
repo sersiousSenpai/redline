@@ -1,0 +1,27 @@
+{
+  "cliVersion": "1.1.28",
+  "scenario": "initial plan, revision continuation, Ask preserving body, allow",
+  "stops": [
+    {
+      "executionNum": 0,
+      "terminationReason": "NO_TOOL_CALL",
+      "fullyIdle": true,
+      "response": "<proposed_plan>\n# Compatibility plan\nStep A.\n</proposed_plan>",
+      "stepIndex": 1
+    },
+    {
+      "executionNum": 1,
+      "terminationReason": "NO_TOOL_CALL",
+      "fullyIdle": true,
+      "response": "<proposed_plan>\n# Compatibility plan\nStep A.\nStep B.\n</proposed_plan>",
+      "stepIndex": 3
+    },
+    {
+      "executionNum": 2,
+      "terminationReason": "NO_TOOL_CALL",
+      "fullyIdle": true,
+      "response": "<proposed_plan>\n# Compatibility plan\nStep A.\nStep B.\n</proposed_plan>",
+      "stepIndex": 5
+    }
+  ]
+}

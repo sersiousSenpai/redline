@@ -605,21 +605,19 @@ impl Database {
     /// The schema version this build writes and expects.
     ///
     /// Bump it and add a step to `MIGRATIONS` in the same diff; never edit a
-    /// step that has shipped. A database stamped with a HIGHER version is
-    /// refused outright — an older build silently "migrating" a newer schema
-    /// by re-running additive steps is how you get a file that neither build
-    /// can read.
-    const SCHEMA_VERSION: i64 = 1;
+    /// step that has shipped. Higher stamps are verified without migrations
+    /// or restamping; only an unusable forward schema is refused.
+    const SCHEMA_VERSION: i64 = 3;
 
     /// Ordered migration steps. `(target_version, step)`: running `step` takes
     /// a database from `target_version - 1` to `target_version`.
     const MIGRATIONS: &'static [(i64, fn(&Connection) -> rusqlite::Result<()>)] =
-        &[(1, Self::migrate_v1)];
+        &[(1, Self::migrate_v1), (2, Self::migrate_v2), (3, Self::migrate_v3)];
 
     /// Bring the database to `SCHEMA_VERSION`, or return an error.
     ///
     /// The point of versioning is the **fast path**: an already-current
-    /// database costs one `PRAGMA user_version` read and nothing else. Before
+    /// database uses read-only schema checks and executes no DDL. Before
     /// this, every single launch replayed the entire schema — ~60
     /// `CREATE TABLE IF NOT EXISTS`, ~50 `CREATE INDEX IF NOT EXISTS`, and 68
     /// `ALTER TABLE ADD COLUMN` statements that were *expected to fail*, each
@@ -639,6 +637,9 @@ impl Database {
         let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
 
         if current == Self::SCHEMA_VERSION {
+            // Another migration lineage has used this same integer before.
+            // Never let a matching stamp hide missing history-read columns.
+            Self::verify_schema(conn)?;
             crate::boot_trace::mark(crate::boot_trace::DB_MIGRATE);
             return Ok(());
         }
@@ -702,7 +703,8 @@ impl Database {
 
     /// Is this database usable by this build?
     ///
-    /// Two callers, two different questions with the same answer:
+    /// Three callers share the same shape check:
+    ///   * on a CURRENT stamp — does the shape agree with the marker?
     ///   * after a migration runs — did the best-effort `ALTER TABLE`s
     ///     actually happen, or would we stamp a half-migrated file as current?
     ///   * on a FORWARD/foreign stamp — the integer says "newer", but is the
@@ -724,6 +726,7 @@ impl Database {
             "app_settings",
             "thread_messages",
             "drafts",
+            "run_graphs", "run_nodes", "run_edges", "run_claims",
         ];
         let mut stmt =
             conn.prepare("SELECT name FROM sqlite_master WHERE type IN ('table','view')")?;
@@ -742,7 +745,7 @@ impl Database {
         const REQUIRED: &[(&str, &[&str])] = &[
             (
                 "sessions",
-                &["attach_state", "updated_at", "run_state", "backend", "model"],
+                &["attach_state", "updated_at", "run_state", "backend", "model", "effort"],
             ),
             ("revisions", &["thread_start", "restored"]),
             (
@@ -776,6 +779,57 @@ impl Database {
             }
         }
         Ok(())
+    }
+
+    /// The execution plane is deliberately separate from backlog provenance.
+    fn migrate_v2(conn: &Connection) -> rusqlite::Result<()> {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS run_graphs (
+                run_id TEXT PRIMARY KEY, plan_session_id TEXT, project_path TEXT NOT NULL,
+                status TEXT NOT NULL, doc_json TEXT NOT NULL, rev INTEGER NOT NULL DEFAULT 0,
+                max_write_parallel INTEGER NOT NULL DEFAULT 3,
+                created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+            CREATE INDEX IF NOT EXISTS idx_run_graphs_plan ON run_graphs(plan_session_id);
+            CREATE TABLE IF NOT EXISTS run_nodes (
+                run_id TEXT NOT NULL, node_id TEXT NOT NULL, kind TEXT NOT NULL,
+                title TEXT NOT NULL, brief TEXT NOT NULL, plan_block_id TEXT,
+                seat TEXT, backend TEXT, model TEXT, effort TEXT, scope_hint TEXT,
+                enforce_scope INTEGER NOT NULL DEFAULT 0, verify_cmd TEXT,
+                status TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL DEFAULT 2, child_session_id TEXT,
+                started_at INTEGER, ended_at INTEGER, meter_json TEXT,
+                PRIMARY KEY(run_id,node_id));
+            CREATE TABLE IF NOT EXISTS run_edges (
+                run_id TEXT NOT NULL, from_id TEXT NOT NULL, to_id TEXT NOT NULL,
+                type TEXT NOT NULL, PRIMARY KEY(run_id,from_id,to_id,type));
+            CREATE TABLE IF NOT EXISTS run_claims (
+                run_id TEXT NOT NULL, path TEXT NOT NULL, node_id TEXT NOT NULL,
+                claimed_at INTEGER NOT NULL, released_at INTEGER,
+                PRIMARY KEY(run_id,path,node_id));
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_run_claims_live ON run_claims(run_id,path)
+                WHERE released_at IS NULL;
+        "#,
+        )?;
+        let mut stmt = conn.prepare("PRAGMA table_info(sessions)")?;
+        let columns = stmt
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if !columns.iter().any(|c| c == "effort") {
+            conn.execute("ALTER TABLE sessions ADD COLUMN effort TEXT", [])?;
+        }
+        Ok(())
+    }
+
+    /// v2 → v3: repair the stamp collision with the older cockpit lineage.
+    /// Its version 2 had neither sessions.effort nor the native run tables.
+    /// Reusing the additive, idempotent step preserves all existing history
+    /// and is also safe for databases that already received our version 2.
+    fn migrate_v3(conn: &Connection) -> rusqlite::Result<()> {
+        Self::migrate_v2(conn)?;
+        // Verify before the caller writes version 3, including on a partial
+        // legacy schema whose unrelated required columns are still missing.
+        Self::verify_schema(conn)
     }
 
     /// v0 → v1: the whole schema as of this build.
@@ -2117,8 +2171,8 @@ impl Database {
     pub fn upsert_session(&self, session: &ReviewSession) -> rusqlite::Result<()> {
         let conn = self.lock_conn();
         conn.execute(
-            "INSERT INTO sessions (session_id, project_path, project_name, created_at, status, attach_state, updated_at, backend, model)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "INSERT INTO sessions (session_id, project_path, project_name, created_at, status, attach_state, updated_at, backend, model, effort)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(session_id) DO UPDATE SET
                 project_path = excluded.project_path,
                 project_name = excluded.project_name,
@@ -2130,7 +2184,8 @@ impl Database {
                 -- one of those blank the backend would send the NEXT restore
                 -- down the claude arm with a Codex thread id.
                 backend = COALESCE(excluded.backend, sessions.backend),
-                model = COALESCE(excluded.model, sessions.model)",
+                model = COALESCE(excluded.model, sessions.model),
+                effort = COALESCE(excluded.effort, sessions.effort)",
             params![
                 session.session_id,
                 session.project_path,
@@ -2141,6 +2196,7 @@ impl Database {
                 session.updated_at,
                 session.backend,
                 session.model,
+                session.effort,
             ],
         )?;
         Ok(())
@@ -7148,6 +7204,18 @@ impl Database {
         Ok(())
     }
 
+    /// Durable history totals for diagnostics; query failure is never an
+    /// empty-history result. One lock and one read cover all three tables.
+    pub fn plan_history_counts(&self) -> rusqlite::Result<(i64, i64, i64)> {
+        self.lock_conn().query_row(
+            "SELECT (SELECT COUNT(*) FROM sessions),
+                    (SELECT COUNT(*) FROM revisions),
+                    (SELECT COUNT(*) FROM comments)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+    }
+
     /// Every session, fully reparsed — the startup read that populates
     /// `SessionStore`. Cost scales with the whole review history, so callers
     /// wanting ONE session must use `load_session`.
@@ -7181,7 +7249,7 @@ impl Database {
         };
 
         let mut stmt = conn.prepare(&narrow(
-            "SELECT session_id, project_path, project_name, created_at, status, attach_state, updated_at, run_state, backend, model FROM sessions",
+            "SELECT session_id, project_path, project_name, created_at, status, attach_state, updated_at, run_state, backend, model, effort FROM sessions",
             "",
         ))?;
         let rows = stmt.query_map(refs().as_slice(), |row| {
@@ -7199,6 +7267,7 @@ impl Database {
                 run_state: row.get(7)?,
                 backend: row.get(8)?,
                 model: row.get(9)?,
+                effort: row.get(10)?,
             })
         })?;
         for row in rows {
@@ -8303,6 +8372,7 @@ mod batched_read_tests {
             run_state: None,
             backend: None,
             model: None,
+        effort: None,
         };
         for id in ["wanted", "other"] {
             db.upsert_session(&mk(id)).unwrap();
@@ -14428,8 +14498,8 @@ body.
         assert_eq!(steps(), 1, "the first open must build the schema exactly once");
         assert_eq!(user_version(&path), Database::SCHEMA_VERSION);
 
-        // Every subsequent launch: one `PRAGMA user_version` read and nothing
-        // else.
+        // Every subsequent launch verifies shape using only read queries;
+        // it never replays the schema migration steps.
         for _ in 0..3 {
             drop(Database::open(&path).unwrap());
         }
@@ -14475,6 +14545,106 @@ body.
         assert_eq!(legacy.model.as_deref(), Some("gpt-5"));
         drop(db);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn foreign_version_two_history_shape_repairs_additively() {
+        let path = tempfile_path();
+        {
+            let conn = Connection::open(&path).unwrap();
+            // Exact collision: the pre-runner shape carrying cockpit's 2.
+            Database::migrate_v1(&conn).unwrap();
+            conn.execute_batch(
+                "INSERT INTO sessions(session_id,project_path,project_name,created_at)
+                 VALUES('foreign-history','/tmp/history','history',1);
+                 INSERT INTO revisions(session_id,version_number,received_at,raw_plan_markdown)
+                 VALUES('foreign-history',1,2,'# Kept plan');
+                 INSERT INTO comments(id,session_id,version_number,type,anchor_id,body,created_at,status)
+                 VALUES('kept-comment','foreign-history',1,'feedback','blk-kept','Keep this feedback',3,'draft');
+                 PRAGMA user_version=2;"
+            ).unwrap();
+            assert!(conn.prepare("SELECT effort FROM sessions").is_err());
+            assert!(conn.prepare("SELECT * FROM run_graphs").is_err());
+        }
+        let db = Database::open(&path).unwrap();
+        assert_eq!(user_version(&path), Database::SCHEMA_VERSION);
+        let sessions = db.load_all().unwrap();
+        assert_eq!(db.plan_history_counts().unwrap(), (1, 1, 1));
+        assert_eq!(sessions.len(), 1);
+        let kept = &sessions["foreign-history"];
+        assert_eq!(kept.effort, None);
+        assert_eq!(kept.revisions.len(), 1);
+        assert_eq!(kept.revisions[0].raw_plan_markdown, "# Kept plan");
+        assert_eq!(kept.revisions[0].comments[0].body, "Keep this feedback");
+        assert!(db.runner_list().unwrap().is_empty());
+        drop(db);
+        // A second open must remain readable and avoid another migration.
+        assert_eq!(Database::open(&path).unwrap().load_all().unwrap().len(), 1);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_matching_stamp_with_missing_history_shape_is_refused_without_ddl() {
+        for ddl in ["ALTER TABLE sessions DROP COLUMN effort", "DROP TABLE run_graphs"] {
+            let path = tempfile_path();
+            drop(Database::open(&path).unwrap());
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(ddl).unwrap();
+            let schema_before: i64 = conn.query_row("PRAGMA schema_version", [], |r|r.get(0)).unwrap();
+            drop(conn);
+            // Even a current stamp must check shape; a read-only connection
+            // demonstrates that this branch cannot try additive repair.
+            let conn = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            assert!(Database::migrate(&conn).is_err());
+            assert_eq!(conn.query_row("PRAGMA schema_version", [], |r|r.get::<_,i64>(0)).unwrap(), schema_before);
+            assert_eq!(conn.query_row("PRAGMA user_version", [], |r|r.get::<_,i64>(0)).unwrap(), Database::SCHEMA_VERSION);
+            drop(conn);
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn version_three_repair_does_not_stamp_an_unusable_legacy_shape() {
+        let conn = Connection::open_in_memory().unwrap();
+        Database::migrate_v1(&conn).unwrap();
+        conn.execute_batch("PRAGMA user_version=2; ALTER TABLE sessions DROP COLUMN model;").unwrap();
+        assert!(Database::migrate(&conn).is_err());
+        assert_eq!(conn.query_row("PRAGMA user_version", [], |r|r.get::<_,i64>(0)).unwrap(), 2);
+    }
+
+    fn history_snapshot(conn: &Connection) -> Vec<(Vec<String>, Vec<Vec<rusqlite::types::Value>>)> {
+        [("sessions","session_id"),("revisions","session_id,version_number"),("comments","session_id,id")]
+            .into_iter().map(|(table,order)| {
+                let columns: Vec<String> = conn.prepare(&format!("PRAGMA table_info({table})")).unwrap()
+                    .query_map([],|r|r.get::<_,String>(1)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+                    .into_iter().filter(|c|table!="sessions" || c!="effort").collect();
+                let projection=columns.iter().map(|c|format!("\"{}\"",c.replace('"',"\"\""))).collect::<Vec<_>>().join(",");
+                let rows=conn.prepare(&format!("SELECT {projection} FROM {table} ORDER BY {order}")).unwrap()
+                    .query_map([],|r|(0..columns.len()).map(|i|r.get(i)).collect::<rusqlite::Result<Vec<rusqlite::types::Value>>>()).unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+                (columns,rows)
+            }).collect()
+    }
+
+    #[test]
+    #[ignore = "requires a separately created SQLite recovery copy via REDLINE_HISTORY_RECOVERY_COPY"]
+    fn recovery_copy_opens_and_loads_all_history_without_changing_rows() {
+        let path = std::path::PathBuf::from(std::env::var("REDLINE_HISTORY_RECOVERY_COPY").expect("set recovery COPY path"));
+        assert!(path.file_name().unwrap().to_string_lossy().starts_with("redline-history-copy-"), "only a disposable recovery copy may be opened");
+        let before = {
+            let conn = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            assert_eq!(conn.query_row("PRAGMA user_version", [], |r|r.get::<_,i64>(0)).unwrap(), 2);
+            history_snapshot(&conn)
+        };
+        let db = Database::open(&path).unwrap();
+        let sessions = db.load_all().unwrap();
+        let counts = (sessions.len(), sessions.values().map(|s|s.revisions.len()).sum::<usize>(), sessions.values().flat_map(|s|&s.revisions).map(|r|r.comments.len()).sum::<usize>());
+        assert_eq!(counts, (before[0].1.len(),before[1].1.len(),before[2].1.len()));
+        assert_eq!(db.plan_history_counts().unwrap(), (counts.0 as i64,counts.1 as i64,counts.2 as i64));
+        assert!(history_snapshot(&db.lock_conn()) == before, "existing history cells changed during recovery migration");
+        assert_eq!(db.lock_conn().query_row("PRAGMA quick_check", [], |r|r.get::<_,String>(0)).unwrap(), "ok");
+        assert_eq!(user_version(&path), Database::SCHEMA_VERSION);
+        println!("Recovery copy preserved and loaded {} sessions, {} revisions, {} comments; quick_check ok",counts.0,counts.1,counts.2);
     }
 
     #[test]
@@ -14859,6 +15029,7 @@ body.
             run_state: None,
             backend: None,
             model: None,
+        effort: None,
         };
         db.upsert_session(&mk("with-rev", 500)).unwrap();
         db.insert_revision(
@@ -15327,6 +15498,7 @@ body.
             run_state: None,
             backend: None,
             model: None,
+        effort: None,
         };
         // Approved + unrun (the queue's targets), out of insertion order.
         db.upsert_session(&mk("b-approved", SessionStatus::Approved, 200)).unwrap();
@@ -15375,6 +15547,7 @@ body.
             run_state: None,
             backend: None,
             model: None,
+        effort: None,
         })
         .unwrap();
         db.insert_revision(
@@ -15814,6 +15987,7 @@ body.
             run_state: None,
             backend: None,
             model: None,
+        effort: None,
         })
         .unwrap();
         db.insert_revision(
@@ -15940,5 +16114,516 @@ body.
             Some("1"),
             "the marker carries the repair's own count"
         );
+    }
+}
+
+// Native execution graph transactions. doc_json is the rehydration artifact;
+// normalized rows and its revision are written in the SAME transaction.
+impl Database {
+    fn runner_read(
+        conn: &Connection,
+        run_id: &str,
+    ) -> Result<crate::runner_graph::RunGraph, String> {
+        let json: String = conn
+            .query_row(
+                "SELECT doc_json FROM run_graphs WHERE run_id=?1",
+                [run_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        serde_json::from_str(&json).map_err(|e| e.to_string())
+    }
+    fn runner_claim_rows(
+        conn: &Connection,
+        run_id: &str,
+    ) -> Result<Vec<crate::runner_graph::RunClaim>, String> {
+        let mut stmt = conn.prepare("SELECT path,node_id,claimed_at,released_at FROM run_claims WHERE run_id=?1 ORDER BY path,node_id").map_err(|e|e.to_string())?;
+        let rows = stmt
+            .query_map([run_id], |r| {
+                Ok(crate::runner_graph::RunClaim {
+                    path: r.get(0)?,
+                    node_id: r.get(1)?,
+                    claimed_at: r.get(2)?,
+                    released_at: r.get(3)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| e.to_string())?;
+        Ok(rows)
+    }
+    fn runner_write(
+        conn: &Connection,
+        graph: &crate::runner_graph::RunGraph,
+    ) -> Result<(), String> {
+        crate::runner_graph::validate(graph)?;
+        let json = serde_json::to_string(graph).map_err(|e| e.to_string())?;
+        conn.execute("INSERT INTO run_graphs(run_id,plan_session_id,project_path,status,doc_json,rev,max_write_parallel,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(run_id) DO UPDATE SET status=excluded.status,doc_json=excluded.doc_json,rev=excluded.rev,max_write_parallel=excluded.max_write_parallel,updated_at=excluded.updated_at", params![graph.run_id,graph.plan_session_id,graph.project_path,graph.status,json,graph.rev,graph.max_write_parallel,graph.created_at,graph.updated_at]).map_err(|e|e.to_string())?;
+        conn.execute("DELETE FROM run_nodes WHERE run_id=?1", [&graph.run_id])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM run_edges WHERE run_id=?1", [&graph.run_id])
+            .map_err(|e| e.to_string())?;
+        for n in &graph.nodes {
+            conn.execute("INSERT INTO run_nodes(run_id,node_id,kind,title,brief,plan_block_id,seat,backend,model,effort,scope_hint,enforce_scope,verify_cmd,status,attempt,max_attempts,child_session_id,started_at,ended_at,meter_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",params![graph.run_id,n.id,n.kind,n.title,n.brief,n.plan_block_id,n.seat,n.backend,n.model,n.effort,serde_json::to_string(&n.scope_hint).unwrap(),n.enforce_scope,n.verify_cmd,n.status,n.attempt,n.max_attempts,n.child_session_id,n.started_at,n.ended_at,n.meter.as_ref().map(serde_json::Value::to_string)]).map_err(|e|e.to_string())?;
+            if crate::runner_graph::terminal(&n.status) {
+                conn.execute("UPDATE run_claims SET released_at=?3 WHERE run_id=?1 AND node_id=?2 AND released_at IS NULL",params![graph.run_id,n.id,graph.updated_at]).map_err(|e|e.to_string())?;
+            }
+        }
+        for e in &graph.edges {
+            conn.execute(
+                "INSERT INTO run_edges(run_id,from_id,to_id,type) VALUES(?1,?2,?3,?4)",
+                params![graph.run_id, e.from, e.to, e.edge_type],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+    pub fn runner_create(&self, graph: &crate::runner_graph::RunGraph) -> Result<(), String> {
+        let mut conn = self.lock_conn();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        if tx
+            .query_row(
+                "SELECT 1 FROM run_graphs WHERE run_id=?1",
+                [&graph.run_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .is_some()
+        {
+            return Err("run already exists".into());
+        }
+        Self::runner_write(&tx, graph)?;
+        tx.commit().map_err(|e| e.to_string())
+    }
+    pub fn runner_get(&self, run_id: &str) -> Result<crate::runner_graph::RunGraph, String> {
+        Self::runner_read(&self.lock_conn(), run_id)
+    }
+    pub fn runner_list(&self) -> Result<Vec<crate::runner_graph::RunGraph>, String> {
+        let conn = self.lock_conn();
+        let mut stmt = conn
+            .prepare("SELECT doc_json FROM run_graphs ORDER BY updated_at DESC LIMIT 100")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| e.to_string())?;
+        rows.into_iter()
+            .map(|s| serde_json::from_str(&s).map_err(|e| e.to_string()))
+            .collect()
+    }
+    pub fn runner_claims(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<crate::runner_graph::RunClaim>, String> {
+        Self::runner_claim_rows(&self.lock_conn(), run_id)
+    }
+    /// Check, mutate, normalize, and release terminal claims under one DB lock.
+    pub fn runner_update(
+        &self,
+        run_id: &str,
+        base_rev: Option<i64>,
+        change: impl FnOnce(
+            &mut crate::runner_graph::RunGraph,
+            &[crate::runner_graph::RunClaim],
+        ) -> Result<(), String>,
+    ) -> Result<crate::runner_graph::RunGraph, String> {
+        // Keep the transaction machinery shared across the runner's many
+        // distinct closures while preserving the public single-use contract.
+        let mut change = Some(change);
+        self.runner_update_inner(run_id, base_rev, &mut |graph, claims| {
+            change.take().expect("runner update callback called once")(graph, claims)
+        })
+    }
+    #[inline(never)]
+    fn runner_update_inner(
+        &self,
+        run_id: &str,
+        base_rev: Option<i64>,
+        change: &mut dyn FnMut(
+            &mut crate::runner_graph::RunGraph,
+            &[crate::runner_graph::RunClaim],
+        ) -> Result<(), String>,
+    ) -> Result<crate::runner_graph::RunGraph, String> {
+        let mut conn = self.lock_conn();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut graph = Self::runner_read(&tx, run_id)?;
+        let previous = graph.rev;
+        if base_rev.is_some_and(|r| r != previous) {
+            return Err(format!(
+                "409: stale revision; current revision is {previous}"
+            ));
+        }
+        let claims = Self::runner_claim_rows(&tx, run_id)?;
+        change(&mut graph, &claims)?;
+        graph.rev = previous + 1;
+        graph.updated_at = crate::state::now_millis();
+        Self::runner_write(&tx, &graph)?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(graph)
+    }
+    /// A claim is both a permission decision and a durable write. The partial
+    /// unique index is the final invariant; the lock also serializes barriers.
+    pub fn runner_claim(&self, run_id: &str, node_id: &str, path: &str, attempt: u32) -> Result<(), String> {
+        use crate::runner_graph::{check_coverage, live, scope_matches};
+        let mut conn = self.lock_conn();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let g = Self::runner_read(&tx, run_id)?;
+        if !["running", "paused"].contains(&g.status.as_str()) {
+            return Err("run is not active".into());
+        }
+        let node = g
+            .nodes
+            .iter()
+            .find(|n| n.id == node_id && n.kind == "task" && live(&n.status))
+            .ok_or("node has no active write-capable turn")?;
+        if attempt == 0 || node.attempt != attempt {
+            return Err("stale run attempt cannot claim writes".into());
+        }
+        if node.enforce_scope && !node.scope_hint.iter().any(|p| scope_matches(p, path)) {
+            return Err(format!("{path} is outside this node's enforced scope"));
+        }
+        let claims = Self::runner_claim_rows(&tx, run_id)?;
+        for check in g
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.kind.as_str(), "check" | "review") && live(&n.status))
+        {
+            if check.kind == "review" || check.check_global || check_coverage(&g, check, &claims).contains(path) {
+                return Err(format!("{path} is busy: check {} holds a verification barrier; continue other work and retry after it finishes",check.id));
+            }
+        }
+        if let Some(c) = claims
+            .iter()
+            .find(|c| c.path == path && c.node_id != node_id && c.released_at.is_none())
+        {
+            return Err(format!("{path} is busy: node {} owns it; continue other work and retry after that node finishes",c.node_id));
+        }
+        tx.execute("INSERT INTO run_claims(run_id,path,node_id,claimed_at,released_at) VALUES(?1,?2,?3,?4,NULL) ON CONFLICT(run_id,path,node_id) DO UPDATE SET released_at=NULL",params![run_id,path,node_id,crate::state::now_millis()]).map_err(|e|e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())
+    }
+    /// Never pretend a process survived an application restart. Claims remain
+    /// held until the human explicitly retries or skips their interrupted node.
+    pub fn runner_recover(&self) -> Result<Vec<crate::runner_graph::RunGraph>, String> {
+        let candidates = {
+            let conn = self.lock_conn();
+            let mut stmt=conn.prepare("SELECT doc_json FROM run_graphs WHERE status='running' OR run_id IN (SELECT run_id FROM run_nodes WHERE status IN ('running','verifying'))").map_err(|e|e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| e.to_string())?;
+            rows.into_iter()
+                .map(|s| {
+                    serde_json::from_str::<crate::runner_graph::RunGraph>(&s)
+                        .map_err(|e| e.to_string())
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut recovered = Vec::new();
+        for g in candidates {
+            if g.status == "running" || g.nodes.iter().any(|n| crate::runner_graph::live(&n.status))
+            {
+                recovered.push(self.runner_update(&g.run_id,None,|g,_| {
+                    g.status="paused".into();g.pause_reason=Some("restart".into());
+                    for n in &mut g.nodes { if crate::runner_graph::live(&n.status) { n.status="awaiting_human".into(); n.output.push_str("\nRedline restarted during this turn. Retry with the saved session or skip this node."); } }
+                    Ok(())
+                })?);
+            }
+        }
+        Ok(recovered)
+    }
+}
+
+#[cfg(test)]
+mod runner_tests {
+    use super::*;
+    use crate::runner_graph::RunGraph;
+    fn fixture() -> RunGraph {
+        serde_json::from_str(include_str!("../../src/lib/runner/fixtures/basic.json")).unwrap()
+    }
+    fn setup() -> Database {
+        let db = Database::open_in_memory().unwrap();
+        db.runner_create(&fixture()).unwrap();
+        db
+    }
+    fn running(db: &Database) -> RunGraph {
+        db.runner_update("run-fixture", None, |g, _| {
+            g.status = "running".into();
+            g.nodes[0].status = "running".into();
+            g.nodes[1].status = "running".into();
+            g.nodes[0].attempt = 1;
+            g.nodes[1].attempt = 1;
+            Ok(())
+        })
+        .unwrap()
+    }
+    #[test]
+    fn graph_revision_rejects_lost_updates_and_keeps_normalized_rows() {
+        let db = setup();
+        let g = running(&db);
+        assert_eq!(g.rev, 1);
+        assert!(db
+            .runner_update("run-fixture", Some(0), |g, _| {
+                g.status = "done".into();
+                Ok(())
+            })
+            .unwrap_err()
+            .starts_with("409"));
+        assert_eq!(db.runner_get("run-fixture").unwrap().status, "running");
+        let conn = db.lock_conn();
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM run_nodes WHERE node_id='n-api'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "running");
+    }
+    #[test]
+    fn single_use_update_error_preserves_graph_rows_revision_and_claims() {
+        let db = setup();
+        let before = running(&db);
+        db.runner_claim("run-fixture", "n-api", "claimed.rs", 1).unwrap();
+        let replacement = String::from("passed");
+        let mut calls = 0;
+        let result = db.runner_update("run-fixture", Some(before.rev), |g, _| {
+            calls += 1;
+            // Moving this String out makes the callback FnOnce, not FnMut.
+            g.nodes[0].status = replacement;
+            g.status = "done".into();
+            Err("mutation failed".into())
+        });
+        assert_eq!(calls, 1);
+        assert_eq!(result.unwrap_err(), "mutation failed");
+        assert_eq!(db.runner_get("run-fixture").unwrap(), before);
+        assert!(db.runner_claims("run-fixture").unwrap()[0].released_at.is_none());
+        let status: String = db.lock_conn().query_row(
+            "SELECT status FROM run_nodes WHERE node_id='n-api'", [], |r| r.get(0)
+        ).unwrap();
+        assert_eq!(status, "running");
+    }
+    #[test]
+    fn first_write_claims_and_terminal_release_serialize_real_paths() {
+        let db = setup();
+        running(&db);
+        db.runner_claim("run-fixture", "n-api", "shared.ts", 1)
+            .unwrap();
+        assert!(db
+            .runner_claim("run-fixture", "n-ui", "shared.ts", 1)
+            .unwrap_err()
+            .contains("n-api"));
+        db.runner_update("run-fixture", None, |g, _| {
+            g.nodes[0].status = "passed".into();
+            Ok(())
+        })
+        .unwrap();
+        db.runner_claim("run-fixture", "n-ui", "shared.ts", 1).unwrap();
+        assert_eq!(
+            db.runner_claims("run-fixture")
+                .unwrap()
+                .iter()
+                .filter(|c| c.released_at.is_none())
+                .count(),
+            1
+        );
+    }
+    #[test]
+    fn hints_are_not_authority_but_enforced_scope_is() {
+        let db = setup();
+        running(&db);
+        db.runner_claim("run-fixture", "n-api", "outside.rs", 1)
+            .unwrap();
+        db.runner_update("run-fixture", None, |g, _| {
+            g.nodes[1].enforce_scope = true;
+            Ok(())
+        })
+        .unwrap();
+        assert!(db
+            .runner_claim("run-fixture", "n-ui", "not-ui.rs", 1)
+            .unwrap_err()
+            .contains("enforced scope"));
+        db.runner_claim("run-fixture", "n-ui", "ui/view.ts", 1)
+            .unwrap();
+    }
+    #[test]
+    fn scoped_and_global_checks_veto_covered_writes() {
+        let db = setup();
+        running(&db);
+        db.runner_claim("run-fixture", "n-api", "api/x.rs", 1).unwrap();
+        db.runner_update("run-fixture", None, |g, _| {
+            g.nodes[0].status = "passed".into();
+            g.nodes[2].status = "verifying".into();
+            g.nodes[2].check_global = false;
+            Ok(())
+        })
+        .unwrap();
+        assert!(db
+            .runner_claim("run-fixture", "n-ui", "api/x.rs", 1)
+            .unwrap_err()
+            .contains("verification barrier"));
+        db.runner_claim("run-fixture", "n-ui", "ui/free.ts", 1)
+            .unwrap();
+        db.runner_update("run-fixture", None, |g, _| {
+            g.nodes[2].check_global = true;
+            Ok(())
+        })
+        .unwrap();
+        assert!(db.runner_claim("run-fixture", "n-ui", "other.rs", 1).is_err());
+    }
+    #[test]
+    fn live_review_vetoes_every_write_even_when_marked_scoped() {
+        let db=setup();running(&db);
+        db.runner_claim("run-fixture","n-api","api/x.rs", 1).unwrap();
+        db.runner_update("run-fixture",None,|g,_| {
+            g.nodes[0].status="passed".into();
+            g.nodes[2].kind="review".into();g.nodes[2].status="running".into();g.nodes[2].check_global=false;
+            Ok(())
+        }).unwrap();
+        for path in ["api/x.rs","unrelated/new.rs"] {
+            assert!(db.runner_claim("run-fixture","n-ui",path, 1).unwrap_err().contains("verification barrier"));
+        }
+        db.runner_update("run-fixture",None,|g,_|{g.nodes[2].status="passed".into();Ok(())}).unwrap();
+        db.runner_claim("run-fixture","n-ui","api/x.rs", 1).unwrap();
+    }
+    #[test]
+    fn recovered_old_attempt_cannot_write_after_successor_starts() {
+        let db=setup();running(&db);
+        db.runner_claim("run-fixture","n-api","before.rs",1).unwrap();
+        db.runner_recover().unwrap();
+        assert!(db.runner_claim("run-fixture","n-api","recovered.rs",1).is_err());
+        db.runner_update("run-fixture",None,|g,_| {
+            g.status="running".into();g.nodes[0].status="running".into();g.nodes[0].attempt=2;Ok(())
+        }).unwrap();
+        assert!(db.runner_claim("run-fixture","n-api","stale.rs",1).unwrap_err().contains("stale run attempt"));
+        assert!(db.runner_claim("run-fixture","n-api","missing.rs",0).is_err());
+        db.runner_claim("run-fixture","n-api","successor.rs",2).unwrap();
+        assert!(!db.runner_claims("run-fixture").unwrap().iter().any(|c|c.path=="stale.rs"));
+    }
+    #[test]
+    fn restart_retains_claims_and_resume_handles_but_never_lies_about_processes() {
+        let db = setup();
+        running(&db);
+        db.runner_claim("run-fixture", "n-api", "x.rs", 1).unwrap();
+        db.runner_update("run-fixture", None, |g, _| {
+            g.nodes[0].child_session_id = Some("resume-id".into());
+            Ok(())
+        })
+        .unwrap();
+        let recovered = db.runner_recover().unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].status, "paused");
+        assert_eq!(recovered[0].nodes[0].status, "awaiting_human");
+        assert_eq!(
+            recovered[0].nodes[0].child_session_id.as_deref(),
+            Some("resume-id")
+        );
+        assert_eq!(
+            db.runner_claims("run-fixture").unwrap()[0].released_at,
+            None
+        );
+        assert!(db.runner_claim("run-fixture", "n-api", "new.rs", 1).is_err());
+        assert!(db.runner_recover().unwrap().is_empty());
+    }
+    #[test]
+    fn concurrent_claims_have_one_winner() {
+        let db = Arc::new(setup());
+        running(&db);
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let handles: Vec<_> = ["n-api", "n-ui"]
+            .into_iter()
+            .map(|id| {
+                let db = db.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    db.runner_claim("run-fixture", id, "same.ts", 1)
+                })
+            })
+            .collect();
+        barrier.wait();
+        let wins = handles
+            .into_iter()
+            .filter(|h| h.thread().id() != std::thread::current().id())
+            .map(|h| h.join().unwrap().is_ok())
+            .filter(|v| *v)
+            .count();
+        assert_eq!(wins, 1);
+    }
+}
+
+#[cfg(test)]
+mod runner_persistence_tests {
+    use super::*;
+    #[test]
+    fn effort_survives_status_upserts_and_disk_reload() {
+        let path =
+            std::env::temp_dir().join(format!("redline-effort-{}.sqlite", uuid::Uuid::new_v4()));
+        {
+            let db = Database::open(&path).unwrap();
+            let mut session = ReviewSession {
+                session_id: "effort-session".into(),
+                project_path: "/tmp".into(),
+                project_name: "tmp".into(),
+                created_at: 1,
+                status: SessionStatus::InReview,
+                attach_state: AttachState::Idle,
+                updated_at: 1,
+                run_state: None,
+                backend: Some("codex".into()),
+                model: Some("gpt-test".into()),
+                effort: Some("high".into()),
+                revisions: Vec::new(),
+            };
+            db.upsert_session(&session).unwrap();
+            session.backend = None;
+            session.model = None;
+            session.effort = None;
+            session.updated_at = 2;
+            db.upsert_session(&session).unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        let session = db.load_session("effort-session").unwrap().unwrap();
+        assert_eq!(session.backend.as_deref(), Some("codex"));
+        assert_eq!(session.model.as_deref(), Some("gpt-test"));
+        assert_eq!(session.effort.as_deref(), Some("high"));
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+    #[test]
+    fn disk_restart_rehydrates_graph_and_rearms_interrupted_gate() {
+        let path = std::env::temp_dir().join(format!(
+            "redline-run-restart-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        {
+            let db = Database::open(&path).unwrap();
+            let mut graph: crate::runner_graph::RunGraph =
+                serde_json::from_str(include_str!("../../src/lib/runner/fixtures/basic.json"))
+                    .unwrap();
+            graph.status = "running".into();
+            graph.nodes[0].status = "running".into();
+            graph.nodes[0].attempt = 1;
+            graph.nodes[0].child_session_id = Some("saved-context".into());
+            db.runner_create(&graph).unwrap();
+            db.runner_claim(&graph.run_id, "n-api", "api/durable.rs", 1)
+                .unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        let recovered = db.runner_recover().unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].nodes[0].status, "awaiting_human");
+        assert_eq!(
+            recovered[0].nodes[0].child_session_id.as_deref(),
+            Some("saved-context")
+        );
+        assert_eq!(
+            db.runner_claims("run-fixture").unwrap()[0].released_at,
+            None
+        );
+        drop(db);
+        let _ = std::fs::remove_file(path);
     }
 }

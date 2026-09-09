@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
+import { backendLabel, type Backend } from "./backendChoice";
 
 // Is this machine actually able to deliver a plan? The front door promises
 // "type a sentence and a real plan-mode session starts" — three routes break
@@ -35,14 +36,32 @@ export interface CodexProbe {
   source: string;
   usable: boolean;
   signedIn: boolean;
+  version?: string | null;
+  identity?: string | null;
+  newerElsewhere?: { path: string; version: string } | null;
+  configuredModel?: string | null;
+  modelRunnable?: boolean | null;
   /** The config profile carrying the plan contract (`codex_profile.rs`).
    *  Optional so a probe predating the field is withheld, not guessed at. */
   profile?: { installed: boolean; outdated: boolean; path: string };
 }
 
+export interface ProviderProbe {
+  found: boolean;
+  path: string | null;
+  source: string;
+  usable: boolean;
+  version?: string | null;
+  identity: string;
+  authentication: "signed-in" | "signed-out" | "unknown";
+  hook: { installed: boolean; state: string; hooksPath: string; error?: string | null };
+  skill: { installed: boolean; outdated: boolean; skillPath?: string };
+}
+
 /** Runtime probe from `preflight_status` (src-tauri/src/preflight.rs). */
 export interface PreflightStatus {
-  claude: { found: boolean; path: string | null; source: string };
+  claude: { found: boolean; path: string | null; source: string; identity?: string | null };
+  providers?: Partial<Record<Backend, ProviderProbe>>;
   /** Optional so a probe predating the field reads as "no answer" — every
    *  derivation from it is withheld rather than guessed at. */
   codex?: CodexProbe | null;
@@ -70,6 +89,7 @@ export interface PreflightStatus {
 }
 
 export type ReadinessId =
+  | "provider-missing" | "provider-logged-out" | "provider-integration-missing" | "codex-model-unavailable"
   | "mode-paused"
   | "claude-missing"
   | "codex-missing"
@@ -87,6 +107,7 @@ export type ReadinessId =
 /** What a fix button does. The surface maps each kind to the handler App
  *  already owns — no new backend paths. */
 export type ReadinessFixKind =
+  | "locate-provider"
   | "resume-mode"
   | "locate-claude"
   | "locate-codex"
@@ -95,6 +116,8 @@ export type ReadinessFixKind =
   | "copy-hooks";
 
 export interface ReadinessFix {
+  backend?: Backend;
+  path?: string;
   label: string;
   kind: ReadinessFixKind;
   /** `copy-hooks` carries the literal text the CopyChip copies. */
@@ -111,6 +134,10 @@ export interface ReadinessItem {
 }
 
 export interface ReadinessInput {
+  targetBackend?: Backend;
+  targetModel?: string | null;
+  /** At dispatch every selected-provider integration must be able to return a plan. */
+  requireIntegration?: boolean;
   /** Null until the first `preflight_status` resolves — every item derived
    *  from it is withheld rather than guessed at. */
   preflight: PreflightStatus | null;
@@ -150,6 +177,10 @@ const ID_ORDER: ReadinessId[] = [
   "mode-paused",
   "claude-missing",
   "codex-missing",
+  "provider-missing",
+  "provider-logged-out",
+  "provider-integration-missing",
+  "codex-model-unavailable",
   "codex-logged-out",
   "codex-contract-missing",
   "daemon-unbound",
@@ -165,6 +196,8 @@ const ID_ORDER: ReadinessId[] = [
 export function deriveReadiness(input: ReadinessInput): ReadinessItem[] {
   const items: ReadinessItem[] = [];
   const pf = input.preflight;
+  const backend = input.targetIsExtension ? "claude-code" : input.targetBackend ?? (input.targetIsCodex ? "codex" : "claude-code");
+  if (backend === "cursor" || backend === "antigravity") items.push(...providerReadiness(backend, pf));
 
   // ── The three silent-failure routes ────────────────────────────────────
   // Paused is the killswitch: the plan is auto-approved and captured NOT AT
@@ -184,7 +217,7 @@ export function deriveReadiness(input: ReadinessInput): ReadinessItem[] {
   // auto-approve countdown is handled at launch by claiming the arriving
   // decision window, so warning about it here would be pure noise.
 
-  if (pf && !pf.claude.found) {
+  if (backend === "claude-code" && pf && !pf.claude.found) {
     items.push({
       id: "claude-missing",
       state: "blocked",
@@ -251,6 +284,14 @@ export function deriveReadiness(input: ReadinessInput): ReadinessItem[] {
         fix: { label: "codex login", kind: "copy-hooks", copyText: "codex login" },
       });
     }
+    if (cx?.usable && !input.targetModel && cx.modelRunnable === false) {
+      const newer = cx.newerElsewhere;
+      items.push({ id: "codex-model-unavailable", state: "blocked",
+        label: `Codex ${cx.version ?? "at this path"} can't run ${cx.configuredModel ?? "the configured model"}${newer ? ` — ${newer.version} is installed at ${newer.path}` : ""}`,
+        detail: "Choose an available model or a newer Codex installation.",
+        fix: { label: newer ? "Use newer Codex" : "Locate Codex…", kind: "locate-codex", path: newer?.path },
+      });
+    }
   }
 
   if (!input.daemonBound) {
@@ -265,6 +306,7 @@ export function deriveReadiness(input: ReadinessInput): ReadinessItem[] {
   }
 
   if (
+    backend === "claude-code" &&
     input.pendingSince !== null &&
     input.now - input.pendingSince > HOOK_SILENCE_MS &&
     !input.planEverArrived
@@ -297,10 +339,10 @@ export function deriveReadiness(input: ReadinessInput): ReadinessItem[] {
   // Recovery copy, not onboarding copy: on a true first run `HookSetupModal`
   // has already run and these are unreachable. Reaching them means the hook
   // was REMOVED later — via the app menu, or a foreign hook overwriting ours.
-  if (pf && !input.hookModalActive && !pf.hook.installed) {
+  if (backend === "claude-code" && pf && (!input.hookModalActive || input.requireIntegration) && !pf.hook.installed) {
     items.push({
       id: "hook-missing",
-      state: "warn",
+      state: input.requireIntegration || input.targetIsExtension ? "blocked" : "warn",
       label: pf.hook.conflictingUrl
         ? "Another hook took over ExitPlanMode"
         : "The plan hook was removed",
@@ -315,13 +357,13 @@ export function deriveReadiness(input: ReadinessInput): ReadinessItem[] {
   // rather than a blocker because the plan still reaches the model — what is
   // lost is the return trip, which is exactly what the detail says.
   if (
-    input.targetIsCodex &&
-    !input.hookModalActive &&
+    backend === "codex" &&
+    (!input.hookModalActive || input.requireIntegration) &&
     input.codexHookInstalled === false
   ) {
     items.push({
       id: "codex-hook-missing",
-      state: "warn",
+      state: input.requireIntegration ? "blocked" : "warn",
       label: "The Codex plan hook isn't installed",
       detail:
         "Without it Codex never sends plans here. Installing it writes the " +
@@ -332,13 +374,14 @@ export function deriveReadiness(input: ReadinessInput): ReadinessItem[] {
   }
 
   if (
+    backend === "claude-code" &&
     pf &&
-    !input.hookModalActive &&
+    (!input.hookModalActive || input.requireIntegration) &&
     (!pf.skill.installed || pf.skill.outdated)
   ) {
     items.push({
       id: "skill-stale",
-      state: "warn",
+      state: input.requireIntegration || input.targetIsExtension ? "blocked" : "warn",
       label: pf.skill.outdated
         ? "The Redline skills are out of date"
         : "The Redline skills were removed",
@@ -387,7 +430,10 @@ export function deriveReadiness(input: ReadinessInput): ReadinessItem[] {
     });
   }
 
-  return sortReadiness(items);
+  if (backend === "codex" && input.requireIntegration && (!pf?.codexSkill?.installed || pf.codexSkill.outdated)) {
+    items.push({ id: "skill-stale", state: "blocked", label: "The Codex review skill needs installation", detail: "Install the current plan revision contract before launching.", fix: { label: "Install integration", kind: "install-integration", backend } });
+  }
+  return sortReadiness(items).map(item => item.fix?.kind === "install-integration" ? { ...item, fix: { ...item.fix, backend } } : item);
 }
 
 /** `blocked` before `warn`, then the fixed id order. Exported for the test
@@ -403,6 +449,29 @@ export function sortReadiness(items: ReadinessItem[]): ReadinessItem[] {
 /** The items that refuse ⏎, in the order the composer should surface them. */
 export function blockingItems(items: ReadinessItem[]): ReadinessItem[] {
   return items.filter((i) => i.state === "blocked");
+}
+
+export function providerReadiness(backend: Backend, pf: PreflightStatus | null): ReadinessItem[] {
+  if (!pf || (backend !== "cursor" && backend !== "antigravity")) return [];
+  const p = pf?.providers?.[backend];
+  const label = backendLabel(backend);
+  const bin = backend === "cursor" ? "agent" : "agy";
+  if (!p?.found || !p.usable) return [{ id: "provider-missing", state: "blocked",
+    label: p?.found ? `${label} CLI lacks required planning or resume capabilities` : `Can't find the ${label} CLI`,
+    detail: `Locate a current ${bin} binary. The editor's launcher is a different command.`,
+    fix: { label: "Locate it…", kind: "locate-provider", backend } }];
+  if (p.authentication === "signed-out") return [{ id: "provider-logged-out", state: "blocked",
+    label: `${label} isn't signed in`, detail: `Run ${backend === "cursor" ? "agent login" : "agy"} in your terminal to sign in.`,
+    fix: { label: "Copy sign-in command", kind: "copy-hooks", copyText: `'${(p.path ?? bin).replace(/'/g, "'\\''")}'${backend === "cursor" ? " login" : ""}` } }];
+  if (!p.hook.installed || !p.skill.installed || p.skill.outdated) return [{ id: "provider-integration-missing", state: "blocked",
+    label: `${label} plan integration needs installation`,
+    detail: p.hook.error ?? `Install the current review skills and hooks (${p.hook.state}).`,
+    fix: { label: "Install integration", kind: "install-integration", backend } }];
+  return [];
+}
+
+export function providerRestoreBlockers(backend: Backend, pf: PreflightStatus | null, codexHookInstalled?: boolean): ReadinessItem[] {
+  return backend === "codex" ? codexRestoreBlockers(pf, codexHookInstalled).map(item => item.fix ? { ...item, fix: { ...item.fix, backend } } : item) : providerReadiness(backend, pf);
 }
 
 /** The Codex faults that make a RESTORE impossible.
@@ -424,6 +493,7 @@ export function blockingItems(items: ReadinessItem[]): ReadinessItem[] {
  *  So the restore refuses instead, and shows the same fix it would have shown
  *  at the door. */
 const CODEX_RESTORE_IDS: readonly ReadinessId[] = [
+  "codex-model-unavailable",
   "codex-missing",
   "codex-contract-missing",
   "codex-logged-out",

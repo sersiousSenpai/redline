@@ -39,19 +39,38 @@ export function buildPlanLaunchCommand(
   choice: BackendChoice = { backend: "claude-code", model: null, effort: null },
   /** Resolved absolute binaries. Only codex needs one (see below); claude
    *  still rides the login shell's `$PATH` as it always has. */
-  bins: { codex?: string | null } = {},
+  bins: Partial<Record<BackendChoice["backend"], string | null>> = {},
+  launchId?: string,
 ): string {
-  const launch =
-    choice.backend === "codex"
+  const launch = choice.backend === "cursor" || choice.backend === "antigravity"
+    ? nativePlanLaunch(prompt, choice, bins[choice.backend], projectPath)
+    : choice.backend === "codex"
       ? codexLaunch(prompt, choice, bins.codex)
-      : claudeLaunch(prompt, choice, addDirs);
-  return projectPath ? `cd ${shq(projectPath)} && ${launch}` : launch;
+      : claudeLaunch(prompt, choice, addDirs, bins["claude-code"]);
+  const env = (launchId ? `REDLINE_PLAN_LAUNCH_ID=${shq(launchId)} ` : "") +
+    ((choice.backend === "cursor" || choice.backend === "antigravity") ? `REDLINE_PROJECT_PATH=${projectPath ? shq(projectPath) : '"$PWD"'} ` : "");
+  const bound = env + launch;
+  return projectPath ? `cd ${shq(projectPath)} && ${bound}` : bound;
+}
+
+/** Keep the contract compact: the canonical skill owns revision semantics. */
+export const NATIVE_PLAN_PREFIX =
+  "Use the installed redline-plan-review skill. Remain in read-only research and planning mode. " +
+  "Finish with exactly one complete <proposed_plan>...</proposed_plan> envelope containing the full plan.\n\n";
+
+function nativePlanLaunch(prompt: string, choice: BackendChoice, resolved?: string | null, projectPath?: string | null): string {
+  const bin = resolved?.trim() || (choice.backend === "cursor" ? "agent" : "agy");
+  const model = choice.model ? `--model ${shq(choice.model)} ` : "";
+  const effort = choice.backend === "antigravity" && choice.effort ? `--effort ${shq(choice.effort)} ` : "";
+  const workspace = choice.backend === "antigravity" && projectPath ? `--add-dir ${shq(projectPath)} ` : "";
+  return `${shq(bin)} --mode=plan ${workspace}${model}${effort}${choice.backend === "antigravity" ? "--prompt-interactive " : ""}${shq(NATIVE_PLAN_PREFIX + prompt)}`;
 }
 
 function claudeLaunch(
   prompt: string,
   choice: BackendChoice,
   addDirs: readonly string[],
+  resolved?: string | null,
 ): string {
   // Read-only research tools + Bash, pre-approved so a fresh plan session can
   // scout the project without surfacing a permission prompt per tool call — the
@@ -68,7 +87,8 @@ function claudeLaunch(
   const grants = addDirs.map((d) => `--add-dir ${shq(d)} `).join("");
   const model = choice.model ? `--model ${shq(choice.model)} ` : "";
   const effort = choice.effort ? `--effort ${shq(choice.effort)} ` : "";
-  return `claude ${grants}${model}${effort}--allowedTools ${ALLOWED_TOOLS} --permission-mode plan ${shq(prompt)}`;
+  const bin = resolved?.trim() ? shq(resolved.trim()) : "claude";
+  return `${bin} ${grants}${model}${effort}--allowedTools ${ALLOWED_TOOLS} --permission-mode plan ${shq(prompt)}`;
 }
 
 /** The Codex arm.

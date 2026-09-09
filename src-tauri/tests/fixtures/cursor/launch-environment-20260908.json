@@ -1,0 +1,9 @@
+{
+  "cliVersion": "2026.09.08-6caf4ff",
+  "launchIdForwarded": true,
+  "projectPathForwarded": true,
+  "hookCwd": "~/.cursor",
+  "workspaceRoots": [
+    "/fixture/project"
+  ]
+}

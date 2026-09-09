@@ -76,6 +76,10 @@ fn port_from_lsof_name(name: &str) -> Option<u16> {
 /// one port) emits several identical `n` lines, so `(pid, port)` is deduped —
 /// otherwise every Vite server would appear two or three times.
 pub fn parse_lsof_listeners(output: &str, own_pid: u32) -> Vec<RawListener> {
+    parse_listener_fields(output, Some(own_pid))
+}
+
+fn parse_listener_fields(output: &str, own_pid: Option<u32>) -> Vec<RawListener> {
     let mut out = Vec::new();
     let mut seen: HashSet<(u32, u16)> = HashSet::new();
     let mut pid: Option<u32> = None;
@@ -90,13 +94,13 @@ pub fn parse_lsof_listeners(output: &str, own_pid: u32) -> Vec<RawListener> {
             let Some(pid) = pid else { continue };
             // Our own listeners are not somebody's dev server, and neither is
             // the daemon port every Redline install holds open.
-            if pid == own_pid || pid <= 1 {
+            if Some(pid) == own_pid || pid <= 1 {
                 continue;
             }
             let Some(port) = port_from_lsof_name(v) else {
                 continue;
             };
-            if port == DAEMON_PORT {
+            if own_pid.is_some() && port == DAEMON_PORT {
                 continue;
             }
             if seen.insert((pid, port)) {
@@ -138,13 +142,244 @@ pub fn parse_ps_args(output: &str) -> HashMap<u32, String> {
         let Some((pid, args)) = trimmed.split_once(char::is_whitespace) else {
             continue;
         };
-        let Ok(pid) = pid.parse::<u32>() else { continue };
+        let Ok(pid) = pid.parse::<u32>() else {
+            continue;
+        };
         let args = args.trim();
         if !args.is_empty() {
             out.insert(pid, args.to_string());
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Stop planning (pure, with all process facts injected)
+// ---------------------------------------------------------------------------
+
+const MAX_CLIMB: usize = 6;
+/// Refuse an unexpectedly broad tree instead of silently stopping half of it.
+const MAX_STOP_PIDS: usize = 256;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcRow {
+    pub ppid: u32,
+    pub comm: String,
+}
+
+pub fn parse_ps_tree(output: &str) -> HashMap<u32, ProcRow> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let (pid, rest) = line.trim_start().split_once(char::is_whitespace)?;
+            let (ppid, comm) = rest.trim_start().split_once(char::is_whitespace)?;
+            let comm = comm.trim();
+            if comm.is_empty() {
+                return None;
+            }
+            Some((
+                pid.parse().ok()?,
+                ProcRow {
+                    ppid: ppid.parse().ok()?,
+                    comm: comm.into(),
+                },
+            ))
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StopPlan {
+    pub root: u32,
+    pub root_label: String,
+    pub pids: Vec<u32>,
+    pub collateral_ports: Vec<u16>,
+}
+
+fn protected_processes(own_pid: u32, procs: &HashMap<u32, ProcRow>) -> HashSet<u32> {
+    let mut protected = HashSet::from([0, 1]);
+    let mut pid = own_pid;
+    while protected.insert(pid) {
+        let Some(row) = procs.get(&pid) else { break };
+        pid = row.ppid;
+    }
+    protected
+}
+
+fn is_shell_or_terminal(comm: &str) -> bool {
+    let name = comm
+        .rsplit('/')
+        .next()
+        .unwrap_or(comm)
+        .trim_start_matches('-');
+    matches!(
+        name,
+        "zsh"
+            | "bash"
+            | "sh"
+            | "fish"
+            | "dash"
+            | "tcsh"
+            | "ksh"
+            | "login"
+            | "sshd"
+            | "tmux"
+            | "screen"
+            | "Terminal"
+            | "iTerm2"
+            | "launchd"
+    )
+}
+
+fn cwd_outside_project(pid: u32, project_path: Option<&str>, cwds: &HashMap<u32, String>) -> bool {
+    match (project_path, cwds.get(&pid)) {
+        (Some(project), Some(cwd)) => !Path::new(cwd).starts_with(Path::new(project)),
+        _ => false,
+    }
+}
+
+/// Find the enclosing supervisor without crossing another listener, terminal,
+/// repository, or Redline's own ancestry. The displayed lsof comm is never an
+/// identity token: Node workers legitimately have a different ps title.
+fn stop_root(
+    target: u32,
+    port: u16,
+    procs: &HashMap<u32, ProcRow>,
+    listeners: &[RawListener],
+    own_pid: u32,
+    project_path: Option<&str>,
+    cwds: &HashMap<u32, String>,
+) -> Result<StopPlan, String> {
+    let protected = protected_processes(own_pid, procs);
+    if protected.contains(&target)
+        || procs
+            .get(&target)
+            .is_some_and(|p| is_shell_or_terminal(&p.comm))
+    {
+        return Err("that process can't be stopped from here".into());
+    }
+    if !procs.contains_key(&target) || !listeners.iter().any(|l| l.pid == target && l.port == port)
+    {
+        return Err(format!("that server is no longer on :{port}"));
+    }
+    if cwd_outside_project(target, project_path, cwds) {
+        return Err("that server is no longer running in this project".into());
+    }
+    let mut root = target;
+    let mut climbed = HashSet::from([target]);
+    for _ in 0..MAX_CLIMB {
+        let ancestor = procs[&root].ppid;
+        let Some(row) = procs.get(&ancestor) else {
+            break;
+        };
+        if !climbed.insert(ancestor)
+            || protected.contains(&ancestor)
+            || is_shell_or_terminal(&row.comm)
+            || listeners
+                .iter()
+                .any(|l| l.pid == ancestor && l.port != port && l.port < EPHEMERAL_PORT_FLOOR)
+            || cwd_outside_project(ancestor, project_path, cwds)
+        {
+            break;
+        }
+        root = ancestor;
+    }
+    let mut members = HashSet::from([root]);
+    loop {
+        let next: Vec<u32> = procs
+            .iter()
+            .filter(|(pid, row)| !members.contains(*pid) && members.contains(&row.ppid))
+            .map(|(&pid, _)| pid)
+            .collect();
+        if next.is_empty() {
+            break;
+        }
+        if next.iter().any(|pid| protected.contains(pid)) {
+            return Err("that server's process tree includes Redline".into());
+        }
+        if members.len() + next.len() > MAX_STOP_PIDS {
+            return Err(format!(
+                "that server has more than {MAX_STOP_PIDS} processes; stop it from its terminal"
+            ));
+        }
+        members.extend(next);
+    }
+    let mut pids: Vec<u32> = members.iter().copied().collect();
+    pids.sort_unstable();
+    let mut collateral_ports: Vec<u16> = listeners
+        .iter()
+        .filter(|l| members.contains(&l.pid) && l.port != port && l.port < EPHEMERAL_PORT_FLOOR)
+        .map(|l| l.port)
+        .collect();
+    collateral_ports.sort_unstable();
+    collateral_ports.dedup();
+    Ok(StopPlan {
+        root,
+        root_label: procs[&root].comm.clone(),
+        pids,
+        collateral_ports,
+    })
+}
+
+/// ps start time is captured alongside the process table, then checked again
+/// immediately before each signal batch. A reparented child is still the same
+/// process; a recycled pid with a new start time must never be signalled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProcIdentity {
+    started: String,
+    comm: String,
+}
+
+fn parse_ps_snapshot(output: &str) -> (HashMap<u32, ProcRow>, HashMap<u32, ProcIdentity>) {
+    let mut tree_text = String::new();
+    let mut identities = HashMap::new();
+    for line in output.lines() {
+        let mut rest = line.trim_start();
+        let mut fields = Vec::new();
+        // pid, ppid, then lstart's weekday/month/day/time/year; comm may
+        // contain spaces and slashes, so preserve its entire remainder.
+        for _ in 0..7 {
+            let Some((field, tail)) = rest.split_once(char::is_whitespace) else {
+                break;
+            };
+            fields.push(field);
+            rest = tail.trim_start();
+        }
+        if fields.len() != 7 || rest.is_empty() {
+            continue;
+        }
+        let Ok(pid) = fields[0].parse::<u32>() else {
+            continue;
+        };
+        if fields[1].parse::<u32>().is_err() {
+            continue;
+        }
+        tree_text.push_str(&format!("{} {} {}\n", fields[0], fields[1], rest));
+        identities.insert(
+            pid,
+            ProcIdentity {
+                started: fields[2..].join(" "),
+                comm: rest.into(),
+            },
+        );
+    }
+    (parse_ps_tree(&tree_text), identities)
+}
+
+fn matching_pids(
+    pids: &[u32],
+    expected: &HashMap<u32, ProcIdentity>,
+    current: &HashMap<u32, ProcIdentity>,
+) -> Vec<u32> {
+    pids.iter()
+        .copied()
+        .filter(|pid| {
+            expected
+                .get(pid)
+                .is_some_and(|id| current.get(pid) == Some(id))
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -164,8 +399,16 @@ fn normalize_path(p: &str) -> String {
 /// System and package-manager trees. A `.git` or `package.json` down one of
 /// these is somebody else's, not a project the user is developing.
 const SYSTEM_PREFIXES: [&str; 10] = [
-    "/usr", "/opt", "/Library", "/System", "/Applications", "/private", "/bin",
-    "/sbin", "/var", "/nix",
+    "/usr",
+    "/opt",
+    "/Library",
+    "/System",
+    "/Applications",
+    "/private",
+    "/bin",
+    "/sbin",
+    "/var",
+    "/nix",
 ];
 
 /// Could this directory plausibly be a project the user WORKS in?
@@ -311,10 +554,15 @@ pub fn probe_project(root: &Path) -> ProjectProbe {
     }
     probe.has_pyproject = root.join("pyproject.toml").exists();
     probe.has_manage_py = root.join("manage.py").exists();
-    probe.lockfile = ["pnpm-lock.yaml", "yarn.lock", "bun.lockb", "package-lock.json"]
-        .into_iter()
-        .find(|f| root.join(f).exists())
-        .map(|f| f.to_string());
+    probe.lockfile = [
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "bun.lockb",
+        "package-lock.json",
+    ]
+    .into_iter()
+    .find(|f| root.join(f).exists())
+    .map(|f| f.to_string());
     probe
 }
 
@@ -415,8 +663,8 @@ pub fn detect_runner(comm: &str, args: &str) -> Option<(&'static str, Family)> {
 /// argv token it is far too common — but as the process's OWN command it is
 /// solid evidence, so it belongs here.
 const RUNTIME_COMMS: [&str; 15] = [
-    "node", "bun", "deno", "npm", "pnpm", "yarn", "python", "python3", "ruby",
-    "java", "php", "dotnet", "cargo", "go", "air",
+    "node", "bun", "deno", "npm", "pnpm", "yarn", "python", "python3", "ruby", "java", "php",
+    "dotnet", "cargo", "go", "air",
 ];
 
 /// Does this process actually claim to be the project's dev server, or does it
@@ -547,11 +795,7 @@ fn package_manager(lockfile: Option<&str>) -> &'static str {
 /// show exactly what Run will type before the user commits to it. The raw
 /// process args are the last resort: verbatim is at least always true, even
 /// when it's `node /long/path/to/.bin/vite`.
-pub fn derive_run_command(
-    probe: Option<&ProjectProbe>,
-    comm: &str,
-    raw_args: &str,
-) -> String {
+pub fn derive_run_command(probe: Option<&ProjectProbe>, comm: &str, raw_args: &str) -> String {
     if let Some(p) = probe {
         // The project's dev script only restarts THIS process if this process is
         // the project's own server. For a Python API sharing a repo with a
@@ -682,9 +926,7 @@ fn run_capture(program: &str, args: &[String]) -> Result<String, String> {
 
 /// One sweep of the machine. See the module header for the spawn budget.
 #[tauri::command(async)]
-pub fn dev_servers_scan(
-    store: tauri::State<'_, SessionStore>,
-) -> Result<DevServerScan, String> {
+pub fn dev_servers_scan(store: tauri::State<'_, SessionStore>) -> Result<DevServerScan, String> {
     let db = store.database();
     scan_with(&db, std::process::id())
 }
@@ -742,11 +984,8 @@ fn scan_with(db: &Database, own_pid: u32) -> Result<DevServerScan, String> {
             ],
         )
         .unwrap_or_default();
-        let ps_out = run_capture(
-            "ps",
-            &["-o".into(), "pid=,args=".into(), "-p".into(), list],
-        )
-        .unwrap_or_default();
+        let ps_out = run_capture("ps", &["-o".into(), "pid=,args=".into(), "-p".into(), list])
+            .unwrap_or_default();
         (parse_lsof_cwds(&cwd_out), parse_ps_args(&ps_out))
     };
 
@@ -770,9 +1009,9 @@ fn scan_with(db: &Database, own_pid: u32) -> Result<DevServerScan, String> {
         let Some(port) = ports.first().copied() else {
             continue;
         };
-        let root = cwds.get(pid).and_then(|cwd| {
-            resolve_project(cwd, &known, home.as_deref(), dir_has_root_marker)
-        });
+        let root = cwds
+            .get(pid)
+            .and_then(|cwd| resolve_project(cwd, &known, home.as_deref(), dir_has_root_marker));
         let Some(root) = root else {
             // Not a project — a compact row, and crucially no filesystem probe.
             if others.len() < MAX_OTHERS {
@@ -863,9 +1102,7 @@ fn scan_with(db: &Database, own_pid: u32) -> Result<DevServerScan, String> {
         .map(|r| (r.project_path.clone(), r.port))
         .collect();
     let busy_ports: HashSet<u16> = listeners.iter().map(|l| l.port).collect();
-    let mut recent = partition_recent(rows, &live_keys, &busy_ports, |p| {
-        Path::new(p).is_dir()
-    });
+    let mut recent = partition_recent(rows, &live_keys, &busy_ports, |p| Path::new(p).is_dir());
     recent.truncate(MAX_RECENT as usize);
 
     Ok(DevServerScan {
@@ -891,40 +1128,247 @@ pub fn dev_server_set_thumb(
         .map_err(|e| e.to_string())
 }
 
-/// Stop a running dev server.
-///
-/// The pid came from a scan that may be seconds old, and pids get reused — so
-/// before signalling anything we re-read the process's command and require it
-/// to match verbatim what the card was showing. A mismatch is an error, never a
-/// stray `SIGTERM` at whatever now owns that pid. `TERM` (not `KILL`) so the
-/// server runs its own shutdown, and via `/bin/kill` so this stays dependency-free
-/// like the neighbouring `ps`/`lsof` calls.
+/// The manifest facts needed by the project launch dialog. No script bodies
+/// are exposed: a quick pick invokes a script by name through its package manager.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeView {
+    pub project_name: String,
+    pub stack: String,
+    pub run_command: String,
+    pub scripts: Vec<String>,
+    pub exists: bool,
+    pub package_manager: String,
+}
+
+#[tauri::command(async)]
+pub fn dev_server_probe(project_path: String) -> ProbeView {
+    let root = Path::new(&project_path);
+    let probe = probe_project(root);
+    let mut scripts: Vec<String> = probe.scripts.iter().cloned().collect();
+    scripts.sort();
+    ProbeView {
+        project_name: probe
+            .pkg_name
+            .clone()
+            .or_else(|| probe.cargo_name.clone())
+            .unwrap_or_else(|| probe.dir_name.clone()),
+        stack: detect_stack(Some(&probe), "", ""),
+        run_command: derive_run_command(Some(&probe), "", ""),
+        scripts,
+        exists: root.is_dir(),
+        package_manager: package_manager(probe.lockfile.as_deref()).into(),
+    }
+}
+
+fn stop_listeners() -> Result<Vec<RawListener>, String> {
+    let output = std::process::Command::new("lsof")
+        .args(["-nP", "-iTCP", "-sTCP:LISTEN", "-Fpcn"])
+        .output()
+        .map_err(|e| format!("lsof: {e}"))?;
+    // lsof exits 1 when no sockets match. Other failures must not be mistaken
+    // for a quiet port and reported as a successful stop.
+    if !output.status.success() && !(output.status.code() == Some(1) && output.stderr.is_empty()) {
+        return Err(format!(
+            "could not inspect listening ports: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(parse_listener_fields(
+        &String::from_utf8_lossy(&output.stdout),
+        None,
+    ))
+}
+
+fn process_snapshot() -> Result<(HashMap<u32, ProcRow>, HashMap<u32, ProcIdentity>), String> {
+    let output = std::process::Command::new("ps")
+        .args(["-axo", "pid=,ppid=,lstart=,comm="])
+        .env("LC_ALL", "C")
+        .output()
+        .map_err(|e| format!("ps: {e}"))?;
+    if !output.status.success() {
+        return Err("could not inspect the process tree".into());
+    }
+    Ok(parse_ps_snapshot(&String::from_utf8_lossy(&output.stdout)))
+}
+
+struct StopSnapshot {
+    plan: StopPlan,
+    identities: HashMap<u32, ProcIdentity>,
+}
+
+fn prepare_stop(pid: u32, port: u16, project_path: Option<&str>) -> Result<StopSnapshot, String> {
+    let (procs, identities) = process_snapshot()?;
+    if !procs.contains_key(&std::process::id()) {
+        return Err("could not inspect Redline’s process ancestry".into());
+    }
+    let listeners = stop_listeners()?;
+    // Only the target and its bounded candidate ancestors need cwd lookups.
+    let mut candidates = HashSet::from([pid]);
+    let mut cursor = pid;
+    for _ in 0..MAX_CLIMB {
+        let Some(row) = procs.get(&cursor) else { break };
+        if row.ppid <= 1 || !candidates.insert(row.ppid) {
+            break;
+        }
+        cursor = row.ppid;
+    }
+    let list = candidates
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let cwds = parse_lsof_cwds(&run_capture(
+        "lsof",
+        &[
+            "-a".into(),
+            "-p".into(),
+            list,
+            "-d".into(),
+            "cwd".into(),
+            "-Fpn".into(),
+        ],
+    )?);
+    let canonical =
+        project_path.map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p)));
+    let project = canonical
+        .as_deref()
+        .map(|p| p.to_string_lossy().into_owned());
+    let plan = stop_root(
+        pid,
+        port,
+        &procs,
+        &listeners,
+        std::process::id(),
+        project.as_deref(),
+        &cwds,
+    )?;
+    Ok(StopSnapshot { plan, identities })
+}
+
+#[tauri::command(async)]
+pub fn dev_server_stop_plan(
+    pid: u32,
+    port: u16,
+    project_path: Option<String>,
+) -> Result<StopPlan, String> {
+    Ok(prepare_stop(pid, port, project_path.as_deref())?.plan)
+}
+
+/// Signal only snapshot members whose start identity still matches. Re-check
+/// after failures too: a child exiting between ps and kill is successful shutdown.
+fn signal_matching(
+    signal: &str,
+    pids: &[u32],
+    identities: &HashMap<u32, ProcIdentity>,
+) -> Result<Vec<u32>, String> {
+    if pids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (_, current) = process_snapshot()?;
+    let live = matching_pids(pids, identities, &current);
+    if live.is_empty() {
+        return Ok(live);
+    }
+    let output = std::process::Command::new("/bin/kill")
+        .arg(signal)
+        .args(live.iter().map(u32::to_string))
+        .output()
+        .map_err(|e| format!("kill: {e}"))?;
+    if !output.status.success() {
+        let (_, after) = process_snapshot()?;
+        if !matching_pids(&live, identities, &after).is_empty() {
+            return Err(format!(
+                "could not stop server: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+    }
+    Ok(live)
+}
+
+fn execute_stop(
+    pid: u32,
+    port: u16,
+    project_path: Option<&str>,
+) -> Result<(StopPlan, usize), String> {
+    let snapshot = prepare_stop(pid, port, project_path)?;
+    // A dry run is advisory only. Check the card's claim again immediately
+    // before the first signal, after the slower ancestry/cwd enrichment.
+    if !stop_listeners()?
+        .iter()
+        .any(|l| l.pid == pid && l.port == port)
+    {
+        return Err(format!("that server is no longer on :{port}"));
+    }
+    let (_, current) = process_snapshot()?;
+    if matching_pids(&snapshot.plan.pids, &snapshot.identities, &current).len()
+        != snapshot.plan.pids.len()
+    {
+        return Err("that server's process tree changed; refresh and try again".into());
+    }
+    let mut signalled = HashSet::new();
+    signalled.extend(signal_matching(
+        "-TERM",
+        &[snapshot.plan.root],
+        &snapshot.identities,
+    )?);
+    let children: Vec<u32> = snapshot
+        .plan
+        .pids
+        .iter()
+        .copied()
+        .filter(|p| *p != snapshot.plan.root)
+        .collect();
+    signalled.extend(signal_matching("-TERM", &children, &snapshot.identities)?);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let (_, current) = process_snapshot()?;
+        let remaining = matching_pids(&snapshot.plan.pids, &snapshot.identities, &current);
+        let quiet = !stop_listeners()?.iter().any(|l| l.port == port);
+        if remaining.is_empty() && quiet {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    // Also reap a supervisor that released the port but ignored shutdown.
+    // Never use kill -0 alone here: those pids may have been recycled in grace.
+    signalled.extend(signal_matching(
+        "-KILL",
+        &snapshot.plan.pids,
+        &snapshot.identities,
+    )?);
+    for _ in 0..4 {
+        if !stop_listeners()?.iter().any(|l| l.port == port) {
+            return Ok((snapshot.plan, signalled.len()));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    Err(format!(
+        "port :{port} is still listening; its server may have restarted"
+    ))
+}
+
 #[tauri::command(async)]
 pub fn dev_server_stop(
     store: tauri::State<'_, SessionStore>,
     pid: u32,
-    expected_comm: String,
+    port: u16,
     project_path: Option<String>,
 ) -> Result<(), String> {
-    if pid <= 1 || pid == std::process::id() {
-        return Err("that process can't be stopped from here".into());
-    }
-    let actual = crate::current_comm(pid);
-    if actual.as_deref() != Some(expected_comm.as_str()) {
-        return Err("that process already exited".into());
-    }
-    let out = std::process::Command::new("/bin/kill")
-        .args(["-TERM", &pid.to_string()])
-        .output()
-        .map_err(|e| format!("kill: {e}"))?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
+    let (plan, count) = execute_stop(pid, port, project_path.as_deref())?;
+    let detail = format!(
+        "root {} ({}), {count} processes signalled, port :{port}",
+        plan.root, plan.root_label
+    );
     let _ = store.database().append_journal(
         "dev_server_stop",
         Some("servers"),
         Some(&pid.to_string()),
-        Some(&expected_comm),
+        Some(&detail),
         project_path.as_deref(),
     );
     Ok(())
@@ -933,6 +1377,371 @@ pub fn dev_server_stop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn proc_tree(rows: &[(u32, u32, &str)]) -> HashMap<u32, ProcRow> {
+        rows.iter()
+            .map(|&(pid, ppid, comm)| {
+                (
+                    pid,
+                    ProcRow {
+                        ppid,
+                        comm: comm.into(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn listener(pid: u32, port: u16) -> RawListener {
+        RawListener {
+            pid,
+            comm: "node".into(),
+            port,
+        }
+    }
+
+    #[test]
+    fn stop_accepts_the_lsof_node_vs_ps_next_server_name_mismatch() {
+        let tree = proc_tree(&[
+            (10, 1, "-zsh"),
+            (20, 10, "npm run dev"),
+            (21, 20, "next-server (v16.3.4)"),
+        ]);
+        let plan = stop_root(
+            21,
+            3103,
+            &tree,
+            &[listener(21, 3103)],
+            99,
+            None,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(plan.root, 20);
+        assert_eq!(plan.pids, vec![20, 21]);
+        assert!(stop_root(
+            21,
+            3100,
+            &tree,
+            &[listener(21, 3103)],
+            99,
+            None,
+            &HashMap::new()
+        )
+        .unwrap_err()
+        .contains("no longer on :3100"));
+    }
+
+    #[test]
+    fn stopping_redlines_vite_never_signals_redline_or_tauri_dev() {
+        let tree = proc_tree(&[
+            (96031, 1, "tauri dev"),
+            (96158, 96031, "npm run dev"),
+            (96207, 96158, "node"),
+            (96210, 96207, "esbuild"),
+            (96246, 96031, "redline"),
+        ]);
+        let plan = stop_root(
+            96207,
+            1420,
+            &tree,
+            &[listener(96207, 1420)],
+            96246,
+            None,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(plan.root, 96158);
+        assert_eq!(plan.pids, vec![96158, 96207, 96210]);
+        for target in [96246, 96031, 1] {
+            assert!(stop_root(
+                target,
+                1420,
+                &tree,
+                &[listener(target, 1420)],
+                96246,
+                None,
+                &HashMap::new()
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn another_card_blocks_the_climb_and_parent_stop_reports_collateral() {
+        let tree = proc_tree(&[
+            (62300, 1, "-zsh"),
+            (62343, 62300, "pnpm dev"),
+            (62408, 62343, "next-server"),
+            (16389, 62408, "npm run dev --port 3103"),
+            (16413, 16389, "next dev"),
+            (16416, 16413, "next-server"),
+        ]);
+        let listeners = [
+            listener(62408, 3100),
+            listener(16416, 3103),
+            listener(16413, 52000),
+        ];
+        let child = stop_root(16416, 3103, &tree, &listeners, 99, None, &HashMap::new()).unwrap();
+        assert_eq!(child.root, 16389);
+        assert!(child.collateral_ports.is_empty());
+        let parent = stop_root(62408, 3100, &tree, &listeners, 99, None, &HashMap::new()).unwrap();
+        assert_eq!(parent.root, 62343);
+        assert_eq!(parent.collateral_ports, vec![3103]);
+        assert_eq!(parent.pids.len(), 5);
+    }
+
+    #[test]
+    fn stop_respects_login_shell_and_repo_directory_boundaries() {
+        let tree = proc_tree(&[(10, 1, "-zsh"), (20, 10, "runner"), (30, 20, "node")]);
+        let cwds = HashMap::from([
+            (20, "/Users/me/app-sibling".into()),
+            (30, "/Users/me/app/packages/web".into()),
+        ]);
+        assert_eq!(
+            stop_root(
+                30,
+                3000,
+                &tree,
+                &[listener(30, 3000)],
+                99,
+                Some("/Users/me/app"),
+                &cwds
+            )
+            .unwrap()
+            .root,
+            30
+        );
+        assert_eq!(
+            stop_root(30, 3000, &tree, &[listener(30, 3000)], 99, None, &cwds)
+                .unwrap()
+                .root,
+            20
+        );
+        assert!(stop_root(
+            30,
+            3000,
+            &tree,
+            &[listener(30, 3000)],
+            99,
+            Some("/another"),
+            &cwds
+        )
+        .is_err());
+        for shell in [
+            "-zsh",
+            "/bin/bash",
+            "-fish",
+            "iTerm2",
+            "/Applications/Terminal.app/Contents/MacOS/Terminal",
+        ] {
+            assert!(is_shell_or_terminal(shell));
+        }
+    }
+
+    #[test]
+    fn stop_walk_has_depth_and_subtree_bounds_and_terminates_on_cycles() {
+        let tree: HashMap<u32, ProcRow> = (10..30)
+            .map(|pid| {
+                (
+                    pid,
+                    ProcRow {
+                        ppid: pid - 1,
+                        comm: "node".into(),
+                    },
+                )
+            })
+            .collect();
+        let plan = stop_root(
+            29,
+            3000,
+            &tree,
+            &[listener(29, 3000)],
+            99,
+            None,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(plan.root, 29 - MAX_CLIMB as u32);
+        let cycle = proc_tree(&[(10, 12, "node"), (11, 10, "node"), (12, 11, "node")]);
+        let plan = stop_root(
+            10,
+            3000,
+            &cycle,
+            &[listener(10, 3000)],
+            99,
+            None,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(plan.pids, vec![10, 11, 12]);
+        let mut wide = proc_tree(&[(10, 1, "node")]);
+        for pid in 100..100 + MAX_STOP_PIDS as u32 {
+            wide.insert(
+                pid,
+                ProcRow {
+                    ppid: 10,
+                    comm: "node".into(),
+                },
+            );
+        }
+        assert!(stop_root(
+            10,
+            3000,
+            &wide,
+            &[listener(10, 3000)],
+            50,
+            None,
+            &HashMap::new()
+        )
+        .unwrap_err()
+        .contains("more than"));
+    }
+
+    #[test]
+    fn ps_tree_preserves_spaces_and_slashes_and_rejects_malformed_rows() {
+        let tree = parse_ps_tree("  100   10 /Applications/LM Studio.app/Contents/MacOS/LM Studio\n 200 100 next-server (v16.3.4)\n bad 20 node\n 300 bad node\n 400 1\n");
+        assert_eq!(tree.len(), 2);
+        assert_eq!(
+            tree[&100].comm,
+            "/Applications/LM Studio.app/Contents/MacOS/LM Studio"
+        );
+        assert_eq!(tree[&200].ppid, 100);
+    }
+
+    #[test]
+    fn escalation_excludes_recycled_pids_but_allows_reparented_children() {
+        let (_, before) = parse_ps_snapshot("  20 10 Wed Sep 9 10:20:30 2026 next-server (v16.3.4)\n 21 20 Wed Sep 9 10:20:30 2026 node\n");
+        let (_, after) = parse_ps_snapshot("  20 1 Wed Sep 9 10:20:30 2026 next-server (v16.3.4)\n 21 1 Wed Sep 9 10:20:31 2026 node\n");
+        assert_eq!(matching_pids(&[20, 21, 22], &before, &after), vec![20]);
+        assert_eq!(before[&20].comm, "next-server (v16.3.4)");
+    }
+
+    #[test]
+    fn probe_without_process_argv_uses_lockfile_or_returns_an_editable_blank() {
+        let mut probe = ProjectProbe {
+            has_package_json: true,
+            scripts: HashSet::from(["dev".into()]),
+            ..Default::default()
+        };
+        for (lock, pm) in [
+            ("pnpm-lock.yaml", "pnpm"),
+            ("yarn.lock", "yarn"),
+            ("bun.lockb", "bun"),
+            ("package-lock.json", "npm"),
+        ] {
+            probe.lockfile = Some(lock.into());
+            assert_eq!(
+                derive_run_command(Some(&probe), "", ""),
+                format!("{pm} run dev")
+            );
+        }
+        probe.scripts = HashSet::from(["test".into()]);
+        assert_eq!(derive_run_command(Some(&probe), "", ""), "");
+    }
+
+    /// These integration fixtures own every process they can stop. No existing
+    /// app/server pid or fixed port is ever used. Opt in because they need the
+    /// host's python3, ps and lsof and exercise actual TERM/KILL delivery.
+    #[test]
+    #[ignore = "spawns disposable localhost fixtures; run with --ignored"]
+    fn disposable_servers_stop_plain_supervised_and_sigterm_ignoring() {
+        use std::io::BufRead;
+        use std::process::{Command, Stdio};
+        struct Fixture {
+            child: std::process::Child,
+            identities: HashMap<u32, ProcIdentity>,
+        }
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let pids: Vec<u32> = self.identities.keys().copied().collect();
+                let _ = signal_matching("-KILL", &pids, &self.identities);
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+            }
+        }
+        for mode in ["plain", "supervised", "ignore"] {
+            let source = r#"
+import os, signal, socket, subprocess, sys, time
+mode = sys.argv[1]
+if mode == 'supervised':
+    child = subprocess.Popen([sys.executable, '-u', '-c', sys.argv[2], 'plain'])
+    def stop(signum, frame):
+        child.terminate()
+        child.wait()
+        sys.exit(0)
+    signal.signal(signal.SIGTERM, stop)
+    while True:
+        child.wait()
+        child = subprocess.Popen([sys.executable, '-u', '-c', sys.argv[2], 'plain'])
+else:
+    if mode == 'ignore': signal.signal(signal.SIGTERM, lambda *args: None)
+    sock = socket.socket()
+    sock.bind(('127.0.0.1', 0))
+    sock.listen()
+    print(str(os.getpid()) + ' ' + str(sock.getsockname()[1]), flush=True)
+    while True: time.sleep(1)
+"#;
+            let mut child = Command::new("python3")
+                .args(["-u", "-c", source, mode, source])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap();
+            let stdout = child.stdout.take().unwrap();
+            let (sender, receiver) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let mut line = String::new();
+                let result = std::io::BufReader::new(stdout)
+                    .read_line(&mut line)
+                    .map(|_| line);
+                let _ = sender.send(result);
+            });
+            let mut fixture = Fixture {
+                child,
+                identities: HashMap::new(),
+            };
+            let line = receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap()
+                .unwrap();
+            let values: Vec<&str> = line.split_whitespace().collect();
+            let pid: u32 = values[0].parse().unwrap();
+            let port: u16 = values[1].parse().unwrap();
+            let snapshot = prepare_stop(pid, port, None).unwrap();
+            fixture.identities = snapshot
+                .plan
+                .pids
+                .iter()
+                .map(|pid| (*pid, snapshot.identities[pid].clone()))
+                .collect();
+            assert_eq!(snapshot.plan.root, fixture.child.id(), "{mode}");
+            assert_eq!(
+                snapshot.plan.pids.len(),
+                if mode == "supervised" { 2 } else { 1 }
+            );
+            assert!(
+                stop_listeners()
+                    .unwrap()
+                    .iter()
+                    .any(|l| l.pid == pid && l.port == port),
+                "dry run sent no signal"
+            );
+            let start = std::time::Instant::now();
+            let (plan, count) = execute_stop(pid, port, None).unwrap();
+            assert_eq!(plan.root, fixture.child.id());
+            assert!(count >= 1);
+            if mode == "ignore" {
+                assert!(start.elapsed() >= std::time::Duration::from_secs(3));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            assert!(
+                !stop_listeners().unwrap().iter().any(|l| l.port == port),
+                "{mode} respawned"
+            );
+            fixture.child.wait().unwrap();
+        }
+    }
 
     /// The registry as `scan_with` hands it over: normalized on the way in, so
     /// `resolve_project` compares two canonical forms and never pays a
@@ -993,7 +1802,10 @@ mod tests {
         assert_eq!(cwds.get(&200).map(String::as_str), Some("/tmp"));
 
         let args = parse_ps_args("  100 node /a/b/vite --host\n 200 python manage.py runserver\n");
-        assert_eq!(args.get(&100).map(String::as_str), Some("node /a/b/vite --host"));
+        assert_eq!(
+            args.get(&100).map(String::as_str),
+            Some("node /a/b/vite --host")
+        );
         assert_eq!(
             args.get(&200).map(String::as_str),
             Some("python manage.py runserver")
@@ -1015,12 +1827,9 @@ mod tests {
 
     #[test]
     fn root_markers_resolve_the_nearest_directory_when_nothing_is_known() {
-        let got = resolve_project(
-            "/Users/me/scratch/thing/src",
-            &known(&[]),
-            HOME,
-            |p| p == Path::new("/Users/me/scratch/thing"),
-        );
+        let got = resolve_project("/Users/me/scratch/thing/src", &known(&[]), HOME, |p| {
+            p == Path::new("/Users/me/scratch/thing")
+        });
         assert_eq!(got, Some(PathBuf::from("/Users/me/scratch/thing")));
     }
 
@@ -1047,8 +1856,8 @@ mod tests {
         for junk in [
             "/",
             "/Users",
-            "/Users/me",                                  // the home dir itself
-            "/opt/homebrew",                              // Homebrew keeps a .git
+            "/Users/me",     // the home dir itself
+            "/opt/homebrew", // Homebrew keeps a .git
             "/usr/local/share/thing",
             "/Applications/Some.app/Contents",
             "/Library/Whatever",
@@ -1079,19 +1888,28 @@ mod tests {
         // A server started in ~/.vscode/... must fall through to "not a
         // project" rather than being attributed to the home directory.
         assert_eq!(
-            resolve_project("/Users/me/.vscode/extensions/x", &known(&[]), HOME, |_| true),
+            resolve_project("/Users/me/.vscode/extensions/x", &known(&[]), HOME, |_| {
+                true
+            }),
             None,
         );
         // Even if the home directory is in the registry (a plan session that
         // launched in $HOME — a real thing that has happened), it must not
         // become every listener's project.
         assert_eq!(
-            resolve_project("/Users/me/random/dir", &known(&["/Users/me"]), HOME, |_| false),
+            resolve_project("/Users/me/random/dir", &known(&["/Users/me"]), HOME, |_| {
+                false
+            }),
             None,
         );
         // But a real repo below home still resolves.
         assert_eq!(
-            resolve_project("/Users/me/app/src", &known(&["/Users/me/app"]), HOME, |_| false),
+            resolve_project(
+                "/Users/me/app/src",
+                &known(&["/Users/me/app"]),
+                HOME,
+                |_| false
+            ),
             Some(PathBuf::from("/Users/me/app")),
         );
     }
@@ -1103,8 +1921,9 @@ mod tests {
         // keeps that from minting two projects for one directory.
         assert_eq!(normalize_path("/Users/me/app/"), "/Users/me/app");
         assert_eq!(normalize_path("/"), "/", "the root survives normalization");
-        let got =
-            resolve_project("/Users/me/app", &known(&["/Users/me/app/"]), HOME, |_| false);
+        let got = resolve_project("/Users/me/app", &known(&["/Users/me/app/"]), HOME, |_| {
+            false
+        });
         assert_eq!(got, Some(PathBuf::from("/Users/me/app")));
     }
 
@@ -1139,7 +1958,10 @@ mod tests {
             ("express", "Express"),
         ] {
             let p = probe_with(&[dep], &[]);
-            assert_eq!(detect_stack(Some(&p), "node", ""), format!("{label} — myapp"));
+            assert_eq!(
+                detect_stack(Some(&p), "node", ""),
+                format!("{label} — myapp")
+            );
         }
         // A package.json with nothing recognizable still beats a bare comm.
         let p = probe_with(&["lodash"], &[]);
@@ -1208,7 +2030,10 @@ mod tests {
 
     #[test]
     fn runners_are_matched_as_whole_tokens_never_substrings() {
-        assert_eq!(detect_runner("node", "node /a/vite-experiments/api.js"), None);
+        assert_eq!(
+            detect_runner("node", "node /a/vite-experiments/api.js"),
+            None
+        );
         assert_eq!(
             detect_runner("node", "node /a/node_modules/.bin/vite dev"),
             Some(("Vite", Family::Node)),
@@ -1230,11 +2055,17 @@ mod tests {
     fn probe_family_reads_the_manifests() {
         assert_eq!(probe_family(&probe_with(&[], &[])), Family::Node);
         assert_eq!(
-            probe_family(&ProjectProbe { has_pyproject: true, ..Default::default() }),
+            probe_family(&ProjectProbe {
+                has_pyproject: true,
+                ..Default::default()
+            }),
             Family::Python,
         );
         assert_eq!(
-            probe_family(&ProjectProbe { has_cargo_toml: true, ..Default::default() }),
+            probe_family(&ProjectProbe {
+                has_cargo_toml: true,
+                ..Default::default()
+            }),
             Family::Rust,
         );
         assert_eq!(probe_family(&ProjectProbe::default()), Family::Unknown);
@@ -1265,20 +2096,29 @@ mod tests {
         ] {
             let mut p = probe_with(&[], &["dev", "start"]);
             p.lockfile = lock.map(|l| l.to_string());
-            assert_eq!(derive_run_command(Some(&p), "node", "node x"), format!("{pm} run dev"));
+            assert_eq!(
+                derive_run_command(Some(&p), "node", "node x"),
+                format!("{pm} run dev")
+            );
         }
     }
 
     #[test]
     fn run_command_falls_through_start_cargo_manage_then_raw_args() {
         let p = probe_with(&[], &["start"]);
-        assert_eq!(derive_run_command(Some(&p), "node", "node x"), "npm run start");
+        assert_eq!(
+            derive_run_command(Some(&p), "node", "node x"),
+            "npm run start"
+        );
 
         let rs = ProjectProbe {
             has_cargo_toml: true,
             ..Default::default()
         };
-        assert_eq!(derive_run_command(Some(&rs), "node", "target/debug/x"), "cargo run");
+        assert_eq!(
+            derive_run_command(Some(&rs), "node", "target/debug/x"),
+            "cargo run"
+        );
 
         let dj = ProjectProbe {
             has_manage_py: true,
@@ -1310,7 +2150,11 @@ mod tests {
         // A bare PATH lookup is not evidence either — no separator, no origin.
         assert!(!claims_project("myserver", "myserver --port 9000", root));
         // Nor is an absolute path that merely shares a prefix with the root.
-        assert!(!claims_project("appd", "/Users/me/app-backup/bin/appd", root));
+        assert!(!claims_project(
+            "appd",
+            "/Users/me/app-backup/bin/appd",
+            root
+        ));
     }
 
     #[test]
@@ -1319,11 +2163,23 @@ mod tests {
         // 1 — argv names a runner.
         assert!(claims_project("sh", "vite --port 5173", root));
         // 2 — the process's own command is a runtime, even with a bare argv.
-        assert!(claims_project("node", "/opt/homebrew/bin/node server.js", root));
+        assert!(claims_project(
+            "node",
+            "/opt/homebrew/bin/node server.js",
+            root
+        ));
         assert!(claims_project("bun", "/usr/local/bin/bun run serve", root));
         // 3 — a compiled binary that lives IN the repo, absolute or relative.
-        assert!(claims_project("api", "/Users/me/app/target/debug/api", root));
-        assert!(claims_project("api", "./target/debug/api --port 8080", root));
+        assert!(claims_project(
+            "api",
+            "/Users/me/app/target/debug/api",
+            root
+        ));
+        assert!(claims_project(
+            "api",
+            "./target/debug/api --port 8080",
+            root
+        ));
         // A trailing slash on the root must not break the prefix test.
         assert!(claims_project(
             "api",
@@ -1349,10 +2205,10 @@ mod tests {
     #[test]
     fn recent_drops_live_rows_and_missing_directories_and_flags_busy_ports() {
         let rows = vec![
-            row(1, "/a", 5173), // live right now → not "recent"
-            row(2, "/a", 3000), // same repo, other port → recent
+            row(1, "/a", 5173),    // live right now → not "recent"
+            row(2, "/a", 3000),    // same repo, other port → recent
             row(3, "/gone", 8080), // directory no longer exists → dropped
-            row(4, "/b", 4000), // port squatted by a foreign process
+            row(4, "/b", 4000),    // port squatted by a foreign process
         ];
         let live: HashSet<(String, u16)> = [("/a".to_string(), 5173u16)].into_iter().collect();
         let busy: HashSet<u16> = [5173, 4000].into_iter().collect();
@@ -1382,14 +2238,34 @@ mod tests {
     #[test]
     fn upsert_keeps_first_seen_and_the_thumbnail_across_rescans() {
         let db = Database::open_in_memory().unwrap();
-        db.upsert_dev_server("/a", "a", 5173, "http://localhost:5173", "Vite — a", "npm run dev", Some(1), Some("node x"), 1_000)
-            .unwrap();
+        db.upsert_dev_server(
+            "/a",
+            "a",
+            5173,
+            "http://localhost:5173",
+            "Vite — a",
+            "npm run dev",
+            Some(1),
+            Some("node x"),
+            1_000,
+        )
+        .unwrap();
         let id = db.list_dev_servers(10).unwrap()[0].id;
         db.set_dev_server_thumb("/a", 5173, "/thumbs/p5173-abc.png")
             .unwrap();
         // A later scan sees the same server with a churned run command.
-        db.upsert_dev_server("/a", "a", 5173, "http://localhost:5173", "Vite — a", "pnpm run dev", Some(2), Some("node y"), 2_000)
-            .unwrap();
+        db.upsert_dev_server(
+            "/a",
+            "a",
+            5173,
+            "http://localhost:5173",
+            "Vite — a",
+            "pnpm run dev",
+            Some(2),
+            Some("node y"),
+            2_000,
+        )
+        .unwrap();
         let rows = db.list_dev_servers(10).unwrap();
         assert_eq!(rows.len(), 1, "the (path, port) key is the same server");
         assert_eq!(rows[0].run_command, "pnpm run dev");
@@ -1418,7 +2294,11 @@ mod tests {
     /// has one (a bare CI runner has none).
     #[test]
     fn a_live_scan_runs_the_real_commands_and_returns_a_coherent_shape() {
-        if std::process::Command::new("lsof").arg("-v").output().is_err() {
+        if std::process::Command::new("lsof")
+            .arg("-v")
+            .output()
+            .is_err()
+        {
             return; // no lsof on this box — nothing to assert
         }
         let db = Database::open_in_memory().unwrap();
@@ -1448,8 +2328,14 @@ mod tests {
         for r in &scan.running {
             assert_ne!(r.pid, own);
             assert_ne!(r.port, DAEMON_PORT);
-            assert!(seen_pids.insert(r.pid), "one process must be exactly one card");
-            assert!(!r.project_path.is_empty(), "a running card is project-mapped");
+            assert!(
+                seen_pids.insert(r.pid),
+                "one process must be exactly one card"
+            );
+            assert!(
+                !r.project_path.is_empty(),
+                "a running card is project-mapped"
+            );
             assert!(!r.project_name.is_empty());
             assert!(!r.stack.is_empty());
             assert_eq!(r.url, format!("http://localhost:{}", r.port));
@@ -1476,8 +2362,10 @@ mod tests {
         );
         for r in &scan.running {
             assert!(
-                !scan.recent.iter().any(|x| x.project_path == r.project_path
-                    && x.port == r.port),
+                !scan
+                    .recent
+                    .iter()
+                    .any(|x| x.project_path == r.project_path && x.port == r.port),
                 "a live server must not also appear as recently-run"
             );
         }
@@ -1507,6 +2395,3 @@ mod tests {
         assert!(rows.iter().all(|r| r.port >= 3010));
     }
 }
-
-
-

@@ -54,7 +54,7 @@ import {
   type ProjectChoice,
 } from "./lib/launch";
 import {
-  codexRestoreBlockers,
+  providerRestoreBlockers,
   deriveReadiness,
   type PreflightStatus,
   type ReadinessInput,
@@ -76,7 +76,7 @@ import {
   type RestoreAttempt,
   type RestoreEvent,
 } from "./lib/restoreAttempt";
-import { isLiveRunState, resolveRunProject } from "./lib/orchestration";
+import { isLiveRunState } from "./lib/orchestration";
 import { Footer } from "./components/Footer";
 import { Header } from "./components/Header";
 import { Button } from "./components/ui/Button";
@@ -158,11 +158,9 @@ import {
 } from "./components/TerminalView";
 import {
   deliverToTerminal,
-  orchestrateHandoff,
   PROMPT_TIMEOUT_MS,
   SHELL_PROMPT,
   type HandoffStep,
-  type OrchestrateDeps,
 } from "./lib/terminalHandoff";
 import { SidebarTabStrip } from "./components/SidebarTabStrip";
 import { PlanToc } from "./components/PlanToc";
@@ -227,12 +225,6 @@ const RunReport = lazy(() =>
 // and controls that nobody who never orchestrates should pay for at boot. The
 // door is on the boot path with single-digit KB of headroom; this is exactly
 // the kind of weight that has no business sitting on it.
-const OrchestrateLaunchModal = lazy(() =>
-  import("./components/OrchestrateLaunchModal").then((m) => ({
-    default: m.OrchestrateLaunchModal,
-  })),
-);
-
 const loadOrchestrationSurface = () => import("./components/OrchestrationSurface");
 const OrchestrationSurface = lazy(() =>
   loadOrchestrationSurface().then((m) => ({
@@ -469,18 +461,19 @@ import {
   onResizeSession,
 } from "./lib/resizeSession";
 import {
-  buildOrchestrateLaunchCommand,
-  buildOrchestratePrompt,
   buildPlanLaunchCommand,
 } from "./lib/planLaunchCommand";
+import type { CodeReviewSession } from "./types";
+import type { RunGraph } from "./lib/runner/schema";
+import { useModelCatalogs } from "./hooks/useModelCatalogs";
 import { guessProjectForPlan } from "./lib/guessProject";
 import {
+  backendLabel,
   defaultChoice as defaultBackendChoice,
   normalizeChoice as normalizeBackendChoice,
   parseChoice as parseBackendChoice,
   type Backend,
   type BackendChoice,
-  type CodexModel,
 } from "./lib/backendChoice";
 import {
   deleteSource,
@@ -571,7 +564,6 @@ import type {
   CommentType,
   CodexHookStatus,
   Companion,
-  GitStatus,
   HookStatus,
   InterceptionMode,
   ModeEvent,
@@ -583,11 +575,9 @@ import type {
   Section,
   SessionSummary,
   SkillStatus,
-  AllowCandidate,
   CombineBrief,
   CombinePreview,
   CombineSource,
-  WorkflowAvailability,
 } from "./types";
 
 // Upgrade pre-quick-switch persisted pane state (four booleans → one surface
@@ -1358,34 +1348,11 @@ function App() {
       "redline.frontDoor.backend",
       defaultBackendChoice(),
     );
-  /** `codex debug models`, fetched on first use of the picker. Never at boot:
-   *  a Claude-only user must not spawn a codex child process to open the app.
-   *  Cached for the session — the catalog only moves when the ChatGPT app
-   *  updates. */
-  const [codexModels, setCodexModels] = useState<CodexModel[]>([]);
-  const codexModelsAskedRef = useRef(false);
-  const requestCodexModels = useCallback(() => {
-    if (codexModelsAskedRef.current) return;
-    codexModelsAskedRef.current = true;
-    void invoke<CodexModel[]>("codex_model_catalog")
-      .then(setCodexModels)
-      // A failed probe is not an error the user has to act on: the picker
-      // simply offers "Default", and codex runs on its own default model.
-      .catch((e: unknown) => console.warn("codex_model_catalog failed", e));
-  }, []);
-  // Tolerant on the way in (a hand-edited or stale blob can't launch on a
-  // backend nobody chose) and folded onto what the backend can actually run.
+  const { catalogs: modelCatalogs, errors: modelErrors, request: requestModels } = useModelCatalogs();
   const frontDoorBackend = useMemo(
-    () => normalizeBackendChoice(parseBackendChoice(frontDoorBackendRaw), codexModels),
-    [frontDoorBackendRaw, codexModels],
+    () => normalizeBackendChoice(parseBackendChoice(frontDoorBackendRaw), modelCatalogs),
+    [frontDoorBackendRaw, modelCatalogs],
   );
-  // A returning Codex user never has to open the picker for their stored pick
-  // to work (`normalizeChoice` passes it through while the catalog is
-  // unknown) — but the chip would read the raw slug and the effort list would
-  // be empty until they did. One fetch, only for someone already on Codex.
-  useEffect(() => {
-    if (frontDoorBackend.backend === "codex") requestCodexModels();
-  }, [frontDoorBackend.backend, requestCodexModels]);
   // ── The chat room ───────────────────────────────────────────────────────
   // Which conversation the room shows. PERSISTED for the same reason the
   // door's sentence is: a chat is a place you come back to, and landing on a
@@ -1476,6 +1443,15 @@ function App() {
    *  "not asked yet", never "healthy" — every derivation from it is withheld
    *  rather than guessed at. */
   const integrationReady = preflight !== null;
+  const selectedModelIdentity = frontDoorBackend.backend === "claude-code"
+    ? preflight?.claude.identity ?? preflight?.claude.path ?? "unresolved"
+    : frontDoorBackend.backend === "codex"
+      ? preflight?.codex?.identity ?? `${preflight?.codex?.path ?? ""}|${preflight?.codex?.version ?? ""}`
+      : preflight?.providers?.[frontDoorBackend.backend]?.identity ?? "unresolved";
+  useEffect(() => {
+    if (preflight) requestModels(frontDoorBackend.backend, selectedModelIdentity);
+  }, [frontDoorBackend.backend, selectedModelIdentity, !!preflight, requestModels]);
+
   // Both read at LAUNCH time, from inside `launchPlan` — the same discipline
   // `readinessRef` uses. The resolved codex path is what makes the codex arm
   // absolute rather than trusting `$PATH`, which on this machine still points
@@ -4970,12 +4946,20 @@ function App() {
       }).message
     : null;
 
+  const [restoreHealth, setRestoreHealth] = useState<{ backend: Backend; preflight: PreflightStatus; codexHook: boolean } | null>(null);
+  useEffect(() => {
+    if (!detached) return;
+    let alive = true;
+    void integrationHealth.ensure({ backend: restoreDecision.harness, extension: false }).then((health) => {
+      if (alive) setRestoreHealth({ backend: restoreDecision.harness, preflight: health.preflight, codexHook: health.codexHook?.installed ?? false });
+    }).catch(() => {});
+    return () => { alive = false; };
+  }, [detached, restoreDecision.harness, preflight]);
   const restoreBlockers = useMemo(
-    () =>
-      restoreDecision.harness === "codex"
-        ? codexRestoreBlockers(preflight, codexHookStatus?.installed)
-        : [],
-    [restoreDecision.harness, preflight, codexHookStatus?.installed],
+    () => restoreHealth?.backend === restoreDecision.harness
+      ? providerRestoreBlockers(restoreDecision.harness, restoreHealth.preflight, restoreHealth.codexHook)
+      : [],
+    [restoreDecision.harness, restoreHealth],
   );
   // `waiting` shows the "Claude is working" indicators and gates the
   // submit/approve buttons — true from "Send to Claude Code" until that
@@ -5185,7 +5169,7 @@ function App() {
     setBusy(true);
     try {
       await invoke("approve_plan", { sessionId: session.sessionId });
-      setToast("Approved · Claude is executing");
+      setToast("Plan approved");
       setTimeout(() => setToast(null), 3500);
     } catch (err) {
       console.error("approve_plan failed", err);
@@ -5198,212 +5182,49 @@ function App() {
     }
   };
 
-  // Orchestrate preflight: gather the modal's three duties (dirty tree via
-  // push_status, inferred Bash allow rules, workflows-disabled probe) and
-  // show the launch modal. A push_status error just means "not a known repo"
-  // — skip the git duty, keep the rest.
-  const [orchestrateModal, setOrchestrateModal] = useState<{
-    gitStatus: GitStatus | null;
-    availability: WorkflowAvailability | null;
-    allowRules: AllowCandidate[];
-  } | null>(null);
+  // A native graph is reviewed in Runs before any task gets write access.
+  const [nativeRunId, setNativeRunId] = useState<string | null>(null);
+  const [runPlanAnchor, setRunPlanAnchor] = useState<{ sessionId: string; blockId: string } | null>(null);
+  useEffect(() => {
+    if (!runPlanAnchor || session?.sessionId !== runPlanAnchor.sessionId || mainSurface !== "document") return;
+    const frame = requestAnimationFrame(() => {
+      const block = document.querySelector(`.doc-article [data-block-id="${cssEscape(runPlanAnchor.blockId)}"]`);
+      if (block instanceof HTMLElement) { block.scrollIntoView({ block: "center", behavior: "smooth" }); setRunPlanAnchor(null); }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [runPlanAnchor, session, mainSurface]);
+  const showNativeRun = (run: RunGraph) => {
+    setNativeRunId(run.runId);
+    selectSurface("runs");
+    void refreshSummaries();
+  };
   const openOrchestrateModal = async () => {
     if (!session || busy) return;
-    const repo = session.projectPath || null;
-    const [git, avail, rules] = await Promise.all([
-      repo
-        ? invoke<GitStatus>("push_status", { repo }).catch(() => null)
-        : Promise.resolve(null),
-      // The project goes with the probe: a `disableWorkflows` in the repo's
-      // own `.claude/settings*.json` binds this run exactly as hard as the
-      // user-level file, and used to be unread.
-      invoke<WorkflowAvailability>("workflow_availability", {
-        projectPath: repo,
-      }).catch(() => null),
-      repo
-        ? invoke<AllowCandidate[]>("orchestrate_allow_candidates", {
-            projectPath: repo,
-          }).catch(() => [])
-        : Promise.resolve([]),
-    ]);
-    setOrchestrateModal({
-      gitStatus: git,
-      availability: avail,
-      allowRules: rules ?? [],
-    });
-  };
-
-  // The verified Orchestrate delivery (Part A): open a terminal, arm the
-  // lineage guards WITH the tab id, then run the checked handoff — real spawn
-  // signal, checked writes, claude-ready marker, and the ingest-claim
-  // confirmation with re-armed retries. On any failure the run state is
-  // rolled back to NULL (the click was not evidence of a run) and a
-  // persistent error banner replaces the old unconditional success toast.
-  const deliverOrchestrator = async (
-    sessionId: string,
-    projectPath: string | null,
-  ) => {
-    const prompt = buildOrchestratePrompt(sessionId);
-    // B3: a `cd`-less orchestrate command spawns in `$HOME`, and the
-    // orchestrator runs `--permission-mode acceptEdits` — a write-capable
-    // session pointed at the wrong tree. The severity is not "it fails", it
-    // is "it succeeds somewhere else", so an unresolved project refuses here
-    // rather than launching against the default directory.
-    if (!projectPath || !projectPath.trim()) {
-      await invoke("reset_run", { sessionId }).catch(() => {});
-      setHandoffFailure({
-        sessionId,
-        stage: "launch",
-        reason:
-          "no project directory could be resolved for this session — " +
-          "refusing to launch a write-capable orchestrator in your home " +
-          "directory",
-        launchCmd: "",
-        prompt,
-        projectPath: null,
-      });
-      void refreshSummaries();
-      return;
-    }
-    const seats = await invoke<{
-      seats: Record<string, { model?: string }>;
-    }>("get_agent_seats").catch(() => null);
-    // Unset seat → sonnet, never the CLI default: every workflow subagent
-    // inherits the session model, so an unset default would mean the big
-    // model × up-to-16 concurrent agents.
-    const model = seats?.seats?.orchestrator?.model?.trim() || "sonnet";
-    const launchCmd = buildOrchestrateLaunchCommand(projectPath, model);
-    suppressTerminalRevealFocus();
-    setTermFullscreen(false);
-    revealTerm();
-    // Waits for the dock rather than racing it: the terminal now mounts after
-    // the first actionable frame, so a launch fired seconds into a session
-    // could otherwise find no handle and report "couldn't open a terminal".
-    const id =
-      (await ensureTerminalReady())?.openSessionTerminal(projectPath) ?? null;
-    const fail = async (stage: string, reason: string) => {
-      await invoke("reset_run", { sessionId }).catch(() => {});
-      setHandoffFailure({
-        sessionId,
-        stage,
-        reason,
-        launchCmd,
-        prompt,
-        projectPath,
-      });
-      void refreshSummaries();
-    };
-    // Arm the lineage guards BEFORE the prompt can reach the hook — carrying
-    // the tab id so a failed handoff still leaves a trace of its terminal.
-    const rearm = () =>
-      invoke("record_orchestration_launch", {
-        prompt,
-        planSessionId: sessionId,
-        terminalId: id,
-      }).then(() => undefined);
-    await rearm().catch((err) =>
-      console.error("record_orchestration_launch failed", err),
-    );
-    if (!id) {
-      await fail("spawn", "no terminal tab could be opened");
-      return;
-    }
-    const deps: OrchestrateDeps = {
-      ...tauriHandoffDeps,
-      journal: (stage, detail) => {
-        void invoke("record_handoff_event", {
-          sessionId,
-          stage,
-          detail: detail ?? null,
-        }).catch(() => {});
-      },
-      getRunState: (sid) =>
-        invoke<string | null>("get_run_state", { sessionId: sid }),
-      rearm,
-    };
-    const result = await orchestrateHandoff(
-      deps,
-      id,
-      sessionId,
-      launchCmd,
-      prompt,
-    );
-    if (result.ok) {
-      setHandoffFailure((cur) =>
-        cur?.sessionId === sessionId ? null : cur,
-      );
-      // The tab is load-bearing: a workflow resumes only within its session.
-      setToast(
-        "Orchestrator is running below ↓ Approve the workflow card when it " +
-          "appears, and keep that terminal tab open until the run finishes — " +
-          "closing it loses the run (--resume won't bring it back).",
-      );
-      setTimeout(() => setToast(null), 10000);
-    } else {
-      await fail(result.stage, result.reason);
-    }
-  };
-
-  // Launch confirmed: approve-with-stand-down, then the verified typed
-  // handoff. The Workflow opt-in is gated on input ORIGIN, so the prompt is
-  // delivered as typed keystrokes into a bare `claude` — never as an argv
-  // positional.
-  const launchOrchestrator = async (checkedRules: string[]) => {
-    const s = session;
-    setOrchestrateModal(null);
-    if (!s || busy) return;
     setBusy(true);
     try {
-      if (checkedRules.length > 0) {
-        // Best-effort: a failed allow write costs permission prompts mid-run,
-        // not correctness.
-        await invoke("apply_orchestrate_allows", {
-          rules: checkedRules,
-        }).catch((err) =>
-          console.error("apply_orchestrate_allows failed", err),
-        );
-      }
-      await invoke("orchestrate_plan", { sessionId: s.sessionId });
+      const graph = await invoke<RunGraph>("runner_decompose", { planSessionId: session.sessionId });
+      await invoke("orchestrate_plan", { sessionId: session.sessionId });
+      showNativeRun(graph);
     } catch (err) {
-      console.error("orchestrate_plan failed", err);
-      if (isDetachError(err)) {
-        setDetachDismissed(false);
-        void refreshSummaries();
-      } else alert(`Orchestrate failed: ${err}`);
-      setBusy(false);
-      return;
-    }
-    setBusy(false);
-    // The delivery runs unawaited (its claim confirmation can take ~20 s per
-    // attempt); it reports through the success toast or the failure banner.
-    void deliverOrchestrator(s.sessionId, s.projectPath || null);
+      setToast(`Could not prepare the run: ${err}`);
+    } finally { setBusy(false); }
   };
-
-  // B2: run an already-approved plan again after a failed (or abandoned)
-  // delivery — reset + orchestrating happen backend-side; the delivery half
-  // is the same verified handoff as a first launch.
   const relaunchOrchestrator = async (sessionId: string) => {
-    // Resolve the tree BEFORE touching the run state: the loaded session
-    // first (same source the first launch uses), the summary as the fallback,
-    // and a refusal when neither answers — never a `cd`-less command.
-    const projectPath = resolveRunProject(sessionId, session, summaries);
-    if (!projectPath) {
-      setToast(
-        "Re-launch refused: this session's project directory could not be " +
-          "resolved, and an orchestrator must never run in your home folder.",
-      );
-      setTimeout(() => setToast(null), 8000);
-      return;
-    }
-    setHandoffFailure((cur) => (cur?.sessionId === sessionId ? null : cur));
+    if (busy) return;
+    setBusy(true);
     try {
-      await invoke("relaunch_run", { sessionId });
-    } catch (err) {
-      setToast(`Re-launch failed: ${err}`);
-      setTimeout(() => setToast(null), 6000);
-      return;
-    }
-    void deliverOrchestrator(sessionId, projectPath);
+      const runs = await invoke<RunGraph[]>("runner_list");
+      const existing = runs.find((run) => run.planSessionId === sessionId && !["done", "abandoned"].includes(run.status));
+      showNativeRun(existing ?? await invoke<RunGraph>("runner_decompose", { planSessionId: sessionId }));
+      setHandoffFailure((cur) => cur?.sessionId === sessionId ? null : cur);
+    } catch (err) { setToast(`Could not open the run: ${err}`); }
+    finally { setBusy(false); }
+  };
+  const openRunReview = async (reviewId: string) => {
+    const reviews = await invoke<CodeReviewSession[]>("review_sessions_list");
+    const review = reviews.find((row) => row.reviewId === reviewId);
+    if (!review) throw new Error("The run review no longer exists.");
+    if (review) { codeReview.setSource("uncommitted"); await codeReview.openReview(review.repoPath, "uncommitted"); selectSurface("review"); }
   };
 
   // B1: clear a wedged run without touching the approval.
@@ -5446,6 +5267,12 @@ function App() {
   // offers to show) the terminal tab to close instead.
   const standDownRun = async (sessionId: string) => {
     try {
+      const native = (await invoke<RunGraph[]>("runner_list")).find((run) => run.planSessionId === sessionId && !["done", "abandoned"].includes(run.status));
+      if (native) {
+        showNativeRun(await invoke<RunGraph>("runner_intervene", { runId: native.runId, nodeId: null, action: "stop", message: null, baseRev: native.rev }));
+        setToast("Run stopped. Its graph, messages, and file changes are saved.");
+        return;
+      }
       const terminal = await invoke<string | null>("stand_down_run", {
         sessionId,
       });
@@ -5579,12 +5406,14 @@ function App() {
   // Refuse a restore that cannot return the plan, and say what's in the way.
   // The banner already renders these rows with their fix buttons; this is the
   // click-time backstop for the gap between a stale probe and the button state.
-  const refuseBlockedRestore = (): boolean => {
-    const [first] = restoreBlockers;
-    if (!first) return false;
-    setToast(`${first.label} — restore can't bring the plan back until that's fixed.`);
-    setTimeout(() => setToast(null), 6000);
-    return true;
+  const checkRestoreHealth = async (): Promise<PreflightStatus | null> => {
+    try {
+      const health = await integrationHealth.refresh({ backend: restoreDecision.harness, extension: false });
+      setRestoreHealth({ backend: restoreDecision.harness, preflight: health.preflight, codexHook: health.codexHook?.installed ?? false });
+      const [first] = providerRestoreBlockers(restoreDecision.harness, health.preflight, health.codexHook?.installed);
+      if (first) { setToast(`${first.label} — restore can't bring the plan back until that's fixed.`); return null; }
+      return health.preflight;
+    } catch (error) { setToast(`Could not check the planning provider: ${error}`); return null; }
   };
 
   /** Bring a restore's terminal on screen, on request.
@@ -5623,7 +5452,8 @@ function App() {
     // missing its binary, sign-in, plan profile or Stop hook opens a terminal
     // that runs, looks healthy, and never gives the plan back. The blocker's
     // own fix is already on screen.
-    if (refuseBlockedRestore()) return;
+    const restoreProbe = await checkRestoreHealth();
+    if (!restoreProbe) return;
     const sessionId = session.sessionId;
     const projectPath = session.projectPath || null;
     onRestore({ type: "start", sessionId, at: Date.now() });
@@ -5655,7 +5485,12 @@ function App() {
       // this is the reviewer's own pick, defaulting to Claude.
       {
         backend: restoreDecision.harness,
-        codexBin: preflight?.codex?.path ?? null,
+        claudeBin: restoreProbe.claude.path,
+        codexBin: restoreProbe.codex?.path ?? null,
+        cursorBin: restoreProbe.providers?.cursor?.path ?? null,
+        antigravityBin: restoreProbe.providers?.antigravity?.path ?? null,
+        model: session.model,
+        effort: session.effort,
       },
     )}\r`;
 
@@ -5874,7 +5709,8 @@ function App() {
         console.error("integration health failed at launch", err);
         return null;
       });
-    if (health) applyHealthRef.current(health);
+    if (!health) return { ok: false, reason: "Could not check the selected planning provider. Try again." };
+    applyHealthRef.current(health);
     // A window that owns no port captures no plans: the session would run and
     // its plan would land in a different instance. Bounded — a bind that never
     // resolves must not strand the launch either.
@@ -5882,13 +5718,13 @@ function App() {
     const gate = attemptLaunch(
       health
         ? deriveReadiness(
-            readinessInputRef.current({
+            { ...readinessInputRef.current({
               preflight: health.preflight,
               daemonOk: daemon !== "failed",
               projectPath: req.projectPath,
               backend: choice.backend,
               now: Date.now(),
-            }),
+            }), requireIntegration: true, codexHookInstalled: health.codexHook?.installed },
           )
         : readinessRef.current,
     );
@@ -5903,17 +5739,22 @@ function App() {
       kind,
       health?.preflight.extension ?? preflightRef.current?.extension ?? null,
     );
+    const launchId = crypto.randomUUID();
     const cmd = `${buildPlanLaunchCommand(
       trimmed,
       req.projectPath,
       addDirs,
       choice,
       {
+        "claude-code": health.preflight.claude.path,
         codex:
           health?.preflight.codex?.path ??
           preflightRef.current?.codex?.path ??
           null,
+        cursor: health?.preflight.providers?.cursor?.path ?? null,
+        antigravity: health?.preflight.providers?.antigravity?.path ?? null,
       },
+      launchId,
     )}\r`;
     suppressTerminalRevealFocus();
     setTermFullscreen(false);
@@ -5925,7 +5766,6 @@ function App() {
     // arrive. Report it — `PendingLaunch.terminalId` is non-nullable precisely
     // so "spinning on a launch that never happened" cannot be constructed.
     if (!terminalId) return { ok: false, reason: "couldn't open a terminal" };
-    typeIntoTerminal(terminalId, cmd, "Couldn't type the plan launch");
 
     // Polis ledger: record the launched prompt (the plan session doesn't exist
     // yet, so this is the only place its body is first-class). `origin` is
@@ -5934,7 +5774,8 @@ function App() {
     // the spawned session first fires. The `.catch` is the point: this used to
     // be a bare `void invoke(...)`, so a failed ledger write was 100% silent.
     const startedAt = Date.now();
-    void invoke("record_plan_launch", {
+    const recordError = await invoke("record_plan_launch", {
+      launchId,
       markdown: trimmed,
       projectPath: req.projectPath,
       draftId: req.draftId,
@@ -5951,13 +5792,11 @@ function App() {
       // instead.
       backend: choice.backend,
       model: choice.model,
-    }).catch((err: unknown) => {
-      const reason = String(err);
-      console.error("record_plan_launch failed", err);
-      setPendingLaunch((cur) =>
-        cur?.startedAt === startedAt ? { ...cur, lineageError: reason } : cur,
-      );
-    });
+      effort: choice.effort,
+    }).then(() => null).catch((err: unknown) => String(err));
+    if (recordError) return { ok: false, reason: `Could not record the plan launch: ${recordError}` };
+
+    typeIntoTerminal(terminalId, cmd, "Couldn't type the plan launch");
 
     // The displaced launch is NOT repaid. It is still running in its own
     // terminal tile with its own plan on the way; handing its sentence back
@@ -6181,7 +6020,8 @@ function App() {
     // The same gate as the embedded path. A command that can't return the plan
     // is no better on the clipboard than in Redline's own terminal — worse, in
     // fact: it fails in a shell where nothing is watching for the answer.
-    if (refuseBlockedRestore()) return;
+    const restoreProbe = await checkRestoreHealth();
+    if (!restoreProbe) return;
     // Same one-shot arming as restorePlanSession, and awaited for the same
     // reason: the reviewer can paste the moment the clipboard is written, and
     // both one-shots (the "vN restored" label, and the resumed session's first
@@ -6206,7 +6046,12 @@ function App() {
         target.primed,
         {
           backend: restoreDecision.harness,
-          codexBin: preflight?.codex?.path ?? null,
+          claudeBin: restoreProbe.claude.path,
+          codexBin: restoreProbe.codex?.path ?? null,
+        cursorBin: restoreProbe.providers?.cursor?.path ?? null,
+        antigravityBin: restoreProbe.providers?.antigravity?.path ?? null,
+        model: session.model,
+        effort: session.effort,
         },
       ),
     );
@@ -6333,7 +6178,7 @@ function App() {
     if (!dw) return;
     try {
       await invoke("approve_plan", { sessionId: dw.sessionId });
-      setToast("Approved · Claude is executing");
+      setToast("Plan approved");
       setTimeout(() => setToast(null), 3500);
     } catch (err) {
       console.error("approve_plan failed", err);
@@ -6463,69 +6308,29 @@ function App() {
   // as a RECOVERY (the hook was removed after a successful first run). That
   // path must not take the screen over with a post-install explainer the user
   // has already read once — it reports through the ordinary toast instead.
-  const installIntegration = async (showExplainer = true) => {
-    const errors: string[] = [];
-    let hookOk = false;
-    let skillOk = false;
-    let codexHookOk = false;
-    let codexSkillOk = false;
+  const installIntegration = async (showExplainer = true, backend: Backend = frontDoorBackend.backend) => {
     try {
-      const status = await invoke<HookStatus>("install_hook");
-      setHookStatus(status);
-      hookOk = status.installed;
-    } catch (err) {
-      console.error("install_hook failed", err);
-      errors.push(`Hook install failed: ${err}`);
+      if (backend === "cursor" || backend === "antigravity") {
+        await invoke("install_provider_integration", { backend });
+      } else if (backend === "codex") {
+        setCodexHookStatus(await invoke<CodexHookStatus>("install_codex_hook"));
+        await invoke("install_codex_profile");
+        setCodexSkillStatus(await invoke<SkillStatus>("install_codex_skill"));
+      } else {
+        setHookStatus(await invoke<HookStatus>("install_hook"));
+        setSkillStatus(await invoke<SkillStatus>("install_skill"));
+      }
+      integrationHealth.invalidate();
+      const health = await integrationHealth.refresh({ backend, extension: false });
+      applyHealthRef.current(health);
+      setInstallError(null);
+      if (showExplainer && backend === "claude-code") setSetupPhase("done");
+      else { setToast(`${backendLabel(backend)} integration installed`); setTimeout(() => setToast(null), 4000); }
+      return true;
+    } catch (error) {
+      setInstallError(String(error)); setToast(`Integration install failed: ${error}`);
+      return false;
     }
-    try {
-      const status = await invoke<CodexHookStatus>("install_codex_hook");
-      setCodexHookStatus(status);
-      codexHookOk = status.installed;
-    } catch (err) {
-      console.error("install_codex_hook failed", err);
-      errors.push(`Codex hook install failed: ${err}`);
-    }
-    try {
-      // The Codex plan contract, as a config profile. Installed here rather
-      // than written at launch because `codex -p <name>` with no such file is
-      // silently ignored — a plan session with no contract looks fine until
-      // its first revision loses every block-identity sidecar.
-      await invoke("install_codex_profile");
-    } catch (err) {
-      console.error("install_codex_profile failed", err);
-      errors.push(`Codex plan contract install failed: ${err}`);
-    }
-    try {
-      const skill = await invoke<SkillStatus>("install_codex_skill");
-      setCodexSkillStatus(skill);
-      codexSkillOk = skill.installed;
-    } catch (err) {
-      console.error("install_codex_skill failed", err);
-      errors.push(`Codex skill install failed: ${err}`);
-    }
-    try {
-      const skill = await invoke<SkillStatus>("install_skill");
-      setSkillStatus(skill);
-      skillOk = skill.installed;
-    } catch (err) {
-      console.error("install_skill failed", err);
-      errors.push(`Skill install failed: ${err}`);
-    }
-    // Every status above was set directly from its install's return value, so
-    // the state is already current — but the SHARED cache still holds the
-    // pre-install answer, and the next asker (a focus refresh, the launch
-    // gate) would read it. Drop it.
-    integrationHealth.invalidate();
-    const ok =
-      errors.length === 0 && hookOk && skillOk && codexHookOk && codexSkillOk;
-    if (showExplainer) {
-      setInstallError(errors.length > 0 ? errors.join(" ") : null);
-      if (ok) setSetupPhase("done");
-    } else {
-      setToast(ok ? "Redline integration reinstalled" : errors.join(" "));
-      setTimeout(() => setToast(null), ok ? 4000 : 8000);
-    }
-    return ok;
   };
 
   // A native child webview paints on top of all React DOM, so when a
@@ -6538,13 +6343,12 @@ function App() {
   // health now resolves AFTER the reveal, so without this the modal would
   // flash on every launch in the beat before the answer arrives.
   const setupModalActive =
+    frontDoorBackend.backend === "claude-code" &&
     integrationReady &&
     !!hookStatus &&
     !!skillStatus &&
     (!hookStatus.installed ||
       !skillStatus.installed ||
-      (codexHookStatus?.available &&
-        (!codexHookStatus.installed || !codexSkillStatus?.installed)) ||
       setupPhase === "done");
   // First-run auto-start waits for the doors to finish — the tour's spotlight
   // is measured against plate geometry, and a coachmark pinned to a plate
@@ -6787,6 +6591,8 @@ function App() {
         // `--add-dir` grants have no read-only Codex analogue), so it is NOT
         // a codex launch however the picker is set.
         targetIsCodex: backend === "codex" && !isExtension,
+        targetBackend: isExtension ? "claude-code" : backend,
+        targetModel: backendChoiceRef.current.model,
         codexHookInstalled: codexHookStatus?.installed,
       };
     },
@@ -7206,18 +7012,21 @@ function App() {
           reprobe();
           return true;
         case "install-integration": {
-          const ok = await installIntegration(false);
+          const ok = await installIntegration(false, item.fix.backend);
           reprobe();
           return ok;
         }
         case "locate-claude":
-        case "locate-codex": {
+        case "locate-codex":
+        case "locate-provider": {
           // The dialog plugin is already in the boot chunk (ProjectPicker),
           // so this import costs nothing beyond the await.
           const { open } = await import("@tauri-apps/plugin-dialog");
-          const picked = await open({ directory: false, multiple: false });
+          const picked = item.fix.path ?? await open({ directory: false, multiple: false });
           if (typeof picked !== "string") return false;
-          await invoke(
+          if (item.fix.kind === "locate-provider") {
+            await invoke("set_provider_bin_override", { backend: item.fix.backend, path: picked });
+          } else await invoke(
             item.fix.kind === "locate-codex"
               ? "set_codex_bin_override"
               : "set_claude_bin_override",
@@ -8384,6 +8193,8 @@ function App() {
                 active={serversOpen}
                 onRefresh={devServers.refresh}
                 onStop={devServers.stopServer}
+                onPlanStop={devServers.planStop}
+                projectOptions={projectOptions}
                 onRun={runDevServer}
                 onOpenUrl={openUrlInBrowser}
                 onThumbCaptured={persistDevServerThumb}
@@ -8409,6 +8220,9 @@ function App() {
                 <ErrorBoundary region="runs" fallback={surfaceFallback("runs")}>
                   <OrchestrationSurface
                     active={runsOpen}
+                    nativeRunId={nativeRunId}
+                    onOpenPlanBlock={(sessionId, blockId) => { setActiveId(sessionId); setRunPlanAnchor({ sessionId, blockId: blockId.replace(/^rl:/, "") }); selectSurface("document"); }}
+                    onReviewSession={(id) => { void openRunReview(id).catch((err) => setToast(`Could not open review: ${err}`)); }}
                     summaries={summaries}
                     activePlanSessionId={activeId}
                     onOpenRunReport={(sid) => {
@@ -8642,8 +8456,10 @@ function App() {
                 onDestinationChange={setFrontDoorDest}
                 backend={frontDoorBackend}
                 onBackendChange={setFrontDoorBackend}
-                codexModels={codexModels}
-                onNeedCodexModels={requestCodexModels}
+                modelCatalogs={modelCatalogs}
+                modelError={modelErrors[frontDoorBackend.backend]}
+                providerInfo={frontDoorBackend.backend === "claude-code" ? preflight?.claude : frontDoorBackend.backend === "codex" ? preflight?.codex ?? undefined : preflight?.providers?.[frontDoorBackend.backend]}
+                onNeedModels={() => requestModels(frontDoorBackend.backend, selectedModelIdentity)}
                 // Dismissing the flight pill retires the INDICATOR, nothing
                 // else: the plan keeps running in its tile and the composer —
                 // already blank, already usable — stays blank. No pay-back.
@@ -9418,6 +9234,8 @@ function App() {
                         [
                           ["claude-code", "Claude Code"],
                           ["codex", "Codex"],
+                          ["cursor", "Cursor"],
+                          ["antigravity", "Antigravity"],
                         ] as [RestoreHarness, string][]
                       ).map(([value, label]) => {
                         const on = restoreDecision.harness === value;
@@ -9909,18 +9727,6 @@ function App() {
           onCancel={() => setSendConfirm(null)}
         />
       )}
-      {orchestrateModal && (
-        <Suspense fallback={null}>
-        <OrchestrateLaunchModal
-          projectPath={session?.projectPath || null}
-          gitStatus={orchestrateModal.gitStatus}
-          availability={orchestrateModal.availability}
-          allowRules={orchestrateModal.allowRules}
-          onLaunch={(rules) => void launchOrchestrator(rules)}
-          onCancel={() => setOrchestrateModal(null)}
-        />
-        </Suspense>
-      )}
       {toast &&
         (typeof toast === "string" ? (
           <ApproveToast message={toast} />
@@ -10089,28 +9895,18 @@ function App() {
           <FeedbackModal onClose={() => setShowFeedback(false)} />
         </Suspense>
       )}
-      {hookStatus &&
-        skillStatus &&
-        (!hookStatus.installed ||
-          !skillStatus.installed ||
-          (codexHookStatus?.available &&
-            (!codexHookStatus.installed || !codexSkillStatus?.installed)) ||
-          setupPhase === "done") && (
+      {setupModalActive && hookStatus && skillStatus && (
           <Suspense fallback={null}>
           <HookSetupModal
             phase={
               !hookStatus.installed ||
-              !skillStatus.installed ||
-              (codexHookStatus?.available &&
-                (!codexHookStatus.installed || !codexSkillStatus?.installed))
+              !skillStatus.installed
                 ? "setup"
                 : "done"
             }
             hookStatus={hookStatus}
             skillStatus={skillStatus}
-            codexHookStatus={codexHookStatus}
-            codexSkillStatus={codexSkillStatus}
-            onInstall={installIntegration}
+            onInstall={() => { void installIntegration(true, "claude-code"); }}
             onDismiss={() => setSetupPhase("setup")}
             onShowHowItWorks={() => setHowItWorksOpen(true)}
             error={installError}

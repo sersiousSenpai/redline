@@ -686,6 +686,7 @@ fn capture_spec() -> CaptureHookSpec {
     use crate::restore_context as rc;
     CaptureHookSpec::new(CAPTURE_INGEST_URL)
         .with_header(CAPTURE_AGENT_HEADER, crate::claude_proc::ENV_AGENT_SEAT)
+        .with_header("X-Redline-Plan-Launch-Id", "REDLINE_PLAN_LAUNCH_ID")
         .with_header(rc::HEADER_TARGET, rc::ENV_TARGET)
         .with_header(rc::HEADER_PRIMED, rc::ENV_PRIMED)
         .with_header(rc::HEADER_RESCINDED, rc::ENV_RESCINDED)
@@ -766,6 +767,7 @@ mod tests {
             capture_command(),
             "resp=$(curl -s --max-time 1 -X POST -H 'Content-Type: application/json' \
              -H \"X-Redline-Agent: ${REDLINE_AGENT_SEAT:-}\" \
+             -H \"X-Redline-Plan-Launch-Id: ${REDLINE_PLAN_LAUNCH_ID:-}\" \
              -H \"X-Redline-Restore: ${REDLINE_RESTORE_TARGET:-}\" \
              -H \"X-Redline-Restore-Primed: ${REDLINE_RESTORE_PRIMED:-}\" \
              -H \"X-Redline-Restore-Rescinded: ${REDLINE_RESTORE_RESCINDED:-}\" \
@@ -1428,4 +1430,14 @@ mod tests {
         assert_eq!(eff.len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+
+/// Per-child settings ensure the claim veto exists even when the global plan
+/// hook was installed by an older build. A dead bridge fails closed for writes.
+pub fn runner_settings() -> Value {
+    json!({"hooks":{"PreToolUse":[{"matcher":"Edit|Write|NotebookEdit","hooks":[{
+        "type":"command", "timeout":20,
+        "command":r#"if [ -n "$REDLINE_RUN_ID" ] && [ -n "$REDLINE_RUN_NODE" ] && [ -n "$REDLINE_RUN_ATTEMPT" ]; then curl --fail --silent --show-error --max-time 15 -X POST -H 'Content-Type: application/json' -H "x-redline-run-id: $REDLINE_RUN_ID" -H "x-redline-run-node: $REDLINE_RUN_NODE" -H "x-redline-run-attempt: $REDLINE_RUN_ATTEMPT" --data-binary @- "${REDLINE_RUN_CLAIM_URL:-http://127.0.0.1:7676/v1/runs/claim}" || { printf '%s\n' 'Redline write ownership service is unavailable; retry after it returns.' >&2; exit 2; }; else printf '%s\n' 'Redline write ownership requires an active run attempt.' >&2; exit 2; fi"#
+    }]}]}})
 }

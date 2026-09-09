@@ -35,6 +35,11 @@ Unregistered routes fail closed: a route added to the router without a `ROUTE_TA
 | GET | `/assets/*path` | open | Shared build chunks for the async-share viewer page (folded into the app build) | path of the built asset under dist/assets | asset bytes with content type |
 | POST | `/v1/plan` | hook contract | Plan-hold ingest: the ExitPlanMode hook POSTs the plan and blocks until the review resolves | JSON hook payload {session_id, plan markdown, cwd, ...} | held; resolves to the review verdict (approve/deny reason) |
 | POST | `/v1/codex/stop` | hook contract | Codex Plan-mode Stop hook: extracts the proposed plan and holds until review resolves | JSON Codex Stop payload {session_id, turn_id, permission_mode, last_assistant_message, ...} | {} to finish the turn, or {decision:"block", reason} to request revision |
+| POST | `/v1/cursor/prompt` | hook contract | Cursor prompt capture using the shared memory ingest contract | prompt, conversation_id, workspace_roots | continue true |
+| POST | `/v1/cursor/response` | hook contract | Cache the complete Cursor response for its exact conversation and generation | conversation_id, generation_id, text | empty object |
+| POST | `/v1/cursor/stop` | hook contract | Hold the completed Cursor plan for review | conversation_id, generation_id, status | empty object or followup_message |
+| POST | `/v1/antigravity/stop` | hook contract | Hold a completed Antigravity plan from its confined transcript | conversationId, executionNum, transcriptPath, fullyIdle | decision allow or continue with reason |
+| POST | `/v1/runs/claim` | hook contract | Runner first-write ownership guard for a live task | run, node and attempt headers; tool_name, tool_input | PreToolUse allow or deny |
 | GET | `/v1/sessions/:session_id/plan` | open | Latest plan revision with block structure (agent-in-doc read) | session id in path | JSON {version, blocks:[{id, markdown}, ...]} |
 | POST | `/v1/sessions/:session_id/suggestions` | token: `plan.suggest` | Post a tracked edit suggestion against a plan block | JSON {block_id, op, markdown, ...} | JSON accepted suggestion (or staleness error) |
 | POST | `/v1/sessions/:session_id/comments` | token: `plan.comment` | Capture a [feedback] comment (voice agent and read-only agents) that rides the next Revise | JSON {body, block_id?, ...} | JSON created comment |

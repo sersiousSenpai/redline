@@ -1,0 +1,11 @@
+{
+  "artifactDirectoryPath": "/home/fixture/.gemini/antigravity-cli/brain/fixture-conversation",
+  "conversationId": "fixture-conversation",
+  "error": "",
+  "executionNum": 0,
+  "fullyIdle": true,
+  "modelName": "gemini-3.8-flash-low",
+  "terminationReason": "NO_TOOL_CALL",
+  "transcriptPath": "/home/fixture/.gemini/antigravity-cli/brain/fixture-conversation/.system_generated/logs/transcript_full.jsonl",
+  "workspacePaths": []
+}

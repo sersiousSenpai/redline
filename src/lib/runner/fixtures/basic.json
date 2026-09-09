@@ -1,0 +1,13 @@
+{
+  "runId": "run-fixture", "planSessionId": "plan-fixture", "projectPath": "/tmp/scratch",
+  "status": "draft", "rev": 0, "maxWriteParallel": 3, "createdAt": 0, "updatedAt": 0,
+  "nodes": [
+    {"id": "n-api", "kind": "task", "title": "Implement API", "brief": "Implement the API", "scopeHint": ["api/**"], "planBlockId": "blk-api"},
+    {"id": "n-ui", "kind": "task", "title": "Implement UI", "brief": "Implement the UI", "scopeHint": ["ui/**"], "planBlockId": "blk-ui"},
+    {"id": "n-check", "kind": "check", "title": "Verify integration", "brief": "Run the full suite", "verifyCmd": "npm test", "checkGlobal": true}
+  ],
+  "edges": [
+    {"id": "e-api-check", "from": "n-api", "to": "n-check", "type": "blocks"},
+    {"id": "e-ui-check", "from": "n-ui", "to": "n-check", "type": "blocks"}
+  ]
+}

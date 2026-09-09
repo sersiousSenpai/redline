@@ -14,9 +14,31 @@
 // live Codex catalog is fetched by the caller and passed in, so every rule in
 // this file is testable without a binary.
 
-import { EFFORT_OPTIONS, MODEL_OPTIONS } from "./seatAssign";
+import { EFFORT_OPTIONS } from "./seatAssign";
 
-export type Backend = "claude-code" | "codex";
+export type Backend = "claude-code" | "codex" | "cursor" | "antigravity";
+
+/** Planning providers are distinct from the model running inside their CLI. */
+export interface PlanBackend {
+  id: Backend;
+  label: string;
+  binary: string;
+  preview?: boolean;
+  effort: "global" | "model" | "none";
+  discussion: "fork" | "sidecar" | "claude-sidecar";
+}
+
+export const PLAN_BACKENDS: Record<Backend, PlanBackend> = {
+  "claude-code": { id: "claude-code", label: "Claude", binary: "claude", effort: "global", discussion: "fork" },
+  codex: { id: "codex", label: "Codex", binary: "codex", effort: "model", discussion: "fork" },
+  cursor: { id: "cursor", label: "Cursor", binary: "agent", effort: "none", discussion: "claude-sidecar" },
+  antigravity: { id: "antigravity", label: "Antigravity", binary: "agy", preview: true, effort: "model", discussion: "claude-sidecar" },
+};
+
+export function parseBackend(value: unknown): Backend {
+  const name = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return Object.prototype.hasOwnProperty.call(PLAN_BACKENDS, name) ? name as Backend : "claude-code";
+}
 
 export interface BackendChoice {
   backend: Backend;
@@ -39,10 +61,16 @@ export interface CodexModel {
   efforts: string[];
 }
 
-export const BACKENDS: { id: Backend; label: string }[] = [
-  { id: "claude-code", label: "Claude" },
-  { id: "codex", label: "Codex" },
-];
+export type ProviderModel = CodexModel;
+export type ModelCatalogs = Partial<Record<Backend, readonly ProviderModel[]>>;
+/** Array input retained for callers predating provider-keyed catalogs. */
+type CatalogInput = ModelCatalogs | readonly CodexModel[];
+function catalogFor(backend: Backend, input: CatalogInput): readonly ProviderModel[] {
+  if (Array.isArray(input)) return backend === "codex" ? input : [];
+  return (input as ModelCatalogs)[backend] ?? [];
+}
+
+export const BACKENDS = Object.values(PLAN_BACKENDS);
 
 export function backendLabel(backend: Backend): string {
   return BACKENDS.find((b) => b.id === backend)?.label ?? "Claude";
@@ -58,7 +86,7 @@ export function agentLabelFor(backend: string | null | undefined): string {
   // side, which is what actually picks the binary. If the two disagreed, a
   // thread could run on Codex while every label in it said Claude.
   const stored = (backend ?? "").trim().toLowerCase();
-  return backendLabel(stored === "codex" ? "codex" : "claude-code");
+  return backendLabel(parseBackend(stored));
 }
 
 /** What the door starts on and falls back to: today's behaviour exactly —
@@ -74,12 +102,13 @@ export function defaultChoice(): BackendChoice {
  *  hardcoded list that quietly goes stale. */
 export function modelsFor(
   backend: Backend,
-  codexModels: readonly CodexModel[],
+  codexModels: CatalogInput,
 ): { value: string; label: string; hint?: string }[] {
-  if (backend === "claude-code") {
-    return MODEL_OPTIONS.map((m) => ({ value: m, label: m }));
+  const catalog = catalogFor(backend, codexModels);
+  if (backend === "claude-code" && catalog.length === 0) {
+    return ["opus", "sonnet", "haiku"].map((m) => ({ value: m, label: m }));
   }
-  return codexModels.map((m) => ({
+  return catalog.map((m) => ({
     value: m.slug,
     label: m.displayName,
     hint: m.description,
@@ -91,11 +120,12 @@ export function modelsFor(
 export function effortsFor(
   backend: Backend,
   model: string | null,
-  codexModels: readonly CodexModel[],
+  codexModels: CatalogInput,
 ): string[] {
+  if (PLAN_BACKENDS[backend].effort === "none") return [];
   if (backend === "claude-code") return [...EFFORT_OPTIONS];
   if (!model) return [];
-  return codexModels.find((m) => m.slug === model)?.efforts ?? [];
+  return catalogFor(backend, codexModels).find((m) => m.slug === model)?.efforts ?? [];
 }
 
 /** Fold a choice back onto what the backend can actually accept.
@@ -107,16 +137,15 @@ export function effortsFor(
  *  Codex slug, and vice versa. */
 export function normalizeChoice(
   choice: BackendChoice,
-  codexModels: readonly CodexModel[],
+  codexModels: CatalogInput,
 ): BackendChoice {
-  const backend: Backend =
-    choice.backend === "codex" ? "codex" : "claude-code";
+  const backend = parseBackend(choice.backend);
   // The one escape hatch: Codex's catalog is live, so an empty list means the
   // probe hasn't answered yet (or failed) — not that nothing is valid. Silently
   // clearing the user's stored pick on every cold boot would make the sticky
   // preference un-sticky exactly when they'd notice. Claude's lists are static,
   // so they always validate.
-  const catalogUnknown = backend === "codex" && codexModels.length === 0;
+  const catalogUnknown = (backend !== "claude-code" || !Array.isArray(codexModels)) && catalogFor(backend, codexModels).length === 0;
   const models = modelsFor(backend, codexModels);
   const model =
     choice.model && (catalogUnknown || models.some((m) => m.value === choice.model))
@@ -124,7 +153,7 @@ export function normalizeChoice(
       : null;
   const efforts = effortsFor(backend, model, codexModels);
   const effort =
-    choice.effort && (catalogUnknown || efforts.includes(choice.effort))
+    PLAN_BACKENDS[backend].effort !== "none" && choice.effort && (catalogUnknown || efforts.includes(choice.effort))
       ? choice.effort
       : null;
   return { backend, model, effort };
@@ -138,7 +167,7 @@ export function parseChoice(raw: unknown): BackendChoice {
   const str = (x: unknown) =>
     typeof x === "string" && x.trim() ? x.trim() : null;
   return {
-    backend: v.backend === "codex" ? "codex" : "claude-code",
+    backend: parseBackend(v.backend),
     model: str(v.model),
     effort: str(v.effort),
   };
@@ -149,15 +178,12 @@ export function parseChoice(raw: unknown): BackendChoice {
  *  picker does, falling back to the slug when the catalog hasn't loaded. */
 export function choiceLabel(
   choice: BackendChoice,
-  codexModels: readonly CodexModel[],
+  codexModels: CatalogInput,
 ): string {
   const parts = [backendLabel(choice.backend)];
   if (choice.model) {
     const display =
-      choice.backend === "codex"
-        ? (codexModels.find((m) => m.slug === choice.model)?.displayName ??
-          choice.model)
-        : choice.model;
+      catalogFor(choice.backend, codexModels).find((m) => m.slug === choice.model)?.displayName ?? choice.model;
     parts.push(display);
   }
   if (choice.effort) parts.push(choice.effort);

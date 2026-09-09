@@ -119,11 +119,12 @@ describe("one launch pipeline", () => {
     }
   });
 
-  it("the Codex readiness gate covers BOTH restore paths", () => {
+  it("fresh provider readiness gates BOTH restore paths", () => {
     // Two guards, one per path. A gate on only the embedded terminal is worse
     // than none: "Copy resume command" then becomes the way to route around it,
     // and it fails in a shell where nothing is watching for the answer.
-    expect(countIn("src", "refuseBlockedRestore()")).toBe(2);
+    expect(countIn("src", "await checkRestoreHealth()")).toBe(2);
+    expect(app).toContain("integrationHealth.refresh({ backend: restoreDecision.harness");
   });
 
   it("restore preparation always names the harness", () => {

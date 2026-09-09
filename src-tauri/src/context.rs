@@ -345,9 +345,11 @@ pub struct SessionHistory {
 }
 
 /// Build a session's history, or `None` if the session id is unknown.
-pub fn build_session_history(db: &Database, session_id: &str) -> Option<SessionHistory> {
+pub fn build_session_history(db: &Database, session_id: &str) -> rusqlite::Result<Option<SessionHistory>> {
     // ONE session, not the whole review history reparsed to keep one entry.
-    let session = &db.load_session(session_id).ok()??;
+    let Some(session) = db.load_session(session_id)? else {
+        return Ok(None);
+    };
 
     let revisions: Vec<RevisionDigest> = session
         .revisions
@@ -385,8 +387,7 @@ pub fn build_session_history(db: &Database, session_id: &str) -> Option<SessionH
         .collect();
 
     let decision_events: Vec<LedgerEventRow> = db
-        .list_session_events(session_id)
-        .unwrap_or_default()
+        .list_session_events(session_id)?
         .into_iter()
         .filter(|e| e.kind != "prompt" && e.kind != "revision")
         .collect();
@@ -398,7 +399,7 @@ pub fn build_session_history(db: &Database, session_id: &str) -> Option<SessionH
     }
     .to_string();
 
-    Some(SessionHistory {
+    Ok(Some(SessionHistory {
         session_id: session.session_id.clone(),
         project: session.project_name.clone(),
         status,
@@ -406,7 +407,7 @@ pub fn build_session_history(db: &Database, session_id: &str) -> Option<SessionH
         revisions,
         comments,
         decision_events,
-    })
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -500,6 +501,22 @@ pub fn render_digest_prompt_block(d: &FrictionDigest) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_history_read_failure_is_distinct_from_unknown_id() {
+        let path = std::env::temp_dir().join(format!(
+            "redline-history-api-error-{}.db", uuid::Uuid::new_v4()
+        ));
+        let db = Database::open(&path).unwrap();
+        assert!(build_session_history(&db, "unknown").unwrap().is_none());
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute("ALTER TABLE sessions RENAME COLUMN effort TO unavailable_effort", []).unwrap();
+        let error = build_session_history(&db, "unknown").unwrap_err();
+        assert!(error.to_string().contains("effort"));
+        drop(conn);
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn empty_db_yields_a_valid_bounded_digest() {
@@ -1296,6 +1313,7 @@ mod tests {
             run_state: None,
             backend: None,
             model: None,
+            effort: None,
         };
         db.upsert_session(&mk("approved-unexported", SessionStatus::Approved)).unwrap();
         db.upsert_session(&mk("approved-exported", SessionStatus::Approved)).unwrap();
@@ -1328,6 +1346,7 @@ mod tests {
             run_state: None,
             backend: None,
             model: None,
+            effort: None,
         })
         .unwrap();
         // A revision row (what `load_all` reads) + its ledger event.
@@ -1359,13 +1378,13 @@ mod tests {
         )
         .unwrap();
 
-        let h = build_session_history(&db, sid).expect("history for a known session");
+        let h = build_session_history(&db, sid).unwrap().expect("history for a known session");
         assert_eq!(h.session_id, sid);
         assert_eq!(h.revisions.len(), 1);
         assert_eq!(h.revisions[0].title.as_deref(), Some("Plan"));
         // The approval shows up as a decision event; the revision event does not.
         assert_eq!(h.decision_events.len(), 1);
         assert_eq!(h.decision_events[0].kind, "approval");
-        assert!(build_session_history(&db, "no-such-session").is_none());
+        assert!(build_session_history(&db, "no-such-session").unwrap().is_none());
     }
 }

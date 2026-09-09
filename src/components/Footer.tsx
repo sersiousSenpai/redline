@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import type { Comment } from "../types";
+import { agentLabelFor } from "../lib/backendChoice";
 import { Button } from "./ui/Button";
 
 interface FooterProps {
@@ -9,10 +10,10 @@ interface FooterProps {
   sessionReady: boolean;
   canSubmit: boolean;
   canApprove: boolean;
-  /** Same gating as canApprove — Orchestrate is approve + multi-agent execute. */
+  /** Same gating as canApprove — Orchestrate prepares a graph for review. */
   canOrchestrate: boolean;
   waiting: boolean;
-  /** The in-flight submit was an Ask batch — Claude is answering, not revising. */
+  /** The in-flight submit was an Ask batch — the author is answering. */
   waitingAsk: boolean;
   onSubmit: () => void;
   onApprove: () => void;
@@ -22,9 +23,7 @@ interface FooterProps {
   termTabCount: number;
   termHasUnseen: boolean;
   onExpandTerminal: () => void;
-  /** Which harness holds this plan ("claude-code" | "codex"; absent reads as
-   *  claude-code). Two buttons say a vendor's name out loud, and saying the
-   *  wrong one is worse than saying none. */
+  /** Which provider authored this plan; absent reads as Claude. */
   backend?: string | null;
 }
 
@@ -45,14 +44,14 @@ export function Footer({
   onExpandTerminal,
   backend,
 }: FooterProps) {
-  const onCodex = backend === "codex";
+  const author = agentLabelFor(backend);
   const pending = comments.filter(
     (c) => c.status === "draft" || c.status === "reopened",
   );
   const counts = countByType(pending);
   const total = pending.length;
   // "All resolutions handled" surfaces once the reviewer has dispatched every
-  // Claude resolution in the current revision: nothing pending, nothing still
+  // author resolution in the current revision: nothing pending, nothing still
   // sitting at resolved (i.e. awaiting accept/reopen), and at least one comment
   // has reached a terminal state. The line is a nudge, not a state machine —
   // the buttons below already drive everything.
@@ -75,16 +74,15 @@ export function Footer({
     total > 0 && pending.every((c) => c.type === "question" && !c.actionable);
   const submitCaption = askMode ? "asks questions only" : "requests a revision";
   const waitingCopy = waitingAsk
-    ? "Claude is working — answering in the terminal…"
-    : "Claude is working — revising in the terminal…";
+    ? `${author} is working — answering in the terminal…`
+    : `${author} is working — revising in the terminal…`;
 
   // No session open and nothing in flight — the app is waiting for a plan.
-  // Surface the one piece of workflow knowledge a new user lacks: Redline
-  // begins when Claude Code is in plan mode.
+  // The selected provider's plan opens the review surface.
   const idle = !sessionReady && !waiting;
 
   // Semantic status dot for the footer: amber while you have pending work,
-  // info-blue while Claude is in-flight, success-green when the tray is clear,
+  // info-blue while the author is in-flight, success-green when the tray is clear,
   // muted while idle.
   const dotColor = waiting
     ? "var(--color-info)"
@@ -130,7 +128,7 @@ export function Footer({
           </button>
         ) : idle ? (
           <span>
-            Waiting for a plan — work in plan mode (shift+tab) in Claude Code
+            Waiting for a plan — start a planning session from the front door
           </span>
         ) : allResolutionsHandled ? (
           <span style={{ color: "var(--color-success)" }}>
@@ -195,11 +193,11 @@ export function Footer({
           disabled={!canSubmit || waiting}
           className="font-medium"
         >
-          {/* One constant verb naming the destination — the real Claude Code
+          {/* One constant verb naming the destination — the original author
               session, never the per-comment Discuss fork. The caption carries
               the mode so the label can't be mistaken for the sidecar. */}
           <span className="flex flex-col items-center leading-tight">
-            <span>{onCodex ? "Send to Codex" : "Send to Claude Code"}</span>
+            <span>Send to {author}</span>
             {total > 0 && (
               <span
                 style={{
@@ -213,26 +211,14 @@ export function Footer({
             )}
           </span>
         </Button>
-        {/* Visually subordinate sibling to Approve: same gating, but the plan
-            is executed by a fresh orchestrated session (the original session
-            is stood down read-only), so the label carries the mechanism.
-
-            Execution is Claude-only, deliberately — the orchestrate launch
-            depends on `--permission-mode acceptEdits`, the orchestrator seat's
-            `--model` and the multi-agent Workflow opt-in, none of which have a
-            Codex analogue. So a Codex-authored plan is BUILT by Claude. That is
-            a real seam, and the caption names it rather than leaving it to be
-            discovered mid-run. */}
+        {/* Decomposition produces an editable graph; execution starts only
+            after the reviewer starts or approves that graph for the queue. */}
         <Button
           size="sm"
           onClick={onOrchestrate}
           disabled={!canOrchestrate || waiting}
           className="font-medium"
-          title={
-            onCodex
-              ? "Approve the plan and execute it as a multi-agent workflow in a new Claude Code terminal — Codex plans, Claude builds"
-              : "Approve the plan and execute it as a multi-agent workflow in a new terminal"
-          }
+          title="Approve the plan and prepare an editable run graph. Review its agents, scope, and checks before starting execution."
         >
           <span className="flex flex-col items-center leading-tight">
             <span>Orchestrate</span>
@@ -243,9 +229,7 @@ export function Footer({
                 color: "var(--color-ink-muted)",
               }}
             >
-              {onCodex
-                ? "approve + execute on Claude"
-                : "approve + multi-agent execute"}
+              approve + review run graph
             </span>
           </span>
         </Button>

@@ -172,6 +172,13 @@ struct CompanionQueueAdvanced {
 struct CompanionStatus {
     companion_id: String,
     label: String,
+    at: i64,
+}
+
+fn emit_companion_status(app: &AppHandle, companion_id: &str, label: &str) {
+    let _ = app.emit("companion-status", CompanionStatus {
+        companion_id: companion_id.to_string(), label: label.to_string(), at: now_millis(),
+    });
 }
 
 /// The completed reply WAS the brief — this chat is graduating into a plan
@@ -312,6 +319,32 @@ pub fn render_journal_delta(rows: &[JournalRow], max_bytes: usize) -> String {
 }
 
 // --- Prompt builders -----------------------------------------------------------
+
+/// Counts come directly from one database read, independently of the hydrated
+/// sidebar store. Empty live state must never be presented as deleted history.
+fn plan_history_grounding(counts: Result<(i64, i64, i64), String>, loaded: usize) -> String {
+    let mut text = String::from("PLAN HISTORY SNAPSHOT — read directly by Redline at this turn's start, not inferred from a search or agent registry:\n");
+    match counts {
+        Ok((sessions, revisions, comments)) => {
+            text.push_str(&format!("Persisted database: {sessions} plan sessions, {revisions} revisions, {comments} comments. Loaded session list: {loaded} sessions.\n"));
+            if sessions > 0 && loaded == 0 {
+                text.push_str("Stored plans exist, but none are loaded into the session list. This establishes a loading/state mismatch, not deletion. The counts alone do not identify the exact loading error.\n");
+            } else if sessions == loaded as i64 {
+                text.push_str("Persisted and loaded session counts currently agree. If the user sees an empty sidebar despite a nonzero count, investigate its filters or presentation; do not claim the database is empty.\n");
+            } else {
+                text.push_str("Persisted and loaded counts differ. Distinguish these two sources and investigate the loading/filter state before concluding any history is missing.\n");
+            }
+        }
+        Err(error) => {
+            let error: String = error.chars().take(300).collect();
+            text.push_str(&format!("Database history count failed: {error}. Persisted counts are UNKNOWN, not zero. Loaded session list: {loaded} sessions.\n"));
+        }
+    }
+    text.push_str("Use this snapshot first for missing-history questions. /v1/global/agents plans reflects the in-memory session list; an empty list does not establish that persisted history is empty. /v1/sessions is not a supported history-list route; do not probe variations. You do not need sqlite3 or a shell approval to establish these counts.\n");
+    text
+}
+
+const CHAT_INVESTIGATION_POLICY: &str = "\nINVESTIGATION PACE — answer as soon as the available evidence resolves the user's question. For work needing several tool calls, give a short public progress update before investigating and another when the diagnosis changes or a useful step completes. State the operation and finding, never private reasoning. Start with supplied ground truth and one relevant supported route. Do not repeat empty, unsupported, or permission-denied queries without a concrete new reason. A tool denial is not a diagnosis; use another supported read or state the remaining uncertainty. Avoid a broad source-code investigation for a simple app-state question unless the supplied facts are insufficient or the user asks for that depth. Preserve the work needed to answer correctly.\n\n";
 
 /// The cross-surface map + consult + staged-write contract. `pub(crate)`
 /// because the voice agent embeds this verbatim too (the Companion's scope
@@ -536,6 +569,7 @@ pub fn build_first_turn_prompt(
          Follow your `companion` skill if you have it.\n\n",
     );
     p.push_str(routes_block());
+    p.push_str(CHAT_INVESTIGATION_POLICY);
     p.push_str(
         "\nPREFETCHED EVIDENCE — a turn may arrive with a `PREFETCHED EVIDENCE` \
          block below, assembled server-side from the user's message before you \
@@ -611,6 +645,7 @@ pub fn build_followup_prompt(
     user_text: &str,
 ) -> String {
     let mut p = format!("The user is now on {}.\n\n", surface_line(surface, self_id));
+    p.push_str(CHAT_INVESTIGATION_POLICY);
     if !journal_delta.trim().is_empty() {
         p.push_str(journal_delta.trim());
         p.push_str("\n\n");
@@ -896,6 +931,7 @@ fn start_companion_turn(
 ) -> turn::BoxStartFuture {
     Box::pin(async move {
         let QueuedCompanionSend { text, cwd, handoff } = payload;
+        emit_companion_status(&app, &companion_id, "Preparing chat context");
         // Read through the app handle rather than as command arguments: the
         // drain path has no `tauri::State` of its own, and both cells are
         // exactly the kind of "where are they NOW" fact that must not be
@@ -934,6 +970,11 @@ fn start_companion_turn(
             .list_journal_since(since, JOURNAL_DELTA_MAX_ROWS)
             .unwrap_or_default();
         let journal_delta = render_journal_delta(&journal_rows, JOURNAL_DELTA_MAX_BYTES);
+        let loaded_sessions = app.state::<crate::state::SessionStore>().list().len();
+        let history_ground = plan_history_grounding(
+            companion.db.plan_history_counts().map_err(|e| e.to_string()), loaded_sessions,
+        );
+        let journal_delta = format!("{journal_delta}\n\n{history_ground}");
         let head = journal_rows.last().map(|r| r.id);
 
         // SERVER-SIDE PREFETCH, first turn only. "The full context of all my
@@ -979,13 +1020,7 @@ fn start_companion_turn(
         // `phase: "streaming"` synchronously before `invoke` resolves, so the
         // room's clearing effect has already run by now.
         if let Some((_, label)) = &prefetch {
-            let _ = app.emit(
-                "companion-status",
-                CompanionStatus {
-                    companion_id: companion_id.clone(),
-                    label: label.clone(),
-                },
-            );
+            emit_companion_status(&app, &companion_id, label);
         }
         let prefetch_block = prefetch.and_then(|(b, _)| b);
 
@@ -1061,6 +1096,7 @@ fn start_companion_turn(
             .or_else(|| std::env::var("HOME").ok())
             .unwrap_or_else(|| "/".to_string());
 
+        emit_companion_status(&app, &companion_id, "Starting the selected model");
         let claude_bin = companion.claude_bin().await?;
         let mut cmd = crate::claude_proc::claude_command_for_seat("companion", &claude_bin);
         let mut child = cmd
@@ -1093,6 +1129,7 @@ fn start_companion_turn(
             let _ = app.emit("companion-cancelled", CompanionCancelled { companion_id });
             return Ok(());
         }
+        emit_companion_status(&app, &companion_id, "Waiting for the model");
         // Arm the handoff AFTER the spawn succeeded (a failed spawn must not
         // strand a stale flag); a plain turn clears any leftover just in case.
         {
@@ -1216,13 +1253,7 @@ async fn read_companion(
         // rides an `assistant` line, which `classify_line` (rightly) ignores —
         // it carries no answer text.
         for (name, input) in crate::claude_proc::tool_uses(&v) {
-            let _ = app.emit(
-                "companion-status",
-                CompanionStatus {
-                    companion_id: companion_id.clone(),
-                    label: crate::claude_proc::retrieval_status_label(&name, &input),
-                },
-            );
+            emit_companion_status(&app, &companion_id, &crate::claude_proc::retrieval_status_label(&name, &input));
         }
         match classify_line(&v) {
             StreamLine::Init(sid) => session = Some(sid),
@@ -2041,6 +2072,37 @@ mod tests {
         assert!(!plain.contains("THEIR CATALOG"));
         assert!(!plain.contains("CONVERSATION SO FAR"));
         assert!(!plain.contains("- searched: beta"));
+    }
+
+    #[test]
+    fn history_grounding_distinguishes_persisted_plans_from_an_empty_sidebar() {
+        let text = plan_history_grounding(Ok((245, 610, 903)), 0);
+        assert!(text.contains("245 plan sessions"));
+        assert!(text.contains("610 revisions"));
+        assert!(text.contains("Loaded session list: 0"));
+        assert!(text.contains("loading/state mismatch, not deletion"));
+        assert!(text.contains("not a supported history-list route"));
+        assert!(text.contains("do not need sqlite3"));
+        let error = plan_history_grounding(Err("no such column: effort".into()), 0);
+        assert!(error.contains("UNKNOWN, not zero"));
+        assert!(error.contains("no such column: effort"));
+        assert!(!error.contains("Persisted database: 0"));
+        assert!(plan_history_grounding(Ok((245, 610, 903)), 245).contains("counts currently agree"));
+    }
+
+    #[test]
+    fn chat_pacing_preserves_required_work_and_does_not_change_the_selected_model() {
+        assert!(CHAT_INVESTIGATION_POLICY.contains("answer as soon as"));
+        assert!(CHAT_INVESTIGATION_POLICY.contains("short public progress update"));
+        assert!(CHAT_INVESTIGATION_POLICY.contains("never private reasoning"));
+        assert!(CHAT_INVESTIGATION_POLICY.contains("Do not repeat empty, unsupported, or permission-denied queries"));
+        assert!(CHAT_INVESTIGATION_POLICY.contains("Preserve the work needed"));
+        let followup = build_followup_prompt(&surface("chat", None, None), SELF_ID, "", "Why is history empty?");
+        assert!(followup.contains(CHAT_INVESTIGATION_POLICY));
+        // The policy is prompt framing only; model/effort argv stay on the
+        // existing per-chat seat override path tested below.
+        assert!(!CHAT_INVESTIGATION_POLICY.contains("--model"));
+        assert!(!CHAT_INVESTIGATION_POLICY.contains("--max-turns"));
     }
 
     /// Two first turns with different VARIABLE inputs (surface, journal

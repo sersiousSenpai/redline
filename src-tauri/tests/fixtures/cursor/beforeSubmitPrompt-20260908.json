@@ -1,0 +1,13 @@
+{
+  "conversation_id": "fixture-conversation",
+  "generation_id": "generation-0",
+  "model": "gpt-5.6-luna-high",
+  "prompt": "Respond with exactly <proposed_plan>\n# Compatibility plan\nKeep this plan unchanged.\n</proposed_plan>. Do not use tools or edit files.",
+  "attachments": [],
+  "session_id": "fixture-conversation",
+  "hook_event_name": "beforeSubmitPrompt",
+  "cursor_version": "2026.09.08-6caf4ff",
+  "workspace_roots": [
+    "/fixture/project"
+  ]
+}

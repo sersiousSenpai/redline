@@ -217,6 +217,7 @@ export interface UpdateCommentRequest {
 export type AttachState = "idle" | "held" | "detached";
 
 export interface ReviewSession {
+  effort?: string | null;
   sessionId: SessionId;
   projectPath: string;
   projectName: string;
@@ -282,6 +283,7 @@ export interface SessionSummary {
   backend?: string | null;
   /** The model behind the latest revision, when known. */
   model?: string | null;
+  effort?: string | null;
 }
 
 /** Mirrors Rust's `db::PlanRunRow` — one orchestrated run's durable record:

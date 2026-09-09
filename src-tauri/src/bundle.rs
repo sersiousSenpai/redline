@@ -60,6 +60,7 @@ mod tests {
             run_state: None,
             backend: None,
             model: None,
+            effort: None,
         })
         .unwrap();
         crate::ledger::record_prompt(

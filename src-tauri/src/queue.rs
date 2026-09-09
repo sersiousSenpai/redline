@@ -1,13 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-//! P0 — the overnight queue. Launches approved-but-unrun plans while the user
-//! sleeps: serial WITHIN a repo, parallel ACROSS repos, no worktrees, no merge
-//! branches, no reconciler. Each queued run is instructed (via the orchestrate
-//! skill plus a queued-mode addendum) to end COMMITTED to its own branch
-//! `redline/run/<plan8>` and to PARK its review through the deferred mode of
-//! `/v1/reviews/start` (`defer=1`) — the human resolves it in the morning
-//! through the existing review pane. Nothing about human authority changes,
-//! only when the human is asked.
+//! The overnight queue. Launches reviewed native run graphs while the user
+//! sleeps: serial within a repository and parallel across repositories. The
+//! same RunnerState owns every child, check, gate and retry. New runs leave
+//! changes uncommitted and park their measured diff in the existing review
+//! surface. A dirty tree stops that repository's dequeue loop until reviewed.
 //!
 //! Explicit opt-in only: never at boot — the queue starts on an explicit
 //! `queue_start` or the keeper's ready-depth nudge, and only ever over the
@@ -193,8 +190,7 @@ pub(crate) fn carry_forward_parked(
 ) -> Vec<QueueEntry> {
     prev.iter()
         .filter(|e| {
-            e.state == "parked"
-                && run_state_of(&e.session_id).as_deref() == Some("awaiting_review")
+            e.state == "parked" && run_state_of(&e.session_id).as_deref() == Some("awaiting_review")
         })
         .cloned()
         .collect()
@@ -214,8 +210,7 @@ pub(crate) fn build_entries(
     ready
         .into_iter()
         .filter(|(sid, project_path, _)| {
-            allowed.contains(&canon(project_path))
-                && !carried.iter().any(|c| c.session_id == *sid)
+            allowed.contains(&canon(project_path)) && !carried.iter().any(|c| c.session_id == *sid)
         })
         .map(|(sid, project_path, _)| QueueEntry {
             branch: run_branch(&sid),
@@ -449,11 +444,7 @@ fn set_stopped_reason(db: &Database, reason: &str) {
 /// on the DELTA from the queue-start baseline, so absolute history is fine.
 fn grand_total_tokens(db: &Database) -> i64 {
     db.seat_burn_totals_by_seat()
-        .map(|rows| {
-            rows.iter()
-                .map(|r| r.input_tokens + r.output_tokens)
-                .sum()
-        })
+        .map(|rows| rows.iter().map(|r| r.input_tokens + r.output_tokens).sum())
         .unwrap_or(0)
 }
 
@@ -595,14 +586,8 @@ pub fn queue_start(
     };
 
     // The ready plan queue IS this query: approved AND never run.
-    let ready = db
-        .list_queue_ready_sessions()
-        .map_err(|e| e.to_string())?;
-    let allowed: Vec<String> = cfg
-        .repos
-        .iter()
-        .map(|r| canon(r))
-        .collect();
+    let ready = db.list_queue_ready_sessions().map_err(|e| e.to_string())?;
+    let allowed: Vec<String> = cfg.repos.iter().map(|r| canon(r)).collect();
     let mut entries = build_entries(ready, &allowed, &carried);
     if entries.is_empty() {
         // Early return WITHOUT saving: the previous night's state — parked
@@ -655,13 +640,10 @@ pub fn queue_start(
             let _ = h.await;
         }
         running.store(false, Ordering::SeqCst);
-        let _ = store_done.database().append_journal(
-            "queue_finished",
-            Some("queue"),
-            None,
-            None,
-            None,
-        );
+        let _ =
+            store_done
+                .database()
+                .append_journal("queue_finished", Some("queue"), None, None, None);
     });
     Ok(serde_json::json!({ "queued": queued }))
 }
@@ -758,141 +740,124 @@ async fn repo_worker(
             break;
         };
         drive_run(&app, &store, &entry).await;
+        // Native runs leave changes uncommitted for review. Do not mix the
+        // next plan into a parked/partial diff in the same working tree.
+        if matches!(tree_dirty(entry.work_dir()), Ok(true) | Err(_)) {
+            break;
+        }
     }
 }
 
-/// Launch one queued run through the one spawn chokepoint
-/// (`claude_command_for_seat`, orchestrator seat) and babysit it: stall kill,
-/// ceiling kill, and the parked/stalled classification at exit.
+/// Overnight execution uses the same durable native scheduler as Live. A
+/// reviewed `ready` graph is the authorization boundary; a legacy queue entry
+/// with no graph produces a draft for review, never a hidden agent workflow.
 async fn drive_run(app: &AppHandle, store: &SessionStore, entry: &QueueEntry) {
+    use tauri::Manager;
     let db = store.database();
     let sid = entry.session_id.as_str();
-    let prompt = queued_prompt(sid, &entry.branch);
-    // Arm the same two ledger guards as an interactive Orchestrate launch:
-    // the hook fire claims the prompt (not a lake prompt) and links the new
-    // claude session under the plan — which is also the `running` beacon and
-    // the run-watcher anchor.
-    let bh = crate::ledger::body_hash(&prompt);
-    crate::ledger::register_agent_prompt(&prompt);
-    crate::ledger::register_orchestration_prompt(&bh, sid);
-    crate::advance_run_state(app, store, sid, "orchestrating");
-
-    let claude_bin = match tokio::task::spawn_blocking(crate::claude_proc::resolve_claude_bin).await
-    {
-        Ok(b) => b,
-        Err(e) => {
-            finish_entry(&db, sid, "stalled", Some(&format!("claude resolve failed: {e}")));
-            crate::advance_run_state(app, store, sid, "stalled");
-            return;
-        }
-    };
-    let mut cmd = crate::claude_proc::claude_command_for_seat("orchestrator", &claude_bin);
-    let mut args: Vec<String> = vec![
-        "-p".to_string(),
-        prompt,
-        "--output-format".to_string(),
-        "stream-json".to_string(),
-        "--verbose".to_string(),
-        "--permission-mode".to_string(),
-        "acceptEdits".to_string(),
-        "--allowedTools".to_string(),
-        "Bash".to_string(),
-        "WebFetch".to_string(),
-        "WebSearch".to_string(),
-        "--strict-mcp-config".to_string(),
-    ];
-    args.extend(crate::seat::flag_args("orchestrator"));
-    let mut child = match cmd
-        .current_dir(entry.work_dir())
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            finish_entry(&db, sid, "stalled", Some(&format!("spawn failed: {e}")));
-            crate::advance_run_state(app, store, sid, "stalled");
-            return;
-        }
-    };
-    tracing::info!(session_id = %sid, repo = %entry.repo, "overnight queue: run launched");
-
-    // Drain the pipes off to the side (a full pipe would block the child);
-    // the outcome is read from durable state, not from stdout.
-    let burn_db = db.clone();
-    let drain = match (child.stdout.take(), child.stderr.take()) {
-        (Some(o), Some(e)) => Some(tokio::spawn(async move {
-            crate::claude_proc::collect_turn_seated(&burn_db, "orchestrator", o, e).await
-        })),
-        _ => None,
-    };
-
-    let started = std::time::Instant::now();
-    let mut killed: Option<String> = None;
-    loop {
-        // `Child::wait` is cancel-safe, so the poll-slice timeout loses
-        // nothing; between slices we run the stall/ceiling checks.
-        match tokio::time::timeout(QUEUE_POLL, child.wait()).await {
-            Ok(_) => break,
-            Err(_) => {
-                if killed.is_some() {
-                    continue; // kill already requested; wait for exit
+    let runner = app.state::<crate::runner::RunnerState>().inner().clone();
+    let graph = db
+        .runner_list()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|g| g.plan_session_id.as_deref() == Some(sid) && g.status == "ready");
+    let Some(graph) = graph else {
+        let existing = db.runner_list().unwrap_or_default().into_iter().find(|g| {
+            g.plan_session_id.as_deref() == Some(sid)
+                && matches!(g.status.as_str(), "draft" | "paused")
+        });
+        let note = if existing.is_some() {
+            "Review the native run graph in Live and approve it for the queue.".to_string()
+        } else if let Some(session) = store.get(sid) {
+            if let Some(revision) = session.revisions.last() {
+                match crate::runner::decompose_plan(
+                    db.clone(),
+                    sid,
+                    &session.project_path,
+                    &revision.raw_plan_markdown,
+                )
+                .await
+                {
+                    Ok(graph) => {
+                        use tauri::Emitter;
+                        let _ = app.emit("run-graph", &graph);
+                        "Draft run graph created. Review it in Live and approve it for the queue."
+                            .to_string()
+                    }
+                    Err(e) => format!("Could not prepare a native run graph: {e}"),
                 }
-                let rs = db.get_run_state(sid);
-                if queue_stall_should_kill(rs.as_deref(), started.elapsed()) {
-                    killed = Some(
-                        "stalled before the first beacon (no ingest claim) — killed, moving on"
-                            .to_string(),
-                    );
-                    let _ = child.start_kill();
-                } else if started.elapsed() >= QUEUE_RUN_CEILING {
-                    killed = Some("run exceeded the overnight ceiling — killed".to_string());
-                    let _ = child.start_kill();
-                }
+            } else {
+                "Plan has no revision.".into()
             }
+        } else {
+            "Plan session no longer exists.".into()
+        };
+        finish_entry(&db, sid, "stalled", Some(&note));
+        return;
+    };
+    if let Err(e) = runner.start(app.clone(), &graph.run_id, Some(graph.rev)) {
+        finish_entry(&db, sid, "stalled", Some(&e));
+        return;
+    }
+    crate::advance_run_state(app, store, sid, "running");
+    let started = std::time::Instant::now();
+    loop {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let current = match db.runner_get(&graph.run_id) {
+            Ok(g) => g,
+            Err(e) => {
+                finish_entry(&db, sid, "stalled", Some(&e));
+                return;
+            }
+        };
+        if current.status == "done" {
+            match crate::review::open_or_continue_review(
+                &db,
+                &current.project_path,
+                crate::review::DiffSource::Uncommitted,
+                None,
+                None,
+            ) {
+                Ok(review) => {
+                    note_parked(&db, sid, &review.review_id);
+                    finish_entry(&db, sid, "parked", None);
+                    crate::advance_run_state(app, store, sid, "awaiting_review");
+                }
+                Err(e) => finish_entry(
+                    &db,
+                    sid,
+                    "stalled",
+                    Some(&format!("Run completed; could not open its review: {e}")),
+                ),
+            }
+            break;
+        }
+        if matches!(current.status.as_str(), "paused" | "abandoned")
+            && !current
+                .nodes
+                .iter()
+                .any(|n| crate::runner_graph::live(&n.status))
+        {
+            finish_entry(
+                &db,
+                sid,
+                "stalled",
+                Some("Native run needs human attention in Live."),
+            );
+            crate::advance_run_state(app, store, sid, "stalled");
+            break;
+        }
+        if started.elapsed() > QUEUE_RUN_CEILING {
+            runner.stop_run(&graph.run_id);
+            finish_entry(
+                &db,
+                sid,
+                "stalled",
+                Some("Native run exceeded the overnight ceiling."),
+            );
+            break;
         }
     }
-    let turn = match drain {
-        Some(h) => h.await.ok(),
-        None => None,
-    };
-
-    // Truth at exit: the deferred park may have flipped the entry under us.
-    let parked = entry_state(&db, sid).as_deref() == Some("parked");
-    let rs = db.get_run_state(sid);
-    let outcome = run_outcome(parked, rs.as_deref());
-    if outcome == "parked" {
-        finish_entry(&db, sid, "parked", None);
-    } else {
-        // A turn's `errored` is a MACHINE string (`error_during_execution`);
-        // this note is read by a person in the Runs surface deciding whether
-        // to relaunch. Same classifier the discussion surfaces use, worded for
-        // a run. Anything unrecognised — including the generic fallback below
-        // and a kill reason — passes through untouched.
-        let note = crate::claude_proc::describe_run_error(
-            &killed
-                .or_else(|| turn.as_ref().and_then(|t| t.errored.clone()))
-                .unwrap_or_else(|| {
-                    format!(
-                        "exited without parking a review (run_state={})",
-                        rs.as_deref().unwrap_or("none")
-                    )
-                }),
-        );
-        finish_entry(&db, sid, "stalled", Some(&note));
-        crate::advance_run_state(app, store, sid, "stalled");
-    }
-    let _ = db.append_journal(
-        "queue_run",
-        Some("session"),
-        Some(sid),
-        Some(outcome),
-        None,
-    );
-    tracing::info!(session_id = %sid, outcome, "overnight queue: run ended");
 }
 
 /// Read-only clean-tree probe for the launch gate: `git status --porcelain`
@@ -972,7 +937,10 @@ mod tests {
     fn stall_frees_the_repos_next_entry() {
         // The failover: a stalled run is terminal — the scheduler moves to the
         // next entry in that repo instead of halting the night.
-        let mut entries = vec![entry("s1", "/r/a", "launched"), entry("s2", "/r/a", "queued")];
+        let mut entries = vec![
+            entry("s1", "/r/a", "launched"),
+            entry("s2", "/r/a", "queued"),
+        ];
         assert_eq!(next_launch_index(&entries, "/r/a"), None);
         entries[0].state = "stalled".to_string();
         assert_eq!(next_launch_index(&entries, "/r/a"), Some(1));
@@ -997,7 +965,12 @@ mod tests {
         // Past the window with no beacon ever: kill.
         assert!(queue_stall_should_kill(Some("orchestrating"), w));
         // Any beacon (running / review / terminal) retires the stall kill.
-        for s in [Some("running"), Some("awaiting_review"), Some("landed"), None] {
+        for s in [
+            Some("running"),
+            Some("awaiting_review"),
+            Some("landed"),
+            None,
+        ] {
             assert!(!queue_stall_should_kill(s, w * 2), "must not kill on {s:?}");
         }
     }
@@ -1008,7 +981,12 @@ mod tests {
         assert_eq!(run_outcome(true, None), "parked");
         assert_eq!(run_outcome(false, Some("awaiting_review")), "parked");
         // Exited without parking — whatever the chip says — is stalled.
-        for s in [None, Some("orchestrating"), Some("running"), Some("in_code_review")] {
+        for s in [
+            None,
+            Some("orchestrating"),
+            Some("running"),
+            Some("in_code_review"),
+        ] {
             assert_eq!(run_outcome(false, s), "stalled", "run_state {s:?}");
         }
     }
@@ -1034,7 +1012,12 @@ mod tests {
         // No opt-in → the queue still never starts itself.
         assert!(!nudge_should_start(false, 0, false, None));
         // A standing stop (user stop / cap crossed) is never overridden.
-        assert!(!nudge_should_start(false, 0, true, Some("stopped by the user")));
+        assert!(!nudge_should_start(
+            false,
+            0,
+            true,
+            Some("stopped by the user")
+        ));
     }
 
     #[test]
@@ -1060,10 +1043,10 @@ mod tests {
     #[test]
     fn carry_forward_keeps_only_unresolved_parks() {
         let prev = vec![
-            entry("p-open", "/r/a", "parked"),  // chip awaiting_review → carried
-            entry("p-done", "/r/a", "parked"),  // chip landed → resolved, dropped
-            entry("s-old", "/r/a", "stalled"),  // terminal, dropped
-            entry("q-old", "/r/b", "queued"),   // rebuilt fresh, dropped
+            entry("p-open", "/r/a", "parked"), // chip awaiting_review → carried
+            entry("p-done", "/r/a", "parked"), // chip landed → resolved, dropped
+            entry("s-old", "/r/a", "stalled"), // terminal, dropped
+            entry("q-old", "/r/b", "queued"),  // rebuilt fresh, dropped
         ];
         let carried = carry_forward_parked(&prev, |sid| match sid {
             "p-open" => Some("awaiting_review".to_string()),
@@ -1095,8 +1078,7 @@ mod tests {
         // entries (the carried plan deduped out even if the frontier somehow
         // re-offered it), append the carried parks.
         let prev = load_state(&db).unwrap();
-        let carried =
-            carry_forward_parked(&prev.entries, |_| Some("awaiting_review".to_string()));
+        let carried = carry_forward_parked(&prev.entries, |_| Some("awaiting_review".to_string()));
         let ready = vec![
             ("plan-2".to_string(), "/r/a".to_string(), "a".to_string()),
             ("plan-1".to_string(), "/r/a".to_string(), "a".to_string()),
@@ -1115,7 +1097,10 @@ mod tests {
         );
         // The morning verdict's link survived the rebuild — the approve path
         // can still resolve awaiting_review → landed against this plan.
-        assert_eq!(parked_plan_for_review(&db, "rev-1").as_deref(), Some("plan-1"));
+        assert_eq!(
+            parked_plan_for_review(&db, "rev-1").as_deref(),
+            Some("plan-1")
+        );
         // Only the fresh entry is launchable; carried parks spawn no worker.
         let s = load_state(&db).unwrap();
         assert_eq!(next_launch_index(&s.entries, &canon("/r/a")), Some(0));
@@ -1129,8 +1114,16 @@ mod tests {
         // exist — the deterministic slice of canonicalization — so two
         // spellings of one physical repo collapse to one scheduler key.
         let ready = vec![
-            ("s1".to_string(), "/no/such/repo".to_string(), "r".to_string()),
-            ("s2".to_string(), "/no/such/repo/".to_string(), "r".to_string()),
+            (
+                "s1".to_string(),
+                "/no/such/repo".to_string(),
+                "r".to_string(),
+            ),
+            (
+                "s2".to_string(),
+                "/no/such/repo/".to_string(),
+                "r".to_string(),
+            ),
         ];
         let entries = build_entries(ready, &[canon("/no/such/repo/")], &[]);
         assert_eq!(entries.len(), 2);
@@ -1240,7 +1233,10 @@ mod tests {
         assert!(s.entries[0].ended_at.is_some());
         // …which is the durable morning link (survives a restart, unlike the
         // in-memory review-links map).
-        assert_eq!(parked_plan_for_review(&db, "rev-9").as_deref(), Some("plan-1"));
+        assert_eq!(
+            parked_plan_for_review(&db, "rev-9").as_deref(),
+            Some("plan-1")
+        );
         // A later stall classification must never downgrade the park.
         finish_entry(&db, "plan-1", "stalled", Some("late"));
         assert_eq!(load_state(&db).unwrap().entries[0].state, "parked");

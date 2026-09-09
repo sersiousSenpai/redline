@@ -5,6 +5,8 @@
 //! seats a real Codex execution path while the same wire primitives can be
 //! promoted into a long-lived manager for conversational seats.
 
+use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::OnceLock;
@@ -14,24 +16,10 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
-/// Resolve the absolute path to the `codex` binary — the same three-layer
-/// discipline as `claude_proc::resolve_claude_bin`, and for a sharper reason.
-///
-/// The ChatGPT desktop app ships the *current* codex inside its bundle
-/// (`/Applications/ChatGPT.app/Contents/Resources/codex`), while a machine
-/// that once ran `brew install codex` still has an old standalone build first
-/// on `$PATH`. That older build has no `app-server` and no `resume`, so it
-/// cannot serve either the tool-less seat path or a plan session — and it
-/// fails *quietly*, which is exactly the class of bug this app exists to kill.
-/// So the bundle is probed ahead of the PATH-ish locations, and callers use
-/// the absolute path rather than the bare word.
-///
-/// 1. `REDLINE_CODEX_BIN`, then the `redline.codexBin` setting — explicit
-///    overrides beat every probe and are returned as given.
-/// 2. Well-known install locations, app bundle first.
-/// 3. An interactive login shell (`-ilc command -v codex`), for exotic
-///    installs. Same TCC cost as the claude fallback, so same last place.
-/// 4. The bare name.
+/// Explicit env/settings choices win. Otherwise select the newest capable
+/// installed Codex, independent of who installed it. Versions and capability
+/// probes share the binary-identity cache, so an upgrade takes effect without
+/// restarting Redline. A login shell remains the final, expensive fallback.
 pub fn resolve_codex_bin() -> String {
     if let Some(path) = std::env::var(crate::seat::ENV_CODEX_BIN)
         .ok()
@@ -43,8 +31,17 @@ pub fn resolve_codex_bin() -> String {
     if let Some(path) = crate::seat::codex_bin_override() {
         return path;
     }
-    if let Some(path) = codex_install_locations().into_iter().find(|p| p.is_file()) {
-        return path.to_string_lossy().into_owned();
+    let candidates = binary_candidates();
+    let versions = candidates
+        .iter()
+        .map(|path| {
+            let path = path.to_string_lossy().into_owned();
+            let version = codex_version(&path);
+            (path, version)
+        })
+        .collect();
+    if let Some(path) = newest_capable_candidate(versions, |path| codex_capability(path).0) {
+        return path;
     }
     // Cached in `binprobe` — same reasoning as the claude resolver: an
     // interactive login shell is the most expensive thing on this path, and
@@ -52,8 +49,7 @@ pub fn resolve_codex_bin() -> String {
     crate::binprobe::login_shell_which("codex").unwrap_or_else(|| "codex".to_string())
 }
 
-/// Probed in order. The app bundle leads deliberately: when both it and a
-/// standalone install exist, the bundle is the one that gets updated.
+/// Discovery order only breaks version ties; location is not freshness.
 fn codex_install_locations() -> Vec<PathBuf> {
     let mut paths = vec![PathBuf::from(CHATGPT_APP_CODEX)];
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
@@ -64,6 +60,150 @@ fn codex_install_locations() -> Vec<PathBuf> {
     paths.push(PathBuf::from("/opt/homebrew/bin/codex"));
     paths.push(PathBuf::from("/usr/local/bin/codex"));
     paths
+}
+
+/// Existing known and PATH installs, deduplicated by their actual target.
+/// Keep the friendly original path for display and commands (e.g. Homebrew's
+/// stable symlink, rather than a version-specific Caskroom path).
+pub fn binary_candidates() -> Vec<PathBuf> {
+    let mut paths = codex_install_locations();
+    if let Some(path) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&path).map(|dir| dir.join("codex")));
+    }
+    let mut seen = HashSet::new();
+    paths
+        .into_iter()
+        .filter(|path| {
+            path.is_file()
+                && seen.insert(std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()))
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexVersion {
+    major: u64,
+    minor: u64,
+    patch: u64,
+    prerelease: Option<String>,
+}
+
+impl std::fmt::Display for CodexVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)?;
+        if let Some(tail) = &self.prerelease {
+            write!(f, "-{tail}")?;
+        }
+        Ok(())
+    }
+}
+
+impl Ord for CodexVersion {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (self.major, self.minor, self.patch)
+            .cmp(&(other.major, other.minor, other.patch))
+            .then_with(|| match (&self.prerelease, &other.prerelease) {
+                (None, None) => Ordering::Equal,
+                (None, Some(_)) => Ordering::Greater,
+                (Some(_), None) => Ordering::Less,
+                (Some(a), Some(b)) => {
+                    let mut a = a.split('.');
+                    let mut b = b.split('.');
+                    loop {
+                        match (a.next(), b.next()) {
+                            (None, None) => break Ordering::Equal,
+                            (None, Some(_)) => break Ordering::Less,
+                            (Some(_), None) => break Ordering::Greater,
+                            (Some(a), Some(b)) => {
+                                let order = match (a.parse::<u64>(), b.parse::<u64>()) {
+                                    (Ok(a), Ok(b)) => a.cmp(&b),
+                                    (Ok(_), Err(_)) => Ordering::Less,
+                                    (Err(_), Ok(_)) => Ordering::Greater,
+                                    _ => a.cmp(b),
+                                };
+                                if order != Ordering::Equal {
+                                    break order;
+                                }
+                            }
+                        }
+                    }
+                }
+            })
+    }
+}
+
+impl PartialOrd for CodexVersion {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Parse only a real version banner, not an rc message containing a number.
+pub fn parse_codex_version(text: &str) -> Option<CodexVersion> {
+    let line = text.lines().next()?.trim().strip_prefix("codex-cli ")?;
+    let token = line.split_whitespace().next()?;
+    let (core, prerelease) = match token.split_once('-') {
+        Some((core, tail))
+            if !tail.is_empty()
+                && tail.split('.').all(|part| {
+                    !part.is_empty()
+                        && part.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+                        && !(part.len() > 1
+                            && part.starts_with('0')
+                            && part.bytes().all(|c| c.is_ascii_digit()))
+                }) =>
+        {
+            (core, Some(tail.to_string()))
+        }
+        Some(_) => return None,
+        None => (token, None),
+    };
+    let mut parts = core.split('.');
+    let mut number = || {
+        let part = parts.next()?;
+        (!part.is_empty()
+            && !(part.len() > 1 && part.starts_with('0'))
+            && part.bytes().all(|c| c.is_ascii_digit()))
+        .then(|| part.parse().ok())
+        .flatten()
+    };
+    let (major, minor, patch) = (number()?, number()?, number()?);
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(CodexVersion {
+        major,
+        minor,
+        patch,
+        prerelease,
+    })
+}
+
+static VERSIONS: OnceLock<crate::binprobe::Cache<Option<CodexVersion>>> = OnceLock::new();
+
+pub fn codex_version(bin: &str) -> Option<CodexVersion> {
+    crate::binprobe::cached(&VERSIONS, bin, || {
+        std::process::Command::new(bin)
+            .arg("--version")
+            .stdin(Stdio::null())
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .and_then(|out| parse_codex_version(&String::from_utf8_lossy(&out.stdout)))
+    })
+}
+
+fn newest_capable_candidate(
+    mut candidates: Vec<(String, Option<CodexVersion>)>,
+    mut capable: impl FnMut(&str) -> bool,
+) -> Option<String> {
+    let fallback = candidates.first().map(|(path, _)| path.clone());
+    candidates.sort_by(|a, b| b.1.cmp(&a.1));
+    candidates
+        .into_iter()
+        .find(|(path, _)| capable(path))
+        .map(|(path, _)| path)
+        .or(fallback)
 }
 
 /// Where the ChatGPT desktop app keeps its bundled codex.
@@ -143,6 +283,8 @@ pub fn codex_capability(bin: &str) -> (bool, bool) {
 /// the same path again is the user saying "look again".
 pub fn forget_codex_capability(bin: &str) {
     crate::binprobe::forget(&CAPABILITY, bin);
+    crate::binprobe::forget(&VERSIONS, bin);
+    crate::binprobe::forget(&MODEL_CATALOG, bin);
 }
 
 /// The actual `codex --help` children. Never call this directly from a surface
@@ -240,21 +382,32 @@ pub fn parse_model_catalog(text: &str) -> Result<Vec<CodexModel>, String> {
 /// Ask the resolved binary what models it can run. Live, never a hardcoded
 /// list: the catalog changes with every ChatGPT app update, and a stale list
 /// would offer a model that fails at the first token.
+static MODEL_CATALOG: OnceLock<crate::binprobe::Cache<Result<Vec<CodexModel>, String>>> =
+    OnceLock::new();
+
+/// Share the selected binary's catalog with preflight, avoiding a second
+/// process or accidentally asking a newly changed override mid-probe.
+pub fn model_catalog_for_bin(bin: &str) -> Result<Vec<CodexModel>, String> {
+    crate::binprobe::cached(&MODEL_CATALOG, bin, || {
+        let out = std::process::Command::new(bin)
+            .args(["debug", "models"])
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| format!("failed to run {bin} debug models: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "{bin} debug models failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        parse_model_catalog(&String::from_utf8_lossy(&out.stdout))
+    })
+}
+
 pub async fn model_catalog() -> Result<Vec<CodexModel>, String> {
-    let bin = resolve_codex_bin();
-    let out = Command::new(&bin)
-        .args(["debug", "models"])
-        .stdin(Stdio::null())
-        .output()
+    tokio::task::spawn_blocking(|| model_catalog_for_bin(&resolve_codex_bin()))
         .await
-        .map_err(|e| format!("failed to run {bin} debug models: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "{bin} debug models failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    parse_model_catalog(&String::from_utf8_lossy(&out.stdout))
+        .map_err(|e| e.to_string())?
 }
 
 async fn send(stdin: &mut tokio::process::ChildStdin, value: Value) -> Result<(), String> {
@@ -379,10 +532,12 @@ mod tests {
         let current = "Commands:\n  resume  Resume a previous session by id\n  fork    Fork a previous session by id into a new session\n  review  Run a code review\n";
         assert!(exec_help_lists_required_subcommands(current));
         // The shape that motivated this probe: exec exists, fork does not.
-        let no_fork = "Commands:\n  resume  Resume a previous session by id\n  help    Print this message\n";
+        let no_fork =
+            "Commands:\n  resume  Resume a previous session by id\n  help    Print this message\n";
         assert!(!exec_help_lists_required_subcommands(no_fork));
         // Neither does the top-level banner answer the question on its own.
-        let top_level = "Commands:\n  exec  Run Codex non-interactively\n  app-server  x\n  resume  y\n";
+        let top_level =
+            "Commands:\n  exec  Run Codex non-interactively\n  app-server  x\n  resume  y\n";
         assert!(help_lists_required_subcommands(top_level));
         assert!(!exec_help_lists_required_subcommands(top_level));
         // Same prefix discipline as the outer list.
@@ -392,17 +547,66 @@ mod tests {
     }
 
     #[test]
-    fn the_app_bundle_is_probed_before_the_stale_path_installs() {
-        let order = codex_install_locations();
-        let bundle = order
-            .iter()
-            .position(|p| p.to_string_lossy().contains("ChatGPT.app"))
-            .expect("the app bundle must be a candidate");
-        let brew = order
-            .iter()
-            .position(|p| p.ends_with("opt/homebrew/bin/codex"))
-            .expect("homebrew must remain a candidate");
-        assert!(bundle < brew, "the bundle build must win over the brew one");
+    fn versions_parse_and_order_by_numeric_components_then_prerelease() {
+        let version = |v: &str| parse_codex_version(&format!("codex-cli {v}")).unwrap();
+        assert!(version("0.149.0-alpha.4.3") < version("0.153.4"));
+        assert!(version("0.153.4") < version("0.153.10"));
+        assert!(version("0.153.10-alpha.2") < version("0.153.10-alpha.10"));
+        assert!(version("0.153.10-alpha.10") < version("0.153.10"));
+        assert_eq!(
+            version("0.149.0-alpha.4.3").to_string(),
+            "0.149.0-alpha.4.3"
+        );
+        for junk in [
+            "",
+            "codex 0.153.4",
+            "hello\ncodex-cli 0.153.4",
+            "codex-cli 0.153",
+            "codex-cli 0.153.x",
+            "codex-cli 0.153.4-",
+            "codex-cli 0.153.4.9",
+        ] {
+            assert!(parse_codex_version(junk).is_none(), "must reject {junk:?}");
+        }
+    }
+
+    #[test]
+    fn newer_brew_beats_older_bundle_and_probes_only_the_winner() {
+        let candidates = vec![
+            (
+                "bundle".into(),
+                parse_codex_version("codex-cli 0.149.0-alpha.4.3"),
+            ),
+            ("brew".into(), parse_codex_version("codex-cli 0.153.4")),
+            ("unknown".into(), None),
+        ];
+        let mut probed = Vec::new();
+        assert_eq!(
+            newest_capable_candidate(candidates, |path| {
+                probed.push(path.to_string());
+                true
+            })
+            .as_deref(),
+            Some("brew")
+        );
+        assert_eq!(probed, ["brew"]);
+    }
+
+    #[test]
+    fn newer_incapable_install_loses_and_no_capable_install_preserves_discovery_fallback() {
+        let candidates = vec![
+            ("bundle".into(), parse_codex_version("codex-cli 0.149.0")),
+            ("brew".into(), parse_codex_version("codex-cli 0.153.4")),
+        ];
+        assert_eq!(
+            newest_capable_candidate(candidates.clone(), |path| path == "bundle").as_deref(),
+            Some("bundle")
+        );
+        assert_eq!(
+            newest_capable_candidate(candidates, |_| false).as_deref(),
+            Some("bundle")
+        );
+        assert_eq!(newest_capable_candidate(Vec::new(), |_| true), None);
     }
 
     #[test]
@@ -433,7 +637,15 @@ mod tests {
 
     #[test]
     fn recognizes_rpc_responses_and_agent_text() {
-        assert_eq!(response_result(&json!({"id":2,"result":{"ok":true}}), 2).unwrap().unwrap()["ok"], true);
-        assert_eq!(agent_text(&json!({"params":{"delta":"hello"}})), Some("hello"));
+        assert_eq!(
+            response_result(&json!({"id":2,"result":{"ok":true}}), 2)
+                .unwrap()
+                .unwrap()["ok"],
+            true
+        );
+        assert_eq!(
+            agent_text(&json!({"params":{"delta":"hello"}})),
+            Some("hello")
+        );
     }
 }

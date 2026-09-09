@@ -52,10 +52,8 @@ struct EmbeddedSkill {
 ///   prompt/context library and emits a prioritized next-actions checklist.
 /// - `sensei`: the Dojo recruit contract — how an external model grounds
 ///   classes-first on the user's lake + ClassMemory (over MCP) to work like them.
-/// - `orchestrate`: the Orchestrate execution contract — fetch the approved
-///   plan (scope contract), run it as a multi-agent workflow (or sequentially),
-///   leave the diff uncommitted, POST the exit report, then the blocking
-///   code-review curl (orchestrator-only, after the workflow returns).
+/// - `orchestrate`: one native task executor's contract — direct file claims,
+///   uncommitted changes, independent checks, and Redline-owned lifecycle.
 const SKILLS: &[EmbeddedSkill] = &[
     EmbeddedSkill {
         name: "redline-plan-review",
@@ -137,7 +135,7 @@ const SKILLS: &[EmbeddedSkill] = &[
     },
     EmbeddedSkill {
         name: "orchestrate",
-        version: 2,
+        version: 3,
         content: include_str!("../../skills/orchestrate/SKILL.md"),
     },
 ];
@@ -285,9 +283,75 @@ pub fn install_under(root: &std::path::Path) -> Result<SkillStatus, String> {
     Ok(get_status_under(root))
 }
 
+/// Native planning integrations deliberately receive only the two audited
+/// contracts; unrelated Redline agent seats remain on their existing backends.
+fn provider_skills_root(backend: &str) -> Result<PathBuf, String> {
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    match backend {
+        "cursor" => Ok(home.join(".cursor/skills")),
+        "antigravity" => Ok(home.join(".gemini/antigravity-cli/skills")),
+        _ => Err(format!("unsupported native planning provider: {backend}")),
+    }
+}
+
+fn provider_status_under(root: &std::path::Path) -> SkillStatus {
+    let states: Vec<_> = SKILLS
+        .iter()
+        .filter(|s| matches!(s.name, "redline-plan-review" | "sidecar"))
+        .map(|s| is_current(s, &root.join(s.name).join("SKILL.md")))
+        .collect();
+    SkillStatus {
+        installed: states.iter().all(|s| *s == Ok(true)),
+        outdated: states.contains(&Ok(false)),
+        skill_path: root
+            .join("redline-plan-review/SKILL.md")
+            .to_string_lossy()
+            .into_owned(),
+        version: SKILL_VERSION,
+    }
+}
+
+pub fn get_provider_status(backend: &str) -> Result<SkillStatus, String> {
+    Ok(provider_status_under(&provider_skills_root(backend)?))
+}
+
+fn install_provider_under(root: &std::path::Path) -> Result<SkillStatus, String> {
+    for skill in SKILLS
+        .iter()
+        .filter(|s| matches!(s.name, "redline-plan-review" | "sidecar"))
+    {
+        crate::provider_hooks::atomic_write(
+            &root.join(skill.name).join("SKILL.md"),
+            skill.content.as_bytes(),
+        )?;
+    }
+    Ok(provider_status_under(root))
+}
+
+pub fn install_provider(backend: &str) -> Result<SkillStatus, String> {
+    install_provider_under(&provider_skills_root(backend)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_provider_installs_only_audited_skills_and_leaves_foreign_files() {
+        let root = tmpdir();
+        fs::create_dir_all(root.join("foreign")).unwrap();
+        fs::write(root.join("foreign/SKILL.md"), "foreign bytes").unwrap();
+        assert!(install_provider_under(&root).unwrap().installed);
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 3);
+        assert_eq!(
+            fs::read_to_string(root.join("foreign/SKILL.md")).unwrap(),
+            "foreign bytes"
+        );
+        fs::write(root.join("sidecar/SKILL.md"), "stale").unwrap();
+        assert!(provider_status_under(&root).outdated);
+        assert!(install_provider_under(&root).unwrap().installed);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     fn tmpdir() -> std::path::PathBuf {
         std::env::temp_dir().join(format!("redline-skill-{}", uuid::Uuid::new_v4()))
@@ -443,12 +507,12 @@ mod tests {
         // the Shipwright back into a generic AI code advisor.
         for needle in [
             "\"findings\"",
-            "At most 5 findings",   // the cap
-            "must quote a number",  // evidence is cited, not asserted
-            "guard test",           // rule+guard preferred over refactor
-            "perf-budget",          // the precedent it imitates
-            "re-word a dismissed finding", // the named dedupe escape hatch
-            "Do not claim one",     // the GUI-verification gap
+            "At most 5 findings",                  // the cap
+            "must quote a number",                 // evidence is cited, not asserted
+            "guard test",                          // rule+guard preferred over refactor
+            "perf-budget",                         // the precedent it imitates
+            "re-word a dismissed finding",         // the named dedupe escape hatch
+            "Do not claim one",                    // the GUI-verification gap
             "repurpose candidates, not deletions", // dead_wiring discipline
             "never write to the repo",
             "on-demand",
@@ -502,7 +566,10 @@ mod tests {
 
     #[test]
     fn context_analysis_skill_teaches_the_mcp_tools() {
-        let ca = SKILLS.iter().find(|s| s.name == "context-analysis").unwrap();
+        let ca = SKILLS
+            .iter()
+            .find(|s| s.name == "context-analysis")
+            .unwrap();
         // The external-session MCP contract (E1): the daemon's own /mcp mount
         // over HTTP, `memory_search` first, the narrower reads, the legacy
         // names for one release, the session-history ROUTE (the alias is not
@@ -532,7 +599,10 @@ mod tests {
                 "context-analysis SKILL.md is missing `{needle}`"
             );
         }
-        assert!(!ca.content.contains("redline-mcp") && !ca.content.contains("bundled"), "no proxy binary to teach");
+        assert!(
+            !ca.content.contains("redline-mcp") && !ca.content.contains("bundled"),
+            "no proxy binary to teach"
+        );
     }
 
     /// Extract the `<!-- CLASS-ROUTER:BEGIN -->…<!-- CLASS-ROUTER:END -->` block
@@ -588,52 +658,20 @@ mod tests {
                 "sensei SKILL.md is missing `{needle}`"
             );
         }
-        assert!(!sensei.content.contains("redline-mcp") && !sensei.content.contains("bundled"), "no proxy binary to teach");
+        assert!(
+            !sensei.content.contains("redline-mcp") && !sensei.content.contains("bundled"),
+            "no proxy binary to teach"
+        );
     }
 
     #[test]
-    fn orchestrate_skill_teaches_the_run_contract() {
-        let orch = SKILLS.iter().find(|s| s.name == "orchestrate").unwrap();
-        // The execution contract's load-bearing phrases. Each needle guards a
-        // rule whose loss corrupts the run: scope discipline, the no-stash
-        // preflight, the uncommitted-diff review, the exit report preceding
-        // the review, and the only-the-orchestrator-reviews rule.
-        for needle in [
-            "rawPlanMarkdown",
-            "rl:blk-",
-            "scope contract",
-            "nothing more",
-            "git stash",
-            "git status --porcelain",
-            "machine-checkable",
-            "worktree isolation",
-            "sequentially",           // the no-Workflow fallback
-            "uncommitted",
-            "/v1/orchestration/report",
-            "planSessionId",
-            "scriptPath",
-            "workflowRan",
-            "planSection",
-            "**before** opening the review", // report precedes the review
-            "Only the orchestrator session",
-            "after the workflow returns",
-            "source=uncommitted&plan=",
-            "REDLINE_DAEMON_TOKEN",
-            "model overrides",
-            // v2: the work-graph alternative — fan out over the ready
-            // frontier instead of re-decomposing, claim-before-build /
-            // close-after-verify, and the law that unverified items stay
-            // open for the next run.
-            "/v1/work/ready?project=",
-            "Claim before building, close after verifying",
-            "Items the run cannot verify stay",
-            "Work outlives the run that discovered it",
-        ] {
-            assert!(
-                orch.content.contains(needle),
-                "orchestrate SKILL.md is missing `{needle}`"
-            );
+    fn orchestrate_skill_teaches_the_native_node_contract() {
+        let orch=SKILLS.iter().find(|s|s.name=="orchestrate").unwrap();
+        for needle in ["REDLINE_RUN_ID","REDLINE_RUN_NODE","scope contract","nothing more","git stash","uncommitted","PreToolUse","claim-on-first-write","scopeHint","enforceScope","busy path","verification barrier","real exit codes","clean-context","Steer","Queue","Stop","measured report"] {
+            assert!(orch.content.contains(needle),"orchestrate executor contract is missing {needle}");
         }
+        assert!(!orch.content.contains("## 4. Author the workflow"));
+        assert!(!orch.content.contains("/v1/orchestration/report"));
     }
 
     #[test]
@@ -741,7 +779,10 @@ mod tests {
         fs::write(&orphan, "stale v8 contract").unwrap();
 
         let status = install_under(&root).unwrap();
-        assert!(status.installed, "pruning happens before status is computed");
+        assert!(
+            status.installed,
+            "pruning happens before status is computed"
+        );
         assert!(
             !root.join("redline").exists(),
             "install must remove the retired `redline` dir"
@@ -802,5 +843,4 @@ mod tests {
         }
         let _ = fs::remove_dir_all(&root);
     }
-
 }

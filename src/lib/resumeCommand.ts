@@ -178,15 +178,17 @@ export function buildResumeCommand(
    *  restore sentinel under an id Redline never held. That surfaces as a
    *  phantom new plan showing literal sentinel text, the exact failure the
    *  `cd` in this command exists to prevent for the other reason. */
-  harness?: { backend?: string | null; codexBin?: string | null },
+  harness?: { backend?: string | null; claudeBin?: string | null; codexBin?: string | null; cursorBin?: string | null; antigravityBin?: string | null; model?: string | null; effort?: string | null },
 ): string {
   const stamp = restoreStamp(now);
   const rescind = rescinded ? RESCINDED_CLAUSE : "";
-  const resume =
+  const resume = harness?.backend === "cursor" || harness?.backend === "antigravity"
+    ? nativeResume(sessionId, stamp, rescind, harness, projectPath)
+    :
     harness?.backend === "codex"
-      ? codexResume(sessionId, stamp, rescind, harness.codexBin)
+      ? codexResume(sessionId, stamp, rescind, harness.codexBin, harness.model, harness.effort)
       : restoreEnvPrefix(sessionId, !!primed, !!rescinded) +
-        `claude --resume ${shq(sessionId)} --permission-mode plan ${shq(
+        `${harness?.claudeBin?.trim() ? shq(harness.claudeBin.trim()) : "claude"} --resume ${shq(sessionId)} --permission-mode plan ${shq(
           compactRestorePrompt(sessionId, !!primed, stamp) + rescind,
         )}`;
   return projectPath ? `cd ${shq(projectPath)} && ${resume}` : resume;
@@ -211,6 +213,8 @@ function codexResume(
   stamp: string,
   rescind: string,
   codexBin: string | null | undefined,
+  model?: string | null,
+  effort?: string | null,
 ): string {
   const bin = codexBin?.trim() ? codexBin.trim() : "codex";
   const prompt =
@@ -220,7 +224,23 @@ function codexResume(
     "it holds and ignores what you submit." +
     rescind;
   return (
-    `${shq(bin)} resume ${shq(sessionId)} -s read-only -a never ` +
+    `${shq(bin)} resume ${shq(sessionId)} ${model ? `-m ${shq(model)} ` : ""}${effort ? `-c ${shq(`model_reasoning_effort=${JSON.stringify(effort)}`)} ` : ""}-s read-only -a never ` +
     `-p ${shq(CODEX_PLAN_PROFILE)} ${shq(prompt)}`
   );
+}
+
+function nativeResume(
+  sessionId: string, stamp: string, rescind: string,
+  harness: { backend?: string | null; cursorBin?: string | null; antigravityBin?: string | null; model?: string | null; effort?: string | null },
+  projectPath?: string | null,
+): string {
+  const cursor = harness.backend === "cursor";
+  const bin = (cursor ? harness.cursorBin : harness.antigravityBin)?.trim() || (cursor ? "agent" : "agy");
+  const prompt = `${RESTORE_TRIGGER_PREFIX}${stamp} — use your redline-plan-review skill. End this turn immediately with exactly ` +
+    `\`<proposed_plan>${restoreSentinel(sessionId)}</proposed_plan>\`. No tools or preamble; Redline re-presents its held plan.` + rescind;
+  const env = projectPath ? `REDLINE_PROJECT_PATH=${shq(projectPath)} ` : "";
+  const workspace = !cursor && projectPath ? `--add-dir ${shq(projectPath)} ` : "";
+  return `${env}${shq(bin)} ${cursor ? "--resume" : "--conversation"} ${shq(sessionId)} --mode=plan ${workspace}` +
+    (harness.model ? `--model ${shq(harness.model)} ` : "") +
+    (!cursor && harness.effort ? `--effort ${shq(harness.effort)} ` : "") + (!cursor ? "--prompt-interactive " : "") + shq(prompt);
 }

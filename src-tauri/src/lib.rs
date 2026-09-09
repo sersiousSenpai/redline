@@ -39,6 +39,15 @@ mod harness;
 mod highlight;
 mod hook;
 mod codex_hook;
+mod claude_models;
+mod runner_graph;
+mod runner;
+mod plan_submission;
+mod plan_launch;
+mod provider_hooks;
+mod cursor_hook;
+mod antigravity_hook;
+mod plan_provider;
 mod codex_profile;
 mod codex_app_server;
 mod inspect;
@@ -115,7 +124,7 @@ use std::time::Duration;
 
 use axum::{
     extract::{ConnectInfo, Path, Query, State},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Redirect},
     routing::{get, post},
     Json, Router,
@@ -613,10 +622,11 @@ impl Drop for DetachGuard {
 /// `src/App.tsx` matches on it to raise the detached banner, so both arms keep
 /// it verbatim.
 fn detached_delivery_error(backend: &str) -> String {
-    let (who, what) = if backend == "codex" {
-        ("Codex", "the Codex session")
-    } else {
-        ("Claude", "the Claude Code session")
+    let (who, what) = match backend.trim().to_ascii_lowercase().as_str() {
+        "codex" => ("Codex", "the Codex session"),
+        "cursor" => ("Cursor", "the Cursor session"),
+        "antigravity" => ("Antigravity", "the Antigravity session"),
+        _ => ("Claude", "the Claude Code session"),
     };
     format!(
         "{who} is no longer waiting for this plan — {what} ended or the hold \
@@ -742,7 +752,7 @@ fn feedback_deny_reason(
     backend: &str,
     payload: &str,
 ) -> String {
-    if backend == "codex" {
+    if matches!(backend, "codex" | "cursor" | "antigravity") {
         let lead = match mode {
             SubmissionMode::Revise =>
                 "✅ Plan returned to Redline for revision — nothing failed. The reviewer's \
@@ -1774,6 +1784,7 @@ async fn handle_plan(
 async fn handle_codex_stop(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     State(app_state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<Value>,
 ) -> Json<Value> {
     // Gate on the BLOCK, not on the mode. A Redline-launched Codex session
@@ -1797,7 +1808,8 @@ async fn handle_codex_stop(
         "cwd": payload.get("cwd").cloned().unwrap_or(Value::Null),
         "model": payload.get("model").cloned().unwrap_or(Value::Null),
         "tool_input": { "plan": plan },
-        "redline_provider": "codex"
+        "redline_provider": "codex",
+        "redline_launch_id": headers.get(plan_launch::HEADER).and_then(|v|v.to_str().ok())
     });
     let decision = handle_plan_core(peer, app_state, normalized).await;
     if decision.hook_specific_output.permission_decision == "deny" {
@@ -1812,6 +1824,136 @@ async fn handle_codex_stop(
         // A successful Stop hook lets the completed Plan-mode turn finish.
         Json(json!({}))
     }
+}
+
+/// The native CLIs have different wire formats, but share the same review hold.
+async fn hold_provider_plan(
+    peer: SocketAddr,
+    state: AppState,
+    submission: plan_submission::PlanSubmission,
+    headers: &HeaderMap,
+) -> Json<Value> {
+    let backend = submission.backend;
+    let mut payload = submission.into_payload();
+    payload["redline_launch_id"] = json!(headers
+        .get(plan_launch::HEADER)
+        .and_then(|v| v.to_str().ok()));
+    let response = handle_plan_core(peer, state, payload).await;
+    let decision = if response.hook_specific_output.permission_decision == "deny" {
+        plan_submission::ReviewDecision::Continue(
+            response.hook_specific_output.permission_decision_reason,
+        )
+    } else {
+        plan_submission::ReviewDecision::Approve
+    };
+    Json(decision.encode(backend))
+}
+
+fn provider_project(payload: &mut Value, headers: &HeaderMap) {
+    if let Some(path) = headers
+        .get("x-redline-project")
+        .and_then(|v| v.to_str().ok())
+        .filter(|p| std::path::Path::new(p).is_absolute())
+    {
+        payload["redlineProjectPath"] = json!(path);
+        if payload
+            .pointer("/workspace_roots/0")
+            .and_then(Value::as_str)
+            .is_none()
+        {
+            payload["workspace_roots"] = json!([path]);
+        }
+    }
+}
+
+async fn handle_cursor_prompt(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(mut payload): Json<Value>,
+) -> Json<Value> {
+    provider_project(&mut payload, &headers);
+    let prompt = payload.get("prompt").and_then(Value::as_str).unwrap_or("");
+    // The compact launch contract is agent context, never a human memory row.
+    let prompt = prompt.strip_prefix("Use the installed redline-plan-review skill. Remain in read-only research and planning mode. Finish with exactly one complete <proposed_plan>...</proposed_plan> envelope containing the full plan.\n\n").unwrap_or(prompt);
+    let normalized = json!({"prompt":prompt,"session_id":payload.get("conversation_id"),"cwd":payload.pointer("/workspace_roots/0"),"redline_provider":"cursor"});
+    if let Ok(body) = serde_json::to_vec(&normalized) {
+        let _ =
+            polis_server::ingest::handle_prompts_ingest(State(state.polis), headers, body.into())
+                .await;
+    }
+    Json(json!({"continue":true}))
+}
+
+async fn handle_cursor_response(headers: HeaderMap, Json(mut payload): Json<Value>) -> Json<Value> {
+    provider_project(&mut payload, &headers);
+    if !headers
+        .get("x-redline-agent")
+        .is_some_and(|v| !v.as_bytes().is_empty())
+    {
+        cursor_hook::record(&payload);
+    }
+    Json(json!({}))
+}
+
+async fn handle_cursor_stop(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> Json<Value> {
+    match cursor_hook::take(&payload).await {
+        Some(submission) => hold_provider_plan(peer, state, submission, &headers).await,
+        None => Json(json!({})),
+    }
+}
+
+async fn handle_antigravity_stop(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(mut payload): Json<Value>,
+) -> Json<Value> {
+    if headers
+        .get("x-redline-agent")
+        .is_some_and(|v| !v.as_bytes().is_empty())
+    {
+        return Json(json!({"decision":"allow"}));
+    }
+    provider_project(&mut payload, &headers);
+    match antigravity_hook::submission(&payload) {
+        Ok(Some(submission)) => hold_provider_plan(peer, state, submission, &headers).await,
+        Ok(None) => Json(json!({"decision":"allow"})),
+        Err(error) => {
+            tracing::warn!(%error, "Antigravity plan intake skipped");
+            Json(json!({"decision":"allow"}))
+        }
+    }
+}
+
+async fn handle_runner_claim(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    let run = headers
+        .get("x-redline-run-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let node = headers
+        .get("x-redline-run-node")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let attempt = headers
+        .get("x-redline-run-attempt")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u32>().ok());
+    Json(runner::claim_hook(
+        &state.store.database(),
+        run,
+        node,
+        &body,
+        attempt,
+    ))
 }
 
 async fn handle_plan_core(
@@ -2114,6 +2256,16 @@ async fn handle_plan_core(
         );
         (upsert.version_number, upsert.is_new_session)
     };
+
+    let launch = plan_launch::claim(
+        payload.get("redline_launch_id").and_then(Value::as_str), &session_id,
+        payload.get("redline_provider").and_then(Value::as_str).or(Some("claude-code")), &cwd,
+    );
+    if let Some(meta) = &launch {
+        app_state.store.set_backend(&session_id, Some(&meta.backend), meta.model.as_deref());
+        app_state.store.set_effort(&session_id, meta.effort.as_deref());
+        polis_host::bind_launch_lineage(&app_state.store, &session_id, &meta.body_hash, &payload);
+    }
 
     // Provenance, from the payload the hook actually sent. `redline_provider`
     // is set by `handle_codex_stop`'s normalizer and absent for Claude, whose
@@ -3054,6 +3206,11 @@ async fn run_server(state: AppState) {
         .route("/assets/*path", get(handle_root_asset))
         .route("/v1/plan", post(handle_plan))
         .route("/v1/codex/stop", post(handle_codex_stop))
+        .route("/v1/cursor/prompt", post(handle_cursor_prompt))
+        .route("/v1/cursor/response", post(handle_cursor_response))
+        .route("/v1/cursor/stop", post(handle_cursor_stop))
+        .route("/v1/antigravity/stop", post(handle_antigravity_stop))
+        .route("/v1/runs/claim", post(handle_runner_claim))
         // Agent-in-doc (M4): the per-user agent's surface — read the plan's
         // block structure, post a tracked suggestion against a block id.
         .route("/v1/sessions/:session_id/plan", get(handle_get_latest_plan))
@@ -5365,8 +5522,12 @@ async fn handle_context_session_history(
 ) -> axum::response::Response {
     let db = app_state.store.database();
     match context::build_session_history(&db, &id) {
-        Some(h) => Json(h).into_response(),
-        None => (StatusCode::NOT_FOUND, "no such session").into_response(),
+        Ok(Some(h)) => Json(h).into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "no such session").into_response(),
+        Err(error) => {
+            tracing::error!(%error, session_id = %id, "could not read session history");
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("could not read session history: {error}")).into_response()
+        }
     }
 }
 
@@ -7420,7 +7581,7 @@ fn capture_approval_shot(app: &AppHandle, store: &SessionStore, session_id: &str
 /// that stands the original session down: the plan is approved, but a
 /// *separate* orchestrated session executes it.
 const ORCHESTRATE_STAND_DOWN: &str = "✅ Plan approved in Redline — the reviewer is \
-     executing it in a separate orchestrated session. Do NOT implement this plan, do \
+     reviewing its execution graph. Redline will run the tasks after Run is pressed. Do NOT implement this plan, do \
      not revise it, and do not call ExitPlanMode again. Acknowledge briefly and end \
      your turn; this session's work is done.";
 
@@ -7478,10 +7639,9 @@ fn orchestrate_plan(
         None,
         None,
     );
-    // Run lifecycle: the click is the first beacon; the stall watchdog fires
-    // `stalled` if no further beacon (ingest claim → `running`) ever arrives.
-    advance_run_state(&app, &store, &session_id, "orchestrating");
-    arm_orchestrate_stall_watchdog(app.clone(), (*store).clone(), session_id.clone());
+    // The human reviews a native graph next. No executor is running yet,
+    // so the historical PTY launch watchdog must not be armed.
+    advance_run_state(&app, &store, &session_id, "ready");
     let _ = app.emit(
         "session-status-changed",
         SessionEvent {
@@ -8062,6 +8222,32 @@ async fn codex_model_catalog() -> Result<Vec<codex_app_server::CodexModel>, Stri
     codex_app_server::model_catalog().await
 }
 
+#[tauri::command(async)]
+async fn claude_model_catalog() -> Vec<claude_models::ClaudeModel> {
+    claude_models::model_catalog().await
+}
+
+#[tauri::command(async)]
+async fn provider_model_catalog(backend: String) -> Result<Vec<codex_app_server::CodexModel>, String> {
+    tokio::task::spawn_blocking(move || plan_provider::model_catalog(&backend)).await.map_err(|e|e.to_string())?
+}
+
+#[tauri::command(async)]
+async fn install_provider_integration(backend: String) -> Result<plan_provider::ProviderProbe, String> {
+    tokio::task::spawn_blocking(move || {
+        if !matches!(backend.as_str(), "cursor" | "antigravity") { return Err("Unknown planning provider".into()); }
+        provider_hooks::install(&backend)?;
+        skill::install_provider(&backend)?;
+        plan_provider::probe(&backend)
+    }).await.map_err(|e|e.to_string())?
+}
+
+#[tauri::command(async)]
+async fn set_provider_bin_override(store: tauri::State<'_, SessionStore>, backend: String, path: Option<String>) -> Result<plan_provider::ProviderProbe,String> {
+    let db = store.database();
+    tokio::task::spawn_blocking(move || plan_provider::set_override(&db,&backend,path)).await.map_err(|e|e.to_string())?
+}
+
 // --- Seat Assignment agent (see `seatassign.rs`) --------------------------
 
 /// Run the Seat Assignment agent once and return its proposed chart. Read-only:
@@ -8559,7 +8745,7 @@ fn prepare_restore(
     //
     // So: the plan's own project directory, no Claude file touched, and no
     // answer claimed about history we never inspected.
-    if backend.as_deref() == Some("codex") {
+    if backend.as_deref().is_some_and(|b| matches!(b.trim().to_ascii_lowercase().as_str(), "codex" | "cursor" | "antigravity")) {
         return ResumeTarget {
             cwd: project_path,
             history: RestoreHistory::Unchecked,
@@ -10125,6 +10311,8 @@ fn record_plan_launch(
     // `None` below; they are a real answer now.
     backend: Option<String>,
     model: Option<String>,
+    effort: Option<String>,
+    launch_id: Option<String>,
 ) -> Result<(), String> {
     let body = markdown.trim().to_string();
     if body.is_empty() {
@@ -10142,11 +10330,11 @@ fn record_plan_launch(
         .unwrap_or_else(|| "drafter".to_string());
     // Qualify the slug with its harness: `opus` and `gpt-5.6-sol` share one
     // column, and a bare slug loses which CLI actually ran it.
-    let launch_model = model
+    let launch_model = model.as_deref()
         .map(|m| m.trim().to_string())
         .filter(|m| !m.is_empty())
         .map(|m| match backend.as_deref().map(str::trim) {
-            Some("codex") => format!("codex/{m}"),
+            Some(provider @ ("codex" | "cursor" | "antigravity")) => format!("{provider}/{m}"),
             _ => m,
         });
     let bh = ledger::body_hash(&body);
@@ -10194,6 +10382,7 @@ fn record_plan_launch(
     let user_text = user_text
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty());
+    let launch_project = project_path.clone();
     let input = ledger::PromptInput {
         source: ledger::PromptSource::DrafterLaunch,
         origin: ledger::Origin::Redline,
@@ -10239,6 +10428,9 @@ fn record_plan_launch(
     // spawned session's `UserPromptSubmit` hook will compute, and a miss here
     // means the hook does not skip and files the whole brief as a fresh prompt
     // row — the blob in the lake PLUS a stray short row.
+    if let Some(id) = launch_id.as_deref() {
+        plan_launch::register(id, &bh, launch_project.as_deref(), backend.as_deref(), model.as_deref(), effort.as_deref())?;
+    }
     ledger::register_agent_prompt(&body);
     ledger::register_plan_launch(
         &bh,
@@ -11795,6 +11987,21 @@ pub fn run() {
             set_claude_bin_override,
             set_codex_bin_override,
             codex_model_catalog,
+            claude_model_catalog,
+            provider_model_catalog,
+            install_provider_integration,
+            set_provider_bin_override,
+            runner::runner_list,
+            runner::runner_get,
+            runner::runner_decompose,
+            runner::runner_apply,
+            runner::runner_start,
+            runner::runner_intervene,
+            runner::runner_node_status,
+            runner::runner_report,
+            runner::runner_review,
+            runner::runner_preview,
+            runner::runner_node_diff,
             seat_assignment_agent,
             seat_assignment_cancel,
             seat_preflight,
@@ -11978,6 +12185,8 @@ pub fn run() {
             dictation_whisper::dictation_set_engine,
             devmap::dev_servers_scan,
             devmap::dev_server_stop,
+            devmap::dev_server_stop_plan,
+            devmap::dev_server_probe,
             devmap::dev_server_set_thumb,
             browser_navigate,
             browser_eval,
@@ -12238,6 +12447,12 @@ pub fn run() {
             // the global claude-binary override) into the process-global store
             // before any agent can spawn.
             seat::load_from_db(&db);
+            plan_provider::load_overrides(&db);
+            let runner_state = runner::RunnerState::new(db.clone());
+            if let Err(error) = runner_state.recover() {
+                tracing::error!(%error, "failed to recover native runs");
+            }
+            app.manage(runner_state);
 
             let claims = ClaimFlags::new();
             app.manage(claims.clone());
@@ -12359,7 +12574,21 @@ pub fn run() {
             // an L1 follow-up or a consult check-in continues the run it's about.
             app.manage(ShipwrightSession::default());
 
-            let store = boot_trace::timed(boot_trace::STORE_HYDRATE, || SessionStore::new(db));
+            let store = boot_trace::timed(boot_trace::STORE_HYDRATE, || {
+                SessionStore::try_new(db)
+            }).unwrap_or_else(|e| {
+                let message = format!(
+                    "Redline could not load your session history and has to stop.\n\n\
+                     Database: {}\n\
+                     Reason:   {e}\n\n\
+                     Your existing history has not been replaced with an empty session list.\n",
+                    db_path.display()
+                );
+                tracing::error!("{message}");
+                let _ = std::fs::write(data_dir.join("boot-error.txt"), &message);
+                eprintln!("\n{message}");
+                std::process::exit(1);
+            });
             app.manage(store.clone());
             // Friction telemetry for the two contexts that hold no `Database`
             // (the axum auth middleware, chiefly). Installed once, right after
@@ -12766,6 +12995,9 @@ pub fn run() {
                 }
                 if let Some(fork) = app_handle.try_state::<fork::ForkState>() {
                     fork.kill_all();
+                }
+                if let Some(runner) = app_handle.try_state::<runner::RunnerState>() {
+                    runner.stop_all();
                 }
                 if let Some(ai) = app_handle.try_state::<ai_review::AiReviewState>() {
                     ai.kill_all();

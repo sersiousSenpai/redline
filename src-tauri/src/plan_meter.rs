@@ -239,6 +239,7 @@ mod tests {
             run_state: None,
             backend: None,
             model: None,
+            effort: None,
         })
         .unwrap();
         let dir = tmpdir();

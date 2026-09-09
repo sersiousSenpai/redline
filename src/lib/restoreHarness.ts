@@ -17,7 +17,8 @@
 // Pure. No Tauri, no React, no clock — the whole point is that it can be
 // pinned by a test that costs nothing to run.
 
-export type RestoreHarness = "claude-code" | "codex";
+import { parseBackend, backendLabel, type Backend } from "./backendChoice";
+export type RestoreHarness = Backend;
 
 /** What `prepare_restore` resolved against the harness's own files.
  *
@@ -61,12 +62,12 @@ export interface HarnessDecision {
 
 /** The full name, as a reviewer would say it. */
 export function harnessLabel(h: RestoreHarness): string {
-  return h === "codex" ? "Codex" : "Claude Code";
+  return h === "claude-code" ? "Claude Code" : backendLabel(h);
 }
 
 /** The short name for mid-sentence use ("Codex is no longer waiting"). */
 export function harnessShortLabel(h: RestoreHarness): string {
-  return h === "codex" ? "Codex" : "Claude";
+  return backendLabel(h);
 }
 
 /** Resolve the harness for a restore.
@@ -85,7 +86,7 @@ export function harnessShortLabel(h: RestoreHarness): string {
 export function resolveRestoreHarness(input: HarnessInput): HarnessDecision {
   const stored = (input.backend ?? "").trim();
   if (stored) {
-    const harness: RestoreHarness = stored === "codex" ? "codex" : "claude-code";
+    const harness = parseBackend(stored);
     return {
       harness,
       legacy: false,

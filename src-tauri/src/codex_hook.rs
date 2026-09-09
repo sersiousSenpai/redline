@@ -35,13 +35,13 @@ pub fn hooks_path() -> PathBuf {
 
 fn stop_command() -> String {
     format!(
-        "/usr/bin/curl -sS --max-time {HOOK_TIMEOUT_SECS} -X POST -H 'Content-Type: application/json' --data-binary @- {STOP_URL}"
+        "/usr/bin/curl -sS --max-time {HOOK_TIMEOUT_SECS} -X POST -H 'Content-Type: application/json' -H \"X-Redline-Plan-Launch-Id: ${{REDLINE_PLAN_LAUNCH_ID:-}}\" -H \"X-Redline-Agent: ${{REDLINE_AGENT_SEAT:-}}\" --data-binary @- {STOP_URL}"
     )
 }
 
 fn capture_command() -> String {
     format!(
-        "/usr/bin/curl -sS --max-time 1 -X POST -H 'Content-Type: application/json' --data-binary @- {INGEST_URL} >/dev/null 2>&1; exit 0"
+        "/usr/bin/curl -sS --max-time 1 -X POST -H 'Content-Type: application/json' -H \"X-Redline-Plan-Launch-Id: ${{REDLINE_PLAN_LAUNCH_ID:-}}\" -H \"X-Redline-Agent: ${{REDLINE_AGENT_SEAT:-}}\" --data-binary @- {INGEST_URL} >/dev/null 2>&1; exit 0"
     )
 }
 

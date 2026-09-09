@@ -40,7 +40,7 @@ import {
   modelsFor,
   normalizeChoice,
   type BackendChoice,
-  type CodexModel,
+  type ModelCatalogs,
 } from "../lib/backendChoice";
 
 // The front door. The document plate's resting state and where Redline opens:
@@ -123,10 +123,12 @@ export interface FrontDoorProps {
   onBackendChange: (next: BackendChoice) => void;
   /** The live `codex debug models` catalog, or empty until it answers. Never
    *  a hardcoded list — it ships with the ChatGPT app and changes under us. */
-  codexModels: CodexModel[];
+  modelCatalogs: ModelCatalogs;
+  modelError?: string;
+  providerInfo?: { path: string | null; version?: string | null; source: string };
   /** Fetch the catalog. Called when the picker opens rather than at boot, so
    *  a Claude-only user never spawns a codex child process. */
-  onNeedCodexModels: () => void;
+  onNeedModels: () => void;
   /** Retire the in-flight indicator. Does NOT cancel the plan and does not
    *  hand the sentence back — the composer was cleared on send and stays
    *  cleared. */
@@ -192,8 +194,10 @@ export function FrontDoor(props: FrontDoorProps) {
     onDestinationChange,
     backend,
     onBackendChange,
-    codexModels,
-    onNeedCodexModels,
+    modelCatalogs,
+    modelError,
+    providerInfo,
+    onNeedModels,
     onCancelPending,
     onRevealPending,
     onHowItWorks,
@@ -716,8 +720,11 @@ export function FrontDoor(props: FrontDoorProps) {
             <BackendMenu
               choice={backend}
               onChange={onBackendChange}
-              codexModels={codexModels}
-              onOpen={onNeedCodexModels}
+              modelCatalogs={modelCatalogs}
+              modelError={modelError}
+              providerInfo={providerInfo}
+              onLocate={() => { void onFix({ id: backend.backend === "codex" ? "codex-missing" : backend.backend === "claude-code" ? "claude-missing" : "provider-missing", state: "blocked", label: `Locate ${backendLabel(backend.backend)}`, detail: "Choose the executable used for planning and restore.", fix: { label: "Change CLI…", kind: backend.backend === "codex" ? "locate-codex" : backend.backend === "claude-code" ? "locate-claude" : "locate-provider", backend: backend.backend } }); }}
+              onOpen={onNeedModels}
               compact={tight}
             />
             <div style={{ flex: 1 }} />
@@ -1056,13 +1063,19 @@ function PlanMenu({
 function BackendMenu({
   choice,
   onChange,
-  codexModels,
+  modelCatalogs,
+  modelError,
+  providerInfo,
+  onLocate,
   onOpen,
   compact,
 }: {
   choice: BackendChoice;
   onChange: (next: BackendChoice) => void;
-  codexModels: CodexModel[];
+  modelCatalogs: ModelCatalogs;
+  modelError?: string;
+  providerInfo?: { path: string | null; version?: string | null; source: string };
+  onLocate: () => void;
   onOpen: () => void;
   compact: boolean;
 }) {
@@ -1075,10 +1088,10 @@ function BackendMenu({
   // inside the hook).
   const { open, panelProps, toggle } = useClickPopover(btnRef, "left", "above");
 
-  const models = modelsFor(choice.backend, codexModels);
-  const efforts = effortsFor(choice.backend, choice.model, codexModels);
-  const set = (next: BackendChoice) => onChange(normalizeChoice(next, codexModels));
-  const full = choiceLabel(choice, codexModels);
+  const models = modelsFor(choice.backend, modelCatalogs);
+  const efforts = effortsFor(choice.backend, choice.model, modelCatalogs);
+  const set = (next: BackendChoice) => onChange(normalizeChoice(next, modelCatalogs));
+  const full = choiceLabel(choice, modelCatalogs);
   // The chip narrows before the composer does: in a squeezed pane the harness
   // is the part you still need to see, the effort is not.
   const label = compact ? backendLabel(choice.backend) : full;
@@ -1142,7 +1155,7 @@ function BackendMenu({
           >
             <div className="rl-fd-menu-label">Harness</div>
             {BACKENDS.map((b) =>
-              row(b.id, b.id === choice.backend, b.label, () =>
+              row(b.id, b.id === choice.backend, b.preview ? `${b.label} · Preview` : b.label, () =>
                 // Switching harness drops the model and effort: a Claude alias
                 // is not a Codex slug, and `normalizeChoice` says so.
                 set({ backend: b.id, model: null, effort: null }),
@@ -1150,6 +1163,10 @@ function BackendMenu({
             )}
 
             <div className="rl-fd-menu-sep" aria-hidden />
+            {providerInfo && <div className="rl-fd-menu-note" title={providerInfo.path ?? undefined} style={{ overflowWrap: "anywhere" }}>
+              {providerInfo.version ? `${backendLabel(choice.backend)} ${providerInfo.version} · ` : ""}{providerInfo.path ?? "CLI not located"}
+            </div>}
+            {row("locate-provider", false, "Change CLI…", onLocate)}
             <div className="rl-fd-menu-label">Model</div>
             {row("model-default", !choice.model, "Default", () =>
               set({ ...choice, model: null, effort: null }),
@@ -1162,13 +1179,14 @@ function BackendMenu({
                 title: m.hint,
               }),
             )}
-            {choice.backend === "codex" && models.length === 0 && (
+            {models.length === 0 && (
               // Not an error row: the catalog is fetched on open, and a codex
               // that can't answer still launches fine on its own default model.
-              <div className="rl-fd-menu-note">Reading the Codex model list…</div>
+              <div className="rl-fd-menu-note">{modelError ? "Model list unavailable. Reopen this menu to retry." : `Reading the ${backendLabel(choice.backend)} model list…`}</div>
             )}
 
             <div className="rl-fd-menu-sep" aria-hidden />
+            {efforts.length > 0 && <>
             <div className="rl-fd-menu-label">Effort</div>
             {row("effort-default", !choice.effort, "Default", () =>
               set({ ...choice, effort: null }),
@@ -1185,6 +1203,7 @@ function BackendMenu({
                     : undefined,
               }),
             )}
+            </>}
           </div>
         </Panel>
       )}

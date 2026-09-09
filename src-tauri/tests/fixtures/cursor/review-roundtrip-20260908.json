@@ -1,0 +1,335 @@
+{
+  "version": "2026.09.08-6caf4ff",
+  "firstStopHoldSeconds": 35,
+  "stopFollowups": 7,
+  "events": [
+    {
+      "event": "beforeSubmitPrompt",
+      "payload": {
+        "conversation_id": "fixture-conversation",
+        "generation_id": "generation-0",
+        "model": "gpt-5.6-luna-high",
+        "prompt": "Respond with exactly <proposed_plan>\n# Compatibility plan\nKeep this plan unchanged.\n</proposed_plan>. Do not use tools or edit files.",
+        "attachments": [],
+        "session_id": "fixture-conversation",
+        "hook_event_name": "beforeSubmitPrompt",
+        "cursor_version": "2026.09.08-6caf4ff",
+        "workspace_roots": [
+          "/fixture/project"
+        ]
+      }
+    },
+    {
+      "event": "stop",
+      "payload": {
+        "conversation_id": "fixture-conversation",
+        "generation_id": "generation-0",
+        "model": "gpt-5.6-luna-high",
+        "status": "completed",
+        "loop_count": 0,
+        "input_tokens": 21879,
+        "output_tokens": 38,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 21876,
+        "session_id": "fixture-conversation",
+        "hook_event_name": "stop",
+        "cursor_version": "2026.09.08-6caf4ff",
+        "workspace_roots": [
+          "/fixture/project"
+        ]
+      }
+    },
+    {
+      "event": "afterAgentResponse",
+      "payload": {
+        "conversation_id": "fixture-conversation",
+        "generation_id": "generation-0",
+        "model": "gpt-5.6-luna-high",
+        "text": "<proposed_plan>\n# Compatibility plan\nKeep this plan unchanged.\n</proposed_plan>",
+        "input_tokens": 21879,
+        "output_tokens": 38,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 21876,
+        "session_id": "fixture-conversation",
+        "hook_event_name": "afterAgentResponse",
+        "cursor_version": "2026.09.08-6caf4ff",
+        "workspace_roots": [
+          "/fixture/project"
+        ]
+      }
+    },
+    {
+      "event": "stop",
+      "payload": {
+        "conversation_id": "fixture-conversation",
+        "generation_id": "generation-1",
+        "model": "gpt-5.6-luna-high",
+        "status": "completed",
+        "loop_count": 1,
+        "input_tokens": 22100,
+        "output_tokens": 23,
+        "cache_read_tokens": 21876,
+        "cache_write_tokens": 221,
+        "session_id": "fixture-conversation",
+        "hook_event_name": "stop",
+        "cursor_version": "2026.09.08-6caf4ff",
+        "workspace_roots": [
+          "/fixture/project"
+        ]
+      }
+    },
+    {
+      "event": "afterAgentResponse",
+      "payload": {
+        "conversation_id": "fixture-conversation",
+        "generation_id": "generation-1",
+        "model": "gpt-5.6-luna-high",
+        "text": "<proposed_plan>\n# Compatibility plan\nKeep this plan unchanged.\n</proposed_plan>",
+        "input_tokens": 22100,
+        "output_tokens": 23,
+        "cache_read_tokens": 21876,
+        "cache_write_tokens": 221,
+        "session_id": "fixture-conversation",
+        "hook_event_name": "afterAgentResponse",
+        "cursor_version": "2026.09.08-6caf4ff",
+        "workspace_roots": [
+          "/fixture/project"
+        ]
+      }
+    },
+    {
+      "event": "afterAgentResponse",
+      "payload": {
+        "conversation_id": "fixture-conversation",
+        "generation_id": "generation-2",
+        "model": "gpt-5.6-luna-high",
+        "text": "<proposed_plan>\n# Compatibility plan\nKeep this plan unchanged.\n</proposed_plan>",
+        "input_tokens": 22306,
+        "output_tokens": 23,
+        "cache_read_tokens": 22097,
+        "cache_write_tokens": 206,
+        "session_id": "fixture-conversation",
+        "hook_event_name": "afterAgentResponse",
+        "cursor_version": "2026.09.08-6caf4ff",
+        "workspace_roots": [
+          "/fixture/project"
+        ]
+      }
+    },
+    {
+      "event": "stop",
+      "payload": {
+        "conversation_id": "fixture-conversation",
+        "generation_id": "generation-2",
+        "model": "gpt-5.6-luna-high",
+        "status": "completed",
+        "loop_count": 2,
+        "input_tokens": 22306,
+        "output_tokens": 23,
+        "cache_read_tokens": 22097,
+        "cache_write_tokens": 206,
+        "session_id": "fixture-conversation",
+        "hook_event_name": "stop",
+        "cursor_version": "2026.09.08-6caf4ff",
+        "workspace_roots": [
+          "/fixture/project"
+        ]
+      }
+    },
+    {
+      "event": "afterAgentResponse",
+      "payload": {
+        "conversation_id": "fixture-conversation",
+        "generation_id": "generation-3",
+        "model": "gpt-5.6-luna-high",
+        "text": "<proposed_plan>\n# Compatibility plan\nKeep this plan unchanged.\n</proposed_plan>",
+        "input_tokens": 22512,
+        "output_tokens": 23,
+        "cache_read_tokens": 22303,
+        "cache_write_tokens": 206,
+        "session_id": "fixture-conversation",
+        "hook_event_name": "afterAgentResponse",
+        "cursor_version": "2026.09.08-6caf4ff",
+        "workspace_roots": [
+          "/fixture/project"
+        ]
+      }
+    },
+    {
+      "event": "stop",
+      "payload": {
+        "conversation_id": "fixture-conversation",
+        "generation_id": "generation-3",
+        "model": "gpt-5.6-luna-high",
+        "status": "completed",
+        "loop_count": 3,
+        "input_tokens": 22512,
+        "output_tokens": 23,
+        "cache_read_tokens": 22303,
+        "cache_write_tokens": 206,
+        "session_id": "fixture-conversation",
+        "hook_event_name": "stop",
+        "cursor_version": "2026.09.08-6caf4ff",
+        "workspace_roots": [
+          "/fixture/project"
+        ]
+      }
+    },
+    {
+      "event": "afterAgentResponse",
+      "payload": {
+        "conversation_id": "fixture-conversation",
+        "generation_id": "generation-4",
+        "model": "gpt-5.6-luna-high",
+        "text": "<proposed_plan>\n# Compatibility plan\nKeep this plan unchanged.\n</proposed_plan>",
+        "input_tokens": 22718,
+        "output_tokens": 23,
+        "cache_read_tokens": 22509,
+        "cache_write_tokens": 206,
+        "session_id": "fixture-conversation",
+        "hook_event_name": "afterAgentResponse",
+        "cursor_version": "2026.09.08-6caf4ff",
+        "workspace_roots": [
+          "/fixture/project"
+        ]
+      }
+    },
+    {
+      "event": "stop",
+      "payload": {
+        "conversation_id": "fixture-conversation",
+        "generation_id": "generation-4",
+        "model": "gpt-5.6-luna-high",
+        "status": "completed",
+        "loop_count": 4,
+        "input_tokens": 22718,
+        "output_tokens": 23,
+        "cache_read_tokens": 22509,
+        "cache_write_tokens": 206,
+        "session_id": "fixture-conversation",
+        "hook_event_name": "stop",
+        "cursor_version": "2026.09.08-6caf4ff",
+        "workspace_roots": [
+          "/fixture/project"
+        ]
+      }
+    },
+    {
+      "event": "stop",
+      "payload": {
+        "conversation_id": "fixture-conversation",
+        "generation_id": "generation-5",
+        "model": "gpt-5.6-luna-high",
+        "status": "completed",
+        "loop_count": 5,
+        "input_tokens": 22924,
+        "output_tokens": 23,
+        "cache_read_tokens": 22715,
+        "cache_write_tokens": 206,
+        "session_id": "fixture-conversation",
+        "hook_event_name": "stop",
+        "cursor_version": "2026.09.08-6caf4ff",
+        "workspace_roots": [
+          "/fixture/project"
+        ]
+      }
+    },
+    {
+      "event": "afterAgentResponse",
+      "payload": {
+        "conversation_id": "fixture-conversation",
+        "generation_id": "generation-5",
+        "model": "gpt-5.6-luna-high",
+        "text": "<proposed_plan>\n# Compatibility plan\nKeep this plan unchanged.\n</proposed_plan>",
+        "input_tokens": 22924,
+        "output_tokens": 23,
+        "cache_read_tokens": 22715,
+        "cache_write_tokens": 206,
+        "session_id": "fixture-conversation",
+        "hook_event_name": "afterAgentResponse",
+        "cursor_version": "2026.09.08-6caf4ff",
+        "workspace_roots": [
+          "/fixture/project"
+        ]
+      }
+    },
+    {
+      "event": "afterAgentResponse",
+      "payload": {
+        "conversation_id": "fixture-conversation",
+        "generation_id": "generation-6",
+        "model": "gpt-5.6-luna-high",
+        "text": "<proposed_plan>\n# Compatibility plan\nKeep this plan unchanged.\n</proposed_plan>",
+        "input_tokens": 23130,
+        "output_tokens": 33,
+        "cache_read_tokens": 22921,
+        "cache_write_tokens": 206,
+        "session_id": "fixture-conversation",
+        "hook_event_name": "afterAgentResponse",
+        "cursor_version": "2026.09.08-6caf4ff",
+        "workspace_roots": [
+          "/fixture/project"
+        ]
+      }
+    },
+    {
+      "event": "stop",
+      "payload": {
+        "conversation_id": "fixture-conversation",
+        "generation_id": "generation-6",
+        "model": "gpt-5.6-luna-high",
+        "status": "completed",
+        "loop_count": 6,
+        "input_tokens": 23130,
+        "output_tokens": 33,
+        "cache_read_tokens": 22921,
+        "cache_write_tokens": 206,
+        "session_id": "fixture-conversation",
+        "hook_event_name": "stop",
+        "cursor_version": "2026.09.08-6caf4ff",
+        "workspace_roots": [
+          "/fixture/project"
+        ]
+      }
+    },
+    {
+      "event": "afterAgentResponse",
+      "payload": {
+        "conversation_id": "fixture-conversation",
+        "generation_id": "generation-7",
+        "model": "gpt-5.6-luna-high",
+        "text": "<proposed_plan>\n# Compatibility plan\nKeep this plan unchanged.\n</proposed_plan>",
+        "input_tokens": 23346,
+        "output_tokens": 23,
+        "cache_read_tokens": 23127,
+        "cache_write_tokens": 216,
+        "session_id": "fixture-conversation",
+        "hook_event_name": "afterAgentResponse",
+        "cursor_version": "2026.09.08-6caf4ff",
+        "workspace_roots": [
+          "/fixture/project"
+        ]
+      }
+    },
+    {
+      "event": "stop",
+      "payload": {
+        "conversation_id": "fixture-conversation",
+        "generation_id": "generation-7",
+        "model": "gpt-5.6-luna-high",
+        "status": "completed",
+        "loop_count": 7,
+        "input_tokens": 23346,
+        "output_tokens": 23,
+        "cache_read_tokens": 23127,
+        "cache_write_tokens": 216,
+        "session_id": "fixture-conversation",
+        "hook_event_name": "stop",
+        "cursor_version": "2026.09.08-6caf4ff",
+        "workspace_roots": [
+          "/fixture/project"
+        ]
+      }
+    }
+  ]
+}

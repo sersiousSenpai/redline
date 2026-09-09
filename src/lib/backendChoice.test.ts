@@ -12,7 +12,7 @@ import {
   parseChoice,
   type CodexModel,
 } from "./backendChoice";
-import { EFFORT_OPTIONS, MODEL_OPTIONS } from "./seatAssign";
+import { EFFORT_OPTIONS } from "./seatAssign";
 
 const CATALOG: CodexModel[] = [
   {
@@ -46,11 +46,9 @@ describe("defaults", () => {
 });
 
 describe("the option lists", () => {
-  it("reuses seatAssign's Claude lists rather than copying them", () => {
-    // That file's header states it is the frontend source of truth; a second
-    // copy is how the picker and the agent plumbing drift.
+  it("uses stable planning aliases until the binary catalog answers, with shared efforts", () => {
     expect(modelsFor("claude-code", []).map((m) => m.value)).toEqual(
-      MODEL_OPTIONS,
+      ["opus", "sonnet", "haiku"],
     );
     expect(effortsFor("claude-code", "opus", [])).toEqual(EFFORT_OPTIONS);
   });

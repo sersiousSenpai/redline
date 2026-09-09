@@ -1,0 +1,39 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string" },
+          "kind": { "type": "string", "enum": ["task", "check", "review", "gate"] },
+          "title": { "type": "string" },
+          "brief": { "type": "string" },
+          "planBlockId": { "type": ["string", "null"] },
+          "scopeHint": { "type": "array", "items": { "type": "string" } },
+          "verifyCmd": { "type": ["string", "null"] },
+          "checkGlobal": { "type": "boolean" }
+        },
+        "required": ["id", "kind", "title", "brief", "planBlockId", "scopeHint", "verifyCmd", "checkGlobal"]
+      }
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string" },
+          "from": { "type": "string" },
+          "to": { "type": "string" },
+          "type": { "type": "string", "enum": ["blocks", "parent-child"] }
+        },
+        "required": ["id", "from", "to", "type"]
+      }
+    }
+  },
+  "required": ["nodes", "edges"]
+}

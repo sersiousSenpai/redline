@@ -121,6 +121,25 @@ afterEach(async () => {
 });
 
 describe("CommentThread names the agent that will actually answer", () => {
+  it.each(["cursor", "antigravity"])("offers a clearly named Claude sidecar for %s without relabeling the author", async (backend) => {
+    await mount(backend);
+    expect(text()).toContain("Discuss with Claude sidecar");
+    expect(text()).toContain(`this ${backend === "cursor" ? "Cursor" : "Antigravity"} plan`);
+    expect(text()).not.toContain(`Discuss with ${backend === "cursor" ? "Cursor" : "Antigravity"}`);
+  });
+
+  it("attributes a fallback transcript to Claude sidecar", async () => {
+    history = [seed, reply];
+    await mount("antigravity");
+    expect(text()).toContain("Claude sidecar: Because the parser needs it first.");
+    await act(async () => clickWith("Discussion"));
+    await flush();
+    await act(async () => clickWith("Attach to next submit"));
+    await flush();
+    const attach = invokeMock.mock.calls.find((call) => call[0] === "attach_discussion");
+    expect((attach?.[1] as { note: string }).note).toContain("Following a discussion with Claude sidecar:");
+  });
+
   it("offers Codex on a Codex-authored plan and Claude on a Claude one", async () => {
     await mount("codex");
     expect(text()).toContain("Discuss with Codex");

@@ -22,7 +22,7 @@ import StreamingBubble from "./StreamingBubble";
 import TurnFooter from "./TurnFooter";
 import { contextResets, type TurnMeter } from "../lib/turnMeter";
 import { QueuedChip, UnsentNote } from "./QueuedChip";
-import { WorkingIndicator } from "./WorkingIndicator";
+import ChatTurnProgress, { type ChatProgressStatus } from "./ChatTurnProgress";
 
 // THE CHAT ROOM — Redline's unbound conversation.
 //
@@ -190,12 +190,12 @@ export function ChatRoom({
   // What the agent is retrieving right now. Retrieval takes most of a first
   // turn's wall clock, so without this the ticker sits blank through the part
   // where the most is happening.
-  const [retrieving, setRetrieving] = useState<string | null>(null);
+  const [retrieving, setRetrieving] = useState<ChatProgressStatus | null>(null);
   useEffect(() => {
-    const un = listen<{ companionId: string; label: string }>(
+    const un = listen<{ companionId: string; label: string; at?: number }>(
       "companion-status",
       (e) => {
-        if (e.payload.companionId === companionId) setRetrieving(e.payload.label);
+        if (e.payload.companionId === companionId) setRetrieving({ label: e.payload.label, at: e.payload.at ?? Date.now() });
       },
     );
     return () => {
@@ -203,8 +203,8 @@ export function ChatRoom({
     };
   }, [companionId]);
   useEffect(() => {
-    if (status !== "streaming" || liveText) setRetrieving(null);
-  }, [status, liveText]);
+    if (status !== "streaming") setRetrieving(null);
+  }, [status]);
 
   // The auto-title landing: the provisional first sentence becomes a real name
   // a beat after the first reply, and the dropdown has to show it.
@@ -513,16 +513,12 @@ export function ChatRoom({
                 meter={meter}
                 activity={activity}
               />
-              {!liveText && (
-                <WorkingIndicator
-                  label={retrieving ?? "Thinking"}
-                  startedAt={startedAt ?? undefined}
-                />
-              )}
             </>
           )}
         </div>
       </div>
+
+      {streaming && <ChatTurnProgress startedAt={startedAt} activity={activity} meter={meter} status={retrieving} textLength={liveText.length} onStop={cancel} />}
 
       {/* Composer */}
       <div
@@ -614,13 +610,6 @@ export function ChatRoom({
               hot={dictation.listening}
               icon={<Mic size={14} />}
             />
-            {streaming && (
-              <ToolbarButton
-                label="Stop"
-                title="Stop the current reply (queued messages still send)"
-                onClick={cancel}
-              />
-            )}
             <button
               type="button"
               className="font-sans"

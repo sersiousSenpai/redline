@@ -11,7 +11,7 @@
 // ink / ink-muted text, no Tailwind color classes) so it inherits every theme
 // including the cycling one.
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Globe, Play, RotateCw, Square } from "lucide-react";
 import type { DevServerScan, OtherListener, RecentServer, RunningServer } from "../types";
 import { thumbKey } from "../lib/thumbs";
@@ -20,6 +20,9 @@ import {
   type ThumbCaptureTarget,
 } from "../hooks/useThumbCapture";
 import { ProjectThumb } from "./ProjectThumb";
+import type { StopPlan } from "../lib/devServerTypes";
+import type { ProjectOption } from "./ProjectPicker";
+import { RunProjectDialog } from "./RunProjectDialog";
 
 /** Shorten a path from the MIDDLE, keeping the leading anchor and the trailing
  *  segments. A dev server's identity lives at both ends — `~/code/…/web` says
@@ -72,29 +75,54 @@ const btnStyle: React.CSSProperties = {
 /** The Stop button. A dev server is a reversible thing to kill — you just start
  *  it again — so a modal would be theatre. It flips to "Really stop?" in place
  *  and reverts after three seconds if you walk away. */
-function StopButton({ onStop }: { onStop: () => void }) {
+export function StopButton({ onStop, onArm }: {
+  onStop: () => void | Promise<void>;
+  onArm: () => Promise<StopPlan | null>;
+}) {
   const [armed, setArmed] = useState(false);
+  const [plan, setPlan] = useState<StopPlan | null>(null);
+  const [stopping, setStopping] = useState(false);
+  const generation = useRef(0);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    generation.current += 1;
+    if (timer.current) clearTimeout(timer.current);
+  }, []);
+  const label = plan?.collateralPorts.length
+    ? `Really stop? · also ${plan.collateralPorts.map((port) => `:${port}`).join(", ")}`
+    : plan && plan.pids.length > 1 ? `Really stop? · ${plan.pids.length} procs` : "Really stop?";
   return (
-    <button
-      type="button"
-      style={{
-        ...btnStyle,
+    <button type="button" disabled={stopping}
+      style={{ ...btnStyle,
         color: armed ? "var(--color-danger, #d33)" : "var(--color-ink)",
         borderColor: armed ? "var(--color-danger, #d33)" : "var(--color-rule)",
       }}
-      title={armed ? "Send SIGTERM to this process" : "Stop this dev server"}
+      title={armed && plan ? `Stop ${plan.rootLabel} (pid ${plan.root}) and its server processes` : "Stop this dev server"}
       onClick={() => {
         if (!armed) {
           setArmed(true);
-          window.setTimeout(() => setArmed(false), 3000);
+          setPlan(null);
+          const request = ++generation.current;
+          timer.current = setTimeout(() => {
+            generation.current += 1;
+            setArmed(false);
+            setPlan(null);
+          }, 3000);
+          void Promise.resolve().then(onArm).then((next) => {
+            if (generation.current === request) setPlan(next);
+          }).catch(() => { /* A failed dry run never blocks a real stop. */ });
           return;
         }
+        if (timer.current) clearTimeout(timer.current);
+        const request = ++generation.current;
         setArmed(false);
-        onStop();
-      }}
-    >
+        setStopping(true);
+        void Promise.resolve().then(onStop).catch(() => { /* The owner surfaces stop errors. */ }).finally(() => {
+          if (generation.current === request) setStopping(false);
+        });
+      }}>
       <Square size={12} strokeWidth={2} />
-      {armed ? "Really stop?" : "Stop"}
+      {stopping ? "Stopping…" : armed ? label : "Stop"}
     </button>
   );
 }
@@ -197,7 +225,9 @@ export interface ServersPaneProps {
    *  webview must never park over a pane the user isn't looking at. */
   active: boolean;
   onRefresh: () => void;
-  onStop: (pid: number, expectedComm: string, projectPath: string | null) => void;
+  onStop: (pid: number, port: number, projectPath: string | null) => void | Promise<void>;
+  onPlanStop: (pid: number, port: number, projectPath: string | null) => Promise<StopPlan | null>;
+  projectOptions: ProjectOption[];
   onRun: (projectPath: string, runCommand: string) => void;
   onOpenUrl: (url: string) => void;
   /** Persist a fresh capture against its remembered row, so the picture
@@ -213,10 +243,13 @@ export function ServersPane({
   active,
   onRefresh,
   onStop,
+  onPlanStop,
+  projectOptions,
   onRun,
   onOpenUrl,
   onThumbCaptured,
 }: ServersPaneProps) {
+  const [runDialogOpen, setRunDialogOpen] = useState(false);
   // Memoized on the scan itself, not spelled inline: `scan?.running ?? []`
   // mints a fresh array on every render while the scan is null, which would
   // change `targets`' identity every render and re-enter the capture queue
@@ -314,11 +347,19 @@ export function ServersPane({
         <div style={{ fontSize: "13px", fontWeight: 600, color: "var(--color-ink)" }}>
           Localhost
         </div>
-        <button type="button" style={btnStyle} onClick={onRefresh} title="Re-scan now">
-          <RotateCw size={12} strokeWidth={2} />
-          Refresh
-        </button>
+        <div style={{ display: "flex", gap: "6px" }}>
+          <button type="button" style={btnStyle} onClick={() => setRunDialogOpen(true)}>
+            <Play size={12} strokeWidth={2} />Run a project…
+          </button>
+          <button type="button" style={btnStyle} onClick={onRefresh} title="Re-scan now">
+            <RotateCw size={12} strokeWidth={2} />Refresh
+          </button>
+        </div>
       </div>
+
+      {runDialogOpen && <RunProjectDialog options={projectOptions}
+        onCancel={() => setRunDialogOpen(false)}
+        onRun={(path, command) => { onRun(path, command); setRunDialogOpen(false); }} />}
 
       {error && (
         <div
@@ -360,7 +401,9 @@ export function ServersPane({
                       Open
                     </button>
                     <StopButton
-                      onStop={() => onStop(s.pid, s.comm, s.projectPath)}
+                      key={`${s.pid}:${s.port}`}
+                      onArm={() => onPlanStop(s.pid, s.port, s.projectPath)}
+                      onStop={() => onStop(s.pid, s.port, s.projectPath)}
                     />
                   </div>
                 </CardBody>
@@ -413,7 +456,7 @@ export function ServersPane({
       {empty && !error && (
         <div style={{ fontSize: "12px", color: "var(--color-ink-muted)", padding: "24px 0" }}>
           {scan
-            ? "No dev servers running, and none remembered yet. Start one from a terminal and it shows up here."
+            ? "No dev servers running, and none remembered yet. Use Run a project to start one."
             : "Looking for dev servers…"}
         </div>
       )}

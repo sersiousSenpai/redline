@@ -240,6 +240,60 @@ ignored.
 
 ---
 
+### 3.7 Native planning providers
+
+`PlanBackend` (`src/lib/backendChoice.ts`) identifies `claude-code`, `codex`,
+`cursor`, and `antigravity`. Provider provenance is distinct from the model:
+a Claude model inside Cursor remains a Cursor plan. Legacy blank values retain
+Claude behavior; recognized providers survive recording, detaching, and restore.
+
+Cursor's local `agent` / `cursor-agent` CLI launches in plan mode and restores
+with `--resume`. Its `afterAgentResponse` text and completed `stop` events join
+on both conversation and generation id in a bounded, expiring cache; their order
+can vary. Stop waits for the matching text before submitting one complete
+`<proposed_plan>` envelope. Approval returns an empty response; revise/Ask returns
+inline `followup_message`. Redline-owned Stop entries permit unlimited follow-ups.
+
+Antigravity Preview launches `agy --mode=plan --prompt-interactive` and restores
+with `--conversation`. Successful fully-idle model stops read the last assistant
+response from a bounded transcript tail. Canonical paths must match the same
+conversation's `.system_generated/logs/transcript.jsonl` or
+`transcript_full.jsonl` beneath the supported Antigravity brain roots. Approval
+ends normally; revise/Ask uses `decision: "continue"` with complete inline
+feedback. Ordinary replies, malformed envelopes, aborted turns, and unrelated
+global-hook traffic do not create plan sessions.
+
+These adapters share `handle_plan_core`: parsing, anchors, Ask validation,
+revision persistence, modes, and held-response ownership remain centralized.
+Native prompt capture records Redline launches and Cursor `beforeSubmitPrompt`;
+later manually typed Antigravity prompts remain a documented gap. Extension-pack
+planning stays on Claude. This integration covers local vendor CLIs, not native
+editor embedding, private conversation-store polling, or Cursor Cloud Agents.
+
+### 3.8 Binary selection and model catalogs
+
+Codex resolution preserves explicit environment and settings choices, then ranks
+existing known/PATH candidates by cached `codex --version` (canonical targets are
+deduplicated). The newest candidate supporting both required help banners wins;
+unknown versions sort last. Preflight reports the selected version, a newer
+alternative if one exists, the top-level `$CODEX_HOME/config.toml` model, and
+whether the selected CLI's catalog contains it. Config parse/catalog failures
+remain unknown instead of inventing a mismatch.
+
+Catalog requests belong to a provider and resolved binary identity. A fresh
+request generation prevents an old A response overwriting a newer A after an
+A→B→A selection. Codex uses `debug models`; Cursor and Antigravity use `models`.
+Claude streams the installed binary in bounded chunks, selects the largest
+recognized model-id set covering multiple families, and offers aliases followed
+by pinned ids. Only Fable/Opus/Sonnet/Haiku families with leading major ≥4 are
+listed; Mythos ids are excluded. Unrecognized formats fall back to the four
+aliases. Catalog discovery describes installed CLI metadata, not account grants.
+
+Codex restores retain persisted model and effort flags. A discussion's Codex
+binary is freshly resolved each turn; its explicit model is included before
+`exec` and frozen with the spawn for meter provenance. No explicit model means
+the meter reports no inferred model.
+
 ## 4. The bridge for spawned agents
 
 The browser page agents (§9) and the mission orchestrator (§10) do not call Tauri
@@ -367,9 +421,20 @@ plan session — a context-aware sub-agent that answers inline without disturbin
 the held plan-mode session. This is the "discuss" verb, distinct from "revise"
 (§6.1): a thread never round-trips into the plan.
 
-**Provider-aware.** A plan-comment fork is a fork *of that conversation*, so it
-runs on the harness that authored the plan (`sessions.backend`, §5). Two command
-protocols, one lifecycle (`fork.rs`):
+**Provider-aware.** Claude and Codex use native conversation forks. Cursor and
+Antigravity use fresh Claude sidecars seeded with the current plan, anchor,
+selection, attachments, and relevant completed discussion history. The original
+provider stays on the plan row; the sidecar stores its own Claude conversation
+id/provider. Its follow-ups can resume only that sidecar, never the held native
+author conversation. Their physical tool list is exactly
+`Read,Grep,Glob,WebFetch,WebSearch` with strict MCP configuration: no Bash or
+Skill tool, and no arbitrary seat extra flags that could expand that list.
+Model, effort, and fallback-model seat settings are retained. These context
+sidecars cannot curl the memory bridge; the current plan and visible discussion
+history arrive in their prompt. Non-Claude consultations share this boundary.
+UI labels distinguish “Claude sidecar” from the author
+that receives an escalated decision. Two execution protocols share one lifecycle
+(`fork.rs`):
 
 - **claude-code** — first turn `claude -p "<prompt>" --resume <plan_session_id>
   --fork-session --output-format stream-json --include-partial-messages
@@ -412,10 +477,12 @@ records the comment's fork so later turns resume rather than re-fork, and
 rows, which reads as `claude-code`. The pair is read, written and cleared
 together: both id spaces are UUIDs and neither CLI errors on the other's id
 (`claude --resume <codex thread>` silently starts a *fresh* session), so the id
-alone cannot say which binary owns it. When a stored fork backend disagrees with
-the plan backend the id is **not** resumed — the plan session is re-forked on
-the correct harness and a bounded set of recent completed turns rides into the
-new fork's first turn as context, so the visible transcript survives the repair.
+alone cannot say which binary owns it. The stored backend must match the plan's
+discussion strategy: its native harness for Claude/Codex, or a separate Claude
+sidecar for Cursor/Antigravity. A mismatched id is **not** resumed. A replacement
+discussion receives a bounded set of recent completed turns as context, so the
+visible transcript survives the repair. Native-provider author conversation ids
+are never accepted as Claude sidecar ids.
 
 **Coexistence.** A fork inherits the user's hooks, so one that submitted a plan
 would POST to `:7676`. Three guards prevent a phantom revision: the withheld
@@ -432,7 +499,9 @@ forking a conversation, so there is no plan provenance to obey.
 Codex capability probe checks two banners: `codex --help` for
 `app-server`/`resume`/`exec`, and `codex exec --help` for `fork`/`resume`. A
 build with the outer command but not the inner one would pass the old probe and
-fail at the first Discuss click.
+fail at the first Discuss click. Companion consultations also use a fresh,
+context-seeded Claude turn for non-Claude authors rather than passing a foreign
+conversation id to `claude --resume`.
 
 Commands: `fork_thread_send`, `get_thread`, `fork_thread_cancel`,
 `fork_thread_discard`, `fork_kill_all`. Events: `fork-delta`, `fork-done`,
@@ -757,6 +826,24 @@ the reliable fallback when the skill is absent. The `browse`, `mission`, and
 
 ---
 
+### 13.3 Cursor and Antigravity installation
+
+Cursor merges `beforeSubmitPrompt`, `afterAgentResponse`, and long-hold `stop`
+entries into `~/.cursor/hooks.json`. Antigravity installs a named
+`redline-plan-review` bundle in `~/.gemini/config/hooks.json`. Both installers
+preserve foreign fields and entries, refuse malformed/conflicting files, and
+write atomically. Status distinguishes missing, partial, stale, current, and
+conflicting installations. Provider skills reuse the canonical plan-review and
+sidecar sources under `~/.cursor/skills` or
+`~/.gemini/antigravity-cli/skills`.
+
+Preflight probes the selected native provider's binary/capabilities, contract,
+hooks, and cheap authentication metadata. Auth is signed-in, signed-out, or
+unknown; inaccessible private credentials are not evidence of logout. The Front
+Door supplies Locate, Install integration, sign-in, and Retry. Environment
+overrides `REDLINE_CURSOR_BIN` / `REDLINE_ANTIGRAVITY_BIN` precede settings; known
+paths, application bundles, login-shell lookup, and PATH supply fallbacks.
+
 ## 14. Tauri command & event surface
 
 ### 14.1 Commands (frontend → backend)
@@ -952,11 +1039,10 @@ dictation / TTS.
 
 Not yet built:
 
-- **Loop orchestrator.** Turning an approved plan into parallel,
-  individually-verified subtasks — each executed in an isolated git worktree and
-  graded by an independent reviewer. A full prototype was built and then parked
-  on the `feature/loop-orchestrator` branch; it is not in the product. Treat as
-  roadmap.
+- **Worktree isolation.** The [native run graph](docs/native-runner.md) executes
+  reviewed tasks, command checks, independent reviews, and gates in the shared
+  working tree. Optional worktrees remain future work; the parked
+  `feature/loop-orchestrator` prototype is not the implementation.
 - **Multiplayer.** Several reviewers in one document at once, each with their own
   agent, over the CRDT (Yjs / Hocuspocus). See the north-star doc.
 - **Documents beyond plans.** A born-in-app Word-class editor and, later,

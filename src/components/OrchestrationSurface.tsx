@@ -50,6 +50,8 @@ import {
 } from "../lib/orchestration";
 import { EmptyState } from "./EmptyState";
 import type { TabRequest } from "../lib/navTarget";
+import { useRunGraphList } from "../hooks/useRunGraph";
+import { RunGraphPane } from "./runner/RunGraphPane";
 
 /** Agent Seats' pill chip, copied — `chipStyle(true)` doubles as primary. */
 function chipStyle(active: boolean): React.CSSProperties {
@@ -1010,6 +1012,10 @@ export interface OrchestrationSurfaceProps {
   /** "Go to Runs: Work" from the command palette. Nonce'd: a controlled prop
    *  would drag this surface back to that tab on every render. */
   tabRequest?: TabRequest | null;
+  /** A reviewed Orchestrate plan opens its durable draft directly. */
+  nativeRunId?: string | null;
+  onOpenPlanBlock?: (sessionId: string, blockId: string) => void;
+  onReviewSession?: (reviewId: string) => void;
 }
 
 /** The failure state this surface exists to make visible: `run_state` says a
@@ -1098,8 +1104,18 @@ export function OrchestrationSurface({
   onUnapprove,
   onStandDown,
   tabRequest = null,
+  nativeRunId = null,
+  onOpenPlanBlock,
+  onReviewSession,
 }: OrchestrationSurfaceProps) {
   const { runs } = useOrchestrationRuns(active);
+  const { runs: nativeRuns, error: nativeError } = useRunGraphList(active);
+  const [pickedNative, setPickedNative] = useState<string | null>(null);
+  const [historyNative, setHistoryNative] = useState<string | null>(null);
+  const nativeLive = nativeRuns.filter((run) => !["done", "abandoned"].includes(run.status));
+  const selectedNative = pickedNative ?? nativeRunId
+    ?? nativeLive.find((run) => run.planSessionId === activePlanSessionId)?.runId
+    ?? nativeLive[0]?.runId ?? null;
   const ordered = useMemo(() => orderRuns(runs), [runs]);
   const liveRuns = useMemo(
     () => ordered.filter((r) => isLiveRunState(r.runState)),
@@ -1113,11 +1129,13 @@ export function OrchestrationSurface({
       summaries.filter(
         (s) =>
           isLiveRunState(s.runState) &&
-          !runs.some((r) => r.planSessionId === s.sessionId),
+          !runs.some((r) => r.planSessionId === s.sessionId) &&
+          !nativeRuns.some((r) => r.planSessionId === s.sessionId),
       ),
-    [summaries, runs],
+    [summaries, runs, nativeRuns],
   );
   const [tab, setTab] = useState<RunsTab>("live");
+  useEffect(() => { if (nativeRunId) { setPickedNative(nativeRunId); setTab("live"); } }, [nativeRunId]);
   const tabNonce = tabRequest?.nonce;
   useEffect(() => {
     if (!tabRequest) return;
@@ -1166,7 +1184,7 @@ export function OrchestrationSurface({
     liveRuns[0]?.planSessionId ??
     null;
   const monitorSid =
-    tab === "live" ? liveSid : tab === "history" ? historySid : null;
+    tab === "live" ? (selectedNative ? null : liveSid) : tab === "history" ? (historyNative ? null : historySid) : null;
   const snapshot = useOrchestration(monitorSid, active);
 
   // One clock for elapsed/stall rendering — a tick per second while visible.
@@ -1247,7 +1265,7 @@ export function OrchestrationSurface({
             marginTop: "8px",
           }}
         >
-          <span style={{ flex: 1 }}>{sentence}</span>
+          <span style={{ flex: 1 }}>{nativeLive.length ? `${nativeLive.length} native run${nativeLive.length === 1 ? "" : "s"} · review, run and steer the graph` : sentence}</span>
           <div style={{ display: "flex", gap: 4 }}>
             {RUNS_TABS.map((t) => (
               <button
@@ -1262,7 +1280,7 @@ export function OrchestrationSurface({
                 }}
               >
                 {t}
-                {t === "live" && liveRuns.length > 0 && (
+                {t === "live" && liveRuns.length + nativeLive.length > 0 && (
                   <span
                     style={{
                       marginLeft: 5,
@@ -1273,7 +1291,7 @@ export function OrchestrationSurface({
                       background: "var(--color-info)",
                     }}
                   >
-                    {liveRuns.length}
+                    {liveRuns.length + nativeLive.length}
                   </span>
                 )}
                 {t === "work" && workReady > 0 && (
@@ -1317,7 +1335,11 @@ export function OrchestrationSurface({
         }}
       >
         {tab === "live" ? (
-          <>
+          selectedNative ? <>
+            {nativeLive.length > 1 && <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>{nativeLive.map((run) => <button key={run.runId} style={chipStyle(run.runId === selectedNative)} onClick={() => setPickedNative(run.runId)}>{summaryFor(run.planSessionId ?? null)?.planTitle ?? run.projectPath.split("/").pop()} · {run.status}</button>)}</div>}
+            <RunGraphPane key={selectedNative} runId={selectedNative} active={active} onOpenPlanBlock={onOpenPlanBlock} onReviewSession={onReviewSession} />
+          </> : <>
+          {nativeError && <p style={{ color: "var(--color-warning)", fontSize: 12 }}>Native run list: {nativeError}</p>}
           {phantomRuns.map((s) => (
             <PhantomRunCard
               key={s.sessionId}
@@ -1377,7 +1399,12 @@ export function OrchestrationSurface({
           </>
         ) : tab === "history" ? (
           <>
-            {ordered.length === 0 ? (
+            {nativeRuns.length > 0 && <>
+              <SectionTitle>Native runs · measured results</SectionTitle>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>{nativeRuns.map((run) => <button key={run.runId} style={chipStyle(historyNative === run.runId)} onClick={() => { setHistoryNative((current) => current === run.runId ? null : run.runId); setHistorySid(null); }}>{summaryFor(run.planSessionId ?? null)?.planTitle ?? run.projectPath.split("/").pop()} · {run.status}</button>)}</div>
+              {historyNative && <RunGraphPane key={historyNative} runId={historyNative} active={active} onOpenPlanBlock={onOpenPlanBlock} onReviewSession={onReviewSession} />}
+            </>}
+            {ordered.length === 0 ? (nativeRuns.length === 0 &&
               <EmptyState
                 title="No orchestrated runs yet"
                 body="Every Orchestrate launch is recorded here, live or finished."
@@ -1391,9 +1418,7 @@ export function OrchestrationSurface({
                     summary={summaryFor(r.planSessionId)}
                     selected={r.planSessionId === historySid}
                     now={now}
-                    onSelect={(sid) =>
-                      setHistorySid((cur) => (cur === sid ? null : sid))
-                    }
+                    onSelect={(sid) => { setHistoryNative(null); setHistorySid((cur) => (cur === sid ? null : sid)); }}
                   />
                 ))}
               </div>

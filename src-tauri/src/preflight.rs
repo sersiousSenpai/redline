@@ -30,6 +30,16 @@ pub struct ClaudeProbe {
     pub path: Option<String>,
     /// Which layer answered: `env`, `override`, `probe`, or `path`.
     pub source: String,
+    /// Binary modification identity, so the picker refreshes after an in-place
+    /// Claude upgrade without paying for another CLI invocation.
+    pub identity: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewerCodex {
+    pub path: String,
+    pub version: String,
 }
 
 /// The same three questions for `codex`, plus the two that only apply to it.
@@ -47,6 +57,13 @@ pub struct CodexProbe {
     pub path: Option<String>,
     /// `env` | `override` | `probe` | `path`.
     pub source: String,
+    pub version: Option<String>,
+    pub newer_elsewhere: Option<NewerCodex>,
+    pub identity: Option<String>,
+    /// Effective top-level model for a Default front-door pick.
+    pub configured_model: Option<String>,
+    /// None means no configured model, or the installed CLI did not answer.
+    pub model_runnable: Option<bool>,
     /// Present AND new enough: `--help` lists `app-server`, `resume` and
     /// `exec`, AND `codex exec --help` lists `fork` and `resume` — the
     /// non-interactive pair a plan comment's discussion thread runs on
@@ -110,6 +127,7 @@ pub struct PreflightStatus {
     /// `None` when the selected backend is Claude — see `probe_codex`, which
     /// spawns a child process this user has no reason to pay for.
     pub codex: Option<CodexProbe>,
+    pub providers: std::collections::HashMap<String, crate::plan_provider::ProviderProbe>,
     pub curl: CurlProbe,
     /// "active" | "ambient" | "paused". Folded in here so ONE call answers
     /// the whole question; the `mode-changed` event App already listens for
@@ -209,9 +227,16 @@ fn probe_claude() -> ClaudeProbe {
     };
     ClaudeProbe {
         found,
+        identity: path.as_deref().and_then(binary_identity),
         path,
         source: source.to_string(),
     }
+}
+
+fn binary_identity(path: &str) -> Option<String> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some(format!("{}:{}:{}", path, modified.as_nanos(), metadata.len()))
 }
 
 /// Which layer of `resolve_codex_bin()` answered. Same label-only discipline
@@ -252,6 +277,13 @@ pub fn codex_auth_present(auth_json: &str) -> bool {
     nonempty(value.get("OPENAI_API_KEY")) || nonempty(value.pointer("/tokens/access_token"))
 }
 
+/// Read only the top-level model; a profile's unrelated model must not become
+/// the Default choice. Invalid TOML and empty values are unavailable answers.
+pub fn configured_codex_model(text: &str) -> Option<String> {
+    text.parse::<toml::Value>().ok()?.get("model")?.as_str()
+        .map(str::trim).filter(|model| !model.is_empty()).map(str::to_string)
+}
+
 fn probe_codex() -> CodexProbe {
     let resolved = crate::codex_app_server::resolve_codex_bin();
     let source = codex_source(&resolved);
@@ -264,15 +296,40 @@ fn probe_codex() -> CodexProbe {
         }
     };
     let usable = found && crate::codex_app_server::codex_capability(&resolved).0;
-    let signed_in = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|h| h.join(".codex/auth.json"))
+    let codex_home = crate::codex_profile::profile_path().parent().map(Path::to_path_buf);
+    let signed_in = codex_home.as_ref()
+        .map(|h| h.join("auth.json"))
         .and_then(|p| std::fs::read_to_string(p).ok())
         .is_some_and(|text| codex_auth_present(&text));
+    let version = found.then(|| crate::codex_app_server::codex_version(&resolved)).flatten();
+    let resolved_target = std::fs::canonicalize(&resolved).ok();
+    let newer_elsewhere = version.as_ref().and_then(|selected| {
+        crate::codex_app_server::binary_candidates().into_iter()
+            .filter(|candidate| resolved_target.as_ref() != std::fs::canonicalize(candidate).ok().as_ref())
+            .filter_map(|candidate| {
+                let path = candidate.to_string_lossy().into_owned();
+                crate::codex_app_server::codex_version(&path)
+                    .filter(|version| version > selected).map(|version| (path, version))
+            })
+            .max_by(|a, b| a.1.cmp(&b.1))
+            .map(|(path, version)| NewerCodex { path, version: version.to_string() })
+    });
+    let configured_model = codex_home.map(|home| home.join("config.toml"))
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| configured_codex_model(&text));
+    let model_runnable = configured_model.as_ref().and_then(|model| {
+        found.then(|| crate::codex_app_server::model_catalog_for_bin(&resolved))?
+            .ok().map(|catalog| catalog.iter().any(|row| &row.slug == model))
+    });
     CodexProbe {
+        identity: binary_identity(&resolved),
         found,
         path,
         source: source.to_string(),
+        version: version.map(|version| version.to_string()),
+        newer_elsewhere,
+        configured_model,
+        model_runnable,
         usable,
         signed_in,
         profile: crate::codex_profile::get_status(),
@@ -386,7 +443,17 @@ pub async fn preflight_status(
     // "Not claude-code" rather than "is codex": an unset/unknown choice must
     // probe both, because withholding an answer the door needs is a worse
     // failure than one extra `--help` on a machine we know nothing about.
-    let want_codex = backend.as_deref() != Some("claude-code");
+    let want_codex = matches!(backend.as_deref(), None | Some("codex"));
+    let provider_backend = backend.clone();
+    let providers = tokio::task::spawn_blocking(move || {
+        let mut results = std::collections::HashMap::new();
+        for name in ["cursor", "antigravity"] {
+            if provider_backend.as_deref().is_none_or(|b| b == name) {
+                if let Ok(probe) = crate::plan_provider::probe(name) { results.insert(name.to_string(), probe); }
+            }
+        }
+        results
+    });
     let want_extension = extension.unwrap_or(false);
 
     let bins = tokio::task::spawn_blocking(move || {
@@ -423,12 +490,22 @@ pub async fn preflight_status(
         codex_hook,
         codex_skill,
         extension,
+        providers: providers.await.map_err(|e| e.to_string())?,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_model_reads_only_the_top_level_and_degrades_on_invalid_toml() {
+        assert_eq!(configured_codex_model("model = 'gpt-6-astra'\n[profiles.other]\nmodel = 'other'"), Some("gpt-6-astra".into()));
+        assert_eq!(configured_codex_model("[profiles.other]\nmodel = 'other'"), None);
+        for text in ["", "model = ' '", "model = 7", "not toml"] {
+            assert_eq!(configured_codex_model(text), None, "{text:?}");
+        }
+    }
 
     #[test]
     fn parses_the_real_banner() {

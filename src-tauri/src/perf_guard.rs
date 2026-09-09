@@ -70,6 +70,8 @@ mod tests {
         let src = include_str!("devmap.rs");
         assert_async_command(src, "devmap.rs", "dev_servers_scan");
         assert_async_command(src, "devmap.rs", "dev_server_stop");
+        assert_async_command(src, "devmap.rs", "dev_server_stop_plan");
+        assert_async_command(src, "devmap.rs", "dev_server_probe");
     }
 
     /// Uninstalling an extension deletes its directory tree from disk —
@@ -196,7 +198,9 @@ mod tests {
             .find("async fn handle_liveness")
             .expect("lib.rs: handle_liveness must exist — it backs /v1/liveness");
         let body = &src[start..];
-        let end = body.find("\n}\n").expect("handle_liveness must be a closed fn");
+        let end = body
+            .find("\n}\n")
+            .expect("handle_liveness must be a closed fn");
         let body = &body[..end];
         assert!(
             !body.contains("webview_windows()"),

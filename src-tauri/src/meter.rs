@@ -1032,7 +1032,6 @@ mod tests {
             ("browse_locate.rs", include_str!("browse_locate.rs")),
             ("intake.rs", include_str!("intake.rs")),
             ("moot.rs", include_str!("moot.rs")),
-            ("queue.rs", include_str!("queue.rs")),
         ];
         for (name, src) in SILENT {
             assert!(
@@ -1047,6 +1046,21 @@ mod tests {
                  that drain's tokens vanish"
             );
         }
+    }
+
+    /// The overnight queue no longer owns a child/pipe. Native task and
+    /// structured-model readers share cancellation-safe booking in the runner.
+    #[test]
+    fn native_queue_delegates_and_runner_books_on_drop() {
+        let queue=include_str!("queue.rs");
+        assert!(queue.contains("runner.start("));
+        assert!(!queue.contains("collect_turn("));
+        let runner=include_str!("runner.rs");
+        assert!(runner.contains("crate::turn::push_meta("));
+        assert!(runner.contains(".meter.observe(&v)"));
+        assert!(runner.contains("impl Drop for MeterBooking"));
+        assert!(runner.contains("crate::meter::book(&self.db, &self.seat, &meter)"));
+        assert!(runner.matches("MeterBooking {").count() >= 4,"model and task readers retain cancellation-safe booking guards");
     }
 
     /// The daemon seats roll their own drain loop (they parse structured

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 import ReviewPanel from "./ReviewPanel";
@@ -36,6 +36,7 @@ interface ReportSubtask {
   verified?: boolean;
   skipped?: boolean;
   notes?: string;
+  checks?: { nodeId: string; kind?: string; command?: string | null; status: string; exitCode?: number | null }[];
 }
 
 interface ParsedReport {
@@ -95,12 +96,24 @@ export function RunReport({
   const [git, setGit] = useState<GitStatus | null>(null);
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
+  const [nativeReport, setNativeReport] = useState<ParsedReport | null>(null);
+  const currentSession = useRef(planSessionId);
+  currentSession.current = planSessionId;
 
   const refresh = () => {
+    const requestedSession = planSessionId;
     void invoke<PlanRun | null>("get_plan_run", { planSessionId })
-      .then((r) => setRun(r))
-      .catch(() => setRun(null))
-      .finally(() => setLoaded(true));
+      .then((r) => { if (currentSession.current === requestedSession) setRun(r); })
+      .catch(() => { if (currentSession.current === requestedSession) setRun(null); })
+      .finally(() => { if (currentSession.current === requestedSession) setLoaded(true); });
+    // A legacy agent can write arbitrary report JSON. Native provenance comes
+    // from the graph registry and measured_report command, never a claimed flag.
+    void invoke<{ runId: string; planSessionId?: string | null }[]>("runner_list")
+      .then(async (runs) => {
+        const native = runs.find((row) => row.planSessionId === requestedSession);
+        const report = native ? await invoke<unknown>("runner_report", { runId: native.runId }) : null;
+        if (currentSession.current === requestedSession) setNativeReport(report ? parseReport(JSON.stringify(report)) : null);
+      }).catch(() => { if (currentSession.current === requestedSession) setNativeReport(null); });
     if (repoPath) {
       void invoke<GitStatus>("push_status", { repo: repoPath })
         .then(setGit)
@@ -108,11 +121,11 @@ export function RunReport({
     }
   };
   // Re-fetch when the target run changes (and on mount).
-  useEffect(refresh, [planSessionId, repoPath]);
+  useEffect(() => { setLoaded(false); setNativeReport(null); refresh(); }, [planSessionId, repoPath]);
 
   const report = useMemo(
-    () => (run ? parseReport(run.reportJson) : null),
-    [run],
+    () => nativeReport ?? (run ? parseReport(run.reportJson) : null),
+    [run, nativeReport],
   );
   const dirty = git ? git.staged + git.unstaged + git.untracked : null;
 
@@ -166,8 +179,8 @@ export function RunReport({
 
         {!loaded ? null : !run ? (
           <p style={{ fontSize: "12px", color: "var(--color-ink-muted)" }}>
-            No exit report has been filed for this run yet — it arrives when
-            the orchestrator's workflow ends.
+            No completed run report has been filed yet. The live graph and its
+            current checks are available in Runs.
           </p>
         ) : (
           <>
@@ -177,7 +190,7 @@ export function RunReport({
               style={{ fontSize: "11px", color: "var(--color-ink-muted)" }}
             >
               <span>
-                {run.workflowRan
+                {nativeReport ? "native run graph · measured results" : run.workflowRan
                   ? "multi-agent workflow"
                   : "sequential execution"}
               </span>
@@ -238,9 +251,10 @@ export function RunReport({
                       textAlign: "left",
                     }}
                   >
-                    <th style={{ paddingRight: 12 }}>Claimed subtask</th>
+                    <th style={{ paddingRight: 12 }}>{nativeReport ? "Measured task" : "Claimed subtask"}</th>
                     <th style={{ paddingRight: 12 }}>Plan section</th>
                     <th>Status</th>
+                    {nativeReport && <th>Checks</th>}
                   </tr>
                 </thead>
                 <tbody style={{ color: "var(--color-ink)" }}>
@@ -271,13 +285,14 @@ export function RunReport({
                             ? "verified"
                             : "unverified"}
                       </td>
+                      {nativeReport && <td>{(Array.isArray(s.checks) ? s.checks : []).map((check) => `${check.command ?? check.nodeId}: ${check.exitCode != null ? `exit ${check.exitCode}` : check.status}`).join("; ") || "No checks"}</td>}
                     </tr>
                   ))}
                 </tbody>
               </table>
             ) : (
               <p style={{ fontSize: "11px", color: "var(--color-ink-muted)" }}>
-                The report carried no structured subtask claims.
+                {nativeReport ? "The graph has no task nodes." : "The report carried no structured subtask claims."}
               </p>
             )}
           </>

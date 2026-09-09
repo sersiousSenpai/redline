@@ -1,0 +1,6 @@
+[
+  {"op":"update_node","id":"n-api","set":{"title":"Implement typed API"}},
+  {"op":"set_parallelism","value":2},
+  {"op":"add_node","node":{"id":"n-release","kind":"gate","title":"Approve release","brief":"Inspect the measured checks","scopeHint":[],"enforceScope":false,"checkGlobal":true,"status":"pending","attempt":0,"maxAttempts":2,"output":"","queuedMessages":[]}},
+  {"op":"add_edge","edge":{"id":"e-check-release","from":"n-check","to":"n-release","type":"blocks"}}
+]
