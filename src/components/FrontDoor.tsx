@@ -1052,8 +1052,8 @@ function PlanMenu({
  *
  *  **Built on `useClickPopover`/`Panel`, not on `.rl-fd-menu`.** Its siblings
  *  are three or four rows and fit above the composer by luck; this one stacks
- *  three sections (harness + up to nine models + up to seven efforts) and
- *  cannot. An absolutely-positioned `bottom: 100%` menu with a `56vh` cap is
+ *  model and effort controls and cannot rely on fitting above the composer.
+ *  An absolutely-positioned `bottom: 100%` menu with a `56vh` cap is
  *  quoting a fraction of the WINDOW, which has nothing to do with the room
  *  above the chip — so it ran off the top of the screen and the Harness rows,
  *  rendered first, became unreachable. `placeOver` measures the room that is
@@ -1158,7 +1158,7 @@ function BackendMenu({
               row(b.id, b.id === choice.backend, b.preview ? `${b.label} · Preview` : b.label, () =>
                 // Switching harness drops the model and effort: a Claude alias
                 // is not a Codex slug, and `normalizeChoice` says so.
-                set({ backend: b.id, model: null, effort: null }),
+                b.id !== choice.backend && set({ backend: b.id, model: null, effort: null }),
               ),
             )}
 
@@ -1167,18 +1167,17 @@ function BackendMenu({
               {providerInfo.version ? `${backendLabel(choice.backend)} ${providerInfo.version} · ` : ""}{providerInfo.path ?? "CLI not located"}
             </div>}
             {row("locate-provider", false, "Change CLI…", onLocate)}
-            <div className="rl-fd-menu-label">Model</div>
-            {row("model-default", !choice.model, "Default", () =>
-              set({ ...choice, model: null, effort: null }),
-            )}
-            {models.map((m) =>
-              // The description rides as a tooltip rather than a second column:
-              // truncated to a menu's width it reads as noise, and the row's
-              // job is to be clickable.
-              row(m.value, m.value === choice.model, m.label, () => set({ ...choice, model: m.value }), {
-                title: m.hint,
-              }),
-            )}
+            <label className="rl-fd-model-field">
+              <span className="rl-fd-menu-label">Model</span>
+              <select aria-label="Model" value={choice.model ?? ""} onChange={(e) =>
+                set({ ...choice, model: e.target.value || null, effort: e.target.value ? choice.effort : null })
+              }>
+                <option value="">Default</option>
+                {models.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+                {choice.model && !models.some(m => m.value === choice.model) &&
+                  <option value={choice.model}>{choice.model}</option>}
+              </select>
+            </label>
             {models.length === 0 && (
               // Not an error row: the catalog is fetched on open, and a codex
               // that can't answer still launches fine on its own default model.
@@ -1186,23 +1185,21 @@ function BackendMenu({
             )}
 
             <div className="rl-fd-menu-sep" aria-hidden />
-            {efforts.length > 0 && <>
-            <div className="rl-fd-menu-label">Effort</div>
-            {row("effort-default", !choice.effort, "Default", () =>
-              set({ ...choice, effort: null }),
-            )}
-            {efforts.map((e) =>
-              row(e, e === choice.effort, e, () => set({ ...choice, effort: e }), {
-                // Codex advertises efforts per MODEL, so there is nothing to
-                // offer until one is picked — hence the disable rather than a
-                // list that would be wrong for whatever gets chosen next.
-                disabled: choice.backend === "codex" && !choice.model,
-                title:
-                  choice.backend === "codex" && !choice.model
-                    ? "Pick a Codex model first — efforts differ per model"
-                    : undefined,
-              }),
-            )}
+            {BACKENDS.find(b => b.id === choice.backend)?.effort !== "none" && <>
+              <label className="rl-fd-model-field">
+                <span className="rl-fd-menu-label">Effort</span>
+                <select aria-label="Effort" value={choice.effort ?? ""}
+                  disabled={efforts.length === 0}
+                  onChange={(e) => set({ ...choice, effort: e.target.value || null })}>
+                  <option value="">Default{modelCatalogs[choice.backend]?.find(m => m.slug === choice.model)?.defaultEffort
+                    ? ` (${modelCatalogs[choice.backend]?.find(m => m.slug === choice.model)?.defaultEffort})` : ""}</option>
+                  {efforts.map(e => <option key={e} value={e}>{e}</option>)}
+                </select>
+              </label>
+              {efforts.length === 0 && <div className="rl-fd-menu-note">
+                {!choice.model ? "Choose a model to set its effort." : models.length === 0
+                  ? "Effort options load with the model list." : "This model has no configurable effort."}
+              </div>}
             </>}
           </div>
         </Panel>

@@ -16,6 +16,11 @@ export const shq = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
  *  was never told the revision contract. */
 export const CODEX_PLAN_PROFILE = "redline-plan";
 
+/** The wrapper owns a private app-server for this TUI. Its hooks inherit the
+ * launch metadata; approval can address the live thread through its socket. */
+export const codexPlanLauncher = (bin: string) =>
+  '/bin/sh "${CODEX_HOME:-$HOME/.codex}/redline-codex-launch.sh" ' + shq(bin);
+
 /** Bare marker the resumed session writes into its plan file on restore. Redline
  *  already holds the authoritative plan, so it re-presents that on restore and
  *  ignores the submitted body — Claude need not fetch or retype the plan. */
@@ -199,13 +204,11 @@ export function buildResumeCommand(
  *  Same shape, different handshake: there is no plan file and no
  *  ExitPlanMode, so the marker rides inside a `<proposed_plan>` block — which
  *  is what the Stop hook extracts and what `restore_handshake` then
- *  recognises. The sandbox flags are repeated because they are per-invocation,
- *  and a restore that came back writable would be a plan session that can edit
- *  the repo.
+ *  recognises. Remote resume rejects permission flags, so the launcher's
+ *  server config resets the resumed thread to read-only review.
  *
- *  No restore environment and no hidden context: Codex fires no
- *  UserPromptSubmit hook, and the `redline-plan` profile it resumes under
- *  already carries the broader contract as `developer_instructions`. So the
+ *  No restore environment or hidden context is needed: the launcher supplies
+ *  the plan contract as `developer_instructions`. So the
  *  trigger is trimmed to the one instruction the profile does not give — which
  *  marker to emit, and to emit nothing else. */
 function codexResume(
@@ -224,7 +227,9 @@ function codexResume(
     "it holds and ignores what you submit." +
     rescind;
   return (
-    `${shq(bin)} resume ${shq(sessionId)} ${model ? `-m ${shq(model)} ` : ""}${effort ? `-c ${shq(`model_reasoning_effort=${JSON.stringify(effort)}`)} ` : ""}-s read-only -a never ` +
+    // Remote resume rejects permission flags. The launcher's server config
+    // supplies read-only/never for restore; approval updates the live thread.
+    `${codexPlanLauncher(bin)} resume ${shq(sessionId)} ${model ? `-m ${shq(model)} ` : ""}${effort ? `-c ${shq(`model_reasoning_effort=${JSON.stringify(effort)}`)} ` : ""}` +
     `-p ${shq(CODEX_PLAN_PROFILE)} ${shq(prompt)}`
   );
 }

@@ -98,9 +98,11 @@ describe("one launch pipeline", () => {
     // — which is the entire difference between a plan session and one that can
     // edit the repo.
     const hits = countIn("src", "-s read-only -a never");
-    expect(hits, `codex sandbox flags written in ${hits} places`).toBe(2);
-    // Two, and exactly two: the launch (planLaunchCommand) and the restore
-    // (resumeCommand). Both are the same law applied to the same session.
+    expect(hits, `codex sandbox flags written in ${hits} places`).toBe(1);
+    // Remote resume rejects permission flags; its server owns the defaults.
+    const launcher = read("src-tauri/src/codex_plan_launch.sh");
+    expect(launcher).toContain('sandbox_mode="read-only"');
+    expect(launcher).toContain('approval_policy="never"');
   });
 
   it("both restore paths pick their harness from one decision", () => {

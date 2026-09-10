@@ -98,9 +98,12 @@ function baseProps(over: Partial<FrontDoorProps> = {}): FrontDoorProps {
  *  reason that has nothing to do with what is being tested. */
 function Harness(props: Partial<FrontDoorProps>) {
   const [text, setText] = useState(props.text ?? "");
+  const [backend, setBackend] = useState(props.backend ?? baseProps().backend);
   return createElement(FrontDoor, {
     ...baseProps(props),
     text,
+    backend,
+    onBackendChange: next => { setBackend(next); props.onBackendChange?.(next); },
     onTextChange: (next) =>
       setText((prev) => (typeof next === "function" ? next(prev) : next)),
   });
@@ -215,5 +218,55 @@ describe("FrontDoor — a launch in flight leaves the door usable", () => {
     });
     expect(host.querySelector(".rl-fd-strip")).not.toBeNull();
     expect(host.textContent).toContain("The plan hook may not be approved yet");
+  });
+});
+
+describe("FrontDoor model and effort controls", () => {
+  const modelCatalogs = { codex: [
+    { slug: "gpt-6-astra", displayName: "GPT-6 Astra", description: "", defaultEffort: "medium", efforts: ["low", "medium", "high", "xhigh", "max", "ultra"] },
+    { slug: "gpt-5.5", displayName: "GPT-5.5", description: "", defaultEffort: "medium", efforts: ["low", "medium", "high", "xhigh"] },
+  ] };
+  const select = (name: string) => document.querySelector<HTMLSelectElement>(`select[aria-label="${name}"]`)!;
+  async function choose(name: string, value: string) {
+    await act(async () => {
+      select(name).value = value;
+      select(name).dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  }
+  async function openPicker(onBackendChange = vi.fn()) {
+    await mount({ backend: { backend: "codex", model: null, effort: null }, modelCatalogs, onBackendChange });
+    const trigger = host.querySelector<HTMLButtonElement>('button[title="⏎ launches on Codex"]')!;
+    await act(async () => trigger.click());
+    return onBackendChange;
+  }
+  it("keeps effort reachable after picking a model in the same open panel", async () => {
+    const changed = await openPicker();
+    expect(select("Effort").disabled).toBe(true);
+    await choose("Model", "gpt-6-astra");
+    expect(select("Effort").disabled).toBe(false);
+    expect(Array.from(select("Effort").options).map(o => o.value)).toContain("ultra");
+    await choose("Effort", "ultra");
+    expect(changed).toHaveBeenLastCalledWith({ backend: "codex", model: "gpt-6-astra", effort: "ultra" });
+    expect(document.querySelector('[role="menu"][aria-label="Harness"]')).not.toBeNull();
+  });
+  it("drops unsupported effort on model change and leaves supported effort selected", async () => {
+    await openPicker();
+    await choose("Model", "gpt-6-astra");
+    await choose("Effort", "ultra");
+    await choose("Model", "gpt-5.5");
+    expect(select("Effort").value).toBe("");
+    expect(Array.from(select("Effort").options).map(o => o.value)).not.toContain("ultra");
+    await choose("Effort", "high");
+    await choose("Model", "gpt-6-astra");
+    expect(select("Effort").value).toBe("high");
+  });
+  it("does not erase model and effort when the selected harness is clicked again", async () => {
+    await openPicker();
+    await choose("Model", "gpt-6-astra");
+    await choose("Effort", "max");
+    const codex = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')).find(b => b.textContent === "Codex")!;
+    await act(async () => codex.click());
+    expect(select("Model").value).toBe("gpt-6-astra");
+    expect(select("Effort").value).toBe("max");
   });
 });

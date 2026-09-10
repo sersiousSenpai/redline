@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Yusuf Al-Bazian
 import type { BackendChoice } from "./backendChoice";
-import { CODEX_PLAN_PROFILE, shq } from "./resumeCommand";
+import { CODEX_PLAN_PROFILE, codexPlanLauncher, shq } from "./resumeCommand";
 
 /** Build the command that launches a *fresh* plan session seeded with a
  *  drafted prompt — on either backend. THE only place a plan launch is built:
@@ -133,7 +133,7 @@ function codexLaunch(
     ? `-c ${shq(`model_reasoning_effort=${tomlString(choice.effort)}`)} `
     : "";
   return (
-    `${shq(bin)} ${model}${effort}-s read-only -a never ` +
+    `${codexPlanLauncher(bin)} ${model}${effort}-s read-only -a never ` +
     `-p ${shq(CODEX_PLAN_PROFILE)} ${shq(prompt)}`
   );
 }

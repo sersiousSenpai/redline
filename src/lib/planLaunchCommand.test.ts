@@ -153,7 +153,7 @@ describe("buildPlanLaunchCommand — the codex arm", () => {
     // to an older standalone build with no `resume` — it plans once and then
     // fails every restore.
     const cmd = buildPlanLaunchCommand("hi", "/p", [], CODEX, { codex: BIN });
-    expect(cmd.startsWith(`cd '/p' && '${BIN}' `)).toBe(true);
+    expect(cmd.startsWith(`cd '/p' && /bin/sh "${'${CODEX_HOME:-$HOME/.codex}'}/redline-codex-launch.sh" '${BIN}' `)).toBe(true);
   });
 
   it("runs read-only with approvals off — plan mode's physical equivalent", () => {

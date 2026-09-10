@@ -192,7 +192,7 @@ describe("buildResumeCommand — the codex arm", () => {
 
   it("resumes the codex thread with the absolute binary", () => {
     const cmd = buildResumeCommand("thr_abc", NOW, "/p", false, false, codex);
-    expect(cmd.startsWith(`cd '/p' && '${BIN}' resume 'thr_abc' `)).toBe(true);
+    expect(cmd.startsWith(`cd '/p' && /bin/sh "${'${CODEX_HOME:-$HOME/.codex}'}/redline-codex-launch.sh" '${BIN}' resume 'thr_abc' `)).toBe(true);
   });
 
   it("never sends a codex thread id down `claude --resume`", () => {
@@ -204,9 +204,11 @@ describe("buildResumeCommand — the codex arm", () => {
     expect(cmd).not.toContain("--permission-mode");
   });
 
-  it("comes back read-only — a restore must not be able to edit the repo", () => {
+  it("uses the read-only launcher without the permission flags remote resume rejects", () => {
     const cmd = buildResumeCommand("thr_abc", NOW, null, false, false, codex);
-    expect(cmd).toContain("-s read-only -a never");
+    expect(cmd).toContain("redline-codex-launch.sh");
+    expect(cmd).not.toContain("-s read-only");
+    expect(cmd).not.toContain("-a never");
   });
 
   it("asks for the sentinel inside a proposed_plan block, not a plan file", () => {
@@ -234,7 +236,7 @@ describe("buildResumeCommand — the codex arm", () => {
       backend: "codex",
       codexBin: null,
     });
-    expect(cmd.startsWith("'codex' resume ")).toBe(true);
+    expect(cmd).toContain('redline-codex-launch.sh" \'codex\' resume ');
   });
 
   it("resumes under the Redline plan profile", () => {
@@ -258,14 +260,13 @@ describe("buildResumeCommand — the codex arm", () => {
     expect(cmd).toContain("ignores what you submit");
     // Self-contained: it never sends Codex back to Redline for anything. The
     // plan sandbox has no network, so a fetch instruction could only ever fail
-    // — and Codex fires no UserPromptSubmit hook, so there is no hidden-context
-    // channel to lean on either. What is here is all there is.
+    // — the restore marker must work using only the supplied context.
     expect(cmd).not.toContain("curl");
     expect(cmd).not.toContain("127.0.0.1");
     expect(cmd).not.toContain("/v1/sessions/");
-    // …and no environment prefix: the restore seat + headers are the Claude
-    // arm's mechanism for reaching the prompt-ingest hook, which Codex has not.
-    expect(cmd.startsWith("'")).toBe(true);
+    // The Codex restore trigger is self-contained and needs no restore-seat
+    // environment prefix.
+    expect(cmd.startsWith("/bin/sh ")).toBe(true);
     expect(cmd).not.toContain("REDLINE_AGENT_SEAT");
   });
 

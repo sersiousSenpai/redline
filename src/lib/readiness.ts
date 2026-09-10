@@ -243,9 +243,9 @@ export function deriveReadiness(input: ReadinessInput): ReadinessItem[] {
           ? "This `codex` is too old for Redline"
           : "Can't find the `codex` command",
         detail: cx?.found
-          ? `${cx.path ?? "It"} has no \`resume\` — it could plan once and then ` +
-            "fail every restore. The ChatGPT desktop app ships a current " +
-            "build; point Redline at that one."
+          ? `${cx.path ?? "This installation"} needs updating. Plan approval requires ` +
+            "Codex 0.154.0 or newer, with resume, discussion forks, and live " +
+            "app-server support. Update Codex or choose a newer installation."
           : "Redline spawns Codex to do the planning. Install the ChatGPT " +
             "desktop app, or point Redline at the binary.",
         fix: { label: "Locate it…", kind: "locate-codex" },
@@ -261,14 +261,12 @@ export function deriveReadiness(input: ReadinessInput): ReadinessItem[] {
         id: "codex-contract-missing",
         state: "blocked",
         label: cx.profile.outdated
-          ? "The Codex plan contract is out of date"
-          : "The Codex plan contract isn't installed",
+          ? "The Codex planning integration is out of date"
+          : "The Codex planning integration isn't installed",
         detail:
-          "It teaches Codex how to submit a plan and how to fold your " +
-          "revisions back in without losing the track-changes markers. " +
-          "Codex ignores a missing profile silently, so a plan would come " +
-          "back looking fine and then break on the first revision.",
-        fix: { label: "Install integration", kind: "install-integration" },
+          "Install the current plan instructions and terminal launcher so " +
+          "Codex can preserve your revisions and begin building when you approve.",
+        fix: { label: "Install integration", kind: "install-integration", backend: "codex" },
       });
     } else if (!cx.signedIn) {
       // The third silent-failure route, and the one this strip exists for: a
@@ -306,7 +304,7 @@ export function deriveReadiness(input: ReadinessInput): ReadinessItem[] {
   }
 
   if (
-    backend === "claude-code" &&
+    (backend === "claude-code" || backend === "codex") &&
     input.pendingSince !== null &&
     input.now - input.pendingSince > HOOK_SILENCE_MS &&
     !input.planEverArrived
@@ -315,8 +313,11 @@ export function deriveReadiness(input: ReadinessInput): ReadinessItem[] {
       id: "hook-unapproved",
       state: "blocked",
       label: "The plan hook may not be approved yet",
-      detail:
-        "Claude Code asks you to approve hooks once, from inside Claude " +
+      detail: backend === "codex"
+        ? "Codex skips new or modified hooks until you trust their current definition. " +
+          "Run /hooks in the Codex terminal and trust Redline’s Stop and UserPromptSubmit entries. " +
+          "An installed hook is not necessarily trusted."
+        : "Claude Code asks you to approve hooks once, from inside Claude " +
         "Code itself — we can't do it for you. Run /hooks in the terminal " +
         "below and approve the Redline entry.",
       fix: { label: "/hooks", kind: "copy-hooks", copyText: "/hooks" },

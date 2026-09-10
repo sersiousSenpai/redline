@@ -717,3 +717,50 @@ A → B → A switch.
 
 Native execution verification, actual process ownership, checked scope, and
 measured run reports are documented in [native-runner.md](native-runner.md).
+
+
+### Codex interactive approval (2026-09-10)
+
+Verified against Codex CLI **0.154.0** using a real TUI, a private Unix
+app-server socket, an isolated `CODEX_HOME`, and a mock Responses endpoint.
+The fixture invokes Redline's actual Rust approval adapter and has Codex
+execute a file write inside the temporary workspace. No paid model call is
+needed. Run `python3 scripts/probe-codex-approval.py`; add `--restore` to close
+and resume the same planning thread before approving it.
+
+The relevant protocol behavior:
+
+- Stop returning `{}` ends the planning turn. It does not mean “implement.”
+  Stop returning `decision: block` continues the existing turn with its frozen
+  read-only permissions, even after `thread/settings/update`.
+- Redline updates that live thread to Default collaboration mode,
+  `workspaceWrite`, and `on-request`, preserving its model and reasoning effort.
+  It then calls `thread/queue/add` with the approved plan, and only releases
+  Stop after Codex acknowledges the queued input. That fresh turn can build.
+- `clientUserMessageId` does **not** deduplicate `thread/queue/add`.
+  Redline serializes approval attempts and searches the paginated queue for
+  the held review's identifier before retrying a lost acknowledgement.
+- The launcher owns a private `app-server --listen unix://…` process and
+  attaches the TUI using `--remote`. The socket uses WebSocket framing,
+  including an HTTP upgrade. `app-server proxy` merely forwards raw bytes;
+  it does not adapt JSONL to WebSocket. A shared managed daemon is unnecessary.
+- The remote TUI forwards model, effort, and sandbox choices, but does not
+  forward the profile's developer instructions. The launcher passes the
+  generated plan contract to the server through a quoted `-c` argument as well.
+  This internal argv does not traverse the terminal's small input buffer.
+- Remote TUI resume rejects explicit `-s` / `-a` permission overrides. The
+  launcher supplies read-only/never defaults on the server. The restore probe
+  verifies both an interrupted planner and a previously approved writable
+  thread resume as read-only, preserving the thread identifier.
+
+Hooks inherit the launch identifier and socket from this terminal's server.
+The Stop curl adapter passes the socket in `X-Redline-Codex-Socket` so approval
+addresses the producing thread. Terminals started outside this launcher need
+to be closed and restored through the updated integration to gain that control
+connection. A failed handoff leaves the review pending and reports the error.
+
+Codex trusts a particular hook definition. A changed command must be reviewed
+again in `/hooks`; installation is not proof of trust. Production code never
+bypasses hook trust. The isolated probe trusts only its own fixture hook.
+Plannotator's command is an executable path; Redline's is the visible curl
+adapter. The different appearance is not a different Codex hook type.

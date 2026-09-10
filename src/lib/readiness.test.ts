@@ -118,6 +118,18 @@ describe("the three silent-failure routes", () => {
     ).toEqual([]);
   });
 
+  it("explains Codex hook trust when an installed integration never sends its first plan", () => {
+    const items = deriveReadiness(healthy({
+      targetIsCodex: true, codexHookInstalled: true,
+      now: 1_000_000, pendingSince: 1_000_000 - HOOK_SILENCE_MS - 1,
+      planEverArrived: false,
+    }));
+    const hook = items.find(item => item.id === "hook-unapproved");
+    expect(hook?.detail).toContain("new or modified");
+    expect(hook?.detail).toContain("not necessarily trusted");
+    expect(hook?.fix?.copyText).toBe("/hooks");
+  });
+
   it("never nudges when nothing is pending", () => {
     expect(
       ids(healthy({ pendingSince: null, planEverArrived: false })),

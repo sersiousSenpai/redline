@@ -6325,7 +6325,12 @@ function App() {
       applyHealthRef.current(health);
       setInstallError(null);
       if (showExplainer && backend === "claude-code") setSetupPhase("done");
-      else { setToast(`${backendLabel(backend)} integration installed`); setTimeout(() => setToast(null), 4000); }
+      else {
+        setToast(backend === "codex"
+          ? "Codex integration installed. Open /hooks in Codex and trust Redline’s Stop and UserPromptSubmit hooks if marked new or modified."
+          : `${backendLabel(backend)} integration installed`);
+        setTimeout(() => setToast(null), backend === "codex" ? 10000 : 4000);
+      }
       return true;
     } catch (error) {
       setInstallError(String(error)); setToast(`Integration install failed: ${error}`);

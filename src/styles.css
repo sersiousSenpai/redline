@@ -3914,6 +3914,24 @@ html[data-rl-dock-caps] .rl-term-dock.rl-plate::after {
   opacity: 0.4;
   cursor: default;
 }
+.rl-fd-model-field {
+  display: grid;
+  gap: 3px;
+  margin: 5px 7px 9px;
+}
+.rl-fd-model-field .rl-fd-menu-label { padding-left: 0; }
+.rl-fd-model-field select {
+  width: 100%;
+  min-width: 0;
+  padding: 7px;
+  border: 1px solid var(--color-rule);
+  border-radius: 6px;
+  background: var(--color-bg-elevated);
+  color: var(--color-ink);
+  font: inherit;
+  font-size: 12px;
+}
+.rl-fd-model-field select:disabled { opacity: 0.5; }
 
 /* Attachments ride as a `Context:` path list on the prompt — the plan session
    already has Read/Grep/Glob pre-approved, so paths are all it needs. */

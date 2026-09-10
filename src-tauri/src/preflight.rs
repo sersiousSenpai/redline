@@ -302,6 +302,7 @@ fn probe_codex() -> CodexProbe {
         .and_then(|p| std::fs::read_to_string(p).ok())
         .is_some_and(|text| codex_auth_present(&text));
     let version = found.then(|| crate::codex_app_server::codex_version(&resolved)).flatten();
+    let usable = usable && crate::codex_app_server::supports_plan_handoff(version.as_ref());
     let resolved_target = std::fs::canonicalize(&resolved).ok();
     let newer_elsewhere = version.as_ref().and_then(|selected| {
         crate::codex_app_server::binary_candidates().into_iter()

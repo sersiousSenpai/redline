@@ -344,14 +344,34 @@ fn deny_response(reason: impl Into<String>) -> HookResponse {
     }
 }
 
+fn codex_stop_response(decision: HookResponse) -> Value {
+    if decision.hook_specific_output.permission_decision == "deny" {
+        json!({"decision":"block","reason":decision.hook_specific_output.permission_decision_reason})
+    } else {
+        // Approval queued a fresh implementation turn with new settings.
+        // A hook continuation would inherit the planner's read-only sandbox.
+        json!({})
+    }
+}
+
 /// One held POST: the oneshot to answer it, the registration token that lets
 /// the drop-guard remove only its own entry, and the dock terminal the POST
 /// came from (`None` = external terminal / unresolvable) — drives the
 /// per-terminal "plan intercepted" strip.
 struct PendingEntry {
     token: u64,
+    approval_id: String,
+    approval_lock: Arc<tokio::sync::Mutex<()>>,
+    codex_socket: Option<String>,
     tx: oneshot::Sender<HookResponse>,
     terminal_id: Option<String>,
+}
+
+struct ApprovalTicket {
+    token: u64,
+    id: String,
+    codex_socket: Option<String>,
+    lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Clone)]
@@ -389,6 +409,9 @@ impl PendingResponses {
             session_id.to_string(),
             PendingEntry {
                 token,
+                approval_id: uuid::Uuid::new_v4().to_string(),
+                approval_lock: Arc::new(tokio::sync::Mutex::new(())),
+                codex_socket: None,
                 tx,
                 terminal_id,
             },
@@ -399,6 +422,19 @@ impl PendingResponses {
     }
     fn take(&self, session_id: &str) -> Option<oneshot::Sender<HookResponse>> {
         self.map.lock().unwrap().remove(session_id).map(|e| e.tx)
+    }
+    fn approval_ticket(&self, session_id: &str) -> Option<ApprovalTicket> {
+        self.map.lock().unwrap().get(session_id).map(|e| ApprovalTicket {
+            token: e.token, id: e.approval_id.clone(), codex_socket: e.codex_socket.clone(), lock: e.approval_lock.clone(),
+        })
+    }
+    fn owns(&self, session_id: &str, token: u64) -> bool {
+        self.map.lock().unwrap().get(session_id).is_some_and(|e| e.token == token)
+    }
+    fn set_codex_socket(&self, session_id: &str, token: u64, socket: Option<String>) {
+        if let Some(entry) = self.map.lock().unwrap().get_mut(session_id).filter(|e| e.token == token) {
+            entry.codex_socket = socket;
+        }
     }
     /// Remove and return this session's sender *iff* it is still the one
     /// registered under `token`. Used by the drop-guard: a hit means the held
@@ -1809,21 +1845,11 @@ async fn handle_codex_stop(
         "model": payload.get("model").cloned().unwrap_or(Value::Null),
         "tool_input": { "plan": plan },
         "redline_provider": "codex",
+        "redline_codex_socket": headers.get("X-Redline-Codex-Socket").and_then(|v| v.to_str().ok()),
         "redline_launch_id": headers.get(plan_launch::HEADER).and_then(|v|v.to_str().ok())
     });
     let decision = handle_plan_core(peer, app_state, normalized).await;
-    if decision.hook_specific_output.permission_decision == "deny" {
-        // The reason already carries the full review inline — `submit_review`
-        // builds it that way for codex, because this session's sandbox has no
-        // network and could never fetch it.
-        Json(json!({
-            "decision": "block",
-            "reason": decision.hook_specific_output.permission_decision_reason
-        }))
-    } else {
-        // A successful Stop hook lets the completed Plan-mode turn finish.
-        Json(json!({}))
-    }
+    Json(codex_stop_response(decision))
 }
 
 /// The native CLIs have different wire formats, but share the same review hold.
@@ -2387,6 +2413,8 @@ async fn handle_plan_core(
     // re-entered plan mode, retried, or the earlier hold was abandoned), release
     // the stale waiter cleanly instead of leaving it hung, then take over.
     let (mut rx, token) = register_hold(&app_state.pending, &session_id, held_terminal_id);
+    app_state.pending.set_codex_socket(&session_id, token,
+        payload.get("redline_codex_socket").and_then(Value::as_str).map(str::to_owned));
     // If this request is cancelled (the held connection drops before a decision),
     // the guard removes our orphaned sender and notifies the UI. On the normal
     // decision path the sender was already taken, so the guard is a no-op.
@@ -2438,13 +2466,46 @@ async fn handle_plan_core(
                             Err(_) => deny_response(cancelled_msg),
                         }
                     } else {
+                        let ticket = app_state.pending.approval_ticket(&session_id);
+                        let _approval_guard = match &ticket {
+                            Some(ticket) => Some(ticket.lock.lock().await),
+                            None => None,
+                        };
+                        // An explicit decision may have won while we waited for its lock.
+                        if !app_state.pending.owns(&session_id, token) {
+                            drop(_approval_guard);
+                            let response = (&mut rx).await.unwrap_or_else(|_| deny_response(cancelled_msg));
+                            app_state.claims.clear(&session_id);
+                            return response;
+                        }
+                        let plan = app_state.store.get(&session_id)
+                            .and_then(|s| s.revisions.last().map(|r| r.raw_plan_markdown.clone()))
+                            .unwrap_or_else(|| raw_plan.clone());
+                        // Keep the review held if the CLI cannot acknowledge
+                        // the mode/sandbox transition. An empty Stop response
+                        // would strand an approved plan in a read-only TUI.
+                        if payload.get("redline_provider").and_then(Value::as_str) == Some("codex") {
+                            let approval_id = ticket.as_ref().map(|t| t.id.as_str()).unwrap_or_default();
+                            let socket = ticket.as_ref().and_then(|t| t.codex_socket.as_deref());
+                            if let Err(error) = codex_app_server::queue_plan_implementation(socket, &session_id, &plan, approval_id).await {
+                                tracing::warn!(%session_id, %error, "Codex Ambient handoff failed; awaiting explicit approval");
+                                drop(_approval_guard);
+                                let response = match (&mut rx).await {
+                                    Ok(r) => r,
+                                    Err(_) => deny_response(cancelled_msg),
+                                };
+                                app_state.claims.clear(&session_id);
+                                return response;
+                            }
+                        }
                         // Window elapsed unclaimed — auto-approve and drop the
                         // pending sender so it is never orphaned.
-                        let _ = app_state.pending.take(&session_id);
+                        let _ = app_state.pending.take_if_owned(&session_id, token);
                         app_state
                             .store
                             .set_attach_state(&session_id, AttachState::Idle);
                         tracing::info!(session_id = %session_id, "Ambient: decision window elapsed — auto-approving");
+                        app_state.store.set_status(&session_id, SessionStatus::Approved);
                         allow_response(
                             "Auto-approved (Ambient mode — the plan was not opened for review within the decision window).",
                         )
@@ -7520,14 +7581,26 @@ async fn submit_review(
 }
 
 #[tauri::command]
-fn approve_plan(
+async fn approve_plan(
     app: AppHandle,
     store: tauri::State<'_, SessionStore>,
     pending: tauri::State<'_, PendingResponses>,
     expected_modes: tauri::State<'_, ExpectedModes>,
     session_id: String,
 ) -> Result<(), String> {
-    let Some(tx) = pending.take(&session_id) else {
+    let session = store.get(&session_id).ok_or("plan session not found")?;
+    let plan = session.revisions.last().ok_or("session has no plan")?.raw_plan_markdown.clone();
+    let ticket = pending.approval_ticket(&session_id);
+    let _approval_guard = match &ticket {
+        Some(ticket) => Some(ticket.lock.lock().await),
+        None => None,
+    };
+    if let Some(ticket) = ticket.as_ref().filter(|t| pending.owns(&session_id, t.token) && session.backend.as_deref() == Some("codex")) {
+        // Do this while Stop is still held, and propagate errors to the Approve
+        // button. Never mark a plan approved when Codex cannot start building.
+        codex_app_server::queue_plan_implementation(ticket.codex_socket.as_deref(), &session_id, &plan, &ticket.id).await?;
+    }
+    let Some(tx) = ticket.as_ref().and_then(|t| pending.take_if_owned(&session_id, t.token)) else {
         // The held POST is gone but this session wasn't reconciled to Detached
         // (drop-guard/sweep gap). Persist it now so the UI surfaces the detached
         // banner + Restore button instead of leaving Approve a silent no-op.
@@ -14912,6 +14985,22 @@ mod tests {
             "two blocks are ambiguous, not a plan"
         );
         assert!(extract_codex_proposed_plan("<proposed_plan>   </proposed_plan>").is_none());
+    }
+
+    #[test]
+    fn codex_approval_finishes_the_planning_turn_and_revision_continues_it() {
+        // Implementation is queued separately before approval releases Stop.
+        // Returning block here would re-enter the read-only planning turn.
+        for reason in ["approved", "paused", "superseded", "fork ignored"] {
+            assert_eq!(codex_stop_response(allow_response(reason)), json!({}));
+        }
+        let revision = codex_stop_response(deny_response("revise this plan"));
+        assert_eq!(revision, json!({"decision":"block","reason":"revise this plan"}));
+        let stand_down = codex_stop_response(deny_response(ORCHESTRATE_STAND_DOWN));
+        assert!(!stand_down["reason"].as_str().unwrap().contains("Begin implementing"));
+        let claude = serde_json::to_value(allow_response("approved")).unwrap();
+        assert_eq!(claude.as_object().unwrap().len(), 1);
+        assert_eq!(claude["hookSpecificOutput"]["permissionDecision"], "allow");
     }
 
     // --- T4.1: the orchestrate -> review link survives a restart ------------

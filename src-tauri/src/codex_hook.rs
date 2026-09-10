@@ -27,15 +27,12 @@ pub struct CodexHookStatus {
 }
 
 pub fn hooks_path() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".codex").join("hooks.json")
+    crate::codex_profile::codex_home().join("hooks.json")
 }
 
 fn stop_command() -> String {
     format!(
-        "/usr/bin/curl -sS --max-time {HOOK_TIMEOUT_SECS} -X POST -H 'Content-Type: application/json' -H \"X-Redline-Plan-Launch-Id: ${{REDLINE_PLAN_LAUNCH_ID:-}}\" -H \"X-Redline-Agent: ${{REDLINE_AGENT_SEAT:-}}\" --data-binary @- {STOP_URL}"
+        "/usr/bin/curl -sS --max-time {HOOK_TIMEOUT_SECS} -X POST -H 'Content-Type: application/json' -H \"X-Redline-Plan-Launch-Id: ${{REDLINE_PLAN_LAUNCH_ID:-}}\" -H \"X-Redline-Agent: ${{REDLINE_AGENT_SEAT:-}}\" -H \"X-Redline-Codex-Socket: ${{REDLINE_CODEX_SOCKET:-}}\" --data-binary @- {STOP_URL}"
     )
 }
 
@@ -45,6 +42,7 @@ fn capture_command() -> String {
     )
 }
 
+#[cfg(test)]
 fn entry_targets(entry: &Value, url: &str) -> bool {
     entry
         .get("hooks")
@@ -68,12 +66,12 @@ fn get_status_at(path: &Path) -> CodexHookStatus {
         .as_ref()
         .and_then(|v| v.pointer("/hooks/Stop"))
         .and_then(Value::as_array)
-        .is_some_and(|entries| entries.iter().any(|entry| entry_targets(entry, STOP_URL)));
+        .is_some_and(|entries| entries.iter().any(|entry| entry_has_command(entry, &stop_command(), false)));
     let prompt_capture_found = root
         .as_ref()
         .and_then(|v| v.pointer("/hooks/UserPromptSubmit"))
         .and_then(Value::as_array)
-        .is_some_and(|entries| entries.iter().any(|entry| entry_targets(entry, INGEST_URL)));
+        .is_some_and(|entries| entries.iter().any(|entry| entry_has_command(entry, &capture_command(), true)));
     CodexHookStatus {
         available: crate::codex_app_server::codex_available(),
         installed: stop_found && prompt_capture_found,
@@ -83,14 +81,34 @@ fn get_status_at(path: &Path) -> CodexHookStatus {
     }
 }
 
+fn entry_has_command(entry: &Value, command: &str, asynchronous: bool) -> bool {
+    entry.get("hooks").and_then(Value::as_array).is_some_and(|hooks| hooks.iter().any(|hook|
+        hook.get("type").and_then(Value::as_str) == Some("command")
+            && hook.get("command").and_then(Value::as_str) == Some(command)
+            && hook.get("async").and_then(Value::as_bool).unwrap_or(false) == asynchronous
+    ))
+}
+
 pub fn install() -> Result<CodexHookStatus, String> {
     install_at(&hooks_path())
 }
 
 fn upsert_command(entries: &mut Vec<Value>, url: &str, hook: Value) {
-    if let Some(entry) = entries.iter_mut().find(|entry| entry_targets(entry, url)) {
-        entry["hooks"] = json!([hook]);
-    } else {
+    let mut found = false;
+    for entry in entries.iter_mut() {
+        if let Some(handlers) = entry.get_mut("hooks").and_then(Value::as_array_mut) {
+            handlers.retain_mut(|handler| {
+                if !handler.get("command").and_then(Value::as_str).is_some_and(|cmd| cmd.contains(url)) {
+                    return true;
+                }
+                if found { return false; }
+                *handler = hook.clone();
+                found = true;
+                true
+            });
+        }
+    }
+    if !found {
         entries.push(json!({ "hooks": [hook] }));
     }
 }
@@ -128,13 +146,37 @@ fn install_at(path: &Path) -> Result<CodexHookStatus, String> {
     }));
 
     let serialized = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
-    fs::write(path, format!("{serialized}\n")).map_err(|e| e.to_string())?;
+    let serialized = format!("{serialized}\n");
+    if fs::read_to_string(path).ok().as_deref() != Some(&serialized) {
+        fs::write(path, serialized).map_err(|e| e.to_string())?;
+    }
     Ok(get_status_at(path))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn updating_a_shared_matcher_preserves_other_handlers_and_removes_only_our_duplicates() {
+        let foreign = json!({"type":"command","command":"plannotator","timeout":345600});
+        let mut entries = vec![
+            json!({"matcher":"*","hooks":[foreign.clone(),{"type":"command","command":format!("old adapter {STOP_URL}")}]}),
+            json!({"hooks":[{"type":"command","command":format!("duplicate {STOP_URL}")}, {"type":"command","command":"another hook"}]}),
+        ];
+        assert!(!entry_has_command(&entries[0], &stop_command(), false));
+        let current = json!({"type":"command","command":stop_command(),"timeout":HOOK_TIMEOUT_SECS});
+        upsert_command(&mut entries, STOP_URL, current.clone());
+        assert_eq!(entries[0]["hooks"][0], foreign);
+        assert_eq!(entries[0]["hooks"][1], current);
+        assert_eq!(entries[0]["matcher"], "*");
+        assert_eq!(entries[1]["hooks"].as_array().unwrap().len(), 1);
+        assert_eq!(entries[1]["hooks"][0]["command"], "another hook");
+        assert!(entry_has_command(&entries[0], &stop_command(), false));
+        assert!(!entry_has_command(&entries[0], &stop_command(), true));
+        let unchanged = entries.clone();
+        upsert_command(&mut entries, STOP_URL, current);
+        assert_eq!(entries, unchanged);
+    }
 
     #[test]
     fn install_preserves_foreign_hooks_and_is_idempotent() {

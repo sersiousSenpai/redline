@@ -37,6 +37,8 @@ pub const CONTRACT: &str = include_str!("codex_plan_contract.txt");
 /// `src/lib/planLaunchCommand.ts` — `launchInvariants.test.ts` pins that they
 /// agree, because a mismatch is silent on both sides.
 pub const PROFILE: &str = "redline-plan";
+const LAUNCHER: &str = include_str!("codex_plan_launch.sh");
+const LAUNCHER_NAME: &str = "redline-codex-launch.sh";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -52,7 +54,7 @@ pub struct CodexProfileStatus {
 }
 
 /// `$CODEX_HOME`, else `~/.codex` — the same resolution `codex -p` uses.
-fn codex_home() -> PathBuf {
+pub(crate) fn codex_home() -> PathBuf {
     if let Some(home) = std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
@@ -114,12 +116,14 @@ pub fn get_status() -> CodexProfileStatus {
 fn get_status_at(path: &Path) -> CodexProfileStatus {
     let current = fs::read_to_string(path).ok();
     let expected = expected_contents();
+    let launcher = path.with_file_name(LAUNCHER_NAME);
     CodexProfileStatus {
         installed: current.is_some(),
         // Byte comparison, not a version field: the file is generated whole,
         // so "differs" and "stale" are the same question and there is nothing
         // to keep in sync.
-        outdated: current.is_some_and(|text| text != expected),
+        outdated: current.is_some_and(|text| text != expected
+            || fs::read_to_string(launcher).ok().as_deref() != Some(LAUNCHER)),
         path: path.to_string_lossy().into_owned(),
     }
 }
@@ -136,6 +140,7 @@ fn install_at(path: &Path) -> Result<CodexProfileStatus, String> {
     // name nobody else would pick, in a directory of per-profile files), so
     // there is no foreign content to merge and preserve.
     fs::write(path, expected_contents()).map_err(|e| e.to_string())?;
+    fs::write(path.with_file_name(LAUNCHER_NAME), LAUNCHER).map_err(|e| e.to_string())?;
     Ok(get_status_at(path))
 }
 
@@ -185,6 +190,22 @@ mod tests {
         // Byte-for-byte: this is the ONLY delivery of the contract, so a
         // round-trip that drops a newline drops part of the contract.
         assert_eq!(delivered, CONTRACT);
+    }
+
+    #[test]
+    fn missing_or_stale_launcher_requires_integration_update() {
+        let dir = temp_dir();
+        let path = dir.join("redline-plan.config.toml");
+        install_at(&path).unwrap();
+        let launcher = dir.join(LAUNCHER_NAME);
+        fs::remove_file(&launcher).unwrap();
+        assert!(get_status_at(&path).outdated);
+        install_at(&path).unwrap();
+        assert_eq!(fs::read_to_string(&launcher).unwrap(), LAUNCHER);
+        fs::write(&launcher, "stale launcher").unwrap();
+        assert!(get_status_at(&path).outdated);
+        assert!(!install_at(&path).unwrap().outdated);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

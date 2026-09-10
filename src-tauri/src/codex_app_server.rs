@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Minimal typed client for Codex's JSONL app-server protocol.
+//! Codex app-server clients: JSONL for headless seats and a private Unix
+//! WebSocket connection for approval in an existing terminal thread.
 //!
-//! This one-shot path is intentionally the first adapter: it gives tool-less
-//! seats a real Codex execution path while the same wire primitives can be
-//! promoted into a long-lived manager for conversational seats.
+//! Headless seats own one-shot child servers. Plan approval addresses the
+//! existing server behind the terminal that produced the plan.
 
 use std::cmp::Ordering;
 use std::collections::HashSet;
@@ -191,6 +191,13 @@ pub fn codex_version(bin: &str) -> Option<CodexVersion> {
             .filter(|out| out.status.success())
             .and_then(|out| parse_codex_version(&String::from_utf8_lossy(&out.stdout)))
     })
+}
+
+/// Minimum CLI whose live-thread queue/settings handoff has been verified.
+/// Older CLIs can plan but cannot support this approval path.
+pub fn supports_plan_handoff(version: Option<&CodexVersion>) -> bool {
+    let minimum = parse_codex_version("codex-cli 0.154.0").unwrap();
+    version.is_some_and(|version| version >= &minimum)
 }
 
 fn newest_capable_candidate(
@@ -416,6 +423,125 @@ async fn send(stdin: &mut tokio::process::ChildStdin, value: Value) -> Result<()
     stdin.write_all(&bytes).await.map_err(|e| e.to_string())
 }
 
+/// Change the live CLI thread's next turn before releasing its Stop hook.
+/// The launcher supplies a private Unix socket belonging to that terminal.
+/// A second stdio app-server would own different threads, so cannot do this.
+pub async fn queue_plan_implementation(socket: Option<&str>, thread_id: &str, plan: &str, approval_id: &str) -> Result<(), String> {
+    let socket = socket.filter(|s| !s.is_empty()).ok_or(
+        "This Codex terminal has no Redline approval connection. Update the Codex integration, close this old Codex terminal, then use Restore in Redline and approve again."
+    )?.to_owned();
+    let (thread_id, plan, approval_id) = (thread_id.to_owned(), plan.to_owned(), approval_id.to_owned());
+    tokio::task::spawn_blocking(move || {
+        queue_implementation_at(&socket, &thread_id, &plan, &approval_id)
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[cfg(unix)]
+fn queue_implementation_at(socket: &str, thread_id: &str, plan: &str, approval_id: &str) -> Result<(), String> {
+    use std::os::unix::net::UnixStream;
+    use std::time::{Duration, Instant};
+    use tungstenite::Message;
+    if !Path::new(socket).is_absolute() { return Err("Invalid Codex approval socket.".into()); }
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let stream = UnixStream::connect(socket).map_err(|e| format!("Could not reach the Codex terminal: {e}. Restore this plan in Redline and approve again."))?;
+    stream.set_read_timeout(Some(Duration::from_secs(8))).map_err(|e| e.to_string())?;
+    stream.set_write_timeout(Some(Duration::from_secs(8))).map_err(|e| e.to_string())?;
+    // app-server Unix sockets speak WebSocket, including the HTTP upgrade.
+    // The URL is the handshake Host header; all bytes stay on this UnixStream.
+    let (mut client, _) = tungstenite::client("ws://localhost/", stream).map_err(|e| e.to_string())?;
+    let mut id = 0u64;
+    queue_implementation_with_rpc(thread_id, plan, approval_id, |method, params| {
+        let remaining = deadline.checked_duration_since(Instant::now())
+            .filter(|d| !d.is_zero()).ok_or("Codex approval timed out; the review is still held. Try again.")?;
+        client.get_ref().set_write_timeout(Some(remaining)).map_err(|e| e.to_string())?;
+        id += 1;
+        client.send(Message::Text(json!({"id":id,"method":method,"params":params}).to_string().into())).map_err(|e| e.to_string())?;
+        loop {
+            let remaining = deadline.checked_duration_since(Instant::now())
+                .filter(|d| !d.is_zero()).ok_or("Codex approval timed out; the review is still held. Try again.")?;
+            client.get_ref().set_read_timeout(Some(remaining)).map_err(|e| e.to_string())?;
+            let message = client.read().map_err(|e| format!("Codex did not acknowledge approval: {e}. The review is still held; try again."))?;
+            if let Message::Text(text) = message {
+                let value: Value = serde_json::from_str(text.as_str()).map_err(|e| e.to_string())?;
+                if let Some(result) = response_result(&value, id) {
+                    if method == "initialize" && result.is_ok() {
+                        client.send(Message::Text(json!({"method":"initialized","params":{}}).to_string().into())).map_err(|e| e.to_string())?;
+                    }
+                    return result;
+                }
+            }
+        }
+    })
+}
+
+#[cfg(not(unix))]
+fn queue_implementation_at(_socket: &str, _thread_id: &str, _plan: &str, _approval_id: &str) -> Result<(), String> {
+    Err("Codex plan approval currently requires a Unix terminal.".into())
+}
+
+fn queue_implementation_with_rpc(
+    thread_id: &str, plan: &str, approval_id: &str,
+    mut request: impl FnMut(&str, Value) -> Result<Value, String>,
+) -> Result<(), String> {
+    if approval_id.is_empty() { return Err("The plan is no longer waiting for approval.".into()); }
+    request("initialize", json!({
+        "clientInfo":{"name":"redline","version":env!("CARGO_PKG_VERSION")},
+        "capabilities":{"experimentalApi":true}
+    }))?;
+    let thread = request("thread/read", json!({"threadId":thread_id,"includeTurns":false}))?;
+    let params = implementation_settings(thread_id, &thread)?;
+    // Codex does NOT deduplicate queue/add by clientUserMessageId. Check
+    // the durable queue ourselves on retry after a lost acknowledgement.
+    let mut cursor = Value::Null;
+    let mut cursors = HashSet::new();
+    loop {
+        let queue = request("thread/queue/list", json!({"threadId":thread_id,"cursor":cursor}))?;
+        let items = queue.get("data").and_then(Value::as_array)
+            .ok_or("Codex returned an invalid queued-input list; approval was not sent.")?;
+        if items.iter().any(|item| item.get("clientUserMessageId").and_then(Value::as_str) == Some(approval_id)) {
+            return Ok(());
+        }
+        cursor = queue.get("nextCursor").cloned().unwrap_or(Value::Null);
+        if cursor.is_null() { break; }
+        if !cursors.insert(cursor.to_string()) { return Err("Codex returned a repeated queue cursor; approval was not sent.".into()); }
+    }
+    request("thread/settings/update", params)?;
+    // Stop "block" inherits the OLD turn's frozen settings. Queue a fresh
+    // user turn; the server starts it as soon as Stop returns {}.
+    let queued = request("thread/queue/add", json!({
+        "threadId":thread_id,"clientUserMessageId":approval_id,
+        "input":[{"type":"text","text":implementation_prompt(plan)}]
+    }))?;
+    if queued.pointer("/queuedSubmission/id").and_then(Value::as_str).is_none() {
+        return Err("Codex did not acknowledge the queued implementation turn. The plan is still waiting for approval.".into());
+    }
+    Ok(())
+}
+
+fn implementation_settings(thread_id: &str, response: &Value) -> Result<Value, String> {
+    let thread = response.get("thread").ok_or("Codex returned no thread")?;
+    if thread.get("id").and_then(Value::as_str) != Some(thread_id)
+        || thread.pointer("/status/type").and_then(Value::as_str) != Some("active") {
+        return Err("The Codex CLI thread is no longer active. Restore this plan session before approving.".into());
+    }
+    let model = thread.get("model").and_then(Value::as_str)
+        .filter(|m| !m.is_empty()).ok_or("Codex did not report the active model; update Codex and retry approval.")?;
+    Ok(json!({
+        "threadId":thread_id,
+        "approvalPolicy":"on-request",
+        "sandboxPolicy":{"type":"workspaceWrite","networkAccess":false},
+        "collaborationMode":{"mode":"default","settings":{
+            "model":model,
+            "reasoning_effort":thread.get("reasoningEffort").cloned().unwrap_or(Value::Null),
+            "developer_instructions":"The reviewer has approved the plan in Redline. The earlier Redline planning-only instructions are complete and no longer apply. Implement the approved plan, run appropriate checks, and report the result. Do not ask for plan approval again or resubmit the approved plan. Respect the configured sandbox and request permission when an operation requires it."
+        }}
+    }))
+}
+
+pub fn implementation_prompt(plan: &str) -> String {
+    format!("Redline plan approved. Begin implementing the approved plan now. Do not ask for confirmation or submit the same plan again.\n\nApproved plan:\n{plan}")
+}
+
 fn response_result(value: &Value, id: u64) -> Option<Result<Value, String>> {
     (value.get("id").and_then(Value::as_u64) == Some(id)).then(|| {
         if let Some(error) = value.get("error") {
@@ -511,6 +637,65 @@ pub async fn run_one_shot(
 mod tests {
     use super::*;
     #[test]
+    fn codex_approval_rpc_queues_once_and_recovers_a_lost_acknowledgement() {
+        for (queued, denied) in [(false, false), (true, false), (false, true)] {
+            let mut calls = vec![];
+            let result = queue_implementation_with_rpc("thread-1", "# Approved revision\nImplement this.", "approval-1", |method, params| {
+                calls.push(json!({"method":method,"params":params}));
+                match method {
+                    "initialize" => Ok(json!({})),
+                    "thread/read" => Ok(json!({"thread":{"id":"thread-1","status":{"type":"active"},"model":"gpt-6-astra","reasoningEffort":"xhigh"}})),
+                    // Put the retry on page two, after an unrelated queued question.
+                    "thread/queue/list" if params["cursor"].is_null() => Ok(json!({"data":[{"clientUserMessageId":"unrelated-question"}],"nextCursor":"page-2"})),
+                    "thread/queue/list" => Ok(json!({"data": if queued {vec![json!({"clientUserMessageId":"approval-1"})]} else {vec![]}, "nextCursor":null})),
+                    "thread/settings/update" if denied => Err("permission policy denied".into()),
+                    "thread/settings/update" => Ok(json!({})),
+                    "thread/queue/add" => Ok(json!({"queuedSubmission":{"id":"queued-1"}})),
+                    _ => panic!("unexpected RPC: {method}"),
+                }
+            });
+            assert_eq!(result.is_err(), denied, "{result:?}");
+            let queued_calls: Vec<_> = calls.iter().filter(|v| v["method"] == "thread/queue/add").collect();
+            assert_eq!(queued_calls.len(), usize::from(!queued && !denied));
+            if let Some(call) = queued_calls.first() {
+                assert_eq!(call["params"]["clientUserMessageId"], "approval-1");
+                assert!(call["params"]["input"][0]["text"].as_str().unwrap().ends_with("# Approved revision\nImplement this."));
+            }
+            if queued { assert!(!calls.iter().any(|v| v["method"] == "thread/settings/update")); }
+        }
+    }
+
+    // Driven by scripts/probe-codex-approval.py against an isolated real CLI.
+    #[tokio::test]
+    #[ignore = "requires the isolated Codex approval probe"]
+    async fn codex_live_approval_probe() {
+        let socket = std::env::var("REDLINE_PROBE_SOCKET").unwrap();
+        let thread = std::env::var("REDLINE_PROBE_THREAD").unwrap();
+        queue_plan_implementation(Some(&socket), &thread, "Write approved.txt and verify it.", "redline-approval-probe").await.unwrap();
+        // The Stop hook is still held, so a retry must find the same queue item.
+        queue_plan_implementation(Some(&socket), &thread, "Write approved.txt and verify it.", "redline-approval-probe").await.unwrap();
+    }
+
+    #[test]
+    fn implementation_handoff_preserves_model_and_effort_and_changes_only_the_live_thread() {
+        let response = json!({"thread":{"id":"thread-1","status":{"type":"active"},
+            "model":"gpt-6-astra","reasoningEffort":"xhigh"}});
+        let settings = implementation_settings("thread-1", &response).unwrap();
+        assert_eq!(settings["collaborationMode"]["mode"], "default");
+        assert_eq!(settings["collaborationMode"]["settings"]["model"], "gpt-6-astra");
+        assert_eq!(settings["collaborationMode"]["settings"]["reasoning_effort"], "xhigh");
+        assert_eq!(settings["sandboxPolicy"]["type"], "workspaceWrite");
+        assert_eq!(settings["sandboxPolicy"]["networkAccess"], false);
+        assert_eq!(settings["approvalPolicy"], "on-request");
+        assert!(implementation_settings("other-thread", &response).is_err());
+        let mut inactive = response.clone();
+        inactive["thread"]["status"]["type"] = json!("notLoaded");
+        assert!(implementation_settings("thread-1", &inactive).is_err());
+        let mut unknown_model = response;
+        unknown_model["thread"]["model"] = Value::Null;
+        assert!(implementation_settings("thread-1", &unknown_model).is_err());
+    }
+    #[test]
     fn required_subcommands_gate_on_the_real_banners() {
         // The 0.149 bundle lists both; the 0.24 brew build lists neither.
         let current = "Commands:\n  exec              Run Codex non-interactively\n  app-server        [experimental] Run the app server\n  resume            Resume a previous interactive session\n";
@@ -549,6 +734,9 @@ mod tests {
     #[test]
     fn versions_parse_and_order_by_numeric_components_then_prerelease() {
         let version = |v: &str| parse_codex_version(&format!("codex-cli {v}")).unwrap();
+        assert!(!supports_plan_handoff(None));
+        assert!(!supports_plan_handoff(Some(&version("0.153.4"))));
+        assert!(supports_plan_handoff(Some(&version("0.154.0"))));
         assert!(version("0.149.0-alpha.4.3") < version("0.153.4"));
         assert!(version("0.153.4") < version("0.153.10"));
         assert!(version("0.153.10-alpha.2") < version("0.153.10-alpha.10"));
