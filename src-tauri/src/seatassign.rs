@@ -279,7 +279,8 @@ pub const SEAT_FACTS: &[SeatFact] = &[
         role: "Read-only fork answering one reviewer comment on a plan section. \
                Narrow, scoped, and the reviewer is waiting on it.",
         traits: &["interactive", "latency_sensitive"],
-        note: None,
+        note: Some("This seat configures Claude discussions only. Native Codex \
+                    discussions use the model recorded on the parent plan."),
     },
     SeatFact {
         seat: "fork_review",
@@ -345,7 +346,8 @@ const SEAT_HINTS: &[(&str, &str)] = &[
     ),
     (
         "fork_plan",
-        "On Inherit it runs exactly like the plan review it forked from.",
+        "Configures Claude discussions. On Inherit they use the parent session's \
+         settings. Codex discussions use the parent plan's Codex model.",
     ),
     (
         "fork_review",

@@ -572,6 +572,22 @@ fn stored_fork_matches(stored: &str, backend: ForkBackend) -> bool {
     !uses_claude_sidecar(stored) && ForkBackend::from_stored(stored) == backend
 }
 
+/// The plan-discussion seat configures Claude. A native Codex fork must use
+/// the model recorded on its parent plan instead, including on follow-ups:
+/// older failed forks may have persisted the Claude seat's model (`opus`).
+/// If the plan has no recorded model, leave selection to Codex.
+fn plan_discussion_model(
+    backend: ForkBackend,
+    plan_model: Option<&str>,
+    claude_seat_model: Option<&str>,
+) -> Option<String> {
+    let model = match backend {
+        ForkBackend::Claude => claude_seat_model,
+        ForkBackend::Codex => plan_model,
+    };
+    model.map(str::trim).filter(|model| !model.is_empty()).map(str::to_string)
+}
+
 fn claude_plan_discussion_args(
     author_backend: &str,
     author_session: &str,
@@ -804,6 +820,11 @@ pub async fn fork_thread_send(
     let author_backend = store.backend_of(&session_id);
     let context_sidecar = uses_claude_sidecar(&author_backend);
     let backend = ForkBackend::from_stored(&author_backend);
+    let model = plan_discussion_model(
+        backend,
+        session.model.as_deref(),
+        crate::seat::model_for("fork_plan").as_deref(),
+    );
 
     // The stored fork, and whether it is still usable. A fork id from the OTHER
     // harness must never be resumed: neither CLI errors on the other's id, so
@@ -904,7 +925,7 @@ pub async fn fork_thread_send(
                 thread_id: comment_id.clone(),
                 parent_session_id: Some(session_id.clone()),
             }),
-            crate::seat::model_for("fork_plan"),
+            model.clone(),
         );
     } else {
         crate::ledger::register_agent_prompt(&prompt);
@@ -935,7 +956,6 @@ pub async fn fork_thread_send(
                 None => ("fork", session_id.as_str()),
                 Some(fork_sid) => ("resume", fork_sid.as_str()),
             };
-            let model = crate::seat::model_for("fork_plan");
             let args = codex_discussion_fork_args(subcommand, thread_id, prompt, model.as_deref());
             ForkSpawn {
                 backend,
@@ -2624,6 +2644,51 @@ mod tests {
             assert!(seeded.contains(expected), "missing {expected}");
         }
         assert!(!seeded.contains("a plan you produced earlier"));
+    }
+
+    #[test]
+    fn codex_discussions_use_the_plan_model_instead_of_the_claude_seat() {
+        // Reproduce the screenshot: a Claude seat set to opus on a Codex
+        // plan. Follow-ups must override it too, since the failed first turn
+        // may already have saved opus on the discussion's Codex rollout.
+        for seat_model in ["opus", "sonnet", "haiku", "fable", "claude-opus-4-6"] {
+            let model = plan_discussion_model(
+                ForkBackend::Codex,
+                Some(" gpt-6-astra "),
+                Some(seat_model),
+            );
+            assert_eq!(model.as_deref(), Some("gpt-6-astra"));
+            for (subcommand, thread_id) in [("fork", "plan-thread"), ("resume", "failed-discussion")] {
+                let args = codex_discussion_fork_args(subcommand, thread_id, "question".into(), model.as_deref());
+                assert!(args.windows(2).any(|pair| pair == ["-m", "gpt-6-astra"]));
+                assert!(!args.iter().any(|arg| arg == seat_model));
+                assert_eq!(args[args.len() - 2], thread_id);
+            }
+            // This same selection labels both the prompt ledger and meter.
+            assert_eq!(crate::meter::from_codex_turn(&Value::Null, model.as_deref()).model, model);
+        }
+    }
+
+    #[test]
+    fn codex_discussions_without_a_recorded_model_never_borrow_the_claude_seat() {
+        for plan_model in [None, Some(""), Some(" \t ")] {
+            let model = plan_discussion_model(ForkBackend::Codex, plan_model, Some("opus"));
+            assert_eq!(model, None);
+            for subcommand in ["fork", "resume"] {
+                let args = codex_discussion_fork_args(subcommand, "thread", "question".into(), model.as_deref());
+                assert!(!args.iter().any(|arg| arg == "-m" || arg == "--model" || arg == "opus"));
+            }
+        }
+    }
+
+    #[test]
+    fn claude_discussions_keep_their_seat_model_even_for_a_native_provider_sidecar() {
+        assert_eq!(
+            plan_discussion_model(ForkBackend::Claude, Some("author-model"), Some(" opus ")),
+            Some("opus".into()),
+        );
+        assert_eq!(plan_discussion_model(ForkBackend::Claude, Some("author-model"), None), None);
+        assert_eq!(plan_discussion_model(ForkBackend::Claude, Some("author-model"), Some(" ")), None);
     }
 
     #[test]
