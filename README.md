@@ -2,7 +2,7 @@
 
 **Research it. Draft it. Redline it. Build it.**
 
-A document-centered workspace for agent-assisted development on macOS. Bring research, conversations, plans, execution, and code review into one app—with tracked changes and comments that carry your decisions back to the agent.
+A document-centered meta-harness for agent-assisted development on macOS. Bring research, conversations, plans, execution, and code review into one app—with tracked changes and comments that carry your decisions back to the agent.
 
 [Get started](#get-started) · [Explore the surfaces](#the-workspace) · [Technical overview](#under-the-hood) · [Documentation](#documentation)
 
