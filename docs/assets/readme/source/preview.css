@@ -1,0 +1,4 @@
+@import '../../../../src/styles.css';
+@source '../../../../src';
+/* Only the demo boundary is styled here. All app styling comes from src/. */
+html,body,#root{width:100%;height:100%;margin:0}
